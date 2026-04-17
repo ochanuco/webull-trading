@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseBooleanEnv, parseCsvEnv, parseNumberEnv } from '../../src/config/env'
+import { parseBooleanEnv, parseCsvEnv, parseNumberEnv, parseSymbolNotionalMap } from '../../src/config/env'
 
 describe('parseBooleanEnv', () => {
   describe('fail-closed defaults', () => {
@@ -60,5 +60,22 @@ describe('parseNumberEnv', () => {
 
   it('throws for a non-numeric string', () => {
     expect(() => parseNumberEnv('abc', 'MAX_ORDER_NOTIONAL')).toThrow('invalid number value')
+  })
+})
+
+describe('parseSymbolNotionalMap', () => {
+  it('returns an empty map for undefined', () => {
+    expect(parseSymbolNotionalMap(undefined)).toEqual({})
+  })
+
+  it('parses JSON object entries and uppercases keys', () => {
+    expect(parseSymbolNotionalMap('{"soxl":200,"SOXS":150}')).toEqual({
+      SOXL: 200,
+      SOXS: 150,
+    })
+  })
+
+  it('returns an empty map for malformed input', () => {
+    expect(parseSymbolNotionalMap('{"SOXL":"bad"}')).toEqual({})
   })
 })

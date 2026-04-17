@@ -8,6 +8,9 @@ export interface RiskInput {
   tradingEnabled: boolean
   allowedSymbols: string[]
   maxOrderNotional: number
+  symbolMaxNotional: Record<string, number>
+  marketHoursCheck: boolean
+  now?: () => Date
 }
 
 export interface RiskPolicy {
