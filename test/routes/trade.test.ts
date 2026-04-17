@@ -315,6 +315,10 @@ describe('trade routes', () => {
     )
 
     expect(response.status).toBe(400)
-    expect(await response.text()).toContain('symbol must be a non-empty string')
+    await expect(response.json()).resolves.toEqual({
+      error: 'validation_error',
+      message: 'symbol must be a non-empty string',
+      field: 'symbol',
+    })
   })
 })

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { TradeEventIngestRequest } from '../infrastructure/webull/TradeEventBridge'
+import { ValidationError } from '../shared/errors'
 import { TradeEventService } from '../trading/application/TradeEventService'
 import { isTradeEventType, isTradeStatus, type TradeEvent } from '../trading/domain/TradeEvent'
 
@@ -9,7 +10,7 @@ export const events = new Hono().post('/trade', async (c) => {
   const payload = (await c.req.json().catch(() => null)) as unknown
 
   if (!isTradeEventIngestRequest(payload)) {
-    return c.json({ error: 'Bad Request' }, 400)
+    throw new ValidationError('event payload is invalid', { field: 'event' })
   }
 
   await tradeEventService.handle(payload.event)
