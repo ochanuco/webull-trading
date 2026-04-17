@@ -5,6 +5,7 @@ export interface Env {
   TRADING_ENABLED: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
+  EVENT_INGEST_SECRET: string
 }
 
 export function parseBooleanEnv(value: string | undefined): boolean {
