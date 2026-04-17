@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../app'
-import { parseCsvEnv, parseNumberEnv } from '../config/env'
+import { parseBooleanEnv, parseCsvEnv, parseNumberEnv } from '../config/env'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
 import { MockExecution } from '../trading/execution/MockExecution'
 import { DefaultRiskPolicy } from '../trading/risk/DefaultRiskPolicy'
@@ -55,12 +55,12 @@ function createTradingService(request: TradeRequest): TradingService {
 }
 
 function readTradingConfig(env: {
-  TRADING_ENABLED: string
+  TRADING_ENABLED?: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
 }): TradingConfig {
   return {
-    tradingEnabled: env.TRADING_ENABLED === 'true',
+    tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED, false),
     allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS).map((symbol) => symbol.toUpperCase()),
     maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL'),
   }

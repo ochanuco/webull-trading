@@ -1,15 +1,24 @@
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
-  DRY_RUN: string
-  TRADING_ENABLED: string
+  DRY_RUN?: string
+  TRADING_ENABLED?: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
   EVENT_INGEST_SECRET: string
 }
 
-export function parseBooleanEnv(value: string | undefined): boolean {
-  return value === 'true'
+export function parseBooleanEnv(value: string | undefined, defaultValue = false): boolean {
+  if (value === undefined) {
+    return defaultValue
+  }
+  if (value === 'true') {
+    return true
+  }
+  if (value === 'false') {
+    return false
+  }
+  throw new Error(`Invalid boolean environment variable value: '${value}'. Expected 'true', 'false', or undefined.`)
 }
 
 export function parseCsvEnv(value: string | undefined): string[] {
