@@ -25,4 +25,8 @@ describe('FixedRuleStrategy', () => {
 
     expect(signal.action).toBe('HOLD')
   })
+
+  it('throws when buyBelow is not less than sellAbove', () => {
+    expect(() => new FixedRuleStrategy(20, 20)).toThrow('buyBelow must be less than sellAbove')
+  })
 })

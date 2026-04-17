@@ -83,7 +83,7 @@ describe('trade routes', () => {
   it('returns 401 for /trade/* without auth', async () => {
     const app = createApp()
 
-    const response = await app.request(
+    const decideResponse = await app.request(
       '/trade/decide',
       {
         method: 'POST',
@@ -101,6 +101,51 @@ describe('trade routes', () => {
       env,
     )
 
-    expect(response.status).toBe(401)
+    const executeResponse = await app.request(
+      '/trade/execute',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          symbol: 'SOXL',
+          price: 9,
+          quantity: 2,
+          buyBelow: 10,
+          sellAbove: 20,
+        }),
+      },
+      env,
+    )
+
+    expect(decideResponse.status).toBe(401)
+    expect(executeResponse.status).toBe(401)
+  })
+
+  it('returns 400 for an empty symbol', async () => {
+    const app = createApp()
+
+    const response = await app.request(
+      '/trade/decide',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
+        body: JSON.stringify({
+          symbol: '   ',
+          price: 9,
+          quantity: 2,
+          buyBelow: 10,
+          sellAbove: 20,
+        }),
+      },
+      env,
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.text()).toContain('symbol must be a non-empty string')
   })
 })

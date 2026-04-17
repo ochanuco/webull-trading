@@ -7,7 +7,6 @@ import type { RiskPolicy } from '../risk/RiskPolicy'
 import type { Strategy, StrategyInput } from '../strategy/Strategy'
 
 export interface TradingConfig {
-  dryRun: boolean
   tradingEnabled: boolean
   allowedSymbols: string[]
   maxOrderNotional: number

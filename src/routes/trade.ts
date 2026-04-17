@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
+import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../app'
-import { parseBooleanEnv, parseCsvEnv, parseNumberEnv } from '../config/env'
+import { parseCsvEnv, parseNumberEnv } from '../config/env'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
 import { MockExecution } from '../trading/execution/MockExecution'
 import { DefaultRiskPolicy } from '../trading/risk/DefaultRiskPolicy'
@@ -26,11 +27,14 @@ export const trade = new Hono<AppBindings>().post('/decide', async (c) => {
 
 async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeRequest> {
   const body = asRecord(await payload)
+  const symbol = readSymbol(body.symbol)
+  const price = readPositiveNumber(body.price, 'price')
+  const quantity = readPositiveNumber(body.quantity, 'quantity')
 
   return {
-    symbol: readString(body.symbol),
-    price: readNumber(body.price),
-    quantity: readNumber(body.quantity),
+    symbol,
+    price,
+    quantity,
     buyBelow: readNumber(body.buyBelow),
     sellAbove: readNumber(body.sellAbove),
   }
@@ -45,15 +49,13 @@ function createTradingService(request: TradeRequest): TradingService {
 }
 
 function readTradingConfig(env: {
-  DRY_RUN: string
   TRADING_ENABLED: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
 }): TradingConfig {
   return {
-    dryRun: parseBooleanEnv(env.DRY_RUN),
-    tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED),
-    allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS),
+    tradingEnabled: env.TRADING_ENABLED === 'true',
+    allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS).map((symbol) => symbol.toUpperCase()),
     maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL),
   }
 }
@@ -70,6 +72,24 @@ function readString(value: unknown): string {
     return value
   }
   return ''
+}
+
+function readSymbol(value: unknown): string {
+  const symbol = readString(value).trim()
+
+  if (symbol.length === 0) {
+    throw new HTTPException(400, { message: 'symbol must be a non-empty string' })
+  }
+
+  return symbol
+}
+
+function readPositiveNumber(value: unknown, field: 'price' | 'quantity'): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value
+  }
+
+  throw new HTTPException(400, { message: `${field} must be a finite number greater than 0` })
 }
 
 function readNumber(value: unknown): number {

@@ -16,7 +16,7 @@ export class DefaultRiskPolicy implements RiskPolicy {
       reasons.push('trading is disabled')
     }
 
-    if (!input.allowedSymbols.includes(input.orderIntent.symbol)) {
+    if (!input.allowedSymbols.includes(input.orderIntent.symbol.toUpperCase())) {
       reasons.push(`symbol ${input.orderIntent.symbol} is not allowed`)
     }
 

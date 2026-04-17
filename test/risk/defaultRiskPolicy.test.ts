@@ -32,6 +32,28 @@ describe('DefaultRiskPolicy', () => {
     expect(decision.normalizedIntent?.symbol).toBe('SOXL')
   })
 
+  it('accepts a lowercase symbol when the whitelist contains its uppercase form', () => {
+    const decision = policy.evaluate({
+      signal: {
+        ...signal,
+        symbol: 'soxl',
+      },
+      orderIntent: {
+        symbol: 'soxl',
+        side: 'BUY',
+        quantity: 2,
+        price: 10,
+        notional: 20,
+      },
+      tradingEnabled: true,
+      allowedSymbols: ['SOXL', 'SOXS'],
+      maxOrderNotional: 100,
+    })
+
+    expect(decision.allowed).toBe(true)
+    expect(decision.normalizedIntent?.symbol).toBe('soxl')
+  })
+
   it('denies an order for an unknown symbol', () => {
     const decision = policy.evaluate({
       signal,

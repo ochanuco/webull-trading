@@ -5,7 +5,11 @@ export class FixedRuleStrategy implements Strategy {
   constructor(
     private readonly buyBelow: number,
     private readonly sellAbove: number,
-  ) {}
+  ) {
+    if (buyBelow >= sellAbove) {
+      throw new Error('buyBelow must be less than sellAbove')
+    }
+  }
 
   decide(input: StrategyInput): Signal {
     const action = this.resolveAction(input.price)
