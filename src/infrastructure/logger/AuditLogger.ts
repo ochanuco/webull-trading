@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
+import { TradingError } from '../../shared/errors'
 
 export interface AuditRecord {
   requestId: string
@@ -33,7 +34,7 @@ export function auditLogger(): MiddlewareHandler<{ Variables: { requestId: strin
       await next()
       status = c.res.status
     } catch (err) {
-      status = err instanceof HTTPException ? err.status : 500
+      status = err instanceof TradingError ? err.status : err instanceof HTTPException ? err.status : 500
       if (err instanceof Error) {
         errorClass = err.constructor.name
         errorMessage = scrubSecret(err.message.split('\n')[0]?.trim() ?? '')

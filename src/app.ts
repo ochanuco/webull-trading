@@ -10,10 +10,38 @@ import { events } from './routes/events'
 // Webull routes (Phase 2 append)
 import { webull } from './routes/webull'
 import { BrokerRequestError, TradingError, ValidationError } from './shared/errors'
+import type { ErrorHandler } from 'hono'
 
 export type AppBindings = {
   Bindings: Env
   Variables: { requestId: string }
+}
+
+export const errorHandler: ErrorHandler<AppBindings> = (err, c) => {
+  if (err instanceof BrokerRequestError) {
+    return c.json({ error: err.code, status: err.status }, err.status)
+  }
+
+  if (err instanceof ValidationError) {
+    return c.json(
+      {
+        error: err.code,
+        message: err.message,
+        ...(err.field ? { field: err.field } : {}),
+      },
+      err.status,
+    )
+  }
+
+  if (err instanceof TradingError) {
+    return c.json({ error: err.code, message: err.message }, err.status)
+  }
+
+  if (err instanceof HTTPException) {
+    return err.getResponse()
+  }
+
+  return c.json({ error: 'internal_error' }, 500)
 }
 
 export function createApp() {
@@ -36,32 +64,7 @@ export function createApp() {
   // Webull routes (Phase 2 append)
   app.use('/webull/*', basicAuthMiddleware())
   app.route('/webull', webull)
-  app.onError((err, c) => {
-    if (err instanceof BrokerRequestError) {
-      return c.json({ error: err.code, status: err.status }, err.status)
-    }
-
-    if (err instanceof ValidationError) {
-      return c.json(
-        {
-          error: err.code,
-          message: err.message,
-          ...(err.field ? { field: err.field } : {}),
-        },
-        err.status,
-      )
-    }
-
-    if (err instanceof TradingError) {
-      return c.json({ error: err.code, message: err.message }, err.status)
-    }
-
-    if (err instanceof HTTPException) {
-      return err.getResponse()
-    }
-
-    return c.json({ error: 'internal_error' }, 500)
-  })
+  app.onError(errorHandler)
   return app
 }
 

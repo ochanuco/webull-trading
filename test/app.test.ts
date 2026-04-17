@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { BrokerRequestError, TradingError, ValidationError } from '../src/shared/errors'
+import { errorHandler, type AppBindings } from '../src/app'
 
 describe('app-level onError', () => {
   it('returns 500 for unknown errors', async () => {
@@ -26,7 +27,7 @@ describe('app-level onError', () => {
 })
 
 function createErrorTestApp() {
-  const app = new Hono()
+  const app = new Hono<AppBindings>()
 
   app.get('/boom', () => {
     throw new Error('unexpected')
@@ -40,32 +41,7 @@ function createErrorTestApp() {
     throw new BrokerRequestError('Webull order placement failed', 'placeOrder')
   })
 
-  app.onError((err, c) => {
-    if (err instanceof BrokerRequestError) {
-      return c.json({ error: err.code, status: err.status }, err.status)
-    }
-
-    if (err instanceof ValidationError) {
-      return c.json(
-        {
-          error: err.code,
-          message: err.message,
-          ...(err.field ? { field: err.field } : {}),
-        },
-        err.status,
-      )
-    }
-
-    if (err instanceof TradingError) {
-      return c.json({ error: err.code, message: err.message }, err.status)
-    }
-
-    if (err instanceof HTTPException) {
-      return err.getResponse()
-    }
-
-    return c.json({ error: 'internal_error' }, 500)
-  })
+  app.onError(errorHandler)
 
   return app
 }
