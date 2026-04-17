@@ -11,6 +11,9 @@ export interface TradingConfig {
   tradingEnabled: boolean
   allowedSymbols: string[]
   maxOrderNotional: number
+  symbolMaxNotional: Record<string, number>
+  marketHoursCheck: boolean
+  now?: () => Date
 }
 
 export interface TradingDecision {
@@ -39,6 +42,9 @@ export class TradingService {
       tradingEnabled: config.tradingEnabled,
       allowedSymbols: config.allowedSymbols,
       maxOrderNotional: config.maxOrderNotional,
+      symbolMaxNotional: config.symbolMaxNotional,
+      marketHoursCheck: config.marketHoursCheck,
+      now: config.now,
     })
 
     return {

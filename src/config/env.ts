@@ -52,3 +52,43 @@ export interface Env {
   WEBULL_ACCOUNT_ID?: string
   WEBULL_API_BASE?: string
 }
+
+// Trading risk config (Phase 5 append)
+export interface Env {
+  SYMBOL_MAX_NOTIONAL?: string
+  MARKET_HOURS_CHECK?: string
+}
+
+let didWarnInvalidSymbolNotionalMap = false
+
+export function parseSymbolNotionalMap(value: string | undefined): Record<string, number> {
+  if (!value) {
+    return {}
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('value must be an object')
+    }
+
+    const result: Record<string, number> = {}
+
+    for (const [symbol, limit] of Object.entries(parsed)) {
+      if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) {
+        throw new Error(`symbol '${symbol}' has invalid notional limit`)
+      }
+
+      result[symbol.toUpperCase()] = limit
+    }
+
+    return result
+  } catch {
+    if (!didWarnInvalidSymbolNotionalMap) {
+      didWarnInvalidSymbolNotionalMap = true
+      console.warn('Invalid SYMBOL_MAX_NOTIONAL value; using empty symbol max notional map')
+    }
+
+    return {}
+  }
+}
