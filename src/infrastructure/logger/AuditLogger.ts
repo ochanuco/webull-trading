@@ -1,0 +1,28 @@
+import type { MiddlewareHandler } from 'hono'
+
+export interface AuditRecord {
+  requestId: string
+  timestamp: string
+  method: string
+  path: string
+  status: number
+  durationMs: number
+}
+
+export function auditLogger(): MiddlewareHandler<{ Variables: { requestId: string } }> {
+  return async (c, next) => {
+    const requestId = crypto.randomUUID()
+    const started = Date.now()
+    c.set('requestId', requestId)
+    await next()
+    const record: AuditRecord = {
+      requestId,
+      timestamp: new Date().toISOString(),
+      method: c.req.method,
+      path: new URL(c.req.url).pathname,
+      status: c.res.status,
+      durationMs: Date.now() - started,
+    }
+    console.log(JSON.stringify(record))
+  }
+}
