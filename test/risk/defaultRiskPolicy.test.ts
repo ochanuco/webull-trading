@@ -10,7 +10,7 @@ describe('DefaultRiskPolicy', () => {
     quantity: 2,
     price: 10,
     reason: 'test',
-    generatedAt: '2026-01-01T00:00:00.000Z',
+    generatedAtIso: '2026-01-01T00:00:00.000Z',
   }
 
   it('allows a whitelisted order within the configured notional limit', () => {
@@ -91,5 +91,18 @@ describe('DefaultRiskPolicy', () => {
     expect(decision.allowed).toBe(false)
     expect(decision.reasons).toContain('trading is disabled')
     expect(decision.reasons).toContain('order notional 200 exceeds max 100')
+  })
+
+  it('returns early when orderIntent is missing', () => {
+    const decision = policy.evaluate({
+      signal,
+      orderIntent: undefined,
+      tradingEnabled: true,
+      allowedSymbols: ['SOXL', 'SOXS'],
+      maxOrderNotional: 100,
+    })
+
+    expect(decision.allowed).toBe(false)
+    expect(decision.reasons).toContain('orderIntent is missing')
   })
 })

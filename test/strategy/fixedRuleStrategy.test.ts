@@ -29,4 +29,20 @@ describe('FixedRuleStrategy', () => {
   it('throws when buyBelow is not less than sellAbove', () => {
     expect(() => new FixedRuleStrategy(20, 20)).toThrow('buyBelow must be less than sellAbove')
   })
+
+  it('returns BUY when price equals buyBelow', () => {
+    const strategy = new FixedRuleStrategy(10, 20)
+
+    const signal = strategy.decide({ symbol: 'SOXL', price: 10, quantity: 2 })
+
+    expect(signal.action).toBe('BUY')
+  })
+
+  it('returns SELL when price equals sellAbove', () => {
+    const strategy = new FixedRuleStrategy(10, 20)
+
+    const signal = strategy.decide({ symbol: 'SOXL', price: 20, quantity: 2 })
+
+    expect(signal.action).toBe('SELL')
+  })
 })

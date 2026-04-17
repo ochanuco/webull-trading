@@ -42,7 +42,7 @@ export class TradingService {
 
     return {
       signal,
-      orderIntent: riskDecision.normalizedIntent,
+      orderIntent: riskDecision.normalizedIntent !== undefined ? riskDecision.normalizedIntent : orderIntent,
       riskDecision,
     }
   }

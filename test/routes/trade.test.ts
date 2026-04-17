@@ -73,7 +73,7 @@ describe('trade routes', () => {
 
     expect(response.status).toBe(200)
     const body = (await response.json()) as {
-      executionResult?: { mode: string; submitted: boolean; brokerOrderId: string }
+      executionResult?: { mode: string; submitted: boolean; brokerOrderId?: string; errorReason?: string }
     }
     expect(body.executionResult?.mode).toBe('DRY_RUN')
     expect(body.executionResult?.submitted).toBe(true)

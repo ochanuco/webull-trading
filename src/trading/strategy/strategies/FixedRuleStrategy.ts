@@ -20,7 +20,7 @@ export class FixedRuleStrategy implements Strategy {
       quantity: input.quantity,
       price: input.price,
       reason: this.buildReason(action, input.price),
-      generatedAt: new Date().toISOString(),
+      generatedAtIso: new Date().toISOString(),
     }
   }
 

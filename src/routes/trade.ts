@@ -30,13 +30,19 @@ async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeReques
   const symbol = readSymbol(body.symbol)
   const price = readPositiveNumber(body.price, 'price')
   const quantity = readPositiveNumber(body.quantity, 'quantity')
+  const buyBelow = readFiniteNumber(body.buyBelow, 'buyBelow')
+  const sellAbove = readFiniteNumber(body.sellAbove, 'sellAbove')
+
+  if (buyBelow >= sellAbove) {
+    throw new HTTPException(400, { message: 'buyBelow must be less than sellAbove' })
+  }
 
   return {
     symbol,
     price,
     quantity,
-    buyBelow: readNumber(body.buyBelow),
-    sellAbove: readNumber(body.sellAbove),
+    buyBelow,
+    sellAbove,
   }
 }
 
@@ -56,7 +62,7 @@ function readTradingConfig(env: {
   return {
     tradingEnabled: env.TRADING_ENABLED === 'true',
     allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS).map((symbol) => symbol.toUpperCase()),
-    maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL),
+    maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL'),
   }
 }
 
@@ -92,9 +98,10 @@ function readPositiveNumber(value: unknown, field: 'price' | 'quantity'): number
   throw new HTTPException(400, { message: `${field} must be a finite number greater than 0` })
 }
 
-function readNumber(value: unknown): number {
+function readFiniteNumber(value: unknown, field: string): number {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value
   }
-  return 0
+
+  throw new HTTPException(400, { message: `${field} must be a finite number` })
 }

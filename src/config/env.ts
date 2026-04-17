@@ -1,9 +1,6 @@
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
-}
-
-export interface Env {
   DRY_RUN: string
   TRADING_ENABLED: string
   ALLOWED_SYMBOLS: string
@@ -25,7 +22,15 @@ export function parseCsvEnv(value: string | undefined): string[] {
     .filter((entry) => entry.length > 0)
 }
 
-export function parseNumberEnv(value: string | undefined): number {
+export function parseNumberEnv(value: string | undefined, key?: string): number {
+  if (value === undefined) {
+    throw new Error(`Environment variable ${key ? `'${key}' ` : ''}is undefined`)
+  }
+
   const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Environment variable ${key ? `'${key}' ` : ''}has invalid number value: '${value}'`)
+  }
+
+  return parsed
 }

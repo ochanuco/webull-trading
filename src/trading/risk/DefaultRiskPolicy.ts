@@ -5,8 +5,8 @@ export class DefaultRiskPolicy implements RiskPolicy {
   evaluate(input: RiskInput): RiskDecision {
     if (!input.orderIntent) {
       return {
-        allowed: true,
-        reasons: [],
+        allowed: false,
+        reasons: ['orderIntent is missing'],
       }
     }
 
