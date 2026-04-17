@@ -17,7 +17,14 @@
 | `trading-strategist` agent | `.claude/agents/trading-strategist.md` | 戦略設計・backtest 議論。コード実装は main に戻す。`Task(subagent_type="trading-strategist", ...)` で呼ぶ |
 | `phase-scope` skill | `.claude/skills/phase-scope/` | PR 作成前 / CodeRabbit 指摘受領時。scope 判定して他 Phase に回す判断 |
 | `coderabbit-policy` skill | `.claude/skills/coderabbit-policy/` | findings の apply / skip 判断、スキップ理由テンプレ |
-| `dev-conventions` skill | `.claude/skills/dev-conventions/` | pnpm / TS / commit / branch 規約、コマンド集 |
+
+## 非自明な慣習 (package.json / tsconfig.json 見れば分かる話は省略)
+
+- ブランチ名: `dev/<topic>` (例: `dev/poc-phase-2-trading`)。 `main` 直接編集禁止
+- worktree: `git gtr new dev/<topic>` で作成、`git gtr rm` で削除
+- PR title: `POC Phase N: <概要> (issue #<n>)` 形式
+- commit: 英文1行 subject、prefix は `feat:` / `fix:` / `chore:`、body は **why** のみ
+- 並列 PR 共有ファイル (`src/app.ts` / `src/config/env.ts` / `.dev.vars.example`) は **末尾 append のみ** → 後発 PR が rebase で解決
 
 ## 関連設定
 
