@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../app'
-import { parseBooleanEnv, parseCsvEnv, parseNumberEnv } from '../config/env'
+import { parseBooleanEnv, parseCsvEnv, parseNumberEnv, parseSymbolNotionalMap } from '../config/env'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
 import { MockExecution } from '../trading/execution/MockExecution'
@@ -70,12 +70,16 @@ function readTradingConfig(env: {
   TRADING_ENABLED?: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
+  SYMBOL_MAX_NOTIONAL?: string
+  MARKET_HOURS_CHECK?: string
 }): TradingConfig {
   return {
     dryRun: parseBooleanEnv(env.DRY_RUN, true),
     tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED, false),
     allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS).map((symbol) => symbol.toUpperCase()),
     maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL'),
+    symbolMaxNotional: parseSymbolNotionalMap(env.SYMBOL_MAX_NOTIONAL),
+    marketHoursCheck: parseBooleanEnv(env.MARKET_HOURS_CHECK, false),
   }
 }
 
