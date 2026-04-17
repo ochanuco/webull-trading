@@ -11,18 +11,24 @@ export class DefaultRiskPolicy implements RiskPolicy {
     }
 
     const reasons: string[] = []
+    const symbol = input.orderIntent.symbol.toUpperCase()
+    const maxNotional = input.symbolMaxNotional[symbol] ?? input.maxOrderNotional
 
     if (!input.tradingEnabled) {
       reasons.push('trading is disabled')
     }
 
-    if (!input.allowedSymbols.includes(input.orderIntent.symbol.toUpperCase())) {
+    if (!input.allowedSymbols.includes(symbol)) {
       reasons.push(`symbol ${input.orderIntent.symbol} is not allowed`)
     }
 
-    if (input.orderIntent.notional > input.maxOrderNotional) {
+    if (input.marketHoursCheck && !isWithinUsEquityRegularTradingHours((input.now ?? defaultNow)())) {
+      reasons.push('market hours check failed: outside US equity regular trading hours')
+    }
+
+    if (input.orderIntent.notional > maxNotional) {
       reasons.push(
-        `order notional ${input.orderIntent.notional} exceeds max ${input.maxOrderNotional}`,
+        `order notional ${input.orderIntent.notional} exceeds max ${maxNotional}`,
       )
     }
 
@@ -43,4 +49,19 @@ export class DefaultRiskPolicy implements RiskPolicy {
       normalizedIntent: input.orderIntent,
     }
   }
+}
+
+function defaultNow(): Date {
+  return new Date()
+}
+
+function isWithinUsEquityRegularTradingHours(now: Date): boolean {
+  const day = now.getUTCDay()
+  if (day === 0 || day === 6) {
+    return false
+  }
+
+  const minutes = now.getUTCHours() * 60 + now.getUTCMinutes()
+  // TODO(Phase 5): handle DST accurately
+  return minutes >= 13 * 60 + 30 && minutes < 20 * 60
 }
