@@ -6,6 +6,7 @@ import { TRADE_EVENT_INGEST_SECRET_HEADER } from './infrastructure/webull/TradeE
 import { health } from './routes/health'
 import { trade } from './routes/trade'
 import { events } from './routes/events'
+// Webull routes (Phase 2 append)
 import { webull } from './routes/webull'
 
 export type AppBindings = {
@@ -17,7 +18,6 @@ export function createApp() {
   const app = new Hono<AppBindings>()
   app.use('*', auditLogger())
   app.use('/trade/*', basicAuthMiddleware())
-  app.use('/webull/*', basicAuthMiddleware())
   app.use('/events/*', async (c, next) => {
     const secret = c.env.EVENT_INGEST_SECRET
     const providedSecret = c.req.header(TRADE_EVENT_INGEST_SECRET_HEADER)
@@ -30,8 +30,10 @@ export function createApp() {
   })
   app.route('/health', health)
   app.route('/trade', trade)
-  app.route('/webull', webull)
   app.route('/events', events)
+  // Webull routes (Phase 2 append)
+  app.use('/webull/*', basicAuthMiddleware())
+  app.route('/webull', webull)
   return app
 }
 
