@@ -57,6 +57,18 @@ export class WebullHttpClient {
     let lastFailure: Error | undefined
     let lastStatus: number | undefined
 
+    // Create auth headers once, outside retry loop - auth errors should fail immediately
+    let authHeaders: Record<string, string>
+    try {
+      authHeaders = await this.options.auth.createHeaders(method, path, payload)
+    } catch (error) {
+      throw new BrokerRequestError(
+        `Webull authentication failed: ${error instanceof Error ? error.message : String(error)}`,
+        `${method} ${path}`,
+        { cause: error instanceof Error ? error : undefined },
+      )
+    }
+
     for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt += 1) {
       const controller = new AbortController()
       let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -66,7 +78,7 @@ export class WebullHttpClient {
         const headers = {
           Accept: 'application/json',
           ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...(await this.options.auth.createHeaders(method, path, payload)),
+          ...authHeaders,
         }
 
         timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -80,6 +92,7 @@ export class WebullHttpClient {
       } catch (error) {
         const normalizedError = normalizeFetchError(error, this.timeoutMs)
         lastFailure = normalizedError ?? undefined
+        lastStatus = undefined // Clear stale status when no response is received
 
         if (normalizedError === null) {
           throw error
