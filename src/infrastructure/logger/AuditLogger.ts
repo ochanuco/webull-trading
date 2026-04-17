@@ -14,15 +14,18 @@ export function auditLogger(): MiddlewareHandler<{ Variables: { requestId: strin
     const requestId = crypto.randomUUID()
     const started = Date.now()
     c.set('requestId', requestId)
-    await next()
-    const record: AuditRecord = {
-      requestId,
-      timestamp: new Date().toISOString(),
-      method: c.req.method,
-      path: new URL(c.req.url).pathname,
-      status: c.res.status,
-      durationMs: Date.now() - started,
+    try {
+      await next()
+    } finally {
+      const record: AuditRecord = {
+        requestId,
+        timestamp: new Date().toISOString(),
+        method: c.req.method,
+        path: new URL(c.req.url).pathname,
+        status: c.res.status,
+        durationMs: Date.now() - started,
+      }
+      console.log(JSON.stringify(record))
     }
-    console.log(JSON.stringify(record))
   }
 }

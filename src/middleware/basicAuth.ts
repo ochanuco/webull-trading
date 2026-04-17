@@ -7,7 +7,7 @@ export function basicAuthMiddleware(): MiddlewareHandler<{ Bindings: Env }> {
     const username = c.env.BASIC_AUTH_USER
     const password = c.env.BASIC_AUTH_PASSWORD
     if (!username || !password) {
-      return c.json({ error: 'auth not configured' }, 500)
+      return c.json({ error: 'Internal Server Error' }, 500)
     }
     return basicAuth({ username, password })(c, next)
   }
