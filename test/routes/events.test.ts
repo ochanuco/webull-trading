@@ -100,7 +100,11 @@ describe('POST /events/trade', () => {
     )
 
     expect(res.status).toBe(400)
-    await expect(res.json()).resolves.toEqual({ error: 'Bad Request' })
+    await expect(res.json()).resolves.toEqual({
+      error: 'validation_error',
+      message: 'event payload is invalid',
+      field: 'event',
+    })
   })
 
   it('returns 400 for a schema-invalid JSON body', async () => {
@@ -131,6 +135,10 @@ describe('POST /events/trade', () => {
     )
 
     expect(res.status).toBe(400)
-    await expect(res.json()).resolves.toEqual({ error: 'Bad Request' })
+    await expect(res.json()).resolves.toEqual({
+      error: 'validation_error',
+      message: 'event payload is invalid',
+      field: 'event',
+    })
   })
 })
