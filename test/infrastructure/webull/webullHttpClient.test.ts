@@ -11,6 +11,25 @@ const intent: OrderIntent = {
   notional: 19,
 }
 
+function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClient {
+  return new WebullHttpClient({
+    auth: new WebullAuth({
+      appKey: 'app-key',
+      appSecret: 'app-secret',
+      accountId: 'acct-1',
+    }),
+    baseUrl: 'https://broker.example.test',
+    timeoutMs,
+    retry: {
+      maxAttempts: 3,
+      baseDelayMs: 0,
+      multiplier: 2,
+      jitter: 0,
+    },
+    fetchFn,
+  })
+}
+
 describe('WebullHttpClient', () => {
   it('places an order with the expected method, URL, body, and auth header', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -26,15 +45,7 @@ describe('WebullHttpClient', () => {
         { status: 200 },
       ),
     )
-    const client = new WebullHttpClient({
-      auth: new WebullAuth({
-        appKey: 'app-key',
-        appSecret: 'app-secret',
-        accountId: 'acct-1',
-      }),
-      baseUrl: 'https://broker.example.test',
-      fetchFn: fetchMock,
-    })
+    const client = createClient(fetchMock)
 
     await client.placeOrder(intent)
 
@@ -57,24 +68,79 @@ describe('WebullHttpClient', () => {
     expect((init?.headers as Record<string, string>).Authorization).toMatch(/^HMAC app-key:/)
   })
 
-  it('times out when fetch does not complete before the deadline', async () => {
-    const fetchMock = vi.fn<typeof fetch>((_url, init) => {
-      return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => {
-          reject(new DOMException('Aborted', 'AbortError'))
-        })
-      })
-    })
-    const client = new WebullHttpClient({
-      auth: new WebullAuth({
-        appKey: 'app-key',
-        appSecret: 'app-secret',
-        accountId: 'acct-1',
-      }),
-      timeoutMs: 20,
-      fetchFn: fetchMock,
-    })
+  it('retries a transient 500 response and succeeds on the next attempt', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('server error', { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            orderId: 'ord-123',
+            status: 'SUBMITTED',
+            symbol: 'SOXL',
+            side: 'BUY',
+            quantity: 2,
+            limitPrice: 9.5,
+          }),
+          { status: 200 },
+        ),
+      )
+    const client = createClient(fetchMock)
 
-    await expect(client.placeOrder(intent)).rejects.toThrow('Webull request timed out after 20ms')
+    await expect(client.placeOrder(intent)).resolves.toMatchObject({
+      orderId: 'ord-123',
+      status: 'SUBMITTED',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('throws BrokerRequestError with the last status after exhausting retries on 500 responses', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('server error', { status: 500 }))
+    const client = createClient(fetchMock)
+
+    await expect(client.placeOrder(intent)).rejects.toThrow(
+      'Webull request failed after 3 attempts with last status 500',
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('fails fast on 4xx responses without retrying', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('bad request', { status: 400 }))
+    const client = createClient(fetchMock)
+
+    await expect(client.placeOrder(intent)).rejects.toThrow(
+      'Webull request failed permanently with status 400',
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries AbortError failures', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new DOMException('Aborted', 'AbortError'))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            orderId: 'ord-456',
+            status: 'SUBMITTED',
+            symbol: 'SOXL',
+            side: 'BUY',
+            quantity: 2,
+            limitPrice: 9.5,
+          }),
+          { status: 200 },
+        ),
+      )
+    const client = createClient(fetchMock, 20)
+
+    await expect(client.placeOrder(intent)).resolves.toMatchObject({
+      orderId: 'ord-456',
+      status: 'SUBMITTED',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
