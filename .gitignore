@@ -7,7 +7,12 @@ dist/
 *.log
 .DS_Store
 
+.local/
+.local/**
+
+
 # Keep .claude/ (repo-level AI agent rules) tracked even when the global
 # git-ignore rules it out.
 !.claude/
 !.claude/**
+.claude/settings.local.json
