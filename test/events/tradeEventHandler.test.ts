@@ -7,10 +7,10 @@ describe('TradeEventHandler', () => {
     const handler = new TradeEventHandler(log)
 
     await handler.handle({
-      eventType: ' ORDER_FILLED ',
+      eventType: 'ORDER_FILLED',
       orderId: ' ord-123 ',
       symbol: 'soxl',
-      status: ' FILLED ',
+      status: 'FILLED',
       filledQty: 2,
       rawPayload: { foo: 'bar' },
       receivedAt: '2026-04-18T10:00:00.000Z',

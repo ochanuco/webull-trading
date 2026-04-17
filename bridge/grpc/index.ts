@@ -11,9 +11,13 @@ export interface BridgeRuntimeEnv {
 export async function startTradeEventBridge(env: BridgeRuntimeEnv): Promise<void> {
   const client = createWebullGrpcTradeEventClient({ endpoint: env.grpcEndpoint })
 
-  await client.subscribe(async (rawEvent) => {
-    const event = mapWebullTradeEvent(rawEvent)
-    await postTradeEvent(env, { event })
+  await client.subscribe(async (rawEvent: unknown) => {
+    try {
+      const event = mapWebullTradeEvent(rawEvent)
+      await postTradeEvent(env, { event })
+    } catch (error) {
+      console.error('Failed to process gRPC trade event', error)
+    }
   })
 }
 
@@ -22,6 +26,7 @@ export async function postTradeEvent(
   payload: TradeEventIngestRequest,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  // TODO(phase-5/#6): add timeout and retry handling for transient ingest failures.
   const response = await fetchImpl(new URL('/events/trade', env.workerBaseUrl), {
     method: 'POST',
     headers: {

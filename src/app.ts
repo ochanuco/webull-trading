@@ -20,7 +20,7 @@ export function createApp() {
     const secret = c.env.EVENT_INGEST_SECRET
     const providedSecret = c.req.header(TRADE_EVENT_INGEST_SECRET_HEADER)
 
-    if (!secret || providedSecret !== secret) {
+    if (!secret || !providedSecret || !timingSafeEqual(providedSecret, secret)) {
       return c.json({ error: 'Unauthorized' }, 401)
     }
 
@@ -30,4 +30,21 @@ export function createApp() {
   app.route('/trade', trade)
   app.route('/events', events)
   return app
+}
+
+function timingSafeEqual(a: string, b: string) {
+  const enc = new TextEncoder()
+  const ab = enc.encode(a)
+  const bb = enc.encode(b)
+
+  if (ab.byteLength !== bb.byteLength) {
+    return false
+  }
+
+  let diff = 0
+  for (let i = 0; i < ab.byteLength; i++) {
+    diff |= ab[i]! ^ bb[i]!
+  }
+
+  return diff === 0
 }

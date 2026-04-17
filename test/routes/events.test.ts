@@ -56,4 +56,58 @@ describe('POST /events/trade', () => {
     expect(res.status).toBe(200)
     await expect(res.json()).resolves.toEqual({ ok: true })
   })
+
+  it('returns 400 for a malformed JSON body', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/events/trade',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          [TRADE_EVENT_INGEST_SECRET_HEADER]: 'secret',
+        },
+        body: '{"event":',
+      },
+      {
+        BASIC_AUTH_USER: 'user',
+        BASIC_AUTH_PASSWORD: 'pass',
+        EVENT_INGEST_SECRET: 'secret',
+      },
+    )
+
+    expect(res.status).toBe(400)
+    await expect(res.json()).resolves.toEqual({ error: 'Bad Request' })
+  })
+
+  it('returns 400 for a schema-invalid JSON body', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/events/trade',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          [TRADE_EVENT_INGEST_SECRET_HEADER]: 'secret',
+        },
+        body: JSON.stringify({
+          event: {
+            orderId: 'ord-123',
+            symbol: 'SOXL',
+            status: 'FILLED',
+            rawPayload: {},
+            receivedAt: '2026-04-18T10:00:00.000Z',
+          },
+        }),
+      },
+      {
+        BASIC_AUTH_USER: 'user',
+        BASIC_AUTH_PASSWORD: 'pass',
+        EVENT_INGEST_SECRET: 'secret',
+      },
+    )
+
+    expect(res.status).toBe(400)
+    await expect(res.json()).resolves.toEqual({ error: 'Bad Request' })
+  })
 })

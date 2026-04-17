@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { TradeEventIngestRequest } from '../infrastructure/webull/TradeEventBridge'
 import { TradeEventService } from '../trading/application/TradeEventService'
-import type { TradeEvent } from '../trading/domain/TradeEvent'
+import { isTradeEventType, isTradeStatus, type TradeEvent } from '../trading/domain/TradeEvent'
 
 const tradeEventService = new TradeEventService()
 
@@ -40,6 +40,10 @@ function isTradeEvent(value: unknown): value is TradeEvent {
     return false
   }
 
+  if (!isTradeEventType(value.eventType) || !isTradeStatus(value.status)) {
+    return false
+  }
+
   if ('filledQty' in value && value.filledQty !== undefined && typeof value.filledQty !== 'number') {
     return false
   }
@@ -48,5 +52,5 @@ function isTradeEvent(value: unknown): value is TradeEvent {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
