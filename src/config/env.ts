@@ -6,6 +6,10 @@ export interface Env {
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
   EVENT_INGEST_SECRET: string
+  WEBULL_APP_KEY?: string
+  WEBULL_APP_SECRET?: string
+  WEBULL_ACCOUNT_ID?: string
+  WEBULL_API_BASE?: string
 }
 
 /**
