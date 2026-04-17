@@ -12,6 +12,7 @@ export class DefaultRiskPolicy implements RiskPolicy {
 
     const reasons: string[] = []
     const symbol = input.orderIntent.symbol.toUpperCase()
+    const normalizedIntent = { ...input.orderIntent }
     const maxNotional = input.symbolMaxNotional[symbol] ?? input.maxOrderNotional
 
     if (!input.tradingEnabled) {
@@ -26,16 +27,16 @@ export class DefaultRiskPolicy implements RiskPolicy {
       reasons.push('market hours check failed: outside US equity regular trading hours')
     }
 
-    if (input.orderIntent.notional > maxNotional) {
+    if (normalizedIntent.notional > maxNotional) {
       reasons.push(
-        `order notional ${input.orderIntent.notional} exceeds max ${maxNotional}`,
+        `order notional ${normalizedIntent.notional} exceeds max ${maxNotional}`,
       )
     }
 
-    return this.buildDecision(reasons, input)
+    return this.buildDecision(reasons, input, normalizedIntent)
   }
 
-  private buildDecision(reasons: string[], input: RiskInput): RiskDecision {
+  private buildDecision(reasons: string[], input: RiskInput, normalizedIntent: RiskInput['orderIntent']): RiskDecision {
     if (reasons.length > 0) {
       return {
         allowed: false,
@@ -46,7 +47,7 @@ export class DefaultRiskPolicy implements RiskPolicy {
     return {
       allowed: true,
       reasons: [],
-      normalizedIntent: input.orderIntent,
+      normalizedIntent,
     }
   }
 }

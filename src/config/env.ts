@@ -45,6 +45,20 @@ export function parseNumberEnv(value: string | undefined, key?: string): number 
   return parsed
 }
 
+// Webull broker config (Phase 2 append)
+export interface Env {
+  WEBULL_APP_KEY?: string
+  WEBULL_APP_SECRET?: string
+  WEBULL_ACCOUNT_ID?: string
+  WEBULL_API_BASE?: string
+}
+
+// Trading risk config (Phase 5 append)
+export interface Env {
+  SYMBOL_MAX_NOTIONAL?: string
+  MARKET_HOURS_CHECK?: string
+}
+
 let didWarnInvalidSymbolNotionalMap = false
 
 export function parseSymbolNotionalMap(value: string | undefined): Record<string, number> {
@@ -77,18 +91,4 @@ export function parseSymbolNotionalMap(value: string | undefined): Record<string
 
     return {}
   }
-}
-
-// Webull broker config (Phase 2 append)
-export interface Env {
-  WEBULL_APP_KEY?: string
-  WEBULL_APP_SECRET?: string
-  WEBULL_ACCOUNT_ID?: string
-  WEBULL_API_BASE?: string
-}
-
-// Trading risk config (Phase 5 append)
-export interface Env {
-  SYMBOL_MAX_NOTIONAL?: string
-  MARKET_HOURS_CHECK?: string
 }
