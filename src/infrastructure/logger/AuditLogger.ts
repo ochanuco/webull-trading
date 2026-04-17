@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from 'hono'
+import { HTTPException } from 'hono/http-exception'
 
 export interface AuditRecord {
   requestId: string
@@ -13,12 +14,15 @@ export function auditLogger(): MiddlewareHandler<{ Variables: { requestId: strin
   return async (c, next) => {
     const requestId = crypto.randomUUID()
     const started = Date.now()
+    let status = 200
     c.set('requestId', requestId)
     try {
       await next()
+      status = c.res.status
+    } catch (err) {
+      status = err instanceof HTTPException ? err.status : 500
+      throw err
     } finally {
-      const status = c.error ? 500 : (c.res?.status ?? 200)
-
       const record: AuditRecord = {
         requestId,
         timestamp: new Date().toISOString(),
