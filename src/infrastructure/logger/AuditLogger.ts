@@ -17,7 +17,7 @@ export function auditLogger(): MiddlewareHandler<{ Variables: { requestId: strin
     try {
       await next()
     } finally {
-      const status = c.res.status || (c.error ? 500 : 200)
+      const status = c.error ? 500 : (c.res?.status ?? 200)
 
       const record: AuditRecord = {
         requestId,

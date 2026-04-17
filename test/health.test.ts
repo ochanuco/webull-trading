@@ -8,6 +8,7 @@ describe('GET /health', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as { status: string; timestamp: string }
     expect(body.status).toBe('ok')
-    expect(new Date(body.timestamp).toString()).not.toBe('Invalid Date')
+    expect(body.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/)
+    expect(new Date(body.timestamp).toISOString()).toBe(body.timestamp)
   })
 })

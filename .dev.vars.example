@@ -1,2 +1,2 @@
-BASIC_AUTH_USER=admin
-BASIC_AUTH_PASSWORD=change-me
+BASIC_AUTH_USER=<your-username>
+BASIC_AUTH_PASSWORD=<your-password>
