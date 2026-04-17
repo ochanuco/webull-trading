@@ -59,15 +59,18 @@ export class WebullHttpClient {
 
     for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt += 1) {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
-      const headers = {
-        Accept: 'application/json',
-        ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
-        ...(await this.options.auth.createHeaders(method, path, payload)),
-      }
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
       let response: Response | undefined
 
       try {
+        const headers = {
+          Accept: 'application/json',
+          ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(await this.options.auth.createHeaders(method, path, payload)),
+        }
+
+        timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
+
         response = await this.fetchFn(`${this.baseUrl}${path}`, {
           method,
           headers,
@@ -82,7 +85,9 @@ export class WebullHttpClient {
           throw error
         }
       } finally {
-        clearTimeout(timeoutId)
+        if (timeoutId !== undefined) {
+          clearTimeout(timeoutId)
+        }
       }
 
       if (response === undefined) {
