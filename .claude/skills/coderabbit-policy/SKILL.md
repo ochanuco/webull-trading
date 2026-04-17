@@ -98,7 +98,7 @@ CODERABBIT_API_KEY="$(op read 'op://Personal/CODERABBIT_API_KEY/credential')" \
 ### findings の整形
 
 ```bash
-grep '"type":"finding"' findings.log | python3 -c '
+grep '"type":"finding"' .local/coderabbit-findings.log | python3 -c '
 import json, sys
 for i, line in enumerate(sys.stdin, 1):
     f = json.loads(line)
