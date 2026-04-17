@@ -1,8 +1,8 @@
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
-  DRY_RUN: string
-  TRADING_ENABLED: string
+  DRY_RUN?: string
+  TRADING_ENABLED?: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
   EVENT_INGEST_SECRET: string
