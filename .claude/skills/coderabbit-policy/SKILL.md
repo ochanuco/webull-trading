@@ -60,7 +60,7 @@ codex sandbox は network と `~/.coderabbit/` への書き込みをデフォル
 ```bash
 codex exec --full-auto \
   -c 'sandbox_workspace_write.network_access=true' \
-  -c 'sandbox_workspace_write.writable_roots=["/Users/chanu/.coderabbit"]' \
+  -c 'sandbox_workspace_write.writable_roots=["$HOME/.coderabbit"]' \
   - < prompt.md
 ```
 
@@ -78,7 +78,7 @@ codex exec --full-auto \
 CODERABBIT_API_KEY="$(op read 'op://Personal/CODERABBIT_API_KEY/credential')" \
   codex exec --full-auto \
     -c 'sandbox_workspace_write.network_access=true' \
-    -c 'sandbox_workspace_write.writable_roots=["/Users/chanu/.coderabbit"]' \
+    -c 'sandbox_workspace_write.writable_roots=["$HOME/.coderabbit"]' \
     - < prompt.md
 ```
 
