@@ -1,0 +1,70 @@
+language: ja
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    - "!.local/**"
+    - "!**/node_modules/**"
+    - "!bridge/pnpm-lock.yaml"
+    - "!pnpm-lock.yaml"
+
+  path_instructions:
+    - path: "**"
+      instructions: |
+        This repository is a POC for a retail algorithmic auto-trading system against Webull OpenAPI,
+        on Hono + Cloudflare Workers + TypeScript. Work proceeds phase-by-phase per issue #1.
+
+        Scope policy (STRICT):
+        - Only request changes that fall within the current PR's declared Phase scope.
+        - Do NOT request features, tests, or hardening that belong to a later Phase. Note as out-of-scope
+          with a reference to the Phase issue instead.
+        - Do NOT request premature abstractions (DI refactor, factory, config indirection)
+          or future-use optional fields that no caller populates.
+        - Do NOT request exhaustive edge-case test coverage beyond one representative pass/fail pair.
+        - POC coverage (pass + fail) is adequate; boundary-value exhaustion is noise.
+
+        Phase map: Phase 1 = merged PR #2. Phase 2 = #3. Phase 3 = #4. Phase 4 = #5. Phase 5 = #6.
+
+        Safety invariants that MUST NOT be weakened:
+        - DRY_RUN default true, TRADING_ENABLED default false.
+        - Strategy → Risk → Execution ordering; Risk must be able to reject.
+        - Input validation on price / quantity / notional (> 0, finite, not NaN).
+        - Timing-safe comparison for secrets / tokens.
+        - Structured JSON audit log with requestId.
+        - Webull raw payloads stay in infrastructure; domain types only in application.
+
+    - path: "bridge/**"
+      instructions: |
+        This directory runs in Node (NOT Cloudflare Workers). `import.meta.main`, `process.env`,
+        and Node builtins are valid here; do not flag them as Workers incompatibilities.
+
+        The bridge tsconfig deliberately uses moduleResolution "Bundler" to avoid forcing `.js`
+        specifiers across Worker source. Do not request NodeNext.
+
+    - path: "bridge/grpc/client.ts"
+      instructions: |
+        Deliberate TODO stub awaiting the Webull gRPC proto. Do NOT request replacing the
+        placeholder with a real client in this PR.
+
+    - path: "src/middleware/basicAuth.ts"
+      instructions: |
+        Phase 1 scaffold. Do not request closure caching of the Hono `basicAuth()` middleware —
+        previously rejected as premature optimization.
+
+    - path: "src/infrastructure/logger/AuditLogger.ts"
+      instructions: |
+        Phase 1 structured JSON logger. Do not request adding optional fields
+        (`userAgent`, `ip`, `responseSize`, etc.) unless a caller actually populates them.
+
+chat:
+  auto_reply: true
