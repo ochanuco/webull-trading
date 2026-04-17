@@ -1,8 +1,8 @@
 import { Hono } from 'hono'
-import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../app'
 import { parseBooleanEnv, parseCsvEnv, parseNumberEnv, parseSymbolNotionalMap } from '../config/env'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
+import { ValidationError } from '../shared/errors'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
 import { MockExecution } from '../trading/execution/MockExecution'
 import { WebullExecution } from '../trading/execution/WebullExecution'
@@ -36,7 +36,7 @@ async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeReques
   const sellAbove = readFiniteNumber(body.sellAbove, 'sellAbove')
 
   if (buyBelow >= sellAbove) {
-    throw new HTTPException(400, { message: 'buyBelow must be less than sellAbove' })
+    throw new ValidationError('buyBelow must be less than sellAbove', { field: 'buyBelow' })
   }
 
   return {
@@ -101,7 +101,7 @@ function readSymbol(value: unknown): string {
   const symbol = readString(value).trim()
 
   if (symbol.length === 0) {
-    throw new HTTPException(400, { message: 'symbol must be a non-empty string' })
+    throw new ValidationError('symbol must be a non-empty string', { field: 'symbol' })
   }
 
   return symbol
@@ -112,7 +112,7 @@ function readPositiveNumber(value: unknown, field: 'price' | 'quantity'): number
     return value
   }
 
-  throw new HTTPException(400, { message: `${field} must be a finite number greater than 0` })
+  throw new ValidationError(`${field} must be a finite number greater than 0`, { field })
 }
 
 function readFiniteNumber(value: unknown, field: string): number {
@@ -120,5 +120,5 @@ function readFiniteNumber(value: unknown, field: string): number {
     return value
   }
 
-  throw new HTTPException(400, { message: `${field} must be a finite number` })
+  throw new ValidationError(`${field} must be a finite number`, { field })
 }

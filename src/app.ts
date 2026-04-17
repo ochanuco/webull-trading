@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { HTTPException } from 'hono/http-exception'
 import type { Env } from './config/env'
 import { auditLogger } from './infrastructure/logger/AuditLogger'
 import { basicAuthMiddleware } from './middleware/basicAuth'
@@ -8,6 +9,7 @@ import { trade } from './routes/trade'
 import { events } from './routes/events'
 // Webull routes (Phase 2 append)
 import { webull } from './routes/webull'
+import { BrokerRequestError, TradingError, ValidationError } from './shared/errors'
 
 export type AppBindings = {
   Bindings: Env
@@ -34,6 +36,32 @@ export function createApp() {
   // Webull routes (Phase 2 append)
   app.use('/webull/*', basicAuthMiddleware())
   app.route('/webull', webull)
+  app.onError((err, c) => {
+    if (err instanceof BrokerRequestError) {
+      return c.json({ error: err.code, status: err.status }, err.status)
+    }
+
+    if (err instanceof ValidationError) {
+      return c.json(
+        {
+          error: err.code,
+          message: err.message,
+          ...(err.field ? { field: err.field } : {}),
+        },
+        err.status,
+      )
+    }
+
+    if (err instanceof TradingError) {
+      return c.json({ error: err.code, message: err.message }, err.status)
+    }
+
+    if (err instanceof HTTPException) {
+      return err.getResponse()
+    }
+
+    return c.json({ error: 'internal_error' }, 500)
+  })
   return app
 }
 

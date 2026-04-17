@@ -1,9 +1,9 @@
 import { Hono } from 'hono'
-import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../app'
 import { parseBooleanEnv } from '../config/env'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import type { WebullPlaceOrderResponseDto } from '../infrastructure/webull/dto'
+import { ValidationError } from '../shared/errors'
 import type { OrderIntent, OrderSide } from '../trading/domain/OrderIntent'
 
 export const webull = new Hono<AppBindings>().post('/order/place', async (c) => {
@@ -55,7 +55,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function readSymbol(value: unknown): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new HTTPException(400, { message: 'symbol must be a non-empty string' })
+    throw new ValidationError('symbol must be a non-empty string', { field: 'symbol' })
   }
 
   return value.trim().toUpperCase()
@@ -66,7 +66,7 @@ function readSide(value: unknown): OrderSide {
     return value
   }
 
-  throw new HTTPException(400, { message: 'side must be BUY or SELL' })
+  throw new ValidationError('side must be BUY or SELL', { field: 'side' })
 }
 
 function readPositiveNumber(value: unknown, field: 'price' | 'quantity'): number {
@@ -74,5 +74,5 @@ function readPositiveNumber(value: unknown, field: 'price' | 'quantity'): number
     return value
   }
 
-  throw new HTTPException(400, { message: `${field} must be a finite number greater than 0` })
+  throw new ValidationError(`${field} must be a finite number greater than 0`, { field })
 }
