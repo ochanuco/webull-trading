@@ -11,7 +11,13 @@ export function parseBooleanEnv(value: string | undefined, defaultValue = false)
   if (value === undefined) {
     return defaultValue
   }
-  return value === 'true'
+  if (value === 'true') {
+    return true
+  }
+  if (value === 'false') {
+    return false
+  }
+  throw new Error(`Invalid boolean environment variable value: '${value}'. Expected 'true', 'false', or undefined.`)
 }
 
 export function parseCsvEnv(value: string | undefined): string[] {
