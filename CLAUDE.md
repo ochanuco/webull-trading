@@ -5,8 +5,9 @@
 ## この repo の前提
 
 - **POC**: 小規模 retail の算出的自動売買 (Webull OpenAPI, Cloudflare Workers, Hono, TypeScript)
+- **POC status: 全 Phase 1–5 merged、[#1](https://github.com/ochanuco/webull-trading/issues/1) closed。以降の作業は [follow-up issues](#関連リンク) 参照**
 - **実マネー前提で fail-closed 設計**。`DRY_RUN=true` / `TRADING_ENABLED=false` が既定
-- **Phase 単位 PR**: 各 Phase の scope を守る (#3 Phase 2 / #4 Phase 3 / #5 Phase 4 / #6 Phase 5)
+- **Phase 単位 PR** (POC 時): 各 Phase の scope を守る (#3 Phase 2 / #4 Phase 3 / #5 Phase 4 / #6 Phase 5 — 全 closed)
 - **pnpm 10+** / Node 24 / TypeScript strict / `moduleResolution: Bundler`
 
 ## Skill / Agent の使い分け
@@ -33,9 +34,16 @@
 
 ## 関連リンク
 
+### POC (closed)
 - POC 設計書: [#1](https://github.com/ochanuco/webull-trading/issues/1)
 - Phase issues: [#3](https://github.com/ochanuco/webull-trading/issues/3) / [#4](https://github.com/ochanuco/webull-trading/issues/4) / [#5](https://github.com/ochanuco/webull-trading/issues/5) / [#6](https://github.com/ochanuco/webull-trading/issues/6)
 - Phase 1 merged PR: [#2](https://github.com/ochanuco/webull-trading/pull/2)
+
+### POC 後の follow-up
+- [#21](https://github.com/ochanuco/webull-trading/issues/21) Webull OpenAPI 実運用化 (canonical signing / live 疎通 / エラー細分化)
+- [#22](https://github.com/ochanuco/webull-trading/issues/22) gRPC bridge 本実装 (Webull proto / runtime deploy)
+- [#23](https://github.com/ochanuco/webull-trading/issues/23) Risk policy 詳細化 (DST / halt / PDT / short locate / settlement)
+- [#24](https://github.com/ochanuco/webull-trading/issues/24) Production operational readiness (secrets / CI / deploy / observability)
 
 ## 迷ったら
 
