@@ -8,17 +8,17 @@ export interface Env {
   EVENT_INGEST_SECRET: string
 }
 
-export function parseBooleanEnv(value: string | undefined, defaultValue = false): boolean {
+/**
+ * Parses a string environment variable as a boolean.
+ * Only the exact string `"true"` is truthy; everything else (including undefined) falls back to
+ * `defaultValue`.  This ensures fail-closed behaviour: callers that omit the env var get the
+ * safe default rather than `false` for a DRY_RUN guard or `true` for a TRADING_ENABLED gate.
+ */
+export function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
   if (value === undefined) {
     return defaultValue
   }
-  if (value === 'true') {
-    return true
-  }
-  if (value === 'false') {
-    return false
-  }
-  throw new Error(`Invalid boolean environment variable value: '${value}'. Expected 'true', 'false', or undefined.`)
+  return value === 'true'
 }
 
 export function parseCsvEnv(value: string | undefined): string[] {
