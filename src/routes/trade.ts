@@ -2,8 +2,10 @@ import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../app'
 import { parseBooleanEnv, parseCsvEnv, parseNumberEnv } from '../config/env'
+import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
 import { MockExecution } from '../trading/execution/MockExecution'
+import { WebullExecution } from '../trading/execution/WebullExecution'
 import { DefaultRiskPolicy } from '../trading/risk/DefaultRiskPolicy'
 import { FixedRuleStrategy } from '../trading/strategy/strategies/FixedRuleStrategy'
 
@@ -17,11 +19,11 @@ interface TradeRequest {
 
 export const trade = new Hono<AppBindings>().post('/decide', async (c) => {
   const request = await parseTradeRequest(c.req.json())
-  const service = createTradingService(request)
+  const service = createTradingService(request, c.env)
   return c.json(service.decide(request, readTradingConfig(c.env)))
 }).post('/execute', async (c) => {
   const request = await parseTradeRequest(c.req.json())
-  const service = createTradingService(request)
+  const service = createTradingService(request, c.env)
   return c.json(await service.executeTrade(request, readTradingConfig(c.env)))
 })
 
@@ -46,20 +48,31 @@ async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeReques
   }
 }
 
-function createTradingService(request: TradeRequest): TradingService {
+export function createTradingService(
+  request: TradeRequest,
+  env: {
+    DRY_RUN?: string
+  } & WebullClientEnv,
+): TradingService {
+  const execution = parseBooleanEnv(env.DRY_RUN, true)
+    ? new MockExecution()
+    : new WebullExecution(createWebullHttpClient(env))
+
   return new TradingService(
     new FixedRuleStrategy(request.buyBelow, request.sellAbove),
     new DefaultRiskPolicy(),
-    new MockExecution(),
+    execution,
   )
 }
 
 function readTradingConfig(env: {
+  DRY_RUN?: string
   TRADING_ENABLED?: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
 }): TradingConfig {
   return {
+    dryRun: parseBooleanEnv(env.DRY_RUN, true),
     tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED, false),
     allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS).map((symbol) => symbol.toUpperCase()),
     maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL'),

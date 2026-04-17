@@ -44,3 +44,11 @@ export function parseNumberEnv(value: string | undefined, key?: string): number 
 
   return parsed
 }
+
+// Webull broker config (Phase 2 append)
+export interface Env {
+  WEBULL_APP_KEY?: string
+  WEBULL_APP_SECRET?: string
+  WEBULL_ACCOUNT_ID?: string
+  WEBULL_API_BASE?: string
+}

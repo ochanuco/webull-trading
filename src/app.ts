@@ -6,6 +6,8 @@ import { TRADE_EVENT_INGEST_SECRET_HEADER } from './infrastructure/webull/TradeE
 import { health } from './routes/health'
 import { trade } from './routes/trade'
 import { events } from './routes/events'
+// Webull routes (Phase 2 append)
+import { webull } from './routes/webull'
 
 export type AppBindings = {
   Bindings: Env
@@ -29,6 +31,9 @@ export function createApp() {
   app.route('/health', health)
   app.route('/trade', trade)
   app.route('/events', events)
+  // Webull routes (Phase 2 append)
+  app.use('/webull/*', basicAuthMiddleware())
+  app.route('/webull', webull)
   return app
 }
 
