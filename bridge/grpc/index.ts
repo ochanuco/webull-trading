@@ -56,6 +56,10 @@ export async function postTradeEvent(
   const multiplier = options.multiplier ?? DEFAULT_BACKOFF_MULTIPLIER
   const jitter = options.jitter ?? DEFAULT_JITTER
 
+  // Prepare URL and body before retry loop - these should fail fast if invalid
+  const url = new URL('/events/trade', env.workerBaseUrl)
+  const body = JSON.stringify(payload)
+
   let lastFailure: Error | undefined
   let lastStatus: number | undefined
 
@@ -65,13 +69,13 @@ export async function postTradeEvent(
     let shouldRetry = false
 
     try {
-      const response = await fetchImpl(new URL('/events/trade', env.workerBaseUrl), {
+      const response = await fetchImpl(url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           [TRADE_EVENT_INGEST_SECRET_HEADER]: env.ingestSecret,
         },
-        body: JSON.stringify(payload),
+        body,
         signal: controller.signal,
       })
 
