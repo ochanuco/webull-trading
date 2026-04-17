@@ -17,12 +17,14 @@ export function auditLogger(): MiddlewareHandler<{ Variables: { requestId: strin
     try {
       await next()
     } finally {
+      const status = c.res.status || (c.error ? 500 : 200)
+
       const record: AuditRecord = {
         requestId,
         timestamp: new Date().toISOString(),
         method: c.req.method,
         path: new URL(c.req.url).pathname,
-        status: c.res.status,
+        status,
         durationMs: Date.now() - started,
       }
       console.log(JSON.stringify(record))
