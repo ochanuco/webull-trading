@@ -117,4 +117,21 @@ describe('auditLogger', () => {
     expect(record.errorMessage).toContain('[redacted]')
     expect(record.errorMessage).not.toContain('sk-abcdef1234567890ABCDEF')
   })
+
+  it('redacts bare sk- / sk_ tokens without the bearer prefix', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const middleware = auditLogger()
+    const c = createMockContext()
+
+    await expect(
+      middleware(c as never, async () => {
+        throw new Error('token sk-dashed1234567890 and sk_undersc1234567890 leaked')
+      }),
+    ).rejects.toBeInstanceOf(Error)
+
+    const record = JSON.parse(logSpy.mock.calls[0]?.[0] ?? '')
+    expect(record.errorMessage).not.toContain('sk-dashed')
+    expect(record.errorMessage).not.toContain('sk_undersc')
+    expect(record.errorMessage).toContain('[redacted]')
+  })
 })

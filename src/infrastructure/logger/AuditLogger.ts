@@ -16,7 +16,7 @@ function scrubSecret(message: string): string {
   return message
     .replace(/bearer\s+\S+/gi, '[redacted]')
     .replace(/basic\s+\S+/gi, '[redacted]')
-    .replace(/sk_[A-Za-z0-9_-]{10,}/g, '[redacted]')
+    .replace(/sk[-_][A-Za-z0-9_-]{10,}/g, '[redacted]')
     .replace(/[A-Za-z0-9_-]{32,}/g, '[redacted]')
     .slice(0, 200)
 }
