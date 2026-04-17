@@ -8,6 +8,8 @@ const env = {
   TRADING_ENABLED: 'true',
   ALLOWED_SYMBOLS: 'SOXL,SOXS',
   MAX_ORDER_NOTIONAL: '100',
+  SYMBOL_MAX_NOTIONAL: undefined,
+  MARKET_HOURS_CHECK: 'false',
   EVENT_INGEST_SECRET: 'change-me',
 }
 
@@ -86,6 +88,39 @@ describe('trade routes', () => {
     expect(body.executionResult?.submitted).toBe(true)
     expect(body.executionResult?.brokerOrderId).toMatch(/^mock-/)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('applies a symbol-specific max notional override from env', async () => {
+    const app = createApp()
+
+    const response = await app.request(
+      '/trade/decide',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
+        body: JSON.stringify({
+          symbol: 'SOXL',
+          price: 20,
+          quantity: 3,
+          buyBelow: 25,
+          sellAbove: 30,
+        }),
+      },
+      {
+        ...env,
+        SYMBOL_MAX_NOTIONAL: '{"SOXL":50}',
+      },
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      riskDecision: { allowed: boolean; reasons: string[] }
+    }
+    expect(body.riskDecision.allowed).toBe(false)
+    expect(body.riskDecision.reasons).toContain('order notional 60 exceeds max 50')
   })
 
   it('uses Webull execution when DRY_RUN=false and trading is enabled', async () => {
