@@ -55,7 +55,7 @@ coderabbit review --agent > .local/coderabbit-findings.log
 
 ### codex 経由での実行
 
-codex sandbox は network + `~/.coderabbit/` への書き込みが必要:
+codex sandbox は network と `~/.coderabbit/` への書き込みをデフォルトでブロックする。両方を明示的に許可する:
 
 ```bash
 codex exec --full-auto \
@@ -64,7 +64,36 @@ codex exec --full-auto \
   - < prompt.md
 ```
 
-認証は OAuth 保存トークン (`coderabbit auth login --agent`) 推奨。`--api-key` ルートは **Hoppy CLI 有料アドオン必須**。
+### 認証の渡し方
+
+**推奨: OAuth 保存トークン** (`coderabbit auth login --agent` を事前に1回実行済み)
+- `~/.coderabbit/` 内に保存されるため、上記 `writable_roots` を設定すれば codex 内でも読める
+- プロンプトでは `coderabbit review --agent` をそのまま呼ぶ (`--api-key` 不要)
+
+**`--api-key` 経由** (有料 Hoppy CLI アドオン必須、通常プランでは "User API keys are not supported" / "No CLI addon found" と弾かれる):
+1. 1P の Agentic API key (User API key ではない) を `op://Personal/CODERABBIT_API_KEY/credential` に保存
+2. 親シェルで解決して env var で渡す (codex sandbox は 1P デスクトップアプリの IPC socket に到達できないので `op run -- ...` を codex 内から直接呼ぶのは失敗する):
+
+```bash
+CODERABBIT_API_KEY="$(op read 'op://Personal/CODERABBIT_API_KEY/credential')" \
+  codex exec --full-auto \
+    -c 'sandbox_workspace_write.network_access=true' \
+    -c 'sandbox_workspace_write.writable_roots=["/Users/chanu/.coderabbit"]' \
+    - < prompt.md
+```
+
+3. codex 内では `coderabbit review --agent --api-key "$CODERABBIT_API_KEY"` と呼ぶ (env var 単体では CLI は honor しないので flag 渡しが必須)
+
+### よくあるエラーと原因
+
+| エラー | 原因 |
+|---|---|
+| `Authentication required` | `~/.coderabbit/` が読めない or `--api-key` 未指定。sandbox 設定か OAuth ログインを確認 |
+| `Invalid or expired API key` | 1P に保存された key が古い。再発行して更新 |
+| `User API keys are not supported for the CLI` | User API key を渡した。**Agentic API key** をダッシュボードで発行 |
+| `No CLI addon found` | 通常プランでは API key 経由 CLI が使えない。OAuth 保存トークン経由に戻す |
+| `ConnectionRefused` to `posthog.com` | codex sandbox の network_access を有効化していない |
+| `EPERM unlink ~/.coderabbit/logs/...` | `writable_roots` に `~/.coderabbit` を含めていない |
 
 ### findings の整形
 
