@@ -123,6 +123,42 @@ describe('trade routes', () => {
     expect(executeResponse.status).toBe(401)
   })
 
+  it('fail-closes when TRADING_ENABLED is absent (defaults to false)', async () => {
+    const app = createApp()
+    const envWithoutTradingEnabled = {
+      BASIC_AUTH_USER: 'admin',
+      BASIC_AUTH_PASSWORD: 'secret',
+      ALLOWED_SYMBOLS: 'SOXL,SOXS',
+      MAX_ORDER_NOTIONAL: '100',
+    }
+
+    const response = await app.request(
+      '/trade/decide',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
+        body: JSON.stringify({
+          symbol: 'SOXL',
+          price: 9,
+          quantity: 2,
+          buyBelow: 10,
+          sellAbove: 20,
+        }),
+      },
+      envWithoutTradingEnabled,
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      riskDecision: { allowed: boolean; reasons: string[] }
+    }
+    expect(body.riskDecision.allowed).toBe(false)
+    expect(body.riskDecision.reasons.some((r) => r.toLowerCase().includes('trading'))).toBe(true)
+  })
+
   it('returns 400 for an empty symbol', async () => {
     const app = createApp()
 

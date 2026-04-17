@@ -1,13 +1,16 @@
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
-  DRY_RUN: string
-  TRADING_ENABLED: string
+  DRY_RUN?: string
+  TRADING_ENABLED?: string
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
 }
 
-export function parseBooleanEnv(value: string | undefined): boolean {
+export function parseBooleanEnv(value: string | undefined, defaultValue = false): boolean {
+  if (value === undefined) {
+    return defaultValue
+  }
   return value === 'true'
 }
 
