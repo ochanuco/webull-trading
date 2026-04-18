@@ -288,7 +288,7 @@ export class TradingService {
     const limit = market === 'JP' ? this.spreadLimits.JP : this.spreadLimits.US
     const spreadPct = computeSpreadPct(bid, ask)
     if (spreadPct === null) {
-      return 'spread unknown, bid/ask missing'
+      return 'spread invalid: crossed book, non-finite, or non-positive bid/ask'
     }
     if (spreadPct > limit) {
       return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%`
