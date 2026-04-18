@@ -82,6 +82,13 @@ export function addPendingSettlement(
   settlement: PendingSettlement,
   ctx: TransitionContext = defaultCtx,
 ): SymbolState {
+  // Validate settlement inputs before adding
+  if (!Number.isFinite(settlement.amount) || settlement.amount <= 0) {
+    throw new Error(`Invalid settlement.amount: ${settlement.amount} (must be a finite number > 0)`)
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(settlement.settleDate)) {
+    throw new Error(`Invalid settlement.settleDate: ${settlement.settleDate} (must match YYYY-MM-DD pattern)`)
+  }
   return {
     ...state,
     pendingSettlement: [...state.pendingSettlement, settlement],
@@ -136,11 +143,13 @@ function applyFillToPosition(
   }
   // SELL
   if (position === null) {
-    // Short not supported in POC; treat as flat with no position adjustment.
-    return null
+    throw new Error('Cannot SELL without an open position (short not supported)')
   }
   const remaining = position.qty - fill.qty
-  if (remaining <= 0) return null
+  if (remaining < 0) {
+    throw new Error(`SELL overfill: position.qty=${position.qty}, fill.qty=${fill.qty}`)
+  }
+  if (remaining === 0) return null
   return { ...position, qty: remaining }
 }
 
