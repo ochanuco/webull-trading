@@ -20,11 +20,13 @@ interface TradeRequest {
 export const trade = new Hono<AppBindings>().post('/decide', async (c) => {
   const request = await parseTradeRequest(c.req.json())
   const service = createTradingService(request, c.env)
-  return c.json(service.decide(request, readTradingConfig(c.env)))
+  return c.json(service.decide(request, readTradingConfig(c.env), { requestId: c.get('requestId') }))
 }).post('/execute', async (c) => {
   const request = await parseTradeRequest(c.req.json())
   const service = createTradingService(request, c.env)
-  return c.json(await service.executeTrade(request, readTradingConfig(c.env)))
+  return c.json(
+    await service.executeTrade(request, readTradingConfig(c.env), { requestId: c.get('requestId') }),
+  )
 })
 
 async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeRequest> {

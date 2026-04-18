@@ -7,5 +7,6 @@ export interface StrategyInput {
 }
 
 export interface Strategy {
+  readonly name: string
   decide(input: StrategyInput): Signal
 }

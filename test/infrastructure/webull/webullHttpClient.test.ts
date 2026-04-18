@@ -9,6 +9,7 @@ const intent: OrderIntent = {
   quantity: 2,
   price: 9.5,
   notional: 19,
+  clientOrderId: 'test-coid',
 }
 
 function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClient {
@@ -87,7 +88,14 @@ describe('WebullHttpClient', () => {
     )
     const client = createClient(fetchMock)
 
-    await client.placeOrder({ symbol: '1570', side: 'BUY', quantity: 1, price: 25000, notional: 25000 })
+    await client.placeOrder({
+      symbol: '1570',
+      side: 'BUY',
+      quantity: 1,
+      price: 25000,
+      notional: 25000,
+      clientOrderId: 'test-coid-jp',
+    })
 
     const body = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)
     expect(body.new_orders[0].market).toBe('JP')
