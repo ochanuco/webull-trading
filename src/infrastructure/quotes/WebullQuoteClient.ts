@@ -8,6 +8,8 @@ export interface QuoteResult {
   symbol: string
   price: number
   asOf: string
+  bid?: number
+  ask?: number
 }
 
 export interface WebullQuoteClientEnv {
@@ -31,6 +33,12 @@ interface RawSnapshotEntry {
   price?: number | string
   trade_time?: string
   timestamp?: number | string
+  bid?: number | string
+  ask?: number | string
+  bid_price?: number | string
+  ask_price?: number | string
+  bp?: number | string
+  ap?: number | string
 }
 
 const QUOTE_PATH = '/market-data/snapshot'
@@ -151,7 +159,12 @@ function normalizeSnapshots(json: unknown, fallbackAsOf: string): QuoteResult[] 
     const symbol = typeof raw.symbol === 'string' ? raw.symbol.trim() : ''
     const price = coerceNumber(raw.last_price ?? raw.last ?? raw.price)
     if (!symbol || price === null) continue
-    results.push({ symbol, price, asOf: coerceAsOf(raw, fallbackAsOf) })
+    const bid = coerceFirstValidNumber(raw.bid, raw.bid_price, raw.bp)
+    const ask = coerceFirstValidNumber(raw.ask, raw.ask_price, raw.ap)
+    const entry: QuoteResult = { symbol, price, asOf: coerceAsOf(raw, fallbackAsOf) }
+    if (bid !== null) entry.bid = bid
+    if (ask !== null) entry.ask = ask
+    results.push(entry)
   }
   return results
 }
@@ -169,6 +182,14 @@ function coerceNumber(value: number | string | undefined): number | null {
   if (value === undefined || value === null) return null
   const num = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(num) && num > 0 ? num : null
+}
+
+function coerceFirstValidNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const result = coerceNumber(value as number | string | undefined)
+    if (result !== null) return result
+  }
+  return null
 }
 
 function coerceAsOf(raw: RawSnapshotEntry, fallback: string): string {
