@@ -4,18 +4,26 @@ import type { WebullPlaceOrderRequestDto, WebullPlaceOrderResponseDto } from './
 
 export function toWebullPlaceOrderRequest(intent: OrderIntent): WebullPlaceOrderRequestDto {
   return {
-    symbol: intent.symbol.toUpperCase(),
-    side: intent.side,
-    quantity: intent.quantity,
-    limitPrice: intent.price,
+    stock_order: {
+      client_order_id: crypto.randomUUID().replaceAll('-', ''),
+      symbol: intent.symbol.toUpperCase(),
+      side: intent.side,
+      tif: 'DAY',
+      order_type: 'LIMIT',
+      limit_price: intent.price.toFixed(3),
+      qty: String(intent.quantity),
+      extended_hours_trading: false,
+    },
   }
 }
 
 export function toExecutionResult(dto: WebullPlaceOrderResponseDto): ExecutionResult {
+  const brokerOrderId = dto.orderId ?? dto.order_id
+
   return {
     mode: 'LIVE',
-    submitted: dto.orderId.trim().length > 0,
-    brokerOrderId: dto.orderId,
+    submitted: typeof brokerOrderId === 'string' && brokerOrderId.trim().length > 0,
+    brokerOrderId,
     errorReason: dto.message,
   }
 }

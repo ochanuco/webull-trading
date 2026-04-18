@@ -20,6 +20,7 @@ interface WebullRetryOptions {
 
 interface WebullHttpClientOptions {
   auth: WebullAuth
+  accountId?: string
   baseUrl?: string
   timeoutMs?: number
   retry?: WebullRetryOptions
@@ -28,12 +29,14 @@ interface WebullHttpClientOptions {
 
 export class WebullHttpClient {
   private readonly baseUrl: string
+  private readonly host: string
   private readonly timeoutMs: number
   private readonly fetchFn: typeof fetch
   private readonly retry: Required<WebullRetryOptions>
 
   constructor(private readonly options: WebullHttpClientOptions) {
-    this.baseUrl = (options.baseUrl ?? 'https://openapi.webull.com').replace(/\/+$/, '')
+    this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
+    this.host = new URL(this.baseUrl).host
     this.timeoutMs = options.timeoutMs ?? 5000
     this.fetchFn = options.fetchFn ?? fetch
     this.retry = {
@@ -45,22 +48,45 @@ export class WebullHttpClient {
   }
 
   async getAccount(): Promise<WebullAccountDto> {
-    return this.request<WebullAccountDto>('GET', '/account')
+    return this.request<WebullAccountDto>('GET', '/account/profile', {
+      query: { account_id: this.requireAccountId() },
+    })
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {
-    return this.request<WebullPlaceOrderResponseDto>('POST', '/order/place', toWebullPlaceOrderRequest(intent))
+    return this.request<WebullPlaceOrderResponseDto>('POST', '/trade/order/place', {
+      query: { account_id: this.requireAccountId() },
+      body: toWebullPlaceOrderRequest(intent),
+    })
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    {
+      query,
+      body,
+    }: {
+      query?: Record<string, string>
+      body?: unknown
+    } = {},
+  ): Promise<T> {
     const payload = body === undefined ? undefined : JSON.stringify(body)
+    const resolvedUrl = buildRequestUrl(this.baseUrl, path, query)
     let lastFailure: Error | undefined
     let lastStatus: number | undefined
 
-    // Create auth headers once, outside retry loop - auth errors should fail immediately
     let authHeaders: Record<string, string>
     try {
-      authHeaders = await this.options.auth.createHeaders(method, path, payload)
+      authHeaders = await this.options.auth.createHeaders({
+        method,
+        path: resolvedUrl.pathname + resolvedUrl.search,
+        query,
+        body: payload,
+        host: resolvedUrl.host,
+        // Webull SDK sets x-version=v1 for the documented trade/account routes.
+        version: 'v1',
+      })
     } catch (error) {
       throw new BrokerRequestError(
         `Webull authentication failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -83,7 +109,7 @@ export class WebullHttpClient {
 
         timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
 
-        response = await this.fetchFn(`${this.baseUrl}${path}`, {
+        response = await this.fetchFn(resolvedUrl.href, {
           method,
           headers,
           body: payload,
@@ -169,6 +195,14 @@ export class WebullHttpClient {
       `${method} ${path}`,
     )
   }
+
+  private requireAccountId(): string {
+    if (!this.options.accountId) {
+      throw new BrokerRequestError('Missing Webull account ID', 'webullAccountId')
+    }
+
+    return this.options.accountId
+  }
 }
 
 export function createWebullHttpClient(
@@ -179,8 +213,8 @@ export function createWebullHttpClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
-      accountId: env.WEBULL_ACCOUNT_ID,
     }),
+    accountId: env.WEBULL_ACCOUNT_ID,
     baseUrl: env.WEBULL_API_BASE,
     timeoutMs: options?.timeoutMs,
     retry: options?.retry,
@@ -214,4 +248,16 @@ function getRetryDelayMs({
 
 function wait(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, string>): URL {
+  const url = new URL(path, `${baseUrl}/`)
+
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      url.searchParams.set(key, value)
+    }
+  }
+
+  return url
 }
