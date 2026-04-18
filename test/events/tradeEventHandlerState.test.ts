@@ -37,6 +37,9 @@ function makeStore(
     async setCooldown() {
       return state
     },
+    async seedSettledCash() {
+      return state
+    },
   }
 }
 

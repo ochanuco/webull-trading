@@ -18,4 +18,5 @@ export interface PositionStore {
   ): Promise<SymbolState>
   addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState>
   setCooldown(symbol: string, untilIso: string): Promise<SymbolState>
+  seedSettledCash(symbol: string, amount: number): Promise<SymbolState>
 }

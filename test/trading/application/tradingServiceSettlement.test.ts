@@ -45,6 +45,9 @@ function makeStore(state: SymbolState): PositionStore {
     async setCooldown() {
       return state
     },
+    async seedSettledCash() {
+      return state
+    },
   }
 }
 

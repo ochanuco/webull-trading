@@ -64,6 +64,8 @@ export function createApp() {
   // Webull routes (Phase 2 append)
   app.use('/webull/*', basicAuthMiddleware())
   app.route('/webull', webull)
+  app.use('/admin/*', basicAuthMiddleware())
+  app.route('/admin', admin)
   app.onError(errorHandler)
   return app
 }
@@ -84,3 +86,4 @@ function timingSafeEqual(a: string, b: string) {
 
   return diff === 0
 }
+import { admin } from './routes/admin'
