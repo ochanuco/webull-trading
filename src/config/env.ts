@@ -62,6 +62,11 @@ export interface Env {
   MARKET_HOURS_CHECK?: string
 }
 
+// Pullback strategy per-symbol rule overrides (Phase 2c append)
+export interface Env {
+  SYMBOL_RULES?: string
+}
+
 let didWarnInvalidSymbolNotionalMap = false
 
 export function parseSymbolNotionalMap(value: string | undefined): Record<string, number> {
@@ -94,4 +99,73 @@ export function parseSymbolNotionalMap(value: string | undefined): Record<string
 
     return {}
   }
+}
+
+let didWarnInvalidSymbolRules = false
+
+/**
+ * Parses SYMBOL_RULES JSON into a per-symbol PullbackUptrendStrategy rule map.
+ * Keys are symbols, values are partial overrides of SymbolRule. Missing fields
+ * fall through to DEFAULT_RULE at strategy level. Returns `{}` on any error so
+ * a typo in one env entry cannot wedge the whole symbol universe.
+ *
+ * Example: `{"SOXL":{"stopPct":-0.03,"timeStopDays":5}}`
+ */
+export function parseSymbolRulesMap(
+  value: string | undefined,
+): Record<string, Partial<SymbolRuleShape>> {
+  if (!value) return {}
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('value must be an object')
+    }
+
+    const result: Record<string, Partial<SymbolRuleShape>> = {}
+    for (const [symbol, rule] of Object.entries(parsed)) {
+      if (typeof rule !== 'object' || rule === null || Array.isArray(rule)) {
+        throw new Error(`rule for '${symbol}' must be an object`)
+      }
+      result[symbol.toUpperCase()] = coerceRule(rule as Record<string, unknown>, symbol)
+    }
+    return result
+  } catch (error) {
+    if (!didWarnInvalidSymbolRules) {
+      didWarnInvalidSymbolRules = true
+      console.warn(
+        `Invalid SYMBOL_RULES value; using empty rules: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    return {}
+  }
+}
+
+interface SymbolRuleShape {
+  stopPct: number
+  takeProfitPct: number
+  timeStopDays: number
+  pullbackMax: number
+  pullbackMin: number
+}
+
+function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<SymbolRuleShape> {
+  const out: Partial<SymbolRuleShape> = {}
+  const numberKeys: Array<keyof SymbolRuleShape> = [
+    'stopPct',
+    'takeProfitPct',
+    'timeStopDays',
+    'pullbackMax',
+    'pullbackMin',
+  ]
+  for (const key of numberKeys) {
+    if (raw[key] !== undefined) {
+      const value = raw[key]
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new Error(`'${symbol}.${key}' must be a finite number`)
+      }
+      out[key] = value
+    }
+  }
+  return out
 }
