@@ -81,6 +81,7 @@ const HOLIDAYS: Record<TradingMarket, ReadonlySet<string>> = {
     '2027-09-06', // Labor Day
     '2027-11-25', // Thanksgiving
     '2027-12-24', // Christmas observed (Dec 25 is Sat)
+    '2027-12-31', // New Year's Day observed (Jan 1 2028 is Sat)
   ]),
 }
 
