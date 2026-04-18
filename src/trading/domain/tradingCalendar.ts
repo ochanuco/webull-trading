@@ -129,6 +129,9 @@ export function countTradingDaysBetween(
   const from = new Date(fromIso)
   if (!Number.isFinite(from.getTime())) return 0
   const end = to.getTime()
+  if (!Number.isFinite(end)) {
+    throw new Error('Invalid "to" date')
+  }
   let count = 0
   const cursor = new Date(from.getTime())
   while (true) {
