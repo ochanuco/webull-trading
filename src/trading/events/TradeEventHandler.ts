@@ -121,20 +121,55 @@ export class TradeEventHandler {
       price: filledPrice,
     })
 
-    if (lock.side === 'SELL' && pre.position !== null && next.position === null) {
-      const realizedPnl = (filledPrice - pre.position.avgPrice) * event.filledQty
-      const holdMs = this.now().getTime() - new Date(pre.position.openedAt).getTime()
-      const holdDays = Math.max(0, Math.floor(holdMs / MS_PER_DAY))
-      logExit({
-        clientOrderId: clientOrderId ?? lock.clientOrderId,
-        orderId,
-        symbol,
-        realizedPnl,
-        holdDays,
-        exitReason: 'OTHER',
-      })
+    if (lock.side === 'SELL') {
+      // T+1: SELL proceeds are unsettled until the next business day.
+      const tradeDay = this.now()
+      await this.positionStore
+        .addPendingSettlement(symbol, {
+          tradeDate: toYmd(tradeDay),
+          settleDate: toYmd(nextBusinessDay(tradeDay)),
+          amount: filledPrice * event.filledQty,
+        })
+        .catch((error) => {
+          this.log(
+            JSON.stringify({
+              warning: 'pending-settlement-failed',
+              symbol,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          )
+        })
+
+      if (pre.position !== null && next.position === null) {
+        const realizedPnl = (filledPrice - pre.position.avgPrice) * event.filledQty
+        const holdMs = this.now().getTime() - new Date(pre.position.openedAt).getTime()
+        const holdDays = Math.max(0, Math.floor(holdMs / MS_PER_DAY))
+        logExit({
+          clientOrderId: clientOrderId ?? lock.clientOrderId,
+          orderId,
+          symbol,
+          realizedPnl,
+          holdDays,
+          exitReason: 'OTHER',
+        })
+      }
     }
   }
+}
+
+function toYmd(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+/**
+ * Next business day (skips Sat/Sun). POC scope — does not honour JP/US holidays.
+ */
+export function nextBusinessDay(date: Date): Date {
+  const next = new Date(date.getTime() + MS_PER_DAY)
+  const dow = next.getUTCDay()
+  if (dow === 6) return new Date(next.getTime() + 2 * MS_PER_DAY) // Sat → Mon
+  if (dow === 0) return new Date(next.getTime() + MS_PER_DAY) // Sun → Mon
+  return next
 }
 
 function readClientOrderId(payload: unknown): string | undefined {

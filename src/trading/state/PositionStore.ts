@@ -1,4 +1,4 @@
-import type { PendingOrderLock, SymbolState } from './types'
+import type { PendingOrderLock, PendingSettlement, SymbolState } from './types'
 
 /**
  * The subset of {@link SymbolStateDO} that TradingService and TradeEventHandler
@@ -16,4 +16,5 @@ export interface PositionStore {
     symbol: string,
     fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
   ): Promise<SymbolState>
+  addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState>
 }
