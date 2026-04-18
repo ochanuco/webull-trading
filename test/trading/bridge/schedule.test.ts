@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { isBridgeActive, parseBridgeRunMode } from '../../../src/trading/bridge/schedule'
 
-const weekday = new Date('2026-04-20T12:00:00.000Z') // Mon
-const weekend = new Date('2026-04-25T12:00:00.000Z') // Sat
+const monJstNoon = new Date('2026-04-20T03:00:00.000Z') // Mon 12:00 JST
+const satJstMidnight = new Date('2026-04-24T15:00:00.000Z') // Sat 00:00 JST (= Fri 15:00 UTC)
+const monJstMidnight = new Date('2026-04-26T15:00:00.000Z') // Mon 00:00 JST (= Sun 15:00 UTC)
 
 describe('parseBridgeRunMode', () => {
   it('defaults to auto when undefined / empty', () => {
@@ -25,23 +26,32 @@ describe('parseBridgeRunMode', () => {
 })
 
 describe('isBridgeActive', () => {
-  it('auto: weekday UTC → true, weekend → false', () => {
-    expect(isBridgeActive(weekday, 'auto')).toBe(true)
-    expect(isBridgeActive(weekend, 'auto')).toBe(false)
+  it('auto: weekday JST → true', () => {
+    expect(isBridgeActive(monJstNoon, 'auto')).toBe(true)
+  })
+
+  it('auto: crosses the day boundary in JST — Saturday 00:00 JST is weekend', () => {
+    expect(isBridgeActive(satJstMidnight, 'auto')).toBe(false)
+  })
+
+  it('auto: crosses the day boundary in JST — Monday 00:00 JST is weekday', () => {
+    expect(isBridgeActive(monJstMidnight, 'auto')).toBe(true)
+  })
+
+  it('auto: mid-Saturday JST → false', () => {
+    expect(isBridgeActive(new Date('2026-04-25T03:00:00.000Z'), 'auto')).toBe(false) // Sat 12:00 JST
   })
 
   it('always-on: true regardless of day', () => {
-    expect(isBridgeActive(weekday, 'always-on')).toBe(true)
-    expect(isBridgeActive(weekend, 'always-on')).toBe(true)
+    expect(isBridgeActive(satJstMidnight, 'always-on')).toBe(true)
   })
 
   it('disabled: false regardless of day', () => {
-    expect(isBridgeActive(weekday, 'disabled')).toBe(false)
-    expect(isBridgeActive(weekend, 'disabled')).toBe(false)
+    expect(isBridgeActive(monJstNoon, 'disabled')).toBe(false)
   })
 
   it('defaults the mode to auto when omitted', () => {
-    expect(isBridgeActive(weekday)).toBe(true)
-    expect(isBridgeActive(weekend)).toBe(false)
+    expect(isBridgeActive(monJstNoon)).toBe(true)
+    expect(isBridgeActive(satJstMidnight)).toBe(false)
   })
 })

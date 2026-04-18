@@ -27,13 +27,17 @@ export function parseBridgeRunMode(value: string | undefined): BridgeRunMode {
   return DEFAULT_MODE
 }
 
+const JST_OFFSET_MS = 9 * 60 * 60 * 1_000
+
 /**
- * True when the bridge should be running now. 平日 UTC のみ true を返す。
- * 祝日カレンダーは #54 系で強化予定。
+ * True when the bridge should be running now. 平日 **JST** のみ true を返す。
+ * JP 市場の営業日境界が UTC だと日跨ぎするため、JST で判定した方が運用感覚に
+ * 一致する (e.g. 土曜 0:30 JST は UTC で金曜 15:30、UTC 判定だと平日扱いに
+ * なり bridge を動かしてしまう)。祝日カレンダーは #54 系で強化予定。
  */
 export function isBridgeActive(now: Date, mode: BridgeRunMode = 'auto'): boolean {
   if (mode === 'always-on') return true
   if (mode === 'disabled') return false
-  const utcDay = now.getUTCDay()
-  return utcDay >= 1 && utcDay <= 5
+  const jstDay = new Date(now.getTime() + JST_OFFSET_MS).getUTCDay()
+  return jstDay >= 1 && jstDay <= 5
 }
