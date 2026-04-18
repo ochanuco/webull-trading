@@ -6,6 +6,7 @@ import {
   parseInversePairs,
   parseNumberEnv,
   parseOptionalNonNegativeNumberEnv,
+  parseOptionalPositiveNumber,
   parseSymbolNotionalMap,
 } from '../config/env'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
@@ -67,11 +68,16 @@ export function createTradingService(
     INVERSE_PAIRS?: string
     SPREAD_LIMIT_PCT_US?: string
     SPREAD_LIMIT_PCT_JP?: string
+    STALE_QUOTE_MS?: string
+    GAP_REJECT_PCT?: string
   } & WebullClientEnv,
 ): TradingService {
   const execution = parseBooleanEnv(env.DRY_RUN, true)
     ? new MockExecution()
     : new WebullExecution(createWebullHttpClient(env))
+
+  const spreadUsRaw = parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US')
+  const spreadJpRaw = parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP')
 
   return new TradingService(
     new FixedRuleStrategy(request.buyBelow, request.sellAbove),
@@ -81,13 +87,11 @@ export function createTradingService(
       positionStore: env.SYMBOL_STATE ? new SymbolStateClient(env.SYMBOL_STATE) : undefined,
       inversePairs: parseInversePairs(env.INVERSE_PAIRS),
       spreadLimits: {
-        US: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US') !== undefined
-          ? parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US')! / 100
-          : 0.0025,
-        JP: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP') !== undefined
-          ? parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP')! / 100
-          : 0.006,
+        US: spreadUsRaw !== undefined ? spreadUsRaw / 100 : 0.0025,
+        JP: spreadJpRaw !== undefined ? spreadJpRaw / 100 : 0.006,
       },
+      staleQuoteMs: parseOptionalPositiveNumber(env.STALE_QUOTE_MS, 15 * 60 * 1_000, 'STALE_QUOTE_MS'),
+      gapRejectPct: parseOptionalPositiveNumber(env.GAP_REJECT_PCT, 0.03, 'GAP_REJECT_PCT'),
     },
   )
 }

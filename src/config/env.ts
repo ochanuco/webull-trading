@@ -229,13 +229,19 @@ export interface Env {
   SPREAD_LIMIT_PCT_JP?: string
 }
 
+// Halt / price-band / gap config (#38-C append)
+export interface Env {
+  STALE_QUOTE_MS?: string
+  GAP_REJECT_PCT?: string
+}
+
 /**
  * Parses an optional numeric env var into a non-negative finite number. Returns
  * `undefined` when the var is unset or empty so callers can fall back to a
  * safe default. Invalid or negative values warn once and return `undefined` —
  * a typo in a risk limit must not silently widen the limit.
  */
-let didWarnInvalidSpreadLimit: Record<string, boolean> = {}
+const didWarnInvalidNonNegative: Record<string, boolean> = {}
 export function parseOptionalNonNegativeNumberEnv(
   value: string | undefined,
   key: string,
@@ -244,11 +250,30 @@ export function parseOptionalNonNegativeNumberEnv(
 
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed < 0) {
-    if (!didWarnInvalidSpreadLimit[key]) {
-      didWarnInvalidSpreadLimit[key] = true
+    if (!didWarnInvalidNonNegative[key]) {
+      didWarnInvalidNonNegative[key] = true
       console.warn(`Invalid ${key} value '${value}'; using safe default`)
     }
     return undefined
+  }
+  return parsed
+}
+
+/**
+ * Optional positive number env parser. Returns `fallback` when undefined or
+ * malformed (fail-closed to a sane default rather than throwing — these are
+ * risk knobs, not hard dependencies).
+ */
+export function parseOptionalPositiveNumber(
+  value: string | undefined,
+  fallback: number,
+  key?: string,
+): number {
+  if (value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(`Invalid ${key ?? 'env'} value: '${value}'; using fallback ${fallback}`)
+    return fallback
   }
   return parsed
 }
