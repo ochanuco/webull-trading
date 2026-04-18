@@ -5,6 +5,7 @@ import {
   parseCsvEnv,
   parseInversePairs,
   parseNumberEnv,
+  parseOptionalNonNegativeNumberEnv,
   parseSymbolNotionalMap,
 } from '../config/env'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
@@ -64,6 +65,8 @@ export function createTradingService(
     DRY_RUN?: string
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
     INVERSE_PAIRS?: string
+    SPREAD_LIMIT_PCT_US?: string
+    SPREAD_LIMIT_PCT_JP?: string
   } & WebullClientEnv,
 ): TradingService {
   const execution = parseBooleanEnv(env.DRY_RUN, true)
@@ -77,6 +80,10 @@ export function createTradingService(
     {
       positionStore: env.SYMBOL_STATE ? new SymbolStateClient(env.SYMBOL_STATE) : undefined,
       inversePairs: parseInversePairs(env.INVERSE_PAIRS),
+      spreadLimits: {
+        US: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US') ?? 0.0025,
+        JP: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP') ?? 0.006,
+      },
     },
   )
 }

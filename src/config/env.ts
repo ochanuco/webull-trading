@@ -222,3 +222,33 @@ export function parseInversePairs(value: string | undefined): Record<string, str
 export interface Env {
   INVERSE_PAIRS?: string
 }
+
+// Spread guard config (Phase 2b #38-D append)
+export interface Env {
+  SPREAD_LIMIT_PCT_US?: string
+  SPREAD_LIMIT_PCT_JP?: string
+}
+
+/**
+ * Parses an optional numeric env var into a non-negative finite number. Returns
+ * `undefined` when the var is unset or empty so callers can fall back to a
+ * safe default. Invalid or negative values warn once and return `undefined` —
+ * a typo in a risk limit must not silently widen the limit.
+ */
+let didWarnInvalidSpreadLimit: Record<string, boolean> = {}
+export function parseOptionalNonNegativeNumberEnv(
+  value: string | undefined,
+  key: string,
+): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    if (!didWarnInvalidSpreadLimit[key]) {
+      didWarnInvalidSpreadLimit[key] = true
+      console.warn(`Invalid ${key} value '${value}'; using safe default`)
+    }
+    return undefined
+  }
+  return parsed
+}
