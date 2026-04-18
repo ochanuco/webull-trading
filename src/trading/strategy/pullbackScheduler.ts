@@ -56,6 +56,9 @@ export async function runPullbackScheduler(
   const strategy =
     options.strategy ?? new PullbackUptrendStrategy(options.rulesMap ?? {})
   const pendingLockTtlMs = options.pendingLockTtlMs ?? 60_000
+  if (typeof pendingLockTtlMs !== 'number' || !Number.isFinite(pendingLockTtlMs) || pendingLockTtlMs <= 0) {
+    throw new Error(`pendingLockTtlMs must be a finite positive number, got: ${pendingLockTtlMs}`)
+  }
 
   const summary: PullbackRunSummary = {
     evaluated: 0,
@@ -121,6 +124,15 @@ export async function runPullbackScheduler(
         })
         continue
       }
+      if (!Number.isFinite(indicators.price) || indicators.price <= 0) {
+        summary.rejected.push({ symbol: upper, reason: `invalid price: ${indicators.price}` })
+        continue
+      }
+      const notional = sizing.quantity * indicators.price
+      if (!Number.isFinite(notional) || notional <= 0) {
+        summary.rejected.push({ symbol: upper, reason: `invalid notional: ${notional} (qty=${sizing.quantity}, price=${indicators.price})` })
+        continue
+      }
       intent = buildIntent(upper, 'BUY', sizing.quantity, indicators.price)
     } else {
       // SELL: close the full open position.
@@ -128,14 +140,32 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason: 'SELL without position' })
         continue
       }
+      if (!Number.isFinite(state.position.qty) || state.position.qty <= 0) {
+        summary.rejected.push({ symbol: upper, reason: `invalid position qty: ${state.position.qty}` })
+        continue
+      }
+      if (!Number.isFinite(indicators.price) || indicators.price <= 0) {
+        summary.rejected.push({ symbol: upper, reason: `invalid price: ${indicators.price}` })
+        continue
+      }
+      const notional = state.position.qty * indicators.price
+      if (!Number.isFinite(notional) || notional <= 0) {
+        summary.rejected.push({ symbol: upper, reason: `invalid notional: ${notional} (qty=${state.position.qty}, price=${indicators.price})` })
+        continue
+      }
       intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
     }
 
+    const expiresAtMs = now().getTime() + pendingLockTtlMs
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
+      summary.rejected.push({ symbol: upper, reason: `invalid expiresAt computed from pendingLockTtlMs: ${pendingLockTtlMs}` })
+      continue
+    }
     const lockResult = await options.positionStore.lockPendingOrder(upper, {
       clientOrderId: intent.clientOrderId,
       side: intent.side,
       submittedAt: now().toISOString(),
-      expiresAt: new Date(now().getTime() + pendingLockTtlMs).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
     })
     if (!lockResult.ok) {
       summary.rejected.push({ symbol: upper, reason: 'pending order already in flight' })
@@ -168,12 +198,22 @@ export async function runPullbackScheduler(
 }
 
 function buildIntent(symbol: string, side: 'BUY' | 'SELL', qty: number, price: number): OrderIntent {
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new Error(`buildIntent: invalid qty=${qty} for ${symbol}`)
+  }
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`buildIntent: invalid price=${price} for ${symbol}`)
+  }
+  const notional = qty * price
+  if (!Number.isFinite(notional) || notional <= 0) {
+    throw new Error(`buildIntent: invalid notional=${notional} for ${symbol} (qty=${qty}, price=${price})`)
+  }
   return {
     symbol,
     side,
     quantity: qty,
     price,
-    notional: qty * price,
+    notional,
     clientOrderId: crypto.randomUUID().replaceAll('-', ''),
   }
 }
