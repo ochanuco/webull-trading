@@ -41,7 +41,9 @@ export class WebullBarClient implements BarClient {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
     this.barsPath = options.barsPath ?? '/market-data/candles'
     this.timeoutMs = options.timeoutMs ?? 5_000
-    this.fetchFn = options.fetchFn ?? fetch
+    // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
+    // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
+    this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
   }
 
   async getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]> {
