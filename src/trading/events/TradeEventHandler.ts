@@ -152,6 +152,23 @@ export class TradeEventHandler {
           holdDays,
           exitReason: 'OTHER',
         })
+
+        // Stop-out cooldown: a losing exit parks the symbol until the next
+        // business day so a whipsaw re-entry cannot compound the loss.
+        if (realizedPnl < 0) {
+          const cooldownUntil = nextBusinessDay(this.now()).toISOString()
+          await this.positionStore
+            .setCooldown(symbol, cooldownUntil)
+            .catch((error) => {
+              this.log(
+                JSON.stringify({
+                  warning: 'stop-out-cooldown-failed',
+                  symbol,
+                  message: error instanceof Error ? error.message : String(error),
+                }),
+              )
+            })
+        }
       }
     }
   }

@@ -39,4 +39,8 @@ export class SymbolStateClient implements PositionStore {
   addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState> {
     return this.stub(symbol).addPendingSettlement(symbol, settlement)
   }
+
+  setCooldown(symbol: string, untilIso: string): Promise<SymbolState> {
+    return this.stub(symbol).setCooldown(symbol, untilIso)
+  }
 }

@@ -41,6 +41,11 @@ export interface TradingServiceOptions {
   positionStore?: PositionStore
   /** How long a pending-order lock stays live before a new submit can replace it. */
   pendingLockTtlMs?: number
+  /**
+   * Bidirectional map of structurally anti-correlated symbols. If SYMBOL_STATE
+   * shows an open position for the inverse, BUY is rejected (P&L decay trap).
+   */
+  inversePairs?: Record<string, string>
   now?: () => Date
 }
 
@@ -49,6 +54,7 @@ const DEFAULT_PENDING_LOCK_TTL_MS = 60_000
 export class TradingService {
   private readonly positionStore?: PositionStore
   private readonly pendingLockTtlMs: number
+  private readonly inversePairs: Record<string, string>
   private readonly now: () => Date
 
   constructor(
@@ -64,6 +70,7 @@ export class TradingService {
       options.pendingLockTtlMs > 0
         ? options.pendingLockTtlMs
         : DEFAULT_PENDING_LOCK_TTL_MS
+    this.inversePairs = options.inversePairs ?? {}
     this.now = options.now ?? (() => new Date())
   }
 
@@ -183,6 +190,25 @@ export class TradingService {
           decision.riskDecision,
           `insufficient settled cash: notional ${decision.orderIntent.notional} exceeds settledCash ${state.settledCash}`,
         ),
+      }
+    }
+
+    // Inverse-pair correlation cap: holding SOXL and SOXS at once is a structural
+    // decay trap. Only gate BUY — a SELL that closes the existing leg must remain
+    // possible even while the inverse leg is open.
+    if (decision.orderIntent.side === 'BUY') {
+      const inverse = this.inversePairs[symbol.toUpperCase()]
+      if (inverse) {
+        const inverseState = await this.positionStore.getState(inverse)
+        if (inverseState.position !== null && inverseState.position.qty > 0) {
+          return {
+            allowed: false,
+            riskDecision: appendReason(
+              decision.riskDecision,
+              `inverse-pair exposure: ${inverse} position (qty ${inverseState.position.qty}) blocks BUY ${symbol}`,
+            ),
+          }
+        }
       }
     }
 

@@ -41,6 +41,9 @@ function makeStore(pre: SymbolState, post: SymbolState) {
       settlements.push({ symbol, settlement })
       return state
     },
+    async setCooldown() {
+      return state
+    },
   }
   return { store, settlements }
 }

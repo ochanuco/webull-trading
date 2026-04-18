@@ -17,4 +17,5 @@ export interface PositionStore {
     fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
   ): Promise<SymbolState>
   addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState>
+  setCooldown(symbol: string, untilIso: string): Promise<SymbolState>
 }
