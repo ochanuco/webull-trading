@@ -37,4 +37,6 @@ if (subscriptions.length === 0) {
   process.exit(2)
 }
 
-console.log(JSON.stringify(subscriptions, null, 2))
+// Extract and deduplicate account_id values only (avoid logging sensitive fields)
+const accountIds = Array.from(new Set(subscriptions.map((sub) => sub.account_id)))
+console.log(JSON.stringify(accountIds, null, 2))
