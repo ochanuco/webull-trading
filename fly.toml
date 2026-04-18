@@ -1,0 +1,38 @@
+# Fly.io config for the Webull trade-event bridge.
+#
+# Runs as a Docker container — holds a persistent gRPC server-streaming
+# subscription to the Webull sandbox/live endpoint and POSTs normalised
+# events to the Worker `/events/trade` ingest. Outbound-only — no
+# `[services]` block.
+#
+# Deploy:
+#   fly launch --config fly.toml --dockerfile bridge/Dockerfile  # first time
+#   fly deploy --config fly.toml                                 # subsequent
+#
+# Staging / production は `app` 名を切り替えて使う:
+#   fly deploy --config fly.toml --app webull-trading-bridge-staging
+#   fly deploy --config fly.toml --app webull-trading-bridge-production
+
+app = "webull-trading-bridge-staging"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "bridge/Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  # WEBULL_APP_KEY / WEBULL_APP_SECRET / WEBULL_ACCOUNT_ID /
+  # WEBULL_GRPC_ENDPOINT / EVENT_INGEST_URL / EVENT_INGEST_SECRET
+  # は `fly secrets set` で投入する (repo に残さない)。
+
+[processes]
+  bridge = "pnpm start"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# Restart on exit — the bridge's own reconnect loop handles transient gRPC
+# errors, but any process crash should self-heal.
+[deploy]
+  strategy = "rolling"
