@@ -72,7 +72,7 @@ export class WebullHttpClient {
     } = {},
   ): Promise<T> {
     const payload = body === undefined ? undefined : JSON.stringify(body)
-    const url = buildRequestUrl(this.baseUrl, path, query)
+    const resolvedUrl = buildRequestUrl(this.baseUrl, path, query)
     let lastFailure: Error | undefined
     let lastStatus: number | undefined
 
@@ -80,10 +80,10 @@ export class WebullHttpClient {
     try {
       authHeaders = await this.options.auth.createHeaders({
         method,
-        path,
+        path: resolvedUrl.pathname + resolvedUrl.search,
         query,
         body: payload,
-        host: this.host,
+        host: resolvedUrl.host,
         // Webull SDK sets x-version=v1 for the documented trade/account routes.
         version: 'v1',
       })
@@ -109,7 +109,7 @@ export class WebullHttpClient {
 
         timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
 
-        response = await this.fetchFn(url, {
+        response = await this.fetchFn(resolvedUrl.href, {
           method,
           headers,
           body: payload,
@@ -250,7 +250,7 @@ function wait(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs))
 }
 
-function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, string>): string {
+function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, string>): URL {
   const url = new URL(path, `${baseUrl}/`)
 
   if (query) {
@@ -259,5 +259,5 @@ function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, s
     }
   }
 
-  return url.toString()
+  return url
 }

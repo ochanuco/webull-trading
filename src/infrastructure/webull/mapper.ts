@@ -18,7 +18,7 @@ export function toWebullPlaceOrderRequest(intent: OrderIntent): WebullPlaceOrder
 }
 
 export function toExecutionResult(dto: WebullPlaceOrderResponseDto): ExecutionResult {
-  const brokerOrderId = dto.orderId ?? dto.order_id ?? dto.client_order_id
+  const brokerOrderId = dto.orderId ?? dto.order_id
 
   return {
     mode: 'LIVE',
