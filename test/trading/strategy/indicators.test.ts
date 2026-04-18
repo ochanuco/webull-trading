@@ -33,21 +33,29 @@ describe('computePullbackIndicators', () => {
 })
 
 describe('computeHoldBusinessDays', () => {
-  it('counts weekday-only days between open and now', () => {
+  it('counts weekday-only days between open and now (US)', () => {
     // Mon 2026-04-13 open, Fri 2026-04-17 now → 4 business days
     expect(
-      computeHoldBusinessDays('2026-04-13T10:00:00.000Z', new Date('2026-04-17T10:00:00.000Z')),
+      computeHoldBusinessDays(
+        '2026-04-13T10:00:00.000Z',
+        new Date('2026-04-17T10:00:00.000Z'),
+        'US',
+      ),
     ).toBe(4)
   })
 
-  it('skips weekends', () => {
+  it('skips weekends (US)', () => {
     // Fri open, next Mon now → 1 business day (weekend does not count)
     expect(
-      computeHoldBusinessDays('2026-04-17T10:00:00.000Z', new Date('2026-04-20T10:00:00.000Z')),
+      computeHoldBusinessDays(
+        '2026-04-17T10:00:00.000Z',
+        new Date('2026-04-20T10:00:00.000Z'),
+        'US',
+      ),
     ).toBe(1)
   })
 
   it('returns 0 for an invalid ISO', () => {
-    expect(computeHoldBusinessDays('not-a-date', new Date())).toBe(0)
+    expect(computeHoldBusinessDays('not-a-date', new Date(), 'US')).toBe(0)
   })
 })

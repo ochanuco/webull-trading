@@ -1,4 +1,5 @@
 import type { BarClient } from '../../infrastructure/quotes/BarClient'
+import { inferTradingMarket } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
 import {
@@ -87,8 +88,11 @@ export async function runPullbackScheduler(
     }
 
     const state = await options.positionStore.getState(upper)
+    const market = inferTradingMarket(upper)
     const holdBusinessDays =
-      state.position !== null ? computeHoldBusinessDays(state.position.openedAt, now()) : 0
+      state.position !== null
+        ? computeHoldBusinessDays(state.position.openedAt, now(), market)
+        : 0
 
     const signal = strategy.decide({
       symbol: upper,

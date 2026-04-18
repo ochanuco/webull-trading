@@ -1,3 +1,5 @@
+import { countTradingDaysBetween, type TradingMarket } from '../domain/tradingCalendar'
+
 /**
  * Daily OHLC bar. Field names match Webull's camel-cased data API payloads
  * (close / high / low / open) to keep the mapper on the client side trivial.
@@ -47,20 +49,12 @@ export function computePullbackIndicators(bars: DailyBar[]): PullbackIndicatorSn
   return { price: last, sma50, return50d, high20d, atr20, baselineAtr20 }
 }
 
-export function computeHoldBusinessDays(openedAtIso: string, now: Date): number {
-  const opened = new Date(openedAtIso)
-  if (!Number.isFinite(opened.getTime())) return 0
-  let count = 0
-  const cursor = new Date(opened.getTime())
-  // Count each subsequent weekday up to `now` (half-open). Weekends skipped.
-  const end = now.getTime()
-  while (true) {
-    cursor.setUTCDate(cursor.getUTCDate() + 1)
-    if (cursor.getTime() > end) break
-    const dow = cursor.getUTCDay()
-    if (dow !== 0 && dow !== 6) count += 1
-  }
-  return count
+export function computeHoldBusinessDays(
+  openedAtIso: string,
+  now: Date,
+  market: TradingMarket,
+): number {
+  return countTradingDaysBetween(openedAtIso, now, market)
 }
 
 function computeTrueRanges(bars: DailyBar[]): number[] {
