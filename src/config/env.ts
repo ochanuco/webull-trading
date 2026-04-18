@@ -67,6 +67,11 @@ export interface Env {
   SYMBOL_RULES?: string
 }
 
+// Risk correlation config (Phase 2b append)
+export interface Env {
+  INVERSE_PAIRS?: string
+}
+
 let didWarnInvalidSymbolNotionalMap = false
 
 export function parseSymbolNotionalMap(value: string | undefined): Record<string, number> {
@@ -168,4 +173,52 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
     }
   }
   return out
+}
+
+let didWarnInvalidInversePairs = false
+
+/**
+ * Parses INVERSE_PAIRS JSON into a bidirectional pair lookup. An inverse pair
+ * is two symbols whose prices are structurally anti-correlated (e.g. SOXL/SOXS).
+ * Holding both at once is a P&L decay trap, not a hedge, so the correlation
+ * gate must reject BUY X while any position in its inverse exists.
+ *
+ * Accepts either a map `{"SOXL":"SOXS"}` (expanded to both directions) or an
+ * already-bidirectional map. Fails closed (empty result) on any malformed entry.
+ */
+export function parseInversePairs(value: string | undefined): Record<string, string> {
+  if (!value) return {}
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('value must be an object')
+    }
+
+    const result: Record<string, string> = {}
+    for (const [left, right] of Object.entries(parsed)) {
+      if (typeof right !== 'string' || right.trim().length === 0) {
+        throw new Error(`inverse pair for '${left}' must be a non-empty string`)
+      }
+      const leftKey = left.toUpperCase()
+      const rightKey = right.toUpperCase()
+      if (leftKey === rightKey) {
+        throw new Error(`inverse pair '${leftKey}' cannot reference itself`)
+      }
+      result[leftKey] = rightKey
+      // Expand to both directions so a caller only needs to write the map once.
+      if (result[rightKey] === undefined) {
+        result[rightKey] = leftKey
+      }
+    }
+    return result
+  } catch (error) {
+    if (!didWarnInvalidInversePairs) {
+      didWarnInvalidInversePairs = true
+      console.warn(
+        `Invalid INVERSE_PAIRS value; using empty pairs: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    return {}
+  }
 }

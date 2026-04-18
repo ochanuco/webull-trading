@@ -34,6 +34,9 @@ function makeStore(
       settlementCalls.push({ symbol, settlement })
       return state
     },
+    async setCooldown() {
+      return state
+    },
   }
 }
 

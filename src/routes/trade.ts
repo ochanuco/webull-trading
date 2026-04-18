@@ -1,6 +1,12 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
-import { parseBooleanEnv, parseCsvEnv, parseNumberEnv, parseSymbolNotionalMap } from '../config/env'
+import {
+  parseBooleanEnv,
+  parseCsvEnv,
+  parseInversePairs,
+  parseNumberEnv,
+  parseSymbolNotionalMap,
+} from '../config/env'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
 import { ValidationError } from '../shared/errors'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
@@ -57,6 +63,7 @@ export function createTradingService(
   env: {
     DRY_RUN?: string
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
+    INVERSE_PAIRS?: string
   } & WebullClientEnv,
 ): TradingService {
   const execution = parseBooleanEnv(env.DRY_RUN, true)
@@ -69,6 +76,7 @@ export function createTradingService(
     execution,
     {
       positionStore: env.SYMBOL_STATE ? new SymbolStateClient(env.SYMBOL_STATE) : undefined,
+      inversePairs: parseInversePairs(env.INVERSE_PAIRS),
     },
   )
 }

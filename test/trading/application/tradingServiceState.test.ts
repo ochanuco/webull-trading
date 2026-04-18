@@ -58,6 +58,10 @@ function makeStore(initial?: SymbolState): PositionStore & { state: SymbolState;
       calls.push('addPendingSettlement')
       return state
     },
+    async setCooldown() {
+      calls.push('setCooldown')
+      return state
+    },
   }
 }
 

@@ -42,6 +42,9 @@ function makeStore(state: SymbolState): PositionStore {
     async addPendingSettlement() {
       return state
     },
+    async setCooldown() {
+      return state
+    },
   }
 }
 
