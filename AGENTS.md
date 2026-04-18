@@ -32,7 +32,7 @@ Codex からも `.claude/skills/*/SKILL.md` と `.claude/agents/*.md` は参照�
 ```
 codex exec --full-auto \
   -c 'sandbox_workspace_write.network_access=true' \
-  -c 'sandbox_workspace_write.writable_roots=["/Users/chanu/.coderabbit"]' \
+  -c 'sandbox_workspace_write.writable_roots=["$HOME/.coderabbit"]' \
   - < prompt.md
 ```
 
