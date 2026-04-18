@@ -99,29 +99,29 @@ pnpm exec wrangler deploy --env staging
 pnpm exec wrangler deploy --env production
 ```
 
+### 非 secret 設定 (`wrangler.jsonc::env.<target>.vars`)
+
+`DRY_RUN` / `TRADING_ENABLED` / `ALLOWED_SYMBOLS` / `MAX_ORDER_NOTIONAL` / `SYMBOL_MAX_NOTIONAL` / `MARKET_HOURS_CHECK` / `WEBULL_API_BASE` は `wrangler.jsonc` に env ごとに記述済。変更は **ファイルを編集して再デプロイ** (git で差分が残る = 監査トレイル)。
+
+**fail-closed 前提で両 env とも初期値は `DRY_RUN=true` / `TRADING_ENABLED=false`。** 本番で LIVE 発注に切り替える時は wrangler.jsonc の `env.production.vars` を編集してコミット + `wrangler deploy --env production`。staging で十分疎通確認してから本番を触る。
+
 ### Secrets 投入 (`wrangler secret put`)
 
-`.dev.vars` の内容は **本番/staging に自動同期しない**。環境ごとに明示的に投入する:
+以下の **秘匿値のみ** secret として環境ごとに投入:
 
 ```bash
 # staging
 pnpm exec wrangler secret put BASIC_AUTH_USER --env staging
 pnpm exec wrangler secret put BASIC_AUTH_PASSWORD --env staging
 pnpm exec wrangler secret put EVENT_INGEST_SECRET --env staging
-pnpm exec wrangler secret put ALLOWED_SYMBOLS --env staging
-pnpm exec wrangler secret put MAX_ORDER_NOTIONAL --env staging
-pnpm exec wrangler secret put SYMBOL_MAX_NOTIONAL --env staging
-# Phase 3 Webull
 pnpm exec wrangler secret put WEBULL_APP_KEY --env staging
 pnpm exec wrangler secret put WEBULL_APP_SECRET --env staging
 pnpm exec wrangler secret put WEBULL_ACCOUNT_ID --env staging
 
-# production (同じ set を production に)
-pnpm exec wrangler secret put BASIC_AUTH_USER --env production
-# ... 以下同様
+# production も同じ set
 ```
 
-`DRY_RUN` / `TRADING_ENABLED` / `MARKET_HOURS_CHECK` / `WEBULL_API_BASE` は env var (非 secret) なので `wrangler.jsonc` の `env.<target>.vars` に平文で書くか、同じく `wrangler secret put` で投入可。**本番で DRY_RUN=false / TRADING_ENABLED=true にする場合は、先に staging で十分疎通確認してから**。
+`wrangler secret put` は同名 var を上書きするので、どうしても一時的に DRY_RUN などを var と違う値にしたい場合のエスケープハッチにも使える (通常は wrangler.jsonc 編集が望ましい)。
 
 ### デプロイ
 

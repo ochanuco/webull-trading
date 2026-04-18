@@ -1,13 +1,22 @@
+# Local dev secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+# Non-secret config (DRY_RUN / TRADING_ENABLED / ALLOWED_SYMBOLS / MAX_ORDER_NOTIONAL
+# / SYMBOL_MAX_NOTIONAL / MARKET_HOURS_CHECK / WEBULL_API_BASE) now lives in
+# wrangler.jsonc::env.<target>.vars and is loaded automatically by `wrangler dev`
+# from the default env (the "webull-trading" worker). Override any of them by
+# uncommenting below.
+
 BASIC_AUTH_USER=<your-username>
 BASIC_AUTH_PASSWORD=<your-password>
-DRY_RUN=true
-TRADING_ENABLED=false
-ALLOWED_SYMBOLS=SOXL,SOXS
-MAX_ORDER_NOTIONAL=100
 EVENT_INGEST_SECRET=change-me
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
 WEBULL_ACCOUNT_ID=
-WEBULL_API_BASE=https://openapi.webull.com
-SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
-MARKET_HOURS_CHECK=false
+
+# Local overrides (optional — leave commented to use wrangler.jsonc defaults):
+# DRY_RUN=true
+# TRADING_ENABLED=false
+# ALLOWED_SYMBOLS=SOXL,SOXS
+# MAX_ORDER_NOTIONAL=100
+# SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
+# MARKET_HOURS_CHECK=false
+# WEBULL_API_BASE=https://openapi.webull.com
