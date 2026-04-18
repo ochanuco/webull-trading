@@ -1,6 +1,6 @@
 import { getContainer } from '@cloudflare/containers'
 import type { BridgeContainer } from './BridgeContainer'
-import { isBridgeActive } from './schedule'
+import { isBridgeActive, parseBridgeRunMode } from './schedule'
 
 export interface BridgeKeepAliveEnv {
   BRIDGE?: DurableObjectNamespace<BridgeContainer>
@@ -10,12 +10,8 @@ export interface BridgeKeepAliveEnv {
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
   EVENT_INGEST_SECRET?: string
-  /**
-   * `"true"` → always keep the container up (ignore schedule).
-   * `"false"` → never start the container (kill-switch).
-   * Anything else / missing → auto (weekdays UTC only, weekends skipped).
-   */
-  BRIDGE_ALWAYS_ON?: string
+  /** See {@link BridgeRunMode}: `always-on` / `disabled` / `auto` (default). */
+  BRIDGE_RUN_MODE?: string
 }
 
 /**
@@ -32,14 +28,10 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
     return
   }
 
-  if (env.BRIDGE_ALWAYS_ON === 'false') {
-    await stopContainer(env, 'kill-switch')
-    return
-  }
+  const mode = parseBridgeRunMode(env.BRIDGE_RUN_MODE)
 
-  const activeNow = env.BRIDGE_ALWAYS_ON === 'true' || isBridgeActive(new Date())
-  if (!activeNow) {
-    await stopContainer(env, 'outside market hours')
+  if (!isBridgeActive(new Date(), mode)) {
+    await stopContainer(env, mode === 'disabled' ? 'kill-switch' : 'outside market hours')
     return
   }
 
@@ -69,7 +61,9 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
         EVENT_INGEST_SECRET: env.EVENT_INGEST_SECRET!,
       },
     })
-    console.log(JSON.stringify({ event: 'bridge_keep_alive_ok', at: new Date().toISOString() }))
+    console.log(
+      JSON.stringify({ event: 'bridge_keep_alive_ok', at: new Date().toISOString(), mode }),
+    )
   } catch (error) {
     console.error(
       JSON.stringify({

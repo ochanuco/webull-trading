@@ -257,10 +257,10 @@ export interface Env {
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
   /**
-   * `"true"` → 24/7 常駐。`"false"` → kill-switch、container を常に stop。
-   * 省略時は auto: 平日 UTC のみ起動 (土日は停止)。
+   * Bridge lifecycle policy — see {@link BridgeRunMode} (`always-on` /
+   * `disabled` / `auto`). 省略時は `auto`: 平日 UTC のみ起動。
    */
-  BRIDGE_ALWAYS_ON?: string
+  BRIDGE_RUN_MODE?: string
 }
 
 /**
