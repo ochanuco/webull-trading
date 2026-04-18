@@ -9,11 +9,7 @@
   "vars": {
     "DRY_RUN": "true",
     "TRADING_ENABLED": "false",
-    "ALLOWED_SYMBOLS": "SOXL,SOXS",
-    "MAX_ORDER_NOTIONAL": "100",
-    "SYMBOL_MAX_NOTIONAL": "{\"SOXL\":200,\"SOXS\":150}",
-    "MARKET_HOURS_CHECK": "false",
-    "WEBULL_API_BASE": "https://openapi.webull.com"
+    "MARKET_HOURS_CHECK": "false"
   },
   "env": {
     "staging": {
@@ -21,11 +17,7 @@
       "vars": {
         "DRY_RUN": "true",
         "TRADING_ENABLED": "false",
-        "ALLOWED_SYMBOLS": "SOXL,SOXS",
-        "MAX_ORDER_NOTIONAL": "100",
-        "SYMBOL_MAX_NOTIONAL": "{\"SOXL\":200,\"SOXS\":150}",
-        "MARKET_HOURS_CHECK": "false",
-        "WEBULL_API_BASE": "https://openapi.webull.com"
+        "MARKET_HOURS_CHECK": "false"
       }
     },
     "production": {
@@ -33,11 +25,7 @@
       "vars": {
         "DRY_RUN": "true",
         "TRADING_ENABLED": "false",
-        "ALLOWED_SYMBOLS": "SOXL,SOXS",
-        "MAX_ORDER_NOTIONAL": "100",
-        "SYMBOL_MAX_NOTIONAL": "{\"SOXL\":200,\"SOXS\":150}",
-        "MARKET_HOURS_CHECK": "false",
-        "WEBULL_API_BASE": "https://openapi.webull.com"
+        "MARKET_HOURS_CHECK": "false"
       }
     }
   }

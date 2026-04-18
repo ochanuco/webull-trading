@@ -99,29 +99,36 @@ pnpm exec wrangler deploy --env staging
 pnpm exec wrangler deploy --env production
 ```
 
-### 非 secret 設定 (`wrangler.jsonc::env.<target>.vars`)
+### 運用フラグ (`wrangler.jsonc::env.<target>.vars`)
 
-`DRY_RUN` / `TRADING_ENABLED` / `ALLOWED_SYMBOLS` / `MAX_ORDER_NOTIONAL` / `SYMBOL_MAX_NOTIONAL` / `MARKET_HOURS_CHECK` / `WEBULL_API_BASE` は `wrangler.jsonc` に env ごとに記述済。変更は **ファイルを編集して再デプロイ** (git で差分が残る = 監査トレイル)。
+`DRY_RUN` / `TRADING_ENABLED` / `MARKET_HOURS_CHECK` の 3つは純粋な運用フラグとして wrangler.jsonc に env ごと記述済。変更は **ファイルを編集して再デプロイ** (git 差分 = 監査トレイル)。
 
 **fail-closed 前提で両 env とも初期値は `DRY_RUN=true` / `TRADING_ENABLED=false`。** 本番で LIVE 発注に切り替える時は wrangler.jsonc の `env.production.vars` を編集してコミット + `wrangler deploy --env production`。staging で十分疎通確認してから本番を触る。
 
 ### Secrets 投入 (`wrangler secret put`)
 
-以下の **秘匿値のみ** secret として環境ごとに投入:
+以下は個人戦略・認証情報・非公開 endpoint を含むので全て secret 扱い:
+
+- `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` — 管理 API の認証
+- `EVENT_INGEST_SECRET` — `/events/trade` の secret header
+- `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID` — broker 認証
+- `WEBULL_API_BASE` — sandbox URL が非公開のため
+- `ALLOWED_SYMBOLS` — 取引対象銘柄 (個人戦略)
+- `MAX_ORDER_NOTIONAL` — 1注文上限 (個人の資金規模)
+- `SYMBOL_MAX_NOTIONAL` — symbol 別上限 (同上)
 
 ```bash
 # staging
-pnpm exec wrangler secret put BASIC_AUTH_USER --env staging
-pnpm exec wrangler secret put BASIC_AUTH_PASSWORD --env staging
-pnpm exec wrangler secret put EVENT_INGEST_SECRET --env staging
-pnpm exec wrangler secret put WEBULL_APP_KEY --env staging
-pnpm exec wrangler secret put WEBULL_APP_SECRET --env staging
-pnpm exec wrangler secret put WEBULL_ACCOUNT_ID --env staging
+for key in BASIC_AUTH_USER BASIC_AUTH_PASSWORD EVENT_INGEST_SECRET \
+           WEBULL_APP_KEY WEBULL_APP_SECRET WEBULL_ACCOUNT_ID WEBULL_API_BASE \
+           ALLOWED_SYMBOLS MAX_ORDER_NOTIONAL SYMBOL_MAX_NOTIONAL; do
+  pnpm exec wrangler secret put "$key" --env staging
+done
 
 # production も同じ set
 ```
 
-`wrangler secret put` は同名 var を上書きするので、どうしても一時的に DRY_RUN などを var と違う値にしたい場合のエスケープハッチにも使える (通常は wrangler.jsonc 編集が望ましい)。
+`wrangler secret put` は同名 var を上書きするので、一時的に `DRY_RUN` などを var と違う値にしたい場合のエスケープハッチにも使える (通常は wrangler.jsonc 編集が望ましい)。
 
 ### デプロイ
 
