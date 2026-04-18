@@ -4,7 +4,7 @@ Node bridge process for Webull trade-event gRPC streaming. It keeps a persistent
 
 ## Environment
 
-Copy [`.env.example`](/Users/chanu/ghq/github.com/ochanuco/worktrees/dev-grpc-bridge-client/bridge/.env.example) and set:
+`.env.example` をコピーして設定:
 
 - `WEBULL_APP_KEY`
 - `WEBULL_APP_SECRET`
@@ -15,7 +15,7 @@ Copy [`.env.example`](/Users/chanu/ghq/github.com/ochanuco/worktrees/dev-grpc-br
 
 ## Run
 
-From [`bridge/`](/Users/chanu/ghq/github.com/ochanuco/worktrees/dev-grpc-bridge-client/bridge):
+`bridge/` ディレクトリで:
 
 ```bash
 pnpm install
