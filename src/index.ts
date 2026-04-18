@@ -9,12 +9,14 @@ const app = createApp()
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const requestId = crypto.randomUUID()
     ctx.waitUntil(
       runQuoteFeed({ env }).then(
         (summary) => {
           console.log(
             JSON.stringify({
               event: 'quote_feed_run',
+              requestId,
               fetched: summary.fetched,
               persisted: summary.persisted,
               skipped: summary.skipped,
@@ -26,6 +28,7 @@ export default {
           console.error(
             JSON.stringify({
               event: 'quote_feed_error',
+              requestId,
               message: error instanceof Error ? error.message : String(error),
             }),
           )

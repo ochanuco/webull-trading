@@ -106,8 +106,16 @@ export class WebullQuoteClient {
       )
     }
 
-    const json = (await response.json()) as unknown
-    return normalizeSnapshots(json, this.now().toISOString())
+    try {
+      const json = (await response.json()) as unknown
+      return normalizeSnapshots(json, this.now().toISOString())
+    } catch (error) {
+      throw new BrokerRequestError(
+        `Webull quote response parse failed: ${error instanceof Error ? error.message : String(error)}`,
+        `GET ${QUOTE_PATH}`,
+        { cause: error instanceof Error ? error : undefined },
+      )
+    }
   }
 }
 
@@ -164,7 +172,7 @@ function coerceNumber(value: number | string | undefined): number | null {
 }
 
 function coerceAsOf(raw: RawSnapshotEntry, fallback: string): string {
-  if (typeof raw.trade_time === 'string' && raw.trade_time.length > 0) return raw.trade_time
+  if (typeof raw.trade_time === 'string' && raw.trade_time.trim().length > 0) return raw.trade_time.trim()
   if (raw.timestamp !== undefined) {
     const ms = typeof raw.timestamp === 'number' ? raw.timestamp : Number(raw.timestamp)
     if (Number.isFinite(ms)) {

@@ -70,9 +70,20 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
         fetchedAt,
         source: QUOTE_SOURCE,
       }
-      const stub = env.SYMBOL_STATE.get(env.SYMBOL_STATE.idFromName(symbol))
-      await stub.setQuote(symbol, quote)
-      summary.persisted += 1
+      try {
+        const stub = env.SYMBOL_STATE.get(env.SYMBOL_STATE.idFromName(symbol))
+        if (!stub) {
+          summary.errors.push({ category, message: `Failed to get DO stub for ${symbol}` })
+          continue
+        }
+        await stub.setQuote(symbol, quote)
+        summary.persisted += 1
+      } catch (error) {
+        summary.errors.push({
+          category,
+          message: `Failed to persist ${symbol}: ${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
     }
   }
 
