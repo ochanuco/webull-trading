@@ -4,6 +4,7 @@ import type { TradeEventIngestRequest } from '../infrastructure/webull/TradeEven
 import { ValidationError } from '../shared/errors'
 import { TradeEventService } from '../trading/application/TradeEventService'
 import { isTradeEventType, isTradeStatus, type TradeEvent } from '../trading/domain/TradeEvent'
+import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 
 export const events = new Hono<AppBindings>().post('/trade', async (c) => {
@@ -15,6 +16,9 @@ export const events = new Hono<AppBindings>().post('/trade', async (c) => {
 
   const service = new TradeEventService({
     positionStore: c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : undefined,
+    portfolioStore: c.env.PORTFOLIO_STATE
+      ? new PortfolioStateClient(c.env.PORTFOLIO_STATE)
+      : undefined,
   })
   await service.handle(payload.event)
 

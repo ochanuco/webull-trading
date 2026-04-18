@@ -3,6 +3,7 @@ import type { Env } from './config/env'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
+export { PortfolioStateDO } from './trading/state/PortfolioStateDO'
 
 const app = createApp()
 

@@ -6,6 +6,7 @@ import type { Execution } from '../execution/Execution'
 import type { RiskPolicy } from '../risk/RiskPolicy'
 import { isWithinJpPriceBand } from '../risk/jpPriceBand'
 import { computeSpreadPct } from '../risk/spreadGuard'
+import type { PortfolioStore } from '../state/PortfolioStore'
 import type { PositionStore } from '../state/PositionStore'
 import type { QuoteSnapshot, SymbolState } from '../state/types'
 import type { Strategy, StrategyInput } from '../strategy/Strategy'
@@ -43,6 +44,17 @@ export interface TradeCallContext {
 
 export interface TradingServiceOptions {
   positionStore?: PositionStore
+  /**
+   * Portfolio-level state (daily equity / realized PnL / kill switch). Separate
+   * from {@link PositionStore} because drawdown is account-wide, not per-symbol.
+   */
+  portfolioStore?: PortfolioStore
+  /**
+   * Drawdown threshold as a fraction of `dailyStartEquity`. When
+   * `dailyRealizedPnl / dailyStartEquity <= threshold`, the kill switch arms
+   * and rejects every submit until EOD. Default -0.02 (i.e. -2%).
+   */
+  drawdownKillThreshold?: number
   /** How long a pending-order lock stays live before a new submit can replace it. */
   pendingLockTtlMs?: number
   /**
@@ -73,9 +85,12 @@ const DEFAULT_PENDING_LOCK_TTL_MS = 60_000
 const DEFAULT_SPREAD_LIMITS = { US: 0.0025, JP: 0.006 } as const
 const DEFAULT_STALE_QUOTE_MS = 15 * 60 * 1_000
 const DEFAULT_GAP_REJECT_PCT = 0.03
+const DEFAULT_DRAWDOWN_KILL_THRESHOLD = -0.02
 
 export class TradingService {
   private readonly positionStore?: PositionStore
+  private readonly portfolioStore?: PortfolioStore
+  private readonly drawdownKillThreshold: number
   private readonly pendingLockTtlMs: number
   private readonly inversePairs: Record<string, string>
   private readonly spreadLimits: { US: number; JP: number }
@@ -90,6 +105,13 @@ export class TradingService {
     options: TradingServiceOptions = {},
   ) {
     this.positionStore = options.positionStore
+    this.portfolioStore = options.portfolioStore
+    this.drawdownKillThreshold =
+      options.drawdownKillThreshold !== undefined &&
+      Number.isFinite(options.drawdownKillThreshold) &&
+      options.drawdownKillThreshold < 0
+        ? options.drawdownKillThreshold
+        : DEFAULT_DRAWDOWN_KILL_THRESHOLD
     this.pendingLockTtlMs =
       options.pendingLockTtlMs !== undefined &&
       Number.isFinite(options.pendingLockTtlMs) &&
@@ -220,6 +242,39 @@ export class TradingService {
       return {
         allowed: false,
         riskDecision: appendReason(decision.riskDecision, `cooldown active until ${state.cooldownUntil}`),
+      }
+    }
+
+    // Portfolio-level drawdown kill switch. Fires before pending-lock acquisition
+    // so the lock is never taken when trading is disabled. Unseeded equity
+    // (0) is treated as fail-open so existing flows keep working.
+    if (this.portfolioStore) {
+      const portfolio = await this.portfolioStore.getPortfolio()
+      if (
+        portfolio.tradingDisabledUntil &&
+        new Date(portfolio.tradingDisabledUntil).getTime() > now.getTime()
+      ) {
+        return {
+          allowed: false,
+          riskDecision: appendReason(
+            decision.riskDecision,
+            `trading disabled until ${portfolio.tradingDisabledUntil}`,
+          ),
+        }
+      }
+      if (portfolio.dailyStartEquity > 0) {
+        const ratio = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
+        if (ratio <= this.drawdownKillThreshold) {
+          const eodIso = endOfUtcDay(now).toISOString()
+          await this.portfolioStore.setTradingDisabledUntil(eodIso).catch(() => undefined)
+          return {
+            allowed: false,
+            riskDecision: appendReason(
+              decision.riskDecision,
+              `daily drawdown kill: realized ${portfolio.dailyRealizedPnl} / start ${portfolio.dailyStartEquity} (ratio ${ratio.toFixed(4)}) <= threshold ${this.drawdownKillThreshold}; disabled until ${eodIso}`,
+            ),
+          }
+        }
       }
     }
 
@@ -381,6 +436,15 @@ function evaluateGap(state: SymbolState, thresholdPct: number): string | null {
     return `gap re-eval: |${gap.toFixed(4)}| > ${thresholdPct} (avgPrice ${position.avgPrice} vs quote ${quote.price})`
   }
   return null
+}
+
+function endOfUtcDay(now: Date): Date {
+  return new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    23, 59, 59, 999,
+  ))
 }
 
 function appendReason(decision: RiskDecision, reason: string): RiskDecision {

@@ -235,6 +235,18 @@ export interface Env {
   GAP_REJECT_PCT?: string
 }
 
+// Drawdown kill switch (#38-B append)
+import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
+
+export interface Env {
+  PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
+  /**
+   * Daily drawdown kill threshold, as a fraction of day-start equity. Parsed as
+   * a negative float (e.g. `"-0.02"`). Default -0.02 when unset or malformed.
+   */
+  DRAWDOWN_KILL_THRESHOLD?: string
+}
+
 /**
  * Parses an optional numeric env var into a non-negative finite number. Returns
  * `undefined` when the var is unset or empty so callers can fall back to a
@@ -274,6 +286,24 @@ export function parseOptionalPositiveNumber(
   if (!Number.isFinite(parsed) || parsed <= 0) {
     console.warn(`Invalid ${key ?? 'env'} value: '${value}'; using fallback ${fallback}`)
     return fallback
+  }
+  return parsed
+}
+
+const DEFAULT_DRAWDOWN_KILL_THRESHOLD = -0.02
+
+/**
+ * Parses DRAWDOWN_KILL_THRESHOLD. Must be a finite negative number; anything
+ * else falls back to the default so a typo cannot silently disarm the kill.
+ */
+export function parseDrawdownKillThreshold(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_DRAWDOWN_KILL_THRESHOLD
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed >= 0) {
+    console.warn(
+      `Invalid DRAWDOWN_KILL_THRESHOLD '${value}'; using default ${DEFAULT_DRAWDOWN_KILL_THRESHOLD}`,
+    )
+    return DEFAULT_DRAWDOWN_KILL_THRESHOLD
   }
   return parsed
 }
