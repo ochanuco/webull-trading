@@ -34,11 +34,11 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test (worker + bridge via vitest glob)
+      - name: Test (worker)
         run: pnpm test
 
   bridge:
-    name: bridge (typecheck)
+    name: bridge (typecheck + test)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -59,4 +59,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm exec tsc --noEmit -p .
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
