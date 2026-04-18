@@ -256,6 +256,11 @@ export interface Env {
   BRIDGE?: DurableObjectNamespace<BridgeContainer>
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
+  /**
+   * `"true"` → 24/7 常駐。`"false"` → kill-switch、container を常に stop。
+   * 省略時は auto: 平日 UTC のみ起動 (土日は停止)。
+   */
+  BRIDGE_ALWAYS_ON?: string
 }
 
 /**

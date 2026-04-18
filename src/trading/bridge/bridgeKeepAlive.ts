@@ -1,5 +1,6 @@
 import { getContainer } from '@cloudflare/containers'
 import type { BridgeContainer } from './BridgeContainer'
+import { isBridgeActive } from './schedule'
 
 export interface BridgeKeepAliveEnv {
   BRIDGE?: DurableObjectNamespace<BridgeContainer>
@@ -9,12 +10,18 @@ export interface BridgeKeepAliveEnv {
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
   EVENT_INGEST_SECRET?: string
+  /**
+   * `"true"` → always keep the container up (ignore schedule).
+   * `"false"` → never start the container (kill-switch).
+   * Anything else / missing → auto (weekdays UTC only, weekends skipped).
+   */
+  BRIDGE_ALWAYS_ON?: string
 }
 
 /**
- * Called from the Worker cron handler. Ensures the single bridge container
- * instance is running and has the current set of secrets. Idempotent: if the
- * container is already up, `start()` is a no-op.
+ * Called from the Worker cron handler. On active hours ensures the single
+ * bridge container instance is running; on inactive hours issues a stop() so
+ * idle time is not billed. Idempotent in both directions.
  *
  * Fails open — any error is logged and swallowed so the rest of the scheduled
  * handler (e.g. quote feed) is unaffected.
@@ -22,6 +29,17 @@ export interface BridgeKeepAliveEnv {
 export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
   if (!env.BRIDGE) {
     console.log(JSON.stringify({ event: 'bridge_keep_alive_skipped', reason: 'BRIDGE binding missing' }))
+    return
+  }
+
+  if (env.BRIDGE_ALWAYS_ON === 'false') {
+    await stopContainer(env, 'kill-switch')
+    return
+  }
+
+  const activeNow = env.BRIDGE_ALWAYS_ON === 'true' || isBridgeActive(new Date())
+  if (!activeNow) {
+    await stopContainer(env, 'outside market hours')
     return
   }
 
@@ -40,8 +58,6 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
   }
 
   try {
-    // Single bridge instance — not a per-symbol DO. Pin the name so every
-    // Worker invocation lands on the same container stub.
     const container = getContainer(env.BRIDGE, 'default')
     await container.start({
       envVars: {
@@ -59,6 +75,27 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
       JSON.stringify({
         event: 'bridge_keep_alive_error',
         at: new Date().toISOString(),
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
+  }
+}
+
+async function stopContainer(env: BridgeKeepAliveEnv, reason: string): Promise<void> {
+  if (!env.BRIDGE) return
+  try {
+    const container = getContainer(env.BRIDGE, 'default')
+    await container.stop()
+    console.log(
+      JSON.stringify({ event: 'bridge_keep_alive_stopped', at: new Date().toISOString(), reason }),
+    )
+  } catch (error) {
+    // `stop()` against a container that was never started is not exceptional;
+    // swallow silently at debug level.
+    console.log(
+      JSON.stringify({
+        event: 'bridge_keep_alive_stop_noop',
+        reason,
         message: error instanceof Error ? error.message : String(error),
       }),
     )
