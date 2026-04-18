@@ -28,7 +28,9 @@ trade_event_type = "exit"
 ### Win rate by strategy
 
 ```
-trade_event_type = "exit"
+(join) exit records (trade_event_type = "exit")
+       -> decision records (trade_event_type = "decision")
+       on client_order_id
 (group by) strategy_name, exit_reason
 ```
 
