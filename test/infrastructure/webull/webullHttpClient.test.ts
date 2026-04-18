@@ -180,4 +180,22 @@ describe('WebullHttpClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
+
+  it('listSubscriptions hits /app/subscriptions/list and returns the array', async () => {
+    const subscriptions = [
+      { subscription_id: 'sub-1', user_id: 'u-1', account_id: 'acct-abc', account_number: '123' },
+    ]
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(subscriptions), { status: 200 }))
+    const client = createClient(fetchMock)
+
+    const result = await client.listSubscriptions()
+
+    expect(result).toEqual(subscriptions)
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toContain('/app/subscriptions/list')
+    expect(init?.method).toBe('GET')
+    expect(init?.body).toBeUndefined()
+  })
 })

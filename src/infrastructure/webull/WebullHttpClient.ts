@@ -1,6 +1,6 @@
 import type { OrderIntent } from '../../trading/domain/OrderIntent'
 import { BrokerRequestError } from '../../shared/errors'
-import type { WebullAccountDto, WebullPlaceOrderResponseDto } from './dto'
+import type { WebullAccountDto, WebullPlaceOrderResponseDto, WebullSubscriptionDto } from './dto'
 import { toWebullPlaceOrderRequest } from './mapper'
 import { WebullAuth } from './WebullAuth'
 
@@ -45,6 +45,10 @@ export class WebullHttpClient {
       multiplier: options.retry?.multiplier ?? 2,
       jitter: options.retry?.jitter ?? 0.25,
     }
+  }
+
+  async listSubscriptions(): Promise<WebullSubscriptionDto[]> {
+    return this.request<WebullSubscriptionDto[]>('GET', '/app/subscriptions/list')
   }
 
   async getAccount(): Promise<WebullAccountDto> {
