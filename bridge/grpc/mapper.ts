@@ -2,12 +2,15 @@ import {
   isTradeEventType,
   isTradeStatus,
   type TradeEvent,
-  type TradeEventType,
-  type TradeStatus,
 } from '../../src/trading/domain/TradeEvent'
+import type { SubscribeResponse } from './proto'
 
-export function mapWebullTradeEvent(rawPayload: unknown, receivedAt: string = new Date().toISOString()): TradeEvent {
-  const payload = asRecord(rawPayload)
+export function mapWebullTradeEvent(
+  rawPayload: SubscribeResponse | unknown,
+  receivedAt: string = new Date().toISOString(),
+): TradeEvent {
+  const envelope = asRecord(rawPayload)
+  const payload = unwrapPayload(envelope)
   const order = asOptionalRecord(payload.order)
 
   const eventType = readRequiredEnum(payload, ['eventType', 'event_type', 'type'], isTradeEventType)
@@ -25,6 +28,24 @@ export function mapWebullTradeEvent(rawPayload: unknown, receivedAt: string = ne
     rawPayload,
     receivedAt,
   }
+}
+
+function unwrapPayload(envelope: Record<string, unknown>): Record<string, unknown> {
+  const nestedPayload = envelope.payload
+
+  if (typeof nestedPayload === 'string' && nestedPayload.trim() !== '') {
+    try {
+      const parsedPayload = JSON.parse(nestedPayload) as unknown
+      return asRecord(parsedPayload)
+    } catch (error) {
+      // TODO(webull-spec): confirm whether non-JSON payloads can carry order updates.
+      throw new Error(
+        `Trade event payload could not be parsed as JSON: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  return envelope
 }
 
 function readRequiredString(

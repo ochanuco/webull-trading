@@ -1,0 +1,34 @@
+// Source: https://github.com/webull-inc/openapi-python-sdk/blob/663c71d6ce6797ce641549cf0e53c496614ea788/webull-python-sdk-trade-events-core/webullsdktradeeventscore/events.proto
+// Copyright 2022 Webull
+// Licensed under the Apache License, Version 2.0.
+syntax = "proto3";
+package grpc.trade.event;
+
+service EventService {
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse) {}
+}
+
+message SubscribeRequest {
+  uint32 subscribeType = 1;
+  int64 timestamp = 2;
+  string contentType = 3;
+  string payload = 4;
+  repeated string accounts = 5;
+}
+
+message SubscribeResponse {
+  EventType eventType = 1;
+  uint32 subscribeType = 2;
+  string contentType = 3;
+  string payload = 4;
+  string requestId = 5;
+  int64 timestamp = 6;
+}
+
+enum EventType {
+  SubscribeSuccess = 0;
+  Ping = 1;
+  AuthError = 2;
+  NumOfConnExceed = 3;
+  SubscribeExpired = 4;
+}
