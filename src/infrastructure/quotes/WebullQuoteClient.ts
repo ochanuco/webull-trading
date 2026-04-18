@@ -16,11 +16,18 @@ export interface WebullQuoteClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
   WEBULL_API_BASE?: string
+  /**
+   * Optional override for the snapshot endpoint path. Webull UAT endpoints are
+   * not finalised for this POC, so the path is kept configurable per
+   * environment. Defaults to {@link DEFAULT_QUOTE_PATH}.
+   */
+  WEBULL_QUOTE_PATH?: string
 }
 
 interface WebullQuoteClientOptions {
   auth: WebullAuth
   baseUrl?: string
+  quotePath?: string
   timeoutMs?: number
   fetchFn?: typeof fetch
   now?: () => Date
@@ -41,7 +48,7 @@ interface RawSnapshotEntry {
   ap?: number | string
 }
 
-const QUOTE_PATH = '/market-data/snapshot'
+const DEFAULT_QUOTE_PATH = '/openapi/market/snapshot'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
@@ -51,12 +58,14 @@ const QUOTE_PATH = '/market-data/snapshot'
  */
 export class WebullQuoteClient {
   private readonly baseUrl: string
+  private readonly quotePath: string
   private readonly timeoutMs: number
   private readonly fetchFn: typeof fetch
   private readonly now: () => Date
 
   constructor(private readonly options: WebullQuoteClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
+    this.quotePath = options.quotePath ?? DEFAULT_QUOTE_PATH
     this.timeoutMs = options.timeoutMs ?? 5000
     // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
     // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
@@ -68,7 +77,7 @@ export class WebullQuoteClient {
     if (symbols.length === 0) return []
 
     const query = { symbols: symbols.join(','), category }
-    const url = new URL(QUOTE_PATH, `${this.baseUrl}/`)
+    const url = new URL(this.quotePath, `${this.baseUrl}/`)
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, value)
     }
@@ -85,7 +94,7 @@ export class WebullQuoteClient {
     } catch (error) {
       throw new BrokerRequestError(
         `Webull quote auth failed: ${error instanceof Error ? error.message : String(error)}`,
-        `GET ${QUOTE_PATH}`,
+        `GET ${this.quotePath}`,
         { cause: error instanceof Error ? error : undefined },
       )
     }
@@ -102,7 +111,7 @@ export class WebullQuoteClient {
     } catch (error) {
       throw new BrokerRequestError(
         `Webull quote fetch failed: ${error instanceof Error ? error.message : String(error)}`,
-        `GET ${QUOTE_PATH}`,
+        `GET ${this.quotePath}`,
         { cause: error instanceof Error ? error : undefined },
       )
     } finally {
@@ -112,7 +121,7 @@ export class WebullQuoteClient {
     if (!response.ok) {
       throw new BrokerRequestError(
         `Webull quote request failed with status ${response.status}`,
-        `GET ${QUOTE_PATH}`,
+        `GET ${this.quotePath}`,
       )
     }
 
@@ -122,7 +131,7 @@ export class WebullQuoteClient {
     } catch (error) {
       throw new BrokerRequestError(
         `Webull quote response parse failed: ${error instanceof Error ? error.message : String(error)}`,
-        `GET ${QUOTE_PATH}`,
+        `GET ${this.quotePath}`,
         { cause: error instanceof Error ? error : undefined },
       )
     }
@@ -139,6 +148,7 @@ export function createWebullQuoteClient(
       appSecret: env.WEBULL_APP_SECRET,
     }),
     baseUrl: env.WEBULL_API_BASE,
+    quotePath: env.WEBULL_QUOTE_PATH,
     timeoutMs: options?.timeoutMs,
     fetchFn: options?.fetchFn,
     now: options?.now,
