@@ -5,5 +5,13 @@
   "compatibility_date": "2025-10-01",
   "observability": {
     "enabled": true
+  },
+  "env": {
+    "staging": {
+      "name": "webull-trading-staging"
+    },
+    "production": {
+      "name": "webull-trading-production"
+    }
   }
 }

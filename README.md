@@ -78,6 +78,77 @@ cd bridge && pnpm install && pnpm exec tsc --noEmit -p .
 | `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID` | — | Webull 認証 (placeholder signing) |
 | `WEBULL_API_BASE` | `https://openapi.webull.com` | Webull HTTP base |
 
+## Deploy / Secrets (Cloudflare Workers)
+
+`wrangler.jsonc` に **staging / production** 2つの environments を定義してある。既定環境 (env 指定なし) はローカル dev 用、デプロイは必ず `--env` 付きで。
+
+| env | worker name | 用途 |
+|---|---|---|
+| default (no `--env`) | `webull-trading` | `wrangler dev` ローカル実行専用 |
+| `staging` | `webull-trading-staging` | 検証環境 |
+| `production` | `webull-trading-production` | 本番 |
+
+### 初回セットアップ
+
+```bash
+# 1. Cloudflare へログイン (ブラウザが開く)
+pnpm exec wrangler login
+
+# 2. Worker を空で作成して secrets 枠を用意
+pnpm exec wrangler deploy --env staging
+pnpm exec wrangler deploy --env production
+```
+
+### Secrets 投入 (`wrangler secret put`)
+
+`.dev.vars` の内容は **本番/staging に自動同期しない**。環境ごとに明示的に投入する:
+
+```bash
+# staging
+pnpm exec wrangler secret put BASIC_AUTH_USER --env staging
+pnpm exec wrangler secret put BASIC_AUTH_PASSWORD --env staging
+pnpm exec wrangler secret put EVENT_INGEST_SECRET --env staging
+pnpm exec wrangler secret put ALLOWED_SYMBOLS --env staging
+pnpm exec wrangler secret put MAX_ORDER_NOTIONAL --env staging
+pnpm exec wrangler secret put SYMBOL_MAX_NOTIONAL --env staging
+# Phase 3 Webull
+pnpm exec wrangler secret put WEBULL_APP_KEY --env staging
+pnpm exec wrangler secret put WEBULL_APP_SECRET --env staging
+pnpm exec wrangler secret put WEBULL_ACCOUNT_ID --env staging
+
+# production (同じ set を production に)
+pnpm exec wrangler secret put BASIC_AUTH_USER --env production
+# ... 以下同様
+```
+
+`DRY_RUN` / `TRADING_ENABLED` / `MARKET_HOURS_CHECK` / `WEBULL_API_BASE` は env var (非 secret) なので `wrangler.jsonc` の `env.<target>.vars` に平文で書くか、同じく `wrangler secret put` で投入可。**本番で DRY_RUN=false / TRADING_ENABLED=true にする場合は、先に staging で十分疎通確認してから**。
+
+### デプロイ
+
+```bash
+pnpm exec wrangler deploy --env staging       # staging に反映
+pnpm exec wrangler deploy --env production    # production に反映
+```
+
+### Secrets のローテーション
+
+```bash
+pnpm exec wrangler secret put WEBULL_APP_SECRET --env production  # 上書き投入
+pnpm exec wrangler secret list --env production                   # 現在の secrets (値は出ない)
+pnpm exec wrangler secret delete WEBULL_APP_SECRET --env staging  # 削除
+```
+
+### 1Password 連携 (推奨、dotfile 手元運用)
+
+\\`~/.coderabbit` の OAuth トークンと同じく、発行した credential を 1Password に保管して `op read` で解決する流れが安全:
+
+```bash
+export CLOUDFLARE_API_TOKEN="$(op read 'op://Personal/CLOUDFLARE_API_TOKEN/credential')"
+pnpm exec wrangler deploy --env staging
+```
+
+GitHub Actions での自動デプロイは **別 PR 予定** (CI/CD 拡張時、follow-up [#24](https://github.com/ochanuco/webull-trading/issues/24))。本 PR は手動デプロイ前提の runbook のみ。
+
 ## AI エージェント / レビュー設定
 
 このリポジトリは AI (Claude Code / Codex / CodeRabbit) で作業することを前提に設定ファイルを整備している:
