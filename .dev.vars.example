@@ -1,13 +1,26 @@
+# Local dev secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+#
+# Split:
+# - Operational flags (not sensitive): DRY_RUN / TRADING_ENABLED / MARKET_HOURS_CHECK
+#   → live in wrangler.jsonc::vars and wrangler.jsonc::env.<target>.vars.
+#   Override locally by uncommenting the block at the bottom.
+# - Sensitive (personal strategy / credentials / non-public endpoint):
+#   ALLOWED_SYMBOLS / MAX_ORDER_NOTIONAL / SYMBOL_MAX_NOTIONAL /
+#   WEBULL_API_BASE / BASIC_AUTH_* / EVENT_INGEST_SECRET / WEBULL_APP_* / WEBULL_ACCOUNT_ID
+#   → set below for local dev, use `wrangler secret put` for deployed envs.
+
 BASIC_AUTH_USER=<your-username>
 BASIC_AUTH_PASSWORD=<your-password>
-DRY_RUN=true
-TRADING_ENABLED=false
-ALLOWED_SYMBOLS=SOXL,SOXS
-MAX_ORDER_NOTIONAL=100
 EVENT_INGEST_SECRET=change-me
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
 WEBULL_ACCOUNT_ID=
 WEBULL_API_BASE=https://openapi.webull.com
+ALLOWED_SYMBOLS=SOXL,SOXS
+MAX_ORDER_NOTIONAL=100
 SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
-MARKET_HOURS_CHECK=false
+
+# Local overrides for operational flags (optional):
+# DRY_RUN=true
+# TRADING_ENABLED=false
+# MARKET_HOURS_CHECK=false

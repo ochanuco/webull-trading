@@ -6,12 +6,27 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    "DRY_RUN": "true",
+    "TRADING_ENABLED": "false",
+    "MARKET_HOURS_CHECK": "false"
+  },
   "env": {
     "staging": {
-      "name": "webull-trading-staging"
+      "name": "webull-trading-staging",
+      "vars": {
+        "DRY_RUN": "true",
+        "TRADING_ENABLED": "false",
+        "MARKET_HOURS_CHECK": "false"
+      }
     },
     "production": {
-      "name": "webull-trading-production"
+      "name": "webull-trading-production",
+      "vars": {
+        "DRY_RUN": "true",
+        "TRADING_ENABLED": "false",
+        "MARKET_HOURS_CHECK": "false"
+      }
     }
   }
 }
