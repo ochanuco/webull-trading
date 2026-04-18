@@ -68,13 +68,13 @@ describe('webull routes', () => {
 
     expect(response.status).toBe(200)
     const body = (await response.json()) as {
-      status: string
-      orderId: string
-      symbol: string
+      order_id: string
+      client_order_id: string
+      message?: string
     }
-    expect(body.status).toBe('DRY_RUN')
-    expect(body.orderId).toMatch(/^dry-run-/)
-    expect(body.symbol).toBe('SOXL')
+    expect(body.order_id).toMatch(/^dry-run-/)
+    expect(body.client_order_id).toMatch(/^[0-9a-f]{32}$/)
+    expect(body.message).toMatch(/DRY_RUN=true/)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -82,12 +82,8 @@ describe('webull routes', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
-          orderId: 'ord-123',
-          status: 'SUBMITTED',
-          symbol: 'SOXL',
-          side: 'BUY',
-          quantity: 2,
-          limitPrice: 9,
+          client_order_id: 'cli-123',
+          order_id: 'ord-123',
         }),
         { status: 200 },
       ),
@@ -121,12 +117,8 @@ describe('webull routes', () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
-      orderId: 'ord-123',
-      status: 'SUBMITTED',
-      symbol: 'SOXL',
-      side: 'BUY',
-      quantity: 2,
-      limitPrice: 9,
+      client_order_id: 'cli-123',
+      order_id: 'ord-123',
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })

@@ -31,16 +31,12 @@ function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClie
 }
 
 describe('WebullHttpClient', () => {
-  it('places an order with the expected method, URL, body, and Webull auth headers', async () => {
+  it('places an order via the v2 endpoint with the expected body and auth headers', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
-          orderId: 'ord-123',
-          status: 'SUBMITTED',
-          symbol: 'SOXL',
-          side: 'BUY',
-          quantity: 2,
-          limitPrice: 9.5,
+          client_order_id: 'cli-123',
+          order_id: 'ord-123',
         }),
         { status: 200 },
       ),
@@ -51,19 +47,25 @@ describe('WebullHttpClient', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]!
-    expect(url).toBe('https://broker.example.test/trade/order/place?account_id=acct-1')
+    expect(url).toBe('https://broker.example.test/openapi/account/orders/place?account_id=acct-1')
     expect(init?.method).toBe('POST')
     expect(JSON.parse(init?.body as string)).toMatchObject({
-      stock_order: {
-        client_order_id: expect.any(String),
-        symbol: 'SOXL',
-        side: 'BUY',
-        tif: 'DAY',
-        order_type: 'LIMIT',
-        limit_price: '9.500',
-        qty: '2',
-        extended_hours_trading: false,
-      },
+      new_orders: [
+        {
+          client_order_id: expect.any(String),
+          symbol: 'SOXL',
+          instrument_type: 'EQUITY',
+          market: 'US',
+          order_type: 'LIMIT',
+          limit_price: '9.500',
+          quantity: '2',
+          support_trading_session: 'N',
+          side: 'BUY',
+          time_in_force: 'DAY',
+          entrust_type: 'QTY',
+          account_tax_type: 'GENERAL',
+        },
+      ],
     })
     expect(init?.headers).toMatchObject({
       Accept: 'application/json',
@@ -77,6 +79,19 @@ describe('WebullHttpClient', () => {
       'x-version': 'v1',
       'x-signature': expect.any(String),
     })
+  })
+
+  it('infers JP market for 4-digit numeric tickers', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ client_order_id: 'cli', order_id: 'ord' }), { status: 200 }),
+    )
+    const client = createClient(fetchMock)
+
+    await client.placeOrder({ symbol: '1570', side: 'BUY', quantity: 1, price: 25000, notional: 25000 })
+
+    const body = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)
+    expect(body.new_orders[0].market).toBe('JP')
+    expect(body.new_orders[0].symbol).toBe('1570')
   })
 
   it('requests account details from the documented profile endpoint', async () => {
