@@ -70,6 +70,8 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
         fetchedAt,
         source: QUOTE_SOURCE,
       }
+      if (result.bid !== undefined) quote.bid = result.bid
+      if (result.ask !== undefined) quote.ask = result.ask
       try {
         const stub = env.SYMBOL_STATE.get(env.SYMBOL_STATE.idFromName(symbol))
         if (!stub) {

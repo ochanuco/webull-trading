@@ -22,6 +22,8 @@ export interface QuoteSnapshot {
   asOf: string
   fetchedAt: string
   source: string
+  bid?: number
+  ask?: number
 }
 
 export interface SymbolState {
