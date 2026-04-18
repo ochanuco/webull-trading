@@ -117,16 +117,25 @@ pnpm exec wrangler deploy --env production
 - `MAX_ORDER_NOTIONAL` — 1注文上限 (個人の資金規模)
 - `SYMBOL_MAX_NOTIONAL` — symbol 別上限 (同上)
 
+`wrangler secret put` は対話プロンプトで値を入力する。**1 件ずつ実行して、入力値と対象 env を都度目視確認する** ことを推奨 (ループ化すると誤 env 投入のリスクが高い)。
+
 ```bash
 # staging
-for key in BASIC_AUTH_USER BASIC_AUTH_PASSWORD EVENT_INGEST_SECRET \
-           WEBULL_APP_KEY WEBULL_APP_SECRET WEBULL_ACCOUNT_ID WEBULL_API_BASE \
-           ALLOWED_SYMBOLS MAX_ORDER_NOTIONAL SYMBOL_MAX_NOTIONAL; do
-  pnpm exec wrangler secret put "$key" --env staging
-done
+pnpm exec wrangler secret put BASIC_AUTH_USER --env staging
+pnpm exec wrangler secret put BASIC_AUTH_PASSWORD --env staging
+pnpm exec wrangler secret put EVENT_INGEST_SECRET --env staging
+pnpm exec wrangler secret put WEBULL_APP_KEY --env staging
+pnpm exec wrangler secret put WEBULL_APP_SECRET --env staging
+pnpm exec wrangler secret put WEBULL_ACCOUNT_ID --env staging
+pnpm exec wrangler secret put WEBULL_API_BASE --env staging
+pnpm exec wrangler secret put ALLOWED_SYMBOLS --env staging
+pnpm exec wrangler secret put MAX_ORDER_NOTIONAL --env staging
+pnpm exec wrangler secret put SYMBOL_MAX_NOTIONAL --env staging
 
-# production も同じ set
+# production は --env production で同じ 10 件
 ```
+
+投入後に `pnpm exec wrangler secret list --env staging` で 10 件揃ったことを確認。
 
 `wrangler secret put` は同名 var を上書きするので、一時的に `DRY_RUN` などを var と違う値にしたい場合のエスケープハッチにも使える (通常は wrangler.jsonc 編集が望ましい)。
 
