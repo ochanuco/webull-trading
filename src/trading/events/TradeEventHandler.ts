@@ -1,5 +1,6 @@
 import type { TradeEvent } from '../domain/TradeEvent'
 import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
+import type { PortfolioStore } from '../state/PortfolioStore'
 import type { PositionStore } from '../state/PositionStore'
 import { logFill, logExit } from '../../infrastructure/logger/tradeJournal'
 
@@ -15,6 +16,11 @@ export interface TradeEventAuditRecord {
 
 export interface TradeEventHandlerOptions {
   positionStore?: PositionStore
+  /**
+   * Portfolio-level store. When provided, SELL realized PnL is accumulated so
+   * the drawdown kill switch can fire at the TradingService gate.
+   */
+  portfolioStore?: PortfolioStore
   now?: () => Date
 }
 
@@ -22,6 +28,7 @@ const MS_PER_DAY = 86_400_000
 
 export class TradeEventHandler {
   private readonly positionStore?: PositionStore
+  private readonly portfolioStore?: PortfolioStore
   private readonly now: () => Date
 
   constructor(
@@ -29,6 +36,7 @@ export class TradeEventHandler {
     options: TradeEventHandlerOptions = {},
   ) {
     this.positionStore = options.positionStore
+    this.portfolioStore = options.portfolioStore
     this.now = options.now ?? (() => new Date())
   }
 
@@ -154,6 +162,20 @@ export class TradeEventHandler {
           holdDays,
           exitReason: 'OTHER',
         })
+
+        // Feed portfolio-level realized PnL so the drawdown kill switch can
+        // fire on the next submit attempt.
+        if (this.portfolioStore) {
+          await this.portfolioStore.applyRealizedPnl(realizedPnl).catch((error) => {
+            this.log(
+              JSON.stringify({
+                warning: 'portfolio-realized-pnl-failed',
+                symbol,
+                message: error instanceof Error ? error.message : String(error),
+              }),
+            )
+          })
+        }
 
         // Stop-out cooldown: a losing exit parks the symbol until the next
         // business day so a whipsaw re-entry cannot compound the loss.

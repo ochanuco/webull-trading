@@ -3,6 +3,7 @@ import type { AppBindings } from '../app'
 import {
   parseBooleanEnv,
   parseCsvEnv,
+  parseDrawdownKillThreshold,
   parseInversePairs,
   parseNumberEnv,
   parseOptionalNonNegativeNumberEnv,
@@ -15,6 +16,8 @@ import { TradingService, type TradingConfig } from '../trading/application/Tradi
 import { MockExecution } from '../trading/execution/MockExecution'
 import { WebullExecution } from '../trading/execution/WebullExecution'
 import { DefaultRiskPolicy } from '../trading/risk/DefaultRiskPolicy'
+import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
+import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
 import { FixedRuleStrategy } from '../trading/strategy/strategies/FixedRuleStrategy'
@@ -65,11 +68,13 @@ export function createTradingService(
   env: {
     DRY_RUN?: string
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
+    PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
     INVERSE_PAIRS?: string
     SPREAD_LIMIT_PCT_US?: string
     SPREAD_LIMIT_PCT_JP?: string
     STALE_QUOTE_MS?: string
     GAP_REJECT_PCT?: string
+    DRAWDOWN_KILL_THRESHOLD?: string
   } & WebullClientEnv,
 ): TradingService {
   const execution = parseBooleanEnv(env.DRY_RUN, true)
@@ -85,6 +90,9 @@ export function createTradingService(
     execution,
     {
       positionStore: env.SYMBOL_STATE ? new SymbolStateClient(env.SYMBOL_STATE) : undefined,
+      portfolioStore: env.PORTFOLIO_STATE
+        ? new PortfolioStateClient(env.PORTFOLIO_STATE)
+        : undefined,
       inversePairs: parseInversePairs(env.INVERSE_PAIRS),
       spreadLimits: {
         US: spreadUsRaw !== undefined ? spreadUsRaw / 100 : 0.0025,
@@ -92,6 +100,7 @@ export function createTradingService(
       },
       staleQuoteMs: parseOptionalPositiveNumber(env.STALE_QUOTE_MS, 15 * 60 * 1_000, 'STALE_QUOTE_MS'),
       gapRejectPct: parseOptionalPositiveNumber(env.GAP_REJECT_PCT, 0.03, 'GAP_REJECT_PCT'),
+      drawdownKillThreshold: parseDrawdownKillThreshold(env.DRAWDOWN_KILL_THRESHOLD),
     },
   )
 }
