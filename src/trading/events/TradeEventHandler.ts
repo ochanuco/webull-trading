@@ -1,4 +1,5 @@
 import type { TradeEvent } from '../domain/TradeEvent'
+import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
 import type { PositionStore } from '../state/PositionStore'
 import { logFill, logExit } from '../../infrastructure/logger/tradeJournal'
 
@@ -124,10 +125,11 @@ export class TradeEventHandler {
     if (lock.side === 'SELL') {
       // T+1: SELL proceeds are unsettled until the next business day.
       const tradeDay = this.now()
+      const market = inferTradingMarket(symbol)
       await this.positionStore
         .addPendingSettlement(symbol, {
           tradeDate: toYmd(tradeDay),
-          settleDate: toYmd(nextBusinessDay(tradeDay)),
+          settleDate: toYmd(nextTradingDay(tradeDay, market)),
           amount: filledPrice * event.filledQty,
         })
         .catch((error) => {
@@ -156,7 +158,7 @@ export class TradeEventHandler {
         // Stop-out cooldown: a losing exit parks the symbol until the next
         // business day so a whipsaw re-entry cannot compound the loss.
         if (realizedPnl < 0) {
-          const cooldownUntil = nextBusinessDay(this.now()).toISOString()
+          const cooldownUntil = nextTradingDay(this.now(), market).toISOString()
           await this.positionStore
             .setCooldown(symbol, cooldownUntil)
             .catch((error) => {
@@ -176,17 +178,6 @@ export class TradeEventHandler {
 
 function toYmd(date: Date): string {
   return date.toISOString().slice(0, 10)
-}
-
-/**
- * Next business day (skips Sat/Sun). POC scope — does not honour JP/US holidays.
- */
-export function nextBusinessDay(date: Date): Date {
-  const next = new Date(date.getTime() + MS_PER_DAY)
-  const dow = next.getUTCDay()
-  if (dow === 6) return new Date(next.getTime() + 2 * MS_PER_DAY) // Sat → Mon
-  if (dow === 0) return new Date(next.getTime() + MS_PER_DAY) // Sun → Mon
-  return next
 }
 
 function readClientOrderId(payload: unknown): string | undefined {

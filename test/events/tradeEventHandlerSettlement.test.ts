@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { TradeEventHandler, nextBusinessDay } from '../../src/trading/events/TradeEventHandler'
+import { TradeEventHandler } from '../../src/trading/events/TradeEventHandler'
+import { nextTradingDay } from '../../src/trading/domain/tradingCalendar'
 import type { PositionStore } from '../../src/trading/state/PositionStore'
 import {
   emptySymbolState,
@@ -48,16 +49,16 @@ function makeStore(pre: SymbolState, post: SymbolState) {
   return { store, settlements }
 }
 
-describe('nextBusinessDay', () => {
+describe('nextTradingDay (US)', () => {
   it('rolls Fri → Mon', () => {
-    expect(nextBusinessDay(friday).toISOString().slice(0, 10)).toBe('2026-04-20')
+    expect(nextTradingDay(friday, 'US').toISOString().slice(0, 10)).toBe('2026-04-20')
   })
   it('rolls Sat → Mon', () => {
     const sat = new Date('2026-04-18T10:00:00.000Z')
-    expect(nextBusinessDay(sat).toISOString().slice(0, 10)).toBe('2026-04-20')
+    expect(nextTradingDay(sat, 'US').toISOString().slice(0, 10)).toBe('2026-04-20')
   })
   it('rolls Tue → Wed', () => {
-    expect(nextBusinessDay(tuesday).toISOString().slice(0, 10)).toBe('2026-04-22')
+    expect(nextTradingDay(tuesday, 'US').toISOString().slice(0, 10)).toBe('2026-04-22')
   })
 })
 
