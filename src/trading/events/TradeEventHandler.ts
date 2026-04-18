@@ -83,20 +83,15 @@ export class TradeEventHandler {
   }): Promise<void> {
     if (!this.positionStore) return
     if (event.filledQty === undefined || filledPrice === undefined) {
-      // Best-effort cleanup: release pending lock and log exit before returning
-      try {
-        logExit({
-          clientOrderId,
-          orderId,
-          symbol,
-          realizedPnl: 0,
-          holdDays: 0,
-          exitReason: 'OTHER',
-        })
-      } catch {
-        // ignore logExit errors
+      // Best-effort cleanup: only release pending lock if it belongs to this order
+      const pre = await this.positionStore.getState(symbol)
+      const lock = pre.pendingOrder
+      if (lock) {
+        const eventClientOrderId = clientOrderId ?? event.orderId
+        if (lock.clientOrderId === eventClientOrderId) {
+          await this.positionStore.clearPendingOrder(symbol).catch(() => undefined)
+        }
       }
-      await this.positionStore.clearPendingOrder(symbol).catch(() => undefined)
       return
     }
 
