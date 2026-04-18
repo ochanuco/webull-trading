@@ -58,7 +58,9 @@ export class WebullQuoteClient {
   constructor(private readonly options: WebullQuoteClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
     this.timeoutMs = options.timeoutMs ?? 5000
-    this.fetchFn = options.fetchFn ?? fetch
+    // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
+    // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
+    this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
     this.now = options.now ?? (() => new Date())
   }
 
