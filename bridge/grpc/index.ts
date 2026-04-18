@@ -3,9 +3,12 @@ import { createWebullGrpcTradeEventClient } from './client'
 import { mapWebullTradeEvent } from './mapper'
 
 export interface BridgeRuntimeEnv {
-  workerBaseUrl: string
+  eventIngestUrl: string
   ingestSecret: string
   grpcEndpoint: string
+  appKey: string
+  appSecret: string
+  accountId: string
 }
 
 interface PostTradeEventRetryOptions {
@@ -32,20 +35,27 @@ const DEFAULT_JITTER = 0.25
 class PermanentTradeEventIngestError extends Error {}
 
 export async function startTradeEventBridge(env: BridgeRuntimeEnv): Promise<void> {
-  const client = createWebullGrpcTradeEventClient({ endpoint: env.grpcEndpoint })
+  const client = createWebullGrpcTradeEventClient({
+    endpoint: env.grpcEndpoint,
+    appKey: env.appKey,
+    appSecret: env.appSecret,
+    accountId: env.accountId,
+  })
 
-  await client.subscribe(async (rawEvent: unknown) => {
+  await client.subscribe(async (rawEvent) => {
     try {
       const event = mapWebullTradeEvent(rawEvent)
       await postTradeEvent(env, { event })
     } catch (error) {
       console.error('Failed to process gRPC trade event', error)
     }
+  }, (error) => {
+    console.error('Webull gRPC client error', error)
   })
 }
 
 export async function postTradeEvent(
-  env: Pick<BridgeRuntimeEnv, 'workerBaseUrl' | 'ingestSecret'>,
+  env: Pick<BridgeRuntimeEnv, 'eventIngestUrl' | 'ingestSecret'>,
   payload: TradeEventIngestRequest,
   fetchImpl: typeof fetch = fetch,
   options: PostTradeEventRetryOptions = {},
@@ -56,8 +66,7 @@ export async function postTradeEvent(
   const multiplier = options.multiplier ?? DEFAULT_BACKOFF_MULTIPLIER
   const jitter = options.jitter ?? DEFAULT_JITTER
 
-  // Prepare URL and body before retry loop - these should fail fast if invalid
-  const url = new URL('/events/trade', env.workerBaseUrl)
+  const url = new URL(env.eventIngestUrl)
   const body = JSON.stringify(payload)
 
   let lastFailure: Error | undefined
@@ -142,13 +151,25 @@ function getRetryDelayMs({
 }
 
 if (import.meta.main) {
-  const workerBaseUrl = process.env.WORKER_BASE_URL
+  const eventIngestUrl = process.env.EVENT_INGEST_URL
   const ingestSecret = process.env.EVENT_INGEST_SECRET
   const grpcEndpoint = process.env.WEBULL_GRPC_ENDPOINT
+  const appKey = process.env.WEBULL_APP_KEY
+  const appSecret = process.env.WEBULL_APP_SECRET
+  const accountId = process.env.WEBULL_ACCOUNT_ID
 
-  if (!workerBaseUrl || !ingestSecret || !grpcEndpoint) {
-    throw new Error('WORKER_BASE_URL, EVENT_INGEST_SECRET, and WEBULL_GRPC_ENDPOINT are required')
+  if (!eventIngestUrl || !ingestSecret || !grpcEndpoint || !appKey || !appSecret || !accountId) {
+    throw new Error(
+      'EVENT_INGEST_URL, EVENT_INGEST_SECRET, WEBULL_GRPC_ENDPOINT, WEBULL_APP_KEY, WEBULL_APP_SECRET, and WEBULL_ACCOUNT_ID are required',
+    )
   }
 
-  await startTradeEventBridge({ workerBaseUrl, ingestSecret, grpcEndpoint })
+  await startTradeEventBridge({
+    eventIngestUrl,
+    ingestSecret,
+    grpcEndpoint,
+    appKey,
+    appSecret,
+    accountId,
+  })
 }

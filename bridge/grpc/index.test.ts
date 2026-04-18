@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { postTradeEvent } from './index'
 
 const env = {
-  workerBaseUrl: 'https://worker.example.com',
+  eventIngestUrl: 'https://worker.example.com/events/trade',
   ingestSecret: 'test-secret',
 }
 
