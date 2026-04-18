@@ -62,6 +62,10 @@ function makeStore(initial?: SymbolState): PositionStore & { state: SymbolState;
       calls.push('setCooldown')
       return state
     },
+    async seedSettledCash() {
+      calls.push('seedSettledCash')
+      return state
+    },
   }
 }
 

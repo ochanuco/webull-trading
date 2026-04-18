@@ -36,6 +36,9 @@ function makeStore(pre: SymbolState, post: SymbolState) {
       cooldownCalls.push({ symbol, untilIso })
       return state
     },
+    async seedSettledCash() {
+      return state
+    },
   }
   return { store, cooldownCalls }
 }

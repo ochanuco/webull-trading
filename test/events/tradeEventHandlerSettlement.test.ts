@@ -44,6 +44,9 @@ function makeStore(pre: SymbolState, post: SymbolState) {
     async setCooldown() {
       return state
     },
+    async seedSettledCash() {
+      return state
+    },
   }
   return { store, settlements }
 }

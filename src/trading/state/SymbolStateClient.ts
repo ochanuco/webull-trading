@@ -43,4 +43,8 @@ export class SymbolStateClient implements PositionStore {
   setCooldown(symbol: string, untilIso: string): Promise<SymbolState> {
     return this.stub(symbol).setCooldown(symbol, untilIso)
   }
+
+  seedSettledCash(symbol: string, amount: number): Promise<SymbolState> {
+    return this.stub(symbol).seedSettledCash(symbol, amount)
+  }
 }

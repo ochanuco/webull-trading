@@ -6,6 +6,7 @@ import {
   recordFill,
   recordSignal,
   rollSettlements,
+  seedSettledCash,
   setCooldown,
   setQuote,
   type TransitionContext,
@@ -93,6 +94,13 @@ export class SymbolStateDO extends DurableObject<object> {
   ): Promise<SymbolState> {
     const state = await this.load(symbol)
     const next = addPendingSettlement(state, settlement, this.transitionCtx)
+    await this.save(next)
+    return next
+  }
+
+  async seedSettledCash(symbol: string, amount: number): Promise<SymbolState> {
+    const state = await this.load(symbol)
+    const next = seedSettledCash(state, amount, this.transitionCtx)
     await this.save(next)
     return next
   }

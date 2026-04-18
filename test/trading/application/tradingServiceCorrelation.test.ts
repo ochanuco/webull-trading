@@ -39,6 +39,9 @@ function makeStore(statesBySymbol: Record<string, SymbolState>): PositionStore {
     async setCooldown(symbol) {
       return emptySymbolState(symbol, () => now)
     },
+    async seedSettledCash(symbol) {
+      return emptySymbolState(symbol, () => now)
+    },
   }
 }
 

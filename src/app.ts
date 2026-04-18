@@ -4,6 +4,7 @@ import type { Env } from './config/env'
 import { auditLogger } from './infrastructure/logger/AuditLogger'
 import { basicAuthMiddleware } from './middleware/basicAuth'
 import { TRADE_EVENT_INGEST_SECRET_HEADER } from './infrastructure/webull/TradeEventBridge'
+import { admin } from './routes/admin'
 import { health } from './routes/health'
 import { trade } from './routes/trade'
 import { events } from './routes/events'
@@ -64,6 +65,8 @@ export function createApp() {
   // Webull routes (Phase 2 append)
   app.use('/webull/*', basicAuthMiddleware())
   app.route('/webull', webull)
+  app.use('/admin/*', basicAuthMiddleware())
+  app.route('/admin', admin)
   app.onError(errorHandler)
   return app
 }

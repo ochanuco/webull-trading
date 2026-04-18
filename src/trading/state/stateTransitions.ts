@@ -127,6 +127,22 @@ export function addPendingSettlement(
 }
 
 /**
+ * Overwrites `settledCash` with an operator-provided value. POC seed path —
+ * used once during initial setup or after a manual reconciliation with the
+ * broker. Not part of the regular fill/roll flow.
+ */
+export function seedSettledCash(
+  state: SymbolState,
+  amount: number,
+  ctx: TransitionContext = defaultCtx,
+): SymbolState {
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error(`Invalid seedSettledCash amount: ${amount} (must be a finite number >= 0)`)
+  }
+  return { ...state, settledCash: amount, updatedAt: ctx.now().toISOString() }
+}
+
+/**
  * Any pendingSettlement whose settleDate is on or before `asOf` moves its
  * amount into `settledCash` and is removed from the queue. Used both
  * proactively (T+1 EOD roll) and defensively on read.
