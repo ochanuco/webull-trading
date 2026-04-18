@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildSignedHeaders,
   canonicalString,
   hmacSha1Base64,
   md5UpperHex,
@@ -57,6 +58,25 @@ describe('WebullAuth helpers', () => {
 
   it('produces uppercase MD5 hex digests', async () => {
     await expect(md5UpperHex('{"symbol":"AAPL"}')).resolves.toBe('0DAB09372CD53C138B7309FFAA8A5E68')
+  })
+
+  it('omits x-version from the canonical signing even when sent as a request header', async () => {
+    const common = {
+      method: 'GET' as const,
+      path: '/app/subscriptions/list',
+      appKey: 'app-key',
+      appSecret: 'app-secret',
+      host: 'api.sandbox.webull.hk',
+      nonce: 'nonce-1',
+      timestamp: '2026-04-18T12:30:45Z',
+    }
+
+    const withVersion = await buildSignedHeaders({ ...common, version: 'v1' })
+    const withoutVersion = await buildSignedHeaders({ ...common })
+
+    expect(withVersion['x-version']).toBe('v1')
+    expect(withoutVersion['x-version']).toBeUndefined()
+    expect(withVersion['x-signature']).toBe(withoutVersion['x-signature'])
   })
 
   it('matches the HMAC-SHA1 worked example from Webull docs', async () => {

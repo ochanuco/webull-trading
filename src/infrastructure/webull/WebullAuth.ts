@@ -77,7 +77,7 @@ export async function buildSignedHeaders({
   appSecret,
   host,
   nonce = crypto.randomUUID(),
-  timestamp = new Date().toISOString(),
+  timestamp = isoTimestampNoMillis(),
   version,
 }: BuildSignedHeadersInput): Promise<Record<string, string>> {
   const normalizedMethod = method.toUpperCase()
@@ -85,6 +85,10 @@ export async function buildSignedHeaders({
     throw new Error(`Unsupported Webull signing method: ${method}`)
   }
 
+  // The Python SDK (webullsdkcore.auth.composer.default_signature_composer) signs
+  // exactly these six headers + optional query/body, regardless of whether the
+  // request carries an x-version header. Including x-version in the canonical
+  // string makes Webull reject the signature as UNAUTHORIZED.
   const signingHeaders = {
     host,
     'x-app-key': appKey,
@@ -92,7 +96,6 @@ export async function buildSignedHeaders({
     'x-signature-nonce': nonce,
     'x-signature-version': WEBULL_SIGNATURE_VERSION,
     'x-timestamp': timestamp,
-    ...(version === undefined ? {} : { 'x-version': version }),
   }
   const bodyMd5 = body === undefined || body.length === 0 ? undefined : await md5UpperHex(body)
   const stringToSign = canonicalString({
@@ -106,8 +109,13 @@ export async function buildSignedHeaders({
 
   return {
     ...signingHeaders,
+    ...(version === undefined ? {} : { 'x-version': version }),
     'x-signature': signature,
   }
+}
+
+function isoTimestampNoMillis(): string {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
 
 export function canonicalString({
