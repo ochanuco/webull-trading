@@ -52,11 +52,11 @@ const EXTREME_PRICE_FALLBACK_BAND = 3_000_000
 
 /**
  * reference price に対する upper/lower 値幅バンドを返す。
- * 正の reference price のみを受け付ける (fail-closed: それ以外は 0 バンド)。
+ * 正の reference price のみを受け付ける (fail-closed: それ以外は zero バンド)。
  */
 export function jpPriceBand(referencePrice: number): { upper: number; lower: number } {
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
-    return { upper: referencePrice, lower: referencePrice }
+    return { upper: 0, lower: 0 }
   }
 
   const band = lookupBand(referencePrice)
@@ -68,11 +68,11 @@ export function jpPriceBand(referencePrice: number): { upper: number; lower: num
 
 /**
  * orderPrice が jpPriceBand(referencePrice) の [lower, upper] 内に収まるか。
- * reference price が不正 (<=0) なときは true (band check 無効) を返す。
+ * reference price が不正 (<=0) なときは false (reject) を返す。
  */
 export function isWithinJpPriceBand(referencePrice: number, orderPrice: number): boolean {
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
-    return true
+    return false
   }
   if (!Number.isFinite(orderPrice) || orderPrice <= 0) {
     return false
