@@ -7,9 +7,16 @@ import {
   recordSignal,
   rollSettlements,
   setCooldown,
+  setQuote,
   type TransitionContext,
 } from './stateTransitions'
-import { emptySymbolState, type PendingOrderLock, type PendingSettlement, type SymbolState } from './types'
+import {
+  emptySymbolState,
+  type PendingOrderLock,
+  type PendingSettlement,
+  type QuoteSnapshot,
+  type SymbolState,
+} from './types'
 
 const STATE_KEY = 'state'
 
@@ -69,6 +76,13 @@ export class SymbolStateDO extends DurableObject<object> {
   async recordSignal(symbol: string): Promise<SymbolState> {
     const state = await this.load(symbol)
     const next = recordSignal(state, this.transitionCtx)
+    await this.save(next)
+    return next
+  }
+
+  async setQuote(symbol: string, quote: QuoteSnapshot): Promise<SymbolState> {
+    const state = await this.load(symbol)
+    const next = setQuote(state, quote, this.transitionCtx)
     await this.save(next)
     return next
   }

@@ -1,5 +1,36 @@
 import { createApp } from './app'
+import type { Env } from './config/env'
+import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 
-export default createApp()
+const app = createApp()
+
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      runQuoteFeed({ env }).then(
+        (summary) => {
+          console.log(
+            JSON.stringify({
+              event: 'quote_feed_run',
+              fetched: summary.fetched,
+              persisted: summary.persisted,
+              skipped: summary.skipped,
+              errors: summary.errors,
+            }),
+          )
+        },
+        (error) => {
+          console.error(
+            JSON.stringify({
+              event: 'quote_feed_error',
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          )
+        },
+      ),
+    )
+  },
+}
