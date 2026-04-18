@@ -8,12 +8,12 @@ Runs as a **Cloudflare Container** attached to the `webull-trading` Worker (clas
 
 ### Secrets (`wrangler secret put`)
 
-- `WEBULL_APP_KEY`
-- `WEBULL_APP_SECRET`
-- `WEBULL_ACCOUNT_ID`
-- `WEBULL_GRPC_ENDPOINT` default sandbox target is `events-api.sandbox.webull.hk:443`
-- `EVENT_INGEST_URL` full Worker ingest URL such as `https://webull-trading-staging.<subdomain>.workers.dev/events/trade`
-- `EVENT_INGEST_SECRET`
+- `WEBULL_APP_KEY` (required)
+- `WEBULL_APP_SECRET` (required)
+- `WEBULL_ACCOUNT_ID` (required)
+- `WEBULL_GRPC_ENDPOINT` (required) — Webull gRPC 疎通先 host:port。`keepBridgeAlive` は未設定だと skip するので必ず投入する。値は 1Password / Webull vendor 資料を参照
+- `EVENT_INGEST_URL` (required) — Worker `/events/trade` の完全 URL。deploy 先 subdomain に合わせる
+- `EVENT_INGEST_SECRET` (required)
 
 ### Plain vars (`wrangler.jsonc` の `vars`)
 

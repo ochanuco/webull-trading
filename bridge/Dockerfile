@@ -25,6 +25,11 @@ COPY bridge/ /app/bridge/
 COPY src/infrastructure/webull/TradeEventBridge.ts /app/src/infrastructure/webull/TradeEventBridge.ts
 COPY src/trading/domain/TradeEvent.ts /app/src/trading/domain/TradeEvent.ts
 
+# Drop root: outbound-only process, no reason to run as root.
+RUN addgroup -S bridge && adduser -S -G bridge -h /app bridge \
+ && chown -R bridge:bridge /app
+USER bridge
+
 WORKDIR /app/bridge
 ENV NODE_ENV=production
 CMD ["pnpm", "start"]
