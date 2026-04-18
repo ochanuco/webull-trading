@@ -17,6 +17,13 @@ export interface PendingSettlement {
   amount: number
 }
 
+export interface QuoteSnapshot {
+  price: number
+  asOf: string
+  fetchedAt: string
+  source: string
+}
+
 export interface SymbolState {
   symbol: string
   position: PositionState | null
@@ -26,6 +33,7 @@ export interface SymbolState {
   settledCash: number
   pendingSettlement: PendingSettlement[]
   lastExecutedPrice: number | null
+  lastQuote: QuoteSnapshot | null
   updatedAt: string
 }
 
@@ -39,6 +47,7 @@ export function emptySymbolState(symbol: string, now: () => Date = () => new Dat
     settledCash: 0,
     pendingSettlement: [],
     lastExecutedPrice: null,
+    lastQuote: null,
     updatedAt: now().toISOString(),
   }
 }

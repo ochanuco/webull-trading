@@ -19,6 +19,9 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SymbolStateDO"] }
   ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "env": {
     "staging": {
       "name": "webull-trading-staging",

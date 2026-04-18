@@ -2,6 +2,7 @@ import type {
   PendingOrderLock,
   PendingSettlement,
   PositionState,
+  QuoteSnapshot,
   SymbolState,
 } from './types'
 
@@ -82,6 +83,28 @@ export function recordSignal(
 ): SymbolState {
   const iso = ctx.now().toISOString()
   return { ...state, lastSignalAt: iso, updatedAt: iso }
+}
+
+export function setQuote(
+  state: SymbolState,
+  quote: QuoteSnapshot,
+  ctx: TransitionContext = defaultCtx,
+): SymbolState {
+  // Validate quote.price before accepting it (fail-closed)
+  if (!Number.isFinite(quote.price) || quote.price <= 0) {
+    throw new Error(`Invalid quote.price: ${quote.price} (must be a finite number > 0)`)
+  }
+  return { ...state, lastQuote: quote, updatedAt: ctx.now().toISOString() }
+}
+
+export function isQuoteStale(
+  quote: QuoteSnapshot | null,
+  asOfIso: string,
+  maxAgeMs: number,
+): boolean {
+  if (!quote) return true
+  const diffMs = new Date(asOfIso).getTime() - new Date(quote.fetchedAt).getTime()
+  return !Number.isFinite(diffMs) || diffMs <= 0 || diffMs > maxAgeMs
 }
 
 export function addPendingSettlement(
