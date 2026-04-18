@@ -43,6 +43,14 @@ export function recordFill(
   fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
   ctx: TransitionContext = defaultCtx,
 ): SymbolState {
+  // Validate fill inputs before applying
+  if (!Number.isFinite(fill.qty) || fill.qty <= 0) {
+    throw new Error(`Invalid fill.qty: ${fill.qty} (must be a finite number > 0)`)
+  }
+  if (!Number.isFinite(fill.price) || fill.price <= 0) {
+    throw new Error(`Invalid fill.price: ${fill.price} (must be a finite number > 0)`)
+  }
+
   const position = applyFillToPosition(state.position, fill, ctx.now)
   return {
     ...state,

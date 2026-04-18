@@ -85,7 +85,17 @@ export class SymbolStateDO extends DurableObject<object> {
 
   private async load(symbol: string): Promise<SymbolState> {
     const stored = await this.ctx.storage.get<SymbolState>(STATE_KEY)
-    return stored ?? emptySymbolState(symbol, this.transitionCtx.now)
+    // Check symbol matches; if mismatch, overwrite with correct empty state
+    if (stored !== undefined && stored.symbol === symbol) {
+      return stored
+    }
+    // Mismatched or missing: return empty and clear storage
+    const empty = emptySymbolState(symbol, this.transitionCtx.now)
+    if (stored !== undefined) {
+      // Clear mismatched state
+      await this.ctx.storage.put(STATE_KEY, empty)
+    }
+    return empty
   }
 
   private async save(state: SymbolState): Promise<void> {
