@@ -68,11 +68,11 @@ export function jpPriceBand(referencePrice: number): { upper: number; lower: num
 
 /**
  * orderPrice が jpPriceBand(referencePrice) の [lower, upper] 内に収まるか。
- * reference price が不正 (<=0) なときは false (reject) を返す。
+ * reference price が不正 (<=0 / 非有限) なときは true (skip — 比較基準なし) を返す。
  */
 export function isWithinJpPriceBand(referencePrice: number, orderPrice: number): boolean {
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
-    return false
+    return true
   }
   if (!Number.isFinite(orderPrice) || orderPrice <= 0) {
     return false
