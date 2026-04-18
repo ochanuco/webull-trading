@@ -26,3 +26,7 @@ SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
 # DRY_RUN=true
 # TRADING_ENABLED=false
 # MARKET_HOURS_CHECK=false
+
+# #38-C risk knobs (optional, both default to sane values):
+# STALE_QUOTE_MS=900000
+# GAP_REJECT_PCT=0.03

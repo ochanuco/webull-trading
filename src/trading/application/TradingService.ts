@@ -4,9 +4,10 @@ import type { RiskDecision } from '../domain/RiskDecision'
 import type { Signal } from '../domain/Signal'
 import type { Execution } from '../execution/Execution'
 import type { RiskPolicy } from '../risk/RiskPolicy'
+import { isWithinJpPriceBand } from '../risk/jpPriceBand'
 import { computeSpreadPct } from '../risk/spreadGuard'
 import type { PositionStore } from '../state/PositionStore'
-import type { QuoteSnapshot } from '../state/types'
+import type { QuoteSnapshot, SymbolState } from '../state/types'
 import type { Strategy, StrategyInput } from '../strategy/Strategy'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import {
@@ -55,17 +56,31 @@ export interface TradingServiceOptions {
    * JP 0.60% — US liquid-name depth is tighter than JP individual names.
    */
   spreadLimits?: { US: number; JP: number }
+  /**
+   * Quote 鮮度の上限 (ms)。`state.lastQuote.fetchedAt` からの経過時間が
+   * この値を超えていれば halt 相当として reject する (POC freshness fallback)。
+   */
+  staleQuoteMs?: number
+  /**
+   * 寄り付きギャップ re-eval の閾値 (ratio, e.g. 0.03 = 3%)。open position の
+   * avgPrice と lastQuote.price の gap が |pct| を超えれば reject。
+   */
+  gapRejectPct?: number
   now?: () => Date
 }
 
 const DEFAULT_PENDING_LOCK_TTL_MS = 60_000
 const DEFAULT_SPREAD_LIMITS = { US: 0.0025, JP: 0.006 } as const
+const DEFAULT_STALE_QUOTE_MS = 15 * 60 * 1_000
+const DEFAULT_GAP_REJECT_PCT = 0.03
 
 export class TradingService {
   private readonly positionStore?: PositionStore
   private readonly pendingLockTtlMs: number
   private readonly inversePairs: Record<string, string>
   private readonly spreadLimits: { US: number; JP: number }
+  private readonly staleQuoteMs: number
+  private readonly gapRejectPct: number
   private readonly now: () => Date
 
   constructor(
@@ -96,6 +111,18 @@ export class TradingService {
           ? options.spreadLimits.JP
           : DEFAULT_SPREAD_LIMITS.JP,
     }
+    this.staleQuoteMs =
+      options.staleQuoteMs !== undefined &&
+      Number.isFinite(options.staleQuoteMs) &&
+      options.staleQuoteMs > 0
+        ? options.staleQuoteMs
+        : DEFAULT_STALE_QUOTE_MS
+    this.gapRejectPct =
+      options.gapRejectPct !== undefined &&
+      Number.isFinite(options.gapRejectPct) &&
+      options.gapRejectPct > 0
+        ? options.gapRejectPct
+        : DEFAULT_GAP_REJECT_PCT
     this.now = options.now ?? (() => new Date())
   }
 
@@ -156,9 +183,6 @@ export class TradingService {
     let error: Error | undefined
     try {
       executionResult = await this.execution.execute(intent)
-      // DRY_RUN never emits a TradeEvent, so the pending-order lock must be
-      // released here; otherwise every subsequent DRY_RUN call would bounce
-      // off the stale lock.
       if (executionResult.mode === 'DRY_RUN' && this.positionStore) {
         await this.positionStore.clearPendingOrder(intent.symbol)
       }
@@ -166,7 +190,6 @@ export class TradingService {
     } catch (err) {
       error = err instanceof Error ? err : new Error(String(err))
       if (this.positionStore) {
-        // Fail-closed: a failed submit must not leave a phantom lock in place.
         await this.positionStore.clearPendingOrder(intent.symbol).catch(() => undefined)
       }
       throw err
@@ -200,10 +223,6 @@ export class TradingService {
       }
     }
 
-    // T+1 settled-cash guard: if settledCash has been seeded (> 0), a BUY whose
-    // notional exceeds it would be a good-faith violation on a JP CASH account.
-    // When settledCash is 0 we treat the symbol as unseeded and skip the check
-    // so existing tests and the legacy FixedRule path keep working unchanged.
     if (
       decision.orderIntent.side === 'BUY' &&
       state.settledCash > 0 &&
@@ -218,9 +237,6 @@ export class TradingService {
       }
     }
 
-    // Inverse-pair correlation cap: holding SOXL and SOXS at once is a structural
-    // decay trap. Only gate BUY — a SELL that closes the existing leg must remain
-    // possible even while the inverse leg is open.
     if (decision.orderIntent.side === 'BUY') {
       const inverse = this.inversePairs[symbol.toUpperCase()]
       if (inverse) {
@@ -237,14 +253,59 @@ export class TradingService {
       }
     }
 
-    // Spread guard: wide spread at submit turns into slippage on market orders
-    // and stale fills on marketable limits. Fail-closed when bid/ask are
-    // missing — an unknown spread must not be silently treated as tight.
+    // Halt detection (#38-C, freshness fallback): broker-side halt flag が UAT
+    // で確認できていないので quote freshness で代替。lastQuote が null のケース
+    // (quote feed まだ未シード) は POC 後方互換のためスキップ。先に halt を見る
+    // のは、stale な quote では下流の spread/gap/band が成立しないため。
+    // 注: `isQuoteStale` は future-quote ガードで diffMs<=0 も stale 扱いするが、
+    //   halt gate では「取得時刻と now がほぼ同時」(diffMs=0) を fresh として扱う。
+    if (state.lastQuote) {
+      const ageMs = now.getTime() - new Date(state.lastQuote.fetchedAt).getTime()
+      if (!Number.isFinite(ageMs) || ageMs > this.staleQuoteMs) {
+        return {
+          allowed: false,
+          riskDecision: appendReason(
+            decision.riskDecision,
+            `halt or stale quote: lastQuote ${state.lastQuote.fetchedAt} exceeds staleQuoteMs ${this.staleQuoteMs}`,
+          ),
+        }
+      }
+    }
+
+    // Spread guard (#38-D): wide spread at submit turns into slippage on market
+    // orders and stale fills on marketable limits. Fail-closed when bid/ask are
+    // missing once a quote has been seeded.
     const spreadGate = this.evaluateSpreadGate(symbol, state.lastQuote)
     if (spreadGate !== null) {
       return {
         allowed: false,
         riskDecision: appendReason(decision.riskDecision, spreadGate),
+      }
+    }
+
+    // Gap re-eval (#38-C, simplified POC): avgPrice と現在 quote の gap が
+    // |gapRejectPct| を超えていれば 1 tick HOLD。open position が無いとき
+    // は比較対象が無いので gap check 自体をスキップする。
+    const gapReject = evaluateGap(state, this.gapRejectPct)
+    if (gapReject) {
+      return {
+        allowed: false,
+        riskDecision: appendReason(decision.riskDecision, gapReject),
+      }
+    }
+
+    // JP 値幅制限 (#38-C): 東証銘柄の指値が approximation band 外なら reject。
+    if (
+      inferWebullMarket(symbol) === 'JP' &&
+      state.lastQuote &&
+      !isWithinJpPriceBand(state.lastQuote.price, decision.orderIntent.price)
+    ) {
+      return {
+        allowed: false,
+        riskDecision: appendReason(
+          decision.riskDecision,
+          `JP price band: order price ${decision.orderIntent.price} outside band for reference ${state.lastQuote.price}`,
+        ),
       }
     }
 
@@ -267,15 +328,13 @@ export class TradingService {
 
   /**
    * Returns a rejection reason string when the spread gate blocks submit, or
-   * null when the gate passes. Fail-closed: missing bid or ask is a reject —
-   * we must never silently treat an unknown spread as tight.
+   * null when the gate passes. Fail-closed: missing bid or ask is a reject
+   * once a quote has been seeded.
    */
   private evaluateSpreadGate(
     symbol: string,
     lastQuote: QuoteSnapshot | null,
   ): string | null {
-    // No quote has ever been seeded for this symbol: treat as unseeded and skip
-    // the gate, consistent with the settled-cash seeding convention.
     if (lastQuote === null) return null
 
     const bid = lastQuote.bid
@@ -310,6 +369,18 @@ export class TradingService {
       clientOrderId: crypto.randomUUID().replaceAll('-', ''),
     }
   }
+}
+
+function evaluateGap(state: SymbolState, thresholdPct: number): string | null {
+  const position = state.position
+  const quote = state.lastQuote
+  if (!position || !quote) return null
+  if (!Number.isFinite(position.avgPrice) || position.avgPrice <= 0) return null
+  const gap = (quote.price - position.avgPrice) / position.avgPrice
+  if (Math.abs(gap) > thresholdPct) {
+    return `gap re-eval: |${gap.toFixed(4)}| > ${thresholdPct} (avgPrice ${position.avgPrice} vs quote ${quote.price})`
+  }
+  return null
 }
 
 function appendReason(decision: RiskDecision, reason: string): RiskDecision {
