@@ -4,7 +4,6 @@ import type { Env } from './config/env'
 import { auditLogger } from './infrastructure/logger/AuditLogger'
 import { basicAuthMiddleware } from './middleware/basicAuth'
 import { TRADE_EVENT_INGEST_SECRET_HEADER } from './infrastructure/webull/TradeEventBridge'
-import { admin } from './routes/admin'
 import { health } from './routes/health'
 import { trade } from './routes/trade'
 import { events } from './routes/events'
@@ -87,3 +86,4 @@ function timingSafeEqual(a: string, b: string) {
 
   return diff === 0
 }
+import { admin } from './routes/admin'
