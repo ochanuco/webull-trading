@@ -14,8 +14,10 @@ BASIC_AUTH_PASSWORD=<your-password>
 EVENT_INGEST_SECRET=change-me
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
+# Run `pnpm run accounts` after setting the two above to fetch account_id.
 WEBULL_ACCOUNT_ID=
-WEBULL_API_BASE=https://openapi.webull.com
+# Sandbox default. Use https://openapi.webull.com for production.
+WEBULL_API_BASE=https://api.sandbox.webull.hk
 ALLOWED_SYMBOLS=SOXL,SOXS
 MAX_ORDER_NOTIONAL=100
 SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
