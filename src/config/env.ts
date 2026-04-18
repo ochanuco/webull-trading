@@ -1,3 +1,5 @@
+import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
+
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
@@ -6,6 +8,7 @@ export interface Env {
   ALLOWED_SYMBOLS: string
   MAX_ORDER_NOTIONAL: string
   EVENT_INGEST_SECRET: string
+  SYMBOL_STATE: DurableObjectNamespace<SymbolStateDO>
 }
 
 /**
