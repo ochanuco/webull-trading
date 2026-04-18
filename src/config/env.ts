@@ -67,11 +67,6 @@ export interface Env {
   SYMBOL_RULES?: string
 }
 
-// Risk correlation config (Phase 2b append)
-export interface Env {
-  INVERSE_PAIRS?: string
-}
-
 let didWarnInvalidSymbolNotionalMap = false
 
 export function parseSymbolNotionalMap(value: string | undefined): Record<string, number> {
@@ -221,4 +216,9 @@ export function parseInversePairs(value: string | undefined): Record<string, str
     }
     return {}
   }
+}
+
+// Risk correlation config (Phase 2b append)
+export interface Env {
+  INVERSE_PAIRS?: string
 }
