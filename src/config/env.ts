@@ -54,6 +54,8 @@ export interface Env {
   WEBULL_APP_SECRET?: string
   WEBULL_ACCOUNT_ID?: string
   WEBULL_API_BASE?: string
+  /** Override the snapshot endpoint path (POC: UAT 未確定なので env で差し替え). */
+  WEBULL_QUOTE_PATH?: string
 }
 
 // Trading risk config (Phase 5 append)
