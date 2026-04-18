@@ -3,18 +3,50 @@ import type { AppBindings } from '../app'
 import { parseBooleanEnv } from '../config/env'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import type { WebullPlaceOrderResponseDto } from '../infrastructure/webull/dto'
+import { logPostSubmit, logPreSubmit } from '../infrastructure/logger/tradeJournal'
 import { ValidationError } from '../shared/errors'
 import type { OrderIntent, OrderSide } from '../trading/domain/OrderIntent'
 
 export const webull = new Hono<AppBindings>().post('/order/place', async (c) => {
   const intent = await parseOrderIntent(c.req.json())
+  const requestId = c.get('requestId')
+
+  logPreSubmit({ requestId, clientOrderId: intent.clientOrderId, intent })
 
   if (parseBooleanEnv(c.env.DRY_RUN, true)) {
-    return c.json(createDryRunResponse(intent))
+    const dto = createDryRunResponse(intent)
+    logPostSubmit({
+      requestId,
+      clientOrderId: intent.clientOrderId,
+      symbol: intent.symbol,
+      result: { mode: 'DRY_RUN', submitted: true, brokerOrderId: dto.order_id },
+      latencyMs: 0,
+    })
+    return c.json(dto)
   }
 
   const client = createWebullHttpClient(c.env)
-  return c.json(await client.placeOrder(intent))
+  const startedAt = Date.now()
+  let dto: WebullPlaceOrderResponseDto | undefined
+  let error: Error | undefined
+  try {
+    dto = await client.placeOrder(intent)
+    return c.json(dto)
+  } catch (err) {
+    error = err instanceof Error ? err : new Error(String(err))
+    throw err
+  } finally {
+    logPostSubmit({
+      requestId,
+      clientOrderId: intent.clientOrderId,
+      symbol: intent.symbol,
+      result: dto
+        ? { mode: 'LIVE', submitted: !!dto.order_id, brokerOrderId: dto.order_id, errorReason: dto.message }
+        : undefined,
+      latencyMs: Date.now() - startedAt,
+      error,
+    })
+  }
 })
 
 async function parseOrderIntent(payload: Promise<unknown>): Promise<OrderIntent> {
@@ -30,12 +62,13 @@ async function parseOrderIntent(payload: Promise<unknown>): Promise<OrderIntent>
     quantity,
     price,
     notional: quantity * price,
+    clientOrderId: crypto.randomUUID().replaceAll('-', ''),
   }
 }
 
-function createDryRunResponse(_intent: OrderIntent): WebullPlaceOrderResponseDto {
+function createDryRunResponse(intent: OrderIntent): WebullPlaceOrderResponseDto {
   return {
-    client_order_id: crypto.randomUUID().replaceAll('-', ''),
+    client_order_id: intent.clientOrderId,
     order_id: `dry-run-${crypto.randomUUID()}`,
     message: 'DRY_RUN=true, broker request skipped',
   }

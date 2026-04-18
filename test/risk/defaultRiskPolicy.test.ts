@@ -30,6 +30,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 2,
         price: 10,
         notional: 20,
+        clientOrderId: 'test-coid',
       },
     })
 
@@ -50,6 +51,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 2,
         price: 10,
         notional: 20,
+        clientOrderId: 'test-coid',
       },
     })
 
@@ -66,6 +68,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 2,
         price: 10,
         notional: 20,
+        clientOrderId: 'test-coid',
       },
     })
 
@@ -82,6 +85,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 20,
         price: 10,
         notional: 200,
+        clientOrderId: 'test-coid',
       },
       tradingEnabled: false,
     })
@@ -110,6 +114,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 4,
         price: 10,
         notional: 40,
+        clientOrderId: 'test-coid',
       },
       symbolMaxNotional: { SOXL: 50 },
     })
@@ -121,6 +126,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 6,
         price: 10,
         notional: 60,
+        clientOrderId: 'test-coid',
       },
       symbolMaxNotional: { SOXL: 50 },
     })
@@ -139,6 +145,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 11,
         price: 10,
         notional: 110,
+        clientOrderId: 'test-coid',
       },
       symbolMaxNotional: { SOXL: 50 },
     })
@@ -156,6 +163,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 2,
         price: 10,
         notional: 20,
+        clientOrderId: 'test-coid',
       },
       marketHoursCheck: true,
       now: () => new Date('2026-04-20T12:00:00.000Z'),
@@ -174,6 +182,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 2,
         price: 10,
         notional: 20,
+        clientOrderId: 'test-coid',
       },
       marketHoursCheck: true,
       now: () => new Date('2026-04-20T15:00:00.000Z'),
@@ -191,6 +200,7 @@ describe('DefaultRiskPolicy', () => {
         quantity: 2,
         price: 10,
         notional: 20,
+        clientOrderId: 'test-coid',
       },
       marketHoursCheck: false,
       now: () => new Date('2026-04-20T12:00:00.000Z'),

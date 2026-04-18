@@ -9,6 +9,7 @@ const intent: OrderIntent = {
   quantity: 2,
   price: 9,
   notional: 18,
+  clientOrderId: 'test-coid',
 }
 
 describe('WebullExecution', () => {

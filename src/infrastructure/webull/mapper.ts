@@ -7,7 +7,7 @@ export function toWebullPlaceOrderRequest(intent: OrderIntent): WebullPlaceOrder
   return {
     new_orders: [
       {
-        client_order_id: crypto.randomUUID().replaceAll('-', ''),
+        client_order_id: intent.clientOrderId,
         symbol,
         instrument_type: 'EQUITY',
         market: inferWebullMarket(symbol),

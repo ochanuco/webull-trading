@@ -11,6 +11,7 @@ describe('MockExecution', () => {
       quantity: 2,
       price: 10,
       notional: 20,
+      clientOrderId: 'test-coid',
     })
 
     expect(result.mode).toBe('DRY_RUN')

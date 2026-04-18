@@ -49,7 +49,8 @@ describe('createWebullGrpcTradeEventClient', () => {
     })
 
     const port = await bindServer(server)
-    server.start()
+
+    await new Promise((resolve) => setTimeout(resolve, 100))
 
     const onEvent = vi.fn()
     const client = createWebullGrpcTradeEventClient({
@@ -92,6 +93,7 @@ async function bindServer(server: grpc.Server): Promise<number> {
         return
       }
 
+      server.start()
       resolve(port)
     })
   })

@@ -2,6 +2,8 @@ import type { Signal } from '../../domain/Signal'
 import type { Strategy, StrategyInput } from '../Strategy'
 
 export class FixedRuleStrategy implements Strategy {
+  readonly name = 'FixedRuleStrategy'
+
   constructor(
     private readonly buyBelow: number,
     private readonly sellAbove: number,
