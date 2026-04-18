@@ -6,12 +6,18 @@ Runs as a **Cloudflare Container** attached to the `webull-trading` Worker (clas
 
 ## Environment
 
+### Secrets (`wrangler secret put`)
+
 - `WEBULL_APP_KEY`
 - `WEBULL_APP_SECRET`
 - `WEBULL_ACCOUNT_ID`
 - `WEBULL_GRPC_ENDPOINT` default sandbox target is `events-api.sandbox.webull.hk:443`
 - `EVENT_INGEST_URL` full Worker ingest URL such as `https://webull-trading-staging.<subdomain>.workers.dev/events/trade`
 - `EVENT_INGEST_SECRET`
+
+### Plain vars (`wrangler.jsonc` の `vars`)
+
+- `BRIDGE_RUN_MODE` — `auto` (default, 平日 JST のみ起動) / `always-on` / `disabled`。秘匿情報ではないので source-controlled。
 
 Secrets flow Worker `env` (投入は `wrangler secret put`) → `container.start({ envVars })` → container process env。image には焼き込まない。
 

@@ -9,7 +9,8 @@
   "vars": {
     "DRY_RUN": "true",
     "TRADING_ENABLED": "false",
-    "MARKET_HOURS_CHECK": "false"
+    "MARKET_HOURS_CHECK": "false",
+    "BRIDGE_RUN_MODE": "auto"
   },
   "durable_objects": {
     "bindings": [
@@ -39,7 +40,8 @@
       "vars": {
         "DRY_RUN": "true",
         "TRADING_ENABLED": "false",
-        "MARKET_HOURS_CHECK": "false"
+        "MARKET_HOURS_CHECK": "false",
+        "BRIDGE_RUN_MODE": "auto"
       },
       "durable_objects": {
         "bindings": [
@@ -61,7 +63,8 @@
       "vars": {
         "DRY_RUN": "true",
         "TRADING_ENABLED": "false",
-        "MARKET_HOURS_CHECK": "false"
+        "MARKET_HOURS_CHECK": "false",
+        "BRIDGE_RUN_MODE": "auto"
       },
       "durable_objects": {
         "bindings": [
