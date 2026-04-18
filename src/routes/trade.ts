@@ -81,8 +81,12 @@ export function createTradingService(
       positionStore: env.SYMBOL_STATE ? new SymbolStateClient(env.SYMBOL_STATE) : undefined,
       inversePairs: parseInversePairs(env.INVERSE_PAIRS),
       spreadLimits: {
-        US: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US') ?? 0.0025,
-        JP: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP') ?? 0.006,
+        US: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US') !== undefined
+          ? parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US')! / 100
+          : 0.0025,
+        JP: parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP') !== undefined
+          ? parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP')! / 100
+          : 0.006,
       },
     },
   )

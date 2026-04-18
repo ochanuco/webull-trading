@@ -82,7 +82,20 @@ export class TradingService {
         ? options.pendingLockTtlMs
         : DEFAULT_PENDING_LOCK_TTL_MS
     this.inversePairs = options.inversePairs ?? {}
-    this.spreadLimits = options.spreadLimits ?? { ...DEFAULT_SPREAD_LIMITS }
+    this.spreadLimits = {
+      US:
+        options.spreadLimits?.US !== undefined &&
+        Number.isFinite(options.spreadLimits.US) &&
+        options.spreadLimits.US >= 0
+          ? options.spreadLimits.US
+          : DEFAULT_SPREAD_LIMITS.US,
+      JP:
+        options.spreadLimits?.JP !== undefined &&
+        Number.isFinite(options.spreadLimits.JP) &&
+        options.spreadLimits.JP >= 0
+          ? options.spreadLimits.JP
+          : DEFAULT_SPREAD_LIMITS.JP,
+    }
     this.now = options.now ?? (() => new Date())
   }
 
