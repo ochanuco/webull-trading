@@ -11,6 +11,14 @@
     "TRADING_ENABLED": "false",
     "MARKET_HOURS_CHECK": "false"
   },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SymbolStateDO"] }
+  ],
   "env": {
     "staging": {
       "name": "webull-trading-staging",
@@ -18,6 +26,11 @@
         "DRY_RUN": "true",
         "TRADING_ENABLED": "false",
         "MARKET_HOURS_CHECK": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" }
+        ]
       }
     },
     "production": {
@@ -26,6 +39,11 @@
         "DRY_RUN": "true",
         "TRADING_ENABLED": "false",
         "MARKET_HOURS_CHECK": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" }
+        ]
       }
     }
   }
