@@ -16,8 +16,8 @@ function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClie
     auth: new WebullAuth({
       appKey: 'app-key',
       appSecret: 'app-secret',
-      accountId: 'acct-1',
     }),
+    accountId: 'acct-1',
     baseUrl: 'https://broker.example.test',
     timeoutMs,
     retry: {
@@ -31,7 +31,7 @@ function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClie
 }
 
 describe('WebullHttpClient', () => {
-  it('places an order with the expected method, URL, body, and auth header', async () => {
+  it('places an order with the expected method, URL, body, and Webull auth headers', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -51,21 +51,58 @@ describe('WebullHttpClient', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]!
-    expect(url).toBe('https://broker.example.test/order/place')
+    expect(url).toBe('https://broker.example.test/trade/order/place?account_id=acct-1')
     expect(init?.method).toBe('POST')
-    expect(init?.body).toBe(JSON.stringify({
-      symbol: 'SOXL',
-      side: 'BUY',
-      quantity: 2,
-      limitPrice: 9.5,
-    }))
+    expect(JSON.parse(init?.body as string)).toMatchObject({
+      stock_order: {
+        client_order_id: expect.any(String),
+        symbol: 'SOXL',
+        side: 'BUY',
+        tif: 'DAY',
+        order_type: 'LIMIT',
+        limit_price: '9.500',
+        qty: '2',
+        extended_hours_trading: false,
+      },
+    })
     expect(init?.headers).toMatchObject({
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      'X-Webull-App-Key': 'app-key',
-      'X-Webull-Account-Id': 'acct-1',
+      host: 'broker.example.test',
+      'x-app-key': 'app-key',
+      'x-signature-algorithm': 'HMAC-SHA1',
+      'x-signature-version': '1.0',
+      'x-signature-nonce': expect.any(String),
+      'x-timestamp': expect.any(String),
+      'x-version': 'v1',
+      'x-signature': expect.any(String),
     })
-    expect((init?.headers as Record<string, string>).Authorization).toMatch(/^HMAC app-key:/)
+  })
+
+  it('requests account details from the documented profile endpoint', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          accountId: 'acct-1',
+          status: 'OPEN',
+        }),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+
+    await client.getAccount()
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://broker.example.test/account/profile?account_id=acct-1')
+    expect(init?.method).toBe('GET')
+    expect(init?.body).toBeUndefined()
+    expect(init?.headers).toMatchObject({
+      Accept: 'application/json',
+      host: 'broker.example.test',
+      'x-app-key': 'app-key',
+      'x-signature': expect.any(String),
+    })
   })
 
   it('retries a transient 500 response and succeeds on the next attempt', async () => {
