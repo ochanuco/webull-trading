@@ -140,7 +140,7 @@ pnpm exec wrangler secret delete WEBULL_APP_SECRET --env staging  # 削除
 
 ### 1Password 連携 (推奨、dotfile 手元運用)
 
-\\`~/.coderabbit` の OAuth トークンと同じく、発行した credential を 1Password に保管して `op read` で解決する流れが安全:
+`~/.coderabbit` の OAuth トークンと同じく、発行した credential を 1Password に保管して `op read` で解決する流れが安全:
 
 ```bash
 export CLOUDFLARE_API_TOKEN="$(op read 'op://Personal/CLOUDFLARE_API_TOKEN/credential')"
