@@ -58,7 +58,9 @@ export class WebullHttpClient {
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {
-    return this.request<WebullPlaceOrderResponseDto>('POST', '/trade/order/place', {
+    // v2 endpoint. JP UAT / newer Webull deployments reject the v1
+    // `/trade/order/place` + `stock_order` body with ILLEGAL_PARAMETER.
+    return this.request<WebullPlaceOrderResponseDto>('POST', '/openapi/account/orders/place', {
       query: { account_id: this.requireAccountId() },
       body: toWebullPlaceOrderRequest(intent),
     })

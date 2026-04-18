@@ -127,12 +127,8 @@ describe('trade routes', () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
-          orderId: 'ord-live-1',
-          status: 'SUBMITTED',
-          symbol: 'SOXL',
-          side: 'BUY',
-          quantity: 2,
-          limitPrice: 9,
+          client_order_id: 'cli-live-1',
+          order_id: 'ord-live-1',
         }),
         { status: 200 },
       ),

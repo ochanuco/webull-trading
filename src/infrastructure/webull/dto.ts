@@ -13,30 +13,29 @@ export interface WebullSubscriptionDto {
   account_number?: string
 }
 
+export type WebullMarket = 'US' | 'JP'
+
+export interface WebullV2OrderEntry {
+  client_order_id: string
+  symbol: string
+  instrument_type: 'EQUITY'
+  market: WebullMarket
+  order_type: 'LIMIT'
+  limit_price: string
+  quantity: string
+  support_trading_session: 'N'
+  side: 'BUY' | 'SELL'
+  time_in_force: 'DAY'
+  entrust_type: 'QTY'
+  account_tax_type: 'GENERAL'
+}
+
 export interface WebullPlaceOrderRequestDto {
-  stock_order: {
-    client_order_id: string
-    symbol: string
-    side: 'BUY' | 'SELL'
-    tif: 'DAY'
-    order_type: 'LIMIT'
-    limit_price: string
-    qty: string
-    extended_hours_trading: boolean
-  }
+  new_orders: [WebullV2OrderEntry]
 }
 
 export interface WebullPlaceOrderResponseDto {
-  orderId?: string
-  order_id?: string
   client_order_id?: string
-  status?: string
-  symbol?: string
-  side?: 'BUY' | 'SELL'
-  quantity?: number
-  qty?: number | string
-  limitPrice?: number
-  limit_price?: string
+  order_id?: string
   message?: string
-  submittedAt?: string
 }

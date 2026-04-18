@@ -15,12 +15,8 @@ describe('WebullExecution', () => {
   it('maps the Webull response into an ExecutionResult', async () => {
     const client = {
       placeOrder: vi.fn().mockResolvedValue({
-        orderId: 'ord-123',
-        status: 'SUBMITTED',
-        symbol: 'SOXL',
-        side: 'BUY',
-        quantity: 2,
-        limitPrice: 9,
+        client_order_id: 'cli-123',
+        order_id: 'ord-123',
       }),
     }
     const execution = new WebullExecution(client)

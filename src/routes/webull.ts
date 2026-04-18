@@ -33,16 +33,11 @@ async function parseOrderIntent(payload: Promise<unknown>): Promise<OrderIntent>
   }
 }
 
-function createDryRunResponse(intent: OrderIntent): WebullPlaceOrderResponseDto {
+function createDryRunResponse(_intent: OrderIntent): WebullPlaceOrderResponseDto {
   return {
-    orderId: `dry-run-${crypto.randomUUID()}`,
-    status: 'DRY_RUN',
-    symbol: intent.symbol,
-    side: intent.side,
-    quantity: intent.quantity,
-    limitPrice: intent.price,
+    client_order_id: crypto.randomUUID().replaceAll('-', ''),
+    order_id: `dry-run-${crypto.randomUUID()}`,
     message: 'DRY_RUN=true, broker request skipped',
-    submittedAt: new Date().toISOString(),
   }
 }
 
