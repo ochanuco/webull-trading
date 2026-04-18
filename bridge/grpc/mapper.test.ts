@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mapWebullTradeEvent } from '../../bridge/grpc/mapper'
+import { mapWebullTradeEvent } from './mapper'
 
 describe('mapWebullTradeEvent', () => {
   it('maps a raw Webull payload into a domain TradeEvent', () => {
