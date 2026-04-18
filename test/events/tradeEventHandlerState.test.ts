@@ -6,11 +6,16 @@ import { emptySymbolState, type PendingOrderLock, type SymbolState } from '../..
 
 const fixedNow = new Date('2026-04-18T10:00:00.000Z')
 
-function makeStore(initial: SymbolState, afterFill: SymbolState): PositionStore & { recordFillCalls: unknown[] } {
+function makeStore(
+  initial: SymbolState,
+  afterFill: SymbolState,
+): PositionStore & { recordFillCalls: unknown[]; settlementCalls: unknown[] } {
   let state = initial
   const recordFillCalls: unknown[] = []
+  const settlementCalls: unknown[] = []
   return {
     recordFillCalls,
+    settlementCalls,
     async getState() {
       return state
     },
@@ -23,6 +28,10 @@ function makeStore(initial: SymbolState, afterFill: SymbolState): PositionStore 
     async recordFill(symbol, fill) {
       recordFillCalls.push({ symbol, fill })
       state = afterFill
+      return state
+    },
+    async addPendingSettlement(symbol, settlement) {
+      settlementCalls.push({ symbol, settlement })
       return state
     },
   }

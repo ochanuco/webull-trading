@@ -54,6 +54,10 @@ function makeStore(initial?: SymbolState): PositionStore & { state: SymbolState;
       calls.push('recordFill')
       return state
     },
+    async addPendingSettlement() {
+      calls.push('addPendingSettlement')
+      return state
+    },
   }
 }
 

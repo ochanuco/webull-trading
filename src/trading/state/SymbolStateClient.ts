@@ -1,6 +1,6 @@
 import type { PositionStore } from './PositionStore'
 import type { SymbolStateDO } from './SymbolStateDO'
-import type { PendingOrderLock, SymbolState } from './types'
+import type { PendingOrderLock, PendingSettlement, SymbolState } from './types'
 
 /**
  * Thin adapter from {@link DurableObjectNamespace} to {@link PositionStore}.
@@ -34,5 +34,9 @@ export class SymbolStateClient implements PositionStore {
     fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
   ): Promise<SymbolState> {
     return this.stub(symbol).recordFill(symbol, fill)
+  }
+
+  addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState> {
+    return this.stub(symbol).addPendingSettlement(symbol, settlement)
   }
 }
