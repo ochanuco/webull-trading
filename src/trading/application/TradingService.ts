@@ -4,8 +4,11 @@ import type { RiskDecision } from '../domain/RiskDecision'
 import type { Signal } from '../domain/Signal'
 import type { Execution } from '../execution/Execution'
 import type { RiskPolicy } from '../risk/RiskPolicy'
+import { computeSpreadPct } from '../risk/spreadGuard'
 import type { PositionStore } from '../state/PositionStore'
+import type { QuoteSnapshot } from '../state/types'
 import type { Strategy, StrategyInput } from '../strategy/Strategy'
+import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import {
   logPostSubmit,
   logPreSubmit,
@@ -46,15 +49,23 @@ export interface TradingServiceOptions {
    * shows an open position for the inverse, BUY is rejected (P&L decay trap).
    */
   inversePairs?: Record<string, string>
+  /**
+   * Per-market spread limits (fraction of mid price). A submit is rejected if
+   * `(ask - bid) / mid` exceeds the market's limit. Defaults to US 0.25% and
+   * JP 0.60% — US liquid-name depth is tighter than JP individual names.
+   */
+  spreadLimits?: { US: number; JP: number }
   now?: () => Date
 }
 
 const DEFAULT_PENDING_LOCK_TTL_MS = 60_000
+const DEFAULT_SPREAD_LIMITS = { US: 0.0025, JP: 0.006 } as const
 
 export class TradingService {
   private readonly positionStore?: PositionStore
   private readonly pendingLockTtlMs: number
   private readonly inversePairs: Record<string, string>
+  private readonly spreadLimits: { US: number; JP: number }
   private readonly now: () => Date
 
   constructor(
@@ -71,6 +82,20 @@ export class TradingService {
         ? options.pendingLockTtlMs
         : DEFAULT_PENDING_LOCK_TTL_MS
     this.inversePairs = options.inversePairs ?? {}
+    this.spreadLimits = {
+      US:
+        options.spreadLimits?.US !== undefined &&
+        Number.isFinite(options.spreadLimits.US) &&
+        options.spreadLimits.US >= 0
+          ? options.spreadLimits.US
+          : DEFAULT_SPREAD_LIMITS.US,
+      JP:
+        options.spreadLimits?.JP !== undefined &&
+        Number.isFinite(options.spreadLimits.JP) &&
+        options.spreadLimits.JP >= 0
+          ? options.spreadLimits.JP
+          : DEFAULT_SPREAD_LIMITS.JP,
+    }
     this.now = options.now ?? (() => new Date())
   }
 
@@ -212,6 +237,17 @@ export class TradingService {
       }
     }
 
+    // Spread guard: wide spread at submit turns into slippage on market orders
+    // and stale fills on marketable limits. Fail-closed when bid/ask are
+    // missing — an unknown spread must not be silently treated as tight.
+    const spreadGate = this.evaluateSpreadGate(symbol, state.lastQuote)
+    if (spreadGate !== null) {
+      return {
+        allowed: false,
+        riskDecision: appendReason(decision.riskDecision, spreadGate),
+      }
+    }
+
     const lock = {
       clientOrderId: decision.orderIntent.clientOrderId,
       side: decision.orderIntent.side,
@@ -227,6 +263,37 @@ export class TradingService {
     }
 
     return { allowed: true }
+  }
+
+  /**
+   * Returns a rejection reason string when the spread gate blocks submit, or
+   * null when the gate passes. Fail-closed: missing bid or ask is a reject —
+   * we must never silently treat an unknown spread as tight.
+   */
+  private evaluateSpreadGate(
+    symbol: string,
+    lastQuote: QuoteSnapshot | null,
+  ): string | null {
+    // No quote has ever been seeded for this symbol: treat as unseeded and skip
+    // the gate, consistent with the settled-cash seeding convention.
+    if (lastQuote === null) return null
+
+    const bid = lastQuote.bid
+    const ask = lastQuote.ask
+    if (bid === undefined || ask === undefined) {
+      return 'spread unknown, bid/ask missing'
+    }
+
+    const market = inferWebullMarket(symbol)
+    const limit = market === 'JP' ? this.spreadLimits.JP : this.spreadLimits.US
+    const spreadPct = computeSpreadPct(bid, ask)
+    if (spreadPct === null) {
+      return 'spread invalid: crossed book, non-finite, or non-positive bid/ask'
+    }
+    if (spreadPct > limit) {
+      return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%`
+    }
+    return null
   }
 
   private createOrderIntent(signal: Signal): OrderIntent | undefined {
