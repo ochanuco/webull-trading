@@ -7,6 +7,8 @@ import { TradingService, type TradingConfig } from '../trading/application/Tradi
 import { MockExecution } from '../trading/execution/MockExecution'
 import { WebullExecution } from '../trading/execution/WebullExecution'
 import { DefaultRiskPolicy } from '../trading/risk/DefaultRiskPolicy'
+import { SymbolStateClient } from '../trading/state/SymbolStateClient'
+import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
 import { FixedRuleStrategy } from '../trading/strategy/strategies/FixedRuleStrategy'
 
 interface TradeRequest {
@@ -54,6 +56,7 @@ export function createTradingService(
   request: TradeRequest,
   env: {
     DRY_RUN?: string
+    SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
   } & WebullClientEnv,
 ): TradingService {
   const execution = parseBooleanEnv(env.DRY_RUN, true)
@@ -64,6 +67,9 @@ export function createTradingService(
     new FixedRuleStrategy(request.buyBelow, request.sellAbove),
     new DefaultRiskPolicy(),
     execution,
+    {
+      positionStore: env.SYMBOL_STATE ? new SymbolStateClient(env.SYMBOL_STATE) : undefined,
+    },
   )
 }
 

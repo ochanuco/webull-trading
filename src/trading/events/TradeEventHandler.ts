@@ -1,5 +1,6 @@
 import type { TradeEvent } from '../domain/TradeEvent'
-import { logFill } from '../../infrastructure/logger/tradeJournal'
+import type { PositionStore } from '../state/PositionStore'
+import { logFill, logExit } from '../../infrastructure/logger/tradeJournal'
 
 export interface TradeEventAuditRecord {
   source: 'trade-event'
@@ -11,8 +12,24 @@ export interface TradeEventAuditRecord {
   receivedAt: string
 }
 
+export interface TradeEventHandlerOptions {
+  positionStore?: PositionStore
+  now?: () => Date
+}
+
+const MS_PER_DAY = 86_400_000
+
 export class TradeEventHandler {
-  constructor(private readonly log: (message: string) => void = console.log) {}
+  private readonly positionStore?: PositionStore
+  private readonly now: () => Date
+
+  constructor(
+    private readonly log: (message: string) => void = console.log,
+    options: TradeEventHandlerOptions = {},
+  ) {
+    this.positionStore = options.positionStore
+    this.now = options.now ?? (() => new Date())
+  }
 
   async handle(event: TradeEvent): Promise<void> {
     const orderId = event.orderId.trim()
@@ -34,8 +51,6 @@ export class TradeEventHandler {
 
     this.log(JSON.stringify(record))
 
-    // Emit a parallel trade-journal line so a single query by client_order_id
-    // can reconstruct the full decision → fill lifecycle.
     const clientOrderId = readClientOrderId(event.rawPayload)
     const filledPrice = readFilledPrice(event.rawPayload)
 
@@ -47,6 +62,51 @@ export class TradeEventHandler {
       filledPrice,
       status,
     })
+
+    if (status === 'FILLED' && this.positionStore) {
+      await this.applyFillToState({ symbol, event, orderId, clientOrderId, filledPrice })
+    }
+  }
+
+  private async applyFillToState({
+    symbol,
+    event,
+    orderId,
+    clientOrderId,
+    filledPrice,
+  }: {
+    symbol: string
+    event: TradeEvent
+    orderId: string
+    clientOrderId?: string
+    filledPrice?: number
+  }): Promise<void> {
+    if (!this.positionStore) return
+    if (event.filledQty === undefined || filledPrice === undefined) return
+
+    const pre = await this.positionStore.getState(symbol)
+    const lock = pre.pendingOrder
+    if (!lock) return
+
+    const next = await this.positionStore.recordFill(symbol, {
+      side: lock.side,
+      qty: event.filledQty,
+      price: filledPrice,
+    })
+
+    if (lock.side === 'SELL' && pre.position !== null && next.position === null) {
+      const realizedPnl = (filledPrice - pre.position.avgPrice) * event.filledQty
+      const holdMs = this.now().getTime() - new Date(pre.position.openedAt).getTime()
+      const holdDays = Math.max(0, Math.floor(holdMs / MS_PER_DAY))
+      logExit({
+        clientOrderId: clientOrderId ?? lock.clientOrderId,
+        orderId,
+        symbol,
+        realizedPnl,
+        holdDays,
+        exitReason: 'OTHER',
+      })
+    }
   }
 }
 
