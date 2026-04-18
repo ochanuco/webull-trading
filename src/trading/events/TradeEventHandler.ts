@@ -82,11 +82,43 @@ export class TradeEventHandler {
     filledPrice?: number
   }): Promise<void> {
     if (!this.positionStore) return
-    if (event.filledQty === undefined || filledPrice === undefined) return
+    if (event.filledQty === undefined || filledPrice === undefined) {
+      // Best-effort cleanup: release pending lock and log exit before returning
+      try {
+        logExit({
+          clientOrderId,
+          orderId,
+          symbol,
+          realizedPnl: 0,
+          holdDays: 0,
+          exitReason: 'OTHER',
+        })
+      } catch {
+        // ignore logExit errors
+      }
+      await this.positionStore.clearPendingOrder(symbol).catch(() => undefined)
+      return
+    }
 
     const pre = await this.positionStore.getState(symbol)
     const lock = pre.pendingOrder
     if (!lock) return
+
+    // Verify the pending lock belongs to this fill
+    const eventClientOrderId = clientOrderId ?? event.orderId
+    if (lock.clientOrderId !== eventClientOrderId) {
+      // Stale or mismatched lock; ignore this fill
+      this.log(
+        JSON.stringify({
+          warning: 'fill-lock-mismatch',
+          symbol,
+          orderId,
+          eventClientOrderId,
+          lockClientOrderId: lock.clientOrderId,
+        }),
+      )
+      return
+    }
 
     const next = await this.positionStore.recordFill(symbol, {
       side: lock.side,

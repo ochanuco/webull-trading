@@ -58,7 +58,12 @@ export class TradingService {
     options: TradingServiceOptions = {},
   ) {
     this.positionStore = options.positionStore
-    this.pendingLockTtlMs = options.pendingLockTtlMs ?? DEFAULT_PENDING_LOCK_TTL_MS
+    this.pendingLockTtlMs =
+      options.pendingLockTtlMs !== undefined &&
+      Number.isFinite(options.pendingLockTtlMs) &&
+      options.pendingLockTtlMs > 0
+        ? options.pendingLockTtlMs
+        : DEFAULT_PENDING_LOCK_TTL_MS
     this.now = options.now ?? (() => new Date())
   }
 
@@ -105,7 +110,7 @@ export class TradingService {
       return decision
     }
 
-    const stateGate = await this.applyStateGate(decision, input.symbol)
+    const stateGate = await this.applyStateGate(decision, decision.orderIntent.symbol)
     if (!stateGate.allowed) {
       return { ...decision, riskDecision: stateGate.riskDecision }
     }
