@@ -38,6 +38,6 @@ export default {
         },
       ),
     )
-    ctx.waitUntil(keepBridgeAlive(env))
+    ctx.waitUntil(keepBridgeAlive(env, { requestId }))
   },
 }

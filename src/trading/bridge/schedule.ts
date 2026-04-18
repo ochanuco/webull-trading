@@ -3,7 +3,7 @@
  *
  * - `always-on`: ignore schedule, keep the container running 24/7
  * - `disabled`: kill switch — stop the container every tick
- * - `auto` (default): start on weekdays UTC, stop on weekends
+ * - `auto` (default): 平日 JST に起動、週末は停止
  *
  * Kept as a dependency-free module so it can be unit-tested without pulling
  * in the `@cloudflare/containers` runtime.

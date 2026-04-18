@@ -14,6 +14,11 @@ export interface BridgeKeepAliveEnv {
   BRIDGE_RUN_MODE?: string
 }
 
+export interface KeepBridgeAliveOptions {
+  /** Correlates every log line emitted by a single cron tick. */
+  requestId?: string
+}
+
 /**
  * Called from the Worker cron handler. On active hours ensures the single
  * bridge container instance is running; on inactive hours issues a stop() so
@@ -22,16 +27,30 @@ export interface BridgeKeepAliveEnv {
  * Fails open — any error is logged and swallowed so the rest of the scheduled
  * handler (e.g. quote feed) is unaffected.
  */
-export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
+export async function keepBridgeAlive(
+  env: BridgeKeepAliveEnv,
+  options: KeepBridgeAliveOptions = {},
+): Promise<void> {
+  const requestId = options.requestId ?? crypto.randomUUID()
+
   if (!env.BRIDGE) {
-    console.log(JSON.stringify({ event: 'bridge_keep_alive_skipped', reason: 'BRIDGE binding missing' }))
+    console.log(
+      JSON.stringify({
+        event: 'bridge_keep_alive_skipped',
+        requestId,
+        reason: 'BRIDGE binding missing',
+      }),
+    )
     return
   }
 
   const mode = parseBridgeRunMode(env.BRIDGE_RUN_MODE)
 
   if (!isBridgeActive(new Date(), mode)) {
-    await stopContainer(env, mode === 'disabled' ? 'kill-switch' : 'outside market hours')
+    await stopContainer(env, {
+      requestId,
+      reason: mode === 'disabled' ? 'kill-switch' : 'outside market hours',
+    })
     return
   }
 
@@ -42,6 +61,7 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
     console.log(
       JSON.stringify({
         event: 'bridge_keep_alive_skipped',
+        requestId,
         reason: 'required secret missing',
         missing,
       }),
@@ -62,12 +82,18 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
       },
     })
     console.log(
-      JSON.stringify({ event: 'bridge_keep_alive_ok', at: new Date().toISOString(), mode }),
+      JSON.stringify({
+        event: 'bridge_keep_alive_ok',
+        requestId,
+        at: new Date().toISOString(),
+        mode,
+      }),
     )
   } catch (error) {
     console.error(
       JSON.stringify({
         event: 'bridge_keep_alive_error',
+        requestId,
         at: new Date().toISOString(),
         message: error instanceof Error ? error.message : String(error),
       }),
@@ -75,13 +101,21 @@ export async function keepBridgeAlive(env: BridgeKeepAliveEnv): Promise<void> {
   }
 }
 
-async function stopContainer(env: BridgeKeepAliveEnv, reason: string): Promise<void> {
+async function stopContainer(
+  env: BridgeKeepAliveEnv,
+  ctx: { requestId: string; reason: string },
+): Promise<void> {
   if (!env.BRIDGE) return
   try {
     const container = getContainer(env.BRIDGE, 'default')
     await container.stop()
     console.log(
-      JSON.stringify({ event: 'bridge_keep_alive_stopped', at: new Date().toISOString(), reason }),
+      JSON.stringify({
+        event: 'bridge_keep_alive_stopped',
+        requestId: ctx.requestId,
+        at: new Date().toISOString(),
+        reason: ctx.reason,
+      }),
     )
   } catch (error) {
     // `stop()` against a container that was never started is not exceptional;
@@ -89,7 +123,8 @@ async function stopContainer(env: BridgeKeepAliveEnv, reason: string): Promise<v
     console.log(
       JSON.stringify({
         event: 'bridge_keep_alive_stop_noop',
-        reason,
+        requestId: ctx.requestId,
+        reason: ctx.reason,
         message: error instanceof Error ? error.message : String(error),
       }),
     )
