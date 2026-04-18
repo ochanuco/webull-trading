@@ -12,6 +12,7 @@
     "accounts": "tsx scripts/list-webull-accounts.ts"
   },
   "dependencies": {
+    "@cloudflare/containers": "^0.3.2",
     "hono": "^4.12.14"
   },
   "devDependencies": {

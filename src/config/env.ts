@@ -249,6 +249,15 @@ export interface Env {
   DRAWDOWN_KILL_THRESHOLD?: string
 }
 
+// Bridge container binding (#33 append)
+import type { BridgeContainer } from '../trading/bridge/BridgeContainer'
+
+export interface Env {
+  BRIDGE?: DurableObjectNamespace<BridgeContainer>
+  WEBULL_GRPC_ENDPOINT?: string
+  EVENT_INGEST_URL?: string
+}
+
 /**
  * Parses an optional numeric env var into a non-negative finite number. Returns
  * `undefined` when the var is unset or empty so callers can fall back to a

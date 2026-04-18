@@ -14,12 +14,21 @@
   "durable_objects": {
     "bindings": [
       { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
-      { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
+      { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
+      { "name": "BRIDGE", "class_name": "BridgeContainer" }
     ]
   },
+  "containers": [
+    {
+      "class_name": "BridgeContainer",
+      "image": "./bridge/Dockerfile",
+      "max_instances": 1
+    }
+  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SymbolStateDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["PortfolioStateDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["PortfolioStateDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["BridgeContainer"] }
   ],
   "triggers": {
     "crons": ["*/5 * * * *"]
@@ -35,9 +44,17 @@
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
-          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
+          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
+          { "name": "BRIDGE", "class_name": "BridgeContainer" }
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "BridgeContainer",
+          "image": "./bridge/Dockerfile",
+          "max_instances": 1
+        }
+      ]
     },
     "production": {
       "name": "webull-trading-production",
@@ -49,9 +66,17 @@
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
-          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
+          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
+          { "name": "BRIDGE", "class_name": "BridgeContainer" }
         ]
-      }
+      },
+      "containers": [
+        {
+          "class_name": "BridgeContainer",
+          "image": "./bridge/Dockerfile",
+          "max_instances": 1
+        }
+      ]
     }
   }
 }
