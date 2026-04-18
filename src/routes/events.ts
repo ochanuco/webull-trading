@@ -1,19 +1,22 @@
 import { Hono } from 'hono'
+import type { AppBindings } from '../app'
 import type { TradeEventIngestRequest } from '../infrastructure/webull/TradeEventBridge'
 import { ValidationError } from '../shared/errors'
 import { TradeEventService } from '../trading/application/TradeEventService'
 import { isTradeEventType, isTradeStatus, type TradeEvent } from '../trading/domain/TradeEvent'
+import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 
-const tradeEventService = new TradeEventService()
-
-export const events = new Hono().post('/trade', async (c) => {
+export const events = new Hono<AppBindings>().post('/trade', async (c) => {
   const payload = (await c.req.json().catch(() => null)) as unknown
 
   if (!isTradeEventIngestRequest(payload)) {
     throw new ValidationError('event payload is invalid', { field: 'event' })
   }
 
-  await tradeEventService.handle(payload.event)
+  const service = new TradeEventService({
+    positionStore: c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : undefined,
+  })
+  await service.handle(payload.event)
 
   return c.json({ ok: true })
 })
