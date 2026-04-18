@@ -93,4 +93,4 @@ cd bridge && pnpm install && pnpm exec tsc --noEmit -p .
 ## 設計書 / POC 履歴
 
 - [#1](https://github.com/ochanuco/webull-trading/issues/1) POC 設計書 (closed)
-- Phase 1: PR #2 / Phase 2: PR #7 / Phase 3: PR #14 / Phase 4: PR #8 / Phase 5: PR #13 #16 #17 #18 #19
+- Phase 1: PR #2 / Phase 2: PR #3 / Phase 3: PR #4 / Phase 4: PR #5 / Phase 5: PR #6
