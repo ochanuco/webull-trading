@@ -122,7 +122,6 @@ export async function runPullbackScheduler(
         continue
       }
       intent = buildIntent(upper, 'BUY', sizing.quantity, indicators.price)
-      summary.buys += 1
     } else {
       // SELL: close the full open position.
       if (state.position === null) {
@@ -130,7 +129,6 @@ export async function runPullbackScheduler(
         continue
       }
       intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
-      summary.sells += 1
     }
 
     const lockResult = await options.positionStore.lockPendingOrder(upper, {
@@ -151,6 +149,13 @@ export async function runPullbackScheduler(
       await options.positionStore.clearPendingOrder(upper).catch(() => undefined)
       summary.errors.push({ symbol: upper, message: messageOf(error) })
       continue
+    }
+
+    // Increment counters only after successful execution.
+    if (intent.side === 'BUY') {
+      summary.buys += 1
+    } else {
+      summary.sells += 1
     }
 
     if (result.mode === 'DRY_RUN') {
