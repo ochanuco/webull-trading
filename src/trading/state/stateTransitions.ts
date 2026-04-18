@@ -22,6 +22,13 @@ export function lockPendingOrder(
   lock: PendingOrderLock,
   ctx: TransitionContext = defaultCtx,
 ): { ok: boolean; state: SymbolState } {
+  // Validate lock.expiresAt before accepting the lock (fail-closed)
+  const lockExpiresAtMs = new Date(lock.expiresAt).getTime()
+  if (!Number.isFinite(lockExpiresAtMs)) {
+    // Invalid expiresAt (NaN) - reject the lock
+    return { ok: false, state }
+  }
+
   if (state.pendingOrder !== null && !isExpired(state.pendingOrder.expiresAt, ctx.now)) {
     return { ok: false, state }
   }

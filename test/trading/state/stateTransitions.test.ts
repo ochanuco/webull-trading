@@ -55,6 +55,24 @@ describe('lockPendingOrder', () => {
     expect(res.ok).toBe(true)
     expect(res.state.pendingOrder?.clientOrderId).toBe('coid-next')
   })
+
+  it('rejects lock with invalid expiresAt (fail-closed)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    const invalidLock = { ...lock, expiresAt: 'invalid-date' }
+    const res = lockPendingOrder(state, invalidLock, { now: fixedNow('2026-04-18T10:00:00.000Z') })
+
+    expect(res.ok).toBe(false)
+    expect(res.state.pendingOrder).toBeNull()
+  })
+
+  it('rejects lock with empty expiresAt', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    const invalidLock = { ...lock, expiresAt: '' }
+    const res = lockPendingOrder(state, invalidLock, { now: fixedNow('2026-04-18T10:00:00.000Z') })
+
+    expect(res.ok).toBe(false)
+    expect(res.state.pendingOrder).toBeNull()
+  })
 })
 
 describe('recordFill', () => {
@@ -99,6 +117,48 @@ describe('recordFill', () => {
     state = recordFill(state, { side: 'BUY', qty: 1, price: 10 }, { now: fixedNow('2026-04-18T12:00:00.000Z') })
 
     expect(state.position?.openedAt).toBe('2026-04-18T10:05:00.000Z')
+  })
+
+  it('rejects fill with invalid qty (NaN)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFill(state, { side: 'BUY', qty: NaN, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    }).toThrow('Invalid fill.qty')
+  })
+
+  it('rejects fill with zero qty', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFill(state, { side: 'BUY', qty: 0, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    }).toThrow('Invalid fill.qty')
+  })
+
+  it('rejects fill with negative qty', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFill(state, { side: 'BUY', qty: -1, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    }).toThrow('Invalid fill.qty')
+  })
+
+  it('rejects fill with invalid price (NaN)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFill(state, { side: 'BUY', qty: 2, price: NaN }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    }).toThrow('Invalid fill.price')
+  })
+
+  it('rejects fill with zero price', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFill(state, { side: 'BUY', qty: 2, price: 0 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    }).toThrow('Invalid fill.price')
+  })
+
+  it('rejects fill with negative price', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFill(state, { side: 'BUY', qty: 2, price: -9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    }).toThrow('Invalid fill.price')
   })
 })
 
@@ -168,10 +228,77 @@ describe('misc transitions', () => {
     )
     state = addPendingSettlement(
       state,
-      { tradeDate: '2026-04-18', settleDate: '2026-04-19', amount: -5 },
+      { tradeDate: '2026-04-18', settleDate: '2026-04-19', amount: 5 },
       { now: fixedNow('2026-04-18T10:00:01.000Z') },
     )
     expect(state.pendingSettlement).toHaveLength(2)
-    expect(state.pendingSettlement[1]?.amount).toBe(-5)
+    expect(state.pendingSettlement[0]?.amount).toBe(10)
+    expect(state.pendingSettlement[1]?.amount).toBe(5)
+  })
+
+  it('addPendingSettlement rejects invalid amount (NaN)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      addPendingSettlement(
+        state,
+        { tradeDate: '2026-04-18', settleDate: '2026-04-19', amount: NaN },
+        { now: fixedNow('2026-04-18T10:00:00.000Z') },
+      )
+    }).toThrow('Invalid settlement.amount')
+  })
+
+  it('addPendingSettlement rejects zero amount', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      addPendingSettlement(
+        state,
+        { tradeDate: '2026-04-18', settleDate: '2026-04-19', amount: 0 },
+        { now: fixedNow('2026-04-18T10:00:00.000Z') },
+      )
+    }).toThrow('Invalid settlement.amount')
+  })
+
+  it('addPendingSettlement rejects negative amount', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      addPendingSettlement(
+        state,
+        { tradeDate: '2026-04-18', settleDate: '2026-04-19', amount: -5 },
+        { now: fixedNow('2026-04-18T10:00:00.000Z') },
+      )
+    }).toThrow('Invalid settlement.amount')
+  })
+
+  it('addPendingSettlement rejects invalid settleDate format', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      addPendingSettlement(
+        state,
+        { tradeDate: '2026-04-18', settleDate: 'invalid-date', amount: 10 },
+        { now: fixedNow('2026-04-18T10:00:00.000Z') },
+      )
+    }).toThrow('Invalid settlement.settleDate')
+  })
+
+  it('addPendingSettlement rejects settleDate with wrong format (ISO timestamp)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      addPendingSettlement(
+        state,
+        { tradeDate: '2026-04-18', settleDate: '2026-04-19T10:00:00.000Z', amount: 10 },
+        { now: fixedNow('2026-04-18T10:00:00.000Z') },
+      )
+    }).toThrow('Invalid settlement.settleDate')
+  })
+
+  it('addPendingSettlement rejects empty settleDate', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      addPendingSettlement(
+        state,
+        { tradeDate: '2026-04-18', settleDate: '', amount: 10 },
+        { now: fixedNow('2026-04-18T10:00:00.000Z') },
+      )
+    }).toThrow('Invalid settlement.settleDate')
   })
 })
