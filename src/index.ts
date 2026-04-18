@@ -1,9 +1,11 @@
 import { createApp } from './app'
 import type { Env } from './config/env'
+import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 export { PortfolioStateDO } from './trading/state/PortfolioStateDO'
+export { BridgeContainer } from './trading/bridge/BridgeContainer'
 
 const app = createApp()
 
@@ -36,5 +38,6 @@ export default {
         },
       ),
     )
+    ctx.waitUntil(keepBridgeAlive(env, { requestId }))
   },
 }
