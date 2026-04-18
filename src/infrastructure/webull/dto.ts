@@ -6,6 +6,13 @@ export interface WebullAccountDto {
   status?: string
 }
 
+export interface WebullSubscriptionDto {
+  subscription_id?: string
+  user_id?: string
+  account_id?: string
+  account_number?: string
+}
+
 export interface WebullPlaceOrderRequestDto {
   stock_order: {
     client_order_id: string

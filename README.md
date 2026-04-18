@@ -75,8 +75,21 @@ cd bridge && pnpm install && pnpm exec tsc --noEmit -p .
 | `SYMBOL_MAX_NOTIONAL` | `{}` | JSON inline で symbol 別上書き |
 | `MARKET_HOURS_CHECK` | `false` | UTC 13:30-20:00 Mon-Fri チェック |
 | `EVENT_INGEST_SECRET` | — | `/events/trade` の secret header 値 |
-| `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID` | — | Webull 認証 (placeholder signing) |
+| `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID` | — | Webull 認証 |
 | `WEBULL_API_BASE` | `https://openapi.webull.com` | Webull HTTP base |
+
+### Webull account_id を取得する
+
+Webull sandbox は公開 dashboard で account_id を表示しないので、app_key + app_secret だけで API を叩いて取得する:
+
+```bash
+WEBULL_APP_KEY="$(op read 'op://Personal/WEBULL_APP_KEY/credential')" \
+WEBULL_APP_SECRET="$(op read 'op://Personal/WEBULL_APP_SECRET/credential')" \
+WEBULL_API_BASE=https://api.sandbox.webull.hk \
+  pnpm run accounts
+```
+
+返ってきた JSON の `account_id` を `.dev.vars` の `WEBULL_ACCOUNT_ID` に、deploy 時は `wrangler secret put WEBULL_ACCOUNT_ID --env staging` に投入。
 
 ## Deploy / Secrets (Cloudflare Workers)
 
