@@ -51,4 +51,59 @@ describe('runStrategyCron', () => {
     const result = await runStrategyCron(envWithout)
     expect(result.skipReason).toBe('no_bridge_state')
   })
+
+  it('skips with portfolio_halted when tradingDisabledUntil is in the future', async () => {
+    const envWithPortfolio = {
+      ...env,
+      PORTFOLIO_STATE: {
+        idFromName: () => ({}),
+        get: () => ({
+          getPortfolio: vi.fn().mockResolvedValue({
+            dailyStartEquity: 0,
+            dailyRealizedPnl: 0,
+            tradingDisabledUntil: new Date(Date.now() + 3_600_000).toISOString(),
+            updatedAt: new Date().toISOString(),
+          }),
+        }),
+      },
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envWithPortfolio)
+    expect(result.skipReason).toBe('portfolio_halted')
+  })
+
+  it('skips with drawdown_kill when realized drawdown exceeds threshold', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ drawdownKillThreshold: -0.02 }),
+    )
+    const envWithPortfolio = {
+      ...env,
+      PORTFOLIO_STATE: {
+        idFromName: () => ({}),
+        get: () => ({
+          getPortfolio: vi.fn().mockResolvedValue({
+            dailyStartEquity: 10_000,
+            dailyRealizedPnl: -250, // -2.5% (below -2% threshold)
+            tradingDisabledUntil: null,
+            updatedAt: new Date().toISOString(),
+          }),
+        }),
+      },
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envWithPortfolio)
+    expect(result.skipReason).toBe('drawdown_kill')
+  })
+
+  it('fail-closes to portfolio_halted when getPortfolio throws', async () => {
+    const envWithBrokenPortfolio = {
+      ...env,
+      PORTFOLIO_STATE: {
+        idFromName: () => ({}),
+        get: () => ({
+          getPortfolio: vi.fn().mockRejectedValue(new Error('DO unreachable')),
+        }),
+      },
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envWithBrokenPortfolio)
+    expect(result.skipReason).toBe('portfolio_halted')
+  })
 })
