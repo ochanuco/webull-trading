@@ -5,6 +5,12 @@ import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalR
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
+import { runStrategyCron } from './trading/strategy/runStrategyCron'
+
+// 5 分毎の quote feed + bridge keep-alive cron
+const CRON_QUOTE_BRIDGE = '*/5 * * * *'
+// 毎時 :15 の Pullback 戦略 cron (position で自然 idempotent)
+const CRON_STRATEGY = '15 * * * *'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 export { PortfolioStateDO } from './trading/state/PortfolioStateDO'
@@ -33,9 +39,39 @@ export default {
     attachTradeJournalDb(env, ctx)
     return app.fetch(request, env, ctx)
   },
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     attachTradeJournalDb(env, ctx)
     const requestId = crypto.randomUUID()
+
+    if (event.cron === CRON_STRATEGY) {
+      ctx.waitUntil(
+        runStrategyCron(env).then(
+          (result) => {
+            console.log(
+              JSON.stringify({
+                event: 'strategy_cron_run',
+                requestId,
+                symbols: result.symbols,
+                skipReason: result.skipReason,
+                summary: result.summary,
+              }),
+            )
+          },
+          (error) => {
+            console.error(
+              JSON.stringify({
+                event: 'strategy_cron_error',
+                requestId,
+                message: error instanceof Error ? error.message : String(error),
+              }),
+            )
+          },
+        ),
+      )
+      return
+    }
+
+    // default: CRON_QUOTE_BRIDGE (`*/5 * * * *`) — quote feed + bridge keep-alive
     ctx.waitUntil(
       runQuoteFeed({ env }).then(
         (summary) => {

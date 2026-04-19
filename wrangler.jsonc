@@ -26,7 +26,10 @@
     { "tag": "v3", "new_sqlite_classes": ["BridgeContainer"] }
   ],
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": [
+      "*/5 * * * *",
+      "15 * * * *"
+    ]
   },
   "env": {
     "staging": {
