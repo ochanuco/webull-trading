@@ -1,5 +1,7 @@
 import { createApp } from './app'
 import type { Env } from './config/env'
+import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
+import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 
@@ -9,9 +11,29 @@ export { BridgeContainer } from './trading/bridge/BridgeContainer'
 
 const app = createApp()
 
+/**
+ * Attach a D1-backed sink so tradeJournal records also land in D1.
+ * We deliberately do not clear the context on handler exit — the background
+ * waitUntil tasks from that handler keep firing logs after return, and those
+ * logs should still reach D1. Subsequent handler invocations overwrite the
+ * context in place.
+ */
+function attachTradeJournalDb(env: Env, ctx: ExecutionContext): void {
+  if (!env.DB) return
+  const db = createDb(env.DB)
+  setTradeJournalDbContext({
+    insert: (record) => insertJournalRecord(db, record),
+    waitUntil: (promise) => ctx.waitUntil(promise),
+  })
+}
+
 export default {
-  fetch: app.fetch,
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
+    attachTradeJournalDb(env, ctx)
+    return app.fetch(request, env, ctx)
+  },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    attachTradeJournalDb(env, ctx)
     const requestId = crypto.randomUUID()
     ctx.waitUntil(
       runQuoteFeed({ env }).then(

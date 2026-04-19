@@ -58,8 +58,45 @@ export function setTradeJournalSink(next: LogSink): () => void {
   }
 }
 
+export interface TradeJournalDbContext {
+  insert: (record: TradeJournalRecord) => Promise<void>
+  /** `ctx.waitUntil` equivalent so the async insert survives handler return. */
+  waitUntil: (promise: Promise<unknown>) => void
+}
+
+let dbContext: TradeJournalDbContext | undefined
+
+/**
+ * Attach a D1-backed sink in addition to {@link setTradeJournalSink}. The
+ * journal always emits its JSON line (console.log by default); when a DB
+ * context is set, every record is also fire-and-forget inserted via
+ * `ctx.waitUntil` so the Worker does not have to await the DB write.
+ *
+ * Intended to be set once at Worker handler entry (`scheduled` / middleware)
+ * and cleared on exit. Concurrency across fetch / scheduled is accepted risk
+ * in this POC — both paths always write to the same D1 schema.
+ */
+export function setTradeJournalDbContext(context: TradeJournalDbContext | undefined): void {
+  dbContext = context
+}
+
 function emit(record: TradeJournalRecord): void {
   sink(JSON.stringify(record))
+
+  const ctx = dbContext
+  if (ctx) {
+    ctx.waitUntil(
+      ctx.insert(record).catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: 'trade_journal_insert_failed',
+            trade_event_type: record.trade_event_type,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        )
+      }),
+    )
+  }
 }
 
 export function logTradeDecision(input: {

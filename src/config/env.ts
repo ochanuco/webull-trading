@@ -263,6 +263,15 @@ export interface Env {
   BRIDGE_RUN_MODE?: string
 }
 
+// D1 binding (#68 Phase A append)
+export interface Env {
+  /**
+   * D1 database for trade_journal (and eventually symbol_config, global_config).
+   * Optional so existing tests / legacy deploys without D1 keep working.
+   */
+  DB?: D1Database
+}
+
 /**
  * Parses an optional numeric env var into a non-negative finite number. Returns
  * `undefined` when the var is unset or empty so callers can fall back to a

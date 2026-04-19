@@ -13,10 +13,12 @@
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.2",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.12.14"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260417.1",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.20.6",
     "typescript": "^5.6.3",
     "vitest": "^2.1.9",
