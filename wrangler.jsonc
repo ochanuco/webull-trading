@@ -61,7 +61,7 @@
         {
           "binding": "DB",
           "database_name": "webull-trading-staging",
-          "database_id": "REPLACE_WITH_STAGING_ID",
+          "database_id": "cbc199f0-5ed8-40b0-b619-6bdb43a400e3",
           "migrations_dir": "drizzle"
         }
       ]
