@@ -67,29 +67,33 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     return { summary: emptySummary, symbols: usSymbols, skipReason: 'no_bridge_state' }
   }
 
-  // Portfolio-level pre-flight: kill-switch and drawdown. Fail-closed — if the
-  // portfolio store is missing or the read fails, treat as halted.
-  if (env.PORTFOLIO_STATE) {
-    const portfolioStore = new PortfolioStateClient(env.PORTFOLIO_STATE)
-    try {
-      const portfolio = await portfolioStore.getPortfolio()
-      const now = Date.now()
-      if (
-        portfolio.tradingDisabledUntil &&
-        new Date(portfolio.tradingDisabledUntil).getTime() > now
-      ) {
+  // Portfolio-level pre-flight (fail-closed):
+  // - PORTFOLIO_STATE binding 不在 → halt (drawdown kill を評価する術が無い)
+  // - getPortfolio 例外 → halt
+  // - tradingDisabledUntil が truthy だが parse 不能 → halt (silent pass 防止)
+  // - tradingDisabledUntil が有効 & 未来 → halt
+  // - drawdown 閾値超過 → halt
+  if (!env.PORTFOLIO_STATE) {
+    return { summary: emptySummary, symbols: usSymbols, skipReason: 'portfolio_halted' }
+  }
+  const portfolioStore = new PortfolioStateClient(env.PORTFOLIO_STATE)
+  try {
+    const portfolio = await portfolioStore.getPortfolio()
+    const now = Date.now()
+    if (portfolio.tradingDisabledUntil) {
+      const disabledUntilMs = new Date(portfolio.tradingDisabledUntil).getTime()
+      if (!Number.isFinite(disabledUntilMs) || disabledUntilMs > now) {
         return { summary: emptySummary, symbols: usSymbols, skipReason: 'portfolio_halted' }
       }
-      if (portfolio.dailyStartEquity > 0) {
-        const ratio = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
-        if (ratio <= global.drawdownKillThreshold) {
-          return { summary: emptySummary, symbols: usSymbols, skipReason: 'drawdown_kill' }
-        }
-      }
-    } catch {
-      // fail-closed: portfolio 読み込みエラー時は strategy を走らせない
-      return { summary: emptySummary, symbols: usSymbols, skipReason: 'portfolio_halted' }
     }
+    if (portfolio.dailyStartEquity > 0) {
+      const ratio = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
+      if (ratio <= global.drawdownKillThreshold) {
+        return { summary: emptySummary, symbols: usSymbols, skipReason: 'drawdown_kill' }
+      }
+    }
+  } catch {
+    return { summary: emptySummary, symbols: usSymbols, skipReason: 'portfolio_halted' }
   }
 
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)

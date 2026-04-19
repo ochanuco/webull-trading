@@ -93,6 +93,34 @@ describe('runStrategyCron', () => {
     expect(result.skipReason).toBe('drawdown_kill')
   })
 
+  it('fail-closes to portfolio_halted when PORTFOLIO_STATE binding is missing', async () => {
+    const envWithoutPortfolio = {
+      DB: {} as D1Database,
+      SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envWithoutPortfolio)
+    expect(result.skipReason).toBe('portfolio_halted')
+  })
+
+  it('fail-closes to portfolio_halted on invalid tradingDisabledUntil timestamp', async () => {
+    const envBadTimestamp = {
+      ...env,
+      PORTFOLIO_STATE: {
+        idFromName: () => ({}),
+        get: () => ({
+          getPortfolio: vi.fn().mockResolvedValue({
+            dailyStartEquity: 0,
+            dailyRealizedPnl: 0,
+            tradingDisabledUntil: 'not-an-iso-timestamp',
+            updatedAt: new Date().toISOString(),
+          }),
+        }),
+      },
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envBadTimestamp)
+    expect(result.skipReason).toBe('portfolio_halted')
+  })
+
   it('fail-closes to portfolio_halted when getPortfolio throws', async () => {
     const envWithBrokenPortfolio = {
       ...env,
