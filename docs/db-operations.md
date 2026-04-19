@@ -64,3 +64,51 @@ pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
 ```
 
 `--remote` 無しだと local の開発 DB (`wrangler dev` 用の SQLite ファイル) に当たるので注意。
+
+## symbol_config / inverse_pairs 運用 (#69 Phase B)
+
+### 初期シード
+
+```bash
+pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
+  --file=docs/seed/symbol_config.sql
+```
+
+### よく使う編集
+
+```sql
+-- 新 symbol を universe に追加 (US)
+INSERT INTO symbol_config (symbol, name, market, active, max_notional, updated_at)
+VALUES ('GLD', 'SPDR Gold Shares', 'US', 1, 5000, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+-- JP 個別
+INSERT INTO symbol_config (symbol, name, market, active, max_notional, updated_at)
+VALUES ('7203', 'トヨタ自動車', 'JP', 1, 100000, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+-- 一時停止 (ALLOWED_SYMBOLS から外れる / 次 cron から反映)
+UPDATE symbol_config SET active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE symbol = 'SOXS';
+
+-- 上限変更
+UPDATE symbol_config SET max_notional = 3000, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE symbol = 'SOXL';
+
+-- 銘柄名だけ更新
+UPDATE symbol_config SET name = 'Direxion Daily Semiconductor Bull 3X', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE symbol = 'SOXL';
+
+-- 逆相関ペア (単方向で書けば bidirectional に展開される)
+INSERT INTO inverse_pairs (symbol, inverse, updated_at)
+VALUES ('TQQQ', 'SQQQ', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+```
+
+### 現状確認
+
+```bash
+pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
+  --command "SELECT symbol, name, market, active, max_notional FROM symbol_config ORDER BY symbol"
+
+pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
+  --command "SELECT * FROM inverse_pairs"
+```
+
