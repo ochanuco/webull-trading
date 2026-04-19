@@ -53,6 +53,8 @@ export type TradeJournalInsert = typeof tradeJournal.$inferInsert
  */
 export const symbolConfig = sqliteTable('symbol_config', {
   symbol: text('symbol').primaryKey(),
+  /** 人間可読な銘柄名 (例: "Direxion Daily Semiconductor Bull 3X"、トヨタ自動車)。運用時の識別用。 */
+  name: text('name'),
   market: text('market').notNull(), // 'US' | 'JP'
   active: integer('active', { mode: 'boolean' }).notNull().default(true),
   maxNotional: real('max_notional'),

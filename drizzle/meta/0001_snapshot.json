@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b1ac7e6c-31fe-4a30-8c53-52b99858dd44",
+  "id": "f8198cae-7277-4cc7-a2c0-d67da1fe48bb",
   "prevId": "44c1ec22-a2ec-434d-aa7c-9fc93bd9488f",
   "tables": {
     "inverse_pairs": {
@@ -43,6 +43,13 @@
           "type": "text",
           "primaryKey": true,
           "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "market": {
