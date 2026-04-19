@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "4227368c-566f-44c7-95ce-b7dcb7e115f0",
+  "id": "3367679b-1183-443a-bff1-fa928ccb7c91",
   "prevId": "f8198cae-7277-4cc7-a2c0-d67da1fe48bb",
   "tables": {
     "global_config": {
@@ -106,7 +106,36 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "global_config_max_order_notional_range": {
+          "name": "global_config_max_order_notional_range",
+          "value": "\"global_config\".\"max_order_notional\" > 0 AND \"global_config\".\"max_order_notional\" <= 10000000"
+        },
+        "global_config_drawdown_kill_threshold_range": {
+          "name": "global_config_drawdown_kill_threshold_range",
+          "value": "\"global_config\".\"drawdown_kill_threshold\" >= -1 AND \"global_config\".\"drawdown_kill_threshold\" <= 0"
+        },
+        "global_config_stale_quote_ms_range": {
+          "name": "global_config_stale_quote_ms_range",
+          "value": "\"global_config\".\"stale_quote_ms\" >= 0"
+        },
+        "global_config_gap_reject_pct_range": {
+          "name": "global_config_gap_reject_pct_range",
+          "value": "\"global_config\".\"gap_reject_pct\" >= 0 AND \"global_config\".\"gap_reject_pct\" <= 1"
+        },
+        "global_config_spread_limit_pct_us_range": {
+          "name": "global_config_spread_limit_pct_us_range",
+          "value": "\"global_config\".\"spread_limit_pct_us\" >= 0 AND \"global_config\".\"spread_limit_pct_us\" <= 1"
+        },
+        "global_config_spread_limit_pct_jp_range": {
+          "name": "global_config_spread_limit_pct_jp_range",
+          "value": "\"global_config\".\"spread_limit_pct_jp\" >= 0 AND \"global_config\".\"spread_limit_pct_jp\" <= 1"
+        },
+        "global_config_bridge_run_mode_enum": {
+          "name": "global_config_bridge_run_mode_enum",
+          "value": "\"global_config\".\"bridge_run_mode\" IN ('auto', 'always-on', 'disabled')"
+        }
+      }
     },
     "inverse_pairs": {
       "name": "inverse_pairs",

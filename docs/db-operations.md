@@ -112,8 +112,6 @@ pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
   --command "SELECT * FROM inverse_pairs"
 ```
 
-```
-
 ## global_config 運用 (#70 Phase D)
 
 singleton row (`id = 'default'`) で runtime な risk / lifecycle knob を保持。env var 側からは削除済み。

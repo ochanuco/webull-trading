@@ -1,4 +1,5 @@
-import { integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { sql } from 'drizzle-orm'
+import { check, integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 /**
  * append-only trade decision / order lifecycle log. A single row per logical
@@ -90,20 +91,55 @@ export type InversePairInsert = typeof inversePairs.$inferInsert
  * bridge_run_mode は 'auto' / 'always-on' / 'disabled' の文字列。
  * drawdown_kill_threshold は負の float (例: -0.02 = -2%)。
  */
-export const globalConfig = sqliteTable('global_config', {
-  id: text('id').primaryKey(), // 'default' 固定
-  dryRun: integer('dry_run', { mode: 'boolean' }).notNull().default(true),
-  tradingEnabled: integer('trading_enabled', { mode: 'boolean' }).notNull().default(false),
-  marketHoursCheck: integer('market_hours_check', { mode: 'boolean' }).notNull().default(false),
-  maxOrderNotional: real('max_order_notional').notNull().default(100),
-  drawdownKillThreshold: real('drawdown_kill_threshold').notNull().default(-0.02),
-  staleQuoteMs: integer('stale_quote_ms').notNull().default(900000),
-  gapRejectPct: real('gap_reject_pct').notNull().default(0.03),
-  spreadLimitPctUs: real('spread_limit_pct_us').notNull().default(0.0025),
-  spreadLimitPctJp: real('spread_limit_pct_jp').notNull().default(0.006),
-  bridgeRunMode: text('bridge_run_mode').notNull().default('auto'),
-  updatedAt: text('updated_at').notNull(),
-})
+export const globalConfig = sqliteTable(
+  'global_config',
+  {
+    id: text('id').primaryKey(), // 'default' 固定
+    dryRun: integer('dry_run', { mode: 'boolean' }).notNull().default(true),
+    tradingEnabled: integer('trading_enabled', { mode: 'boolean' }).notNull().default(false),
+    marketHoursCheck: integer('market_hours_check', { mode: 'boolean' }).notNull().default(false),
+    maxOrderNotional: real('max_order_notional').notNull().default(100),
+    drawdownKillThreshold: real('drawdown_kill_threshold').notNull().default(-0.02),
+    staleQuoteMs: integer('stale_quote_ms').notNull().default(900000),
+    gapRejectPct: real('gap_reject_pct').notNull().default(0.03),
+    spreadLimitPctUs: real('spread_limit_pct_us').notNull().default(0.0025),
+    spreadLimitPctJp: real('spread_limit_pct_jp').notNull().default(0.006),
+    bridgeRunMode: text('bridge_run_mode').notNull().default('auto'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    // DB レベルで typo / 桁違いの UPDATE を弾く。上限値は POC としての上限
+    // (例: 1 回の発注で $10M は明らかに誤入力) を想定。
+    maxOrderNotionalRange: check(
+      'global_config_max_order_notional_range',
+      sql`${t.maxOrderNotional} > 0 AND ${t.maxOrderNotional} <= 10000000`,
+    ),
+    drawdownKillThresholdRange: check(
+      'global_config_drawdown_kill_threshold_range',
+      sql`${t.drawdownKillThreshold} >= -1 AND ${t.drawdownKillThreshold} <= 0`,
+    ),
+    staleQuoteMsRange: check(
+      'global_config_stale_quote_ms_range',
+      sql`${t.staleQuoteMs} >= 0`,
+    ),
+    gapRejectPctRange: check(
+      'global_config_gap_reject_pct_range',
+      sql`${t.gapRejectPct} >= 0 AND ${t.gapRejectPct} <= 1`,
+    ),
+    spreadLimitPctUsRange: check(
+      'global_config_spread_limit_pct_us_range',
+      sql`${t.spreadLimitPctUs} >= 0 AND ${t.spreadLimitPctUs} <= 1`,
+    ),
+    spreadLimitPctJpRange: check(
+      'global_config_spread_limit_pct_jp_range',
+      sql`${t.spreadLimitPctJp} >= 0 AND ${t.spreadLimitPctJp} <= 1`,
+    ),
+    bridgeRunModeEnum: check(
+      'global_config_bridge_run_mode_enum',
+      sql`${t.bridgeRunMode} IN ('auto', 'always-on', 'disabled')`,
+    ),
+  }),
+)
 
 export type GlobalConfigRow = typeof globalConfig.$inferSelect
 export type GlobalConfigInsert = typeof globalConfig.$inferInsert

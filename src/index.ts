@@ -72,8 +72,15 @@ export default {
               message: error instanceof Error ? error.message : String(error),
             }),
           )
-          // D1 読めなかったら env fallback (keepBridgeAlive が env.BRIDGE_RUN_MODE を見る)
-          return keepBridgeAlive(env, { requestId })
+          // D1 binding がある deploy は "config が読めるはず" が正の状態。
+          // そこで読めなかった場合は fail-closed で bridge を停止する
+          // (runMode='disabled')。env-only (D1 未 bind) の legacy 環境は
+          // 従来どおり env.BRIDGE_RUN_MODE / default 'auto' に寄せる。
+          const isDbBound = env.DB !== undefined
+          return keepBridgeAlive(env, {
+            requestId,
+            ...(isDbBound ? { runMode: 'disabled' } : {}),
+          })
         },
       ),
     )

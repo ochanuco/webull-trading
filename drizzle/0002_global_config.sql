@@ -10,5 +10,12 @@ CREATE TABLE `global_config` (
 	`spread_limit_pct_us` real DEFAULT 0.0025 NOT NULL,
 	`spread_limit_pct_jp` real DEFAULT 0.006 NOT NULL,
 	`bridge_run_mode` text DEFAULT 'auto' NOT NULL,
-	`updated_at` text NOT NULL
+	`updated_at` text NOT NULL,
+	CONSTRAINT "global_config_max_order_notional_range" CHECK("global_config"."max_order_notional" > 0 AND "global_config"."max_order_notional" <= 10000000),
+	CONSTRAINT "global_config_drawdown_kill_threshold_range" CHECK("global_config"."drawdown_kill_threshold" >= -1 AND "global_config"."drawdown_kill_threshold" <= 0),
+	CONSTRAINT "global_config_stale_quote_ms_range" CHECK("global_config"."stale_quote_ms" >= 0),
+	CONSTRAINT "global_config_gap_reject_pct_range" CHECK("global_config"."gap_reject_pct" >= 0 AND "global_config"."gap_reject_pct" <= 1),
+	CONSTRAINT "global_config_spread_limit_pct_us_range" CHECK("global_config"."spread_limit_pct_us" >= 0 AND "global_config"."spread_limit_pct_us" <= 1),
+	CONSTRAINT "global_config_spread_limit_pct_jp_range" CHECK("global_config"."spread_limit_pct_jp" >= 0 AND "global_config"."spread_limit_pct_jp" <= 1),
+	CONSTRAINT "global_config_bridge_run_mode_enum" CHECK("global_config"."bridge_run_mode" IN ('auto', 'always-on', 'disabled'))
 );
