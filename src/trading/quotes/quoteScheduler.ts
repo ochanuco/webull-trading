@@ -1,5 +1,5 @@
 import type { Env } from '../../config/env'
-import { parseCsvEnv } from '../../config/env'
+import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import {
   groupSymbolsByCategory,
   WebullQuoteClient,
@@ -33,7 +33,8 @@ interface RunQuoteFeedOptions {
 export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteRunSummary> {
   const { env } = options
   const now = options.now ?? (() => new Date())
-  const symbols = parseCsvEnv(env.ALLOWED_SYMBOLS)
+  const universe = await loadSymbolUniverse(env)
+  const symbols = universe.allowedSymbols
 
   const summary: QuoteRunSummary = { fetched: 0, persisted: 0, skipped: [], errors: [] }
   if (symbols.length === 0) return summary

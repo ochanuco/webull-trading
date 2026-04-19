@@ -2,14 +2,12 @@ import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import {
   parseBooleanEnv,
-  parseCsvEnv,
   parseDrawdownKillThreshold,
-  parseInversePairs,
   parseNumberEnv,
   parseOptionalNonNegativeNumberEnv,
   parseOptionalPositiveNumber,
-  parseSymbolNotionalMap,
 } from '../config/env'
+import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
 import { ValidationError } from '../shared/errors'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
@@ -30,17 +28,25 @@ interface TradeRequest {
   sellAbove: number
 }
 
-export const trade = new Hono<AppBindings>().post('/decide', async (c) => {
-  const request = await parseTradeRequest(c.req.json())
-  const service = createTradingService(request, c.env)
-  return c.json(service.decide(request, readTradingConfig(c.env), { requestId: c.get('requestId') }))
-}).post('/execute', async (c) => {
-  const request = await parseTradeRequest(c.req.json())
-  const service = createTradingService(request, c.env)
-  return c.json(
-    await service.executeTrade(request, readTradingConfig(c.env), { requestId: c.get('requestId') }),
-  )
-})
+export const trade = new Hono<AppBindings>()
+  .post('/decide', async (c) => {
+    const request = await parseTradeRequest(c.req.json())
+    const universe = await loadSymbolUniverse(c.env)
+    const service = createTradingService(request, c.env, universe)
+    return c.json(
+      service.decide(request, readTradingConfig(c.env, universe), { requestId: c.get('requestId') }),
+    )
+  })
+  .post('/execute', async (c) => {
+    const request = await parseTradeRequest(c.req.json())
+    const universe = await loadSymbolUniverse(c.env)
+    const service = createTradingService(request, c.env, universe)
+    return c.json(
+      await service.executeTrade(request, readTradingConfig(c.env, universe), {
+        requestId: c.get('requestId'),
+      }),
+    )
+  })
 
 async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeRequest> {
   const body = asRecord(await payload)
@@ -69,13 +75,13 @@ export function createTradingService(
     DRY_RUN?: string
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
     PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
-    INVERSE_PAIRS?: string
     SPREAD_LIMIT_PCT_US?: string
     SPREAD_LIMIT_PCT_JP?: string
     STALE_QUOTE_MS?: string
     GAP_REJECT_PCT?: string
     DRAWDOWN_KILL_THRESHOLD?: string
   } & WebullClientEnv,
+  universe: SymbolUniverse,
 ): TradingService {
   const execution = parseBooleanEnv(env.DRY_RUN, true)
     ? new MockExecution()
@@ -93,7 +99,7 @@ export function createTradingService(
       portfolioStore: env.PORTFOLIO_STATE
         ? new PortfolioStateClient(env.PORTFOLIO_STATE)
         : undefined,
-      inversePairs: parseInversePairs(env.INVERSE_PAIRS),
+      inversePairs: universe.inversePairs,
       spreadLimits: {
         US: spreadUsRaw !== undefined ? spreadUsRaw / 100 : 0.0025,
         JP: spreadJpRaw !== undefined ? spreadJpRaw / 100 : 0.006,
@@ -105,20 +111,21 @@ export function createTradingService(
   )
 }
 
-function readTradingConfig(env: {
-  DRY_RUN?: string
-  TRADING_ENABLED?: string
-  ALLOWED_SYMBOLS: string
-  MAX_ORDER_NOTIONAL: string
-  SYMBOL_MAX_NOTIONAL?: string
-  MARKET_HOURS_CHECK?: string
-}): TradingConfig {
+function readTradingConfig(
+  env: {
+    DRY_RUN?: string
+    TRADING_ENABLED?: string
+    MAX_ORDER_NOTIONAL: string
+    MARKET_HOURS_CHECK?: string
+  },
+  universe: SymbolUniverse,
+): TradingConfig {
   return {
     dryRun: parseBooleanEnv(env.DRY_RUN, true),
     tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED, false),
-    allowedSymbols: parseCsvEnv(env.ALLOWED_SYMBOLS).map((symbol) => symbol.toUpperCase()),
+    allowedSymbols: universe.allowedSymbols,
     maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL'),
-    symbolMaxNotional: parseSymbolNotionalMap(env.SYMBOL_MAX_NOTIONAL),
+    symbolMaxNotional: universe.symbolMaxNotional,
     marketHoursCheck: parseBooleanEnv(env.MARKET_HOURS_CHECK, false),
   }
 }
