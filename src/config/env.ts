@@ -3,12 +3,14 @@ import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
-  DRY_RUN?: string
-  TRADING_ENABLED?: string
-  ALLOWED_SYMBOLS: string
-  MAX_ORDER_NOTIONAL: string
   EVENT_INGEST_SECRET: string
   SYMBOL_STATE: DurableObjectNamespace<SymbolStateDO>
+  // 以下 Phase D (#70) 以降は D1 `global_config` / `symbol_config` に移行済。
+  // wrangler.jsonc から vars は削除済、env 側への供給は "test 用の fallback" 扱い。
+  DRY_RUN?: string
+  TRADING_ENABLED?: string
+  ALLOWED_SYMBOLS?: string
+  MAX_ORDER_NOTIONAL?: string
 }
 
 /**
