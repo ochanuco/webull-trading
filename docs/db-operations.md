@@ -112,3 +112,37 @@ pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
   --command "SELECT * FROM inverse_pairs"
 ```
 
+## global_config 運用 (#70 Phase D)
+
+singleton row (`id = 'default'`) で runtime な risk / lifecycle knob を保持。env var 側からは削除済み。
+
+### 初期シード
+
+```bash
+pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
+  --file=docs/seed/global_config.sql
+```
+
+### 運用サンプル
+
+```sql
+-- 実発注 ON に切替 (慎重に)
+UPDATE global_config SET dry_run = 0, trading_enabled = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE id = 'default';
+
+-- 緊急 kill-switch
+UPDATE global_config SET trading_enabled = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE id = 'default';
+
+-- drawdown 閾値を -3% に緩和
+UPDATE global_config SET drawdown_kill_threshold = -0.03, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE id = 'default';
+
+-- bridge を週末も常駐させる (値: auto / always-on / disabled)
+UPDATE global_config SET bridge_run_mode = 'always-on', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE id = 'default';
+
+-- 現状確認
+SELECT dry_run, trading_enabled, max_order_notional, drawdown_kill_threshold, bridge_run_mode
+FROM global_config WHERE id = 'default';
+```

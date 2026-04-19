@@ -6,12 +6,6 @@
   "observability": {
     "enabled": true
   },
-  "vars": {
-    "DRY_RUN": "true",
-    "TRADING_ENABLED": "false",
-    "MARKET_HOURS_CHECK": "false",
-    "BRIDGE_RUN_MODE": "auto"
-  },
   "durable_objects": {
     "bindings": [
       { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
@@ -37,12 +31,6 @@
   "env": {
     "staging": {
       "name": "webull-trading-staging",
-      "vars": {
-        "DRY_RUN": "true",
-        "TRADING_ENABLED": "false",
-        "MARKET_HOURS_CHECK": "false",
-        "BRIDGE_RUN_MODE": "auto"
-      },
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
@@ -68,12 +56,6 @@
     },
     "production": {
       "name": "webull-trading-production",
-      "vars": {
-        "DRY_RUN": "true",
-        "TRADING_ENABLED": "false",
-        "MARKET_HOURS_CHECK": "false",
-        "BRIDGE_RUN_MODE": "auto"
-      },
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },

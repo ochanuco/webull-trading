@@ -1,5 +1,6 @@
 import { createApp } from './app'
 import type { Env } from './config/env'
+import { loadGlobalConfigFrom } from './infrastructure/db/globalConfigLoader'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
@@ -60,6 +61,28 @@ export default {
         },
       ),
     )
-    ctx.waitUntil(keepBridgeAlive(env, { requestId }))
+    ctx.waitUntil(
+      loadGlobalConfigFrom(env).then(
+        (global) => keepBridgeAlive(env, { requestId, runMode: global.bridgeRunMode }),
+        (error) => {
+          console.error(
+            JSON.stringify({
+              event: 'global_config_load_error',
+              requestId,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          )
+          // D1 binding がある deploy は "config が読めるはず" が正の状態。
+          // そこで読めなかった場合は fail-closed で bridge を停止する
+          // (runMode='disabled')。env-only (D1 未 bind) の legacy 環境は
+          // 従来どおり env.BRIDGE_RUN_MODE / default 'auto' に寄せる。
+          const isDbBound = env.DB !== undefined
+          return keepBridgeAlive(env, {
+            requestId,
+            ...(isDbBound ? { runMode: 'disabled' } : {}),
+          })
+        },
+      ),
+    )
   },
 }
