@@ -6,7 +6,17 @@ export interface GlobalConfigSnapshot {
   dryRun: boolean
   tradingEnabled: boolean
   marketHoursCheck: boolean
+  /**
+   * @deprecated Phase E で通貨別 `maxOrderNotionalUsd` / `maxOrderNotionalJpy`
+   * に移行。互換目的でロード時も読み出しているが Risk gate は通貨別値を使う。
+   */
   maxOrderNotional: number
+  maxOrderNotionalUsd: number
+  maxOrderNotionalJpy: number
+  /** 総資本 USD。null なら portfolio exposure check を skip。 */
+  totalCapitalUsd: number | null
+  totalCapitalJpy: number | null
+  maxPortfolioExposurePct: number
   drawdownKillThreshold: number
   staleQuoteMs: number
   gapRejectPct: number
@@ -25,6 +35,11 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   tradingEnabled: false,
   marketHoursCheck: false,
   maxOrderNotional: 100,
+  maxOrderNotionalUsd: 2000,
+  maxOrderNotionalJpy: 100000,
+  totalCapitalUsd: null,
+  totalCapitalJpy: null,
+  maxPortfolioExposurePct: 0.6,
   drawdownKillThreshold: -0.02,
   staleQuoteMs: 15 * 60 * 1_000,
   gapRejectPct: 0.03,
@@ -44,6 +59,11 @@ export async function loadGlobalConfig(
     tradingEnabled: row.tradingEnabled,
     marketHoursCheck: row.marketHoursCheck,
     maxOrderNotional: row.maxOrderNotional,
+    maxOrderNotionalUsd: row.maxOrderNotionalUsd,
+    maxOrderNotionalJpy: row.maxOrderNotionalJpy,
+    totalCapitalUsd: row.totalCapitalUsd,
+    totalCapitalJpy: row.totalCapitalJpy,
+    maxPortfolioExposurePct: row.maxPortfolioExposurePct,
     drawdownKillThreshold: row.drawdownKillThreshold,
     staleQuoteMs: row.staleQuoteMs,
     gapRejectPct: row.gapRejectPct,

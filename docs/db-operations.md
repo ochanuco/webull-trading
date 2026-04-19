@@ -146,3 +146,47 @@ WHERE id = 'default';
 SELECT dry_run, trading_enabled, max_order_notional, drawdown_kill_threshold, bridge_run_mode
 FROM global_config WHERE id = 'default';
 ```
+
+## currency + budget (#76 Phase E)
+
+`symbol_config.currency` と `global_config.max_order_notional_{usd,jpy}` で通貨別の注文上限を管理する。`TradingConfig.maxOrderNotional` は route handler で symbol の currency に応じて USD 値か JPY 値を選ぶ。
+
+### 銘柄追加時は currency を明示
+
+```sql
+-- US 銘柄 (default 'USD' でも可だが明示推奨)
+INSERT INTO symbol_config (symbol, name, market, currency, active, max_notional, updated_at)
+VALUES ('SOXL', 'Direxion Daily Semiconductor Bull 3X', 'US', 'USD', 1, 650,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+-- JP 銘柄
+INSERT INTO symbol_config (symbol, name, market, currency, active, max_notional, updated_at)
+VALUES ('6301', '小松製作所', 'JP', 'JPY', 1, 100000,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+```
+
+### 通貨別 cap 調整
+
+```sql
+-- USD 1 注文上限を $700 に
+UPDATE global_config SET max_order_notional_usd = 700,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 'default';
+
+-- JPY 1 注文上限を ¥15万に
+UPDATE global_config SET max_order_notional_jpy = 150000,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 'default';
+```
+
+### 総資本 (future: exposure tracking と連動)
+
+```sql
+-- 予算 20万円 × 2 (海外 + JP)
+UPDATE global_config SET
+  total_capital_usd = 1333,     -- ≒ ¥20万 / 150
+  total_capital_jpy = 200000,
+  max_portfolio_exposure_pct = 0.6,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE id = 'default';
+```
+
+**注: `total_capital_*` / `max_portfolio_exposure_pct` は schema に入れてあるが、現時点で exposure tracking 側 (PortfolioStateDO の open_exposure) が未実装。gate に反映されるのは follow-up issue 完了後。**

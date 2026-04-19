@@ -55,14 +55,21 @@ export async function loadGlobalConfigFrom(env: GlobalConfigEnv): Promise<Loaded
     'SPREAD_LIMIT_PCT_JP',
   )
 
+  const maxOrderNotional =
+    env.MAX_ORDER_NOTIONAL !== undefined
+      ? parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL')
+      : GLOBAL_CONFIG_DEFAULTS.maxOrderNotional
+
   return {
     dryRun: parseBooleanEnv(env.DRY_RUN, GLOBAL_CONFIG_DEFAULTS.dryRun),
     tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED, GLOBAL_CONFIG_DEFAULTS.tradingEnabled),
     marketHoursCheck: parseBooleanEnv(env.MARKET_HOURS_CHECK, GLOBAL_CONFIG_DEFAULTS.marketHoursCheck),
-    maxOrderNotional:
-      env.MAX_ORDER_NOTIONAL !== undefined
-        ? parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL')
-        : GLOBAL_CONFIG_DEFAULTS.maxOrderNotional,
+    maxOrderNotional,
+    maxOrderNotionalUsd: GLOBAL_CONFIG_DEFAULTS.maxOrderNotionalUsd,
+    maxOrderNotionalJpy: GLOBAL_CONFIG_DEFAULTS.maxOrderNotionalJpy,
+    totalCapitalUsd: GLOBAL_CONFIG_DEFAULTS.totalCapitalUsd,
+    totalCapitalJpy: GLOBAL_CONFIG_DEFAULTS.totalCapitalJpy,
+    maxPortfolioExposurePct: GLOBAL_CONFIG_DEFAULTS.maxPortfolioExposurePct,
     drawdownKillThreshold: parseDrawdownKillThreshold(env.DRAWDOWN_KILL_THRESHOLD),
     staleQuoteMs: parseOptionalPositiveNumber(
       env.STALE_QUOTE_MS,
