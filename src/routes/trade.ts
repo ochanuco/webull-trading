@@ -1,12 +1,6 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
-import {
-  parseBooleanEnv,
-  parseDrawdownKillThreshold,
-  parseNumberEnv,
-  parseOptionalNonNegativeNumberEnv,
-  parseOptionalPositiveNumber,
-} from '../config/env'
+import { loadGlobalConfigFrom, type LoadedGlobalConfig } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
 import { ValidationError } from '../shared/errors'
@@ -31,18 +25,24 @@ interface TradeRequest {
 export const trade = new Hono<AppBindings>()
   .post('/decide', async (c) => {
     const request = await parseTradeRequest(c.req.json())
-    const universe = await loadSymbolUniverse(c.env)
-    const service = createTradingService(request, c.env, universe)
+    const [universe, global] = await Promise.all([
+      loadSymbolUniverse(c.env),
+      loadGlobalConfigFrom(c.env),
+    ])
+    const service = createTradingService(request, c.env, universe, global)
     return c.json(
-      service.decide(request, readTradingConfig(c.env, universe), { requestId: c.get('requestId') }),
+      service.decide(request, toTradingConfig(universe, global), { requestId: c.get('requestId') }),
     )
   })
   .post('/execute', async (c) => {
     const request = await parseTradeRequest(c.req.json())
-    const universe = await loadSymbolUniverse(c.env)
-    const service = createTradingService(request, c.env, universe)
+    const [universe, global] = await Promise.all([
+      loadSymbolUniverse(c.env),
+      loadGlobalConfigFrom(c.env),
+    ])
+    const service = createTradingService(request, c.env, universe, global)
     return c.json(
-      await service.executeTrade(request, readTradingConfig(c.env, universe), {
+      await service.executeTrade(request, toTradingConfig(universe, global), {
         requestId: c.get('requestId'),
       }),
     )
@@ -72,23 +72,15 @@ async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeReques
 export function createTradingService(
   request: TradeRequest,
   env: {
-    DRY_RUN?: string
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
     PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
-    SPREAD_LIMIT_PCT_US?: string
-    SPREAD_LIMIT_PCT_JP?: string
-    STALE_QUOTE_MS?: string
-    GAP_REJECT_PCT?: string
-    DRAWDOWN_KILL_THRESHOLD?: string
   } & WebullClientEnv,
   universe: SymbolUniverse,
+  global: LoadedGlobalConfig,
 ): TradingService {
-  const execution = parseBooleanEnv(env.DRY_RUN, true)
+  const execution = global.dryRun
     ? new MockExecution()
     : new WebullExecution(createWebullHttpClient(env))
-
-  const spreadUsRaw = parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_US, 'SPREAD_LIMIT_PCT_US')
-  const spreadJpRaw = parseOptionalNonNegativeNumberEnv(env.SPREAD_LIMIT_PCT_JP, 'SPREAD_LIMIT_PCT_JP')
 
   return new TradingService(
     new FixedRuleStrategy(request.buyBelow, request.sellAbove),
@@ -101,32 +93,24 @@ export function createTradingService(
         : undefined,
       inversePairs: universe.inversePairs,
       spreadLimits: {
-        US: spreadUsRaw !== undefined ? spreadUsRaw / 100 : 0.0025,
-        JP: spreadJpRaw !== undefined ? spreadJpRaw / 100 : 0.006,
+        US: global.spreadLimitPctUs,
+        JP: global.spreadLimitPctJp,
       },
-      staleQuoteMs: parseOptionalPositiveNumber(env.STALE_QUOTE_MS, 15 * 60 * 1_000, 'STALE_QUOTE_MS'),
-      gapRejectPct: parseOptionalPositiveNumber(env.GAP_REJECT_PCT, 0.03, 'GAP_REJECT_PCT'),
-      drawdownKillThreshold: parseDrawdownKillThreshold(env.DRAWDOWN_KILL_THRESHOLD),
+      staleQuoteMs: global.staleQuoteMs,
+      gapRejectPct: global.gapRejectPct,
+      drawdownKillThreshold: global.drawdownKillThreshold,
     },
   )
 }
 
-function readTradingConfig(
-  env: {
-    DRY_RUN?: string
-    TRADING_ENABLED?: string
-    MAX_ORDER_NOTIONAL: string
-    MARKET_HOURS_CHECK?: string
-  },
-  universe: SymbolUniverse,
-): TradingConfig {
+function toTradingConfig(universe: SymbolUniverse, global: LoadedGlobalConfig): TradingConfig {
   return {
-    dryRun: parseBooleanEnv(env.DRY_RUN, true),
-    tradingEnabled: parseBooleanEnv(env.TRADING_ENABLED, false),
+    dryRun: global.dryRun,
+    tradingEnabled: global.tradingEnabled,
     allowedSymbols: universe.allowedSymbols,
-    maxOrderNotional: parseNumberEnv(env.MAX_ORDER_NOTIONAL, 'MAX_ORDER_NOTIONAL'),
+    maxOrderNotional: global.maxOrderNotional,
     symbolMaxNotional: universe.symbolMaxNotional,
-    marketHoursCheck: parseBooleanEnv(env.MARKET_HOURS_CHECK, false),
+    marketHoursCheck: global.marketHoursCheck,
   }
 }
 

@@ -80,3 +80,30 @@ export const inversePairs = sqliteTable('inverse_pairs', {
 
 export type InversePairRow = typeof inversePairs.$inferSelect
 export type InversePairInsert = typeof inversePairs.$inferInsert
+
+/**
+ * Singleton global risk / lifecycle config。`id = 'default'` の 1 行のみ。
+ * 運用者が `wrangler d1 execute` で UPDATE して runtime 変更する (実発注
+ * ON / drawdown 閾値 / kill-switch 等)。env var 側と完全一致のフィールド
+ * を持ち、Worker 起動時に loadGlobalConfig で取得する。
+ *
+ * bridge_run_mode は 'auto' / 'always-on' / 'disabled' の文字列。
+ * drawdown_kill_threshold は負の float (例: -0.02 = -2%)。
+ */
+export const globalConfig = sqliteTable('global_config', {
+  id: text('id').primaryKey(), // 'default' 固定
+  dryRun: integer('dry_run', { mode: 'boolean' }).notNull().default(true),
+  tradingEnabled: integer('trading_enabled', { mode: 'boolean' }).notNull().default(false),
+  marketHoursCheck: integer('market_hours_check', { mode: 'boolean' }).notNull().default(false),
+  maxOrderNotional: real('max_order_notional').notNull().default(100),
+  drawdownKillThreshold: real('drawdown_kill_threshold').notNull().default(-0.02),
+  staleQuoteMs: integer('stale_quote_ms').notNull().default(900000),
+  gapRejectPct: real('gap_reject_pct').notNull().default(0.03),
+  spreadLimitPctUs: real('spread_limit_pct_us').notNull().default(0.0025),
+  spreadLimitPctJp: real('spread_limit_pct_jp').notNull().default(0.006),
+  bridgeRunMode: text('bridge_run_mode').notNull().default('auto'),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export type GlobalConfigRow = typeof globalConfig.$inferSelect
+export type GlobalConfigInsert = typeof globalConfig.$inferInsert

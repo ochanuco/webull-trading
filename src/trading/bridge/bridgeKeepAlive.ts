@@ -17,6 +17,12 @@ export interface BridgeKeepAliveEnv {
 export interface KeepBridgeAliveOptions {
   /** Correlates every log line emitted by a single cron tick. */
   requestId?: string
+  /**
+   * Override the env-derived run mode. When the caller already loaded the
+   * global config (`global_config.bridge_run_mode`), pass it here so we don't
+   * re-read `env.BRIDGE_RUN_MODE` (which becomes stale after Phase D).
+   */
+  runMode?: string
 }
 
 /**
@@ -44,7 +50,7 @@ export async function keepBridgeAlive(
     return
   }
 
-  const mode = parseBridgeRunMode(env.BRIDGE_RUN_MODE)
+  const mode = parseBridgeRunMode(options.runMode ?? env.BRIDGE_RUN_MODE)
 
   if (!isBridgeActive(new Date(), mode)) {
     await stopContainer(env, {

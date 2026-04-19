@@ -1,5 +1,6 @@
 import { createApp } from './app'
 import type { Env } from './config/env'
+import { loadGlobalConfigFrom } from './infrastructure/db/globalConfigLoader'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
@@ -60,6 +61,21 @@ export default {
         },
       ),
     )
-    ctx.waitUntil(keepBridgeAlive(env, { requestId }))
+    ctx.waitUntil(
+      loadGlobalConfigFrom(env).then(
+        (global) => keepBridgeAlive(env, { requestId, runMode: global.bridgeRunMode }),
+        (error) => {
+          console.error(
+            JSON.stringify({
+              event: 'global_config_load_error',
+              requestId,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          )
+          // D1 読めなかったら env fallback (keepBridgeAlive が env.BRIDGE_RUN_MODE を見る)
+          return keepBridgeAlive(env, { requestId })
+        },
+      ),
+    )
   },
 }
