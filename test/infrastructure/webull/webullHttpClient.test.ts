@@ -32,6 +32,32 @@ function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClie
 }
 
 describe('WebullHttpClient', () => {
+  it('signs using pathname only (query stays in canonical sorted pairs, not the path prefix)', async () => {
+    // Regression: previously we passed `pathname + search` to auth.createHeaders,
+    // which duplicated `account_id` in the canonical string (once inside the path,
+    // once in the sorted pairs) and triggered Webull 401 UNAUTHORIZED.
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ client_order_id: 'c', order_id: 'o' }), { status: 200 }),
+    )
+    const auth = new WebullAuth({ appKey: 'app-key', appSecret: 'app-secret' })
+    const spy = vi.spyOn(auth, 'createHeaders')
+    const client = new WebullHttpClient({
+      auth,
+      accountId: 'acct-1',
+      baseUrl: 'https://broker.example.test',
+      retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 2, jitter: 0 },
+      fetchFn: fetchMock,
+    })
+
+    await client.placeOrder(intent)
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0]![0]).toMatchObject({
+      path: '/openapi/account/orders/place',
+      query: { account_id: 'acct-1' },
+    })
+  })
+
   it('places an order via the v2 endpoint with the expected body and auth headers', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
