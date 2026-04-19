@@ -88,7 +88,7 @@ export class WebullHttpClient {
     try {
       authHeaders = await this.options.auth.createHeaders({
         method,
-        path: resolvedUrl.pathname + resolvedUrl.search,
+        path: resolvedUrl.pathname,
         query,
         body: payload,
         host: resolvedUrl.host,
