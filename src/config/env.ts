@@ -5,12 +5,6 @@ export interface Env {
   BASIC_AUTH_PASSWORD: string
   EVENT_INGEST_SECRET: string
   SYMBOL_STATE: DurableObjectNamespace<SymbolStateDO>
-  // 以下 Phase D (#70) 以降は D1 `global_config` / `symbol_config` に移行済。
-  // wrangler.jsonc から vars は削除済、env 側への供給は "test 用の fallback" 扱い。
-  DRY_RUN?: string
-  TRADING_ENABLED?: string
-  ALLOWED_SYMBOLS?: string
-  MAX_ORDER_NOTIONAL?: string
 }
 
 /**
@@ -60,11 +54,6 @@ export interface Env {
   WEBULL_QUOTE_PATH?: string
 }
 
-// Trading risk config (Phase 5 append)
-export interface Env {
-  SYMBOL_MAX_NOTIONAL?: string
-  MARKET_HOURS_CHECK?: string
-}
 
 // Pullback strategy per-symbol rule overrides (Phase 2c append)
 export interface Env {
@@ -222,47 +211,20 @@ export function parseInversePairs(value: string | undefined): Record<string, str
   }
 }
 
-// Risk correlation config (Phase 2b append)
-export interface Env {
-  INVERSE_PAIRS?: string
-}
-
-// Spread guard config (Phase 2b #38-D append)
-export interface Env {
-  SPREAD_LIMIT_PCT_US?: string
-  SPREAD_LIMIT_PCT_JP?: string
-}
-
-// Halt / price-band / gap config (#38-C append)
-export interface Env {
-  STALE_QUOTE_MS?: string
-  GAP_REJECT_PCT?: string
-}
-
-// Drawdown kill switch (#38-B append)
+// PortfolioStateDO binding (#38-B)
 import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
 
 export interface Env {
   PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
-  /**
-   * Daily drawdown kill threshold, as a fraction of day-start equity. Parsed as
-   * a negative float (e.g. `"-0.02"`). Default -0.02 when unset or malformed.
-   */
-  DRAWDOWN_KILL_THRESHOLD?: string
 }
 
-// Bridge container binding (#33 append)
+// Bridge container binding (#33)
 import type { BridgeContainer } from '../trading/bridge/BridgeContainer'
 
 export interface Env {
   BRIDGE?: DurableObjectNamespace<BridgeContainer>
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
-  /**
-   * Bridge lifecycle policy — see {@link BridgeRunMode} (`always-on` /
-   * `disabled` / `auto`). 省略時は `auto`: 平日 UTC のみ起動。
-   */
-  BRIDGE_RUN_MODE?: string
 }
 
 /**

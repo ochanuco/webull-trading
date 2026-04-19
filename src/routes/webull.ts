@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
-import { parseBooleanEnv } from '../config/env'
+import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import type { WebullPlaceOrderResponseDto } from '../infrastructure/webull/dto'
 import { logPostSubmit, logPreSubmit } from '../infrastructure/logger/tradeJournal'
@@ -13,7 +13,8 @@ export const webull = new Hono<AppBindings>().post('/order/place', async (c) => 
 
   logPreSubmit({ requestId, clientOrderId: intent.clientOrderId, intent })
 
-  if (parseBooleanEnv(c.env.DRY_RUN, true)) {
+  const global = await loadGlobalConfigFrom(c.env)
+  if (global.dryRun) {
     const dto = createDryRunResponse(intent)
     logPostSubmit({
       requestId,

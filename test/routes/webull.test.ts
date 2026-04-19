@@ -1,13 +1,15 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
+import { loadGlobalConfigFrom } from '../../src/infrastructure/db/globalConfigLoader'
+import { makeGlobalConfigSnapshot } from '../helpers/configFixtures'
+
+vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
+  loadGlobalConfigFrom: vi.fn(),
+}))
 
 const baseEnv = {
   BASIC_AUTH_USER: 'admin',
   BASIC_AUTH_PASSWORD: 'secret',
-  DRY_RUN: 'true',
-  TRADING_ENABLED: 'true',
-  ALLOWED_SYMBOLS: 'SOXL,SOXS',
-  MAX_ORDER_NOTIONAL: '100',
   EVENT_INGEST_SECRET: 'change-me',
 }
 
@@ -16,8 +18,13 @@ const authHeader = {
 }
 
 describe('webull routes', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.resetAllMocks()
   })
 
   it('returns 401 for /webull/* without auth', async () => {
@@ -43,7 +50,7 @@ describe('webull routes', () => {
     expect(response.status).toBe(401)
   })
 
-  it('returns a synthetic response when DRY_RUN=true', async () => {
+  it('returns a synthetic response when dryRun=true (D1 default)', async () => {
     const fetchMock = vi.fn<typeof fetch>()
     vi.stubGlobal('fetch', fetchMock)
     const app = createApp()
@@ -78,7 +85,10 @@ describe('webull routes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('calls Webull and returns the raw broker DTO on success', async () => {
+  it('calls Webull and returns the raw broker DTO when dryRun=false', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ dryRun: false }),
+    )
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -108,7 +118,6 @@ describe('webull routes', () => {
       },
       {
         ...baseEnv,
-        DRY_RUN: 'false',
         WEBULL_APP_KEY: 'app-key',
         WEBULL_APP_SECRET: 'app-secret',
         WEBULL_ACCOUNT_ID: 'acct-1',

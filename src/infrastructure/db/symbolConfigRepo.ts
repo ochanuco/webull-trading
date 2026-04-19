@@ -42,9 +42,8 @@ export async function loadSymbolConfig(
 
 /**
  * Returns a bidirectional inverse-pair map (SOXL→SOXS AND SOXS→SOXL even if
- * only one direction is stored). Mirrors the behaviour of the previous
- * `parseInversePairs` env parser so TradingService keeps working without
- * changing its gate logic.
+ * only one direction is stored). TradingService's inverse-pair gate expects
+ * both directions populated.
  */
 export async function loadInversePairs(
   db: DrizzleD1Database,
