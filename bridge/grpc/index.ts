@@ -150,7 +150,19 @@ function getRetryDelayMs({
   return Math.max(0, Math.round(exponentialDelay * jitterFactor))
 }
 
-if (import.meta.main) {
+// `import.meta.main` is Node 24.10+ only; our Cloudflare Container image uses an
+// older 24.x tag where it is undefined, which caused the entry to be skipped
+// and Node to exit immediately (Cloudflare reports this as `exitCode: 1 reason:
+// "exit"`). Use the canonical pathToFileURL comparison so tests (which import
+// named exports) stay inert while the container entry still fires.
+const { pathToFileURL } = await import('node:url')
+const isMain =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (isMain) {
+  console.log(JSON.stringify({ event: 'bridge_node_starting', at: new Date().toISOString() }))
+
   const eventIngestUrl = process.env.EVENT_INGEST_URL
   const ingestSecret = process.env.EVENT_INGEST_SECRET
   const grpcEndpoint = process.env.WEBULL_GRPC_ENDPOINT
