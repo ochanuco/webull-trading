@@ -56,6 +56,14 @@
           "image": "./Dockerfile",
           "max_instances": 1
         }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "webull-trading-staging",
+          "database_id": "cbc199f0-5ed8-40b0-b619-6bdb43a400e3",
+          "migrations_dir": "drizzle"
+        }
       ]
     },
     "production": {
@@ -78,6 +86,14 @@
           "class_name": "BridgeContainer",
           "image": "./Dockerfile",
           "max_instances": 1
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "webull-trading-production",
+          "database_id": "REPLACE_WITH_PRODUCTION_ID",
+          "migrations_dir": "drizzle"
         }
       ]
     }

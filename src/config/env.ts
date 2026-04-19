@@ -323,3 +323,12 @@ export function parseDrawdownKillThreshold(value: string | undefined): number {
   }
   return parsed
 }
+
+// D1 binding (#68 Phase A append)
+export interface Env {
+  /**
+   * D1 database for trade_journal (and eventually symbol_config, global_config).
+   * Optional so existing tests / legacy deploys without D1 keep working.
+   */
+  DB?: D1Database
+}
