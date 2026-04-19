@@ -2,6 +2,8 @@ import { eq } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import { inversePairs, symbolConfig } from './schema'
 
+export type SymbolCurrency = 'USD' | 'JPY'
+
 export interface SymbolConfigSnapshot {
   /** Uppercased symbols where `active = 1`. */
   allowedSymbols: string[]
@@ -11,6 +13,8 @@ export interface SymbolConfigSnapshot {
    * `MAX_ORDER_NOTIONAL`.
    */
   symbolMaxNotional: Record<string, number>
+  /** symbol → currency ('USD' / 'JPY')。Risk gate が global 通貨別 cap を引くのに使う。 */
+  symbolCurrency: Record<string, SymbolCurrency>
 }
 
 /**
@@ -24,21 +28,22 @@ export async function loadSymbolConfig(
 
   const allowedSymbols: string[] = []
   const symbolMaxNotional: Record<string, number> = {}
+  const symbolCurrency: Record<string, SymbolCurrency> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     allowedSymbols.push(symbol)
     if (row.maxNotional !== null && Number.isFinite(row.maxNotional) && row.maxNotional > 0) {
       symbolMaxNotional[symbol] = row.maxNotional
     }
+    symbolCurrency[symbol] = row.currency === 'JPY' ? 'JPY' : 'USD'
   }
-  return { allowedSymbols, symbolMaxNotional }
+  return { allowedSymbols, symbolMaxNotional, symbolCurrency }
 }
 
 /**
  * Returns a bidirectional inverse-pair map (SOXL→SOXS AND SOXS→SOXL even if
- * only one direction is stored). Mirrors the behaviour of the previous
- * `parseInversePairs` env parser so TradingService keeps working without
- * changing its gate logic.
+ * only one direction is stored). TradingService's inverse-pair gate expects
+ * both directions populated.
  */
 export async function loadInversePairs(
   db: DrizzleD1Database,

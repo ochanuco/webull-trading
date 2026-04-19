@@ -31,7 +31,9 @@ export const trade = new Hono<AppBindings>()
     ])
     const service = createTradingService(request, c.env, universe, global)
     return c.json(
-      service.decide(request, toTradingConfig(universe, global), { requestId: c.get('requestId') }),
+      service.decide(request, toTradingConfig(request, universe, global), {
+        requestId: c.get('requestId'),
+      }),
     )
   })
   .post('/execute', async (c) => {
@@ -42,7 +44,7 @@ export const trade = new Hono<AppBindings>()
     ])
     const service = createTradingService(request, c.env, universe, global)
     return c.json(
-      await service.executeTrade(request, toTradingConfig(universe, global), {
+      await service.executeTrade(request, toTradingConfig(request, universe, global), {
         requestId: c.get('requestId'),
       }),
     )
@@ -103,12 +105,23 @@ export function createTradingService(
   )
 }
 
-function toTradingConfig(universe: SymbolUniverse, global: LoadedGlobalConfig): TradingConfig {
+function toTradingConfig(
+  request: TradeRequest,
+  universe: SymbolUniverse,
+  global: LoadedGlobalConfig,
+): TradingConfig {
+  // 通貨別の max_order_notional を symbol の currency で選ぶ。universe に
+  // 未登録の symbol は URL の 4 桁数字ヒューリスティックにフォールバックする
+  // (validation は RiskPolicy の allowedSymbols で別途弾かれる)。
+  const upperSymbol = request.symbol.toUpperCase()
+  const currency = universe.symbolCurrency[upperSymbol] ?? (/^\d{4}$/.test(upperSymbol) ? 'JPY' : 'USD')
+  const maxOrderNotional =
+    currency === 'JPY' ? global.maxOrderNotionalJpy : global.maxOrderNotionalUsd
   return {
     dryRun: global.dryRun,
     tradingEnabled: global.tradingEnabled,
     allowedSymbols: universe.allowedSymbols,
-    maxOrderNotional: global.maxOrderNotional,
+    maxOrderNotional,
     symbolMaxNotional: universe.symbolMaxNotional,
     marketHoursCheck: global.marketHoursCheck,
   }

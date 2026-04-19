@@ -1,15 +1,19 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
+import { loadGlobalConfigFrom } from '../../src/infrastructure/db/globalConfigLoader'
+import { loadSymbolUniverse } from '../../src/infrastructure/db/symbolUniverse'
+import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
+
+vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
+  loadGlobalConfigFrom: vi.fn(),
+}))
+vi.mock('../../src/infrastructure/db/symbolUniverse', () => ({
+  loadSymbolUniverse: vi.fn(),
+}))
 
 const env = {
   BASIC_AUTH_USER: 'admin',
   BASIC_AUTH_PASSWORD: 'secret',
-  DRY_RUN: 'true',
-  TRADING_ENABLED: 'true',
-  ALLOWED_SYMBOLS: 'SOXL,SOXS',
-  MAX_ORDER_NOTIONAL: '100',
-  SYMBOL_MAX_NOTIONAL: undefined,
-  MARKET_HOURS_CHECK: 'false',
   EVENT_INGEST_SECRET: 'change-me',
 }
 
@@ -18,8 +22,14 @@ const authHeader = {
 }
 
 describe('trade routes', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(makeSymbolUniverse())
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.resetAllMocks()
   })
 
   it('POST /trade/decide returns signal, intent, and risk decision', async () => {
@@ -90,7 +100,10 @@ describe('trade routes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('applies a symbol-specific max notional override from env', async () => {
+  it('applies a symbol-specific max notional override from D1', async () => {
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({ symbolMaxNotional: { SOXL: 50 } }),
+    )
     const app = createApp()
 
     const response = await app.request(
@@ -109,10 +122,7 @@ describe('trade routes', () => {
           sellAbove: 30,
         }),
       },
-      {
-        ...env,
-        SYMBOL_MAX_NOTIONAL: '{"SOXL":50}',
-      },
+      env,
     )
 
     expect(response.status).toBe(200)
@@ -123,7 +133,10 @@ describe('trade routes', () => {
     expect(body.riskDecision.reasons).toContain('order notional 60 exceeds max 50')
   })
 
-  it('uses Webull execution when DRY_RUN=false and trading is enabled', async () => {
+  it('uses Webull execution when dryRun=false (via D1)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ dryRun: false }),
+    )
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -152,13 +165,7 @@ describe('trade routes', () => {
           sellAbove: 20,
         }),
       },
-      {
-        ...env,
-        DRY_RUN: 'false',
-        WEBULL_APP_KEY: 'app-key',
-        WEBULL_APP_SECRET: 'app-secret',
-        WEBULL_ACCOUNT_ID: 'acct-1',
-      },
+      { ...env, WEBULL_APP_KEY: 'app-key', WEBULL_APP_SECRET: 'app-secret', WEBULL_ACCOUNT_ID: 'acct-1' },
     )
 
     expect(response.status).toBe(200)
@@ -171,42 +178,6 @@ describe('trade routes', () => {
       brokerOrderId: 'ord-live-1',
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('fail-closes to MockExecution when DRY_RUN is absent', async () => {
-    const fetchMock = vi.fn<typeof fetch>()
-    vi.stubGlobal('fetch', fetchMock)
-    const app = createApp()
-
-    const response = await app.request(
-      '/trade/execute',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeader,
-        },
-        body: JSON.stringify({
-          symbol: 'SOXL',
-          price: 9,
-          quantity: 2,
-          buyBelow: 10,
-          sellAbove: 20,
-        }),
-      },
-      {
-        ...env,
-        DRY_RUN: undefined,
-      },
-    )
-
-    expect(response.status).toBe(200)
-    const body = (await response.json()) as {
-      executionResult?: { mode: string; brokerOrderId?: string }
-    }
-    expect(body.executionResult?.mode).toBe('DRY_RUN')
-    expect(body.executionResult?.brokerOrderId).toMatch(/^mock-/)
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 401 for /trade/* without auth', async () => {
@@ -252,14 +223,11 @@ describe('trade routes', () => {
     expect(executeResponse.status).toBe(401)
   })
 
-  it('fail-closes when TRADING_ENABLED is absent (defaults to false)', async () => {
+  it('fail-closes when tradingEnabled=false (via D1)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: false }),
+    )
     const app = createApp()
-    const envWithoutTradingEnabled = {
-      BASIC_AUTH_USER: 'admin',
-      BASIC_AUTH_PASSWORD: 'secret',
-      ALLOWED_SYMBOLS: 'SOXL,SOXS',
-      MAX_ORDER_NOTIONAL: '100',
-    }
 
     const response = await app.request(
       '/trade/decide',
@@ -277,7 +245,7 @@ describe('trade routes', () => {
           sellAbove: 20,
         }),
       },
-      envWithoutTradingEnabled,
+      env,
     )
 
     expect(response.status).toBe(200)
