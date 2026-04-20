@@ -3,7 +3,6 @@ import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
 export interface Env {
   BASIC_AUTH_USER: string
   BASIC_AUTH_PASSWORD: string
-  EVENT_INGEST_SECRET: string
   SYMBOL_STATE: DurableObjectNamespace<SymbolStateDO>
 }
 
@@ -216,15 +215,6 @@ import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
 
 export interface Env {
   PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
-}
-
-// Bridge container binding (#33)
-import type { BridgeContainer } from '../trading/bridge/BridgeContainer'
-
-export interface Env {
-  BRIDGE?: DurableObjectNamespace<BridgeContainer>
-  WEBULL_GRPC_ENDPOINT?: string
-  EVENT_INGEST_URL?: string
 }
 
 /**

@@ -24,7 +24,6 @@ export function makeGlobalConfigSnapshot(
     gapRejectPct: 0.03,
     spreadLimitPctUs: 0.0025,
     spreadLimitPctJp: 0.006,
-    bridgeRunMode: 'auto',
     source: 'd1',
     ...overrides,
   }

@@ -8,7 +8,6 @@ const baseEnv = {
   TRADING_ENABLED: 'false',
   ALLOWED_SYMBOLS: 'SOXL',
   MAX_ORDER_NOTIONAL: '100',
-  EVENT_INGEST_SECRET: 'change-me',
 }
 
 const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }

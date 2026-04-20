@@ -22,7 +22,6 @@ export interface GlobalConfigSnapshot {
   gapRejectPct: number
   spreadLimitPctUs: number
   spreadLimitPctJp: number
-  bridgeRunMode: string
 }
 
 /**
@@ -45,7 +44,6 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   gapRejectPct: 0.03,
   spreadLimitPctUs: 0.0025,
   spreadLimitPctJp: 0.006,
-  bridgeRunMode: 'auto',
 })
 
 export async function loadGlobalConfig(
@@ -69,6 +67,5 @@ export async function loadGlobalConfig(
     gapRejectPct: row.gapRejectPct,
     spreadLimitPctUs: row.spreadLimitPctUs,
     spreadLimitPctJp: row.spreadLimitPctJp,
-    bridgeRunMode: row.bridgeRunMode,
   }
 }

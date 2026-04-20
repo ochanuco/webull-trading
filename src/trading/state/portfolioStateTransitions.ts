@@ -33,7 +33,7 @@ export function seedDailyStartEquity(
 }
 
 /**
- * Accumulates realized PnL for the day. Called from TradeEventHandler when a
+ * Accumulates realized PnL for the day. Called from reconcileFills when a
  * SELL closes (or partially closes) a position.
  */
 export function applyRealizedPnl(

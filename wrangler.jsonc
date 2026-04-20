@@ -9,21 +9,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
-      { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
-      { "name": "BRIDGE", "class_name": "BridgeContainer" }
+      { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
     ]
   },
-  "containers": [
-    {
-      "class_name": "BridgeContainer",
-      "image": "./Dockerfile",
-      "max_instances": 1
-    }
-  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SymbolStateDO"] },
     { "tag": "v2", "new_sqlite_classes": ["PortfolioStateDO"] },
-    { "tag": "v3", "new_sqlite_classes": ["BridgeContainer"] }
+    { "tag": "v3", "new_sqlite_classes": ["BridgeContainer"] },
+    { "tag": "v4", "deleted_classes": ["BridgeContainer"] }
   ],
   "triggers": {
     "crons": [
@@ -37,17 +30,9 @@
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
-          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
-          { "name": "BRIDGE", "class_name": "BridgeContainer" }
+          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
         ]
       },
-      "containers": [
-        {
-          "class_name": "BridgeContainer",
-          "image": "./Dockerfile",
-          "max_instances": 1
-        }
-      ],
       "d1_databases": [
         {
           "binding": "DB",
@@ -62,17 +47,9 @@
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
-          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
-          { "name": "BRIDGE", "class_name": "BridgeContainer" }
+          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
         ]
       },
-      "containers": [
-        {
-          "class_name": "BridgeContainer",
-          "image": "./Dockerfile",
-          "max_instances": 1
-        }
-      ],
       "d1_databases": [
         {
           "binding": "DB",
