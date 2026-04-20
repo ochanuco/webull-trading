@@ -15,7 +15,6 @@ reviews:
   path_filters:
     - "!.local/**"
     - "!**/node_modules/**"
-    - "!bridge/pnpm-lock.yaml"
     - "!pnpm-lock.yaml"
 
   path_instructions:
@@ -42,19 +41,6 @@ reviews:
         - Timing-safe comparison for secrets / tokens.
         - Structured JSON audit log with requestId.
         - Webull raw payloads stay in infrastructure; domain types only in application.
-
-    - path: "bridge/**"
-      instructions: |
-        This directory runs in Node (NOT Cloudflare Workers). `import.meta.main`, `process.env`,
-        and Node builtins are valid here; do not flag them as Workers incompatibilities.
-
-        The bridge tsconfig deliberately uses moduleResolution "Bundler" to avoid forcing `.js`
-        specifiers across Worker source. Do not request NodeNext.
-
-    - path: "bridge/grpc/client.ts"
-      instructions: |
-        Deliberate TODO stub awaiting the Webull gRPC proto. Do NOT request replacing the
-        placeholder with a real client in this PR.
 
     - path: "src/middleware/basicAuth.ts"
       instructions: |

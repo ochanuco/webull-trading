@@ -4,6 +4,7 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
 import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
+import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
 
@@ -210,6 +211,14 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           realizedPnl,
         })
       }
+
+      // Release the pending-order lock on every terminal status — FILLED,
+      // CANCELLED, REJECTED, EXPIRED — so pullbackScheduler can re-enter
+      // the symbol on the next cron tick. Previously the removed
+      // TradeEventHandler did this on every trade_event_type=fill.
+      if (symbol !== null) {
+        await clearPendingLock(options.env, options.requestId, symbol)
+      }
     } catch (error) {
       // A single row's UPDATE shouldn't kill the whole batch; most other
       // rows can still be reconciled. Log the failure into the errors bucket
@@ -296,6 +305,62 @@ async function applyFillToState(args: {
         }),
       )
     }
+  }
+
+  // Stop-out cooldown: a losing exit parks the symbol until the next trading
+  // day so a whipsaw re-entry cannot compound the loss. Ported from the
+  // removed TradeEventHandler — pullbackScheduler reads `state.cooldownUntil`
+  // for its signal decision, so without this write the strategy never
+  // backs off after a losing sell.
+  if (
+    side === 'SELL' &&
+    realizedPnl !== null &&
+    realizedPnl < 0 &&
+    env.SYMBOL_STATE
+  ) {
+    try {
+      const market = inferTradingMarket(symbol)
+      const cooldownUntil = nextTradingDay(new Date(), market).toISOString()
+      await new SymbolStateClient(env.SYMBOL_STATE).setCooldown(symbol, cooldownUntil)
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'reconcile_cooldown_apply_error',
+          requestId,
+          clientOrderId,
+          symbol,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
+}
+
+/**
+ * Ported from the removed TradeEventHandler: any terminal status (FILLED or
+ * otherwise) releases the symbol's pending-order lock so subsequent cron
+ * ticks can re-enter. pullbackScheduler sets the lock on submit; without
+ * this release it would expire on the 60s TTL but a failed / cancelled
+ * order would still leave a dangling `pendingOrder` field in the DO state
+ * that the strategy reads.
+ */
+async function clearPendingLock(
+  env: Env,
+  requestId: string | undefined,
+  symbol: string,
+): Promise<void> {
+  if (!env.SYMBOL_STATE) return
+  try {
+    await new SymbolStateClient(env.SYMBOL_STATE).clearPendingOrder(symbol)
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: 'reconcile_clear_pending_error',
+        requestId,
+        symbol,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
   }
 }
 

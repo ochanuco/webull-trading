@@ -102,7 +102,6 @@ export type InversePairInsert = typeof inversePairs.$inferInsert
  * ON / drawdown 閾値 / kill-switch 等)。env var 側と完全一致のフィールド
  * を持ち、Worker 起動時に loadGlobalConfig で取得する。
  *
- * bridge_run_mode は 'auto' / 'always-on' / 'disabled' の文字列。
  * drawdown_kill_threshold は負の float (例: -0.02 = -2%)。
  */
 export const globalConfig = sqliteTable(
@@ -133,7 +132,6 @@ export const globalConfig = sqliteTable(
     gapRejectPct: real('gap_reject_pct').notNull().default(0.03),
     spreadLimitPctUs: real('spread_limit_pct_us').notNull().default(0.0025),
     spreadLimitPctJp: real('spread_limit_pct_jp').notNull().default(0.006),
-    bridgeRunMode: text('bridge_run_mode').notNull().default('auto'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -182,10 +180,6 @@ export const globalConfig = sqliteTable(
     spreadLimitPctJpRange: check(
       'global_config_spread_limit_pct_jp_range',
       sql`${t.spreadLimitPctJp} >= 0 AND ${t.spreadLimitPctJp} <= 1`,
-    ),
-    bridgeRunModeEnum: check(
-      'global_config_bridge_run_mode_enum',
-      sql`${t.bridgeRunMode} IN ('auto', 'always-on', 'disabled')`,
     ),
   }),
 )

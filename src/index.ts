@@ -1,21 +1,18 @@
 import { createApp } from './app'
 import type { Env } from './config/env'
-import { loadGlobalConfigFrom } from './infrastructure/db/globalConfigLoader'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
-import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
 
-// 5 分毎の quote feed + bridge keep-alive cron
-const CRON_QUOTE_BRIDGE = '*/5 * * * *'
+// 5 分毎の quote feed + fill reconcile cron.
+const CRON_QUOTE_RECONCILE = '*/5 * * * *'
 // 毎時 :15 の Pullback 戦略 cron (position で自然 idempotent)
 const CRON_STRATEGY = '15 * * * *'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 export { PortfolioStateDO } from './trading/state/PortfolioStateDO'
-export { BridgeContainer } from './trading/bridge/BridgeContainer'
 
 const app = createApp()
 
@@ -72,7 +69,7 @@ export default {
       return
     }
 
-    // default: CRON_QUOTE_BRIDGE (`*/5 * * * *`) — quote feed + bridge keep-alive
+    // default: CRON_QUOTE_RECONCILE (`*/5 * * * *`) — quote feed + fill reconcile.
     ctx.waitUntil(
       runQuoteFeed({ env }).then(
         (summary) => {
@@ -127,29 +124,6 @@ export default {
               message: error instanceof Error ? error.message : String(error),
             }),
           )
-        },
-      ),
-    )
-    ctx.waitUntil(
-      loadGlobalConfigFrom(env).then(
-        (global) => keepBridgeAlive(env, { requestId, runMode: global.bridgeRunMode }),
-        (error) => {
-          console.error(
-            JSON.stringify({
-              event: 'global_config_load_error',
-              requestId,
-              message: error instanceof Error ? error.message : String(error),
-            }),
-          )
-          // D1 binding がある deploy は "config が読めるはず" が正の状態。
-          // そこで読めなかった場合は fail-closed で bridge を停止する
-          // (runMode='disabled')。env-only (D1 未 bind) の legacy 環境は
-          // 従来どおり env.BRIDGE_RUN_MODE / default 'auto' に寄せる。
-          const isDbBound = env.DB !== undefined
-          return keepBridgeAlive(env, {
-            requestId,
-            ...(isDbBound ? { runMode: 'disabled' } : {}),
-          })
         },
       ),
     )

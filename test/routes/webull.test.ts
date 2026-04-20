@@ -10,7 +10,6 @@ vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
 const baseEnv = {
   BASIC_AUTH_USER: 'admin',
   BASIC_AUTH_PASSWORD: 'secret',
-  EVENT_INGEST_SECRET: 'change-me',
 }
 
 const authHeader = {

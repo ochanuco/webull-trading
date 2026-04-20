@@ -1,7 +1,7 @@
 import type { PendingOrderLock, PendingSettlement, SymbolState } from './types'
 
 /**
- * The subset of {@link SymbolStateDO} that TradingService and TradeEventHandler
+ * The subset of {@link SymbolStateDO} that TradingService and reconcileFills
  * need. Exposing it as an interface keeps both testable without a Durable
  * Object runtime.
  */
