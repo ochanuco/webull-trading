@@ -3,6 +3,7 @@ import type { AppBindings } from '../app'
 import { ValidationError } from '../shared/errors'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
+import { runStrategyCron } from '../trading/strategy/runStrategyCron'
 
 /**
  * Operator-only endpoints. Basic-auth-protected by the same middleware as
@@ -25,6 +26,18 @@ export const admin = new Hono<AppBindings>()
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
     const state = await client.seedSettledCash(symbol, amount)
     return c.json({ symbol, settledCash: state.settledCash, updatedAt: state.updatedAt })
+  })
+  /**
+   * Manual trigger for `runStrategyCron`. Returns the same `StrategyCronResult`
+   * the hourly scheduled handler would console.log. Useful for debugging bar
+   * fetch failures / skip reasons without waiting for :15 of the hour.
+   *
+   * Honours `global_config.dry_run` via runStrategyCron itself — does NOT
+   * bypass. Protected by the same basic-auth as the rest of /admin/*.
+   */
+  .post('/strategy/run', async (c) => {
+    const result = await runStrategyCron(c.env)
+    return c.json(result)
   })
   .post('/portfolio/seed-equity', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
