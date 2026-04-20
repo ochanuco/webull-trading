@@ -2,7 +2,14 @@ import { BrokerRequestError } from '../../shared/errors'
 import { WebullAuth } from '../webull/WebullAuth'
 import { inferWebullMarket } from '../webull/mapper'
 
-export type WebullQuoteCategory = 'US_STOCK' | 'JP_STOCK'
+// Webull market-data snapshot endpoint only accepts equity/ETF categories.
+// JP_STOCK is NOT supported here — JP quotes require a separate API path we
+// haven't wired yet. See #84.
+export type WebullQuoteCategory = 'US_STOCK' | 'US_ETF'
+
+// Minimal US ETF allowlist for the POC universe. Expand or move to
+// symbol_config.category when universe grows.
+const US_ETF_SYMBOLS = new Set<string>(['SOXL', 'SOXS'])
 
 export interface QuoteResult {
   symbol: string
@@ -48,7 +55,7 @@ interface RawSnapshotEntry {
   ap?: number | string
 }
 
-const DEFAULT_QUOTE_PATH = '/openapi/market/snapshot'
+const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
@@ -86,10 +93,13 @@ export class WebullQuoteClient {
     try {
       authHeaders = await this.options.auth.createHeaders({
         method: 'GET',
-        path: url.pathname + url.search,
+        // Signing is path-only; query is merged into canonical sorted pairs.
+        // Passing `pathname + search` would duplicate query params (see #80).
+        path: url.pathname,
         query,
         host: url.host,
-        version: 'v1',
+        // Market-data snapshot requires x-version: v2 (per developer.webull.com).
+        version: 'v2',
       })
     } catch (error) {
       throw new BrokerRequestError(
@@ -155,13 +165,25 @@ export function createWebullQuoteClient(
   })
 }
 
-export function groupSymbolsByCategory(symbols: string[]): Record<WebullQuoteCategory, string[]> {
-  const grouped: Record<WebullQuoteCategory, string[]> = { US_STOCK: [], JP_STOCK: [] }
+export interface SymbolGrouping {
+  grouped: Record<WebullQuoteCategory, string[]>
+  // Symbols that cannot be routed through the US snapshot endpoint
+  // (currently JP — tracked separately so callers can log / skip).
+  unsupported: string[]
+}
+
+export function groupSymbolsByCategory(symbols: string[]): SymbolGrouping {
+  const grouped: Record<WebullQuoteCategory, string[]> = { US_STOCK: [], US_ETF: [] }
+  const unsupported: string[] = []
   for (const symbol of symbols) {
-    const category: WebullQuoteCategory = inferWebullMarket(symbol) === 'JP' ? 'JP_STOCK' : 'US_STOCK'
+    if (inferWebullMarket(symbol) === 'JP') {
+      unsupported.push(symbol)
+      continue
+    }
+    const category: WebullQuoteCategory = US_ETF_SYMBOLS.has(symbol) ? 'US_ETF' : 'US_STOCK'
     grouped[category].push(symbol)
   }
-  return grouped
+  return { grouped, unsupported }
 }
 
 function normalizeSnapshots(json: unknown, fallbackAsOf: string): QuoteResult[] {

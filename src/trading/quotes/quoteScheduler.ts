@@ -40,10 +40,14 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
   if (symbols.length === 0) return summary
 
   const client = options.client ?? createWebullQuoteClient(env, { now })
-  const groups = groupSymbolsByCategory(symbols)
+  const { grouped, unsupported } = groupSymbolsByCategory(symbols)
   const fetchedAt = now().toISOString()
 
-  for (const [category, group] of Object.entries(groups) as Array<[WebullQuoteCategory, string[]]>) {
+  // JP symbols have no working snapshot endpoint yet — mark as skipped so the
+  // summary reflects "known unfetchable" rather than a silent drop.
+  for (const symbol of unsupported) summary.skipped.push(symbol)
+
+  for (const [category, group] of Object.entries(grouped) as Array<[WebullQuoteCategory, string[]]>) {
     if (group.length === 0) continue
     let results: QuoteResult[]
     try {

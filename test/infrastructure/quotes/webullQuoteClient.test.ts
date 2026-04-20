@@ -15,10 +15,11 @@ function mockFetch(responseBody: unknown, init: ResponseInit = { status: 200 }):
 }
 
 describe('groupSymbolsByCategory', () => {
-  it('routes 4-digit codes to JP_STOCK and others to US_STOCK', () => {
-    const grouped = groupSymbolsByCategory(['SOXL', '7203', 'AAPL', '9984'])
-    expect(grouped.US_STOCK).toEqual(['SOXL', 'AAPL'])
-    expect(grouped.JP_STOCK).toEqual(['7203', '9984'])
+  it('splits US symbols into US_ETF (allowlist) vs US_STOCK, and surfaces JP as unsupported', () => {
+    const { grouped, unsupported } = groupSymbolsByCategory(['SOXL', '7203', 'AAPL', '9984', 'SOXS'])
+    expect(grouped.US_ETF).toEqual(['SOXL', 'SOXS'])
+    expect(grouped.US_STOCK).toEqual(['AAPL'])
+    expect(unsupported).toEqual(['7203', '9984'])
   })
 })
 
