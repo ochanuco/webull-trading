@@ -71,13 +71,14 @@ describe('WebullQuoteClient.getSnapshots', () => {
     expect(capturedUrl?.pathname).not.toBe('/openapi/market-data/snapshot')
   })
 
-  it('sends category as space-separated wire form (US STOCK / US ETF), not underscore', async () => {
-    // Regression: underscored categories (US_STOCK / US_ETF) yielded 417/500
-    // from the Webull snapshot endpoint.
+  it('sends category as the underscored identifier (US_STOCK / US_ETF)', async () => {
+    // Wire format confirmed by developer.webull.com example
+    // (`category=US_STOCK`) and Python SDK EasyEnum.__str__ = self.name.
+    // An earlier hypothesis of space-separated wire format was incorrect.
     const fetchFn = vi.fn(async (input: Request | string | URL) => {
       const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       const url = new URL(urlStr)
-      expect(url.searchParams.get('category')).toBe('US ETF')
+      expect(url.searchParams.get('category')).toBe('US_ETF')
       return new Response(JSON.stringify({ data: [] }), { status: 200 })
     }) as unknown as typeof fetch
     const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
