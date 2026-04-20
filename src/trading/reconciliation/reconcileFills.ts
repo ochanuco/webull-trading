@@ -78,7 +78,12 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   }
 
   const now = options.now ?? (() => new Date())
-  const since = new Date(now().getTime() - (options.lookbackMs ?? 48 * 3_600_000)).toISOString()
+  // Capture a single "reconcile run" timestamp so every derived computation
+  // (lookback window, cooldown expiry) uses the same basis. Using fresh
+  // `new Date()` at each call site makes back-catch-up runs lengthen the
+  // cooldown window incorrectly.
+  const runNow = now()
+  const since = new Date(runNow.getTime() - (options.lookbackMs ?? 48 * 3_600_000)).toISOString()
   const limit = options.limit ?? 50
 
   const db = createDb(options.env.DB)
@@ -209,6 +214,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           filledQty,
           filledPrice,
           realizedPnl,
+          runNow,
         })
       }
 
@@ -216,8 +222,17 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       // CANCELLED, REJECTED, EXPIRED — so pullbackScheduler can re-enter
       // the symbol on the next cron tick. Previously the removed
       // TradeEventHandler did this on every trade_event_type=fill.
+      //
+      // Guard by clientOrderId: a backlog reconcile for an old row A
+      // shouldn't clear a newer order B's lock on the same symbol. Only
+      // clear if the currently-held lock still matches this row's coid.
       if (symbol !== null) {
-        await clearPendingLock(options.env, options.requestId, symbol)
+        await clearPendingLockIfMatches(
+          options.env,
+          options.requestId,
+          symbol,
+          coid,
+        )
       }
     } catch (error) {
       // A single row's UPDATE shouldn't kill the whole batch; most other
@@ -266,8 +281,11 @@ async function applyFillToState(args: {
   filledQty: number
   filledPrice: number
   realizedPnl: number | null
+  /** Reconcile run basis time — used for cooldown expiry so back-catch-up runs
+   * don't lengthen the window past the original fill's next trading day. */
+  runNow: Date
 }): Promise<void> {
-  const { env, requestId, clientOrderId, symbol, side, filledQty, filledPrice, realizedPnl } = args
+  const { env, requestId, clientOrderId, symbol, side, filledQty, filledPrice, realizedPnl, runNow } = args
 
   if (env.SYMBOL_STATE) {
     try {
@@ -320,7 +338,7 @@ async function applyFillToState(args: {
   ) {
     try {
       const market = inferTradingMarket(symbol)
-      const cooldownUntil = nextTradingDay(new Date(), market).toISOString()
+      const cooldownUntil = nextTradingDay(runNow, market).toISOString()
       await new SymbolStateClient(env.SYMBOL_STATE).setCooldown(symbol, cooldownUntil)
     } catch (error) {
       console.error(
@@ -340,24 +358,48 @@ async function applyFillToState(args: {
  * Ported from the removed TradeEventHandler: any terminal status (FILLED or
  * otherwise) releases the symbol's pending-order lock so subsequent cron
  * ticks can re-enter. pullbackScheduler sets the lock on submit; without
- * this release it would expire on the 60s TTL but a failed / cancelled
- * order would still leave a dangling `pendingOrder` field in the DO state
- * that the strategy reads.
+ * this release a failed / cancelled order would leave a dangling
+ * `pendingOrder` field that the strategy reads.
+ *
+ * Guard by clientOrderId: reconcile can run late (back-catch-up / cron
+ * pause). By the time we process an old terminal row A, the scheduler may
+ * already have issued a new order B and acquired a fresh lock on the same
+ * symbol. Unconditionally clearing would drop B's lock; only clear when
+ * the currently-held lock still matches row A's coid.
  */
-async function clearPendingLock(
+async function clearPendingLockIfMatches(
   env: Env,
   requestId: string | undefined,
   symbol: string,
+  clientOrderId: string,
 ): Promise<void> {
   if (!env.SYMBOL_STATE) return
   try {
-    await new SymbolStateClient(env.SYMBOL_STATE).clearPendingOrder(symbol)
+    const client = new SymbolStateClient(env.SYMBOL_STATE)
+    const state = await client.getState(symbol)
+    const holder = state.pendingOrder?.clientOrderId
+    if (!holder) return // nothing to clear
+    if (holder !== clientOrderId) {
+      // Newer order already holds the lock — leave it intact.
+      console.log(
+        JSON.stringify({
+          event: 'reconcile_clear_pending_skipped_stale',
+          requestId,
+          symbol,
+          terminalClientOrderId: clientOrderId,
+          holderClientOrderId: holder,
+        }),
+      )
+      return
+    }
+    await client.clearPendingOrder(symbol)
   } catch (error) {
     console.error(
       JSON.stringify({
         event: 'reconcile_clear_pending_error',
         requestId,
         symbol,
+        clientOrderId,
         message: error instanceof Error ? error.message : String(error),
       }),
     )
