@@ -144,6 +144,10 @@ export function createWebullBarClient(
 }
 
 interface RawBar {
+  // v2 stock/bars returns `time` as ISO-with-offset, e.g.
+  // "2026-04-17T04:00:00.000+0000". v1 and other surfaces use `date` or
+  // `trade_time`. Accept all three.
+  time?: string
   date?: string
   trade_time?: string
   open?: number | string
@@ -156,7 +160,7 @@ function normalizeBars(json: unknown): DailyBar[] {
   const rawList = extractList(json)
   const bars: DailyBar[] = []
   for (const raw of rawList) {
-    const date = typeof raw.date === 'string' ? raw.date : typeof raw.trade_time === 'string' ? raw.trade_time.slice(0, 10) : ''
+    const date = extractDate(raw)
     const open = toNumber(raw.open)
     const high = toNumber(raw.high)
     const low = toNumber(raw.low)
@@ -167,6 +171,16 @@ function normalizeBars(json: unknown): DailyBar[] {
   // Ensure oldest-first for downstream indicators.
   bars.sort((a, b) => a.date.localeCompare(b.date))
   return bars
+}
+
+function extractDate(raw: RawBar): string {
+  // Prefer a full `date` string when present, else derive YYYY-MM-DD from
+  // `time` / `trade_time` by taking the leading 10 chars. All three shapes
+  // have been observed in the wild depending on the endpoint version.
+  if (typeof raw.date === 'string' && raw.date.length >= 10) return raw.date
+  if (typeof raw.time === 'string' && raw.time.length >= 10) return raw.time.slice(0, 10)
+  if (typeof raw.trade_time === 'string' && raw.trade_time.length >= 10) return raw.trade_time.slice(0, 10)
+  return ''
 }
 
 function extractList(json: unknown): RawBar[] {

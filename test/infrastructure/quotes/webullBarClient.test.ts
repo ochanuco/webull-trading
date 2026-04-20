@@ -12,6 +12,45 @@ function mockJsonResponse(body: unknown, status = 200) {
 }
 
 describe('WebullBarClient.getDailyBars', () => {
+  // Regression: v2 /market-data/stock/bars returns `time` as
+  // "2026-04-17T04:00:00.000+0000"; a prior normalizer only looked at
+  // `date` / `trade_time`, so every bar was dropped and Pullback saw
+  // "insufficient bars for indicators" even on 200 OK.
+  it('parses v2 `time` field (ISO w/ offset) as a YYYY-MM-DD date', async () => {
+    const fetchFn = vi.fn(async () =>
+      mockJsonResponse([
+        {
+          tickerId: '913244722',
+          symbol: 'SOXL',
+          time: '2026-04-17T04:00:00.000+0000',
+          open: '93.195000',
+          high: '94.750000',
+          low: '90.660000',
+          close: '94.680000',
+          volume: '67081435',
+        },
+        {
+          symbol: 'SOXL',
+          time: '2026-04-16T04:00:00.000+0000',
+          open: '85.010000',
+          high: '90.0',
+          low: '84.0',
+          close: '88.37',
+        },
+      ]),
+    ) as unknown as typeof fetch
+
+    const client = new WebullBarClient({ auth: baseAuth, fetchFn })
+    const bars = await client.getDailyBars('SOXL', 2)
+
+    expect(bars).toHaveLength(2)
+    // Oldest first by date
+    expect(bars[0]?.date).toBe('2026-04-16')
+    expect(bars[1]?.date).toBe('2026-04-17')
+    expect(bars[1]?.close).toBeCloseTo(94.68)
+  })
+
+
   // Regression for #84-style drift: default endpoint + Java-SDK-matching
   // query field names (`timespan` + `count`, NOT `period` + `limit`).
   // Historical default `/market-data/candles` + `period/limit` silently
