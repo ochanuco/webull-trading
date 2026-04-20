@@ -1,5 +1,5 @@
 import type { Env } from '../../config/env'
-import { createWebullBarClient } from '../../infrastructure/quotes/BarClient'
+import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
@@ -100,7 +100,10 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
   const execution = global.dryRun
     ? new MockExecution()
     : new WebullExecution(createWebullHttpClient(env))
-  const barClient = createWebullBarClient(env)
+  // Yahoo Finance /v8/finance/chart is free, no auth, covers US + JP (7267.T
+  // style) in one endpoint — chosen over Webull's JP-subscription-gated
+  // market-data API (see #84). Webull is still the order-execution path.
+  const barClient = new YahooBarClient()
 
   // sizing に流す equity は正の有限値のみ許可 (0 / 負 / NaN / Infinity を弾く)。
   // D1 から読んだ値が壊れていたら default に落とす。
