@@ -41,12 +41,13 @@ export const admin = new Hono<AppBindings>()
     return c.json(result)
   })
   /**
-   * Lookup the Webull-side status of an order by client_order_id. Primary use
-   * is checking whether an auto-placed order filled / was cancelled, ahead of
-   * wiring fill-tracking into PortfolioStateDO (#81).
+   * Lookup the Webull-side status of an order by client_order_id.
    *
-   * `client_order_id` is the uuid we pass into `toWebullPlaceOrderRequest` and
-   * the same id that's stored in `trade_journal.client_order_id`.
+   * The JP UAT tenant does not expose `/openapi/account/orders/detail` (404
+   * on both v1 and v2), so we fetch the first page of
+   * `/openapi/account/orders/history` (50 entries) and filter client-side.
+   * If the order is older than that window, returns 404
+   * `order_not_found_in_recent_history`.
    */
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
@@ -54,7 +55,10 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError('clientOrderId must be non-empty', { field: 'clientOrderId' })
     }
     const client = createWebullHttpClient(c.env)
-    const detail = await client.getOrderDetail(clientOrderId)
+    const detail = await client.findOrderByClientId(clientOrderId)
+    if (!detail) {
+      return c.json({ error: 'order_not_found_in_recent_history', clientOrderId }, 404)
+    }
     return c.json(detail)
   })
   .post('/portfolio/seed-equity', async (c) => {

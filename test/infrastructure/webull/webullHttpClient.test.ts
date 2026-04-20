@@ -128,32 +128,38 @@ describe('WebullHttpClient', () => {
     expect(body.new_orders[0].symbol).toBe('1570')
   })
 
-  it('fetches order detail via GET /openapi/account/orders/detail with client_order_id', async () => {
+  it('findOrderByClientId fetches orders/history and filters client-side', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
-        JSON.stringify({
-          client_order_id: 'coid-123',
-          order_id: 'ord-abc',
-          symbol: 'SOXL',
-          status: 'FILLED',
-          quantity: '1',
-          filled_quantity: '1',
-        }),
+        JSON.stringify([
+          { client_order_id: 'other-1', status: 'PENDING' },
+          { client_order_id: 'coid-123', order_id: 'ord-abc', symbol: 'SOXL', status: 'FILLED', filled_quantity: '1' },
+          { client_order_id: 'other-2', status: 'CANCELLED' },
+        ]),
         { status: 200 },
       ),
     )
     const client = createClient(fetchMock)
 
-    const detail = await client.getOrderDetail('coid-123')
+    const detail = await client.findOrderByClientId('coid-123')
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]!
     const u = new URL(url as string)
-    expect(u.pathname).toBe('/openapi/account/orders/detail')
+    // History endpoint — the JP UAT tenant does not expose /orders/detail.
+    expect(u.pathname).toBe('/openapi/account/orders/history')
     expect(u.searchParams.get('account_id')).toBe('acct-1')
-    expect(u.searchParams.get('client_order_id')).toBe('coid-123')
+    expect(u.searchParams.get('page_size')).toBe('50')
     expect(init?.method).toBe('GET')
-    expect(detail.status).toBe('FILLED')
+    expect(detail?.status).toBe('FILLED')
+  })
+
+  it('findOrderByClientId returns undefined when the coid is not in the history page', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify([{ client_order_id: 'unrelated' }]), { status: 200 }),
+    )
+    const client = createClient(fetchMock)
+    expect(await client.findOrderByClientId('missing')).toBeUndefined()
   })
 
   it('requests account details from the documented profile endpoint', async () => {

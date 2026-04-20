@@ -66,15 +66,30 @@ export class WebullHttpClient {
 
   /**
    * Fetch the current status of a previously-placed order by its client-side
-   * idempotency key. Mirrors openapi-java-sdk's TradeHttpApiV2Service.
+   * idempotency key.
+   *
+   * `/openapi/account/orders/detail` returns 404 on the JP UAT tenant our
+   * `WEBULL_API_BASE` resolves to; `/openapi/account/orders/history` is the
+   * only working lookup. It returns a paginated array — we fetch the first
+   * page (default 10) and filter client-side. If the order is older than the
+   * last page, the caller gets `undefined` and should fall back to a wider
+   * pagination sweep (out of scope for the MVP admin endpoint).
    */
-  async getOrderDetail(clientOrderId: string): Promise<WebullOrderDetailDto> {
-    return this.request<WebullOrderDetailDto>('GET', '/openapi/account/orders/detail', {
-      query: {
-        account_id: this.requireAccountId(),
-        client_order_id: clientOrderId,
+  async findOrderByClientId(
+    clientOrderId: string,
+    pageSize = 50,
+  ): Promise<WebullOrderDetailDto | undefined> {
+    const history = await this.request<WebullOrderDetailDto[]>(
+      'GET',
+      '/openapi/account/orders/history',
+      {
+        query: {
+          account_id: this.requireAccountId(),
+          page_size: String(pageSize),
+        },
       },
-    })
+    )
+    return history.find((entry) => entry.client_order_id === clientOrderId)
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {
