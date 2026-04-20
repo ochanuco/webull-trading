@@ -29,6 +29,13 @@
       "when": 1776610656488,
       "tag": "0003_currency_budget",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1776690952243,
+      "tag": "0004_drop_bridge_run_mode",
+      "breakpoints": true
     }
   ]
 }
