@@ -6,7 +6,7 @@ export interface BridgeKeepAliveEnv {
   BRIDGE?: DurableObjectNamespace<BridgeContainer>
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_ACCOUNT_ID_US_MARGIN?: string
+  WEBULL_ACCOUNT_ID_JP_CASH?: string
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
   EVENT_INGEST_SECRET?: string
@@ -81,9 +81,9 @@ export async function keepBridgeAlive(
       envVars: {
         WEBULL_APP_KEY: env.WEBULL_APP_KEY!,
         WEBULL_APP_SECRET: env.WEBULL_APP_SECRET!,
-        // Bridge streams US equity events only. JP_CASH account isn't wired
-        // into the bridge; pass only the US_MARGIN id through.
-        WEBULL_ACCOUNT_ID_US_MARGIN: env.WEBULL_ACCOUNT_ID_US_MARGIN!,
+        // Bridge streams the JP CASH account's trade events (the single
+        // multi-currency cash account that holds both US and JP positions).
+        WEBULL_ACCOUNT_ID_JP_CASH: env.WEBULL_ACCOUNT_ID_JP_CASH!,
         WEBULL_GRPC_ENDPOINT: env.WEBULL_GRPC_ENDPOINT!,
         EVENT_INGEST_URL: env.EVENT_INGEST_URL!,
         EVENT_INGEST_SECRET: env.EVENT_INGEST_SECRET!,
@@ -142,7 +142,7 @@ async function stopContainer(
 const requiredSecrets = [
   'WEBULL_APP_KEY',
   'WEBULL_APP_SECRET',
-  'WEBULL_ACCOUNT_ID_US_MARGIN',
+  'WEBULL_ACCOUNT_ID_JP_CASH',
   'WEBULL_GRPC_ENDPOINT',
   'EVENT_INGEST_URL',
   'EVENT_INGEST_SECRET',
