@@ -62,7 +62,12 @@ interface RawSnapshotEntry {
   ap?: number | string
 }
 
-const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
+// openapi-java-sdk's HttpQuotesApiClient (v1) hits `/openapi/market-data/snapshot`
+// with x-version: v1 and only `symbols` + `category`. developer.webull.com also
+// documents a v2 variant at `/openapi/market-data/stock/snapshot`, but the v2
+// endpoint returns 417 on our sandbox credentials, whereas v1 is the path the
+// SDK has shipped in production. Stay on v1 for now.
+const DEFAULT_QUOTE_PATH = '/openapi/market-data/snapshot'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
@@ -92,14 +97,9 @@ export class WebullQuoteClient {
 
     // Webull SDK wire format is space-separated: "US STOCK" / "US ETF".
     // Using the underscore identifiers as-is yields 417/500.
-    // extend_hour_required + overnight_required are documented as optional but
-    // are always present in the developer.webull.com example, and omitting
-    // them yields 417 Expectation Failed on v2 snapshot.
     const query = {
       symbols: symbols.join(','),
       category: WEBULL_CATEGORY_WIRE[category],
-      extend_hour_required: 'false',
-      overnight_required: 'false',
     }
     const url = new URL(this.quotePath, `${this.baseUrl}/`)
     for (const [key, value] of Object.entries(query)) {
@@ -115,8 +115,8 @@ export class WebullQuoteClient {
         path: url.pathname,
         query,
         host: url.host,
-        // Market-data snapshot requires x-version: v2 (per developer.webull.com).
-        version: 'v2',
+        // v1 matches HttpQuotesApiClient in openapi-java-sdk.
+        version: 'v1',
       })
     } catch (error) {
       throw new BrokerRequestError(
