@@ -75,6 +75,34 @@ export const admin = new Hono<AppBindings>()
     }
     return c.json(detail)
   })
+  /**
+   * EOD-ish rollover: snapshot `dailyStartEquity + dailyRealizedPnl` as the
+   * new day's opening equity and zero out `dailyRealizedPnl`. Intended as a
+   * manual / cron-triggered "close the day" step so the drawdown-kill gate
+   * re-anchors against today's session rather than cumulative lifetime PnL.
+   *
+   * Returns both the before / after snapshot so an operator (or the eventual
+   * EOD cron) can log the exact dollar delta that was rolled.
+   */
+  .post('/portfolio/roll-daily', async (c) => {
+    if (!c.env.PORTFOLIO_STATE) {
+      throw new ValidationError('PORTFOLIO_STATE binding is not configured', { field: 'env' })
+    }
+    const client = new PortfolioStateClient(c.env.PORTFOLIO_STATE)
+    const { before, after } = await client.rollDaily()
+    return c.json({
+      rolledAt: after.updatedAt,
+      rolledDelta: before.dailyRealizedPnl,
+      before: {
+        dailyStartEquity: before.dailyStartEquity,
+        dailyRealizedPnl: before.dailyRealizedPnl,
+      },
+      after: {
+        dailyStartEquity: after.dailyStartEquity,
+        dailyRealizedPnl: after.dailyRealizedPnl,
+      },
+    })
+  })
   .post('/portfolio/seed-equity', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
       throw new ValidationError('PORTFOLIO_STATE binding is not configured', { field: 'env' })

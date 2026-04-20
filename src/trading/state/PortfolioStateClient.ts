@@ -31,4 +31,8 @@ export class PortfolioStateClient implements PortfolioStore {
   setTradingDisabledUntil(iso: string | null): Promise<PortfolioState> {
     return this.stub().setTradingDisabledUntil(iso)
   }
+
+  rollDaily(): Promise<{ before: PortfolioState; after: PortfolioState }> {
+    return this.stub().rollDaily()
+  }
 }

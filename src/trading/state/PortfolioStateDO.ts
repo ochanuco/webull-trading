@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
   applyRealizedPnl,
+  rollDaily,
   seedDailyStartEquity,
   setTradingDisabledUntil,
   type PortfolioTransitionContext,
@@ -40,6 +41,13 @@ export class PortfolioStateDO extends DurableObject<object> {
     const next = setTradingDisabledUntil(state, iso, this.transitionCtx)
     await this.save(next)
     return next
+  }
+
+  async rollDaily(): Promise<{ before: PortfolioState; after: PortfolioState }> {
+    const state = await this.load()
+    const { before, after } = rollDaily(state, this.transitionCtx)
+    await this.save(after)
+    return { before, after }
   }
 
   private async load(): Promise<PortfolioState> {
