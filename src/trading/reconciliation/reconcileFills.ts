@@ -4,6 +4,8 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
 import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
+import { PortfolioStateClient } from '../state/PortfolioStateClient'
+import { SymbolStateClient } from '../state/SymbolStateClient'
 
 // Terminal Webull order statuses — once we see one of these we can stop
 // polling for this order. Anything else (NEW, PENDING, PARTIALLY_FILLED) is
@@ -17,7 +19,7 @@ const TERMINAL_STATUSES = new Set<string>([
 
 export interface ReconcileSummary {
   inspected: number
-  updated: Array<{ clientOrderId: string; status: string }>
+  updated: Array<{ clientOrderId: string; status: string; realizedPnl?: number }>
   stillPending: Array<{ clientOrderId: string; status?: string }>
   notFound: string[]
   errors: Array<{ clientOrderId: string; message: string }>
@@ -44,10 +46,20 @@ interface ReconcileOptions {
  * matching `post_submit` row in `trade_journal` with `filled_qty /
  * filled_price / broker_status`.
  *
- * PnL computation + PortfolioStateDO apply is deliberately out of scope —
- * that step needs per-symbol avg-cost tracking and will land as a separate
- * issue. This is just the plumbing that turns "we placed an order" into
- * "we know what happened to it."
+ * Terminal FILLED rows are also applied into the DO layer:
+ *   - Every filled leg (BUY or SELL) is pushed to SymbolStateDO.recordFill
+ *     so per-symbol position + avg cost stay in sync with the broker.
+ *   - SELL fills additionally compute realized_pnl = (fill_price - prior
+ *     avg_cost) * filled_qty and apply it to PortfolioStateDO via
+ *     applyRealizedPnl. The computed delta is also persisted on the
+ *     trade_journal row (realized_pnl column).
+ *
+ * Idempotency note: the SELECT filter `broker_status IS NULL` prevents
+ * double processing in the common case. If the journal UPDATE succeeds but
+ * the subsequent DO apply throws, the row is marked reconciled and the DO
+ * won't auto-repair on the next tick — the error is logged loudly so an
+ * operator can fix it manually. Proper idempotency would need a separate
+ * `applied_at` marker column; out of scope for this change.
  */
 export async function reconcileFills(options: ReconcileOptions): Promise<ReconcileSummary> {
   // Fail-closed on a missing DB binding to match loadGlobalConfigFrom /
@@ -130,6 +142,41 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     const filledQty = toNumberOrNull(detail.filled_quantity)
     const filledPrice = resolveFilledPrice(filledQty, detail)
 
+    // Compute realized P&L for SELL fills BEFORE we touch any state. Needs
+    // the symbol's current avg cost from SymbolStateDO, which is only
+    // meaningful after we've been recording BUY fills. Early trades with no
+    // prior position yield realized=null (can't compute).
+    const side = (detail.side ?? row.side ?? null) as 'BUY' | 'SELL' | null
+    const symbol = row.symbol ?? detail.symbol ?? null
+    let realizedPnl: number | null = null
+    if (
+      status === 'FILLED' &&
+      side === 'SELL' &&
+      symbol !== null &&
+      filledQty !== null && filledQty > 0 &&
+      filledPrice !== null && filledPrice > 0 &&
+      options.env.SYMBOL_STATE
+    ) {
+      try {
+        const priorState = await new SymbolStateClient(options.env.SYMBOL_STATE).getState(symbol)
+        const avg = priorState.position?.avgPrice
+        if (typeof avg === 'number' && Number.isFinite(avg) && avg > 0) {
+          realizedPnl = (filledPrice - avg) * filledQty
+        }
+      } catch (error) {
+        // Not fatal — just means we can't pre-compute realized. Log + continue.
+        console.error(
+          JSON.stringify({
+            event: 'reconcile_prior_state_error',
+            requestId: options.requestId,
+            clientOrderId: coid,
+            symbol,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        )
+      }
+    }
+
     try {
       await db
         .update(tradeJournal)
@@ -137,9 +184,32 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           brokerStatus: status,
           filledQty,
           filledPrice,
+          realizedPnl,
         })
         .where(eq(tradeJournal.id, row.id))
-      summary.updated.push({ clientOrderId: coid, status })
+      summary.updated.push({ clientOrderId: coid, status, ...(realizedPnl !== null ? { realizedPnl } : {}) })
+
+      // After the journal is stamped reconciled, push the fill into the DO
+      // layer. Any DO failure here is logged but does NOT retry — see the
+      // idempotency note in the module docstring.
+      if (
+        status === 'FILLED' &&
+        side !== null &&
+        symbol !== null &&
+        filledQty !== null && filledQty > 0 &&
+        filledPrice !== null && filledPrice > 0
+      ) {
+        await applyFillToState({
+          env: options.env,
+          requestId: options.requestId,
+          clientOrderId: coid,
+          symbol,
+          side,
+          filledQty,
+          filledPrice,
+          realizedPnl,
+        })
+      }
     } catch (error) {
       // A single row's UPDATE shouldn't kill the whole batch; most other
       // rows can still be reconciled. Log the failure into the errors bucket
@@ -168,6 +238,65 @@ function toNumberOrNull(value: string | undefined): number | null {
   if (value === undefined || value === null) return null
   const n = Number(value)
   return Number.isFinite(n) ? n : null
+}
+
+/**
+ * Apply a terminal FILLED order into SymbolStateDO (position tracking) and,
+ * for SELL legs, PortfolioStateDO (realized PnL aggregation).
+ *
+ * Failures here are logged but not rethrown — the journal row is already
+ * marked reconciled at this point, so the next cron tick would skip it.
+ * Proper repair would need an `applied_at` column; see module docstring.
+ */
+async function applyFillToState(args: {
+  env: Env
+  requestId?: string
+  clientOrderId: string
+  symbol: string
+  side: 'BUY' | 'SELL'
+  filledQty: number
+  filledPrice: number
+  realizedPnl: number | null
+}): Promise<void> {
+  const { env, requestId, clientOrderId, symbol, side, filledQty, filledPrice, realizedPnl } = args
+
+  if (env.SYMBOL_STATE) {
+    try {
+      await new SymbolStateClient(env.SYMBOL_STATE).recordFill(symbol, {
+        side,
+        qty: filledQty,
+        price: filledPrice,
+      })
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'reconcile_symbol_state_apply_error',
+          requestId,
+          clientOrderId,
+          symbol,
+          side,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
+
+  if (side === 'SELL' && realizedPnl !== null && env.PORTFOLIO_STATE) {
+    try {
+      await new PortfolioStateClient(env.PORTFOLIO_STATE).applyRealizedPnl(realizedPnl)
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'reconcile_portfolio_apply_error',
+          requestId,
+          clientOrderId,
+          symbol,
+          realizedPnl,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
 }
 
 /**
