@@ -132,7 +132,7 @@ describe('WebullHttpClient', () => {
     // Client is configured with both jp + us accounts. An order can live in
     // either, so we must query both. Return the target coid from the us
     // account page and unrelated entries from the jp page.
-    const fetchMock = vi.fn<typeof fetch>(async (input: Request | string | URL) => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       const accountId = new URL(urlStr).searchParams.get('account_id')
       const body = accountId === 'acct-1'
@@ -142,7 +142,7 @@ describe('WebullHttpClient', () => {
           ]
         : [{ client_order_id: 'unrelated', status: 'PENDING' }]
       return new Response(JSON.stringify(body), { status: 200 })
-    }) as unknown as typeof fetch
+    })
     const client = createClient(fetchMock)
 
     const detail = await client.findOrderByClientId('coid-123')
@@ -158,9 +158,9 @@ describe('WebullHttpClient', () => {
   it('findOrderByClientId returns undefined when the coid is in neither account', async () => {
     // Each account call needs a fresh Response since the body can only be
     // read once. `mockResolvedValue` returns the same instance every time.
-    const fetchMock = vi.fn<typeof fetch>(
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(
       async () => new Response(JSON.stringify([{ client_order_id: 'unrelated' }]), { status: 200 }),
-    ) as unknown as typeof fetch
+    )
     const client = createClient(fetchMock)
     expect(await client.findOrderByClientId('missing')).toBeUndefined()
   })
