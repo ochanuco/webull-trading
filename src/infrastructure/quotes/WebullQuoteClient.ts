@@ -92,7 +92,15 @@ export class WebullQuoteClient {
 
     // Webull SDK wire format is space-separated: "US STOCK" / "US ETF".
     // Using the underscore identifiers as-is yields 417/500.
-    const query = { symbols: symbols.join(','), category: WEBULL_CATEGORY_WIRE[category] }
+    // extend_hour_required + overnight_required are documented as optional but
+    // are always present in the developer.webull.com example, and omitting
+    // them yields 417 Expectation Failed on v2 snapshot.
+    const query = {
+      symbols: symbols.join(','),
+      category: WEBULL_CATEGORY_WIRE[category],
+      extend_hour_required: 'false',
+      overnight_required: 'false',
+    }
     const url = new URL(this.quotePath, `${this.baseUrl}/`)
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, value)
