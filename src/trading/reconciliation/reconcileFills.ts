@@ -25,6 +25,12 @@ export interface ReconcileSummary {
 
 interface ReconcileOptions {
   env: Env
+  /**
+   * Correlates reconcile logs with the originating request. Callers should
+   * pass `c.get('requestId')` when invoking from a route, or generate their
+   * own (e.g. `crypto.randomUUID()`) for cron-triggered runs.
+   */
+  requestId?: string
   /** How far back to scan for unreconciled post_submit rows. Default 48h. */
   lookbackMs?: number
   /** Cap on rows inspected per call so a single invocation doesn't fan out. */
@@ -137,7 +143,11 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       console.error(
         JSON.stringify({
           event: 'reconcile_fill_update_error',
+          requestId: options.requestId,
+          rowId: row.id,
           clientOrderId: coid,
+          symbol: row.symbol,
+          side: row.side,
           status,
           message,
         }),
@@ -156,13 +166,22 @@ function toNumberOrNull(value: string | undefined): number | null {
 }
 
 /**
- * The order detail payload doesn't always carry an aggregate `filled_price`
- * at the top level. Prefer the first fill item's price if present; otherwise
- * fall back to limit_price (best-effort proxy for small sandbox orders).
+ * Webull's order history response doesn't expose an aggregate `filled_price`.
+ * Recover a usable effective fill price in this order:
+ *
+ *   1. If `items[]` carries per-fill `filled_price` entries (partial or full
+ *      fills), **average across all positively-priced items**.
+ *   2. Otherwise fall back to the signed `limit_price` — strict upper bound
+ *      for a BUY limit and lower bound for a SELL limit, good enough as a
+ *      best-effort proxy for small sandbox orders where we only care about
+ *      ballpark P&L aggregation.
+ *   3. Otherwise `null`.
  */
 function pickFilledPrice(detail: WebullOrderDetailDto): number | null {
-  // v2 OrderHistory doesn't expose an aggregate filled_price, so average from
-  // the items if available. Sandbox orders often have a single item.
+  // Sandbox orders usually have a single item, so the average collapses to
+  // that one item's price. Partial fills at multiple prices would average
+  // out naturally — callers that need precise per-fill accounting will need
+  // to walk items[] directly instead.
   if (detail.items && detail.items.length > 0) {
     const prices = detail.items
       .map((item) => toNumberOrNull((item as { filled_price?: string }).filled_price))

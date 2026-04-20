@@ -60,7 +60,7 @@ export const admin = new Hono<AppBindings>()
    * the journal reflects what Webull says about each order.
    */
   .post('/orders/reconcile', async (c) => {
-    const summary = await reconcileFills({ env: c.env })
+    const summary = await reconcileFills({ env: c.env, requestId: c.get('requestId') })
     return c.json(summary)
   })
   .get('/orders/:clientOrderId', async (c) => {
