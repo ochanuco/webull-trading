@@ -169,7 +169,7 @@ describe('trade routes', () => {
         ...env,
         WEBULL_APP_KEY: 'app-key',
         WEBULL_APP_SECRET: 'app-secret',
-        WEBULL_ACCOUNT_ID_US_MARGIN: 'acct-1',
+        
         WEBULL_ACCOUNT_ID_JP_CASH: 'acct-jp-1',
       },
     )

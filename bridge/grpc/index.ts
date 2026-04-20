@@ -168,14 +168,13 @@ if (isMain) {
   const grpcEndpoint = process.env.WEBULL_GRPC_ENDPOINT
   const appKey = process.env.WEBULL_APP_KEY
   const appSecret = process.env.WEBULL_APP_SECRET
-  // Trade-event bridge currently streams US equity fills only — use the
-  // US_MARGIN account. JP events would need a separate bridge instance
-  // subscribed to the JP_CASH account (not wired in the POC).
-  const accountId = process.env.WEBULL_ACCOUNT_ID_US_MARGIN
+  // Trade-event bridge subscribes to the JP CASH account — the single
+  // multi-currency cash account that holds both US and JP positions.
+  const accountId = process.env.WEBULL_ACCOUNT_ID_JP_CASH
 
   if (!eventIngestUrl || !ingestSecret || !grpcEndpoint || !appKey || !appSecret || !accountId) {
     throw new Error(
-      'EVENT_INGEST_URL, EVENT_INGEST_SECRET, WEBULL_GRPC_ENDPOINT, WEBULL_APP_KEY, WEBULL_APP_SECRET, and WEBULL_ACCOUNT_ID_US_MARGIN are required',
+      'EVENT_INGEST_URL, EVENT_INGEST_SECRET, WEBULL_GRPC_ENDPOINT, WEBULL_APP_KEY, WEBULL_APP_SECRET, and WEBULL_ACCOUNT_ID_JP_CASH are required',
     )
   }
 

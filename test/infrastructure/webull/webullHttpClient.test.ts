@@ -24,7 +24,7 @@ function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClie
       appKey: 'app-key',
       appSecret: 'app-secret',
     }),
-    accountIds: { us: 'acct-1', jp: 'acct-jp-1' },
+    accountId: 'acct-1',
     baseUrl: 'https://broker.example.test',
     timeoutMs,
     retry: {
@@ -49,7 +49,7 @@ describe('WebullHttpClient', () => {
     const spy = vi.spyOn(auth, 'createHeaders')
     const client = new WebullHttpClient({
       auth,
-      accountIds: { us: 'acct-1', jp: 'acct-jp-1' },
+      accountId: 'acct-1',
       baseUrl: 'https://broker.example.test',
       retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 2, jitter: 0 },
       fetchFn: fetchMock,
@@ -134,51 +134,41 @@ describe('WebullHttpClient', () => {
     expect(body.new_orders[0].symbol).toBe('1570')
   })
 
-  it('findOrderByClientId queries orders/history for every configured account and merges results', async () => {
-    // Client is configured with both jp + us accounts. An order can live in
-    // either, so we must query both. Return the target coid from the us
-    // account page and unrelated entries from the jp page.
-    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
-      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-      const accountId = new URL(urlStr).searchParams.get('account_id')
-      const body = accountId === 'acct-1'
-        ? [
-            { client_order_id: 'other-1', status: 'PENDING' },
-            { client_order_id: 'coid-123', symbol: 'SOXL', status: 'FILLED', filled_quantity: '1' },
-          ]
-        : [{ client_order_id: 'unrelated', status: 'PENDING' }]
-      return new Response(JSON.stringify(body), { status: 200 })
-    })
+  it('findOrderByClientId queries orders/history and filters the target coid client-side', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { client_order_id: 'other-1', status: 'PENDING' },
+          { client_order_id: 'coid-123', symbol: 'SOXL', status: 'FILLED', filled_quantity: '1' },
+        ]),
+        { status: 200 },
+      ),
+    )
     const client = createClient(fetchMock)
-
     const detail = await client.findOrderByClientId('coid-123')
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const accountIdsQueried = fetchMock.mock.calls
-      .map((call) => new URL(call[0] as string).searchParams.get('account_id'))
-      .sort()
-    expect(accountIdsQueried).toEqual(['acct-1', 'acct-jp-1'])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const u = new URL(fetchMock.mock.calls[0]![0] as string)
+    expect(u.pathname).toBe('/openapi/account/orders/history')
+    expect(u.searchParams.get('account_id')).toBe('acct-1')
+    expect(u.searchParams.get('page_size')).toBe('50')
     expect(detail?.status).toBe('FILLED')
   })
 
-  it('findOrderByClientId throws BrokerRequestError when no account ids are configured', async () => {
+  it('findOrderByClientId throws BrokerRequestError when no account id is configured', async () => {
     const fetchMock = vi.fn<typeof fetch>()
     const client = new WebullHttpClient({
       auth: new WebullAuth({ appKey: 'app-key', appSecret: 'app-secret' }),
-      accountIds: {},
       baseUrl: 'https://broker.example.test',
       retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 },
       fetchFn: fetchMock,
     })
-    await expect(client.findOrderByClientId('whatever')).rejects.toThrow(/Missing Webull account IDs/)
+    await expect(client.findOrderByClientId('whatever')).rejects.toThrow(/Missing Webull account ID/)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('findOrderByClientId returns undefined when the coid is in neither account', async () => {
-    // Each account call needs a fresh Response since the body can only be
-    // read once. `mockResolvedValue` returns the same instance every time.
-    const fetchMock = vi.fn<typeof fetch>().mockImplementation(
-      async () => new Response(JSON.stringify([{ client_order_id: 'unrelated' }]), { status: 200 }),
+  it('findOrderByClientId returns undefined when the coid is not on the recent history page', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify([{ client_order_id: 'unrelated' }]), { status: 200 }),
     )
     const client = createClient(fetchMock)
     expect(await client.findOrderByClientId('missing')).toBeUndefined()
@@ -198,11 +188,8 @@ describe('WebullHttpClient', () => {
 
     await client.getAccount()
 
-    // getAccount() uses the first configured account id. Our createClient
-    // helper sets `{ us: 'acct-1', jp: 'acct-jp-1' }` — jp wins since it's
-    // preferred in requireAnyAccountId's lookup order.
     const [url, init] = fetchMock.mock.calls[0]!
-    expect(url).toBe('https://broker.example.test/account/profile?account_id=acct-jp-1')
+    expect(url).toBe('https://broker.example.test/account/profile?account_id=acct-1')
     expect(init?.method).toBe('GET')
     expect(init?.body).toBeUndefined()
     expect(init?.headers).toMatchObject({
