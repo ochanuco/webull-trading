@@ -35,8 +35,9 @@ export function toExecutionResult(dto: WebullPlaceOrderResponseDto): ExecutionRe
   }
 }
 
-// 4-digit numeric codes are Japanese exchange tickers (TYO / TSE). Anything else
-// is treated as US by default. Extend this when adding other markets.
+// TSE codes are 4 chars. Historically all-numeric (e.g. 7203), but since
+// 2024 TSE issues alphanumeric codes where the 4th character can be a letter
+// (e.g. 285A = Kioxia HD). Match "3 digits + [0-9A-Z]".
 export function inferWebullMarket(symbol: string): WebullMarket {
-  return /^\d{4}$/.test(symbol) ? 'JP' : 'US'
+  return /^\d{3}[0-9A-Z]$/.test(symbol) ? 'JP' : 'US'
 }

@@ -16,14 +16,35 @@ function mockFetch(responseBody: unknown, init: ResponseInit = { status: 200 }):
 
 describe('groupSymbolsByCategory', () => {
   it('splits US symbols into US_ETF (allowlist) vs US_STOCK, and surfaces JP as unsupported', () => {
-    const { grouped, unsupported } = groupSymbolsByCategory(['SOXL', '7203', 'AAPL', '9984', 'SOXS'])
+    const { grouped, unsupported } = groupSymbolsByCategory([
+      'SOXL',
+      '7203',
+      'AAPL',
+      '9984',
+      'SOXS',
+      '285A', // alphanumeric TSE code (Kioxia HD) — must classify as JP
+    ])
     expect(grouped.US_ETF).toEqual(['SOXL', 'SOXS'])
     expect(grouped.US_STOCK).toEqual(['AAPL'])
-    expect(unsupported).toEqual(['7203', '9984'])
+    expect(unsupported).toEqual(['7203', '9984', '285A'])
   })
 })
 
 describe('WebullQuoteClient.getSnapshots', () => {
+  it('sends category as space-separated wire form (US STOCK / US ETF), not underscore', async () => {
+    // Regression: underscored categories (US_STOCK / US_ETF) yielded 417/500
+    // from the Webull snapshot endpoint.
+    const fetchFn = vi.fn(async (input: Request | string | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      const url = new URL(urlStr)
+      expect(url.searchParams.get('category')).toBe('US ETF')
+      return new Response(JSON.stringify({ data: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
+    await client.getSnapshots(['SOXL'], 'US_ETF')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('returns an empty array when no symbols are requested', async () => {
     const fetchFn = vi.fn() as unknown as typeof fetch
     const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
