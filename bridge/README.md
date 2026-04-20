@@ -10,7 +10,7 @@ Runs as a **Cloudflare Container** attached to the `webull-trading` Worker (clas
 
 - `WEBULL_APP_KEY` (required)
 - `WEBULL_APP_SECRET` (required)
-- `WEBULL_ACCOUNT_ID_JP_CASH` (required — US_MARGIN account id; JP CASH is not wired in the bridge)
+- `WEBULL_ACCOUNT_ID_JP_CASH` (required — JP CASH account id; JP CASH is not wired in the bridge)
 - `WEBULL_GRPC_ENDPOINT` (required) — Webull gRPC 疎通先 host:port。`keepBridgeAlive` は未設定だと skip するので必ず投入する。値は 1Password / Webull vendor 資料を参照
 - `EVENT_INGEST_URL` (required) — Worker `/events/trade` の完全 URL。deploy 先 subdomain に合わせる
 - `EVENT_INGEST_SECRET` (required)
