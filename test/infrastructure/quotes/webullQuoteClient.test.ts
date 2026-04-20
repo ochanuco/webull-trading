@@ -15,7 +15,7 @@ function mockFetch(responseBody: unknown, init: ResponseInit = { status: 200 }):
 }
 
 describe('groupSymbolsByCategory', () => {
-  it('splits US symbols into US_ETF (allowlist) vs US_STOCK, and surfaces JP as unsupported', () => {
+  it('routes SOXL/SOXS → US_ETF, other US → US_STOCK, 4-digit/alphanumeric TSE → JP_STOCK', () => {
     const { grouped, unsupported } = groupSymbolsByCategory([
       'SOXL',
       '7203',
@@ -26,7 +26,8 @@ describe('groupSymbolsByCategory', () => {
     ])
     expect(grouped.US_ETF).toEqual(['SOXL', 'SOXS'])
     expect(grouped.US_STOCK).toEqual(['AAPL'])
-    expect(unsupported).toEqual(['7203', '9984', '285A'])
+    expect(grouped.JP_STOCK).toEqual(['7203', '9984', '285A'])
+    expect(unsupported).toEqual([])
   })
 })
 

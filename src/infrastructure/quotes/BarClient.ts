@@ -6,7 +6,11 @@ import { inferWebullMarket } from '../webull/mapper'
 // developer.webull.com shows `category=US_STOCK` on the wire (underscore).
 // Python SDK's EasyEnum.__str__ returns `self.name` (the underscored
 // identifier), and Java SDK passes `Category.US_STOCK.name()` the same way.
-// JP_STOCK has no working HK-sandbox path — JP bars need a JP tenant (#89).
+// JP_STOCK is accepted on this JP UAT tenant's /stock/bars endpoint, but the
+// app key needs a JP stock-quotes subscription enabled (Webull support). Until
+// then JP requests return 401 "Insufficient permission, please subscribe to
+// stock quotes." We route JP symbols through the normal category so the cron
+// starts succeeding the moment the subscription lands.
 export type BarCategory = 'US_STOCK' | 'US_ETF' | 'JP_STOCK'
 
 // Mirrors WebullQuoteClient's US ETF allowlist.

@@ -2,10 +2,14 @@ import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { WebullAuth } from '../webull/WebullAuth'
 import { inferWebullMarket } from '../webull/mapper'
 
-// Webull market-data snapshot endpoint only accepts equity/ETF categories.
-// JP_STOCK is NOT supported here — JP quotes require a separate API path we
-// haven't wired yet. See #84.
-export type WebullQuoteCategory = 'US_STOCK' | 'US_ETF'
+// Webull /openapi/market-data/stock/snapshot (v2) accepts US_STOCK / US_ETF
+// and ALSO JP_STOCK on the JP UAT tenant — the endpoint/category are valid,
+// but the app key needs a JP quotes subscription enabled (today Webull
+// support has to flip it; no self-serve portal). Until then JP requests
+// return 401 "Insufficient permission, please subscribe to stock quotes."
+// We still route JP through the same path so the moment subscription lands,
+// the cron starts feeding JP quotes with no code change.
+export type WebullQuoteCategory = 'US_STOCK' | 'US_ETF' | 'JP_STOCK'
 
 // Minimal US ETF allowlist for the POC universe. Expand or move to
 // symbol_config.category when universe grows.
@@ -185,17 +189,18 @@ export function createWebullQuoteClient(
 
 export interface SymbolGrouping {
   grouped: Record<WebullQuoteCategory, string[]>
-  // Symbols that cannot be routed through the US snapshot endpoint
-  // (currently JP — tracked separately so callers can log / skip).
+  // Reserved for symbols that can't be routed (none today — kept so callers
+  // and tests don't regress if a new market shows up that the endpoint
+  // genuinely doesn't handle).
   unsupported: string[]
 }
 
 export function groupSymbolsByCategory(symbols: string[]): SymbolGrouping {
-  const grouped: Record<WebullQuoteCategory, string[]> = { US_STOCK: [], US_ETF: [] }
+  const grouped: Record<WebullQuoteCategory, string[]> = { US_STOCK: [], US_ETF: [], JP_STOCK: [] }
   const unsupported: string[] = []
   for (const symbol of symbols) {
     if (inferWebullMarket(symbol) === 'JP') {
-      unsupported.push(symbol)
+      grouped.JP_STOCK.push(symbol)
       continue
     }
     const category: WebullQuoteCategory = US_ETF_SYMBOLS.has(symbol) ? 'US_ETF' : 'US_STOCK'
