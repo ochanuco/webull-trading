@@ -39,3 +39,31 @@ export interface WebullPlaceOrderResponseDto {
   order_id?: string
   message?: string
 }
+
+/**
+ * Shape returned by GET /openapi/account/orders/detail (v1).
+ * Fields mirror openapi-java-sdk's `v2.OrderHistory`.
+ */
+export interface WebullOrderDetailDto {
+  client_order_id?: string
+  order_id?: string
+  symbol?: string
+  side?: 'BUY' | 'SELL'
+  order_type?: string
+  time_in_force?: string
+  limit_price?: string
+  stop_price?: string
+  quantity?: string
+  filled_quantity?: string
+  // Webull order lifecycle statuses: NEW, PARTIALLY_FILLED, FILLED,
+  // CANCELLED, REJECTED, EXPIRED, etc. Keep as free string for forward-compat.
+  status?: string
+  support_trading_session?: string
+  items?: Array<{
+    order_id?: string
+    symbol?: string
+    quantity?: string
+    filled_quantity?: string
+    status?: string
+  }>
+}

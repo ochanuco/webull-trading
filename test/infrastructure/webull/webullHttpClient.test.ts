@@ -128,6 +128,34 @@ describe('WebullHttpClient', () => {
     expect(body.new_orders[0].symbol).toBe('1570')
   })
 
+  it('fetches order detail via GET /openapi/account/orders/detail with client_order_id', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          client_order_id: 'coid-123',
+          order_id: 'ord-abc',
+          symbol: 'SOXL',
+          status: 'FILLED',
+          quantity: '1',
+          filled_quantity: '1',
+        }),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+
+    const detail = await client.getOrderDetail('coid-123')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]!
+    const u = new URL(url as string)
+    expect(u.pathname).toBe('/openapi/account/orders/detail')
+    expect(u.searchParams.get('account_id')).toBe('acct-1')
+    expect(u.searchParams.get('client_order_id')).toBe('coid-123')
+    expect(init?.method).toBe('GET')
+    expect(detail.status).toBe('FILLED')
+  })
+
   it('requests account details from the documented profile endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
