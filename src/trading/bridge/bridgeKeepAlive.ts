@@ -6,7 +6,8 @@ export interface BridgeKeepAliveEnv {
   BRIDGE?: DurableObjectNamespace<BridgeContainer>
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_ACCOUNT_ID?: string
+  WEBULL_ACCOUNT_ID_JP_CASH?: string
+  WEBULL_ACCOUNT_ID_US_MARGIN?: string
   WEBULL_GRPC_ENDPOINT?: string
   EVENT_INGEST_URL?: string
   EVENT_INGEST_SECRET?: string
@@ -81,7 +82,8 @@ export async function keepBridgeAlive(
       envVars: {
         WEBULL_APP_KEY: env.WEBULL_APP_KEY!,
         WEBULL_APP_SECRET: env.WEBULL_APP_SECRET!,
-        WEBULL_ACCOUNT_ID: env.WEBULL_ACCOUNT_ID!,
+        WEBULL_ACCOUNT_ID_JP_CASH: env.WEBULL_ACCOUNT_ID_JP_CASH!,
+        WEBULL_ACCOUNT_ID_US_MARGIN: env.WEBULL_ACCOUNT_ID_US_MARGIN!,
         WEBULL_GRPC_ENDPOINT: env.WEBULL_GRPC_ENDPOINT!,
         EVENT_INGEST_URL: env.EVENT_INGEST_URL!,
         EVENT_INGEST_SECRET: env.EVENT_INGEST_SECRET!,
@@ -140,7 +142,8 @@ async function stopContainer(
 const requiredSecrets = [
   'WEBULL_APP_KEY',
   'WEBULL_APP_SECRET',
-  'WEBULL_ACCOUNT_ID',
+  'WEBULL_ACCOUNT_ID_JP_CASH',
+  'WEBULL_ACCOUNT_ID_US_MARGIN',
   'WEBULL_GRPC_ENDPOINT',
   'EVENT_INGEST_URL',
   'EVENT_INGEST_SECRET',
