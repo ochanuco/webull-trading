@@ -1,6 +1,11 @@
 import type { OrderIntent } from '../../trading/domain/OrderIntent'
 import { BrokerRequestError } from '../../shared/errors'
-import type { WebullAccountDto, WebullPlaceOrderResponseDto, WebullSubscriptionDto } from './dto'
+import type {
+  WebullAccountDto,
+  WebullOrderDetailDto,
+  WebullPlaceOrderResponseDto,
+  WebullSubscriptionDto,
+} from './dto'
 import { toWebullPlaceOrderRequest } from './mapper'
 import { WebullAuth } from './WebullAuth'
 
@@ -56,6 +61,19 @@ export class WebullHttpClient {
   async getAccount(): Promise<WebullAccountDto> {
     return this.request<WebullAccountDto>('GET', '/account/profile', {
       query: { account_id: this.requireAccountId() },
+    })
+  }
+
+  /**
+   * Fetch the current status of a previously-placed order by its client-side
+   * idempotency key. Mirrors openapi-java-sdk's TradeHttpApiV2Service.
+   */
+  async getOrderDetail(clientOrderId: string): Promise<WebullOrderDetailDto> {
+    return this.request<WebullOrderDetailDto>('GET', '/openapi/account/orders/detail', {
+      query: {
+        account_id: this.requireAccountId(),
+        client_order_id: clientOrderId,
+      },
     })
   }
 

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import { ValidationError } from '../shared/errors'
+import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
@@ -38,6 +39,23 @@ export const admin = new Hono<AppBindings>()
   .post('/strategy/run', async (c) => {
     const result = await runStrategyCron(c.env)
     return c.json(result)
+  })
+  /**
+   * Lookup the Webull-side status of an order by client_order_id. Primary use
+   * is checking whether an auto-placed order filled / was cancelled, ahead of
+   * wiring fill-tracking into PortfolioStateDO (#81).
+   *
+   * `client_order_id` is the uuid we pass into `toWebullPlaceOrderRequest` and
+   * the same id that's stored in `trade_journal.client_order_id`.
+   */
+  .get('/orders/:clientOrderId', async (c) => {
+    const clientOrderId = c.req.param('clientOrderId').trim()
+    if (clientOrderId.length === 0) {
+      throw new ValidationError('clientOrderId must be non-empty', { field: 'clientOrderId' })
+    }
+    const client = createWebullHttpClient(c.env)
+    const detail = await client.getOrderDetail(clientOrderId)
+    return c.json(detail)
   })
   .post('/portfolio/seed-equity', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
