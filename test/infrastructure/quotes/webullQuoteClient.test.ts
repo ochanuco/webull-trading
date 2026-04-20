@@ -31,6 +31,46 @@ describe('groupSymbolsByCategory', () => {
 })
 
 describe('WebullQuoteClient.getSnapshots', () => {
+  // Regression for #84/#85/#86/#87/#88: the combination of path + x-version is
+  // fragile against developer.webull.com's v2 docs vs what the SDK actually
+  // ships. Lock both so any future drift is caught here instead of at runtime.
+  it('defaults to v1 /openapi/market-data/snapshot with x-version: v1 header', async () => {
+    let capturedUrl: URL | undefined
+    let capturedHeaders: Headers | undefined
+    const fetchFn = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      capturedUrl = new URL(urlStr)
+      capturedHeaders = new Headers(init?.headers)
+      return new Response(JSON.stringify({ data: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
+    await client.getSnapshots(['SOXL'], 'US_ETF')
+    expect(capturedUrl?.pathname).toBe('/openapi/market-data/snapshot')
+    expect(capturedHeaders?.get('x-version')).toBe('v1')
+  })
+
+  // Negative: show the assertions above are not trivially satisfied — if the
+  // default path were accidentally changed (e.g. back to the v2 stock variant
+  // docs), overriding quotePath produces a different pathname. This guards
+  // against a regression where DEFAULT_QUOTE_PATH drifts silently.
+  it('honours quotePath override (proves the default assertion is meaningful)', async () => {
+    let capturedUrl: URL | undefined
+    const fetchFn = vi.fn(async (input: Request | string | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      capturedUrl = new URL(urlStr)
+      return new Response(JSON.stringify({ data: [] }), { status: 200 })
+    }) as unknown as typeof fetch
+    const overridePath = '/openapi/market-data/stock/snapshot'
+    const client = new WebullQuoteClient({
+      auth: baseAuth,
+      fetchFn,
+      quotePath: overridePath,
+    })
+    await client.getSnapshots(['SOXL'], 'US_ETF')
+    expect(capturedUrl?.pathname).toBe(overridePath)
+    expect(capturedUrl?.pathname).not.toBe('/openapi/market-data/snapshot')
+  })
+
   it('sends category as space-separated wire form (US STOCK / US ETF), not underscore', async () => {
     // Regression: underscored categories (US_STOCK / US_ETF) yielded 417/500
     // from the Webull snapshot endpoint.
