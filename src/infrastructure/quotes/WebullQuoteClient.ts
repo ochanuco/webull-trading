@@ -56,12 +56,15 @@ interface RawSnapshotEntry {
   ap?: number | string
 }
 
-// openapi-java-sdk's HttpQuotesApiClient (v1) hits `/openapi/market-data/snapshot`
-// with x-version: v1 and only `symbols` + `category`. developer.webull.com also
-// documents a v2 variant at `/openapi/market-data/stock/snapshot`, but the v2
-// endpoint returns 417 on our sandbox credentials, whereas v1 is the path the
-// SDK has shipped in production. Stay on v1 for now.
-const DEFAULT_QUOTE_PATH = '/openapi/market-data/snapshot'
+// Confirmed working combination on the JP UAT tenant (our `WEBULL_API_BASE`
+// resolves to jp-openapi-alb.uat.webullbroker.com — not the generic
+// api.sandbox.webull.hk fallback):
+// - path `/openapi/market-data/stock/snapshot`
+// - x-version: v2
+// - category: US_ETF / US_STOCK (underscore — matches EasyEnum.__str__ = name)
+// - `extend_hour_required=false` + `overnight_required=false` REQUIRED
+//   (omitting them → 417 Expectation Failed; see probe trace in #84)
+const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
@@ -89,12 +92,15 @@ export class WebullQuoteClient {
   async getSnapshots(symbols: string[], category: WebullQuoteCategory): Promise<QuoteResult[]> {
     if (symbols.length === 0) return []
 
-    // Category goes on the wire as the underscored identifier
-    // (developer.webull.com example + Python/Java SDK convention). An earlier
-    // hypothesis that the wire format was "US STOCK" / "US ETF" (space) was
-    // wrong — Python's EasyEnum.__str__ returns `self.name`, and the docs
-    // example is literally `category=US_STOCK`.
-    const query = { symbols: symbols.join(','), category }
+    // v2 snapshot requires `extend_hour_required` + `overnight_required` —
+    // omitting them returns 417 Expectation Failed. We don't want extended
+    // or overnight data for the Pullback strategy (daytime cash equity only).
+    const query = {
+      symbols: symbols.join(','),
+      category,
+      extend_hour_required: 'false',
+      overnight_required: 'false',
+    }
     const url = new URL(this.quotePath, `${this.baseUrl}/`)
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, value)
@@ -109,8 +115,8 @@ export class WebullQuoteClient {
         path: url.pathname,
         query,
         host: url.host,
-        // v1 matches HttpQuotesApiClient in openapi-java-sdk.
-        version: 'v1',
+        // JP UAT only exposes the v2 snapshot; v1 /market-data/snapshot → 404.
+        version: 'v2',
       })
     } catch (error) {
       throw new BrokerRequestError(

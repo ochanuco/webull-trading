@@ -51,11 +51,11 @@ export class WebullBarClient implements BarClient {
 
   constructor(private readonly options: WebullBarClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
-    // openapi-java-sdk's HttpQuotesApiClient.getBars uses
-    // `/openapi/market-data/bars` with v1. Historical default here was
-    // `/market-data/candles` which has no /openapi prefix and the wrong
-    // resource name (`candles`). Update to SDK-accurate default.
-    this.barsPath = options.barsPath ?? '/openapi/market-data/bars'
+    // JP UAT tenant (jp-openapi-alb.uat.webullbroker.com) only exposes the
+    // v2 bars endpoint at `/openapi/market-data/stock/bars`. The Java SDK's
+    // v1 `/openapi/market-data/bars` returns 404 on this tenant. See #84
+    // probe trace.
+    this.barsPath = options.barsPath ?? '/openapi/market-data/stock/bars'
     this.timeoutMs = options.timeoutMs ?? 5_000
     // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
     // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
@@ -64,13 +64,13 @@ export class WebullBarClient implements BarClient {
 
   async getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]> {
     const category = resolveBarCategory(symbol)
-    // Java SDK (HttpQuotesApiClient.getBars) uses `timespan` + `count`, not
-    // `period` + `limit`. The category goes on the wire as the underscored
-    // identifier per developer.webull.com example + Python SDK __str__.
+    // v2 stock/bars timespan enum (from probe 417 body):
+    //   M1, M5, M15, M30, M60, M120, M240, D, W, M, Y
+    // Daily = "D" (upper-case). Earlier `d1` yielded UNSUPPORTED_TIMESPAN.
     const query = {
       symbol,
       category,
-      timespan: 'd1',
+      timespan: 'D',
       count: String(lookback),
     }
 
@@ -86,7 +86,8 @@ export class WebullBarClient implements BarClient {
         path: url.pathname,
         query,
         host: url.host,
-        version: 'v1',
+        // v2 — v1 /market-data/bars is 404 on the JP UAT tenant.
+        version: 'v2',
       })
     } catch (error) {
       throw new BrokerRequestError(
