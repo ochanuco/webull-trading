@@ -10,4 +10,5 @@ export interface PortfolioStore {
   seedDailyStartEquity(amount: number): Promise<PortfolioState>
   applyRealizedPnl(delta: number): Promise<PortfolioState>
   setTradingDisabledUntil(iso: string | null): Promise<PortfolioState>
+  rollDaily(): Promise<{ before: PortfolioState; after: PortfolioState }>
 }

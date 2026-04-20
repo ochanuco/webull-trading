@@ -80,6 +80,11 @@ function makePortfolioStore(initial: PortfolioState): {
       current = { ...current, tradingDisabledUntil: iso }
       return current
     },
+    async rollDaily() {
+      const before = current
+      current = { ...current, dailyStartEquity: 0, dailyRealizedPnl: 0 }
+      return { before, after: current }
+    },
   }
   return { store, captured, current: () => current }
 }

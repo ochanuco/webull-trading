@@ -72,3 +72,23 @@ export function setTradingDisabledUntil(
     updatedAt: ctx.now().toISOString(),
   }
 }
+
+/**
+ * EOD rollover: computes `nextStart = dailyStartEquity + dailyRealizedPnl`,
+ * resets `dailyRealizedPnl` to 0, and returns both the before and after states.
+ * This is the atomic version that prevents races with `applyRealizedPnl`.
+ */
+export function rollDaily(
+  state: PortfolioState,
+  ctx: PortfolioTransitionContext = defaultCtx,
+): { before: PortfolioState; after: PortfolioState } {
+  const before = state
+  const nextStart = state.dailyStartEquity + state.dailyRealizedPnl
+  const after: PortfolioState = {
+    ...state,
+    dailyStartEquity: nextStart,
+    dailyRealizedPnl: 0,
+    updatedAt: ctx.now().toISOString(),
+  }
+  return { before, after }
+}

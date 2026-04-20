@@ -89,9 +89,7 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError('PORTFOLIO_STATE binding is not configured', { field: 'env' })
     }
     const client = new PortfolioStateClient(c.env.PORTFOLIO_STATE)
-    const before = await client.getPortfolio()
-    const nextStart = before.dailyStartEquity + before.dailyRealizedPnl
-    const after = await client.seedDailyStartEquity(nextStart)
+    const { before, after } = await client.rollDaily()
     return c.json({
       rolledAt: after.updatedAt,
       rolledDelta: before.dailyRealizedPnl,
