@@ -34,7 +34,10 @@ describe('WebullQuoteClient.getSnapshots', () => {
   // Regression for #84/#85/#86/#87/#88: the combination of path + x-version is
   // fragile against developer.webull.com's v2 docs vs what the SDK actually
   // ships. Lock both so any future drift is caught here instead of at runtime.
-  it('defaults to v1 /openapi/market-data/snapshot with x-version: v1 header', async () => {
+  it('defaults to v2 /openapi/market-data/stock/snapshot with x-version: v2 + extend/overnight params', async () => {
+    // Confirmed against the JP UAT tenant via stdlib probe (#84). v1
+    // `/market-data/snapshot` returns 404; v2 `/market-data/stock/snapshot`
+    // returns 200 with extend_hour_required + overnight_required present.
     let capturedUrl: URL | undefined
     let capturedHeaders: Headers | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
@@ -45,8 +48,10 @@ describe('WebullQuoteClient.getSnapshots', () => {
     }) as unknown as typeof fetch
     const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
     await client.getSnapshots(['SOXL'], 'US_ETF')
-    expect(capturedUrl?.pathname).toBe('/openapi/market-data/snapshot')
-    expect(capturedHeaders?.get('x-version')).toBe('v1')
+    expect(capturedUrl?.pathname).toBe('/openapi/market-data/stock/snapshot')
+    expect(capturedUrl?.searchParams.get('extend_hour_required')).toBe('false')
+    expect(capturedUrl?.searchParams.get('overnight_required')).toBe('false')
+    expect(capturedHeaders?.get('x-version')).toBe('v2')
   })
 
   // Negative: show the assertions above are not trivially satisfied — if the
@@ -60,7 +65,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
       capturedUrl = new URL(urlStr)
       return new Response(JSON.stringify({ data: [] }), { status: 200 })
     }) as unknown as typeof fetch
-    const overridePath = '/openapi/market-data/stock/snapshot'
+    const overridePath = '/openapi/market-data/snapshot'
     const client = new WebullQuoteClient({
       auth: baseAuth,
       fetchFn,
@@ -68,7 +73,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
     })
     await client.getSnapshots(['SOXL'], 'US_ETF')
     expect(capturedUrl?.pathname).toBe(overridePath)
-    expect(capturedUrl?.pathname).not.toBe('/openapi/market-data/snapshot')
+    expect(capturedUrl?.pathname).not.toBe('/openapi/market-data/stock/snapshot')
   })
 
   it('sends category as the underscored identifier (US_STOCK / US_ETF)', async () => {

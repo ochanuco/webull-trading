@@ -16,7 +16,10 @@ describe('WebullBarClient.getDailyBars', () => {
   // query field names (`timespan` + `count`, NOT `period` + `limit`).
   // Historical default `/market-data/candles` + `period/limit` silently
   // drops every bar request because it has the wrong path AND wrong params.
-  it('defaults to /openapi/market-data/bars with timespan=d1 + count + x-version: v1', async () => {
+  it('defaults to v2 /openapi/market-data/stock/bars with timespan=D + count + x-version: v2', async () => {
+    // Confirmed via stdlib probe (#84): v1 `/market-data/bars` → 404,
+    // v2 `/market-data/stock/bars` → 417 UNSUPPORTED_TIMESPAN (path valid).
+    // Accepted timespan set: {M1, M5, M15, M30, M60, M120, M240, D, W, M, Y}.
     let capturedUrl: URL | undefined
     let capturedHeaders: Headers | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
@@ -29,13 +32,13 @@ describe('WebullBarClient.getDailyBars', () => {
     const client = new WebullBarClient({ auth: baseAuth, fetchFn })
     await client.getDailyBars('SOXL', 30)
 
-    expect(capturedUrl?.pathname).toBe('/openapi/market-data/bars')
+    expect(capturedUrl?.pathname).toBe('/openapi/market-data/stock/bars')
     expect(capturedUrl?.searchParams.get('symbol')).toBe('SOXL')
-    expect(capturedUrl?.searchParams.get('timespan')).toBe('d1')
+    expect(capturedUrl?.searchParams.get('timespan')).toBe('D')
     expect(capturedUrl?.searchParams.get('count')).toBe('30')
     expect(capturedUrl?.searchParams.get('period')).toBeNull()
     expect(capturedUrl?.searchParams.get('limit')).toBeNull()
-    expect(capturedHeaders?.get('x-version')).toBe('v1')
+    expect(capturedHeaders?.get('x-version')).toBe('v2')
   })
 
   // Category routing mirrors WebullQuoteClient: SOXL/SOXS are ETFs, 4-digit
@@ -74,6 +77,6 @@ describe('WebullBarClient.getDailyBars', () => {
     await client.getDailyBars('SOXL', 1)
 
     expect(capturedPath).toBe('/market-data/candles')
-    expect(capturedPath).not.toBe('/openapi/market-data/bars')
+    expect(capturedPath).not.toBe('/openapi/market-data/stock/bars')
   })
 })
