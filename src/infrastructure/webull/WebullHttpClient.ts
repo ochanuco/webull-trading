@@ -98,6 +98,15 @@ export class WebullHttpClient {
     // The order could have been placed against either account. Query every
     // configured account and return the first hit.
     const configured = this.configuredAccountIds()
+    if (configured.length === 0) {
+      // Mirror placeOrder / getAccount: surface misconfiguration loudly
+      // rather than returning `undefined` (which would be indistinguishable
+      // from "order not in the recent history window" at the call site).
+      throw new BrokerRequestError(
+        'Missing Webull account IDs: set WEBULL_ACCOUNT_ID_JP_CASH and/or WEBULL_ACCOUNT_ID_US_MARGIN',
+        'webullAccountId',
+      )
+    }
     const pages = await Promise.all(
       configured.map((accountId) =>
         this.request<WebullOrderDetailDto[]>('GET', '/openapi/account/orders/history', {

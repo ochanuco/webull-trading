@@ -155,6 +155,19 @@ describe('WebullHttpClient', () => {
     expect(detail?.status).toBe('FILLED')
   })
 
+  it('findOrderByClientId throws BrokerRequestError when no account ids are configured', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    const client = new WebullHttpClient({
+      auth: new WebullAuth({ appKey: 'app-key', appSecret: 'app-secret' }),
+      accountIds: {},
+      baseUrl: 'https://broker.example.test',
+      retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 },
+      fetchFn: fetchMock,
+    })
+    await expect(client.findOrderByClientId('whatever')).rejects.toThrow(/Missing Webull account IDs/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('findOrderByClientId returns undefined when the coid is in neither account', async () => {
     // Each account call needs a fresh Response since the body can only be
     // read once. `mockResolvedValue` returns the same instance every time.
