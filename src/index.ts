@@ -5,6 +5,7 @@ import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalR
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { keepBridgeAlive } from './trading/bridge/bridgeKeepAlive'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
+import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
 
 // 5 分毎の quote feed + bridge keep-alive cron
@@ -90,6 +91,38 @@ export default {
           console.error(
             JSON.stringify({
               event: 'quote_feed_error',
+              requestId,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          )
+        },
+      ),
+    )
+    // Fill reconciliation piggybacks on the 5-minute cadence. The SELECT
+    // filters out terminal rows so if nothing is in flight this is a single
+    // zero-row query. Per-order Webull GET only fires for unreconciled coids.
+    ctx.waitUntil(
+      reconcileFills({ env, requestId }).then(
+        (summary) => {
+          // Skip the log line entirely when there was nothing to do — the
+          // feed runs every 5 minutes and most intervals are idle.
+          if (summary.inspected === 0) return
+          console.log(
+            JSON.stringify({
+              event: 'reconcile_fills_run',
+              requestId,
+              inspected: summary.inspected,
+              updated: summary.updated,
+              stillPending: summary.stillPending.length,
+              notFound: summary.notFound.length,
+              errorCount: summary.errors.length,
+            }),
+          )
+        },
+        (error) => {
+          console.error(
+            JSON.stringify({
+              event: 'reconcile_fills_error',
               requestId,
               message: error instanceof Error ? error.message : String(error),
             }),
