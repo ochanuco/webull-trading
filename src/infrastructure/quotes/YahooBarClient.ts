@@ -70,6 +70,15 @@ export class YahooBarClient implements BarClient {
   }
 
   async getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]> {
+    if (!Number.isInteger(lookback) || lookback <= 0) {
+      // rangeForLookback assumes a positive bucket, and `slice(-0)` /
+      // `slice(-NaN)` both silently return the full array rather than the
+      // requested window. Fail fast with a descriptive error so callers can't
+      // accidentally ask for "all bars".
+      throw new RangeError(
+        `YahooBarClient.getDailyBars: lookback must be a positive integer, got ${lookback}`,
+      )
+    }
     const yahooSymbol = toYahooSymbol(symbol)
     const url = new URL(`/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`, this.baseUrl)
     url.searchParams.set('interval', '1d')
@@ -160,9 +169,17 @@ function normalizeYahooChart(json: YahooChartResponse, lookback: number): DailyB
     const high = highs[i]
     const low = lows[i]
     const close = closes[i]
-    if (open == null || high == null || low == null || close == null) continue
+    // Drop any row that fails the repo-wide "price > 0 and finite" guarantee
+    // (rejects null, NaN, Infinity, zero, and negatives in one guard).
+    if (!isPositiveFinite(open) || !isPositiveFinite(high) || !isPositiveFinite(low) || !isPositiveFinite(close)) {
+      continue
+    }
+    // Sanity check: Yahoo occasionally ships adjusted rows where `low > high`
+    // around dividend events. A bar with that invariant broken is unreliable
+    // for downstream indicators (ATR, etc.), so skip it.
+    if (low > high) continue
     const ts = timestamps[i]
-    if (typeof ts !== 'number') continue
+    if (typeof ts !== 'number' || !Number.isFinite(ts)) continue
     const date = new Date(ts * 1000).toISOString().slice(0, 10)
     bars.push({ date, open, high, low, close })
   }
@@ -171,4 +188,8 @@ function normalizeYahooChart(json: YahooChartResponse, lookback: number): DailyB
   // so callers get the shape they asked for.
   bars.sort((a, b) => a.date.localeCompare(b.date))
   return bars.slice(-lookback)
+}
+
+function isPositiveFinite(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
 }

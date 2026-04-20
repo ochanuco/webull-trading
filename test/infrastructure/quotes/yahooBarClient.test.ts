@@ -110,6 +110,46 @@ describe('YahooBarClient.getDailyBars', () => {
     expect(bars.at(-1)?.close).toBe(closes[21])
   })
 
+  it.each([0, -1, 1.5, NaN, Number.POSITIVE_INFINITY])(
+    'throws RangeError for non-positive-integer lookback=%s',
+    async (bad) => {
+      const fetchFn = vi.fn<typeof fetch>()
+      const client = new YahooBarClient({ fetchFn })
+      await expect(client.getDailyBars('SOXL', bad)).rejects.toBeInstanceOf(RangeError)
+      expect(fetchFn).not.toHaveBeenCalled()
+    },
+  )
+
+  it('drops bars with non-positive / non-finite prices and low>high inversions', async () => {
+    const ts = [1745539200, 1745625600, 1745712000, 1745798400, 1745884800]
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
+      mockJsonResponse({
+        chart: {
+          result: [
+            {
+              meta: { currency: 'USD', regularMarketPrice: 94.68 },
+              timestamp: ts,
+              indicators: {
+                quote: [
+                  {
+                    open: [94, 0, 95, 96, 97], // zero at idx 1
+                    high: [95, 95, 95, 90, 98], // low>high at idx 3
+                    low: [93, 94, 94, 95, 96],
+                    close: [94.5, 94.5, Number.NaN, 95.5, 97.5], // NaN at idx 2
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    )
+    const client = new YahooBarClient({ fetchFn })
+    const bars = await client.getDailyBars('SOXL', 5)
+    // Rows 0 and 4 survive; 1 (open=0), 2 (close=NaN), 3 (low>high) dropped.
+    expect(bars.map((b) => b.close)).toEqual([94.5, 97.5])
+  })
+
   it('throws BrokerRequestError on non-2xx (mapped via brokerErrorForStatus)', async () => {
     const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
       new Response('Too Many Requests', { status: 429 }),
