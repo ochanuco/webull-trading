@@ -2,18 +2,31 @@ import type { OrderIntent } from '../../trading/domain/OrderIntent'
 import { BrokerRequestError } from '../../shared/errors'
 import type {
   WebullAccountDto,
+  WebullMarket,
   WebullOrderDetailDto,
   WebullPlaceOrderResponseDto,
   WebullSubscriptionDto,
 } from './dto'
-import { toWebullPlaceOrderRequest } from './mapper'
+import { inferWebullMarket, toWebullPlaceOrderRequest } from './mapper'
 import { WebullAuth } from './WebullAuth'
 
 export interface WebullClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_ACCOUNT_ID?: string
   WEBULL_API_BASE?: string
+  /**
+   * Per-market account IDs. Webull issues separate accounts per market
+   * (JP CASH for JP equities, US_MARGIN for US equities) and each order
+   * must route through the matching one — a JPY account silently rejects
+   * USD-denominated orders.
+   */
+  WEBULL_ACCOUNT_ID_JP_CASH?: string
+  WEBULL_ACCOUNT_ID_US_MARGIN?: string
+}
+
+export interface WebullAccountIdMap {
+  jp?: string
+  us?: string
 }
 
 interface WebullRetryOptions {
@@ -25,7 +38,8 @@ interface WebullRetryOptions {
 
 interface WebullHttpClientOptions {
   auth: WebullAuth
-  accountId?: string
+  /** Per-market account IDs. Supply at least one. */
+  accountIds: WebullAccountIdMap
   baseUrl?: string
   timeoutMs?: number
   retry?: WebullRetryOptions
@@ -38,6 +52,7 @@ export class WebullHttpClient {
   private readonly timeoutMs: number
   private readonly fetchFn: typeof fetch
   private readonly retry: Required<WebullRetryOptions>
+  private readonly accountIds: WebullAccountIdMap
 
   constructor(private readonly options: WebullHttpClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
@@ -52,6 +67,7 @@ export class WebullHttpClient {
       multiplier: options.retry?.multiplier ?? 2,
       jitter: options.retry?.jitter ?? 0.25,
     }
+    this.accountIds = options.accountIds
   }
 
   async listSubscriptions(): Promise<WebullSubscriptionDto[]> {
@@ -60,7 +76,7 @@ export class WebullHttpClient {
 
   async getAccount(): Promise<WebullAccountDto> {
     return this.request<WebullAccountDto>('GET', '/account/profile', {
-      query: { account_id: this.requireAccountId() },
+      query: { account_id: this.requireAnyAccountId() },
     })
   }
 
@@ -79,24 +95,40 @@ export class WebullHttpClient {
     clientOrderId: string,
     pageSize = 50,
   ): Promise<WebullOrderDetailDto | undefined> {
-    const history = await this.request<WebullOrderDetailDto[]>(
-      'GET',
-      '/openapi/account/orders/history',
-      {
-        query: {
-          account_id: this.requireAccountId(),
-          page_size: String(pageSize),
-        },
-      },
+    // The order could have been placed against either account. Query every
+    // configured account and return the first hit.
+    const configured = this.configuredAccountIds()
+    if (configured.length === 0) {
+      // Mirror placeOrder / getAccount: surface misconfiguration loudly
+      // rather than returning `undefined` (which would be indistinguishable
+      // from "order not in the recent history window" at the call site).
+      throw new BrokerRequestError(
+        'Missing Webull account IDs: set WEBULL_ACCOUNT_ID_JP_CASH and/or WEBULL_ACCOUNT_ID_US_MARGIN',
+        'webullAccountId',
+      )
+    }
+    const pages = await Promise.all(
+      configured.map((accountId) =>
+        this.request<WebullOrderDetailDto[]>('GET', '/openapi/account/orders/history', {
+          query: { account_id: accountId, page_size: String(pageSize) },
+        }),
+      ),
     )
-    return history.find((entry) => entry.client_order_id === clientOrderId)
+    for (const page of pages) {
+      const hit = page.find((entry) => entry.client_order_id === clientOrderId)
+      if (hit) return hit
+    }
+    return undefined
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {
+    // Route to the market-matching account. Placing a USD order on a JPY
+    // CASH account results in silent rejection (#97).
+    const market = inferWebullMarket(intent.symbol)
     // v2 endpoint. JP UAT / newer Webull deployments reject the v1
     // `/trade/order/place` + `stock_order` body with ILLEGAL_PARAMETER.
     return this.request<WebullPlaceOrderResponseDto>('POST', '/openapi/account/orders/place', {
-      query: { account_id: this.requireAccountId() },
+      query: { account_id: this.requireAccountId(market) },
       body: toWebullPlaceOrderRequest(intent),
     })
   }
@@ -237,12 +269,25 @@ export class WebullHttpClient {
     )
   }
 
-  private requireAccountId(): string {
-    if (!this.options.accountId) {
+  private requireAccountId(market: WebullMarket): string {
+    const key: keyof WebullAccountIdMap = market === 'JP' ? 'jp' : 'us'
+    const id = this.accountIds[key]
+    if (!id) {
+      throw new BrokerRequestError(`Missing Webull account ID for market=${market}`, 'webullAccountId')
+    }
+    return id
+  }
+
+  private requireAnyAccountId(): string {
+    const id = this.accountIds.jp ?? this.accountIds.us
+    if (!id) {
       throw new BrokerRequestError('Missing Webull account ID', 'webullAccountId')
     }
+    return id
+  }
 
-    return this.options.accountId
+  private configuredAccountIds(): string[] {
+    return [this.accountIds.jp, this.accountIds.us].filter((x): x is string => !!x)
   }
 }
 
@@ -255,7 +300,10 @@ export function createWebullHttpClient(
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
     }),
-    accountId: env.WEBULL_ACCOUNT_ID,
+    accountIds: {
+      jp: env.WEBULL_ACCOUNT_ID_JP_CASH,
+      us: env.WEBULL_ACCOUNT_ID_US_MARGIN,
+    },
     baseUrl: env.WEBULL_API_BASE,
     timeoutMs: options?.timeoutMs,
     retry: options?.retry,

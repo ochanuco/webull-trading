@@ -48,7 +48,8 @@ export function parseNumberEnv(value: string | undefined, key?: string): number 
 export interface Env {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_ACCOUNT_ID?: string
+  WEBULL_ACCOUNT_ID_JP_CASH?: string
+  WEBULL_ACCOUNT_ID_US_MARGIN?: string
   WEBULL_API_BASE?: string
   /** Override the snapshot endpoint path (POC: UAT 未確定なので env で差し替え). */
   WEBULL_QUOTE_PATH?: string
