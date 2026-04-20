@@ -4,6 +4,7 @@ import { ValidationError } from '../shared/errors'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
+import { reconcileFills } from '../trading/reconciliation/reconcileFills'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
 
 /**
@@ -49,6 +50,19 @@ export const admin = new Hono<AppBindings>()
    * If the order is older than that window, returns 404
    * `order_not_found_in_recent_history`.
    */
+  /**
+   * Poll Webull for every locally-submitted order that doesn't yet have a
+   * terminal `broker_status` in trade_journal, and patch the row with
+   * `filled_qty / filled_price / broker_status`. Safe to call on demand —
+   * idempotent (terminal rows are already excluded by the WHERE clause).
+   *
+   * PnL roll-up into PortfolioStateDO is a follow-up; this just makes sure
+   * the journal reflects what Webull says about each order.
+   */
+  .post('/orders/reconcile', async (c) => {
+    const summary = await reconcileFills({ env: c.env, requestId: c.get('requestId') })
+    return c.json(summary)
+  })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
     if (clientOrderId.length === 0) {
