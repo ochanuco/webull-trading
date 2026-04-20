@@ -3,7 +3,19 @@ import { BrokerRequestError } from '../../shared/errors'
 import { WebullAuth } from '../webull/WebullAuth'
 import { inferWebullMarket } from '../webull/mapper'
 
-export type BarCategory = 'US_STOCK' | 'JP_STOCK'
+// developer.webull.com shows `category=US_STOCK` on the wire (underscore).
+// Python SDK's EasyEnum.__str__ returns `self.name` (the underscored
+// identifier), and Java SDK passes `Category.US_STOCK.name()` the same way.
+// JP_STOCK has no working HK-sandbox path — JP bars need a JP tenant (#89).
+export type BarCategory = 'US_STOCK' | 'US_ETF' | 'JP_STOCK'
+
+// Mirrors WebullQuoteClient's US ETF allowlist.
+const US_ETF_SYMBOLS = new Set<string>(['SOXL', 'SOXS'])
+
+function resolveBarCategory(symbol: string): BarCategory {
+  if (inferWebullMarket(symbol) === 'JP') return 'JP_STOCK'
+  return US_ETF_SYMBOLS.has(symbol) ? 'US_ETF' : 'US_STOCK'
+}
 
 export interface BarClient {
   getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]>
@@ -39,7 +51,11 @@ export class WebullBarClient implements BarClient {
 
   constructor(private readonly options: WebullBarClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
-    this.barsPath = options.barsPath ?? '/market-data/candles'
+    // openapi-java-sdk's HttpQuotesApiClient.getBars uses
+    // `/openapi/market-data/bars` with v1. Historical default here was
+    // `/market-data/candles` which has no /openapi prefix and the wrong
+    // resource name (`candles`). Update to SDK-accurate default.
+    this.barsPath = options.barsPath ?? '/openapi/market-data/bars'
     this.timeoutMs = options.timeoutMs ?? 5_000
     // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
     // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
@@ -47,8 +63,16 @@ export class WebullBarClient implements BarClient {
   }
 
   async getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]> {
-    const category: BarCategory = inferWebullMarket(symbol) === 'JP' ? 'JP_STOCK' : 'US_STOCK'
-    const query = { symbol, category, period: '1d', limit: String(lookback) }
+    const category = resolveBarCategory(symbol)
+    // Java SDK (HttpQuotesApiClient.getBars) uses `timespan` + `count`, not
+    // `period` + `limit`. The category goes on the wire as the underscored
+    // identifier per developer.webull.com example + Python SDK __str__.
+    const query = {
+      symbol,
+      category,
+      timespan: 'd1',
+      count: String(lookback),
+    }
 
     const url = new URL(this.barsPath, `${this.baseUrl}/`)
     for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v)
@@ -57,7 +81,9 @@ export class WebullBarClient implements BarClient {
     try {
       headers = await this.options.auth.createHeaders({
         method: 'GET',
-        path: url.pathname + url.search,
+        // Signing is path-only; query is merged into the canonical sorted pairs.
+        // Passing `pathname + search` duplicates query params (same bug as #80).
+        path: url.pathname,
         query,
         host: url.host,
         version: 'v1',

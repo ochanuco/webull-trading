@@ -11,12 +11,6 @@ export type WebullQuoteCategory = 'US_STOCK' | 'US_ETF'
 // symbol_config.category when universe grows.
 const US_ETF_SYMBOLS = new Set<string>(['SOXL', 'SOXS'])
 
-// Wire format on the API is space-separated, not underscore.
-// ref https://github.com/webull-inc/openapi-python-sdk/blob/main/webull-python-sdk-mdata/webullsdkmdata/common/category.py
-const WEBULL_CATEGORY_WIRE: Record<WebullQuoteCategory, string> = {
-  US_STOCK: 'US STOCK',
-  US_ETF: 'US ETF',
-}
 
 export interface QuoteResult {
   symbol: string
@@ -95,12 +89,12 @@ export class WebullQuoteClient {
   async getSnapshots(symbols: string[], category: WebullQuoteCategory): Promise<QuoteResult[]> {
     if (symbols.length === 0) return []
 
-    // Webull SDK wire format is space-separated: "US STOCK" / "US ETF".
-    // Using the underscore identifiers as-is yields 417/500.
-    const query = {
-      symbols: symbols.join(','),
-      category: WEBULL_CATEGORY_WIRE[category],
-    }
+    // Category goes on the wire as the underscored identifier
+    // (developer.webull.com example + Python/Java SDK convention). An earlier
+    // hypothesis that the wire format was "US STOCK" / "US ETF" (space) was
+    // wrong — Python's EasyEnum.__str__ returns `self.name`, and the docs
+    // example is literally `category=US_STOCK`.
+    const query = { symbols: symbols.join(','), category }
     const url = new URL(this.quotePath, `${this.baseUrl}/`)
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, value)
