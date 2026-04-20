@@ -84,7 +84,16 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
 
   for (const row of candidates) {
     const coid = row.clientOrderId
-    if (!coid) continue
+    if (!coid) {
+      // In practice a post_submit row with submitted=1 always has a coid
+      // (it's the idempotency key we signed the order with). Surface any
+      // violation loudly instead of silently dropping the row.
+      summary.errors.push({
+        clientOrderId: `row_id:${row.id}`,
+        message: 'missing client_order_id on post_submit row',
+      })
+      continue
+    }
     let detail: WebullOrderDetailDto | undefined
     try {
       detail = await client.findOrderByClientId(coid)
@@ -110,16 +119,31 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     const filledQty = toNumberOrNull(detail.filled_quantity)
     const filledPrice = pickFilledPrice(detail)
 
-    await db
-      .update(tradeJournal)
-      .set({
-        brokerStatus: status,
-        filledQty,
-        filledPrice,
-      })
-      .where(eq(tradeJournal.id, row.id))
-
-    summary.updated.push({ clientOrderId: coid, status })
+    try {
+      await db
+        .update(tradeJournal)
+        .set({
+          brokerStatus: status,
+          filledQty,
+          filledPrice,
+        })
+        .where(eq(tradeJournal.id, row.id))
+      summary.updated.push({ clientOrderId: coid, status })
+    } catch (error) {
+      // A single row's UPDATE shouldn't kill the whole batch; most other
+      // rows can still be reconciled. Log the failure into the errors bucket
+      // so the operator can retry just this one.
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(
+        JSON.stringify({
+          event: 'reconcile_fill_update_error',
+          clientOrderId: coid,
+          status,
+          message,
+        }),
+      )
+      summary.errors.push({ clientOrderId: coid, message: `update_failed: ${message}` })
+    }
   }
 
   return summary
