@@ -11,6 +11,13 @@ export type WebullQuoteCategory = 'US_STOCK' | 'US_ETF'
 // symbol_config.category when universe grows.
 const US_ETF_SYMBOLS = new Set<string>(['SOXL', 'SOXS'])
 
+// Wire format on the API is space-separated, not underscore.
+// ref https://github.com/webull-inc/openapi-python-sdk/blob/main/webull-python-sdk-mdata/webullsdkmdata/common/category.py
+const WEBULL_CATEGORY_WIRE: Record<WebullQuoteCategory, string> = {
+  US_STOCK: 'US STOCK',
+  US_ETF: 'US ETF',
+}
+
 export interface QuoteResult {
   symbol: string
   price: number
@@ -83,7 +90,9 @@ export class WebullQuoteClient {
   async getSnapshots(symbols: string[], category: WebullQuoteCategory): Promise<QuoteResult[]> {
     if (symbols.length === 0) return []
 
-    const query = { symbols: symbols.join(','), category }
+    // Webull SDK wire format is space-separated: "US STOCK" / "US ETF".
+    // Using the underscore identifiers as-is yields 417/500.
+    const query = { symbols: symbols.join(','), category: WEBULL_CATEGORY_WIRE[category] }
     const url = new URL(this.quotePath, `${this.baseUrl}/`)
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, value)
