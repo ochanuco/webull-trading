@@ -82,7 +82,8 @@ function makePortfolioStore(initial: PortfolioState): {
     },
     async rollDaily() {
       const before = current
-      current = { ...current, dailyStartEquity: 0, dailyRealizedPnl: 0 }
+      const nextStart = current.dailyStartEquity + current.dailyRealizedPnl
+      current = { ...current, dailyStartEquity: nextStart, dailyRealizedPnl: 0 }
       return { before, after: current }
     },
   }
