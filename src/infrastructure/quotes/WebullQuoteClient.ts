@@ -1,4 +1,4 @@
-import { BrokerRequestError } from '../../shared/errors'
+import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { WebullAuth } from '../webull/WebullAuth'
 import { inferWebullMarket } from '../webull/mapper'
 
@@ -146,7 +146,8 @@ export class WebullQuoteClient {
     }
 
     if (!response.ok) {
-      throw new BrokerRequestError(
+      throw brokerErrorForStatus(
+        response.status,
         `Webull quote request failed with status ${response.status}`,
         `GET ${this.quotePath}`,
       )

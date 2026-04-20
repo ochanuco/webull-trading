@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  BrokerAuthError,
+  BrokerClientError,
+  BrokerRateLimitError,
+  BrokerServerError,
+} from '../../../src/shared/errors'
 import { WebullAuth } from '../../../src/infrastructure/webull/WebullAuth'
 import { WebullHttpClient } from '../../../src/infrastructure/webull/WebullHttpClient'
 import type { OrderIntent } from '../../../src/trading/domain/OrderIntent'
@@ -255,6 +261,37 @@ describe('WebullHttpClient', () => {
       'Webull request failed permanently with status 400',
     )
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps 401 to BrokerAuthError (and does not retry)', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('unauth', { status: 401 }))
+    const client = createClient(fetchMock)
+    await expect(client.placeOrder(intent)).rejects.toBeInstanceOf(BrokerAuthError)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps 429 to BrokerRateLimitError (and does not retry inside the 4xx branch)', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('slow down', { status: 429 }))
+    const client = createClient(fetchMock)
+    await expect(client.placeOrder(intent)).rejects.toBeInstanceOf(BrokerRateLimitError)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps a non-auth 4xx to BrokerClientError', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('nope', { status: 400 }))
+    const client = createClient(fetchMock)
+    await expect(client.placeOrder(intent)).rejects.toBeInstanceOf(BrokerClientError)
+  })
+
+  it('maps a retried-out 5xx to BrokerServerError with brokerStatus set', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('boom', { status: 503 }))
+    const client = createClient(fetchMock)
+    const err = await client.placeOrder(intent).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BrokerServerError)
+    expect((err as BrokerServerError).brokerStatus).toBe(503)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('retries AbortError failures', async () => {

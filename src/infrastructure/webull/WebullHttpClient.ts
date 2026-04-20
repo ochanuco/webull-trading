@@ -1,5 +1,5 @@
 import type { OrderIntent } from '../../trading/domain/OrderIntent'
-import { BrokerRequestError } from '../../shared/errors'
+import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import type {
   WebullAccountDto,
   WebullMarket,
@@ -227,7 +227,11 @@ export class WebullHttpClient {
       lastFailure = new Error(`Webull request failed with status ${response.status}`)
 
       if (response.status >= 400 && response.status < 500) {
-        throw new BrokerRequestError(
+        // 4xx is the caller's fault or an auth/rate-limit problem — do not
+        // retry. Map to the narrowest error subclass so downstream handlers
+        // can treat 401/429 differently from 400.
+        throw brokerErrorForStatus(
+          response.status,
           `Webull request failed permanently with status ${response.status}`,
           `${method} ${path}`,
           { cause: lastFailure },
@@ -248,7 +252,10 @@ export class WebullHttpClient {
     }
 
     if (lastStatus !== undefined) {
-      throw new BrokerRequestError(
+      // Retries exhausted on a 5xx. Surface as a server-class error so alerts
+      // can distinguish "Webull is down" from "we sent a bad request".
+      throw brokerErrorForStatus(
+        lastStatus,
         `Webull request failed after ${this.retry.maxAttempts} attempts with last status ${lastStatus}`,
         `${method} ${path}`,
         { cause: lastFailure },

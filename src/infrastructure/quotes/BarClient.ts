@@ -1,5 +1,5 @@
 import type { DailyBar } from '../../trading/strategy/indicators'
-import { BrokerRequestError } from '../../shared/errors'
+import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { WebullAuth } from '../webull/WebullAuth'
 import { inferWebullMarket } from '../webull/mapper'
 
@@ -117,7 +117,8 @@ export class WebullBarClient implements BarClient {
     }
 
     if (!response.ok) {
-      throw new BrokerRequestError(
+      throw brokerErrorForStatus(
+        response.status,
         `Webull bar request failed with status ${response.status}`,
         `GET ${this.barsPath}`,
       )
