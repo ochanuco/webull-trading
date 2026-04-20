@@ -50,6 +50,12 @@ interface ReconcileOptions {
  * "we know what happened to it."
  */
 export async function reconcileFills(options: ReconcileOptions): Promise<ReconcileSummary> {
+  // Fail-closed on a missing DB binding to match loadGlobalConfigFrom /
+  // loadSymbolUniverse. A silent empty summary would be indistinguishable
+  // from "nothing to reconcile" and hide a misconfiguration.
+  if (!options.env.DB) {
+    throw new Error('reconcileFills requires env.DB binding (D1 not configured)')
+  }
   const summary: ReconcileSummary = {
     inspected: 0,
     updated: [],
@@ -57,7 +63,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     notFound: [],
     errors: [],
   }
-  if (!options.env.DB) return summary
 
   const now = options.now ?? (() => new Date())
   const since = new Date(now().getTime() - (options.lookbackMs ?? 48 * 3_600_000)).toISOString()
