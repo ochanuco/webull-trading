@@ -28,6 +28,13 @@ export interface WebullV2OrderEntry {
   time_in_force: 'DAY'
   entrust_type: 'QTY'
   account_tax_type: 'GENERAL'
+  /**
+   * Required by Webull's JP UAT tenant for US orders (placed through the
+   * US_MARGIN account). `ONE_DAY` = intraday, closes same session.
+   * `INDEFINITE` = can be held overnight. Omit for JP orders — JP_CASH
+   * account is non-margin and rejects this field.
+   */
+  margin_type?: 'ONE_DAY' | 'INDEFINITE'
 }
 
 export interface WebullPlaceOrderRequestDto {

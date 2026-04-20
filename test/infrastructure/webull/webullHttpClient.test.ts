@@ -97,6 +97,7 @@ describe('WebullHttpClient', () => {
           time_in_force: 'DAY',
           entrust_type: 'QTY',
           account_tax_type: 'GENERAL',
+          margin_type: 'INDEFINITE',
         },
       ],
     })
@@ -132,6 +133,9 @@ describe('WebullHttpClient', () => {
     const body = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)
     expect(body.new_orders[0].market).toBe('JP')
     expect(body.new_orders[0].symbol).toBe('1570')
+    // JP CASH account is non-margin — margin_type would be rejected by
+    // Webull. The mapper must omit the field for JP orders.
+    expect(body.new_orders[0].margin_type).toBeUndefined()
   })
 
   it('findOrderByClientId queries orders/history for every configured account and merges results', async () => {

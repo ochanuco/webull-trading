@@ -4,13 +4,14 @@ import type { WebullMarket, WebullPlaceOrderRequestDto, WebullPlaceOrderResponse
 
 export function toWebullPlaceOrderRequest(intent: OrderIntent): WebullPlaceOrderRequestDto {
   const symbol = intent.symbol.toUpperCase()
+  const market = inferWebullMarket(symbol)
   return {
     new_orders: [
       {
         client_order_id: intent.clientOrderId,
         symbol,
         instrument_type: 'EQUITY',
-        market: inferWebullMarket(symbol),
+        market,
         order_type: 'LIMIT',
         limit_price: intent.price.toFixed(3),
         quantity: String(intent.quantity),
@@ -19,6 +20,16 @@ export function toWebullPlaceOrderRequest(intent: OrderIntent): WebullPlaceOrder
         time_in_force: 'DAY',
         entrust_type: 'QTY',
         account_tax_type: 'GENERAL',
+        // US orders on the JP UAT tenant's US_MARGIN account require a
+        // margin_type. The Webull enum exposes ONE_DAY (intraday) and
+        // INDEFINITE (can hold overnight). Pullback is a swing strategy →
+        // INDEFINITE. Leveraged securities (SOXL / SOXS) are rejected with
+        // OPENAPI_SECURITY_NOT_SUPPORT_MARGIN_TRADE regardless of value;
+        // exclude them from the cron universe rather than trying to work
+        // around it here.
+        // JP orders go through the CASH account (JPY, non-margin) and must
+        // NOT carry margin_type.
+        ...(market === 'US' ? { margin_type: 'INDEFINITE' } : {}),
       },
     ],
   }
