@@ -39,4 +39,24 @@ describe('reconcileFills internals', () => {
     })
     expect(price).toBeCloseTo(25)
   })
+
+  // The guard that sits between pickFilledPrice and the DB write.
+  it('resolveFilledPrice returns null when filledQty is zero / null / negative', () => {
+    const detail = { limit_price: '30' }
+    expect(_internal.resolveFilledPrice(0, detail)).toBeNull()
+    expect(_internal.resolveFilledPrice(null, detail)).toBeNull()
+    expect(_internal.resolveFilledPrice(-1, detail)).toBeNull()
+  })
+
+  it('resolveFilledPrice returns the candidate price when filledQty > 0 and price is finite + positive', () => {
+    const detail = { limit_price: '30' }
+    expect(_internal.resolveFilledPrice(1, detail)).toBe(30)
+  })
+
+  it('resolveFilledPrice returns null when the candidate price is non-positive / non-finite', () => {
+    expect(_internal.resolveFilledPrice(1, { limit_price: '0' })).toBeNull()
+    expect(_internal.resolveFilledPrice(1, { limit_price: '-5' })).toBeNull()
+    expect(_internal.resolveFilledPrice(1, { limit_price: 'NaN' })).toBeNull()
+    expect(_internal.resolveFilledPrice(1, {})).toBeNull()
+  })
 })

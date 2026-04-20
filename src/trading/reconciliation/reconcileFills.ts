@@ -123,7 +123,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     }
 
     const filledQty = toNumberOrNull(detail.filled_quantity)
-    const filledPrice = pickFilledPrice(detail)
+    const filledPrice = resolveFilledPrice(filledQty, detail)
 
     try {
       await db
@@ -198,5 +198,21 @@ function pickFilledPrice(detail: WebullOrderDetailDto): number | null {
   return toNumberOrNull(detail.limit_price)
 }
 
+/**
+ * Only record a fill price when there's actually a fill, and only if it
+ * passes the "finite and > 0" guideline. For CANCELLED / REJECTED rows
+ * (filledQty=0) this returns null so we don't misrepresent the row as if
+ * it had transacted at the signed limit price.
+ */
+function resolveFilledPrice(
+  filledQty: number | null,
+  detail: WebullOrderDetailDto,
+): number | null {
+  if (filledQty === null || filledQty <= 0) return null
+  const candidate = pickFilledPrice(detail)
+  if (candidate === null || !Number.isFinite(candidate) || candidate <= 0) return null
+  return candidate
+}
+
 // Exposed for tests.
-export const _internal = { TERMINAL_STATUSES, pickFilledPrice }
+export const _internal = { TERMINAL_STATUSES, pickFilledPrice, resolveFilledPrice }
