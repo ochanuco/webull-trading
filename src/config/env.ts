@@ -215,6 +215,13 @@ import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
 
 export interface Env {
   PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
+  /**
+   * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
+   * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
+   * TP/SL + 1-day time stop. Used purely for pipeline observation; never
+   * enable in real-money deployments.
+   */
+  DEMO_MODE?: string
 }
 
 /**

@@ -21,6 +21,16 @@ export interface SymbolRule {
   pullbackMax: number
   /** Pullback range: deeper bound. Default -0.06. */
   pullbackMin: number
+  /**
+   * Minimum 50-day return required to consider the stock in an uptrend.
+   * Default 0.08. Set negative to effectively disable the filter.
+   */
+  minReturn50d: number
+  /**
+   * Require `price > sma50` before entering. Default true. Set false in
+   * demo / frequent-cycle mode so entry doesn't depend on trend direction.
+   */
+  requireAboveSma50: boolean
 }
 
 export const DEFAULT_RULE: SymbolRule = Object.freeze({
@@ -29,6 +39,8 @@ export const DEFAULT_RULE: SymbolRule = Object.freeze({
   timeStopDays: 10,
   pullbackMax: -0.03,
   pullbackMin: -0.06,
+  minReturn50d: 0.08,
+  requireAboveSma50: true,
 })
 
 /**
@@ -41,6 +53,24 @@ export const LEVERAGED_RULE: SymbolRule = Object.freeze({
   timeStopDays: 5,
   pullbackMax: -0.03,
   pullbackMin: -0.06,
+  minReturn50d: 0.08,
+  requireAboveSma50: true,
+})
+
+/**
+ * Demo / pipeline-observation rule: deliberately easy to trigger so the
+ * place → fill → reconcile → exit → fill loop cycles multiple times per
+ * trading day. All trend / direction gates disabled; tiny TP/SL so exits
+ * fire intraday on normal volatility. NOT for real-money trading.
+ */
+export const DEMO_FREQUENT_RULE: SymbolRule = Object.freeze({
+  stopPct: -0.005,       // 0.5% drop → SELL
+  takeProfitPct: 0.005,  // 0.5% rise → SELL
+  timeStopDays: 1,       // 1 business day max hold
+  pullbackMax: -0.0001,  // any pullback from 20d high qualifies
+  pullbackMin: -0.50,    // no meaningful lower bound
+  minReturn50d: -1.0,    // disable 50d trend filter
+  requireAboveSma50: false,
 })
 
 export interface PullbackInput {
@@ -102,10 +132,10 @@ export class PullbackUptrendStrategy {
 
   private entryDecision(input: PullbackInput, rule: SymbolRule): Signal {
     const ind = input.indicators
-    if (ind.return50d <= 0.08) {
-      return hold(input, `50d return ${ind.return50d.toFixed(4)} <= 0.08 trend threshold`)
+    if (ind.return50d <= rule.minReturn50d) {
+      return hold(input, `50d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`)
     }
-    if (ind.price <= ind.sma50) {
+    if (rule.requireAboveSma50 && ind.price <= ind.sma50) {
       return hold(input, `price ${ind.price} <= sma50 ${ind.sma50}`)
     }
     if (ind.high20d <= 0) {
