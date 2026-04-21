@@ -139,7 +139,9 @@ interface SymbolRuleShape {
   timeStopDays: number
   pullbackMax: number
   pullbackMin: number
+  /** Minimum 50d return to treat the stock as in-uptrend. See SymbolRule. */
   minReturn50d: number
+  /** If true, entry requires price > 50d SMA. See SymbolRule. */
   requireAboveSma50: boolean
 }
 
@@ -162,16 +164,12 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
       ;(out[key] as number) = value
     }
   }
-
-  // Parse requireAboveSma50 as boolean
   if (raw.requireAboveSma50 !== undefined) {
-    const value = raw.requireAboveSma50
-    if (typeof value !== 'boolean') {
+    if (typeof raw.requireAboveSma50 !== 'boolean') {
       throw new Error(`'${symbol}.requireAboveSma50' must be a boolean`)
     }
-    out.requireAboveSma50 = value
+    out.requireAboveSma50 = raw.requireAboveSma50
   }
-
   return out
 }
 
@@ -299,13 +297,13 @@ export interface Env {
    */
   DB?: D1Database
 }
-
-/**
- * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
- * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
- * TP/SL + 1-day time stop. Used purely for pipeline observation; never
- * enable in real-money deployments.
- */
+// DEMO_MODE: pipeline observation helper, frequent BUY/SELL cycles (#113).
 export interface Env {
+  /**
+   * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
+   * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
+   * TP/SL + 1-day time stop. Pipeline observation only; never enable
+   * in real-money deployments.
+   */
   DEMO_MODE?: string
 }

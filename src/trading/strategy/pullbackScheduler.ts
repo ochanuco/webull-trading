@@ -1,4 +1,5 @@
 import type { BarClient } from '../../infrastructure/quotes/BarClient'
+import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
 import { inferTradingMarket } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
@@ -176,13 +177,74 @@ export async function runPullbackScheduler(
       continue
     }
 
+    // Journal the pre_submit so reconcileFills (which scans
+    // trade_journal.post_submit with broker_status IS NULL) can pick up
+    // the cron-placed order. Without this, cron orders bypass the
+    // journal entirely and are invisible to reconcile.
+    //
+    // Logging is isolated in its own try/catch — if the logger sink
+    // (D1 write) throws, we must still proceed to execute + release
+    // the pending lock, otherwise the lock leaks and the symbol gets
+    // stuck.
+    try {
+      logPreSubmit({ clientOrderId: intent.clientOrderId, intent })
+    } catch (logError) {
+      console.error(
+        JSON.stringify({
+          event: 'cron_log_pre_submit_failed',
+          symbol: upper,
+          clientOrderId: intent.clientOrderId,
+          message: logError instanceof Error ? logError.message : String(logError),
+        }),
+      )
+    }
+
     let result: ExecutionResult | undefined
+    const startedAt = Date.now()
     try {
       result = await options.execution.execute(intent)
     } catch (error) {
       await options.positionStore.clearPendingOrder(upper).catch(() => undefined)
-      summary.errors.push({ symbol: upper, message: messageOf(error) })
+      summary.errors.push({
+        symbol: upper,
+        message: messageOf(error),
+      })
+      try {
+        logPostSubmit({
+          clientOrderId: intent.clientOrderId,
+          symbol: upper,
+          latencyMs: Date.now() - startedAt,
+          error: error instanceof Error ? error : new Error(String(error)),
+        })
+      } catch (logError) {
+        console.error(
+          JSON.stringify({
+            event: 'cron_log_post_submit_failed',
+            symbol: upper,
+            clientOrderId: intent.clientOrderId,
+            message: logError instanceof Error ? logError.message : String(logError),
+          }),
+        )
+      }
       continue
+    }
+
+    try {
+      logPostSubmit({
+        clientOrderId: intent.clientOrderId,
+        symbol: upper,
+        result,
+        latencyMs: Date.now() - startedAt,
+      })
+    } catch (logError) {
+      console.error(
+        JSON.stringify({
+          event: 'cron_log_post_submit_failed',
+          symbol: upper,
+          clientOrderId: intent.clientOrderId,
+          message: logError instanceof Error ? logError.message : String(logError),
+        }),
+      )
     }
 
     // Increment counters only after successful execution.

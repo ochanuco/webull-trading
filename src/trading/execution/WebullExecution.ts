@@ -13,7 +13,18 @@ export class WebullExecution implements Execution {
       const response = await this.client.placeOrder(intent)
       return toExecutionResult(response)
     } catch (error) {
-      throw new BrokerRequestError('Webull order placement failed', 'placeOrder', { cause: error })
+      // Preserve the upstream broker error when it's already a
+      // BrokerRequestError (status + class). Rethrow as-is so callers see
+      // the real 4xx/5xx status classification from brokerErrorForStatus.
+      if (error instanceof BrokerRequestError) {
+        throw error
+      }
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new BrokerRequestError(
+        `Webull order placement failed: ${detail}`,
+        'placeOrder',
+        { cause: error instanceof Error ? error : undefined },
+      )
     }
   }
 }
