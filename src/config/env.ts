@@ -297,13 +297,3 @@ export interface Env {
    */
   DB?: D1Database
 }
-// DEMO_MODE: pipeline observation helper, frequent BUY/SELL cycles (#113).
-export interface Env {
-  /**
-   * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
-   * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
-   * TP/SL + 1-day time stop. Pipeline observation only; never enable
-   * in real-money deployments.
-   */
-  DEMO_MODE?: string
-}

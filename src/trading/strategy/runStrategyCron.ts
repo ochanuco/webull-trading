@@ -7,7 +7,6 @@ import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
-import { DEMO_FREQUENT_RULE, type SymbolRule } from './strategies/PullbackUptrendStrategy'
 import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -110,14 +109,6 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
   // D1 から読んだ値が壊れていたら default に落とす。
   const equity = sanitizeEquity(global.totalCapitalUsd)
 
-  // DEMO_MODE=true で Pullback の全 gate を緩め、毎日複数回 fire する
-  // 設定 (DEMO_FREQUENT_RULE) を全 US symbol に適用。pipeline の実観察
-  // のために置いてある一時モード、実運用では env を外す。
-  const demoMode = env.DEMO_MODE === 'true'
-  const rulesMap: Record<string, SymbolRule> | undefined = demoMode
-    ? Object.fromEntries(usSymbols.map((s) => [s.toUpperCase(), DEMO_FREQUENT_RULE]))
-    : undefined
-
   const summary = await runPullbackScheduler({
     symbols: usSymbols,
     equity,
@@ -125,7 +116,6 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     positionStore,
     execution,
     symbolCapMap: universe.symbolMaxNotional,
-    rulesMap,
   })
 
   return { summary, symbols: usSymbols }
