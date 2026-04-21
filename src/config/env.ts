@@ -161,7 +161,7 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw new Error(`'${symbol}.${key}' must be a finite number`)
       }
-      out[key] = value
+      ;(out[key] as number) = value
     }
   }
   if (raw.requireAboveSma50 !== undefined) {
