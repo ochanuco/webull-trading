@@ -4,7 +4,7 @@ import { _internal } from '../../../src/trading/reconciliation/reconcileFills'
 describe('reconcileFills internals', () => {
   it('TERMINAL_STATUSES covers the expected Webull statuses', () => {
     expect([...(_internal.TERMINAL_STATUSES as Set<string>)].sort()).toEqual(
-      ['CANCELLED', 'EXPIRED', 'FILLED', 'REJECTED'],
+      ['CANCELED', 'CANCELLED', 'EXPIRED', 'FILLED', 'REJECTED'],
     )
   })
 
