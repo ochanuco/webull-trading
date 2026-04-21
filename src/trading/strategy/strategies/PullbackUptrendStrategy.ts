@@ -57,22 +57,6 @@ export const LEVERAGED_RULE: SymbolRule = Object.freeze({
   requireAboveSma50: true,
 })
 
-/**
- * Demo / pipeline-observation rule: deliberately easy to trigger so the
- * place → fill → reconcile → exit → fill loop cycles multiple times per
- * trading day. All trend / direction gates disabled; tiny TP/SL so exits
- * fire intraday on normal volatility. NOT for real-money trading.
- */
-export const DEMO_FREQUENT_RULE: SymbolRule = Object.freeze({
-  stopPct: -0.005,       // 0.5% drop → SELL
-  takeProfitPct: 0.005,  // 0.5% rise → SELL
-  timeStopDays: 1,       // 1 business day max hold
-  pullbackMax: -0.0001,  // any pullback from 20d high qualifies
-  pullbackMin: -0.50,    // no meaningful lower bound
-  minReturn50d: -1.0,    // disable 50d trend filter
-  requireAboveSma50: false,
-})
-
 export interface PullbackInput {
   symbol: string
   indicators: PullbackIndicators
