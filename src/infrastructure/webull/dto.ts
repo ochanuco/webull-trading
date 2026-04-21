@@ -20,7 +20,8 @@ export interface WebullV2OrderEntry {
   symbol: string
   instrument_type: 'EQUITY'
   market: WebullMarket
-  order_type: 'LIMIT'
+  order_type: 'LIMIT' | 'MARKET'
+  /** MARKET orders still carry limit_price as a safety cap (Webull schema). */
   limit_price: string
   quantity: string
   support_trading_session: 'N'
