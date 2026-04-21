@@ -139,6 +139,8 @@ interface SymbolRuleShape {
   timeStopDays: number
   pullbackMax: number
   pullbackMin: number
+  minReturn50d: number
+  requireAboveSma50: boolean
 }
 
 function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<SymbolRuleShape> {
@@ -149,6 +151,7 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
     'timeStopDays',
     'pullbackMax',
     'pullbackMin',
+    'minReturn50d',
   ]
   for (const key of numberKeys) {
     if (raw[key] !== undefined) {
@@ -156,9 +159,19 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw new Error(`'${symbol}.${key}' must be a finite number`)
       }
-      out[key] = value
+      ;(out[key] as number) = value
     }
   }
+
+  // Parse requireAboveSma50 as boolean
+  if (raw.requireAboveSma50 !== undefined) {
+    const value = raw.requireAboveSma50
+    if (typeof value !== 'boolean') {
+      throw new Error(`'${symbol}.requireAboveSma50' must be a boolean`)
+    }
+    out.requireAboveSma50 = value
+  }
+
   return out
 }
 
@@ -285,4 +298,14 @@ export interface Env {
    * Optional so existing tests / legacy deploys without D1 keep working.
    */
   DB?: D1Database
+}
+
+/**
+ * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
+ * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
+ * TP/SL + 1-day time stop. Used purely for pipeline observation; never
+ * enable in real-money deployments.
+ */
+export interface Env {
+  DEMO_MODE?: string
 }
