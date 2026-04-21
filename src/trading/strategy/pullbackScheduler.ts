@@ -1,4 +1,5 @@
 import type { BarClient } from '../../infrastructure/quotes/BarClient'
+import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
 import { inferTradingMarket } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
@@ -176,14 +177,37 @@ export async function runPullbackScheduler(
       continue
     }
 
+    // Journal the pre_submit so reconcileFills (which scans
+    // trade_journal.post_submit with broker_status IS NULL) can pick up
+    // the cron-placed order. Without this, cron orders bypass the
+    // journal entirely and are invisible to reconcile.
+    logPreSubmit({ clientOrderId: intent.clientOrderId, intent })
+
     let result: ExecutionResult | undefined
+    const startedAt = Date.now()
     try {
       result = await options.execution.execute(intent)
     } catch (error) {
       await options.positionStore.clearPendingOrder(upper).catch(() => undefined)
-      summary.errors.push({ symbol: upper, message: messageOf(error) })
+      summary.errors.push({
+        symbol: upper,
+        message: messageOf(error),
+      })
+      logPostSubmit({
+        clientOrderId: intent.clientOrderId,
+        symbol: upper,
+        latencyMs: Date.now() - startedAt,
+        error: error instanceof Error ? error : new Error(String(error)),
+      })
       continue
     }
+
+    logPostSubmit({
+      clientOrderId: intent.clientOrderId,
+      symbol: upper,
+      result,
+      latencyMs: Date.now() - startedAt,
+    })
 
     // Increment counters only after successful execution.
     if (intent.side === 'BUY') {
