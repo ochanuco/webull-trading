@@ -11,9 +11,15 @@ import { SymbolStateClient } from '../state/SymbolStateClient'
 // Terminal Webull order statuses — once we see one of these we can stop
 // polling for this order. Anything else (NEW, PENDING, PARTIALLY_FILLED) is
 // still in flight.
+//
+// Include both `CANCELLED` (British, expected from the SDK enum) and
+// `CANCELED` (American, actually observed on the JP UAT tenant's
+// orders/history response for a day-expired limit). Matching only one
+// spelling left a 15-hour "stillPending" gap on a real SOXL order.
 const TERMINAL_STATUSES = new Set<string>([
   'FILLED',
   'CANCELLED',
+  'CANCELED',
   'REJECTED',
   'EXPIRED',
 ])
