@@ -139,6 +139,10 @@ interface SymbolRuleShape {
   timeStopDays: number
   pullbackMax: number
   pullbackMin: number
+  /** Minimum 50d return to treat the stock as in-uptrend. See SymbolRule. */
+  minReturn50d: number
+  /** If true, entry requires price > 50d SMA. See SymbolRule. */
+  requireAboveSma50: boolean
 }
 
 function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<SymbolRuleShape> {
@@ -149,6 +153,7 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
     'timeStopDays',
     'pullbackMax',
     'pullbackMin',
+    'minReturn50d',
   ]
   for (const key of numberKeys) {
     if (raw[key] !== undefined) {
@@ -158,6 +163,12 @@ function coerceRule(raw: Record<string, unknown>, symbol: string): Partial<Symbo
       }
       out[key] = value
     }
+  }
+  if (raw.requireAboveSma50 !== undefined) {
+    if (typeof raw.requireAboveSma50 !== 'boolean') {
+      throw new Error(`'${symbol}.requireAboveSma50' must be a boolean`)
+    }
+    out.requireAboveSma50 = raw.requireAboveSma50
   }
   return out
 }
@@ -215,13 +226,6 @@ import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
 
 export interface Env {
   PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
-  /**
-   * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
-   * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
-   * TP/SL + 1-day time stop. Used purely for pipeline observation; never
-   * enable in real-money deployments.
-   */
-  DEMO_MODE?: string
 }
 
 /**
@@ -292,4 +296,14 @@ export interface Env {
    * Optional so existing tests / legacy deploys without D1 keep working.
    */
   DB?: D1Database
+}
+// DEMO_MODE: pipeline observation helper, frequent BUY/SELL cycles (#113).
+export interface Env {
+  /**
+   * When `'true'`, runStrategyCron replaces DEFAULT_RULE with
+   * DEMO_FREQUENT_RULE for every US symbol — loose entry gates + tight
+   * TP/SL + 1-day time stop. Pipeline observation only; never enable
+   * in real-money deployments.
+   */
+  DEMO_MODE?: string
 }
