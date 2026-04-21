@@ -11,7 +11,10 @@ export function toWebullPlaceOrderRequest(intent: OrderIntent): WebullPlaceOrder
         symbol,
         instrument_type: 'EQUITY',
         market: inferWebullMarket(symbol),
-        order_type: 'LIMIT',
+        // MARKET: sandbox の fill simulator は limit 注文を通さないので、
+        // POC 検証用に成行で発注する。Webull schema は MARKET でも
+        // limit_price を safety cap として必須にしている。
+        order_type: 'MARKET',
         limit_price: intent.price.toFixed(3),
         quantity: String(intent.quantity),
         support_trading_session: 'N',

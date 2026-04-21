@@ -89,7 +89,7 @@ describe('WebullHttpClient', () => {
           symbol: 'SOXL',
           instrument_type: 'EQUITY',
           market: 'US',
-          order_type: 'LIMIT',
+          order_type: 'MARKET',
           limit_price: '9.500',
           quantity: '2',
           support_trading_session: 'N',
