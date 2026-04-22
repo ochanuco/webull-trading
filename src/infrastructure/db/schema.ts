@@ -215,6 +215,12 @@ export const globalConfig = sqliteTable(
       'global_config_pullback_default_min_return_50d_range',
       sql`${t.pullbackDefaultMinReturn50d} >= -1 AND ${t.pullbackDefaultMinReturn50d} <= 10`,
     ),
+    // 相対関係を DB で縛る: min > max だと BUY 条件を満たす pullback 幅が
+    // 空集合になり戦略が静かに停止する。runtime UPDATE の typo 防止。
+    pullbackDefaultPullbackWindowOrder: check(
+      'global_config_pullback_default_pullback_window_order',
+      sql`${t.pullbackDefaultPullbackMin} <= ${t.pullbackDefaultPullbackMax}`,
+    ),
   }),
 )
 

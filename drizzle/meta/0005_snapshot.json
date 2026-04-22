@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "1ff2aa45-cd37-4454-adae-62446380ca62",
+  "id": "8e552429-a62e-4c9c-b6e4-587be747634f",
   "prevId": "d466e12c-2afc-4485-8455-31b063e6452b",
   "tables": {
     "global_config": {
@@ -260,6 +260,10 @@
         "global_config_pullback_default_min_return_50d_range": {
           "name": "global_config_pullback_default_min_return_50d_range",
           "value": "\"global_config\".\"pullback_default_min_return_50d\" >= -1 AND \"global_config\".\"pullback_default_min_return_50d\" <= 10"
+        },
+        "global_config_pullback_default_pullback_window_order": {
+          "name": "global_config_pullback_default_pullback_window_order",
+          "value": "\"global_config\".\"pullback_default_pullback_min\" <= \"global_config\".\"pullback_default_pullback_max\""
         }
       }
     },
