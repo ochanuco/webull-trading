@@ -37,9 +37,14 @@ export const DEFAULT_RULE: SymbolRule = Object.freeze({
   stopPct: -0.04,
   takeProfitPct: 0.07,
   timeStopDays: 10,
-  pullbackMax: -0.03,
+  // Looser pullback band: accept shallow dips too. Original -0.03 → -0.06
+  // rarely fired (weekly-at-most signal rate). -0.01 → -0.06 expects a
+  // few signals per week in normal market conditions.
+  pullbackMax: -0.01,
   pullbackMin: -0.06,
-  minReturn50d: 0.08,
+  // Drop trend threshold from +8% → +3%. The 8% filter was tuned for
+  // steep trends; +3% captures mild uptrends which are far more common.
+  minReturn50d: 0.03,
   requireAboveSma50: true,
 })
 
