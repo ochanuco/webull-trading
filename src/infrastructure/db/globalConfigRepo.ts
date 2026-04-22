@@ -22,6 +22,14 @@ export interface GlobalConfigSnapshot {
   gapRejectPct: number
   spreadLimitPctUs: number
   spreadLimitPctJp: number
+  /** Pullback 戦略のデフォルト rule。#118 で hardcoded → D1 化。 */
+  pullbackDefaultStopPct: number
+  pullbackDefaultTakeProfitPct: number
+  pullbackDefaultTimeStopDays: number
+  pullbackDefaultPullbackMax: number
+  pullbackDefaultPullbackMin: number
+  pullbackDefaultMinReturn50d: number
+  pullbackDefaultRequireAboveSma50: boolean
 }
 
 /**
@@ -44,6 +52,13 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   gapRejectPct: 0.03,
   spreadLimitPctUs: 0.0025,
   spreadLimitPctJp: 0.006,
+  pullbackDefaultStopPct: -0.04,
+  pullbackDefaultTakeProfitPct: 0.07,
+  pullbackDefaultTimeStopDays: 10,
+  pullbackDefaultPullbackMax: -0.03,
+  pullbackDefaultPullbackMin: -0.06,
+  pullbackDefaultMinReturn50d: 0.08,
+  pullbackDefaultRequireAboveSma50: true,
 })
 
 export async function loadGlobalConfig(
@@ -67,5 +82,12 @@ export async function loadGlobalConfig(
     gapRejectPct: row.gapRejectPct,
     spreadLimitPctUs: row.spreadLimitPctUs,
     spreadLimitPctJp: row.spreadLimitPctJp,
+    pullbackDefaultStopPct: row.pullbackDefaultStopPct,
+    pullbackDefaultTakeProfitPct: row.pullbackDefaultTakeProfitPct,
+    pullbackDefaultTimeStopDays: row.pullbackDefaultTimeStopDays,
+    pullbackDefaultPullbackMax: row.pullbackDefaultPullbackMax,
+    pullbackDefaultPullbackMin: row.pullbackDefaultPullbackMin,
+    pullbackDefaultMinReturn50d: row.pullbackDefaultMinReturn50d,
+    pullbackDefaultRequireAboveSma50: row.pullbackDefaultRequireAboveSma50,
   }
 }

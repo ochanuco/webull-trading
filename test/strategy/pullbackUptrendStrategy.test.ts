@@ -1,13 +1,23 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_RULE,
-  LEVERAGED_RULE,
   PullbackUptrendStrategy,
+  TEST_DEFAULT_RULE,
   type PullbackInput,
+  type SymbolRule,
 } from '../../src/trading/strategy/strategies/PullbackUptrendStrategy'
 import type { PendingOrderLock, PositionState } from '../../src/trading/state/types'
 
 const now = new Date('2026-04-20T14:30:00.000Z')
+
+const LEVERAGED_RULE: SymbolRule = {
+  stopPct: -0.03,
+  takeProfitPct: 0.05,
+  timeStopDays: 5,
+  pullbackMax: -0.03,
+  pullbackMin: -0.06,
+  minReturn50d: 0.08,
+  requireAboveSma50: true,
+}
 
 /** Build a valid BUY-triggering input; individual tests mutate one field. */
 function goodEntryInput(): PullbackInput {
@@ -36,7 +46,7 @@ const openPosition: PositionState = {
 }
 
 describe('PullbackUptrendStrategy entry', () => {
-  const strategy = new PullbackUptrendStrategy()
+  const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
 
   it('BUYs when all four entry conditions hold', () => {
     const signal = strategy.decide(goodEntryInput())
@@ -88,7 +98,7 @@ describe('PullbackUptrendStrategy entry', () => {
 })
 
 describe('PullbackUptrendStrategy exit priority', () => {
-  const strategy = new PullbackUptrendStrategy()
+  const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
 
   function withPosition(price: number, holdBusinessDays = 0): PullbackInput {
     return {
@@ -115,7 +125,7 @@ describe('PullbackUptrendStrategy exit priority', () => {
   })
 
   it('SELLs on time-stop once hold reaches timeStopDays', () => {
-    const signal = strategy.decide(withPosition(101, DEFAULT_RULE.timeStopDays))
+    const signal = strategy.decide(withPosition(101, TEST_DEFAULT_RULE.timeStopDays))
     expect(signal.action).toBe('SELL')
     expect(signal.reason).toMatch(/time-stop/)
   })
@@ -125,19 +135,19 @@ describe('PullbackUptrendStrategy exit priority', () => {
   })
 })
 
-describe('PullbackUptrendStrategy 3x ETF guardrail', () => {
-  const strategy = new PullbackUptrendStrategy({ SOXL: LEVERAGED_RULE })
+describe('PullbackUptrendStrategy per-symbol override', () => {
+  const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE, { SOXL: LEVERAGED_RULE })
 
-  it('applies LEVERAGED_RULE for SOXL', () => {
+  it('applies per-symbol rule for SOXL', () => {
     expect(strategy.resolveRule('SOXL').timeStopDays).toBe(5)
     expect(strategy.resolveRule('SOXL').stopPct).toBe(-0.03)
   })
 
-  it('falls back to DEFAULT_RULE for non-listed symbols', () => {
-    expect(strategy.resolveRule('AAPL')).toEqual(DEFAULT_RULE)
+  it('falls back to default rule for non-listed symbols', () => {
+    expect(strategy.resolveRule('AAPL')).toEqual(TEST_DEFAULT_RULE)
   })
 
-  it('SELLs SOXL at hold=5 days where DEFAULT_RULE would still hold', () => {
+  it('SELLs SOXL at hold=5 days where default rule would still hold', () => {
     const signal = strategy.decide({
       symbol: 'SOXL',
       indicators: { price: 101, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },

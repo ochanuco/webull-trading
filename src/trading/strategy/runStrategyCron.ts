@@ -109,6 +109,18 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
   // D1 から読んだ値が壊れていたら default に落とす。
   const equity = sanitizeEquity(global.totalCapitalUsd)
 
+  // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
+  // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
+  const defaultRule = {
+    stopPct: global.pullbackDefaultStopPct,
+    takeProfitPct: global.pullbackDefaultTakeProfitPct,
+    timeStopDays: global.pullbackDefaultTimeStopDays,
+    pullbackMax: global.pullbackDefaultPullbackMax,
+    pullbackMin: global.pullbackDefaultPullbackMin,
+    minReturn50d: global.pullbackDefaultMinReturn50d,
+    requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+  }
+
   const summary = await runPullbackScheduler({
     symbols: usSymbols,
     equity,
@@ -116,6 +128,7 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     positionStore,
     execution,
     symbolCapMap: universe.symbolMaxNotional,
+    defaultRule,
   })
 
   return { summary, symbols: usSymbols }

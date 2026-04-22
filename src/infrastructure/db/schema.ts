@@ -132,6 +132,16 @@ export const globalConfig = sqliteTable(
     gapRejectPct: real('gap_reject_pct').notNull().default(0.03),
     spreadLimitPctUs: real('spread_limit_pct_us').notNull().default(0.0025),
     spreadLimitPctJp: real('spread_limit_pct_jp').notNull().default(0.006),
+    // Pullback 戦略のデフォルト rule パラメタ。per-symbol は symbol_config 側で
+    // 個別 override 予定 (未実装、fall-through でここの値が全銘柄に効く)。
+    // DB 化の狙いは "tune するのに PR / deploy 不要" (#118)。
+    pullbackDefaultStopPct: real('pullback_default_stop_pct').notNull().default(-0.04),
+    pullbackDefaultTakeProfitPct: real('pullback_default_take_profit_pct').notNull().default(0.07),
+    pullbackDefaultTimeStopDays: integer('pullback_default_time_stop_days').notNull().default(10),
+    pullbackDefaultPullbackMax: real('pullback_default_pullback_max').notNull().default(-0.03),
+    pullbackDefaultPullbackMin: real('pullback_default_pullback_min').notNull().default(-0.06),
+    pullbackDefaultMinReturn50d: real('pullback_default_min_return_50d').notNull().default(0.08),
+    pullbackDefaultRequireAboveSma50: integer('pullback_default_require_above_sma50', { mode: 'boolean' }).notNull().default(true),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -180,6 +190,36 @@ export const globalConfig = sqliteTable(
     spreadLimitPctJpRange: check(
       'global_config_spread_limit_pct_jp_range',
       sql`${t.spreadLimitPctJp} >= 0 AND ${t.spreadLimitPctJp} <= 1`,
+    ),
+    pullbackDefaultStopPctRange: check(
+      'global_config_pullback_default_stop_pct_range',
+      sql`${t.pullbackDefaultStopPct} < 0 AND ${t.pullbackDefaultStopPct} >= -1`,
+    ),
+    pullbackDefaultTakeProfitPctRange: check(
+      'global_config_pullback_default_take_profit_pct_range',
+      sql`${t.pullbackDefaultTakeProfitPct} > 0 AND ${t.pullbackDefaultTakeProfitPct} <= 1`,
+    ),
+    pullbackDefaultTimeStopDaysRange: check(
+      'global_config_pullback_default_time_stop_days_range',
+      sql`${t.pullbackDefaultTimeStopDays} > 0 AND ${t.pullbackDefaultTimeStopDays} <= 365`,
+    ),
+    pullbackDefaultPullbackMaxRange: check(
+      'global_config_pullback_default_pullback_max_range',
+      sql`${t.pullbackDefaultPullbackMax} <= 0 AND ${t.pullbackDefaultPullbackMax} >= -1`,
+    ),
+    pullbackDefaultPullbackMinRange: check(
+      'global_config_pullback_default_pullback_min_range',
+      sql`${t.pullbackDefaultPullbackMin} <= 0 AND ${t.pullbackDefaultPullbackMin} >= -1`,
+    ),
+    pullbackDefaultMinReturn50dRange: check(
+      'global_config_pullback_default_min_return_50d_range',
+      sql`${t.pullbackDefaultMinReturn50d} >= -1 AND ${t.pullbackDefaultMinReturn50d} <= 10`,
+    ),
+    // 相対関係を DB で縛る: min > max だと BUY 条件を満たす pullback 幅が
+    // 空集合になり戦略が静かに停止する。runtime UPDATE の typo 防止。
+    pullbackDefaultPullbackWindowOrder: check(
+      'global_config_pullback_default_pullback_window_order',
+      sql`${t.pullbackDefaultPullbackMin} <= ${t.pullbackDefaultPullbackMax}`,
     ),
   }),
 )
