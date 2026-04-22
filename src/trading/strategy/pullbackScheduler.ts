@@ -12,8 +12,8 @@ import { computePullbackSizing } from './pullbackSizing'
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
 import {
-  DEFAULT_RULE,
   PullbackUptrendStrategy,
+  TEST_DEFAULT_RULE,
   type SymbolRule,
 } from './strategies/PullbackUptrendStrategy'
 
@@ -26,6 +26,12 @@ export interface PullbackSchedulerOptions {
   positionStore: PositionStore
   execution: Execution
   strategy?: PullbackUptrendStrategy
+  /**
+   * Default rule used when neither `strategy` nor a per-symbol `rulesMap`
+   * entry applies. Production path (runStrategyCron) loads this from
+   * global_config in D1; tests can pass TEST_DEFAULT_RULE or a custom one.
+   */
+  defaultRule?: SymbolRule
   rulesMap?: Record<string, SymbolRule>
   symbolCapMap?: Record<string, number>
   barLookback?: number
@@ -56,7 +62,8 @@ export async function runPullbackScheduler(
   const now = options.now ?? (() => new Date())
   const lookback = options.barLookback ?? DEFAULT_BAR_LOOKBACK
   const strategy =
-    options.strategy ?? new PullbackUptrendStrategy(options.rulesMap ?? {})
+    options.strategy ??
+    new PullbackUptrendStrategy(options.defaultRule ?? TEST_DEFAULT_RULE, options.rulesMap ?? {})
   const pendingLockTtlMs = options.pendingLockTtlMs ?? 60_000
   if (typeof pendingLockTtlMs !== 'number' || !Number.isFinite(pendingLockTtlMs) || pendingLockTtlMs <= 0) {
     throw new Error(`pendingLockTtlMs must be a finite positive number, got: ${pendingLockTtlMs}`)
@@ -288,5 +295,3 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-// Re-export DEFAULT_RULE so callers can seed options without another import.
-export { DEFAULT_RULE }

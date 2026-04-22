@@ -24,6 +24,13 @@ export function makeGlobalConfigSnapshot(
     gapRejectPct: 0.03,
     spreadLimitPctUs: 0.0025,
     spreadLimitPctJp: 0.006,
+    pullbackDefaultStopPct: -0.04,
+    pullbackDefaultTakeProfitPct: 0.07,
+    pullbackDefaultTimeStopDays: 10,
+    pullbackDefaultPullbackMax: -0.03,
+    pullbackDefaultPullbackMin: -0.06,
+    pullbackDefaultMinReturn50d: 0.08,
+    pullbackDefaultRequireAboveSma50: true,
     source: 'd1',
     ...overrides,
   }

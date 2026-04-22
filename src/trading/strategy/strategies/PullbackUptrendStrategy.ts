@@ -33,24 +33,15 @@ export interface SymbolRule {
   requireAboveSma50: boolean
 }
 
-export const DEFAULT_RULE: SymbolRule = Object.freeze({
+/**
+ * Test-only default. Production path loads Pullback defaults from D1
+ * (global_config.pullback_default_*) — see runStrategyCron. Unit tests
+ * that don't plumb a D1 fixture can use this to instantiate the strategy.
+ */
+export const TEST_DEFAULT_RULE: SymbolRule = Object.freeze({
   stopPct: -0.04,
   takeProfitPct: 0.07,
   timeStopDays: 10,
-  pullbackMax: -0.03,
-  pullbackMin: -0.06,
-  minReturn50d: 0.08,
-  requireAboveSma50: true,
-})
-
-/**
- * 3x leveraged ETFs (SOXL / SOXS / TQQQ / SQQQ ...): tighter stop, shorter
- * time stop to avoid volatility-drag + path-dependency decay.
- */
-export const LEVERAGED_RULE: SymbolRule = Object.freeze({
-  stopPct: -0.03,
-  takeProfitPct: 0.07,
-  timeStopDays: 5,
   pullbackMax: -0.03,
   pullbackMin: -0.06,
   minReturn50d: 0.08,
@@ -71,11 +62,14 @@ export interface PullbackInput {
 export class PullbackUptrendStrategy {
   readonly name = 'PullbackUptrendStrategy'
 
-  constructor(private readonly rules: Record<string, SymbolRule> = {}) {}
+  constructor(
+    private readonly defaultRule: SymbolRule,
+    private readonly rules: Record<string, SymbolRule> = {},
+  ) {}
 
   resolveRule(symbol: string): SymbolRule {
     const override = this.rules[symbol.toUpperCase()]
-    return override ?? DEFAULT_RULE
+    return override ?? this.defaultRule
   }
 
   decide(input: PullbackInput): Signal {
