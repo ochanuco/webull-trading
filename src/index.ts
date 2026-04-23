@@ -8,8 +8,10 @@ import { runStrategyCron } from './trading/strategy/runStrategyCron'
 
 // 5 分毎の quote feed + fill reconcile cron.
 const CRON_QUOTE_RECONCILE = '*/5 * * * *'
-// 毎時 :15 の Pullback 戦略 cron (position で自然 idempotent)
-const CRON_STRATEGY = '15 * * * *'
+// 15 分毎の Pullback 戦略 cron (position 保有で自然 idempotent)。:00/:05/:10
+// の quote 更新後、:15/:30/:45/:00 に判定が走る (quote と strategy の 5 分ズレ
+// を維持するため HH:00 ではなく +15 相当の */15 にしている)。
+const CRON_STRATEGY = '*/15 * * * *'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 export { PortfolioStateDO } from './trading/state/PortfolioStateDO'

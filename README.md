@@ -9,7 +9,7 @@ Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking 
 ```
  ┌──────────────┐  */5 cron       ┌──────────────────────────┐
  │  Cloudflare  │────────────────▶│  quote feed + reconcile   │
- │   Workers    │  15 * * * * ───▶│  Pullback strategy cron   │
+ │   Workers    │  */15 * * * * ─▶│  Pullback strategy cron   │
  │              │  /trade/* HTTP  └──────────────────────────┘
  │              │────▶ decide / execute → Webull HTTP
  │              │  /events/trade  ◀────── bridge Container
@@ -146,7 +146,7 @@ cd bridge && pnpm install && pnpm run typecheck
 
 Cron:
 - `*/5 * * * *` — quote feed (Yahoo bars → SymbolStateDO) + reconcileFills
-- `15 * * * *` — Pullback strategy cron (USD + JPY currency-aware、JP は 100株ロット丸め)
+- `*/15 * * * *` — Pullback strategy cron (USD + JPY currency-aware、JP は 100株ロット丸め)
 
 ## Bindings (wrangler.jsonc)
 
