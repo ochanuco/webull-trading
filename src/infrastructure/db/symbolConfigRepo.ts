@@ -15,6 +15,11 @@ export interface SymbolConfigSnapshot {
   symbolMaxNotional: Record<string, number>
   /** symbol → currency ('USD' / 'JPY')。Risk gate が global 通貨別 cap を引くのに使う。 */
   symbolCurrency: Record<string, SymbolCurrency>
+  /**
+   * symbol → bucket tag。NULL bucket は map に含めない (gate 側で未分類扱い
+   * = 個別銘柄判定)。相関集約 cap (#23 Lane 3) で使う。
+   */
+  symbolBucket: Record<string, string>
 }
 
 /**
@@ -29,6 +34,7 @@ export async function loadSymbolConfig(
   const allowedSymbols: string[] = []
   const symbolMaxNotional: Record<string, number> = {}
   const symbolCurrency: Record<string, SymbolCurrency> = {}
+  const symbolBucket: Record<string, string> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     allowedSymbols.push(symbol)
@@ -36,8 +42,14 @@ export async function loadSymbolConfig(
       symbolMaxNotional[symbol] = row.maxNotional
     }
     symbolCurrency[symbol] = row.currency === 'JPY' ? 'JPY' : 'USD'
+    // bucket を trim + lowercase で正規化しないと 'semi' / ' semi' / 'SEMI'
+    // が別 bucket 扱いになって集中 cap が実質回避される (CodeRabbit #126)。
+    const normalizedBucket = row.bucket?.trim().toLowerCase()
+    if (normalizedBucket) {
+      symbolBucket[symbol] = normalizedBucket
+    }
   }
-  return { allowedSymbols, symbolMaxNotional, symbolCurrency }
+  return { allowedSymbols, symbolMaxNotional, symbolCurrency, symbolBucket }
 }
 
 /**

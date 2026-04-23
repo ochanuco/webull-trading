@@ -66,6 +66,13 @@ export const symbolConfig = sqliteTable(
     currency: text('currency').notNull().default('USD'),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
     maxNotional: real('max_notional'),
+    /**
+     * 相関 bucket の粗タグ (例: 'semi' / 'us_large_cap' / 'jp_auto')。
+     * 同一 bucket の open position 合計 notional を
+     * `equity * global_config.bucket_exposure_pct` で clamp するために使う
+     * (#23 Lane 3)。NULL / 空文字 / 空白のみは bucket 未分類扱い (gate 素通り)。
+     */
+    bucket: text('bucket'),
     notes: text('notes'),
     updatedAt: text('updated_at').notNull(),
   },
@@ -157,6 +164,11 @@ export const globalConfig = sqliteTable(
     riskDdHalfThreshold: real('risk_dd_half_threshold').notNull().default(-0.05),
     /** drawdown がこの閾値 (負) 未満になると size を 0 に (halt)。-0.10 既定。 */
     riskDdHaltThreshold: real('risk_dd_halt_threshold').notNull().default(-0.10),
+    /**
+     * 同一 bucket (symbol_config.bucket) の open 合計 notional 上限を
+     * `equity * bucket_exposure_pct` で算出 (#23 Lane 3)。POC default 0.30。
+     */
+    bucketExposurePct: real('bucket_exposure_pct').notNull().default(0.30),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -257,6 +269,10 @@ export const globalConfig = sqliteTable(
     riskDdThresholdOrder: check(
       'global_config_risk_dd_threshold_order',
       sql`${t.riskDdHaltThreshold} <= ${t.riskDdHalfThreshold}`,
+    ),
+    bucketExposurePctRange: check(
+      'global_config_bucket_exposure_pct_range',
+      sql`${t.bucketExposurePct} > 0 AND ${t.bucketExposurePct} <= 1`,
     ),
   }),
 )

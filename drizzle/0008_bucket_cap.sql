@@ -1,0 +1,1 @@
+ALTER TABLE `symbol_config` ADD `bucket` text;

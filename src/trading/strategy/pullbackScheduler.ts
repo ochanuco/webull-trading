@@ -16,6 +16,7 @@ import {
   TEST_DEFAULT_RULE,
   type SymbolRule,
 } from './strategies/PullbackUptrendStrategy'
+import { decideBucketGate } from '../risk/bucketExposureGate'
 
 const DEFAULT_BAR_LOOKBACK = 60
 
@@ -43,6 +44,16 @@ export interface PullbackSchedulerOptions {
    * markets should invoke the scheduler once per lot-size.
    */
   lotSize?: number
+  /**
+   * symbol → bucket tag ('semi' 等)。同一 bucket の open position 合計
+   * notional を bucketCapMap で clamp する。未指定 symbol は個別判定。
+   */
+  symbolBucketMap?: Record<string, string>
+  /**
+   * bucket → 合計 notional 上限 (単一 currency の absolute 値)。呼び出し側
+   * (runStrategyCron) が NAV × exposure_pct で算出する。
+   */
+  bucketCapMap?: Record<string, number>
   now?: () => Date
 }
 
@@ -82,6 +93,33 @@ export async function runPullbackScheduler(
     holds: 0,
     rejected: [],
     errors: [],
+  }
+
+  // Bucket pre-scan: sum the open-position notional per bucket across all
+  // symbols in this run so the BUY gate can refuse an entry that would push
+  // the bucket over `bucketCapMap[bucket]`. Skipped entirely when no bucket
+  // map provided. Quote source: lastQuote ?? avgPrice — cron runs at :15 so
+  // quote feed (*/5) should have populated lastQuote already; avgPrice is a
+  // safe fallback that just charges bucket at cost basis.
+  const bucketExposure: Record<string, number> = {}
+  if (options.symbolBucketMap && options.bucketCapMap) {
+    for (const sym of options.symbols) {
+      const bucket = options.symbolBucketMap[sym.toUpperCase()]
+      if (!bucket) continue
+      try {
+        const s = await options.positionStore.getState(sym.toUpperCase())
+        if (s.position !== null && s.position.qty > 0) {
+          const px = s.lastQuote?.price ?? s.position.avgPrice
+          if (Number.isFinite(px) && px > 0) {
+            bucketExposure[bucket] = (bucketExposure[bucket] ?? 0) + s.position.qty * px
+          }
+        }
+      } catch {
+        // Pre-scan failure for one symbol shouldn't block the rest of the
+        // scheduler. The per-symbol loop below will retry getState and
+        // surface errors in `summary.errors`.
+      }
+    }
   }
 
   for (const symbol of options.symbols) {
@@ -152,6 +190,20 @@ export async function runPullbackScheduler(
       if (!Number.isFinite(notional) || notional <= 0) {
         summary.rejected.push({ symbol: upper, reason: `invalid notional: ${notional} (qty=${sizing.quantity}, price=${indicators.price})` })
         continue
+      }
+      const bucket = options.symbolBucketMap?.[upper]
+      const bucketDecision = decideBucketGate({
+        bucket,
+        currentExposure: bucket ? bucketExposure[bucket] ?? 0 : 0,
+        addNotional: notional,
+        cap: bucket ? options.bucketCapMap?.[bucket] : undefined,
+      })
+      if (!bucketDecision.allowed) {
+        summary.rejected.push({ symbol: upper, reason: bucketDecision.reason ?? 'bucket cap' })
+        continue
+      }
+      if (bucket && bucketDecision.newExposure !== undefined) {
+        bucketExposure[bucket] = bucketDecision.newExposure
       }
       intent = buildIntent(upper, 'BUY', sizing.quantity, indicators.price)
     } else {
