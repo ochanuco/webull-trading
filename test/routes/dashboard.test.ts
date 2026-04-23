@@ -119,6 +119,8 @@ describe('dashboard', () => {
     const body = await res.text()
     expect(body).toContain('dailyStartEquity')
     expect(body).toContain('-1.50%')
+    // 2026-04-23T00:00:00Z → 2026-04-23 09:00:00 JST
+    expect(body).toContain('2026-04-23 09:00:00 JST')
   })
 
   it('renders config page with global_config + symbol table', async () => {
