@@ -96,6 +96,31 @@ function fmtNumber(n: number | null | undefined, digits = 2): string {
   return n.toFixed(digits)
 }
 
+const JST_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Tokyo',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+})
+
+/**
+ * Render an ISO/Date value in JST (YYYY-MM-DD HH:mm:ss JST). Returns the
+ * raw string unchanged on parse failure so operators can still grep for the
+ * original even if upstream emits a weird format.
+ */
+function fmtJst(value: string | Date | null | undefined): string {
+  if (value === null || value === undefined) return '-'
+  const d = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(d.getTime())) return typeof value === 'string' ? value : '-'
+  const parts = JST_FORMATTER.formatToParts(d)
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
+  return `${pick('year')}-${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}:${pick('second')} JST`
+}
+
 const STYLE = `
   body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
@@ -134,7 +159,7 @@ function layout(title: string, body: string): string {
   <a href="/dashboard/config">Config</a>
 </nav>
 ${body}
-<div class="footer">rendered at ${esc(new Date().toISOString())}</div>
+<div class="footer">rendered at ${esc(fmtJst(new Date()))}</div>
 </body>
 </html>`
 }
@@ -178,8 +203,8 @@ function positionsBody(
         <td>${quote ? fmtNumber(quote.price, 2) : '<span class="muted">-</span>'}</td>
         <td class="${pnlClass}">${pnlPct === null ? '-' : fmtNumber(pnlPct, 2) + '%'}</td>
         <td>${pendingSide ? esc(pendingSide) : '<span class="muted">-</span>'}</td>
-        <td>${s.cooldownUntil ? esc(s.cooldownUntil) : '<span class="muted">-</span>'}</td>
-        <td class="muted">${esc(s.updatedAt)}</td>
+        <td>${s.cooldownUntil ? esc(fmtJst(s.cooldownUntil)) : '<span class="muted">-</span>'}</td>
+        <td class="muted">${esc(fmtJst(s.updatedAt))}</td>
       </tr>`
     })
     .join('')
@@ -207,8 +232,8 @@ function portfolioBody(p: {
       <tr><th>dailyStartEquity</th><td>${fmtNumber(p.dailyStartEquity, 2)}</td></tr>
       <tr><th>dailyRealizedPnl</th><td class="${ddClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</td></tr>
       <tr><th>drawdown</th><td class="${ddClass}">${drawdownPct === null ? '-' : fmtNumber(drawdownPct, 2) + '%'}</td></tr>
-      <tr><th>tradingDisabledUntil</th><td>${kill ? `<span class="warn">${esc(kill)}</span>` : '<span class="ok">active</span>'}</td></tr>
-      <tr><th>updatedAt</th><td class="muted">${esc(p.updatedAt)}</td></tr>
+      <tr><th>tradingDisabledUntil</th><td>${kill ? `<span class="warn">${esc(fmtJst(kill))}</span>` : '<span class="ok">active</span>'}</td></tr>
+      <tr><th>updatedAt</th><td class="muted">${esc(fmtJst(p.updatedAt))}</td></tr>
     </tbody>
   </table>`
 }
@@ -247,7 +272,7 @@ function tradesBody(
         r.errorMessage ? `ERR: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
       return `<tr>
         <td>${r.id}</td>
-        <td class="muted">${esc(r.timestamp)}</td>
+        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td>${esc(r.tradeEventType)}</td>
         <td><strong>${esc(r.symbol ?? '-')}</strong></td>
         <td>${esc(r.side ?? '-')}</td>
