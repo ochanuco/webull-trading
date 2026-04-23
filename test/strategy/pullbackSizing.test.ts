@@ -71,4 +71,48 @@ describe('computePullbackSizing', () => {
       computePullbackSizing({ equity: 100_000, entryPrice: 100, stopPct: 0, atr20: 2, baselineAtr20: 2 }),
     ).toMatchObject({ quantity: 0, capReason: 'invalid-stop' })
   })
+
+  it('rounds down to lotSize multiples (TSE 100-share lot)', () => {
+    // equity 1.5M JPY, risk 0.4% = 6_000 JPY budget. Entry 1500, stop -4% =
+    // 60 JPY risk/share. Raw qty = floor(6000 / 60) = 100. Already a
+    // 100-lot multiple so no change.
+    const exact = computePullbackSizing({
+      equity: 1_500_000,
+      entryPrice: 1500,
+      stopPct: -0.04,
+      atr20: 10,
+      baselineAtr20: 10,
+      lotSize: 100,
+    })
+    expect(exact.quantity).toBe(100)
+
+    // symbolCap forces qty below a lot boundary: cap 250_000 at 1500 →
+    // floor(250000/1500) = 166 → round down to 100.
+    const rounded = computePullbackSizing({
+      equity: 100_000_000,
+      entryPrice: 1500,
+      stopPct: -0.04,
+      atr20: 10,
+      baselineAtr20: 10,
+      symbolCap: 250_000,
+      lotSize: 100,
+    })
+    expect(rounded.quantity).toBe(100)
+    expect(rounded.notional).toBe(150_000)
+    expect(rounded.capped).toBe(true)
+  })
+
+  it('returns qty=0 with lot-size-round when raw qty is below one lot', () => {
+    // Budget too small to afford 100 shares → round down to 0.
+    const result = computePullbackSizing({
+      equity: 100_000,
+      entryPrice: 5000,
+      stopPct: -0.04,
+      atr20: 10,
+      baselineAtr20: 10,
+      lotSize: 100,
+    })
+    expect(result.quantity).toBe(0)
+    expect(result.capReason).toBe('lot-size-round')
+  })
 })
