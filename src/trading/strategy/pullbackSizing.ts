@@ -74,12 +74,20 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   // other caps so we don't round up back over symbolCap. If the round-down
   // zeroes the qty, surface it explicitly so caller can reject rather than
   // silently skip.
-  const lotSize = input.lotSize ?? 1
+  // Validate and normalize lotSize to a positive finite integer.
+  let lotSize = input.lotSize ?? 1
+  if (!Number.isFinite(lotSize) || !Number.isInteger(lotSize) || lotSize <= 0) {
+    lotSize = 1
+  }
   if (lotSize > 1) {
     const rounded = Math.floor(quantity / lotSize) * lotSize
     if (rounded !== quantity) {
       quantity = rounded
       notional = quantity * input.entryPrice
+      // Guard that quantity and notional are finite after rounding.
+      if (!Number.isFinite(quantity) || !Number.isFinite(notional)) {
+        return { quantity: 0, notional: 0, capped: true, capReason: 'lot-size-round' }
+      }
       capped = true
       capReason = rounded === 0 ? 'lot-size-round' : capReason ?? 'lot-size-round'
     }
