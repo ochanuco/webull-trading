@@ -31,6 +31,12 @@ export interface SymbolRule {
    * demo / frequent-cycle mode so entry doesn't depend on trend direction.
    */
   requireAboveSma50: boolean
+  /**
+   * Optional ATR multiplier for vol-adaptive stop sizing. When set the
+   * sizing stop distance becomes `max(kAtr * atr20, |entry * stopPct|)`.
+   * Undefined (default) = legacy pct-only stop.
+   */
+  kAtr?: number
 }
 
 /**

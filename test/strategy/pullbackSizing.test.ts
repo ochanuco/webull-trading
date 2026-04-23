@@ -115,4 +115,41 @@ describe('computePullbackSizing', () => {
     expect(result.quantity).toBe(0)
     expect(result.capReason).toBe('lot-size-round')
   })
+
+  it('kAtr takes the ATR-based stop when wider than the pct-based stop', () => {
+    // entry 100, stopPct -4% → pct stop = 4. atr20=3 × kAtr=2 → atr stop = 6.
+    const withAtr = computePullbackSizing({
+      equity: 100_000,
+      entryPrice: 100,
+      stopPct: -0.04,
+      atr20: 3,
+      baselineAtr20: 3,
+      kAtr: 2,
+    })
+    const withoutAtr = computePullbackSizing({
+      equity: 100_000,
+      entryPrice: 100,
+      stopPct: -0.04,
+      atr20: 3,
+      baselineAtr20: 3,
+    })
+    expect(withAtr.quantity).toBeLessThan(withoutAtr.quantity)
+    // 100k * 0.4% = 400 budget. floor(400 / 6) = 66.
+    expect(withAtr.quantity).toBe(66)
+  })
+
+  it('kAtr falls back to pct stop when atr20 is 0 (post-halt ATR collapse guard)', () => {
+    // atr20=0 → kAtr stop = 0, pct stop = 4 wins. floor(400/4) = 100, then
+    // atr-floor halving kicks in (atr20=0 < baseline*0.5) → 50.
+    const result = computePullbackSizing({
+      equity: 100_000,
+      entryPrice: 100,
+      stopPct: -0.04,
+      atr20: 0,
+      baselineAtr20: 3,
+      kAtr: 2,
+    })
+    expect(result.quantity).toBe(50)
+    expect(result.capReason).toBe('atr-floor')
+  })
 })
