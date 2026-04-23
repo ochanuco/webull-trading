@@ -12,13 +12,23 @@ export interface PullbackSizingInput {
   riskPerTradePct?: number
   /** ATR floor ratio. If atr20 < baselineAtr20 * this, size is halved. Default 0.5. */
   atrFloorRatio?: number
+  /**
+   * Exchange lot size. Final quantity is floored to a multiple of this
+   * (e.g. 100 for TSE equities). Default 1 (no rounding).
+   */
+  lotSize?: number
 }
 
 export interface PullbackSizingResult {
   quantity: number
   notional: number
   capped: boolean
-  capReason?: 'atr-floor' | 'symbol-cap' | 'invalid-stop' | 'insufficient-risk-budget'
+  capReason?:
+    | 'atr-floor'
+    | 'symbol-cap'
+    | 'invalid-stop'
+    | 'insufficient-risk-budget'
+    | 'lot-size-round'
 }
 
 /**
@@ -58,6 +68,21 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
     notional = quantity * input.entryPrice
     capped = true
     capReason = 'symbol-cap'
+  }
+
+  // Exchange lot-size rounding (e.g. TSE 100-share lots). Must run AFTER all
+  // other caps so we don't round up back over symbolCap. If the round-down
+  // zeroes the qty, surface it explicitly so caller can reject rather than
+  // silently skip.
+  const lotSize = input.lotSize ?? 1
+  if (lotSize > 1) {
+    const rounded = Math.floor(quantity / lotSize) * lotSize
+    if (rounded !== quantity) {
+      quantity = rounded
+      notional = quantity * input.entryPrice
+      capped = true
+      capReason = rounded === 0 ? 'lot-size-round' : capReason ?? 'lot-size-round'
+    }
   }
 
   return { quantity, notional, capped, capReason }

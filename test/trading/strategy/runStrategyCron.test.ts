@@ -35,15 +35,15 @@ describe('runStrategyCron', () => {
     expect(result.summary.evaluated).toBe(0)
   })
 
-  it('skips with no_us_symbols when universe is JP-only', async () => {
+  it('skips with no_tradable_symbols when universe is empty', async () => {
     vi.mocked(loadSymbolUniverse).mockResolvedValue(
       makeSymbolUniverse({
-        allowedSymbols: ['6301', '4502'],
-        symbolCurrency: { '6301': 'JPY', '4502': 'JPY' },
+        allowedSymbols: [],
+        symbolCurrency: {},
       }),
     )
     const result = await runStrategyCron(env)
-    expect(result.skipReason).toBe('no_us_symbols')
+    expect(result.skipReason).toBe('no_tradable_symbols')
   })
 
   it('skips with no_bridge_state when SYMBOL_STATE binding is missing', async () => {

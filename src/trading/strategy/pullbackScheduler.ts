@@ -37,6 +37,12 @@ export interface PullbackSchedulerOptions {
   barLookback?: number
   riskPerTradePct?: number
   pendingLockTtlMs?: number
+  /**
+   * Exchange lot size for this run (e.g. 100 for TSE). Default 1. Applied
+   * uniformly to all symbols in this invocation — callers running mixed
+   * markets should invoke the scheduler once per lot-size.
+   */
+  lotSize?: number
   now?: () => Date
 }
 
@@ -128,6 +134,7 @@ export async function runPullbackScheduler(
         baselineAtr20: indicators.baselineAtr20,
         symbolCap: options.symbolCapMap?.[upper],
         riskPerTradePct: options.riskPerTradePct,
+        lotSize: options.lotSize,
       })
       if (sizing.quantity <= 0) {
         summary.rejected.push({
