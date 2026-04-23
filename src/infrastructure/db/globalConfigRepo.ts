@@ -30,6 +30,8 @@ export interface GlobalConfigSnapshot {
   pullbackDefaultPullbackMin: number
   pullbackDefaultMinReturn50d: number
   pullbackDefaultRequireAboveSma50: boolean
+  /** ATR multiplier for vol-adaptive stop。default 2.0。 */
+  pullbackDefaultKAtr: number
 }
 
 /**
@@ -59,6 +61,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultPullbackMin: -0.06,
   pullbackDefaultMinReturn50d: 0.08,
   pullbackDefaultRequireAboveSma50: true,
+  pullbackDefaultKAtr: 2.0,
 })
 
 export async function loadGlobalConfig(
@@ -89,5 +92,6 @@ export async function loadGlobalConfig(
     pullbackDefaultPullbackMin: row.pullbackDefaultPullbackMin,
     pullbackDefaultMinReturn50d: row.pullbackDefaultMinReturn50d,
     pullbackDefaultRequireAboveSma50: row.pullbackDefaultRequireAboveSma50,
+    pullbackDefaultKAtr: row.pullbackDefaultKAtr,
   }
 }

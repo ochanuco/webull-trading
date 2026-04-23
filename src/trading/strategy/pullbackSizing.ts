@@ -17,6 +17,13 @@ export interface PullbackSizingInput {
    * (e.g. 100 for TSE equities). Default 1 (no rounding).
    */
   lotSize?: number
+  /**
+   * ATR multiplier for the stop distance. Effective stop becomes
+   * `max(kAtr * atr20, |entryPrice * stopPct|)` — vol-adaptive normally,
+   * pct-based as a floor guard when ATR is 0 (post-halt / post-gap).
+   * Required; invalid (<=0 or non-finite) throws.
+   */
+  kAtr: number
 }
 
 export interface PullbackSizingResult {
@@ -41,7 +48,13 @@ export interface PullbackSizingResult {
 export function computePullbackSizing(input: PullbackSizingInput): PullbackSizingResult {
   const riskPct = input.riskPerTradePct ?? 0.004
   const atrFloor = input.atrFloorRatio ?? 0.5
-  const stopDistance = Math.abs(input.entryPrice * input.stopPct)
+  if (!Number.isFinite(input.kAtr) || input.kAtr <= 0) {
+    throw new Error(`computePullbackSizing: kAtr must be a positive finite number, got ${input.kAtr}`)
+  }
+  const pctStop = Math.abs(input.entryPrice * input.stopPct)
+  // vol-adaptive: kAtr * atr20。atr20=0 (post-halt/gap) は pct stop が floor。
+  const atrStop = input.atr20 > 0 ? input.kAtr * input.atr20 : 0
+  const stopDistance = atrStop > pctStop ? atrStop : pctStop
 
   if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
     return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop' }

@@ -31,6 +31,7 @@ export function makeGlobalConfigSnapshot(
     pullbackDefaultPullbackMin: -0.06,
     pullbackDefaultMinReturn50d: 0.08,
     pullbackDefaultRequireAboveSma50: true,
+    pullbackDefaultKAtr: 2.0,
     source: 'd1',
     ...overrides,
   }

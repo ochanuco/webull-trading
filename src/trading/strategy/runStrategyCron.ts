@@ -135,6 +135,7 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     pullbackMin: global.pullbackDefaultPullbackMin,
     minReturn50d: global.pullbackDefaultMinReturn50d,
     requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+    kAtr: global.pullbackDefaultKAtr,
   }
 
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }

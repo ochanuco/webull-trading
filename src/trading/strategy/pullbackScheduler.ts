@@ -135,6 +135,7 @@ export async function runPullbackScheduler(
         symbolCap: options.symbolCapMap?.[upper],
         riskPerTradePct: options.riskPerTradePct,
         lotSize: options.lotSize,
+        kAtr: rule.kAtr,
       })
       if (sizing.quantity <= 0) {
         summary.rejected.push({
