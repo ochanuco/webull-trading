@@ -32,11 +32,11 @@ export interface SymbolRule {
    */
   requireAboveSma50: boolean
   /**
-   * Optional ATR multiplier for vol-adaptive stop sizing. When set the
-   * sizing stop distance becomes `max(kAtr * atr20, |entry * stopPct|)`.
-   * Undefined (default) = legacy pct-only stop.
+   * ATR multiplier for vol-adaptive stop sizing。
+   *   stopDistance = max(kAtr * atr20, |entry * stopPct|)
+   * POC 推奨域 1.5–2.5。
    */
-  kAtr?: number
+  kAtr: number
 }
 
 /**
@@ -52,6 +52,7 @@ export const TEST_DEFAULT_RULE: SymbolRule = Object.freeze({
   pullbackMin: -0.06,
   minReturn50d: 0.08,
   requireAboveSma50: true,
+  kAtr: 2.0,
 })
 
 export interface PullbackInput {

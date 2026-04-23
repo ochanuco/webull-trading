@@ -143,12 +143,11 @@ export const globalConfig = sqliteTable(
     pullbackDefaultMinReturn50d: real('pullback_default_min_return_50d').notNull().default(0.08),
     pullbackDefaultRequireAboveSma50: integer('pullback_default_require_above_sma50', { mode: 'boolean' }).notNull().default(true),
     /**
-     * Optional ATR multiplier for vol-adaptive stop sizing. NULL = disabled
-     * (legacy pct-only stop)。set 時は
+     * ATR multiplier for vol-adaptive stop sizing。
      *   stopDistance = max(k_atr * atr20, |entry * stop_pct|)
-     * POC 推奨域 1.5–2.5。
+     * POC 推奨域 1.5–2.5、default 2.0。
      */
-    pullbackDefaultKAtr: real('pullback_default_k_atr'),
+    pullbackDefaultKAtr: real('pullback_default_k_atr').notNull().default(2.0),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -224,7 +223,7 @@ export const globalConfig = sqliteTable(
     ),
     pullbackDefaultKAtrRange: check(
       'global_config_pullback_default_k_atr_range',
-      sql`${t.pullbackDefaultKAtr} IS NULL OR (${t.pullbackDefaultKAtr} > 0 AND ${t.pullbackDefaultKAtr} <= 10)`,
+      sql`${t.pullbackDefaultKAtr} > 0 AND ${t.pullbackDefaultKAtr} <= 10`,
     ),
     // 相対関係を DB で縛る: min > max だと BUY 条件を満たす pullback 幅が
     // 空集合になり戦略が静かに停止する。runtime UPDATE の typo 防止。

@@ -1,17 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { computePullbackSizing } from '../../src/trading/strategy/pullbackSizing'
+import { computePullbackSizing, type PullbackSizingInput } from '../../src/trading/strategy/pullbackSizing'
+
+/**
+ * kAtr is required (#23 Lane 1, no-backward-compat). This helper injects
+ * kAtr=2 by default; individual tests override to exercise ATR-dominant
+ * paths. Chosen so `kAtr * atr20 <= |entry * stopPct|` in the baseline case,
+ * preserving the pct-bound expectations of legacy tests.
+ */
+const baseInput = (
+  overrides: Partial<PullbackSizingInput> = {},
+): PullbackSizingInput => ({
+  equity: 100_000,
+  entryPrice: 100,
+  stopPct: -0.04,
+  atr20: 2,
+  baselineAtr20: 2,
+  kAtr: 2,
+  ...overrides,
+})
 
 describe('computePullbackSizing', () => {
   it('sizes to 0.4% NAV risk divided by stop distance', () => {
-    // $100k equity, 0.4% risk = $400 budget. Entry $100, stop -4% = $4 risk/share.
-    // qty = floor(400 / 4) = 100. notional = 100 * 100 = 10_000.
-    const result = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 2,
-      baselineAtr20: 2,
-    })
+    // max(pct=4, atr=4) = 4. qty = floor(400 / 4) = 100.
+    const result = computePullbackSizing(baseInput())
     expect(result.quantity).toBe(100)
     expect(result.notional).toBe(10_000)
     expect(result.capped).toBe(false)
@@ -19,137 +30,104 @@ describe('computePullbackSizing', () => {
 
   it('implied $ risk never exceeds equity * riskPerTradePct', () => {
     const equity = 50_000
-    const result = computePullbackSizing({
-      equity,
-      entryPrice: 55,
-      stopPct: -0.05,
-      atr20: 1,
-      baselineAtr20: 1,
-      riskPerTradePct: 0.004,
-    })
+    const result = computePullbackSizing(
+      baseInput({
+        equity,
+        entryPrice: 55,
+        stopPct: -0.05,
+        atr20: 1,
+        baselineAtr20: 1,
+        riskPerTradePct: 0.004,
+      }),
+    )
     const maxRisk = equity * 0.004
     const realizedRisk = result.quantity * Math.abs(55 * -0.05)
     expect(realizedRisk).toBeLessThanOrEqual(maxRisk)
   })
 
   it('halves the size when ATR(20) collapses below half the baseline', () => {
-    const base = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 2,
-      baselineAtr20: 2,
-    })
-    const floored = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 0.5,
-      baselineAtr20: 2,
-    })
+    const base = computePullbackSizing(baseInput())
+    const floored = computePullbackSizing(baseInput({ atr20: 0.5, baselineAtr20: 2 }))
     expect(floored.quantity).toBe(Math.floor(base.quantity / 2))
     expect(floored.capped).toBe(true)
     expect(floored.capReason).toBe('atr-floor')
   })
 
   it('clamps to symbolCap when unrestricted notional would exceed it', () => {
-    const result = computePullbackSizing({
-      equity: 1_000_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 2,
-      baselineAtr20: 2,
-      symbolCap: 5_000,
-    })
+    const result = computePullbackSizing(baseInput({ equity: 1_000_000, symbolCap: 5_000 }))
     expect(result.notional).toBeLessThanOrEqual(5_000)
     expect(result.capped).toBe(true)
     expect(result.capReason).toBe('symbol-cap')
   })
 
-  it('rejects a non-positive stop distance', () => {
+  it('rejects when both ATR and pct stop distances are 0', () => {
+    // pctStop=0 (stopPct=0) AND atrStop=0 (atr20=0) → stopDistance=0 → invalid
     expect(
-      computePullbackSizing({ equity: 100_000, entryPrice: 100, stopPct: 0, atr20: 2, baselineAtr20: 2 }),
+      computePullbackSizing(baseInput({ stopPct: 0, atr20: 0, baselineAtr20: 2 })),
     ).toMatchObject({ quantity: 0, capReason: 'invalid-stop' })
   })
 
   it('rounds down to lotSize multiples (TSE 100-share lot)', () => {
-    // equity 1.5M JPY, risk 0.4% = 6_000 JPY budget. Entry 1500, stop -4% =
-    // 60 JPY risk/share. Raw qty = floor(6000 / 60) = 100. Already a
-    // 100-lot multiple so no change.
-    const exact = computePullbackSizing({
-      equity: 1_500_000,
-      entryPrice: 1500,
-      stopPct: -0.04,
-      atr20: 10,
-      baselineAtr20: 10,
-      lotSize: 100,
-    })
+    const exact = computePullbackSizing(
+      baseInput({
+        equity: 1_500_000,
+        entryPrice: 1500,
+        atr20: 10,
+        baselineAtr20: 10,
+        lotSize: 100,
+      }),
+    )
     expect(exact.quantity).toBe(100)
 
-    // symbolCap forces qty below a lot boundary: cap 250_000 at 1500 →
-    // floor(250000/1500) = 166 → round down to 100.
-    const rounded = computePullbackSizing({
-      equity: 100_000_000,
-      entryPrice: 1500,
-      stopPct: -0.04,
-      atr20: 10,
-      baselineAtr20: 10,
-      symbolCap: 250_000,
-      lotSize: 100,
-    })
+    const rounded = computePullbackSizing(
+      baseInput({
+        equity: 100_000_000,
+        entryPrice: 1500,
+        atr20: 10,
+        baselineAtr20: 10,
+        symbolCap: 250_000,
+        lotSize: 100,
+      }),
+    )
     expect(rounded.quantity).toBe(100)
     expect(rounded.notional).toBe(150_000)
     expect(rounded.capped).toBe(true)
   })
 
   it('returns qty=0 with lot-size-round when raw qty is below one lot', () => {
-    // Budget too small to afford 100 shares → round down to 0.
-    const result = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 5000,
-      stopPct: -0.04,
-      atr20: 10,
-      baselineAtr20: 10,
-      lotSize: 100,
-    })
+    const result = computePullbackSizing(
+      baseInput({
+        entryPrice: 5000,
+        atr20: 10,
+        baselineAtr20: 10,
+        lotSize: 100,
+      }),
+    )
     expect(result.quantity).toBe(0)
     expect(result.capReason).toBe('lot-size-round')
   })
 
-  it('kAtr takes the ATR-based stop when wider than the pct-based stop', () => {
-    // entry 100, stopPct -4% → pct stop = 4. atr20=3 × kAtr=2 → atr stop = 6.
-    const withAtr = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 3,
-      baselineAtr20: 3,
-      kAtr: 2,
-    })
-    const withoutAtr = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 3,
-      baselineAtr20: 3,
-    })
-    expect(withAtr.quantity).toBeLessThan(withoutAtr.quantity)
-    // 100k * 0.4% = 400 budget. floor(400 / 6) = 66.
-    expect(withAtr.quantity).toBe(66)
+  it('uses the ATR-based stop when wider than the pct-based stop', () => {
+    // atr20=3 × kAtr=2 → atr stop = 6 > pct stop 4. floor(400 / 6) = 66.
+    const result = computePullbackSizing(
+      baseInput({ atr20: 3, baselineAtr20: 3, kAtr: 2 }),
+    )
+    expect(result.quantity).toBe(66)
   })
 
-  it('kAtr falls back to pct stop when atr20 is 0 (post-halt ATR collapse guard)', () => {
-    // atr20=0 → kAtr stop = 0, pct stop = 4 wins. floor(400/4) = 100, then
-    // atr-floor halving kicks in (atr20=0 < baseline*0.5) → 50.
-    const result = computePullbackSizing({
-      equity: 100_000,
-      entryPrice: 100,
-      stopPct: -0.04,
-      atr20: 0,
-      baselineAtr20: 3,
-      kAtr: 2,
-    })
+  it('falls back to pct stop when atr20 is 0 (post-halt ATR collapse guard)', () => {
+    // atr20=0 → atrStop=0, pctStop=4 wins. floor(400/4)=100, then atr-floor
+    // halving (atr20 < baseline*0.5) → 50.
+    const result = computePullbackSizing(
+      baseInput({ atr20: 0, baselineAtr20: 3 }),
+    )
     expect(result.quantity).toBe(50)
     expect(result.capReason).toBe('atr-floor')
+  })
+
+  it('throws when kAtr is non-positive or non-finite', () => {
+    expect(() => computePullbackSizing(baseInput({ kAtr: 0 }))).toThrow(/kAtr/)
+    expect(() => computePullbackSizing(baseInput({ kAtr: -1 }))).toThrow(/kAtr/)
+    expect(() => computePullbackSizing(baseInput({ kAtr: Number.NaN }))).toThrow(/kAtr/)
   })
 })

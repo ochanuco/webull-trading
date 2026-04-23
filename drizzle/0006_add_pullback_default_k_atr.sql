@@ -22,7 +22,7 @@ CREATE TABLE `__new_global_config` (
 	`pullback_default_pullback_min` real DEFAULT -0.06 NOT NULL,
 	`pullback_default_min_return_50d` real DEFAULT 0.08 NOT NULL,
 	`pullback_default_require_above_sma50` integer DEFAULT true NOT NULL,
-	`pullback_default_k_atr` real,
+	`pullback_default_k_atr` real DEFAULT 2.0 NOT NULL,
 	`updated_at` text NOT NULL,
 	CONSTRAINT "global_config_max_order_notional_range" CHECK("__new_global_config"."max_order_notional" > 0 AND "__new_global_config"."max_order_notional" <= 10000000),
 	CONSTRAINT "global_config_max_order_notional_usd_range" CHECK("__new_global_config"."max_order_notional_usd" > 0 AND "__new_global_config"."max_order_notional_usd" <= 1000000),
@@ -41,12 +41,12 @@ CREATE TABLE `__new_global_config` (
 	CONSTRAINT "global_config_pullback_default_pullback_max_range" CHECK("__new_global_config"."pullback_default_pullback_max" <= 0 AND "__new_global_config"."pullback_default_pullback_max" >= -1),
 	CONSTRAINT "global_config_pullback_default_pullback_min_range" CHECK("__new_global_config"."pullback_default_pullback_min" <= 0 AND "__new_global_config"."pullback_default_pullback_min" >= -1),
 	CONSTRAINT "global_config_pullback_default_min_return_50d_range" CHECK("__new_global_config"."pullback_default_min_return_50d" >= -1 AND "__new_global_config"."pullback_default_min_return_50d" <= 10),
-	CONSTRAINT "global_config_pullback_default_k_atr_range" CHECK("__new_global_config"."pullback_default_k_atr" IS NULL OR ("__new_global_config"."pullback_default_k_atr" > 0 AND "__new_global_config"."pullback_default_k_atr" <= 10)),
+	CONSTRAINT "global_config_pullback_default_k_atr_range" CHECK("__new_global_config"."pullback_default_k_atr" > 0 AND "__new_global_config"."pullback_default_k_atr" <= 10),
 	CONSTRAINT "global_config_pullback_default_pullback_window_order" CHECK("__new_global_config"."pullback_default_pullback_min" <= "__new_global_config"."pullback_default_pullback_max")
 );
 --> statement-breakpoint
 -- Existing global_config にはまだ pullback_default_k_atr が無いので
--- SELECT から除外、DEFAULT (NULL) に任せる。
+-- SELECT から除外、DEFAULT (2.0) に任せる。
 INSERT INTO `__new_global_config`("id", "dry_run", "trading_enabled", "market_hours_check", "max_order_notional", "max_order_notional_usd", "max_order_notional_jpy", "total_capital_usd", "total_capital_jpy", "max_portfolio_exposure_pct", "drawdown_kill_threshold", "stale_quote_ms", "gap_reject_pct", "spread_limit_pct_us", "spread_limit_pct_jp", "pullback_default_stop_pct", "pullback_default_take_profit_pct", "pullback_default_time_stop_days", "pullback_default_pullback_max", "pullback_default_pullback_min", "pullback_default_min_return_50d", "pullback_default_require_above_sma50", "updated_at") SELECT "id", "dry_run", "trading_enabled", "market_hours_check", "max_order_notional", "max_order_notional_usd", "max_order_notional_jpy", "total_capital_usd", "total_capital_jpy", "max_portfolio_exposure_pct", "drawdown_kill_threshold", "stale_quote_ms", "gap_reject_pct", "spread_limit_pct_us", "spread_limit_pct_jp", "pullback_default_stop_pct", "pullback_default_take_profit_pct", "pullback_default_time_stop_days", "pullback_default_pullback_max", "pullback_default_pullback_min", "pullback_default_min_return_50d", "pullback_default_require_above_sma50", "updated_at" FROM `global_config`;--> statement-breakpoint
 DROP TABLE `global_config`;--> statement-breakpoint
 ALTER TABLE `__new_global_config` RENAME TO `global_config`;--> statement-breakpoint

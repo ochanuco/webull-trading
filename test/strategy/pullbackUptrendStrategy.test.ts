@@ -17,6 +17,7 @@ const LEVERAGED_RULE: SymbolRule = {
   pullbackMin: -0.06,
   minReturn50d: 0.08,
   requireAboveSma50: true,
+  kAtr: 2.5,
 }
 
 /** Build a valid BUY-triggering input; individual tests mutate one field. */

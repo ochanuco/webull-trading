@@ -18,12 +18,12 @@ export interface PullbackSizingInput {
    */
   lotSize?: number
   /**
-   * ATR multiplier for the stop distance. When set, the effective stop is
+   * ATR multiplier for the stop distance. Effective stop becomes
    * `max(kAtr * atr20, |entryPrice * stopPct|)` — vol-adaptive normally,
-   * pct-based as a floor guard for post-halt / post-gap periods where
-   * ATR can collapse. Undefined = disabled (legacy pct-only behaviour).
+   * pct-based as a floor guard when ATR is 0 (post-halt / post-gap).
+   * Required; invalid (<=0 or non-finite) throws.
    */
-  kAtr?: number
+  kAtr: number
 }
 
 export interface PullbackSizingResult {
@@ -48,15 +48,12 @@ export interface PullbackSizingResult {
 export function computePullbackSizing(input: PullbackSizingInput): PullbackSizingResult {
   const riskPct = input.riskPerTradePct ?? 0.004
   const atrFloor = input.atrFloorRatio ?? 0.5
+  if (!Number.isFinite(input.kAtr) || input.kAtr <= 0) {
+    throw new Error(`computePullbackSizing: kAtr must be a positive finite number, got ${input.kAtr}`)
+  }
   const pctStop = Math.abs(input.entryPrice * input.stopPct)
-  // kAtr: vol-adaptive stop. Take max with pct-based so ATR collapse
-  // (halts, gaps) doesn't produce a dangerously tight stop. Undefined =
-  // legacy behaviour.
-  const kAtr = input.kAtr
-  const atrStop =
-    kAtr !== undefined && Number.isFinite(kAtr) && kAtr > 0 && input.atr20 > 0
-      ? kAtr * input.atr20
-      : 0
+  // vol-adaptive: kAtr * atr20。atr20=0 (post-halt/gap) は pct stop が floor。
+  const atrStop = input.atr20 > 0 ? input.kAtr * input.atr20 : 0
   const stopDistance = atrStop > pctStop ? atrStop : pctStop
 
   if (!Number.isFinite(stopDistance) || stopDistance <= 0) {

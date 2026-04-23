@@ -184,8 +184,9 @@
           "name": "pullback_default_k_atr",
           "type": "real",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": true,
+          "autoincrement": false,
+          "default": 2
         },
         "updated_at": {
           "name": "updated_at",
@@ -270,7 +271,7 @@
         },
         "global_config_pullback_default_k_atr_range": {
           "name": "global_config_pullback_default_k_atr_range",
-          "value": "\"global_config\".\"pullback_default_k_atr\" IS NULL OR (\"global_config\".\"pullback_default_k_atr\" > 0 AND \"global_config\".\"pullback_default_k_atr\" <= 10)"
+          "value": "\"global_config\".\"pullback_default_k_atr\" > 0 AND \"global_config\".\"pullback_default_k_atr\" <= 10"
         },
         "global_config_pullback_default_pullback_window_order": {
           "name": "global_config_pullback_default_pullback_window_order",
