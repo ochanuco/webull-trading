@@ -53,8 +53,11 @@ export function createApp() {
   app.route('/webull', webull)
   app.use('/admin/*', basicAuthMiddleware())
   app.route('/admin', admin)
+  app.use('/dashboard/*', basicAuthMiddleware())
+  app.route('/dashboard', dashboard)
   app.onError(errorHandler)
   return app
 }
 
 import { admin } from './routes/admin'
+import { dashboard } from './routes/dashboard'
