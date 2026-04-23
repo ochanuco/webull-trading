@@ -32,6 +32,12 @@ export interface GlobalConfigSnapshot {
   pullbackDefaultRequireAboveSma50: boolean
   /** ATR multiplier for vol-adaptive stop。default 2.0。 */
   pullbackDefaultKAtr: number
+  /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
+  riskBasePerTradePct: number
+  /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
+  riskDdHalfThreshold: number
+  /** drawdown がこの閾値 (負) 未満で size を 0 に (-0.10 default)。 */
+  riskDdHaltThreshold: number
 }
 
 /**
@@ -62,6 +68,9 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultMinReturn50d: 0.08,
   pullbackDefaultRequireAboveSma50: true,
   pullbackDefaultKAtr: 2.0,
+  riskBasePerTradePct: 0.004,
+  riskDdHalfThreshold: -0.05,
+  riskDdHaltThreshold: -0.10,
 })
 
 export async function loadGlobalConfig(
@@ -93,5 +102,8 @@ export async function loadGlobalConfig(
     pullbackDefaultMinReturn50d: row.pullbackDefaultMinReturn50d,
     pullbackDefaultRequireAboveSma50: row.pullbackDefaultRequireAboveSma50,
     pullbackDefaultKAtr: row.pullbackDefaultKAtr,
+    riskBasePerTradePct: row.riskBasePerTradePct,
+    riskDdHalfThreshold: row.riskDdHalfThreshold,
+    riskDdHaltThreshold: row.riskDdHaltThreshold,
   }
 }

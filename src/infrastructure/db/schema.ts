@@ -148,6 +148,15 @@ export const globalConfig = sqliteTable(
      * POC 推奨域 1.5–2.5、default 2.0。
      */
     pullbackDefaultKAtr: real('pullback_default_k_atr').notNull().default(2.0),
+    /**
+     * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
+     * pullbackSizing に渡る。#23 Lane 2。
+     */
+    riskBasePerTradePct: real('risk_base_per_trade_pct').notNull().default(0.004),
+    /** drawdown がこの閾値 (負) 未満になると size を halfScaleFactor に。-0.05 既定。 */
+    riskDdHalfThreshold: real('risk_dd_half_threshold').notNull().default(-0.05),
+    /** drawdown がこの閾値 (負) 未満になると size を 0 に (halt)。-0.10 既定。 */
+    riskDdHaltThreshold: real('risk_dd_halt_threshold').notNull().default(-0.10),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -230,6 +239,24 @@ export const globalConfig = sqliteTable(
     pullbackDefaultPullbackWindowOrder: check(
       'global_config_pullback_default_pullback_window_order',
       sql`${t.pullbackDefaultPullbackMin} <= ${t.pullbackDefaultPullbackMax}`,
+    ),
+    riskBasePerTradePctRange: check(
+      'global_config_risk_base_per_trade_pct_range',
+      sql`${t.riskBasePerTradePct} > 0 AND ${t.riskBasePerTradePct} <= 1`,
+    ),
+    riskDdHalfThresholdRange: check(
+      'global_config_risk_dd_half_threshold_range',
+      sql`${t.riskDdHalfThreshold} < 0 AND ${t.riskDdHalfThreshold} >= -1`,
+    ),
+    riskDdHaltThresholdRange: check(
+      'global_config_risk_dd_halt_threshold_range',
+      sql`${t.riskDdHaltThreshold} < 0 AND ${t.riskDdHaltThreshold} >= -1`,
+    ),
+    // halt (深) ≤ half (浅) の順序を強制。逆転すると runtime で throw するので
+    // DB 側でも弾く。
+    riskDdThresholdOrder: check(
+      'global_config_risk_dd_threshold_order',
+      sql`${t.riskDdHaltThreshold} <= ${t.riskDdHalfThreshold}`,
     ),
   }),
 )

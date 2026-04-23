@@ -8,10 +8,7 @@ import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
-import {
-  BASE_RISK_PER_TRADE_PCT,
-  computeDrawdownRiskScale,
-} from '../risk/drawdownRiskScale'
+import { computeDrawdownRiskScale } from '../risk/drawdownRiskScale'
 import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -44,7 +41,15 @@ export interface StrategyCronResult {
  * JP 銘柄は 100 株ロットで round-down される。bar 取得は Yahoo Finance の
  * `<code>.T` サフィックス (YahooBarClient 内で自動付与)。
  */
-export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
+export interface RunStrategyCronOptions {
+  /** Correlation id for structured logs (from scheduled() handler). */
+  requestId?: string
+}
+
+export async function runStrategyCron(
+  env: Env,
+  options: RunStrategyCronOptions = {},
+): Promise<StrategyCronResult> {
   const emptySummary = (): PullbackRunSummary => ({
     evaluated: 0,
     buys: 0,
@@ -125,18 +130,23 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
   // when realized PnL is underwater but not yet at drawdown_kill threshold.
   // Emits a journal-visible log so the operator can tell a quiet day from
   // a halved one.
-  const ddScale = computeDrawdownRiskScale(portfolioSnapshot)
+  const ddScale = computeDrawdownRiskScale(portfolioSnapshot, {
+    baseRiskPct: global.riskBasePerTradePct,
+    halfThreshold: global.riskDdHalfThreshold,
+    haltThreshold: global.riskDdHaltThreshold,
+  })
   if (ddScale.step !== 'normal') {
     console.log(
       JSON.stringify({
         event: 'drawdown_risk_scale',
+        requestId: options.requestId,
         step: ddScale.step,
         scale: ddScale.scale,
         drawdown: ddScale.drawdown,
       }),
     )
   }
-  const scaledRiskPerTradePct = BASE_RISK_PER_TRADE_PCT * ddScale.scale
+  const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
   const execution = global.dryRun
