@@ -2,18 +2,19 @@
 
 Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking Webull OpenAPI directly (no SDK). Trade-event streaming via a Node-runtime gRPC bridge hosted in a Cloudflare Container.
 
-**Status**: POC Phase 1–5 完了 (#1 closed)。以降は follow-up issues (#21-#24) と D1 化 (#68-#70) が merged。
+**Current scope**: staging で Pullback 戦略が 1h cron で稼働、MARKET 注文が Webull JP UAT (sandbox) に到達して fill まで確認済。US + JP 両通貨対応 (JP は 100 株ロット丸め)。Risk: kill-switch / drawdown kill / ATR stop / drawdown-scaled size / sector bucket cap。read-only dashboard 有り。残タスク: Bearer auth 移行 (#29) / portfolio exposure gate (#77) / JP sandbox tenant (#89、Webull 側 blocker) / multi-account routing (#97)。
 
 ## アーキテクチャ概要
 
 ```
  ┌──────────────┐  */5 cron       ┌──────────────────────────┐
- │  Cloudflare  │────────────────▶│  quote feed (DO write)    │
- │   Workers    │                 │  bridge keep-alive        │
+ │  Cloudflare  │────────────────▶│  quote feed + reconcile   │
+ │   Workers    │  15 * * * * ───▶│  Pullback strategy cron   │
  │              │  /trade/* HTTP  └──────────────────────────┘
  │              │────▶ decide / execute → Webull HTTP
  │              │  /events/trade  ◀────── bridge Container
  │              │  /admin/*       operator (Basic Auth)
+ │              │  /dashboard/*   read-only SSR (Basic Auth)
  └──────┬───────┘
         │
  ┌──────┴────────────────────────────────────────────────────┐
@@ -28,23 +29,55 @@ Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking 
 
 ## Safety defaults (fail-closed)
 
-`global_config` singleton (D1 `id='default'`) で保持。未シード時は `GLOBAL_CONFIG_DEFAULTS` にフォールバック:
+`global_config` singleton (D1 `id='default'`) で保持。未シード時は `GLOBAL_CONFIG_DEFAULTS` にフォールバック。`UPDATE global_config SET ...` で runtime 即反映、deploy 不要 (#118 で確立した POC 方針)。
+
+**Kill-switch / gate:**
 
 | フィールド | 既定 | 意味 |
 |---|---|---|
 | `dry_run` | `1` | Execution Mock に固定、broker へ送らない |
 | `trading_enabled` | `0` | Risk layer が全注文 reject |
 | `market_hours_check` | `0` | UTC 13:30-20:00 Mon-Fri チェック |
-| `max_order_notional` | `100` | 1 注文上限 ($ / ¥) |
 | `drawdown_kill_threshold` | `-0.02` | 日次 realized_pnl / start_equity 比で自動 kill |
 | `stale_quote_ms` | `900000` | halt 判定 (15 min) |
+
+**通貨別 cap / 予算 (Phase E、#76):**
+
+| フィールド | 既定 | 意味 |
+|---|---|---|
+| `max_order_notional_usd` | `2000` | USD 銘柄の 1 注文上限 ($) |
+| `max_order_notional_jpy` | `100000` | JPY 銘柄の 1 注文上限 (¥) |
+| `total_capital_usd` / `_jpy` | `NULL` | NAV (NULL なら exposure check skip) |
+| `max_portfolio_exposure_pct` | `0.6` | total_capital × これを超える open 合計を禁止 |
 | `spread_limit_pct_{us,jp}` | `0.0025` / `0.006` | spread guard |
-| `bridge_run_mode` | `auto` | 平日 JST のみ bridge 稼働 (auto / always-on / disabled) |
+| `gap_reject_pct` | `0.03` | gap 判定 |
+
+**Pullback 戦略の default rule (#118、#124):**
+
+| フィールド | 既定 | 意味 |
+|---|---|---|
+| `pullback_default_stop_pct` | `-0.04` | pct-based stop (ATR stop の floor) |
+| `pullback_default_take_profit_pct` | `0.07` | take-profit |
+| `pullback_default_time_stop_days` | `10` | 保有上限 (営業日) |
+| `pullback_default_pullback_{max,min}` | `-0.03` / `-0.06` | entry 窓 |
+| `pullback_default_min_return_50d` | `0.08` | 50日 return の uptrend filter |
+| `pullback_default_require_above_sma50` | `1` | sma50 超を entry 必須 |
+| `pullback_default_k_atr` | `2.0` | ATR 倍率。`stopDistance = max(k_atr × atr20, pct stop)` |
+
+**Risk gate の動的パラメタ (#23 Lane 2-3):**
+
+| フィールド | 既定 | 意味 |
+|---|---|---|
+| `risk_base_per_trade_pct` | `0.004` | 1 trade 基準 risk (%) |
+| `risk_dd_half_threshold` | `-0.05` | 日次 DD でこれ未満 → size 0.5× |
+| `risk_dd_halt_threshold` | `-0.10` | 日次 DD でこれ未満 → size 0 (halt) |
+| `bucket_exposure_pct` | `0.30` | 同一 `symbol_config.bucket` の open notional ≤ equity × これ |
 
 加えて:
 - `symbol_config.active = 0` にすれば ALLOWED から外れて cron から除外
+- `symbol_config.bucket` に tag ('semi' / 'jp_auto' 等) を入れると bucket exposure cap 対象
 - `inverse_pairs` で SOXL/SOXS 同時保有を構造的に禁止
-- Basic Auth で `/trade/*` / `/webull/*` / `/admin/*` 保護
+- Basic Auth で `/trade/*` / `/webull/*` / `/admin/*` / `/dashboard/*` 保護
 - `EVENT_INGEST_SECRET` header + timing-safe 比較で `/events/trade` 保護
 
 ## Layout
@@ -52,20 +85,20 @@ Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking 
 ```
 src/
   app.ts / index.ts           Hono factory + Workers entry (fetch / scheduled)
-  routes/                     health / trade / webull / events / admin
+  routes/                     health / trade / webull / events / admin / dashboard
   trading/
     application/              TradingService / TradeEventService
     domain/                   Signal / OrderIntent / RiskDecision / ExecutionResult / TradeEvent
-    strategy/                 Strategy + FixedRuleStrategy + PullbackUptrendStrategy + pullbackSizing / indicators / scheduler
-    risk/                     RiskPolicy + DefaultRiskPolicy + jpPriceBand + spreadGuard
+    strategy/                 PullbackUptrendStrategy + pullbackSizing (ATR stop, lot-round) + indicators + scheduler + runStrategyCron
+    risk/                     DefaultRiskPolicy + jpPriceBand + spreadGuard + drawdownRiskScale + bucketExposureGate
     execution/                Execution + MockExecution + WebullExecution
-    events/                   TradeEventHandler
+    reconciliation/           reconcileFills (Webull order history → D1 + DO apply)
     state/                    SymbolStateDO / PortfolioStateDO + clients / transitions
-    bridge/                   BridgeContainer (Cloudflare Container DO class) + keepAlive + schedule
+    bridge/                   BridgeContainer (Cloudflare Container DO class) + keepAlive
     quotes/                   quoteScheduler
   infrastructure/
     webull/                   WebullHttpClient / WebullAuth / mapper / TradeEventBridge
-    quotes/                   WebullQuoteClient / BarClient
+    quotes/                   YahooBarClient (US + JP bar source) / WebullQuoteClient / BarClient
     logger/                   AuditLogger + tradeJournal (console + D1 sink)
     db/                       drizzle schema + tradeJournalRepo / symbolConfigRepo / globalConfigRepo + loaders
   middleware/                 basicAuth
@@ -73,9 +106,9 @@ src/
   config/                     env (少数: secret 参照のみ)
 Dockerfile                    bridge Container image (repo root context)
 bridge/                       Node gRPC subscriber (pnpm start)
-drizzle/                      generated D1 migrations (0000_init / 0001_symbol_config / 0002_global_config)
+drizzle/                      generated D1 migrations (0000_init … 0008_bucket_cap)
 docs/                         db-operations.md / seed/*.sql
-test/                         vitest suite (275 cases)
+test/                         vitest suite (322 cases)
 ```
 
 ## Dev
@@ -102,10 +135,18 @@ cd bridge && pnpm install && pnpm run typecheck
 | POST | `/trade/execute` | Basic | 上記 + ExecutionResult (`dry_run=1` で Mock、0 で Webull) |
 | POST | `/webull/order/place` | Basic | 低レベル疎通 endpoint (`dry_run=1` で synthetic response) |
 | POST | `/events/trade` | secret header | bridge からの trade event ingest |
-| POST | `/admin/symbols/:symbol/seed-cash` | Basic | `settled_cash` の初期値投入 (#55) |
-| POST | `/admin/portfolio/seed-equity` | Basic | `daily_start_equity` 投入 (#50) |
+| POST | `/admin/symbols/:symbol/seed-cash` | Basic | `settled_cash` の初期値投入 |
+| POST | `/admin/portfolio/seed-equity` | Basic | `daily_start_equity` 投入 |
+| POST | `/admin/portfolio/roll-daily` | Basic | EOD rollover (start_equity ← 現 equity、realized=0 に) |
+| POST | `/admin/strategy/run` | Basic | `runStrategyCron` 手動 trigger (cron 待たず試走) |
+| POST | `/admin/orders/reconcile` | Basic | `reconcileFills` 手動 trigger |
+| GET | `/admin/orders/:clientOrderId` | Basic | Webull order history を client_order_id で検索 |
+| GET | `/dashboard` | Basic | read-only ランディング → positions / portfolio / trades / config |
+| GET | `/dashboard/{positions,portfolio,trades,config}` | Basic | DO / D1 snapshot を HTML で可視化 (#121) |
 
-Cron: `*/5 * * * *` で quote feed + bridge keep-alive。
+Cron:
+- `*/5 * * * *` — quote feed (Yahoo bars → SymbolStateDO) + reconcileFills
+- `15 * * * *` — Pullback strategy cron (USD + JPY currency-aware、JP は 100株ロット丸め)
 
 ## Bindings (wrangler.jsonc)
 
@@ -212,6 +253,18 @@ pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
 pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
   --command "UPDATE global_config SET trading_enabled = 0 WHERE id = 'default'"
 
+# Pullback rule / risk param を runtime tuning (#118 / #124 / #125 / #126)
+pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
+  --command "UPDATE global_config SET \
+             pullback_default_k_atr = 2.5, \
+             risk_dd_half_threshold = -0.05, \
+             bucket_exposure_pct = 0.30 \
+             WHERE id = 'default'"
+
+# symbol に bucket tag を付ける (SOXL/NVDA を 'semi' で集約 cap の対象に)
+pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
+  --command "UPDATE symbol_config SET bucket = 'semi' WHERE symbol IN ('SOXL','NVDA','SOXS')"
+
 # 振り返りクエリ
 pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
   --command "SELECT trade_event_type, COUNT(*) FROM trade_journal GROUP BY trade_event_type"
@@ -229,10 +282,3 @@ pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
 - `.claude/agents/trading-strategist.md` — 戦略設計 delegate 用 subagent
 - `.coderabbit.yaml` — 自動レビュー設定 (profile: chill + path_instructions)
 
-## 設計書 / POC 履歴
-
-- [#1](https://github.com/ochanuco/webull-trading/issues/1) POC 設計書 (closed)
-- Phase 1: PR #2 / Phase 2: PR #3 / Phase 3: PR #4 / Phase 4: PR #5 / Phase 5: PR #6
-- D1 化: #68 / #69 / #70
-- Bridge (Cloudflare Containers): #33 / PR #65
-- Risk hardening: #38 サブ PR 47/59/60/61
