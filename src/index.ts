@@ -43,7 +43,7 @@ export default {
 
     if (event.cron === CRON_STRATEGY) {
       ctx.waitUntil(
-        runStrategyCron(env).then(
+        runStrategyCron(env, { requestId }).then(
           (result) => {
             console.log(
               JSON.stringify({

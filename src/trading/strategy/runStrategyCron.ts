@@ -8,6 +8,7 @@ import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
+import { computeDrawdownRiskScale } from '../risk/drawdownRiskScale'
 import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -40,7 +41,15 @@ export interface StrategyCronResult {
  * JP 銘柄は 100 株ロットで round-down される。bar 取得は Yahoo Finance の
  * `<code>.T` サフィックス (YahooBarClient 内で自動付与)。
  */
-export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
+export interface RunStrategyCronOptions {
+  /** Correlation id for structured logs (from scheduled() handler). */
+  requestId?: string
+}
+
+export async function runStrategyCron(
+  env: Env,
+  options: RunStrategyCronOptions = {},
+): Promise<StrategyCronResult> {
   const emptySummary = (): PullbackRunSummary => ({
     evaluated: 0,
     buys: 0,
@@ -85,11 +94,12 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     }
   }
   const portfolioStore = new PortfolioStateClient(env.PORTFOLIO_STATE)
+  let portfolioSnapshot: Awaited<ReturnType<typeof portfolioStore.getPortfolio>>
   try {
-    const portfolio = await portfolioStore.getPortfolio()
+    portfolioSnapshot = await portfolioStore.getPortfolio()
     const now = Date.now()
-    if (portfolio.tradingDisabledUntil) {
-      const disabledUntilMs = new Date(portfolio.tradingDisabledUntil).getTime()
+    if (portfolioSnapshot.tradingDisabledUntil) {
+      const disabledUntilMs = new Date(portfolioSnapshot.tradingDisabledUntil).getTime()
       if (!Number.isFinite(disabledUntilMs) || disabledUntilMs > now) {
         return {
           summary: emptySummary(),
@@ -98,8 +108,8 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
         }
       }
     }
-    if (portfolio.dailyStartEquity > 0) {
-      const ratio = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
+    if (portfolioSnapshot.dailyStartEquity > 0) {
+      const ratio = portfolioSnapshot.dailyRealizedPnl / portfolioSnapshot.dailyStartEquity
       if (ratio <= global.drawdownKillThreshold) {
         return {
           summary: emptySummary(),
@@ -115,6 +125,28 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
       skipReason: 'portfolio_halted',
     }
   }
+
+  // Drawdown-scaled risk: derate sizing for the rest of the trading day
+  // when realized PnL is underwater but not yet at drawdown_kill threshold.
+  // Emits a journal-visible log so the operator can tell a quiet day from
+  // a halved one.
+  const ddScale = computeDrawdownRiskScale(portfolioSnapshot, {
+    baseRiskPct: global.riskBasePerTradePct,
+    halfThreshold: global.riskDdHalfThreshold,
+    haltThreshold: global.riskDdHaltThreshold,
+  })
+  if (ddScale.step !== 'normal') {
+    console.log(
+      JSON.stringify({
+        event: 'drawdown_risk_scale',
+        requestId: options.requestId,
+        step: ddScale.step,
+        scale: ddScale.scale,
+        drawdown: ddScale.drawdown,
+      }),
+    )
+  }
+  const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
   const execution = global.dryRun
@@ -173,6 +205,7 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
       execution,
       symbolCapMap: universe.symbolMaxNotional,
       defaultRule,
+      riskPerTradePct: scaledRiskPerTradePct,
     })
     summary.evaluated += sub.evaluated
     summary.buys += sub.buys

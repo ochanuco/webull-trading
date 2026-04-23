@@ -32,6 +32,9 @@ export function makeGlobalConfigSnapshot(
     pullbackDefaultMinReturn50d: 0.08,
     pullbackDefaultRequireAboveSma50: true,
     pullbackDefaultKAtr: 2.0,
+    riskBasePerTradePct: 0.004,
+    riskDdHalfThreshold: -0.05,
+    riskDdHaltThreshold: -0.10,
     source: 'd1',
     ...overrides,
   }
