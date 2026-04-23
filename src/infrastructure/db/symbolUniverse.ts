@@ -5,6 +5,7 @@ export interface SymbolUniverse {
   allowedSymbols: string[]
   symbolMaxNotional: Record<string, number>
   symbolCurrency: Record<string, SymbolCurrency>
+  symbolBucket: Record<string, string>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -29,6 +30,7 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     allowedSymbols: config.allowedSymbols,
     symbolMaxNotional: config.symbolMaxNotional,
     symbolCurrency: config.symbolCurrency,
+    symbolBucket: config.symbolBucket,
     inversePairs: pairs,
     source: 'd1',
   }

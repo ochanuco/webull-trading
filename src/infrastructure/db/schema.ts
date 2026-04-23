@@ -66,6 +66,12 @@ export const symbolConfig = sqliteTable(
     currency: text('currency').notNull().default('USD'),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
     maxNotional: real('max_notional'),
+    /**
+     * 相関 bucket の粗タグ (例: 'semi' / 'us_large_cap' / 'jp_auto')。
+     * 同一 bucket の open position 合計 notional を NAV の X% (global
+     * で設定) で clamp するために使う (#23 Lane 3)。NULL は bucket 未分類。
+     */
+    bucket: text('bucket'),
     notes: text('notes'),
     updatedAt: text('updated_at').notNull(),
   },

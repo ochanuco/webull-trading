@@ -9,6 +9,7 @@ import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
 import { computeDrawdownRiskScale } from '../risk/drawdownRiskScale'
+import { DEFAULT_BUCKET_EXPOSURE_PCT } from '../risk/bucketExposureGate'
 import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -196,6 +197,18 @@ export async function runStrategyCron(
   }
 
   for (const run of runs) {
+    // Bucket cap: per-currency NAV × DEFAULT_BUCKET_EXPOSURE_PCT。
+    // 同一 bucket の合計 open notional がこれを超える BUY は reject。
+    // bucket が未分類 (symbol_config.bucket NULL) の symbol は素通り。
+    const buckets = new Set<string>()
+    for (const sym of run.symbols) {
+      const b = universe.symbolBucket[sym.toUpperCase()]
+      if (b) buckets.add(b)
+    }
+    const bucketCapMap: Record<string, number> = {}
+    for (const b of buckets) {
+      bucketCapMap[b] = run.equity * DEFAULT_BUCKET_EXPOSURE_PCT
+    }
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
       equity: run.equity,
@@ -204,6 +217,8 @@ export async function runStrategyCron(
       positionStore,
       execution,
       symbolCapMap: universe.symbolMaxNotional,
+      symbolBucketMap: universe.symbolBucket,
+      bucketCapMap,
       defaultRule,
       riskPerTradePct: scaledRiskPerTradePct,
     })

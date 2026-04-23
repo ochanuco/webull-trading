@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2dd29ae8-8d36-4eee-9f8a-0b3a286c81ef",
-  "prevId": "873cb7aa-a7c8-4d84-98a7-0d349531fb04",
+  "id": "9306ba65-d6fb-4b93-bf47-0ebc580c8863",
+  "prevId": "2dd29ae8-8d36-4eee-9f8a-0b3a286c81ef",
   "tables": {
     "global_config": {
       "name": "global_config",
@@ -393,6 +393,13 @@
         "max_notional": {
           "name": "max_notional",
           "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "bucket": {
+          "name": "bucket",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
