@@ -8,6 +8,10 @@ import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
+import {
+  BASE_RISK_PER_TRADE_PCT,
+  computeDrawdownRiskScale,
+} from '../risk/drawdownRiskScale'
 import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -85,11 +89,12 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     }
   }
   const portfolioStore = new PortfolioStateClient(env.PORTFOLIO_STATE)
+  let portfolioSnapshot: Awaited<ReturnType<typeof portfolioStore.getPortfolio>>
   try {
-    const portfolio = await portfolioStore.getPortfolio()
+    portfolioSnapshot = await portfolioStore.getPortfolio()
     const now = Date.now()
-    if (portfolio.tradingDisabledUntil) {
-      const disabledUntilMs = new Date(portfolio.tradingDisabledUntil).getTime()
+    if (portfolioSnapshot.tradingDisabledUntil) {
+      const disabledUntilMs = new Date(portfolioSnapshot.tradingDisabledUntil).getTime()
       if (!Number.isFinite(disabledUntilMs) || disabledUntilMs > now) {
         return {
           summary: emptySummary(),
@@ -98,8 +103,8 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
         }
       }
     }
-    if (portfolio.dailyStartEquity > 0) {
-      const ratio = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
+    if (portfolioSnapshot.dailyStartEquity > 0) {
+      const ratio = portfolioSnapshot.dailyRealizedPnl / portfolioSnapshot.dailyStartEquity
       if (ratio <= global.drawdownKillThreshold) {
         return {
           summary: emptySummary(),
@@ -115,6 +120,23 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
       skipReason: 'portfolio_halted',
     }
   }
+
+  // Drawdown-scaled risk: derate sizing for the rest of the trading day
+  // when realized PnL is underwater but not yet at drawdown_kill threshold.
+  // Emits a journal-visible log so the operator can tell a quiet day from
+  // a halved one.
+  const ddScale = computeDrawdownRiskScale(portfolioSnapshot)
+  if (ddScale.step !== 'normal') {
+    console.log(
+      JSON.stringify({
+        event: 'drawdown_risk_scale',
+        step: ddScale.step,
+        scale: ddScale.scale,
+        drawdown: ddScale.drawdown,
+      }),
+    )
+  }
+  const scaledRiskPerTradePct = BASE_RISK_PER_TRADE_PCT * ddScale.scale
 
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
   const execution = global.dryRun
@@ -173,6 +195,7 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
       execution,
       symbolCapMap: universe.symbolMaxNotional,
       defaultRule,
+      riskPerTradePct: scaledRiskPerTradePct,
     })
     summary.evaluated += sub.evaluated
     summary.buys += sub.buys
