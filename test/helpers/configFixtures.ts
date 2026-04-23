@@ -35,6 +35,7 @@ export function makeGlobalConfigSnapshot(
     riskBasePerTradePct: 0.004,
     riskDdHalfThreshold: -0.05,
     riskDdHaltThreshold: -0.10,
+    bucketExposurePct: 0.30,
     source: 'd1',
     ...overrides,
   }

@@ -42,8 +42,11 @@ export async function loadSymbolConfig(
       symbolMaxNotional[symbol] = row.maxNotional
     }
     symbolCurrency[symbol] = row.currency === 'JPY' ? 'JPY' : 'USD'
-    if (row.bucket && row.bucket.length > 0) {
-      symbolBucket[symbol] = row.bucket
+    // bucket を trim + lowercase で正規化しないと 'semi' / ' semi' / 'SEMI'
+    // が別 bucket 扱いになって集中 cap が実質回避される (CodeRabbit #126)。
+    const normalizedBucket = row.bucket?.trim().toLowerCase()
+    if (normalizedBucket) {
+      symbolBucket[symbol] = normalizedBucket
     }
   }
   return { allowedSymbols, symbolMaxNotional, symbolCurrency, symbolBucket }

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9306ba65-d6fb-4b93-bf47-0ebc580c8863",
+  "id": "39be53f4-2157-4c72-897c-4096ba803e9a",
   "prevId": "2dd29ae8-8d36-4eee-9f8a-0b3a286c81ef",
   "tables": {
     "global_config": {
@@ -212,6 +212,14 @@
           "autoincrement": false,
           "default": -0.1
         },
+        "bucket_exposure_pct": {
+          "name": "bucket_exposure_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.3
+        },
         "updated_at": {
           "name": "updated_at",
           "type": "text",
@@ -316,6 +324,10 @@
         "global_config_risk_dd_threshold_order": {
           "name": "global_config_risk_dd_threshold_order",
           "value": "\"global_config\".\"risk_dd_halt_threshold\" <= \"global_config\".\"risk_dd_half_threshold\""
+        },
+        "global_config_bucket_exposure_pct_range": {
+          "name": "global_config_bucket_exposure_pct_range",
+          "value": "\"global_config\".\"bucket_exposure_pct\" > 0 AND \"global_config\".\"bucket_exposure_pct\" <= 1"
         }
       }
     },

@@ -1,9 +1,3 @@
-/**
- * POC のデフォルト bucket exposure 上限 (NAV の 30%)。
- * 将来 `global_config.bucket_exposure_pct` に D1 化する前段の中間実装。
- */
-export const DEFAULT_BUCKET_EXPOSURE_PCT = 0.30
-
 export interface BucketGateDecision {
   allowed: boolean
   reason?: string
@@ -16,7 +10,10 @@ export interface BucketGateDecision {
  * 新規 BUY を許容するかを判定する pure 関数。
  *
  * - bucket が undefined → 個別銘柄として扱い、cap 適用なし (`allowed: true`)
- * - cap が undefined / ≤ 0 → 適用なし (fail-open)
+ * - cap が undefined (運用側で bucket 未設定) → 適用なし
+ * - cap が非有限 / ≤ 0 (`equity=0` 等の異常) → **fail-closed で reject**
+ *   (CodeRabbit #126 review: "Risk must be able to reject")
+ * - addNotional 非有限 / ≤ 0 → fail-closed で reject
  * - 現 exposure + 追加 notional > cap → 拒否
  *
  * 呼び出し側 (scheduler) は決定後に承認された bucket の `currentExposure`
@@ -29,11 +26,23 @@ export function decideBucketGate(args: {
   cap: number | undefined
 }): BucketGateDecision {
   if (!args.bucket) return { allowed: true }
-  if (args.cap === undefined || !Number.isFinite(args.cap) || args.cap <= 0) {
+  // cap 未設定は bucket 管理対象外 (symbol に bucket はあるが global に cap
+  // が無いケース) として pass。明示的な安全ルート。
+  if (args.cap === undefined) {
     return { allowed: true }
   }
+  // cap が壊れている (non-finite / ≤0) → 評価不能なので fail-closed で reject。
+  if (!Number.isFinite(args.cap) || args.cap <= 0) {
+    return {
+      allowed: false,
+      reason: `bucket cap: ${args.bucket} invalid cap ${args.cap}`,
+    }
+  }
   if (!Number.isFinite(args.addNotional) || args.addNotional <= 0) {
-    return { allowed: true }
+    return {
+      allowed: false,
+      reason: `bucket cap: ${args.bucket} invalid addNotional ${args.addNotional}`,
+    }
   }
   const projected = args.currentExposure + args.addNotional
   if (projected > args.cap) {

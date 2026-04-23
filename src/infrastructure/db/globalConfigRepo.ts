@@ -38,6 +38,8 @@ export interface GlobalConfigSnapshot {
   riskDdHalfThreshold: number
   /** drawdown がこの閾値 (負) 未満で size を 0 に (-0.10 default)。 */
   riskDdHaltThreshold: number
+  /** 同一 bucket の open 合計 notional 上限 = equity × この比率。#23 Lane 3。 */
+  bucketExposurePct: number
 }
 
 /**
@@ -71,6 +73,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   riskBasePerTradePct: 0.004,
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
+  bucketExposurePct: 0.30,
 })
 
 export async function loadGlobalConfig(
@@ -105,5 +108,6 @@ export async function loadGlobalConfig(
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,
+    bucketExposurePct: row.bucketExposurePct,
   }
 }
