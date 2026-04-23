@@ -135,6 +135,8 @@ export async function runStrategyCron(env: Env): Promise<StrategyCronResult> {
     pullbackMin: global.pullbackDefaultPullbackMin,
     minReturn50d: global.pullbackDefaultMinReturn50d,
     requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+    // null → undefined で opt-out (legacy pct-only stop) を表現。
+    kAtr: global.pullbackDefaultKAtr ?? undefined,
   }
 
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
