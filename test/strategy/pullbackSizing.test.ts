@@ -107,6 +107,32 @@ describe('computePullbackSizing', () => {
     expect(result.capReason).toBe('lot-size-round')
   })
 
+  it('populates diagnostic fields (rawQuantity / stopDistance / riskBudget)', () => {
+    // equity 100k, risk 0.4% → budget 400。entry 100 × stopPct -4% → pctStop 4。
+    // atr20 × kAtr = 2×2 = 4。max = 4。raw qty = floor(400 / 4) = 100。
+    const result = computePullbackSizing(baseInput())
+    expect(result.rawQuantity).toBe(100)
+    expect(result.stopDistance).toBe(4)
+    expect(result.riskBudget).toBe(400)
+  })
+
+  it('rawQuantity reflects pre-lot-round value so operators can see the gap', () => {
+    // entry 1297 atr20 24 kAtr 2 → atrStop 48、pctStop 1297*0.04=51.88。stop≒52。
+    // equity 2M risk 0.4% → budget 8000。raw qty = floor(8000/51.88) = 154。
+    // lot 100 → rounded 100 (allowed) → diagnostic rawQuantity still 154.
+    const result = computePullbackSizing(
+      baseInput({
+        equity: 2_000_000,
+        entryPrice: 1297,
+        atr20: 24,
+        baselineAtr20: 24,
+        lotSize: 100,
+      }),
+    )
+    expect(result.quantity).toBe(100)
+    expect(result.rawQuantity).toBe(154)
+  })
+
   it('uses the ATR-based stop when wider than the pct-based stop', () => {
     // atr20=3 × kAtr=2 → atr stop = 6 > pct stop 4. floor(400 / 6) = 66.
     const result = computePullbackSizing(

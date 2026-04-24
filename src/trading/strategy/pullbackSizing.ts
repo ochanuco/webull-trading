@@ -36,6 +36,20 @@ export interface PullbackSizingResult {
     | 'invalid-stop'
     | 'insufficient-risk-budget'
     | 'lot-size-round'
+  /**
+   * Diagnostic fields populated only when applicable per decision/reject route;
+   * may be undefined otherwise. These are diagnostic-only for debugging and
+   * help operators understand the reject reason.
+   * - `rawQuantity`: pre-lot-size quantity (shows how much short of 1 lot).
+   *   Filled on lot-size-round path and in successful sizing path.
+   * - `stopDistance`: max(kAtr * atr20, |entry * stopPct|).
+   *   Filled on invalid-stop, insufficient-risk-budget, lot-size-round, and successful paths.
+   * - `riskBudget`: equity * riskPerTradePct.
+   *   Filled on insufficient-risk-budget, lot-size-round, and successful paths.
+   */
+  rawQuantity?: number
+  stopDistance?: number
+  riskBudget?: number
 }
 
 /**
@@ -57,12 +71,12 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   const stopDistance = atrStop > pctStop ? atrStop : pctStop
 
   if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
-    return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop' }
+    return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop', stopDistance }
   }
 
   const riskBudget = input.equity * riskPct
   if (!Number.isFinite(riskBudget) || riskBudget <= 0) {
-    return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
+    return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget', stopDistance, riskBudget }
   }
 
   let quantity = Math.floor(riskBudget / stopDistance)
@@ -92,19 +106,21 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   if (!Number.isFinite(lotSize) || !Number.isInteger(lotSize) || lotSize <= 0) {
     lotSize = 1
   }
+  // pre-lot-round を diagnostic 用に捕捉 (symbol-cap で clamp されていれば
+  // その clamp 後の qty、されていなければ rawQuantity と同じ)
+  const preLotQuantity = quantity
   if (lotSize > 1) {
     const rounded = Math.floor(quantity / lotSize) * lotSize
     if (rounded !== quantity) {
       quantity = rounded
       notional = quantity * input.entryPrice
-      // Guard that quantity and notional are finite after rounding.
       if (!Number.isFinite(quantity) || !Number.isFinite(notional)) {
-        return { quantity: 0, notional: 0, capped: true, capReason: 'lot-size-round' }
+        return { quantity: 0, notional: 0, capped: true, capReason: 'lot-size-round', rawQuantity: preLotQuantity, stopDistance, riskBudget }
       }
       capped = true
       capReason = rounded === 0 ? 'lot-size-round' : capReason ?? 'lot-size-round'
     }
   }
 
-  return { quantity, notional, capped, capReason }
+  return { quantity, notional, capped, capReason, rawQuantity: preLotQuantity, stopDistance, riskBudget }
 }
