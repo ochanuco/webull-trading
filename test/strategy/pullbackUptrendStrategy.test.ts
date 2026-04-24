@@ -53,12 +53,29 @@ describe('PullbackUptrendStrategy entry', () => {
     const signal = strategy.decide(goodEntryInput())
     expect(signal.action).toBe('BUY')
     expect(signal.quantity).toBe(0) // sizing resolves this downstream
+    expect(signal.trace?.map((step) => [step.label, step.passed])).toEqual([
+      ['guard.pending_order_absent', true],
+      ['guard.cooldown_inactive', true],
+      ['route.position_open', false],
+      ['entry.trend_50d_return', true],
+      ['entry.above_sma50', true],
+      ['entry.high20d_valid', true],
+      ['entry.pullback_not_too_shallow', true],
+      ['entry.pullback_not_too_deep', true],
+      ['entry.adopt_buy', true],
+    ])
+    expect(signal.trace?.find((step) => step.label === 'entry.adopt_buy')?.label_ja).toBe('買い採用')
   })
 
   it('HOLDs when 50d return is below the +8% trend threshold', () => {
     const input = goodEntryInput()
     input.indicators.return50d = 0.05
-    expect(strategy.decide(input).action).toBe('HOLD')
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.trace?.at(-1)).toMatchObject({
+      label: 'entry.trend_50d_return',
+      passed: false,
+    })
   })
 
   it('HOLDs when price is at or below sma50', () => {
@@ -117,6 +134,7 @@ describe('PullbackUptrendStrategy exit priority', () => {
     const signal = strategy.decide(withPosition(108, 20))
     expect(signal.action).toBe('SELL')
     expect(signal.reason).toMatch(/take-profit/)
+    expect(signal.trace?.at(-1)).toMatchObject({ label: 'exit.take_profit', passed: true })
   })
 
   it('SELLs on stop-loss before time-stop', () => {

@@ -47,13 +47,16 @@ export default {
       ctx.waitUntil(
         runStrategyCron(env, { requestId }).then(
           (result) => {
+            const { decisions: _decisions, ...summary } = result.summary
             console.log(
               JSON.stringify({
                 event: 'strategy_cron_run',
+                logSchema: result.analysis.schema,
                 requestId,
                 symbols: result.symbols,
                 skipReason: result.skipReason,
-                summary: result.summary,
+                summary,
+                analysis: result.analysis,
               }),
             )
           },
