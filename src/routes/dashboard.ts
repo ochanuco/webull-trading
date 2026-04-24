@@ -394,36 +394,32 @@ function configBody(
 
 /** global_config 列の簡潔な日本語説明。SQL 互換のため keys は snake_case で保持。 */
 /**
- * global_config 列に日本語の補助説明。金融ドメイン用語 (ドローダウン /
- * 押し目 / 損切り 等) に寄せる。id / updated_at のような汎用語は元の英字
- * で意味が通るので辞書に入れない (説明列は空 "—" 扱い)。
+ * global_config 列に短い日本語ラベル。金融ドメイン語 (押し目 / 損切り /
+ * ドローダウン / エクスポージャ) のみ日本語化、dry_run / trading_enabled /
+ * market_hours_check 等は英字で通るので辞書に入れない (fallback は em-dash)。
  */
 const CONFIG_KEY_JA: Record<string, string> = {
-  dry_run: 'ドライラン (実発注しない)',
-  trading_enabled: '取引有効化',
-  market_hours_check: '取引時間チェック',
-  max_order_notional: '1注文あたり上限金額 (旧、非推奨)',
-  max_order_notional_usd: '1注文あたり上限金額 (USD)',
-  max_order_notional_jpy: '1注文あたり上限金額 (JPY)',
-  total_capital_usd: '運用総資本 (USD)',
-  total_capital_jpy: '運用総資本 (JPY)',
-  max_portfolio_exposure_pct: 'ポートフォリオ最大エクスポージャ率',
-  drawdown_kill_threshold: 'ドローダウン kill 閾値 (負)',
-  stale_quote_ms: '気配値の鮮度上限 (ms)',
+  max_order_notional_usd: '1注文上限 (USD)',
+  max_order_notional_jpy: '1注文上限 (JPY)',
+  total_capital_usd: '運用資本 (USD)',
+  total_capital_jpy: '運用資本 (JPY)',
+  max_portfolio_exposure_pct: 'ポートフォリオ上限率',
+  drawdown_kill_threshold: 'ドローダウン kill 閾値',
+  stale_quote_ms: '気配値鮮度上限',
   gap_reject_pct: 'ギャップ拒否閾値',
-  spread_limit_pct_us: 'スプレッド上限率 (US)',
-  spread_limit_pct_jp: 'スプレッド上限率 (JP)',
-  pullback_default_stop_pct: 'Pullback 戦略: 損切り幅 (負)',
-  pullback_default_take_profit_pct: 'Pullback 戦略: 利確目標',
-  pullback_default_time_stop_days: 'Pullback 戦略: 最大保有日数',
-  pullback_default_pullback_max: 'Pullback 戦略: 押し目上限 (浅い側)',
-  pullback_default_pullback_min: 'Pullback 戦略: 押し目下限 (深い側)',
-  pullback_default_min_return_50d: 'Pullback 戦略: 50日騰落率の必要値',
-  pullback_default_require_above_sma50: 'Pullback 戦略: SMA50 超を必須化',
-  pullback_default_k_atr: 'Pullback 戦略: ATR 倍率',
-  risk_base_per_trade_pct: '1トレードあたり基本リスク率',
-  risk_dd_half_threshold: 'リスク半減のドローダウン閾値',
-  risk_dd_halt_threshold: 'リスク停止のドローダウン閾値',
+  spread_limit_pct_us: 'スプレッド上限 (US)',
+  spread_limit_pct_jp: 'スプレッド上限 (JP)',
+  pullback_default_stop_pct: '損切り幅',
+  pullback_default_take_profit_pct: '利確目標',
+  pullback_default_time_stop_days: '最大保有日数',
+  pullback_default_pullback_max: '押し目上限',
+  pullback_default_pullback_min: '押し目下限',
+  pullback_default_min_return_50d: '50日騰落率の必要値',
+  pullback_default_require_above_sma50: 'SMA50 超必須',
+  pullback_default_k_atr: 'ATR 倍率',
+  risk_base_per_trade_pct: '基本リスク率',
+  risk_dd_half_threshold: 'リスク半減閾値',
+  risk_dd_halt_threshold: 'リスク停止閾値',
   bucket_exposure_pct: '同グループ建玉上限率',
 }
 
