@@ -361,8 +361,17 @@ function configBody(
     .filter(([k]) => k !== 'source')
     .map(([k, v]) => {
       const camelKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
-      const desc = CONFIG_KEY_JA[camelKey] ?? CONFIG_KEY_JA[k] ?? '—'
-      return `<tr><th>${esc(camelKey)}</th><td class="muted">${esc(desc)}</td><td>${esc(formatConfigValue(v))}</td></tr>`
+      // DB 列名の digit 前 underscore は列ごとに揺れがある
+      // (min_return_50d は有 / require_above_sma50 は無)。
+      // naive 版 → digit 前 underscore 版の順でフォールバック。
+      const camelKeyWithDigitUnderscore = camelKey.replace(/([a-z])(\d)/g, '$1_$2')
+      const meta =
+        CONFIG_KEY_META[camelKey] ??
+        CONFIG_KEY_META[camelKeyWithDigitUnderscore] ??
+        CONFIG_KEY_META[k]
+      const label = meta?.label ?? '—'
+      const detail = meta?.detail ?? '—'
+      return `<tr><th>${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td></tr>`
     })
     .join('')
   const symRows = universe.allowedSymbols
@@ -379,7 +388,7 @@ function configBody(
   return `<details open>
     <summary>グローバル設定 (global_config)</summary>
     <table>
-      <thead><tr><th>列名 (列名で UPDATE 可)</th><th>説明</th><th>値</th></tr></thead>
+      <thead><tr><th>Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
       <tbody>${globalRows}</tbody>
     </table>
   </details>
@@ -392,35 +401,127 @@ function configBody(
   </details>`
 }
 
-/** global_config 列の簡潔な日本語説明。SQL 互換のため keys は snake_case で保持。 */
 /**
- * global_config 列に短い日本語ラベル。金融ドメイン語 (押し目 / 損切り /
- * ドローダウン / エクスポージャ) のみ日本語化、dry_run / trading_enabled /
- * market_hours_check 等は英字で通るので辞書に入れない (fallback は em-dash)。
+ * global_config 列のメタ情報 (label + detail)。
+ *
+ * - `label`: 短い見出し (単位込み)。IT / 汎用英単語 (dry-run / drawdown / spread
+ *   等) は英字のまま、日本株固有語 (押し目 / 建玉 / 利食い / 損切り / 騰落率)
+ *   のみ日本語化。
+ * - `detail`: 株初心者向け advisory。1-3 文、「何をするか」「大小で何が変わるか」
+ *   「目安」の順で記述。技術用語を避け具体的な動作で説明。
+ *
+ * 未登録 key の fallback は em-dash。
  */
-const CONFIG_KEY_JA: Record<string, string> = {
-  max_order_notional_usd: '1注文上限 (USD)',
-  max_order_notional_jpy: '1注文上限 (JPY)',
-  total_capital_usd: '運用資本 (USD)',
-  total_capital_jpy: '運用資本 (JPY)',
-  max_portfolio_exposure_pct: 'ポートフォリオ上限率',
-  drawdown_kill_threshold: 'ドローダウン kill 閾値',
-  stale_quote_ms: '気配値鮮度上限',
-  gap_reject_pct: 'ギャップ拒否閾値',
-  spread_limit_pct_us: 'スプレッド上限 (US)',
-  spread_limit_pct_jp: 'スプレッド上限 (JP)',
-  pullback_default_stop_pct: '損切り幅',
-  pullback_default_take_profit_pct: '利確目標',
-  pullback_default_time_stop_days: '最大保有日数',
-  pullback_default_pullback_max: '押し目上限',
-  pullback_default_pullback_min: '押し目下限',
-  pullback_default_min_return_50d: '50日騰落率の必要値',
-  pullback_default_require_above_sma50: 'SMA50 超必須',
-  pullback_default_k_atr: 'ATR 倍率',
-  risk_base_per_trade_pct: '基本リスク率',
-  risk_dd_half_threshold: 'リスク半減閾値',
-  risk_dd_halt_threshold: 'リスク停止閾値',
-  bucket_exposure_pct: '同グループ建玉上限率',
+interface ConfigKeyMeta {
+  label: string
+  detail: string
+}
+
+const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
+  dry_run: {
+    label: 'dry-run (bool)',
+    detail: 'true にすると実際には注文せず動作確認だけ。false で証券会社へ本当に注文します。テスト中は true、本番のみ false に。',
+  },
+  trading_enabled: {
+    label: 'trading enabled (bool)',
+    detail: 'false にすると全ての注文を拒否します。緊急停止用のスイッチ。止めたい時だけ false に。',
+  },
+  market_hours_check: {
+    label: '場中チェック (bool)',
+    detail: 'true で市場時間外の注文を防ぎます。false は 24 時間発注可 (sandbox 確認用)。',
+  },
+  max_order_notional: {
+    label: '1注文上限 (非推奨)',
+    detail: '旧 generic 上限 (通貨別 cap 導入前の互換)。現在は参照されないので触らなくて OK。',
+  },
+  max_order_notional_usd: {
+    label: '1注文上限 (USD)',
+    detail: 'US 株 1 回あたりの発注上限額 (ドル)。大きすぎる注文を防ぐ安全装置。$2000 なら 1 銘柄最大 $2000 まで。',
+  },
+  max_order_notional_jpy: {
+    label: '1注文上限 (JPY)',
+    detail: '日本株 1 回あたりの発注上限額 (円)。同上の円版。¥100000 なら 1 銘柄最大 10 万円まで。',
+  },
+  total_capital_usd: {
+    label: '運用資本 (USD)',
+    detail: 'US 株に割り当てる運用資金 (ドル)。この金額を元に 1 回のリスク額や保有上限を計算します。',
+  },
+  total_capital_jpy: {
+    label: '運用資本 (JPY)',
+    detail: '日本株に割り当てる運用資金 (円)。この金額を元に 1 回のリスク額や保有上限を計算します。',
+  },
+  max_portfolio_exposure_pct: {
+    label: 'portfolio exposure 上限率 (比率)',
+    detail: '同時保有の合計上限を「資本 × この率」で決めます。0.6 なら 60%。大きくすると分散度↑、損失時の衝撃↑。',
+  },
+  drawdown_kill_threshold: {
+    label: 'drawdown kill 閾値 (比率、負)',
+    detail: 'その日の損失がこの割合を超えたら、その日は新規売買を止めます。きつく -2% だと早く止まる、緩く -8% だと下げを我慢して継続。',
+  },
+  stale_quote_ms: {
+    label: '気配値鮮度上限 (ms)',
+    detail: '気配値が古すぎる時に判定を止める閾値。900000 = 15 分。短いと厳格、長いと古い気配でも売買。',
+  },
+  gap_reject_pct: {
+    label: 'gap reject 閾値 (比率)',
+    detail: '前日終値からの寄付 gap がこの率を超えた銘柄は買わない。0.03 = 3% 以上の gap で見送り。寄付の高値掴みを防ぐ。',
+  },
+  spread_limit_pct_us: {
+    label: 'spread 上限率 (US、比率)',
+    detail: '買値と売値の差 (spread) がこの率を超えた銘柄は流動性不足で見送り。US は 0.25% 目安。',
+  },
+  spread_limit_pct_jp: {
+    label: 'spread 上限率 (JP、比率)',
+    detail: '買値と売値の差 (spread) がこの率を超えた銘柄は流動性不足で見送り。日本株は 0.6% 目安。',
+  },
+  pullback_default_stop_pct: {
+    label: '損切り幅 (比率、負)',
+    detail: '損切りライン。買値からこの率下がったら売却。-0.04 = -4%。深いと耐えるが大損失リスク、浅いと早く切るが騙し上げで空振り。',
+  },
+  pullback_default_take_profit_pct: {
+    label: '利食い目標 (比率)',
+    detail: '利食い目標。買値からこの率上がったら売却。0.07 = +7%。高いと大きな利益を狙うが取り逃す、低いとコツコツ確定。',
+  },
+  pullback_default_time_stop_days: {
+    label: '最大保有日数 (営業日)',
+    detail: '建玉を保有する最大日数。この日数を超えても利食い/損切りに達しなければ強制売却。10 = 約 2 週間。',
+  },
+  pullback_default_pullback_max: {
+    label: '押し目上限 (比率、負)',
+    detail: '押し目買いを狙う「浅い側」の下落率閾値。-0.03 なら「-3% 以上下げた銘柄を候補に」。緩めると機会↑、騙し↑。',
+  },
+  pullback_default_pullback_min: {
+    label: '押し目下限 (比率、負)',
+    detail: '押し目買いを狙う「深い側」の下落率閾値。-0.06 なら「-6% より深い下げは敬遠」。深すぎる下げは反発せず転換の可能性。',
+  },
+  pullback_default_min_return_50d: {
+    label: '50日最低騰落率 (比率)',
+    detail: '過去 50 日の騰落率がこの値以上の銘柄だけ押し目買い対象。0.08 = +8%。上昇トレンド銘柄を絞るフィルター。',
+  },
+  pullback_default_require_above_sma50: {
+    label: 'SMA50 超必須 (bool)',
+    detail: 'true で 50 日移動平均線より上の銘柄だけ買い対象。上昇トレンドフィルターを厳しくする。',
+  },
+  pullback_default_k_atr: {
+    label: 'ATR 倍率',
+    detail: '損切り幅を ATR (日々の値動き幅) の何倍にするか。2.0 が標準。大きくすると激しい値動き銘柄でも余裕を持って保有、小さいと早めに損切り。',
+  },
+  risk_base_per_trade_pct: {
+    label: '基本リスク率 (比率)',
+    detail: '1 回のトレードで失ってよい割合 (対 総資本)。0.004 = 0.4%。大きくすると 1 回あたりの建玉サイズ↑、連敗時の損失↑。',
+  },
+  risk_dd_half_threshold: {
+    label: 'risk half 閾値 (比率、負)',
+    detail: '日次損失がこの率を超えたら 1 回のリスクを半分に減らす。-0.05 = -5%。連敗時の傷を浅く保つ自動ブレーキ。',
+  },
+  risk_dd_halt_threshold: {
+    label: 'risk halt 閾値 (比率、負)',
+    detail: '日次損失がこの率を超えたら 1 回のリスクを 0 に (新規 entry 停止)。-0.10 = -10%。drawdown_kill より前の緊急ブレーキ。',
+  },
+  bucket_exposure_pct: {
+    label: '同グループ建玉上限率 (比率)',
+    detail: '同じグループ (例: 半導体 ETF) の合計をこの率まで保有可。0.30 = 総資本の 30%。大きくすると集中投資↑、小さいと分散↑。',
+  },
 }
 
 /**
