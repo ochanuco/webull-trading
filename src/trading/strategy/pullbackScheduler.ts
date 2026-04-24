@@ -222,7 +222,10 @@ export async function runPullbackScheduler(
         kAtr: rule.kAtr,
       })
       if (sizing.quantity <= 0) {
-        const reason = `sizing rejected: ${sizing.capReason ?? 'zero qty'}`
+        const reason = buildSizingRejectReason(sizing, {
+          lotSize: options.lotSize ?? 1,
+          entryPrice: indicators.price,
+        })
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price, indicatorsJson: JSON.stringify(indicators) })
         continue
@@ -430,5 +433,33 @@ function buildIntent(symbol: string, side: 'BUY' | 'SELL', qty: number, price: n
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Build an operator-actionable reject reason from a sizing failure。
+ * 単に capReason を出すと「なぜ失敗したか / 何を直せばよいか」が見えない
+ * (例: `lot-size-round` だけでは raw qty も stop も予算も分からない)。
+ * 失敗 route ごとに diagnostic 値を埋め込む。localizeReason 側が regex で
+ * 日本語化する。
+ */
+function buildSizingRejectReason(
+  sizing: import('./pullbackSizing').PullbackSizingResult,
+  ctx: { lotSize: number; entryPrice: number },
+): string {
+  const cr = sizing.capReason
+  if (cr === 'lot-size-round') {
+    const raw = sizing.rawQuantity ?? 0
+    const stop = sizing.stopDistance ?? 0
+    return `sizing rejected: lot-size-round (raw qty ${raw} < lot ${ctx.lotSize}, stop ${stop.toFixed(2)}, entry ${ctx.entryPrice})`
+  }
+  if (cr === 'insufficient-risk-budget') {
+    const budget = sizing.riskBudget ?? 0
+    return `sizing rejected: insufficient-risk-budget (budget ${budget.toFixed(2)})`
+  }
+  if (cr === 'invalid-stop') {
+    const stop = sizing.stopDistance ?? 0
+    return `sizing rejected: invalid-stop (stopDistance ${stop})`
+  }
+  return `sizing rejected: ${cr ?? 'zero qty'}`
 }
 

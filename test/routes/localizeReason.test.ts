@@ -45,7 +45,7 @@ describe('localizeReason', () => {
     ).toBe('BUY 判定: 押し目 -3.00%、上昇トレンド継続 (50日 return 12.00%)')
   })
 
-  it('keeps sizing / scheduler / bucket reasons as-is (already clear)', () => {
+  it('keeps sizing / scheduler / bucket reasons as-is (legacy forms)', () => {
     expect(localizeReason('sizing rejected: lot-size-round')).toBe(
       'サイジング拒否: ロット丸め後に最小取引単位未満',
     )
@@ -56,6 +56,22 @@ describe('localizeReason', () => {
     expect(
       localizeReason('bucket cap: semi projected 500 > 300'),
     ).toBe('バケット cap: semi 合計 500 が上限 300 を超過')
+  })
+
+  it('localizes sizing rejects with diagnostic values', () => {
+    // lot-size-round with raw qty / stop / entry → operator can see how
+    // close we were to 1 lot.
+    expect(
+      localizeReason(
+        'sizing rejected: lot-size-round (raw qty 98 < lot 100, stop 203.00, entry 2876)',
+      ),
+    ).toBe('サイジング拒否: 生 qty 98 株が 1 lot (100 株) 未満 (stop 203.00/株、entry 2876)')
+    expect(
+      localizeReason('sizing rejected: insufficient-risk-budget (budget 0.00)'),
+    ).toBe('サイジング拒否: リスク予算不足 (予算 0.00)')
+    expect(
+      localizeReason('sizing rejected: invalid-stop (stopDistance 0)'),
+    ).toBe('サイジング拒否: stop 距離が無効 (0)')
   })
 
   it('does not touch unknown strings (forward-compat for new reason formats)', () => {

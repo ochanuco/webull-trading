@@ -414,10 +414,24 @@ export function localizeReason(en: string | null | undefined): string {
     (_m, p, r) => `BUY 判定: 押し目 ${fmtPct(p)}、上昇トレンド継続 (50日 return ${fmtPct(r)})`,
   )
   // Sizing capReason
+  // Sizing capReason — 診断値付きパターンを先に試行し、fallback で素の形に
+  // もマッチさせる (旧ログとの互換維持)。
+  s = s.replace(
+    /^sizing rejected: lot-size-round \(raw qty (\S+) < lot (\S+), stop (\S+), entry (\S+)\)$/,
+    'サイジング拒否: 生 qty $1 株が 1 lot ($2 株) 未満 (stop $3/株、entry $4)',
+  )
   s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: ロット丸め後に最小取引単位未満')
+  s = s.replace(
+    /^sizing rejected: insufficient-risk-budget \(budget (\S+)\)$/,
+    'サイジング拒否: リスク予算不足 (予算 $1)',
+  )
   s = s.replace(/^sizing rejected: insufficient-risk-budget$/, 'サイジング拒否: リスク予算不足')
   s = s.replace(/^sizing rejected: atr-floor$/, 'サイジング拒否: ATR floor (vol 崩壊)')
   s = s.replace(/^sizing rejected: symbol-cap$/, 'サイジング拒否: 銘柄別 notional cap 超過')
+  s = s.replace(
+    /^sizing rejected: invalid-stop \(stopDistance (\S+)\)$/,
+    'サイジング拒否: stop 距離が無効 ($1)',
+  )
   s = s.replace(/^sizing rejected: invalid-stop$/, 'サイジング拒否: stop 距離が無効')
   s = s.replace(/^sizing rejected: zero qty$/, 'サイジング拒否: qty が 0')
   // Scheduler inline
