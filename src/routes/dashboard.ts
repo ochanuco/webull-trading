@@ -494,9 +494,11 @@ export function localizeReason(en: string | null | undefined): string {
     /^bucket cap: (\S+) projected (\S+) > (\S+)$/,
     '発注スキップ: 同グループ建玉上限超過 ($1 合計 $2 > 上限 $3)',
   )
+  // bucketExposureGate.ts は `bucket cap: X invalid cap Y` / `... invalid addNotional Y`
+  // の 2 形で emit する (非有限 / ≤0 のとき fail-closed reject)。
   s = s.replace(
-    /^bucket cap: (\S+) cap (\S+) <= 0$/,
-    '発注スキップ: 同グループ建玉上限が無効 ($1 の上限 $2 ≤ 0)',
+    /^bucket cap: (\S+) invalid cap (\S+)$/,
+    '発注スキップ: 同グループ建玉上限が無効 ($1 の上限 $2)',
   )
   s = s.replace(
     /^bucket cap: (\S+) invalid addNotional (\S+)$/,
