@@ -434,11 +434,11 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(
     /^50d return (\S+) <= (\S+) trend threshold$/,
     (_m, r, t) =>
-      `様子見: 上昇トレンド未成立 (50日騰落率 ${fmtPct(r)} < 条件 ${fmtPct(t)})`,
+      `様子見: 上昇トレンド未成立 (50日騰落率 ${fmtPct(r)} ≤ 条件 ${fmtPct(t)})`,
   )
   s = s.replace(
     /^price (\S+) <= sma50 (\S+)$/,
-    '様子見: 50日移動平均線割れ (株価 $1 < 移動平均 $2)',
+    '様子見: 50日移動平均線割れ (株価 $1 ≤ 移動平均 $2)',
   )
   s = s.replace(/^invalid 20d high$/, 'データ不足: 直近20日高値を算出できず')
   s = s.replace(
@@ -480,7 +480,7 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の建玉なし')
   s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄不足')
   s = s.replace(/^invalid price: (\S+)$/, 'データ不足: 株価が無効 ($1)')
-  s = s.replace(/^invalid notional:/, 'データ不足: 約定代金が無効:')
+  s = s.replace(/^invalid notional:/, 'データ不足: 発注金額が無効:')
   s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: 建玉数が無効 ($1)')
   s = s.replace(/^invalid expiresAt/, 'データ不足: 注文有効期限が無効')
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
@@ -500,7 +500,7 @@ export function localizeReason(en: string | null | undefined): string {
   )
   s = s.replace(
     /^bucket cap: (\S+) invalid addNotional (\S+)$/,
-    'データ不足: 同グループ発注代金が無効 ($1 の代金 $2)',
+    'データ不足: 同グループ発注金額が無効 ($1 の金額 $2)',
   )
   return s
 }

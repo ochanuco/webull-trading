@@ -11,13 +11,13 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
   describe('未保有 (様子見 / データ不足)', () => {
     it('50d return unmet', () => {
       expect(localizeReason('50d return 0.0108 <= 0.03 trend threshold')).toBe(
-        '様子見: 上昇トレンド未成立 (50日騰落率 +1.08% < 条件 +3.00%)',
+        '様子見: 上昇トレンド未成立 (50日騰落率 +1.08% ≤ 条件 +3.00%)',
       )
     })
 
     it('price <= sma50 → 移動平均線割れ', () => {
       expect(localizeReason('price 100 <= sma50 105')).toBe(
-        '様子見: 50日移動平均線割れ (株価 100 < 移動平均 105)',
+        '様子見: 50日移動平均線割れ (株価 100 ≤ 移動平均 105)',
       )
     })
 
