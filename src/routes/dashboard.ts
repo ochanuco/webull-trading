@@ -255,7 +255,7 @@ function positionsBody(
         <td>${quote ? fmtNumber(quote.price, 2) : '<span class="muted">—</span>'}</td>
         <td class="${pnlClass}">${pnlPct === null ? '—' : fmtNumber(pnlPct, 2) + '%'}</td>
         <td>${pendingSide ? esc(pendingSide) : '<span class="muted">—</span>'}</td>
-        <td>${s.cooldownUntil ? esc(fmtJst(s.cooldownUntil)) : '<span class="muted">—</span>'}</td>
+        <td>${formatCooldown(s.cooldownUntil)}</td>
         <td class="muted">${esc(fmtJst(s.updatedAt))}</td>
       </tr>`
     })
@@ -421,6 +421,22 @@ const CONFIG_KEY_JA: Record<string, string> = {
   risk_dd_half_threshold: 'リスク半減閾値',
   risk_dd_halt_threshold: 'リスク停止閾値',
   bucket_exposure_pct: '同グループ建玉上限率',
+}
+
+/**
+ * cooldownUntil を保有状況テーブル向けに整形。null または past timestamp
+ * (admin /clear-cooldown で epoch 0 が書き込まれた状態等) は「解除済」
+ * 扱いで em-dash を返す。strategy 側の `cooldownUntil > now` 判定と表示を
+ * 整合させ、"1970-01-01 09:00:00 JST" がクールダウン列に残るように見える
+ * 不具合を解消する (#145 admin clear-cooldown の副作用)。
+ */
+function formatCooldown(cooldownUntil: string | null): string {
+  if (!cooldownUntil) return '<span class="muted">—</span>'
+  const ms = new Date(cooldownUntil).getTime()
+  if (!Number.isFinite(ms) || ms <= Date.now()) {
+    return '<span class="muted">—</span>'
+  }
+  return `<span class="warn">${esc(fmtJst(cooldownUntil))}</span>`
 }
 
 function formatConfigValue(v: unknown): string {
