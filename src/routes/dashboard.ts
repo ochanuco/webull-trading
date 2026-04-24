@@ -361,7 +361,14 @@ function configBody(
     .filter(([k]) => k !== 'source')
     .map(([k, v]) => {
       const camelKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
-      const meta = CONFIG_KEY_META[camelKey] ?? CONFIG_KEY_META[k]
+      // DB 列名の digit 前 underscore は列ごとに揺れがある
+      // (min_return_50d は有 / require_above_sma50 は無)。
+      // naive 版 → digit 前 underscore 版の順でフォールバック。
+      const camelKeyWithDigitUnderscore = camelKey.replace(/([a-z])(\d)/g, '$1_$2')
+      const meta =
+        CONFIG_KEY_META[camelKey] ??
+        CONFIG_KEY_META[camelKeyWithDigitUnderscore] ??
+        CONFIG_KEY_META[k]
       const label = meta?.label ?? '—'
       const detail = meta?.detail ?? '—'
       return `<tr><th>${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td></tr>`
