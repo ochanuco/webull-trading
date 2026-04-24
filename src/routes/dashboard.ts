@@ -17,10 +17,10 @@ import type { SymbolState } from '../trading/state/types'
  * still yields a usable landing.
  */
 export const dashboard = new Hono<AppBindings>()
-  .get('/', (c) => c.html(layout('Dashboard', indexBody())))
+  .get('/', (c) => c.html(layout('ダッシュボード', indexBody())))
   .get('/positions', async (c) => {
     if (!c.env.DB || !c.env.SYMBOL_STATE) {
-      return c.html(layout('Positions', unavailable('DB or SYMBOL_STATE not bound')))
+      return c.html(layout('保有状況', unavailable('DB or SYMBOL_STATE not bound')))
     }
     const universe = await loadSymbolUniverse(c.env)
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
@@ -33,41 +33,41 @@ export const dashboard = new Hono<AppBindings>()
         }
       }),
     )
-    return c.html(layout('Positions', positionsBody(rows)))
+    return c.html(layout('保有状況', positionsBody(rows)))
   })
   .get('/portfolio', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
-      return c.html(layout('Portfolio', unavailable('PORTFOLIO_STATE not bound')))
+      return c.html(layout('ポートフォリオ', unavailable('PORTFOLIO_STATE not bound')))
     }
     try {
       const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
-      return c.html(layout('Portfolio', portfolioBody(portfolio)))
+      return c.html(layout('ポートフォリオ', portfolioBody(portfolio)))
     } catch (err) {
-      return c.html(layout('Portfolio', unavailable(messageOf(err))))
+      return c.html(layout('ポートフォリオ', unavailable(messageOf(err))))
     }
   })
   .get('/trades', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('Trades', unavailable('DB not bound')))
+      return c.html(layout('約定履歴', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
     const db = createDb(c.env.DB)
     const rows = await db.select().from(tradeJournal).orderBy(desc(tradeJournal.id)).limit(limit)
-    return c.html(layout('Trades', tradesBody(rows, limit)))
+    return c.html(layout('約定履歴', tradesBody(rows, limit)))
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('Config', unavailable('DB not bound')))
+      return c.html(layout('設定', unavailable('DB not bound')))
     }
     const [global, universe] = await Promise.all([
       loadGlobalConfigFrom(c.env),
       loadSymbolUniverse(c.env),
     ])
-    return c.html(layout('Config', configBody(global, universe)))
+    return c.html(layout('設定', configBody(global, universe)))
   })
   .get('/cron', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('Cron Decisions', unavailable('DB not bound')))
+      return c.html(layout('Cron 判定', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
@@ -108,11 +108,11 @@ export const dashboard = new Hono<AppBindings>()
         : await baseQuery
             .orderBy(desc(strategyDecisionLog.id))
             .limit(limit)
-      return c.html(layout('Cron Decisions', cronBody(rows, limit, symbolFilter)))
+      return c.html(layout('Cron 判定', cronBody(rows, limit, symbolFilter)))
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
-      return c.html(layout('Cron Decisions', unavailable(messageOf(err))))
+      return c.html(layout('Cron 判定', unavailable(messageOf(err))))
     }
   })
 
@@ -202,42 +202,42 @@ function layout(title: string, body: string): string {
 <body>
 <h1>Webull Trading — ${esc(title)}</h1>
 <nav>
-  <a href="/dashboard">Home</a>
-  <a href="/dashboard/positions">Positions</a>
-  <a href="/dashboard/portfolio">Portfolio</a>
-  <a href="/dashboard/trades">Trades</a>
-  <a href="/dashboard/config">Config</a>
+  <a href="/dashboard">ホーム</a>
+  <a href="/dashboard/positions">保有状況</a>
+  <a href="/dashboard/portfolio">ポートフォリオ</a>
+  <a href="/dashboard/trades">約定履歴</a>
+  <a href="/dashboard/config">設定</a>
   <a href="/dashboard/cron">Cron</a>
 </nav>
 ${body}
-<div class="footer">rendered at ${esc(fmtJst(new Date()))}</div>
+<div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
 </body>
 </html>`
 }
 
 function unavailable(reason: string): string {
-  return `<p class="warn">unavailable: ${esc(reason)}</p>`
+  return `<p class="warn">利用不可: ${esc(reason)}</p>`
 }
 
 function indexBody(): string {
-  return `<p>Operator read-only dashboard. 各ページは basic-auth で保護されています。</p>
+  return `<p>運用者向け読み取り専用ダッシュボード。各ページは Basic 認証で保護されています。</p>
 <ul>
-  <li><a href="/dashboard/positions">Positions</a> — 全銘柄の DO 状態 (position / avgPrice / pendingOrder / cooldown)</li>
-  <li><a href="/dashboard/portfolio">Portfolio</a> — dailyStartEquity / realized PnL / drawdown / kill-switch</li>
-  <li><a href="/dashboard/trades">Trades</a> — trade_journal 直近 (default 50、<code>?limit=N</code> で可変、max 200)</li>
-  <li><a href="/dashboard/config">Config</a> — global_config + active symbol_config</li>
-  <li><a href="/dashboard/cron">Cron Decisions</a> — strategy_decision_log 直近 (<code>?symbol=SOXL</code> で絞り込み、日本語 reason)</li>
+  <li><a href="/dashboard/positions">保有状況</a> — 全銘柄の Durable Object 状態 (保有 / 平均取得単価 / 未約定注文 / クールダウン)</li>
+  <li><a href="/dashboard/portfolio">ポートフォリオ</a> — 当日始値資産 / 当日実現損益 / ドローダウン / 緊急停止 (kill-switch)</li>
+  <li><a href="/dashboard/trades">約定履歴</a> — <code>trade_journal</code> 直近 (既定 50件、<code>?limit=N</code> で可変、最大 200)</li>
+  <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
+  <li><a href="/dashboard/cron">Cron 判定</a> — <code>strategy_decision_log</code> 直近 (<code>?symbol=SOXL</code> で絞り込み可)</li>
 </ul>`
 }
 
 function positionsBody(
   rows: Array<{ sym: string; state: SymbolState | null; error: string | null }>,
 ): string {
-  if (rows.length === 0) return `<p class="muted">No active symbols.</p>`
+  if (rows.length === 0) return `<p class="muted">有効な銘柄がありません。</p>`
   const tbody = rows
     .map((r) => {
       if (r.error !== null || r.state === null) {
-        return `<tr><td>${esc(r.sym)}</td><td colspan="7" class="err">${esc(r.error ?? 'state unavailable')}</td></tr>`
+        return `<tr><td>${esc(r.sym)}</td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
       }
       const s = r.state
       const pos = s.position
@@ -250,20 +250,20 @@ function positionsBody(
       const pnlClass = pnlPct === null ? 'muted' : pnlPct >= 0 ? 'ok' : 'err'
       return `<tr>
         <td><strong>${esc(s.symbol)}</strong></td>
-        <td>${pos ? esc(pos.qty) : '<span class="muted">-</span>'}</td>
-        <td>${pos ? fmtNumber(pos.avgPrice, 2) : '<span class="muted">-</span>'}</td>
-        <td>${quote ? fmtNumber(quote.price, 2) : '<span class="muted">-</span>'}</td>
-        <td class="${pnlClass}">${pnlPct === null ? '-' : fmtNumber(pnlPct, 2) + '%'}</td>
-        <td>${pendingSide ? esc(pendingSide) : '<span class="muted">-</span>'}</td>
-        <td>${s.cooldownUntil ? esc(fmtJst(s.cooldownUntil)) : '<span class="muted">-</span>'}</td>
+        <td>${pos ? esc(pos.qty) : '<span class="muted">—</span>'}</td>
+        <td>${pos ? fmtNumber(pos.avgPrice, 2) : '<span class="muted">—</span>'}</td>
+        <td>${quote ? fmtNumber(quote.price, 2) : '<span class="muted">—</span>'}</td>
+        <td class="${pnlClass}">${pnlPct === null ? '—' : fmtNumber(pnlPct, 2) + '%'}</td>
+        <td>${pendingSide ? esc(pendingSide) : '<span class="muted">—</span>'}</td>
+        <td>${s.cooldownUntil ? esc(fmtJst(s.cooldownUntil)) : '<span class="muted">—</span>'}</td>
         <td class="muted">${esc(fmtJst(s.updatedAt))}</td>
       </tr>`
     })
     .join('')
   return `<table>
     <thead><tr>
-      <th>Symbol</th><th>Qty</th><th>Avg</th><th>Quote</th><th>PnL</th>
-      <th>Pending</th><th>Cooldown</th><th>Updated</th>
+      <th>銘柄</th><th>数量</th><th>平均取得単価</th><th>現在値</th><th>評価損益</th>
+      <th>未約定</th><th>クールダウン</th><th>更新時刻</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
@@ -281,11 +281,11 @@ function portfolioBody(p: {
   const kill = p.tradingDisabledUntil
   return `<table>
     <tbody>
-      <tr><th>dailyStartEquity</th><td>${fmtNumber(p.dailyStartEquity, 2)}</td></tr>
-      <tr><th>dailyRealizedPnl</th><td class="${ddClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</td></tr>
-      <tr><th>drawdown</th><td class="${ddClass}">${drawdownPct === null ? '-' : fmtNumber(drawdownPct, 2) + '%'}</td></tr>
-      <tr><th>tradingDisabledUntil</th><td>${kill ? `<span class="warn">${esc(fmtJst(kill))}</span>` : '<span class="ok">active</span>'}</td></tr>
-      <tr><th>updatedAt</th><td class="muted">${esc(fmtJst(p.updatedAt))}</td></tr>
+      <tr><th>当日始値資産 (dailyStartEquity)</th><td>${fmtNumber(p.dailyStartEquity, 2)}</td></tr>
+      <tr><th>当日実現損益 (dailyRealizedPnl)</th><td class="${ddClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</td></tr>
+      <tr><th>ドローダウン (drawdown)</th><td class="${ddClass}">${drawdownPct === null ? '—' : fmtNumber(drawdownPct, 2) + '%'}</td></tr>
+      <tr><th>取引停止解除時刻 (tradingDisabledUntil)</th><td>${kill ? `<span class="warn">${esc(fmtJst(kill))}</span>` : '<span class="ok">稼働中</span>'}</td></tr>
+      <tr><th>更新時刻 (updatedAt)</th><td class="muted">${esc(fmtJst(p.updatedAt))}</td></tr>
     </tbody>
   </table>`
 }
@@ -308,7 +308,7 @@ function tradesBody(
   limit: number,
 ): string {
   if (rows.length === 0) {
-    return `<p class="muted">No trade_journal rows. (limit=${limit})</p>`
+    return `<p class="muted">trade_journal にレコードがありません (limit=${limit})。</p>`
   }
   const tbody = rows
     .map((r) => {
@@ -320,28 +320,31 @@ function tradesBody(
             : r.brokerStatus
               ? 'warn'
               : 'muted'
+      // status セルは enum 値 (FILLED/CANCELED 等) は英字のまま、error は
+      // "エラー: " を和訳 prefix。運用者が grep / broker API と突き合わせ
+      // しやすい粒度を保つ。
       const statusText =
-        r.errorMessage ? `ERR: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
+        r.errorMessage ? `エラー: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
       return `<tr>
         <td>${r.id}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td>${esc(r.tradeEventType)}</td>
-        <td><strong>${esc(r.symbol ?? '-')}</strong></td>
-        <td>${esc(r.side ?? '-')}</td>
-        <td>${r.quantity === null ? '-' : esc(r.quantity)}</td>
-        <td>${r.limitPrice === null ? '-' : fmtNumber(r.limitPrice, 2)}</td>
-        <td>${r.filledQty === null ? '-' : esc(r.filledQty)}</td>
-        <td>${r.filledPrice === null ? '-' : fmtNumber(r.filledPrice, 2)}</td>
+        <td><strong>${esc(r.symbol ?? '—')}</strong></td>
+        <td>${esc(r.side ?? '—')}</td>
+        <td>${r.quantity === null ? '—' : esc(r.quantity)}</td>
+        <td>${r.limitPrice === null ? '—' : fmtNumber(r.limitPrice, 2)}</td>
+        <td>${r.filledQty === null ? '—' : esc(r.filledQty)}</td>
+        <td>${r.filledPrice === null ? '—' : fmtNumber(r.filledPrice, 2)}</td>
         <td class="${statusClass}">${esc(statusText)}</td>
-        <td>${esc(r.mode ?? '-')}</td>
+        <td>${esc(r.mode ?? '—')}</td>
       </tr>`
     })
     .join('')
-  return `<p class="muted">Showing ${rows.length} rows (limit=${limit}, max 200).</p>
+  return `<p class="muted">直近 ${rows.length} 件 (limit=${limit}、最大 200)。</p>
   <table>
     <thead><tr>
-      <th>id</th><th>timestamp</th><th>event</th><th>symbol</th><th>side</th>
-      <th>qty</th><th>limit</th><th>fill qty</th><th>fill px</th><th>status</th><th>mode</th>
+      <th>ID</th><th>日時</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th>数量</th><th>指値</th><th>約定数量</th><th>約定単価</th><th>状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
@@ -351,32 +354,72 @@ function configBody(
   global: Awaited<ReturnType<typeof loadGlobalConfigFrom>>,
   universe: Awaited<ReturnType<typeof loadSymbolUniverse>>,
 ): string {
+  // 列名 (snake_case) は SQL での copy-paste 互換のため英字のまま残し、
+  // 日本語説明は別列に分離。これで `UPDATE global_config SET xxx = ...` が
+  // そのまま使える。
   const globalRows = Object.entries(global as unknown as Record<string, unknown>)
     .filter(([k]) => k !== 'source')
-    .map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(formatConfigValue(v))}</td></tr>`)
+    .map(([k, v]) => {
+      const camelKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
+      const desc = CONFIG_KEY_JA[camelKey] ?? CONFIG_KEY_JA[k] ?? ''
+      return `<tr><th>${esc(camelKey)}</th><td class="muted">${esc(desc)}</td><td>${esc(formatConfigValue(v))}</td></tr>`
+    })
     .join('')
   const symRows = universe.allowedSymbols
     .map(
       (sym) =>
         `<tr>
           <td><strong>${esc(sym)}</strong></td>
-          <td>${esc(universe.symbolCurrency[sym] ?? '-')}</td>
-          <td>${universe.symbolMaxNotional[sym] ? esc(universe.symbolMaxNotional[sym]) : '<span class="muted">-</span>'}</td>
-          <td>${universe.inversePairs[sym] ? esc(universe.inversePairs[sym]) : '<span class="muted">-</span>'}</td>
+          <td>${esc(universe.symbolCurrency[sym] ?? '—')}</td>
+          <td>${universe.symbolMaxNotional[sym] ? esc(universe.symbolMaxNotional[sym]) : '<span class="muted">—</span>'}</td>
+          <td>${universe.inversePairs[sym] ? esc(universe.inversePairs[sym]) : '<span class="muted">—</span>'}</td>
         </tr>`,
     )
     .join('')
   return `<details open>
-    <summary>global_config</summary>
-    <table><tbody>${globalRows}</tbody></table>
+    <summary>グローバル設定 (global_config)</summary>
+    <table>
+      <thead><tr><th>列名 (列名で UPDATE 可)</th><th>説明</th><th>値</th></tr></thead>
+      <tbody>${globalRows}</tbody>
+    </table>
   </details>
   <details open>
-    <summary>symbol_config (active=1) — ${universe.allowedSymbols.length} symbols</summary>
+    <summary>銘柄別設定 (symbol_config、active=1) — ${universe.allowedSymbols.length} 銘柄</summary>
     <table>
-      <thead><tr><th>symbol</th><th>currency</th><th>max_notional</th><th>inverse</th></tr></thead>
+      <thead><tr><th>銘柄</th><th>通貨</th><th>1注文あたり上限 (max_notional)</th><th>インバース対 (inverse)</th></tr></thead>
       <tbody>${symRows}</tbody>
     </table>
   </details>`
+}
+
+/** global_config 列の簡潔な日本語説明。SQL 互換のため keys は snake_case で保持。 */
+const CONFIG_KEY_JA: Record<string, string> = {
+  dry_run: 'ドライラン (実発注しない)',
+  trading_enabled: '取引有効化',
+  market_hours_check: '取引時間チェック',
+  max_order_notional: '1注文あたり上限金額 (旧、非推奨)',
+  max_order_notional_usd: '1注文あたり上限金額 (USD)',
+  max_order_notional_jpy: '1注文あたり上限金額 (JPY)',
+  total_capital_usd: '運用総資本 (USD)',
+  total_capital_jpy: '運用総資本 (JPY)',
+  max_portfolio_exposure_pct: 'ポートフォリオ最大エクスポージャ率',
+  drawdown_kill_threshold: 'ドローダウン kill 閾値 (負)',
+  stale_quote_ms: '気配値の鮮度上限 (ms)',
+  gap_reject_pct: 'ギャップ拒否閾値',
+  spread_limit_pct_us: 'スプレッド上限率 (US)',
+  spread_limit_pct_jp: 'スプレッド上限率 (JP)',
+  pullback_default_stop_pct: 'Pullback 戦略: 損切り幅 (負)',
+  pullback_default_take_profit_pct: 'Pullback 戦略: 利確目標',
+  pullback_default_time_stop_days: 'Pullback 戦略: 最大保有日数',
+  pullback_default_pullback_max: 'Pullback 戦略: 押し目上限 (浅い側)',
+  pullback_default_pullback_min: 'Pullback 戦略: 押し目下限 (深い側)',
+  pullback_default_min_return_50d: 'Pullback 戦略: 50日騰落率の必要値',
+  pullback_default_require_above_sma50: 'Pullback 戦略: SMA50 超を必須化',
+  pullback_default_k_atr: 'Pullback 戦略: ATR 倍率',
+  risk_base_per_trade_pct: '1トレードあたり基本リスク率',
+  risk_dd_half_threshold: 'リスク半減のドローダウン閾値',
+  risk_dd_halt_threshold: 'リスク停止のドローダウン閾値',
+  bucket_exposure_pct: '同グループ建玉上限率',
 }
 
 function formatConfigValue(v: unknown): string {
