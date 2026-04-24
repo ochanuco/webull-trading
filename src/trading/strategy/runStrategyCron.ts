@@ -13,7 +13,7 @@ import {
   logStrategyDecision,
   strategyDecisionDbOrUndefined,
 } from '../../infrastructure/logger/strategyDecisionLog'
-import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
+import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
 const DEFAULT_EQUITY_JPY = 1_500_000
@@ -22,12 +22,70 @@ const JP_LOT_SIZE = 100
 export interface StrategyCronResult {
   summary: PullbackRunSummary
   symbols: string[]
+  /**
+   * Operator/AI analysis packet. Safe for logs: no broker secrets or raw
+   * Webull payloads, only config/risk context and per-symbol decisions.
+   */
+  analysis: StrategyCronAnalysis
   skipReason?:
     | 'trading_disabled'
     | 'no_tradable_symbols'
     | 'no_bridge_state'
     | 'portfolio_halted'
     | 'drawdown_kill'
+}
+
+export interface StrategyCronAnalysis {
+  schema: 'strategy_cron_analysis.v1'
+  generatedAt: string
+  requestId?: string
+  config: {
+    dryRun: boolean
+    tradingEnabled: boolean
+    pullbackRule: {
+      stopPct: number
+      takeProfitPct: number
+      timeStopDays: number
+      pullbackMax: number
+      pullbackMin: number
+      minReturn50d: number
+      requireAboveSma50: boolean
+      kAtr: number
+    }
+    risk: {
+      basePerTradePct: number
+      scaledPerTradePct?: number
+      ddHalfThreshold: number
+      ddHaltThreshold: number
+      drawdownKillThreshold: number
+      bucketExposurePct: number
+    }
+  }
+  universe: {
+    symbols: string[]
+    byCurrency: Record<SymbolCurrency, string[]>
+    symbolMaxNotional: Record<string, number>
+    symbolBucket: Record<string, string>
+  }
+  portfolio?: {
+    dailyStartEquity: number
+    dailyRealizedPnl: number
+    tradingDisabledUntil: string | null
+    updatedAt: string
+  }
+  drawdownScale?: {
+    step: 'normal' | 'half' | 'halt'
+    scale: number
+    drawdown: number
+  }
+  runs: Array<{
+    currency: SymbolCurrency
+    equity: number
+    lotSize: number
+    symbols: string[]
+    bucketCapMap: Record<string, number>
+  }>
+  decisions: PullbackDecisionTrace[]
 }
 
 /**
@@ -61,6 +119,7 @@ export async function runStrategyCron(
     holds: 0,
     rejected: [],
     errors: [],
+    decisions: [],
   })
 
   const [global, universe] = await Promise.all([
@@ -68,18 +127,60 @@ export async function runStrategyCron(
     loadSymbolUniverse(env),
   ])
 
+  const defaultRule = {
+    stopPct: global.pullbackDefaultStopPct,
+    takeProfitPct: global.pullbackDefaultTakeProfitPct,
+    timeStopDays: global.pullbackDefaultTimeStopDays,
+    pullbackMax: global.pullbackDefaultPullbackMax,
+    pullbackMin: global.pullbackDefaultPullbackMin,
+    minReturn50d: global.pullbackDefaultMinReturn50d,
+    requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+    kAtr: global.pullbackDefaultKAtr,
+  }
+  const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
+  for (const sym of universe.allowedSymbols) {
+    const cur = universe.symbolCurrency[sym] ?? 'USD'
+    byCurrency[cur].push(sym)
+  }
+  const analysisBase = (): StrategyCronAnalysis => ({
+    schema: 'strategy_cron_analysis.v1',
+    generatedAt: new Date().toISOString(),
+    requestId: options.requestId,
+    config: {
+      dryRun: global.dryRun,
+      tradingEnabled: global.tradingEnabled,
+      pullbackRule: defaultRule,
+      risk: {
+        basePerTradePct: global.riskBasePerTradePct,
+        ddHalfThreshold: global.riskDdHalfThreshold,
+        ddHaltThreshold: global.riskDdHaltThreshold,
+        drawdownKillThreshold: global.drawdownKillThreshold,
+        bucketExposurePct: global.bucketExposurePct,
+      },
+    },
+    universe: {
+      symbols: universe.allowedSymbols,
+      byCurrency,
+      symbolMaxNotional: universe.symbolMaxNotional,
+      symbolBucket: universe.symbolBucket,
+    },
+    runs: [],
+    decisions: [],
+  })
+
   if (!global.tradingEnabled) {
-    return { summary: emptySummary(), symbols: [], skipReason: 'trading_disabled' }
+    return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'trading_disabled' }
   }
 
   if (universe.allowedSymbols.length === 0) {
-    return { summary: emptySummary(), symbols: [], skipReason: 'no_tradable_symbols' }
+    return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'no_tradable_symbols' }
   }
 
   if (!env.SYMBOL_STATE) {
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
+      analysis: analysisBase(),
       skipReason: 'no_bridge_state',
     }
   }
@@ -94,13 +195,24 @@ export async function runStrategyCron(
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
+      analysis: analysisBase(),
       skipReason: 'portfolio_halted',
     }
   }
   const portfolioStore = new PortfolioStateClient(env.PORTFOLIO_STATE)
   let portfolioSnapshot: Awaited<ReturnType<typeof portfolioStore.getPortfolio>>
+  let analysis = analysisBase()
   try {
     portfolioSnapshot = await portfolioStore.getPortfolio()
+    analysis = {
+      ...analysis,
+      portfolio: {
+        dailyStartEquity: portfolioSnapshot.dailyStartEquity,
+        dailyRealizedPnl: portfolioSnapshot.dailyRealizedPnl,
+        tradingDisabledUntil: portfolioSnapshot.tradingDisabledUntil,
+        updatedAt: portfolioSnapshot.updatedAt,
+      },
+    }
     const now = Date.now()
     if (portfolioSnapshot.tradingDisabledUntil) {
       const disabledUntilMs = new Date(portfolioSnapshot.tradingDisabledUntil).getTime()
@@ -108,6 +220,7 @@ export async function runStrategyCron(
         return {
           summary: emptySummary(),
           symbols: universe.allowedSymbols,
+          analysis,
           skipReason: 'portfolio_halted',
         }
       }
@@ -118,6 +231,7 @@ export async function runStrategyCron(
         return {
           summary: emptySummary(),
           symbols: universe.allowedSymbols,
+          analysis,
           skipReason: 'drawdown_kill',
         }
       }
@@ -126,6 +240,7 @@ export async function runStrategyCron(
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
+      analysis,
       skipReason: 'portfolio_halted',
     }
   }
@@ -152,6 +267,21 @@ export async function runStrategyCron(
     halfThreshold: global.riskDdHalfThreshold,
     haltThreshold: global.riskDdHaltThreshold,
   })
+  analysis = {
+    ...analysis,
+    config: {
+      ...analysis.config,
+      risk: {
+        ...analysis.config.risk,
+        scaledPerTradePct: global.riskBasePerTradePct * ddScale.scale,
+      },
+    },
+    drawdownScale: {
+      step: ddScale.step,
+      scale: ddScale.scale,
+      drawdown: ddScale.drawdown,
+    },
+  }
   if (ddScale.step !== 'normal') {
     console.log(
       JSON.stringify({
@@ -176,23 +306,6 @@ export async function runStrategyCron(
 
   // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
   // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
-  const defaultRule = {
-    stopPct: global.pullbackDefaultStopPct,
-    takeProfitPct: global.pullbackDefaultTakeProfitPct,
-    timeStopDays: global.pullbackDefaultTimeStopDays,
-    pullbackMax: global.pullbackDefaultPullbackMax,
-    pullbackMin: global.pullbackDefaultPullbackMin,
-    minReturn50d: global.pullbackDefaultMinReturn50d,
-    requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
-    kAtr: global.pullbackDefaultKAtr,
-  }
-
-  const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
-  for (const sym of universe.allowedSymbols) {
-    const cur = universe.symbolCurrency[sym] ?? 'USD'
-    byCurrency[cur].push(sym)
-  }
-
   const summary = emptySummary()
   const runs: Array<{ currency: SymbolCurrency; equity: number; lotSize: number; symbols: string[] }> = []
   if (byCurrency.USD.length > 0) {
@@ -225,6 +338,13 @@ export async function runStrategyCron(
     for (const b of buckets) {
       bucketCapMap[b] = run.equity * global.bucketExposurePct
     }
+    analysis.runs.push({
+      currency: run.currency,
+      equity: run.equity,
+      lotSize: run.lotSize,
+      symbols: run.symbols,
+      bucketCapMap,
+    })
     const decisionDb = strategyDecisionDbOrUndefined(env)
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
@@ -252,9 +372,11 @@ export async function runStrategyCron(
     summary.holds += sub.holds
     summary.rejected.push(...sub.rejected)
     summary.errors.push(...sub.errors)
+    summary.decisions.push(...sub.decisions)
+    analysis.decisions.push(...sub.decisions)
   }
 
-  return { summary, symbols: universe.allowedSymbols }
+  return { summary, symbols: universe.allowedSymbols, analysis }
 }
 
 function sanitizeEquity(value: number | null | undefined, fallback: number): number {

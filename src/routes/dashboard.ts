@@ -4,7 +4,7 @@ import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
@@ -64,6 +64,82 @@ export const dashboard = new Hono<AppBindings>()
       loadSymbolUniverse(c.env),
     ])
     return c.html(layout('設定', configBody(global, universe)))
+  })
+  .get('/cron/json', async (c) => {
+    if (!c.env.DB) {
+      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
+    }
+    const db = createDb(c.env.DB)
+    const requestedRequestId = c.req.query('requestId')?.trim()
+    try {
+      let requestId = requestedRequestId && requestedRequestId.length > 0
+        ? requestedRequestId
+        : undefined
+      if (!requestId) {
+        const latest = await db
+          .select({ requestId: strategyDecisionLog.requestId })
+          .from(strategyDecisionLog)
+          .orderBy(desc(strategyDecisionLog.id))
+          .limit(50)
+        requestId = latest.find((row) => row.requestId !== null)?.requestId ?? undefined
+      }
+      if (!requestId) {
+        return jsonPretty({ error: 'no_cron_logs', message: 'strategy_decision_log has no request_id rows' }, 404)
+      }
+
+      const rows = await db
+        .select({
+          id: strategyDecisionLog.id,
+          timestamp: strategyDecisionLog.timestamp,
+          requestId: strategyDecisionLog.requestId,
+          symbol: strategyDecisionLog.symbol,
+          decision: strategyDecisionLog.decision,
+          reason: strategyDecisionLog.reason,
+          price: strategyDecisionLog.price,
+          indicatorsJson: strategyDecisionLog.indicatorsJson,
+          clientOrderId: strategyDecisionLog.clientOrderId,
+          filledPrice: tradeJournal.filledPrice,
+          filledQty: tradeJournal.filledQty,
+          realizedPnl: tradeJournal.realizedPnl,
+          brokerStatus: tradeJournal.brokerStatus,
+        })
+        .from(strategyDecisionLog)
+        .leftJoin(
+          tradeJournal,
+          and(
+            eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
+            eq(tradeJournal.tradeEventType, 'post_submit'),
+          ),
+        )
+        .where(eq(strategyDecisionLog.requestId, requestId))
+        .orderBy(asc(strategyDecisionLog.id))
+
+      return jsonPretty({
+        schema: 'dashboard_cron_export.v1',
+        exportedAt: new Date().toISOString(),
+        requestId,
+        rowCount: rows.length,
+        decisions: rows.map((row) => ({
+          id: row.id,
+          timestamp: row.timestamp,
+          symbol: row.symbol,
+          decision: row.decision,
+          reason: row.reason,
+          localizedReason: localizeReason(row.reason),
+          price: row.price,
+          indicators: parseJsonObject(row.indicatorsJson),
+          clientOrderId: row.clientOrderId,
+          broker: {
+            status: row.brokerStatus,
+            filledPrice: row.filledPrice,
+            filledQty: row.filledQty,
+            realizedPnl: row.realizedPnl,
+          },
+        })),
+      })
+    } catch (err) {
+      return jsonPretty({ error: 'cron_json_export_failed', message: messageOf(err) }, 500)
+    }
   })
   .get('/cron', async (c) => {
     if (!c.env.DB) {
@@ -217,6 +293,22 @@ ${body}
 
 function unavailable(reason: string): string {
   return `<p class="warn">利用不可: ${esc(reason)}</p>`
+}
+
+function jsonPretty(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload, null, 2), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  })
+}
+
+function parseJsonObject(value: string | null | undefined): unknown {
+  if (!value) return null
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
 }
 
 function indexBody(): string {
@@ -611,8 +703,8 @@ function cronBody(
   symbolFilter: string | undefined,
 ): string {
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(symbolFilter)}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a></p>`
-    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。</p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(symbolFilter)}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
+    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
   if (rows.length === 0) {
     return `${header}<p class="muted">判定ログがまだありません。</p>`
   }

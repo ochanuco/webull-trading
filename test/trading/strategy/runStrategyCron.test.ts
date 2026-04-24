@@ -33,6 +33,8 @@ describe('runStrategyCron', () => {
     const result = await runStrategyCron(env)
     expect(result.skipReason).toBe('trading_disabled')
     expect(result.summary.evaluated).toBe(0)
+    expect(result.analysis.schema).toBe('strategy_cron_analysis.v1')
+    expect(result.analysis.config.tradingEnabled).toBe(false)
   })
 
   it('skips with no_tradable_symbols when universe is empty', async () => {
@@ -100,6 +102,7 @@ describe('runStrategyCron', () => {
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithoutPortfolio)
     expect(result.skipReason).toBe('portfolio_halted')
+    expect(result.analysis.universe.symbols).toEqual(['SOXL', 'SOXS'])
   })
 
   it('fail-closes to portfolio_halted on invalid tradingDisabledUntil timestamp', async () => {

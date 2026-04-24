@@ -93,6 +93,15 @@ describe('runPullbackScheduler', () => {
     const intent = execution.calls[0] as { side: string; quantity: number }
     expect(intent.side).toBe('BUY')
     expect(intent.quantity).toBeGreaterThan(0)
+    expect(summary.decisions).toHaveLength(1)
+    expect(summary.decisions[0]).toMatchObject({
+      symbol: 'AAPL',
+      decision: 'BUY',
+      order: { side: 'BUY' },
+    })
+    expect(summary.decisions[0]?.trace?.map((step) => step.label)).toContain('entry.adopt_buy')
+    expect(summary.decisions[0]?.trace?.map((step) => step.label)).toContain('broker.submit')
+    expect(summary.decisions[0]?.trace?.find((step) => step.label === 'broker.submit')?.label_ja).toBe('証券会社への発注送信')
   })
 
   it('HOLDs (and does not submit) when bars are too short for indicators', async () => {
@@ -110,6 +119,13 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(0)
     expect(summary.rejected).toEqual([
       { symbol: 'AAPL', reason: 'insufficient bars for indicators' },
+    ])
+    expect(summary.decisions).toEqual([
+      {
+        symbol: 'AAPL',
+        decision: 'REJECT',
+        reason: 'insufficient bars for indicators',
+      },
     ])
     expect(execution.calls).toHaveLength(0)
   })
