@@ -10,6 +10,8 @@ export interface StrategyDecisionRecord {
   reason?: string | null
   price?: number | null
   indicatorsJson?: string | null
+  /** BUY/SELL 成立時のみ設定。dashboard が trade_journal と JOIN する key (#143)。 */
+  clientOrderId?: string | null
 }
 
 /**
@@ -35,6 +37,7 @@ export async function logStrategyDecision(
       reason: record.reason ?? null,
       price: record.price ?? null,
       indicatorsJson: record.indicatorsJson ?? null,
+      clientOrderId: record.clientOrderId ?? null,
     })
   } catch (error) {
     console.error(

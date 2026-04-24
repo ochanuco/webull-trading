@@ -4,7 +4,7 @@ import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
-import { desc, eq } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
@@ -73,16 +73,39 @@ export const dashboard = new Hono<AppBindings>()
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     const db = createDb(c.env.DB)
     try {
+      // trade_journal の post_submit と LEFT JOIN して realized_pnl を引く
+      // (#143)。client_order_id が JOIN key — BUY/SELL 成立時のみ strategy
+      // 側に記録されているので HOLD/REJECT 行は realized_pnl が NULL に
+      // 落ちる (意図通り)。
+      const baseQuery = db
+        .select({
+          id: strategyDecisionLog.id,
+          timestamp: strategyDecisionLog.timestamp,
+          requestId: strategyDecisionLog.requestId,
+          symbol: strategyDecisionLog.symbol,
+          decision: strategyDecisionLog.decision,
+          reason: strategyDecisionLog.reason,
+          price: strategyDecisionLog.price,
+          clientOrderId: strategyDecisionLog.clientOrderId,
+          filledPrice: tradeJournal.filledPrice,
+          filledQty: tradeJournal.filledQty,
+          realizedPnl: tradeJournal.realizedPnl,
+          brokerStatus: tradeJournal.brokerStatus,
+        })
+        .from(strategyDecisionLog)
+        .leftJoin(
+          tradeJournal,
+          and(
+            eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
+            eq(tradeJournal.tradeEventType, 'post_submit'),
+          ),
+        )
       const rows = symbolFilter
-        ? await db
-            .select()
-            .from(strategyDecisionLog)
+        ? await baseQuery
             .where(eq(strategyDecisionLog.symbol, symbolFilter))
             .orderBy(desc(strategyDecisionLog.id))
             .limit(limit)
-        : await db
-            .select()
-            .from(strategyDecisionLog)
+        : await baseQuery
             .orderBy(desc(strategyDecisionLog.id))
             .limit(limit)
       return c.html(layout('Cron Decisions', cronBody(rows, limit, symbolFilter)))
@@ -516,6 +539,11 @@ function cronBody(
     decision: string
     reason: string | null
     price: number | null
+    clientOrderId?: string | null
+    filledPrice?: number | null
+    filledQty?: number | null
+    realizedPnl?: number | null
+    brokerStatus?: string | null
   }>,
   limit: number,
   symbolFilter: string | undefined,
@@ -538,20 +566,41 @@ function cronBody(
               : r.decision === 'REJECT'
                 ? 'warn'
                 : 'muted'
+      // 実 fill 結果 (trade_journal post_submit から JOIN、#143)
+      // realized_pnl は主に SELL で非 null (利確/損切のドル額)。BUY の realized は null。
+      const realizedCell =
+        r.realizedPnl === null || r.realizedPnl === undefined
+          ? '-'
+          : formatRealizedPnl(r.realizedPnl)
+      const fillCell =
+        r.filledPrice === null || r.filledPrice === undefined
+          ? '-'
+          : `${fmtNumber(r.filledPrice, 2)} × ${r.filledQty ?? '?'}`
       return `<tr>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"><strong>${esc(r.symbol)}</strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${esc(localizeReason(r.reason))}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
+        <td class="muted">${esc(fillCell)}</td>
+        <td>${realizedCell}</td>
       </tr>`
     })
     .join('')
   return `${header}
   <table>
     <thead><tr>
-      <th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason</th><th>price</th>
+      <th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
+}
+
+/**
+ * realized_pnl ($ / ¥ raw 値) を符号付き小数 2 桁で。loss は赤、profit は緑。
+ */
+function formatRealizedPnl(value: number): string {
+  const sign = value > 0 ? '+' : ''
+  const cls = value > 0 ? 'ok' : value < 0 ? 'err' : 'muted'
+  return `<span class="${cls}">${sign}${value.toFixed(2)}</span>`
 }
