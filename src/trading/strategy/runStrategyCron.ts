@@ -252,15 +252,21 @@ function sanitizeEquity(value: number | null | undefined, fallback: number): num
 }
 
 /**
- * 「未 seed」portfolio (dailyStartEquity <= 0) と「壊れた値」(NaN / 負値) を
- * 区別する pure helper。未 seed かつ global.totalCapitalUsd が正値なら、
- * その baseline で dailyStartEquity を埋めた snapshot を返す。これで
- * `/admin/portfolio/roll-daily` 未実行の初日 / 日跨ぎでも drawdownRiskScale
- * が halt ではなく normal で動く。
+ * 「未 seed」portfolio と「壊れた値」の portfolio を区別する pure helper。
  *
- * 壊れた値 (NaN など) は fallback せず元の snapshot を返し、
- * drawdownRiskScale 側の fail-closed (halt) に任せる。
- * CodeRabbit review #125 の fail-closed 意図を崩さない。
+ * 分類:
+ *   - `dailyStartEquity > 0`: seed 済、そのまま使う (fallback なし)
+ *   - `dailyStartEquity <= 0` かつ **有限値** (0 / 負値): 未 seed 扱い。
+ *     `global.totalCapitalUsd` が正値なら baseline として fallback。負値も
+ *     同じく未 seed 判定 (tests 参照) で、broken data ではない。
+ *   - `dailyStartEquity` が **非有限** (NaN / Infinity): 壊れ値 → fallback
+ *     しない。後段 `drawdownRiskScale` の fail-closed (step: 'halt') に任せる。
+ *   - `dailyRealizedPnl` が非有限: 同上、fallback 経路で 0 に上書きして
+ *     fail-closed を迂回しないよう早期 return (CodeRabbit review #131)。
+ *
+ * 狙い: `/admin/portfolio/roll-daily` 未実行の初日 / 日跨ぎでも
+ * `drawdownRiskScale` が halt ではなく normal で動き、BUY 機会を逃さない。
+ * 同時に CodeRabbit review #125 の fail-closed 意図 (壊れ値は halt) は維持。
  */
 export function resolvePortfolioForRiskScale<
   P extends { dailyStartEquity: number; dailyRealizedPnl: number },
