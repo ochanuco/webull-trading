@@ -9,6 +9,10 @@ import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
 import { computeDrawdownRiskScale } from '../risk/drawdownRiskScale'
+import {
+  logStrategyDecision,
+  strategyDecisionDbOrUndefined,
+} from '../../infrastructure/logger/strategyDecisionLog'
 import { runPullbackScheduler, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -221,6 +225,7 @@ export async function runStrategyCron(
     for (const b of buckets) {
       bucketCapMap[b] = run.equity * global.bucketExposurePct
     }
+    const decisionDb = strategyDecisionDbOrUndefined(env)
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
       equity: run.equity,
@@ -233,6 +238,13 @@ export async function runStrategyCron(
       bucketCapMap,
       defaultRule,
       riskPerTradePct: scaledRiskPerTradePct,
+      requestId: options.requestId,
+      onDecision: (record) =>
+        logStrategyDecision(decisionDb, {
+          timestamp: new Date().toISOString(),
+          requestId: options.requestId,
+          ...record,
+        }),
     })
     summary.evaluated += sub.evaluated
     summary.buys += sub.buys

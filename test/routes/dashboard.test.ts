@@ -147,4 +147,17 @@ describe('dashboard', () => {
     expect(body).not.toContain('<script>')
     expect(body).toContain('&lt;script&gt;')
   })
+
+  it('renders cron page with "unavailable" when DB is not bound', async () => {
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('unavailable')
+  })
+
+  it('cron page requires basic auth', async () => {
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', {}, baseEnv)
+    expect(res.status).toBe(401)
+  })
 })

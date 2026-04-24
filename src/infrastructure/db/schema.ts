@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { check, integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { check, index, integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 /**
  * append-only trade decision / order lifecycle log. A single row per logical
@@ -279,3 +279,34 @@ export const globalConfig = sqliteTable(
 
 export type GlobalConfigRow = typeof globalConfig.$inferSelect
 export type GlobalConfigInsert = typeof globalConfig.$inferInsert
+
+/**
+ * Per-symbol decision log from `runPullbackScheduler`。1 row per
+ * (cron fire × symbol)。HOLD / BUY / SELL / REJECT / ERROR 全ルートを残す。
+ * #128。運用で銘柄単位の診断 (なぜ BUY が出ないのか) に使う。
+ * 7 日 TTL で quote feed cron が cleanup 同梱予定。
+ */
+export const strategyDecisionLog = sqliteTable(
+  'strategy_decision_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    timestamp: text('timestamp').notNull(),
+    requestId: text('request_id'),
+    symbol: text('symbol').notNull(),
+    /** 'BUY' / 'SELL' / 'HOLD' / 'REJECT' / 'ERROR' */
+    decision: text('decision').notNull(),
+    /** signal.reason (HOLD) / sizing.capReason (REJECT) / error.message (ERROR) */
+    reason: text('reason'),
+    price: real('price'),
+    /** indicators snapshot JSON (debug 用、optional) */
+    indicatorsJson: text('indicators_json'),
+  },
+  (t) => ({
+    // `/dashboard/cron?symbol=X` は WHERE symbol=? ORDER BY id DESC で読む。
+    // (symbol, id) の複合 index で drop-in covering (CodeRabbit #132)。
+    symbolIdIdx: index('strategy_decision_log_symbol_id_idx').on(t.symbol, t.id),
+  }),
+)
+
+export type StrategyDecisionLogRow = typeof strategyDecisionLog.$inferSelect
+export type StrategyDecisionLogInsert = typeof strategyDecisionLog.$inferInsert

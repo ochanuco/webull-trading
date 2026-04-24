@@ -54,6 +54,25 @@ export interface PullbackSchedulerOptions {
    * (runStrategyCron) が NAV × exposure_pct で算出する。
    */
   bucketCapMap?: Record<string, number>
+  /**
+   * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
+   * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
+   * 呼び出し側が失敗を throw しないのが前提 (logging failure isolation)。
+   */
+  onDecision?: (record: {
+    symbol: string
+    decision: 'BUY' | 'SELL' | 'HOLD' | 'REJECT' | 'ERROR'
+    reason?: string
+    price?: number
+    indicatorsJson?: string
+  }) => Promise<void> | void
+  /**
+   * cron fire 単位の correlation id。emit 失敗時の構造化ログに含めることで
+   * 「どの run で decision sink が落ちたか」を tail から追えるようにする
+   * (CodeRabbit #132 follow-up)。runStrategyCron が scheduled() handler の
+   * `crypto.randomUUID()` を渡す。
+   */
+  requestId?: string
   now?: () => Date
 }
 
@@ -95,6 +114,24 @@ export async function runPullbackScheduler(
     errors: [],
   }
 
+  // Logging helper: sink が投げても本体を落とさない (logging failure isolation)。
+  const emitDecision = async (record: Parameters<NonNullable<typeof options.onDecision>>[0]): Promise<void> => {
+    if (!options.onDecision) return
+    try {
+      await options.onDecision(record)
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          event: 'on_decision_sink_failed',
+          requestId: options.requestId ?? null,
+          symbol: record.symbol,
+          decision: record.decision,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    }
+  }
+
   // Bucket pre-scan: sum the open-position notional per bucket across all
   // symbols in this run so the BUY gate can refuse an entry that would push
   // the bucket over `bucketCapMap[bucket]`. Skipped entirely when no bucket
@@ -130,12 +167,14 @@ export async function runPullbackScheduler(
       bars = await options.barClient.getDailyBars(symbol, lookback)
     } catch (error) {
       summary.errors.push({ symbol: upper, message: messageOf(error) })
+      await emitDecision({ symbol: upper, decision: 'ERROR', reason: `bar fetch: ${messageOf(error)}` })
       continue
     }
 
     const indicators = computePullbackIndicators(bars)
     if (!indicators) {
       summary.rejected.push({ symbol: upper, reason: 'insufficient bars for indicators' })
+      await emitDecision({ symbol: upper, decision: 'REJECT', reason: 'insufficient bars for indicators' })
       continue
     }
 
@@ -158,6 +197,13 @@ export async function runPullbackScheduler(
 
     if (signal.action === 'HOLD') {
       summary.holds += 1
+      await emitDecision({
+        symbol: upper,
+        decision: 'HOLD',
+        reason: signal.reason,
+        price: indicators.price,
+        indicatorsJson: JSON.stringify(indicators),
+      })
       continue
     }
 
@@ -176,19 +222,22 @@ export async function runPullbackScheduler(
         kAtr: rule.kAtr,
       })
       if (sizing.quantity <= 0) {
-        summary.rejected.push({
-          symbol: upper,
-          reason: `sizing rejected: ${sizing.capReason ?? 'zero qty'}`,
-        })
+        const reason = `sizing rejected: ${sizing.capReason ?? 'zero qty'}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price, indicatorsJson: JSON.stringify(indicators) })
         continue
       }
       if (!Number.isFinite(indicators.price) || indicators.price <= 0) {
-        summary.rejected.push({ symbol: upper, reason: `invalid price: ${indicators.price}` })
+        const reason = `invalid price: ${indicators.price}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
         continue
       }
       const notional = sizing.quantity * indicators.price
       if (!Number.isFinite(notional) || notional <= 0) {
-        summary.rejected.push({ symbol: upper, reason: `invalid notional: ${notional} (qty=${sizing.quantity}, price=${indicators.price})` })
+        const reason = `invalid notional: ${notional} (qty=${sizing.quantity}, price=${indicators.price})`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
         continue
       }
       const bucket = options.symbolBucketMap?.[upper]
@@ -199,7 +248,9 @@ export async function runPullbackScheduler(
         cap: bucket ? options.bucketCapMap?.[bucket] : undefined,
       })
       if (!bucketDecision.allowed) {
-        summary.rejected.push({ symbol: upper, reason: bucketDecision.reason ?? 'bucket cap' })
+        const reason = bucketDecision.reason ?? 'bucket cap'
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price, indicatorsJson: JSON.stringify(indicators) })
         continue
       }
       if (bucket && bucketDecision.newExposure !== undefined) {
@@ -209,20 +260,28 @@ export async function runPullbackScheduler(
     } else {
       // SELL: close the full open position.
       if (state.position === null) {
-        summary.rejected.push({ symbol: upper, reason: 'SELL without position' })
+        const reason = 'SELL without position'
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
         continue
       }
       if (!Number.isFinite(state.position.qty) || state.position.qty <= 0) {
-        summary.rejected.push({ symbol: upper, reason: `invalid position qty: ${state.position.qty}` })
+        const reason = `invalid position qty: ${state.position.qty}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
         continue
       }
       if (!Number.isFinite(indicators.price) || indicators.price <= 0) {
-        summary.rejected.push({ symbol: upper, reason: `invalid price: ${indicators.price}` })
+        const reason = `invalid price: ${indicators.price}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
         continue
       }
       const notional = state.position.qty * indicators.price
       if (!Number.isFinite(notional) || notional <= 0) {
-        summary.rejected.push({ symbol: upper, reason: `invalid notional: ${notional} (qty=${state.position.qty}, price=${indicators.price})` })
+        const reason = `invalid notional: ${notional} (qty=${state.position.qty}, price=${indicators.price})`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
         continue
       }
       intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
@@ -230,7 +289,9 @@ export async function runPullbackScheduler(
 
     const expiresAtMs = now().getTime() + pendingLockTtlMs
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
-      summary.rejected.push({ symbol: upper, reason: `invalid expiresAt computed from pendingLockTtlMs: ${pendingLockTtlMs}` })
+      const reason = `invalid expiresAt computed from pendingLockTtlMs: ${pendingLockTtlMs}`
+      summary.rejected.push({ symbol: upper, reason })
+      await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
       continue
     }
     const lockResult = await options.positionStore.lockPendingOrder(upper, {
@@ -240,7 +301,9 @@ export async function runPullbackScheduler(
       expiresAt: new Date(expiresAtMs).toISOString(),
     })
     if (!lockResult.ok) {
-      summary.rejected.push({ symbol: upper, reason: 'pending order already in flight' })
+      const reason = 'pending order already in flight'
+      summary.rejected.push({ symbol: upper, reason })
+      await emitDecision({ symbol: upper, decision: 'REJECT', reason, price: indicators.price })
       continue
     }
 
@@ -275,6 +338,13 @@ export async function runPullbackScheduler(
       summary.errors.push({
         symbol: upper,
         message: messageOf(error),
+      })
+      await emitDecision({
+        symbol: upper,
+        decision: 'ERROR',
+        // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
+        reason: `broker submit error: ${messageOf(error)}`,
+        price: indicators.price,
       })
       try {
         logPostSubmit({
@@ -320,6 +390,13 @@ export async function runPullbackScheduler(
     } else {
       summary.sells += 1
     }
+    await emitDecision({
+      symbol: upper,
+      decision: intent.side,
+      reason: signal.reason,
+      price: intent.price,
+      indicatorsJson: JSON.stringify(indicators),
+    })
 
     if (result.mode === 'DRY_RUN') {
       // No broker event will clear the lock; release it eagerly.
