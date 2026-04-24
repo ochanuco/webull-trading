@@ -37,11 +37,15 @@ export interface PullbackSizingResult {
     | 'insufficient-risk-budget'
     | 'lot-size-round'
   /**
-   * Diagnostic fields populated on every run。reject reason を組み立てる時に
-   * operator がすぐ原因を把握できるようにする。
-   * - `rawQuantity`: lot-size 丸めの前の qty (1 lot に何株足りないか分かる)
-   * - `stopDistance`: max(kAtr * atr20, |entry * stopPct|)
-   * - `riskBudget`: equity * riskPerTradePct
+   * Diagnostic fields populated only when applicable per decision/reject route;
+   * may be undefined otherwise. These are diagnostic-only for debugging and
+   * help operators understand the reject reason.
+   * - `rawQuantity`: pre-lot-size quantity (shows how much short of 1 lot).
+   *   Filled on lot-size-round path and in successful sizing path.
+   * - `stopDistance`: max(kAtr * atr20, |entry * stopPct|).
+   *   Filled on invalid-stop, insufficient-risk-budget, lot-size-round, and successful paths.
+   * - `riskBudget`: equity * riskPerTradePct.
+   *   Filled on insufficient-risk-budget, lot-size-round, and successful paths.
    */
   rawQuantity?: number
   stopDistance?: number
