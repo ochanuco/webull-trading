@@ -371,7 +371,7 @@ function configBody(
         `<tr>
           <td><strong>${esc(sym)}</strong></td>
           <td>${esc(universe.symbolCurrency[sym] ?? '—')}</td>
-          <td>${universe.symbolMaxNotional[sym] ? esc(universe.symbolMaxNotional[sym]) : '<span class="muted">—</span>'}</td>
+          <td>${universe.symbolMaxNotional[sym] != null ? esc(universe.symbolMaxNotional[sym]) : '<span class="muted">—</span>'}</td>
           <td>${universe.inversePairs[sym] ? esc(universe.inversePairs[sym]) : '<span class="muted">—</span>'}</td>
         </tr>`,
     )
