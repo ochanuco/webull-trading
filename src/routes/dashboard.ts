@@ -362,94 +362,132 @@ function formatConfigValue(v: unknown): string {
   return String(v)
 }
 
-/** Numeric string ratio → percent string (0.0108 → "1.08%"). fallback は原文字列。 */
+/**
+ * Numeric string ratio → 符号付き % 表記 (0.0108 → "+1.08%"、-0.04 → "-4.00%")。
+ * fallback は原文字列 (数値 parse 失敗時は canonical な reason を見せる方が安全)。
+ */
 function fmtPct(s: string): string {
   const n = Number(s)
   if (!Number.isFinite(n)) return s
-  return `${(n * 100).toFixed(2)}%`
+  const pct = n * 100
+  const sign = pct > 0 ? '+' : ''
+  return `${sign}${pct.toFixed(2)}%`
 }
 
 /**
- * Strategy / sizing が出力する英語 reason を日本語に翻訳する display helper。
- * ログ DB には英語のまま保存し、表示時のみ翻訳 (テスト互換性を崩さない)。
+ * Strategy / sizing が出力する英語 reason を **初心者にも分かる日本語** に翻訳
+ * する display helper。ログ DB は英語 canonical のまま、表示層でのみ翻訳
+ * (tests / journal の契約に影響させない)。
  *
- * 命名規則:
- *   - entry 系 HOLD は「entry 見送り:」prefix (entry filter 未達を示す)
- *   - exit 系 HOLD/SELL は「(exit)」suffix (保有ポジションの出口判定)
- *   - 比率 (0.0108 等) は %表記に変換 (読みやすさ)
+ * 統一テンプレ: `[判定ラベル]: [事実] ([具体値])`
+ *
+ * 判定ラベル (9 種):
+ *   - 様子見 / 買い / 利食い / 損切り / 時間切れ / 保有継続
+ *   - 発注スキップ / 発注中 / データ不足
+ *
+ * trading-strategist review に基づき、一般語 (押し目 / 騰落率 / 単元 /
+ * セクター枠 / 日柄) と証券アプリ準拠の英字 (SMA50, ATR) を混在。
+ * 初出語には併記する方針。
  */
 export function localizeReason(en: string | null | undefined): string {
   if (!en) return '-'
   let s = en
-  // Pending / cooldown (entry 前ガード)
-  s = s.replace(/^pending order in flight$/, '発注中 (lock 保持)')
-  s = s.replace(/^cooldown active until (.+)$/, 'クールダウン中 ($1 まで)')
-  // Exit 判定 (保有ポジション)
-  s = s.replace(/^take-profit hit: pnl (\S+) >= (\S+)$/, (_m, p, t) => `利確到達 (pnl ${fmtPct(p)} ≥ ${fmtPct(t)}) (exit)`)
-  s = s.replace(/^stop-loss hit: pnl (\S+) <= (\S+)$/, (_m, p, t) => `損切到達 (pnl ${fmtPct(p)} ≤ ${fmtPct(t)}) (exit)`)
-  s = s.replace(/^time-stop hit: held (\S+) >= (\S+)$/, '時間切れ (保有 $1 ≥ $2) (exit)')
-  // holding の range 上下限も % 化して表示を統一 (CodeRabbit #133)。
+
+  // === 発注中 / クールダウン (entry 前ガード) ===
+  s = s.replace(/^pending order in flight$/, '発注中: 直前注文の結果待ち')
+  s = s.replace(/^cooldown active until (.+)$/, '様子見: クールダウン中 ($1 まで取引停止)')
+  s = s.replace(/^pending order already in flight$/, '発注中: 同銘柄の注文が処理中')
+
+  // === 保有中の exit 判定 ===
+  s = s.replace(
+    /^take-profit hit: pnl (\S+) >= (\S+)$/,
+    (_m, p, t) => `利食い: 目標到達 (損益 ${fmtPct(p)} ≥ 目標 ${fmtPct(t)})`,
+  )
+  s = s.replace(
+    /^stop-loss hit: pnl (\S+) <= (\S+)$/,
+    (_m, p, t) => `損切り: 下限到達 (損益 ${fmtPct(p)} ≤ 下限 ${fmtPct(t)})`,
+  )
+  s = s.replace(
+    /^time-stop hit: held (\S+) >= (\S+)$/,
+    '時間切れ: 最大保有期間到達 (保有 $1 ≥ 上限 $2)',
+  )
   s = s.replace(
     /^holding: pnl (\S+) within \(([^,]+),\s*([^)]+)\)$/,
-    (_m, p, low, high) => `保有継続 (pnl ${fmtPct(p)}、範囲 ${fmtPct(low)} 〜 ${fmtPct(high)}) (exit)`,
+    (_m, p, low, high) =>
+      `保有継続: 損益 ${fmtPct(p)} (利食い ${fmtPct(high)} / 損切り ${fmtPct(low)} の範囲内)`,
   )
-  // Entry filter (未保有、entry 条件未達)
+
+  // === 未保有の entry 判定 ===
+  // "様子見" で「未保有 + 条件未成立」を表現 (以前の "entry 見送り" は
+  // 「試みた」と誤読されるのを回避)
   s = s.replace(
     /^50d return (\S+) <= (\S+) trend threshold$/,
-    (_m, r, t) => `entry 見送り: 50日 return ${fmtPct(r)} ≤ 必要値 ${fmtPct(t)} (上昇トレンド filter)`,
+    (_m, r, t) =>
+      `様子見: 上昇トレンド不成立 (50日騰落率 ${fmtPct(r)} < 必要 ${fmtPct(t)})`,
   )
-  s = s.replace(/^price (\S+) <= sma50 (\S+)$/, 'entry 見送り: 価格 $1 ≤ SMA50 $2 (上昇トレンド filter)')
-  s = s.replace(/^invalid 20d high$/, 'entry 見送り: 20日高値が無効')
+  s = s.replace(
+    /^price (\S+) <= sma50 (\S+)$/,
+    '様子見: 50日移動平均 (SMA50) を下回る (株価 $1 < SMA50 $2)',
+  )
+  s = s.replace(/^invalid 20d high$/, 'データ不足: 直近20日高値を算出できず')
   s = s.replace(
     /^pullback (\S+) > (\S+) \(not deep enough\)$/,
-    (_m, p, t) => `entry 見送り: 押し目 ${fmtPct(p)} が浅すぎる (閾値 ${fmtPct(t)})`,
+    (_m, p, t) => `様子見: 押し目が浅い (下落率 ${fmtPct(p)} > 必要 ${fmtPct(t)})`,
   )
   s = s.replace(
     /^pullback (\S+) < (\S+) \(too deep\)$/,
-    (_m, p, t) => `entry 見送り: 押し目 ${fmtPct(p)} が深すぎる (閾値 ${fmtPct(t)})`,
+    (_m, p, t) => `様子見: 押し目が深すぎる/下落転換の恐れ (下落率 ${fmtPct(p)} < 許容 ${fmtPct(t)})`,
   )
-  // BUY: entry 成立 (strategy signal)
+
+  // === BUY signal ===
   s = s.replace(
     /^pullback (\S+) in uptrend \(50d return (\S+)\)$/,
-    (_m, p, r) => `BUY 判定: 押し目 ${fmtPct(p)}、上昇トレンド継続 (50日 return ${fmtPct(r)})`,
+    (_m, p, r) => `買い: 上昇トレンド中の押し目 (下落率 ${fmtPct(p)}、50日騰落率 ${fmtPct(r)})`,
   )
-  // Sizing capReason
-  // Sizing capReason — 診断値付きパターンを先に試行し、fallback で素の形に
-  // もマッチさせる (旧ログとの互換維持)。
-  // lot-size-round: 「生 qty」は誤読 (発注しようとした株数と誤解される) なので
-  // 「リスク予算で賄える上限」に言い換え。実際は 0 株で発注せず reject。
+
+  // === Sizing 系 reject → "発注スキップ" ===
+  // POC なので legacy (診断値なし) bare 形は持たない — 現行 buildSizingRejectReason
+  // が diagnostic 値付きで emit するため。atr-floor / symbol-cap / zero qty は
+  // 診断情報が無いので bare のまま扱う。
   s = s.replace(
     /^sizing rejected: lot-size-round \(raw qty (\S+) < lot (\S+), stop (\S+), entry (\S+)\)$/,
-    'サイジング拒否: リスク予算で賄える上限 $1 株が 1 lot ($2 株) に届かず (stop $3/株、entry $4)',
+    '発注スキップ: 売買単位未満 (リスク許容 $1 株 < 1単元 $2 株、stop $3/株、株価 $4)',
   )
-  s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: ロット丸め後に最小取引単位未満')
   s = s.replace(
     /^sizing rejected: insufficient-risk-budget \(budget (\S+)\)$/,
-    'サイジング拒否: リスク予算不足 (予算 $1)',
+    '発注スキップ: リスク予算が枯渇 (残 $1)',
   )
-  s = s.replace(/^sizing rejected: insufficient-risk-budget$/, 'サイジング拒否: リスク予算不足')
-  s = s.replace(/^sizing rejected: atr-floor$/, 'サイジング拒否: ATR floor (vol 崩壊)')
-  s = s.replace(/^sizing rejected: symbol-cap$/, 'サイジング拒否: 銘柄別 notional cap 超過')
+  s = s.replace(/^sizing rejected: atr-floor$/, '発注スキップ: ボラティリティ低下 (ATR 下限割れ)')
+  s = s.replace(/^sizing rejected: symbol-cap$/, '発注スキップ: 銘柄別の投資上限超過')
   s = s.replace(
     /^sizing rejected: invalid-stop \(stopDistance (\S+)\)$/,
-    'サイジング拒否: stop 距離が無効 ($1)',
+    '発注スキップ: 損切り幅を算出できず (stopDistance $1)',
   )
-  s = s.replace(/^sizing rejected: invalid-stop$/, 'サイジング拒否: stop 距離が無効')
-  s = s.replace(/^sizing rejected: zero qty$/, 'サイジング拒否: qty が 0')
-  // Scheduler inline
-  s = s.replace(/^SELL without position$/, 'SELL 対象ポジションなし')
-  s = s.replace(/^insufficient bars for indicators$/, 'bar 本数不足 (indicator 計算不能)')
-  s = s.replace(/^pending order already in flight$/, '発注中 (pending lock 競合)')
-  s = s.replace(/^invalid price: (\S+)$/, '価格が無効 ($1)')
-  s = s.replace(/^invalid notional:/, 'notional が無効:')
-  s = s.replace(/^invalid position qty: (\S+)$/, 'ポジション qty が無効 ($1)')
-  s = s.replace(/^invalid expiresAt/, 'expiresAt が無効')
-  s = s.replace(/^bar fetch: /, 'bar 取得失敗: ')
-  s = s.replace(/^broker submit error: /, 'broker 送信エラー: ')
-  // Bucket gate
-  s = s.replace(/^bucket cap: (\S+) projected (\S+) > (\S+)$/, 'バケット cap: $1 合計 $2 が上限 $3 を超過')
-  s = s.replace(/^bucket cap: (\S+) cap (\S+) <= 0$/, 'バケット cap: $1 の cap ($2) が 0 以下')
-  s = s.replace(/^bucket cap: (\S+) invalid addNotional (\S+)$/, 'バケット cap: $1 の addNotional ($2) が無効')
+  s = s.replace(/^sizing rejected: zero qty$/, '発注スキップ: 発注数量が 0 株')
+
+  // === Scheduler inline ===
+  s = s.replace(/^SELL without position$/, '発注スキップ: 売却対象のポジションなし')
+  s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄が揃わず')
+  s = s.replace(/^invalid price: (\S+)$/, 'データ不足: 価格が無効 ($1)')
+  s = s.replace(/^invalid notional:/, 'データ不足: 発注金額が無効:')
+  s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: ポジション数量が無効 ($1)')
+  s = s.replace(/^invalid expiresAt/, 'データ不足: 注文有効期限が無効')
+  s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
+  s = s.replace(/^broker submit error: /, '発注エラー: 証券会社側で拒否 — ')
+
+  // === Bucket cap (セクター枠) ===
+  s = s.replace(
+    /^bucket cap: (\S+) projected (\S+) > (\S+)$/,
+    '発注スキップ: セクター枠超過 ($1 合計 $2 > 上限 $3)',
+  )
+  s = s.replace(
+    /^bucket cap: (\S+) cap (\S+) <= 0$/,
+    '発注スキップ: セクター枠が無効 ($1 の上限 $2 が 0 以下)',
+  )
+  s = s.replace(
+    /^bucket cap: (\S+) invalid addNotional (\S+)$/,
+    'データ不足: セクター枠追加分が無効 ($1 の発注金額 $2)',
+  )
   return s
 }
 
