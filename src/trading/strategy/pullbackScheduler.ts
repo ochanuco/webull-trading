@@ -334,7 +334,8 @@ export async function runPullbackScheduler(
       await emitDecision({
         symbol: upper,
         decision: 'ERROR',
-        reason: `broker 送信エラー: ${messageOf(error)}`,
+        // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
+        reason: `broker submit error: ${messageOf(error)}`,
         price: indicators.price,
       })
       try {

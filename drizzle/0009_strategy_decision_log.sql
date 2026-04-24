@@ -8,3 +8,5 @@ CREATE TABLE `strategy_decision_log` (
 	`price` real,
 	`indicators_json` text
 );
+--> statement-breakpoint
+CREATE INDEX `strategy_decision_log_symbol_id_idx` ON `strategy_decision_log` (`symbol`,`id`);

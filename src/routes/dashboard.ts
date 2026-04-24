@@ -72,19 +72,25 @@ export const dashboard = new Hono<AppBindings>()
     const limit = clampLimit(c.req.query('limit'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     const db = createDb(c.env.DB)
-    const rows = symbolFilter
-      ? await db
-          .select()
-          .from(strategyDecisionLog)
-          .where(eq(strategyDecisionLog.symbol, symbolFilter))
-          .orderBy(desc(strategyDecisionLog.id))
-          .limit(limit)
-      : await db
-          .select()
-          .from(strategyDecisionLog)
-          .orderBy(desc(strategyDecisionLog.id))
-          .limit(limit)
-    return c.html(layout('Cron Decisions', cronBody(rows, limit, symbolFilter)))
+    try {
+      const rows = symbolFilter
+        ? await db
+            .select()
+            .from(strategyDecisionLog)
+            .where(eq(strategyDecisionLog.symbol, symbolFilter))
+            .orderBy(desc(strategyDecisionLog.id))
+            .limit(limit)
+        : await db
+            .select()
+            .from(strategyDecisionLog)
+            .orderBy(desc(strategyDecisionLog.id))
+            .limit(limit)
+      return c.html(layout('Cron Decisions', cronBody(rows, limit, symbolFilter)))
+    } catch (err) {
+      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
+      // (CodeRabbit #132)。段階的デプロイ時の自己保護。
+      return c.html(layout('Cron Decisions', unavailable(messageOf(err))))
+    }
   })
 
 function messageOf(error: unknown): string {
@@ -378,7 +384,7 @@ function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^pullback (\S+) < (\S+) \(too deep\)$/, '押し目 $1 が深すぎ (閾値 $2)')
   s = s.replace(/^pullback (\S+) in uptrend \(50d return (\S+)\)$/, '押し目 $1、uptrend 継続 (50日 return $2)')
   // Sizing capReason
-  s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: 100株ロット未満')
+  s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: ロット丸め後に最小取引単位未満')
   s = s.replace(/^sizing rejected: insufficient-risk-budget$/, 'サイジング拒否: リスク予算不足')
   s = s.replace(/^sizing rejected: atr-floor$/, 'サイジング拒否: ATR floor (vol 崩壊)')
   s = s.replace(/^sizing rejected: symbol-cap$/, 'サイジング拒否: 銘柄別 notional cap 超過')
@@ -393,6 +399,7 @@ function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^invalid position qty: (\S+)$/, 'ポジション qty が無効 ($1)')
   s = s.replace(/^invalid expiresAt/, 'expiresAt が無効')
   s = s.replace(/^bar fetch: /, 'bar 取得失敗: ')
+  s = s.replace(/^broker submit error: /, 'broker 送信エラー: ')
   // Bucket gate
   s = s.replace(/^bucket cap: (\S+) projected (\S+) > (\S+)$/, 'バケット cap: $1 合計 $2 が上限 $3 を超過')
   s = s.replace(/^bucket cap: (\S+) cap (\S+) <= 0$/, 'バケット cap: $1 の cap ($2) が 0 以下')
@@ -433,7 +440,7 @@ function cronBody(
                 : 'muted'
       return `<tr>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td><a href="/dashboard/cron?symbol=${esc(r.symbol)}"><strong>${esc(r.symbol)}</strong></a></td>
+        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"><strong>${esc(r.symbol)}</strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${esc(localizeReason(r.reason))}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>

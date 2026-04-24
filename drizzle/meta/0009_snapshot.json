@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "64928a04-4d14-47e4-8c0f-0c3f93ea6b6f",
+  "id": "725c7835-02e4-42d5-81f4-0e4f08609d10",
   "prevId": "39be53f4-2157-4c72-897c-4096ba803e9a",
   "tables": {
     "global_config": {
@@ -422,7 +422,16 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "strategy_decision_log_symbol_id_idx": {
+          "name": "strategy_decision_log_symbol_id_idx",
+          "columns": [
+            "symbol",
+            "id"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},

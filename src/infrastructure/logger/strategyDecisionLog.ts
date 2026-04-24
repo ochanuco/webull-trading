@@ -40,6 +40,7 @@ export async function logStrategyDecision(
     console.error(
       JSON.stringify({
         event: 'strategy_decision_log_insert_failed',
+        requestId: record.requestId ?? null,
         symbol: record.symbol,
         decision: record.decision,
         message: error instanceof Error ? error.message : String(error),
