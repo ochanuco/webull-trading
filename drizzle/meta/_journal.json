@@ -71,6 +71,13 @@
       "when": 1777007970066,
       "tag": "0009_strategy_decision_log",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1777043276942,
+      "tag": "0010_strategy_decision_log_coid",
+      "breakpoints": true
     }
   ]
 }

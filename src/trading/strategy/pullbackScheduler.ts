@@ -65,6 +65,8 @@ export interface PullbackSchedulerOptions {
     reason?: string
     price?: number
     indicatorsJson?: string
+    /** BUY/SELL 成立時のみ設定。dashboard が trade_journal と JOIN する key (#143)。 */
+    clientOrderId?: string
   }) => Promise<void> | void
   /**
    * cron fire 単位の correlation id。emit 失敗時の構造化ログに含めることで
@@ -399,6 +401,7 @@ export async function runPullbackScheduler(
       reason: signal.reason,
       price: intent.price,
       indicatorsJson: JSON.stringify(indicators),
+      clientOrderId: intent.clientOrderId,
     })
 
     if (result.mode === 'DRY_RUN') {

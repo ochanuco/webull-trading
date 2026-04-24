@@ -300,11 +300,18 @@ export const strategyDecisionLog = sqliteTable(
     price: real('price'),
     /** indicators snapshot JSON (debug 用、optional) */
     indicatorsJson: text('indicators_json'),
+    /**
+     * BUY/SELL 成立時の client_order_id。dashboard が trade_journal と JOIN
+     * して realized_pnl を引くためのキー (#143)。HOLD/REJECT/ERROR は null。
+     */
+    clientOrderId: text('client_order_id'),
   },
   (t) => ({
     // `/dashboard/cron?symbol=X` は WHERE symbol=? ORDER BY id DESC で読む。
     // (symbol, id) の複合 index で drop-in covering (CodeRabbit #132)。
     symbolIdIdx: index('strategy_decision_log_symbol_id_idx').on(t.symbol, t.id),
+    // trade_journal との JOIN 用 (#143)。
+    clientOrderIdIdx: index('strategy_decision_log_coid_idx').on(t.clientOrderId),
   }),
 )
 
