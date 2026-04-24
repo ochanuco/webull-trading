@@ -76,7 +76,7 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('<title>Dashboard')
+    expect(body).toContain('<title>ダッシュボード')
     expect(body).toContain('/dashboard/positions')
   })
 
@@ -100,7 +100,7 @@ describe('dashboard', () => {
     const app = createApp()
     const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
     expect(res.status).toBe(200)
-    expect(await res.text()).toContain('unavailable')
+    expect(await res.text()).toContain('利用不可')
   })
 
   it('renders portfolio page', async () => {
@@ -152,7 +152,7 @@ describe('dashboard', () => {
     const app = createApp()
     const res = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(200)
-    expect(await res.text()).toContain('unavailable')
+    expect(await res.text()).toContain('利用不可')
   })
 
   it('cron page requires basic auth', async () => {
