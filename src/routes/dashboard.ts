@@ -361,7 +361,7 @@ function configBody(
     .filter(([k]) => k !== 'source')
     .map(([k, v]) => {
       const camelKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
-      const desc = CONFIG_KEY_JA[camelKey] ?? CONFIG_KEY_JA[k] ?? ''
+      const desc = CONFIG_KEY_JA[camelKey] ?? CONFIG_KEY_JA[k] ?? '—'
       return `<tr><th>${esc(camelKey)}</th><td class="muted">${esc(desc)}</td><td>${esc(formatConfigValue(v))}</td></tr>`
     })
     .join('')
@@ -393,8 +393,12 @@ function configBody(
 }
 
 /** global_config 列の簡潔な日本語説明。SQL 互換のため keys は snake_case で保持。 */
+/**
+ * global_config 列に日本語の補助説明。金融ドメイン用語 (ドローダウン /
+ * 押し目 / 損切り 等) に寄せる。id / updated_at のような汎用語は元の英字
+ * で意味が通るので辞書に入れない (説明列は空 "—" 扱い)。
+ */
 const CONFIG_KEY_JA: Record<string, string> = {
-  id: '行識別子 (固定値 "default")',
   dry_run: 'ドライラン (実発注しない)',
   trading_enabled: '取引有効化',
   market_hours_check: '取引時間チェック',
