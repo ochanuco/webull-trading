@@ -130,7 +130,20 @@ export async function runStrategyCron(
   // when realized PnL is underwater but not yet at drawdown_kill threshold.
   // Emits a journal-visible log so the operator can tell a quiet day from
   // a halved one.
-  const ddScale = computeDrawdownRiskScale(portfolioSnapshot, {
+  const { portfolio: portfolioForScale, usedFallback } = resolvePortfolioForRiskScale(
+    portfolioSnapshot,
+    global.totalCapitalUsd,
+  )
+  if (usedFallback) {
+    console.log(
+      JSON.stringify({
+        event: 'portfolio_unseeded_fallback',
+        requestId: options.requestId,
+        fallbackEquity: portfolioForScale.dailyStartEquity,
+      }),
+    )
+  }
+  const ddScale = computeDrawdownRiskScale(portfolioForScale, {
     baseRiskPct: global.riskBasePerTradePct,
     halfThreshold: global.riskDdHalfThreshold,
     haltThreshold: global.riskDdHaltThreshold,
@@ -236,4 +249,43 @@ function sanitizeEquity(value: number | null | undefined, fallback: number): num
   if (value === null || value === undefined) return fallback
   if (!Number.isFinite(value) || value <= 0) return fallback
   return value
+}
+
+/**
+ * 「未 seed」portfolio (dailyStartEquity <= 0) と「壊れた値」(NaN / 負値) を
+ * 区別する pure helper。未 seed かつ global.totalCapitalUsd が正値なら、
+ * その baseline で dailyStartEquity を埋めた snapshot を返す。これで
+ * `/admin/portfolio/roll-daily` 未実行の初日 / 日跨ぎでも drawdownRiskScale
+ * が halt ではなく normal で動く。
+ *
+ * 壊れた値 (NaN など) は fallback せず元の snapshot を返し、
+ * drawdownRiskScale 側の fail-closed (halt) に任せる。
+ * CodeRabbit review #125 の fail-closed 意図を崩さない。
+ */
+export function resolvePortfolioForRiskScale<
+  P extends { dailyStartEquity: number; dailyRealizedPnl: number },
+>(
+  portfolio: P,
+  totalCapitalUsd: number | null | undefined,
+): { portfolio: P; usedFallback: boolean } {
+  // start > 0 ならそのまま
+  if (portfolio.dailyStartEquity > 0) return { portfolio, usedFallback: false }
+  // NaN / 負値など壊れている場合は fallback しない (halt を期待)
+  if (!Number.isFinite(portfolio.dailyStartEquity)) return { portfolio, usedFallback: false }
+  if (
+    totalCapitalUsd === null ||
+    totalCapitalUsd === undefined ||
+    !Number.isFinite(totalCapitalUsd) ||
+    totalCapitalUsd <= 0
+  ) {
+    return { portfolio, usedFallback: false }
+  }
+  return {
+    portfolio: {
+      ...portfolio,
+      dailyStartEquity: totalCapitalUsd,
+      dailyRealizedPnl: 0, // 未 seed = 未実現損益もゼロ扱い
+    },
+    usedFallback: true,
+  }
 }
