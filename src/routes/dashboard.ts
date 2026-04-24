@@ -3,8 +3,8 @@ import type { AppBindings } from '../app'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
-import { tradeJournal } from '../infrastructure/db/schema'
-import { desc } from 'drizzle-orm'
+import { strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
+import { desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
@@ -64,6 +64,27 @@ export const dashboard = new Hono<AppBindings>()
       loadSymbolUniverse(c.env),
     ])
     return c.html(layout('Config', configBody(global, universe)))
+  })
+  .get('/cron', async (c) => {
+    if (!c.env.DB) {
+      return c.html(layout('Cron Decisions', unavailable('DB not bound')))
+    }
+    const limit = clampLimit(c.req.query('limit'))
+    const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
+    const db = createDb(c.env.DB)
+    const rows = symbolFilter
+      ? await db
+          .select()
+          .from(strategyDecisionLog)
+          .where(eq(strategyDecisionLog.symbol, symbolFilter))
+          .orderBy(desc(strategyDecisionLog.id))
+          .limit(limit)
+      : await db
+          .select()
+          .from(strategyDecisionLog)
+          .orderBy(desc(strategyDecisionLog.id))
+          .limit(limit)
+    return c.html(layout('Cron Decisions', cronBody(rows, limit, symbolFilter)))
   })
 
 function messageOf(error: unknown): string {
@@ -157,6 +178,7 @@ function layout(title: string, body: string): string {
   <a href="/dashboard/portfolio">Portfolio</a>
   <a href="/dashboard/trades">Trades</a>
   <a href="/dashboard/config">Config</a>
+  <a href="/dashboard/cron">Cron</a>
 </nav>
 ${body}
 <div class="footer">rendered at ${esc(fmtJst(new Date()))}</div>
@@ -175,6 +197,7 @@ function indexBody(): string {
   <li><a href="/dashboard/portfolio">Portfolio</a> — dailyStartEquity / realized PnL / drawdown / kill-switch</li>
   <li><a href="/dashboard/trades">Trades</a> — trade_journal 直近 (default 50、<code>?limit=N</code> で可変、max 200)</li>
   <li><a href="/dashboard/config">Config</a> — global_config + active symbol_config</li>
+  <li><a href="/dashboard/cron">Cron Decisions</a> — strategy_decision_log 直近 (<code>?symbol=SOXL</code> で絞り込み、日本語 reason)</li>
 </ul>`
 }
 
@@ -331,4 +354,97 @@ function formatConfigValue(v: unknown): string {
   if (v === null || v === undefined) return 'null'
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   return String(v)
+}
+
+/**
+ * Strategy / sizing が出力する英語 reason を日本語に翻訳する display helper。
+ * ログ DB には英語のまま保存し、表示時のみ翻訳 (テスト互換性を崩さない)。
+ * 動的数値はそのまま残すため正規表現で置換。
+ */
+function localizeReason(en: string | null | undefined): string {
+  if (!en) return '-'
+  let s = en
+  // Strategy signal.reason パターン
+  s = s.replace(/^pending order in flight$/, '発注中 (lock 保持)')
+  s = s.replace(/^cooldown active until (.+)$/, 'クールダウン中 ($1 まで)')
+  s = s.replace(/^take-profit hit: pnl (\S+) >= (\S+)$/, '利確到達 (pnl $1 ≥ $2)')
+  s = s.replace(/^stop-loss hit: pnl (\S+) <= (\S+)$/, '損切到達 (pnl $1 ≤ $2)')
+  s = s.replace(/^time-stop hit: held (\S+) >= (\S+)$/, '時間切れ (保有 $1 ≥ $2)')
+  s = s.replace(/^holding: pnl (\S+) within \(([^)]+)\)$/, '保有継続 (pnl $1、範囲 $2)')
+  s = s.replace(/^50d return (\S+) <= (\S+) trend threshold$/, '50日 return $1 が閾値 $2 未満 (uptrend 不成立)')
+  s = s.replace(/^price (\S+) <= sma50 (\S+)$/, '価格 $1 が SMA50 $2 以下 (uptrend 不成立)')
+  s = s.replace(/^invalid 20d high$/, '20日高値が無効')
+  s = s.replace(/^pullback (\S+) > (\S+) \(not deep enough\)$/, '押し目 $1 が浅すぎ (閾値 $2)')
+  s = s.replace(/^pullback (\S+) < (\S+) \(too deep\)$/, '押し目 $1 が深すぎ (閾値 $2)')
+  s = s.replace(/^pullback (\S+) in uptrend \(50d return (\S+)\)$/, '押し目 $1、uptrend 継続 (50日 return $2)')
+  // Sizing capReason
+  s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: 100株ロット未満')
+  s = s.replace(/^sizing rejected: insufficient-risk-budget$/, 'サイジング拒否: リスク予算不足')
+  s = s.replace(/^sizing rejected: atr-floor$/, 'サイジング拒否: ATR floor (vol 崩壊)')
+  s = s.replace(/^sizing rejected: symbol-cap$/, 'サイジング拒否: 銘柄別 notional cap 超過')
+  s = s.replace(/^sizing rejected: invalid-stop$/, 'サイジング拒否: stop 距離が無効')
+  s = s.replace(/^sizing rejected: zero qty$/, 'サイジング拒否: qty が 0')
+  // Scheduler inline
+  s = s.replace(/^SELL without position$/, 'SELL 対象ポジションなし')
+  s = s.replace(/^insufficient bars for indicators$/, 'bar 本数不足 (indicator 計算不能)')
+  s = s.replace(/^pending order already in flight$/, '発注中 (pending lock 競合)')
+  s = s.replace(/^invalid price: (\S+)$/, '価格が無効 ($1)')
+  s = s.replace(/^invalid notional:/, 'notional が無効:')
+  s = s.replace(/^invalid position qty: (\S+)$/, 'ポジション qty が無効 ($1)')
+  s = s.replace(/^invalid expiresAt/, 'expiresAt が無効')
+  s = s.replace(/^bar fetch: /, 'bar 取得失敗: ')
+  // Bucket gate
+  s = s.replace(/^bucket cap: (\S+) projected (\S+) > (\S+)$/, 'バケット cap: $1 合計 $2 が上限 $3 を超過')
+  s = s.replace(/^bucket cap: (\S+) cap (\S+) <= 0$/, 'バケット cap: $1 の cap ($2) が 0 以下')
+  s = s.replace(/^bucket cap: (\S+) invalid addNotional (\S+)$/, 'バケット cap: $1 の addNotional ($2) が無効')
+  return s
+}
+
+function cronBody(
+  rows: Array<{
+    id: number
+    timestamp: string
+    requestId: string | null
+    symbol: string
+    decision: string
+    reason: string | null
+    price: number | null
+  }>,
+  limit: number,
+  symbolFilter: string | undefined,
+): string {
+  const header = symbolFilter
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(symbolFilter)}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a></p>`
+    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。</p>`
+  if (rows.length === 0) {
+    return `${header}<p class="muted">判定ログがまだありません。</p>`
+  }
+  const tbody = rows
+    .map((r) => {
+      const cls =
+        r.decision === 'BUY'
+          ? 'ok'
+          : r.decision === 'SELL'
+            ? 'warn'
+            : r.decision === 'ERROR'
+              ? 'err'
+              : r.decision === 'REJECT'
+                ? 'warn'
+                : 'muted'
+      return `<tr>
+        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
+        <td><a href="/dashboard/cron?symbol=${esc(r.symbol)}"><strong>${esc(r.symbol)}</strong></a></td>
+        <td class="${cls}">${esc(r.decision)}</td>
+        <td>${esc(localizeReason(r.reason))}</td>
+        <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
+      </tr>`
+    })
+    .join('')
+  return `${header}
+  <table>
+    <thead><tr>
+      <th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason</th><th>price</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>`
 }

@@ -64,6 +64,13 @@
       "when": 1776953017653,
       "tag": "0008_bucket_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1777006563811,
+      "tag": "0009_strategy_decision_log",
+      "breakpoints": true
     }
   ]
 }
