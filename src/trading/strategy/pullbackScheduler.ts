@@ -66,6 +66,13 @@ export interface PullbackSchedulerOptions {
     price?: number
     indicatorsJson?: string
   }) => Promise<void> | void
+  /**
+   * cron fire 単位の correlation id。emit 失敗時の構造化ログに含めることで
+   * 「どの run で decision sink が落ちたか」を tail から追えるようにする
+   * (CodeRabbit #132 follow-up)。runStrategyCron が scheduled() handler の
+   * `crypto.randomUUID()` を渡す。
+   */
+  requestId?: string
   now?: () => Date
 }
 
@@ -116,6 +123,7 @@ export async function runPullbackScheduler(
       console.error(
         JSON.stringify({
           event: 'on_decision_sink_failed',
+          requestId: options.requestId ?? null,
           symbol: record.symbol,
           decision: record.decision,
           message: err instanceof Error ? err.message : String(err),

@@ -238,6 +238,7 @@ export async function runStrategyCron(
       bucketCapMap,
       defaultRule,
       riskPerTradePct: scaledRiskPerTradePct,
+      requestId: options.requestId,
       onDecision: (record) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
