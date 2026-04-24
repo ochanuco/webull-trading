@@ -362,27 +362,57 @@ function formatConfigValue(v: unknown): string {
   return String(v)
 }
 
+/** Numeric string ratio → percent string (0.0108 → "1.08%"). fallback は原文字列。 */
+function fmtPct(s: string): string {
+  const n = Number(s)
+  if (!Number.isFinite(n)) return s
+  return `${(n * 100).toFixed(2)}%`
+}
+
 /**
  * Strategy / sizing が出力する英語 reason を日本語に翻訳する display helper。
  * ログ DB には英語のまま保存し、表示時のみ翻訳 (テスト互換性を崩さない)。
- * 動的数値はそのまま残すため正規表現で置換。
+ *
+ * 命名規則:
+ *   - entry 系 HOLD は「entry 見送り:」prefix (entry filter 未達を示す)
+ *   - exit 系 HOLD/SELL は「(exit)」suffix (保有ポジションの出口判定)
+ *   - 比率 (0.0108 等) は %表記に変換 (読みやすさ)
  */
-function localizeReason(en: string | null | undefined): string {
+export function localizeReason(en: string | null | undefined): string {
   if (!en) return '-'
   let s = en
-  // Strategy signal.reason パターン
+  // Pending / cooldown (entry 前ガード)
   s = s.replace(/^pending order in flight$/, '発注中 (lock 保持)')
   s = s.replace(/^cooldown active until (.+)$/, 'クールダウン中 ($1 まで)')
-  s = s.replace(/^take-profit hit: pnl (\S+) >= (\S+)$/, '利確到達 (pnl $1 ≥ $2)')
-  s = s.replace(/^stop-loss hit: pnl (\S+) <= (\S+)$/, '損切到達 (pnl $1 ≤ $2)')
-  s = s.replace(/^time-stop hit: held (\S+) >= (\S+)$/, '時間切れ (保有 $1 ≥ $2)')
-  s = s.replace(/^holding: pnl (\S+) within \(([^)]+)\)$/, '保有継続 (pnl $1、範囲 $2)')
-  s = s.replace(/^50d return (\S+) <= (\S+) trend threshold$/, '50日 return $1 が閾値 $2 未満 (uptrend 不成立)')
-  s = s.replace(/^price (\S+) <= sma50 (\S+)$/, '価格 $1 が SMA50 $2 以下 (uptrend 不成立)')
-  s = s.replace(/^invalid 20d high$/, '20日高値が無効')
-  s = s.replace(/^pullback (\S+) > (\S+) \(not deep enough\)$/, '押し目 $1 が浅すぎ (閾値 $2)')
-  s = s.replace(/^pullback (\S+) < (\S+) \(too deep\)$/, '押し目 $1 が深すぎ (閾値 $2)')
-  s = s.replace(/^pullback (\S+) in uptrend \(50d return (\S+)\)$/, '押し目 $1、uptrend 継続 (50日 return $2)')
+  // Exit 判定 (保有ポジション)
+  s = s.replace(/^take-profit hit: pnl (\S+) >= (\S+)$/, (_m, p, t) => `利確到達 (pnl ${fmtPct(p)} ≥ ${fmtPct(t)}) (exit)`)
+  s = s.replace(/^stop-loss hit: pnl (\S+) <= (\S+)$/, (_m, p, t) => `損切到達 (pnl ${fmtPct(p)} ≤ ${fmtPct(t)}) (exit)`)
+  s = s.replace(/^time-stop hit: held (\S+) >= (\S+)$/, '時間切れ (保有 $1 ≥ $2) (exit)')
+  // holding の range 上下限も % 化して表示を統一 (CodeRabbit #133)。
+  s = s.replace(
+    /^holding: pnl (\S+) within \(([^,]+),\s*([^)]+)\)$/,
+    (_m, p, low, high) => `保有継続 (pnl ${fmtPct(p)}、範囲 ${fmtPct(low)} 〜 ${fmtPct(high)}) (exit)`,
+  )
+  // Entry filter (未保有、entry 条件未達)
+  s = s.replace(
+    /^50d return (\S+) <= (\S+) trend threshold$/,
+    (_m, r, t) => `entry 見送り: 50日 return ${fmtPct(r)} ≤ 必要値 ${fmtPct(t)} (上昇トレンド filter)`,
+  )
+  s = s.replace(/^price (\S+) <= sma50 (\S+)$/, 'entry 見送り: 価格 $1 ≤ SMA50 $2 (上昇トレンド filter)')
+  s = s.replace(/^invalid 20d high$/, 'entry 見送り: 20日高値が無効')
+  s = s.replace(
+    /^pullback (\S+) > (\S+) \(not deep enough\)$/,
+    (_m, p, t) => `entry 見送り: 押し目 ${fmtPct(p)} が浅すぎる (閾値 ${fmtPct(t)})`,
+  )
+  s = s.replace(
+    /^pullback (\S+) < (\S+) \(too deep\)$/,
+    (_m, p, t) => `entry 見送り: 押し目 ${fmtPct(p)} が深すぎる (閾値 ${fmtPct(t)})`,
+  )
+  // BUY: entry 成立 (strategy signal)
+  s = s.replace(
+    /^pullback (\S+) in uptrend \(50d return (\S+)\)$/,
+    (_m, p, r) => `BUY 判定: 押し目 ${fmtPct(p)}、上昇トレンド継続 (50日 return ${fmtPct(r)})`,
+  )
   // Sizing capReason
   s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: ロット丸め後に最小取引単位未満')
   s = s.replace(/^sizing rejected: insufficient-risk-budget$/, 'サイジング拒否: リスク予算不足')
