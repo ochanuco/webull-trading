@@ -125,7 +125,7 @@ describe('dashboard', () => {
     const app = createApp()
     const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
     const body = await res.text()
-    expect(body).toContain('JST')
+    expect(body).toMatch(/<span class="warn">[^<]*JST<\/span>/)
   })
 
   it('renders portfolio page', async () => {
