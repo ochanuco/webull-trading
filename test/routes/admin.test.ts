@@ -102,3 +102,50 @@ describe('POST /admin/symbols/:symbol/seed-cash', () => {
     expect(captured.calls).toEqual([{ symbol: 'SOXL', amount: 12_345 }])
   })
 })
+
+describe('POST /admin/symbols/:symbol/clear-cooldown', () => {
+  function fakeCooldownNamespace(captured: { calls: Array<{ symbol: string; untilIso: string }> }) {
+    const stub = {
+      async setCooldown(symbol: string, untilIso: string) {
+        captured.calls.push({ symbol, untilIso })
+        return {
+          symbol,
+          position: null,
+          pendingOrder: null,
+          lastSignalAt: null,
+          cooldownUntil: untilIso,
+          settledCash: 0,
+          pendingSettlement: [],
+          lastExecutedPrice: null,
+          lastQuote: null,
+          updatedAt: '2026-04-25T00:00:00.000Z',
+        }
+      },
+    }
+    return {
+      idFromName: () => 'id',
+      get: () => stub,
+    } as unknown
+  }
+
+  it('401s without Basic Auth', async () => {
+    const app = createApp()
+    const res = await app.request('/admin/symbols/SOXL/clear-cooldown', { method: 'POST' }, baseEnv)
+    expect(res.status).toBe(401)
+  })
+
+  it('200s and sets cooldown to epoch 0 (effectively cleared)', async () => {
+    const captured = { calls: [] as Array<{ symbol: string; untilIso: string }> }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbols/soxl/clear-cooldown',
+      { method: 'POST', headers: { ...authHeader } },
+      { ...baseEnv, SYMBOL_STATE: fakeCooldownNamespace(captured) },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { symbol: string; cooldownUntil: string }
+    expect(body.symbol).toBe('SOXL')
+    expect(body.cooldownUntil).toBe('1970-01-01T00:00:00.000Z')
+    expect(captured.calls).toEqual([{ symbol: 'SOXL', untilIso: '1970-01-01T00:00:00.000Z' }])
+  })
+})

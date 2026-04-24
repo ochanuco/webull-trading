@@ -30,6 +30,30 @@ export const admin = new Hono<AppBindings>()
     return c.json({ symbol, settledCash: state.settledCash, updatedAt: state.updatedAt })
   })
   /**
+   * 強制的に cooldownUntil を過去時刻 (UNIX epoch 0) にして取引停止状態を解除する。
+   * 直前損切後の cooldown (reconcileFills が設定) を staging で即解除したい時に
+   * 使う。PositionStore.setCooldown は string 必須なので `new Date(0).toISOString()`
+   * を渡すことで「過去」扱いにして実質クリア。
+   */
+  .post('/symbols/:symbol/clear-cooldown', async (c) => {
+    const symbol = c.req.param('symbol').trim().toUpperCase()
+    if (symbol.length === 0) {
+      throw new ValidationError('symbol must be a non-empty path param', { field: 'symbol' })
+    }
+    if (!c.env.SYMBOL_STATE) {
+      throw new ValidationError('SYMBOL_STATE binding is not configured', { field: 'env' })
+    }
+    const pastIso = new Date(0).toISOString()
+    const client = new SymbolStateClient(c.env.SYMBOL_STATE)
+    const state = await client.setCooldown(symbol, pastIso)
+    return c.json({
+      symbol,
+      cooldownUntil: state.cooldownUntil,
+      note: 'cooldown を epoch に戻したため strategy の `> now` 判定で即失効',
+      updatedAt: state.updatedAt,
+    })
+  })
+  /**
    * Manual trigger for `runStrategyCron`. Returns the same `StrategyCronResult`
    * the hourly scheduled handler would console.log. Useful for debugging bar
    * fetch failures / skip reasons without waiting for :15 of the hour.
