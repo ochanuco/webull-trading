@@ -18,7 +18,7 @@ const baseEnv = {
 
 const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
 
-function fakeSymbolStateNamespace() {
+function fakeSymbolStateNamespace(cooldownUntil: string | null = null) {
   const stub = {
     async getState(symbol: string) {
       return {
@@ -26,7 +26,7 @@ function fakeSymbolStateNamespace() {
         position: { qty: 10, avgPrice: 100, openedAt: '2026-04-20T00:00:00.000Z' },
         pendingOrder: null,
         lastSignalAt: null,
-        cooldownUntil: null,
+        cooldownUntil,
         settledCash: 0,
         pendingSettlement: [],
         lastExecutedPrice: null,
@@ -101,6 +101,31 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     expect(await res.text()).toContain('利用不可')
+  })
+
+  it('past cooldownUntil (epoch 0 from admin clear-cooldown) is shown as em-dash, not 1970', async () => {
+    const env = {
+      ...baseEnv,
+      DB: {} as D1Database,
+      SYMBOL_STATE: fakeSymbolStateNamespace('1970-01-01T00:00:00.000Z'),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).not.toContain('1970-01-01')
+  })
+
+  it('future cooldownUntil is shown in JST', async () => {
+    const future = new Date(Date.now() + 3_600_000).toISOString()
+    const env = {
+      ...baseEnv,
+      DB: {} as D1Database,
+      SYMBOL_STATE: fakeSymbolStateNamespace(future),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).toMatch(/<span class="warn">[^<]*JST<\/span>/)
   })
 
   it('renders portfolio page', async () => {
