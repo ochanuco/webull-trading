@@ -400,7 +400,12 @@ export function localizeReason(en: string | null | undefined): string {
 
   // === 発注中 / 取引停止 (entry 前ガード) ===
   s = s.replace(/^pending order in flight$/, '発注中: 直前注文の約定待ち')
-  s = s.replace(/^cooldown active until (.+)$/, '様子見: 取引停止中 ($1 まで)')
+  // cooldown の timestamp は UTC ISO で emit されるが operator 向けには JST 表記が
+  // 読みやすい。fmtJst は parse 失敗時に原文字列を返すので安全 (CodeRabbit)。
+  s = s.replace(
+    /^cooldown active until (.+)$/,
+    (_m, ts) => `様子見: 取引停止中 (${fmtJst(ts)} まで)`,
+  )
   s = s.replace(/^pending order already in flight$/, '発注中: 同銘柄の注文処理中')
 
   // === 保有中の exit 判定 ===

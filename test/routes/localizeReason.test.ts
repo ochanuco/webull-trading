@@ -121,10 +121,17 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
-    it('cooldown → 取引停止中', () => {
+    it('cooldown → 取引停止中 (JST 表記)', () => {
+      // UTC 2026-04-25T00:00:00.000Z → JST 2026-04-25 09:00:00
       expect(
         localizeReason('cooldown active until 2026-04-25T00:00:00.000Z'),
-      ).toBe('様子見: 取引停止中 (2026-04-25T00:00:00.000Z まで)')
+      ).toBe('様子見: 取引停止中 (2026-04-25 09:00:00 JST まで)')
+    })
+
+    it('cooldown with unparseable timestamp falls back to raw', () => {
+      expect(localizeReason('cooldown active until not-a-date')).toBe(
+        '様子見: 取引停止中 (not-a-date まで)',
+      )
     })
 
     it('insufficient bars → 日柄不足', () => {
