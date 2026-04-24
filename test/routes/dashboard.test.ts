@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
 import { loadGlobalConfigFrom } from '../../src/infrastructure/db/globalConfigLoader'
+import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
 import { loadSymbolUniverse } from '../../src/infrastructure/db/symbolUniverse'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
@@ -9,6 +10,9 @@ vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
 }))
 vi.mock('../../src/infrastructure/db/symbolUniverse', () => ({
   loadSymbolUniverse: vi.fn(),
+}))
+vi.mock('../../src/infrastructure/db/tradeJournalRepo', () => ({
+  createDb: vi.fn(),
 }))
 
 const baseEnv = {
@@ -56,6 +60,19 @@ function fakePortfolioNamespace(portfolio: {
     idFromName: () => 'id',
     get: () => stub,
   } as unknown
+}
+
+function fakeCronDb(rows: unknown[]) {
+  const query = {
+    from: vi.fn(() => query),
+    leftJoin: vi.fn(() => query),
+    where: vi.fn(() => query),
+    orderBy: vi.fn(() => query),
+    limit: vi.fn(async () => rows),
+  }
+  return {
+    select: vi.fn(() => query),
+  }
 }
 
 describe('dashboard', () => {
@@ -178,6 +195,37 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(200)
     expect(await res.text()).toContain('利用不可')
+  })
+
+  it('renders cron reason as clickable details', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeCronDb([
+        {
+          id: 123,
+          timestamp: '2026-04-23T00:00:00.000Z',
+          requestId: 'req-1',
+          symbol: 'SOXL',
+          decision: 'BUY',
+          reason: 'pullback -0.0500 in uptrend (50d return 0.1000)',
+          price: 10,
+          indicatorsJson: '{"price":10,"return50d":0.1}',
+          clientOrderId: 'coid-1',
+          filledPrice: null,
+          filledQty: null,
+          realizedPnl: null,
+          brokerStatus: null,
+        },
+      ]) as unknown as ReturnType<typeof createDb>,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+
+    expect(body).toContain('<details class="reason-details">')
+    expect(body).toContain('買い: 上昇トレンド中の押し目買い')
+    expect(body).toContain('<strong>raw reason</strong>')
+    expect(body).toContain('/dashboard/cron/json?requestId=req-1')
+    expect(body).toContain('&quot;return50d&quot;: 0.1')
   })
 
   it('cron page requires basic auth', async () => {
