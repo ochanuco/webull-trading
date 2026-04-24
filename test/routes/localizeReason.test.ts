@@ -65,7 +65,7 @@ describe('localizeReason', () => {
       localizeReason(
         'sizing rejected: lot-size-round (raw qty 98 < lot 100, stop 203.00, entry 2876)',
       ),
-    ).toBe('サイジング拒否: 生 qty 98 株が 1 lot (100 株) 未満 (stop 203.00/株、entry 2876)')
+    ).toBe('サイジング拒否: リスク予算で賄える上限 98 株が 1 lot (100 株) に届かず (stop 203.00/株、entry 2876)')
     expect(
       localizeReason('sizing rejected: insufficient-risk-budget (budget 0.00)'),
     ).toBe('サイジング拒否: リスク予算不足 (予算 0.00)')

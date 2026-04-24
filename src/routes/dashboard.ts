@@ -416,9 +416,11 @@ export function localizeReason(en: string | null | undefined): string {
   // Sizing capReason
   // Sizing capReason — 診断値付きパターンを先に試行し、fallback で素の形に
   // もマッチさせる (旧ログとの互換維持)。
+  // lot-size-round: 「生 qty」は誤読 (発注しようとした株数と誤解される) なので
+  // 「リスク予算で賄える上限」に言い換え。実際は 0 株で発注せず reject。
   s = s.replace(
     /^sizing rejected: lot-size-round \(raw qty (\S+) < lot (\S+), stop (\S+), entry (\S+)\)$/,
-    'サイジング拒否: 生 qty $1 株が 1 lot ($2 株) 未満 (stop $3/株、entry $4)',
+    'サイジング拒否: リスク予算で賄える上限 $1 株が 1 lot ($2 株) に届かず (stop $3/株、entry $4)',
   )
   s = s.replace(/^sizing rejected: lot-size-round$/, 'サイジング拒否: ロット丸め後に最小取引単位未満')
   s = s.replace(
