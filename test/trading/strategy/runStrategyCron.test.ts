@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadGlobalConfigFrom } from '../../../src/infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../../src/infrastructure/db/symbolUniverse'
-import { runStrategyCron } from '../../../src/trading/strategy/runStrategyCron'
+import { resolvePortfolioForRiskScale, runStrategyCron } from '../../../src/trading/strategy/runStrategyCron'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../../helpers/configFixtures'
 
 vi.mock('../../../src/infrastructure/db/globalConfigLoader', () => ({
@@ -133,5 +133,61 @@ describe('runStrategyCron', () => {
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithBrokenPortfolio)
     expect(result.skipReason).toBe('portfolio_halted')
+  })
+
+})
+
+describe('resolvePortfolioForRiskScale', () => {
+  it('returns the portfolio unchanged when dailyStartEquity > 0', () => {
+    const p = { dailyStartEquity: 10_000, dailyRealizedPnl: -100 }
+    const r = resolvePortfolioForRiskScale(p, 3333)
+    expect(r.usedFallback).toBe(false)
+    expect(r.portfolio).toBe(p)
+  })
+
+  it('substitutes totalCapitalUsd when dailyStartEquity is 0 (unseeded)', () => {
+    const r = resolvePortfolioForRiskScale(
+      { dailyStartEquity: 0, dailyRealizedPnl: 0 },
+      3333,
+    )
+    expect(r.usedFallback).toBe(true)
+    expect(r.portfolio.dailyStartEquity).toBe(3333)
+    expect(r.portfolio.dailyRealizedPnl).toBe(0)
+  })
+
+  it('does NOT fallback when dailyStartEquity is NaN (truly broken)', () => {
+    const p = { dailyStartEquity: Number.NaN, dailyRealizedPnl: 0 }
+    const r = resolvePortfolioForRiskScale(p, 3333)
+    expect(r.usedFallback).toBe(false)
+    expect(r.portfolio).toBe(p)
+  })
+
+  it('does NOT fallback when totalCapitalUsd is null / 0 / negative', () => {
+    const p = { dailyStartEquity: 0, dailyRealizedPnl: 0 }
+    expect(resolvePortfolioForRiskScale(p, null).usedFallback).toBe(false)
+    expect(resolvePortfolioForRiskScale(p, undefined).usedFallback).toBe(false)
+    expect(resolvePortfolioForRiskScale(p, 0).usedFallback).toBe(false)
+    expect(resolvePortfolioForRiskScale(p, -100).usedFallback).toBe(false)
+    expect(resolvePortfolioForRiskScale(p, Number.NaN).usedFallback).toBe(false)
+  })
+
+  it('treats negative dailyStartEquity as unseeded and falls back', () => {
+    // Negative finite value is treated as unseeded (not yet initialized),
+    // distinct from NaN which means corrupt.
+    const r = resolvePortfolioForRiskScale(
+      { dailyStartEquity: -1, dailyRealizedPnl: 0 },
+      3333,
+    )
+    expect(r.usedFallback).toBe(true)
+  })
+
+  it('does NOT fallback when dailyRealizedPnl is non-finite (corrupt)', () => {
+    // CodeRabbit #131 review: if realizedPnl is NaN / Infinity, the portfolio
+    // snapshot is corrupt and must trigger fail-closed via drawdownRiskScale,
+    // not get silently zeroed by the fallback path.
+    const p = { dailyStartEquity: 0, dailyRealizedPnl: Number.NaN }
+    const r = resolvePortfolioForRiskScale(p, 3333)
+    expect(r.usedFallback).toBe(false)
+    expect(r.portfolio).toBe(p)
   })
 })
