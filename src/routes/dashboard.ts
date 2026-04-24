@@ -394,6 +394,7 @@ function configBody(
 
 /** global_config 列の簡潔な日本語説明。SQL 互換のため keys は snake_case で保持。 */
 const CONFIG_KEY_JA: Record<string, string> = {
+  id: '行識別子 (固定値 "default")',
   dry_run: 'ドライラン (実発注しない)',
   trading_enabled: '取引有効化',
   market_hours_check: '取引時間チェック',
@@ -423,7 +424,9 @@ const CONFIG_KEY_JA: Record<string, string> = {
 }
 
 function formatConfigValue(v: unknown): string {
-  if (v === null || v === undefined) return 'null'
+  // null placeholder は他ページと同じ em-dash (—) に統一。"null" 文字列は
+  // 運用者が誤って "null" という string 値と混同するリスクがあるので避ける。
+  if (v === null || v === undefined) return '—'
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   return String(v)
 }
