@@ -1,80 +1,174 @@
 import { describe, expect, it } from 'vitest'
 import { localizeReason } from '../../src/routes/dashboard'
 
-describe('localizeReason', () => {
+describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
   it('returns "-" for null / undefined / empty', () => {
     expect(localizeReason(null)).toBe('-')
     expect(localizeReason(undefined)).toBe('-')
     expect(localizeReason('')).toBe('-')
   })
 
-  it('prefixes entry-side HOLD reasons with "entry 見送り:" and converts ratios to %', () => {
-    // The dashboard reason that confused the operator in #132 (6971 HOLD).
-    expect(
-      localizeReason('50d return 0.0108 <= 0.03 trend threshold'),
-    ).toBe('entry 見送り: 50日 return 1.08% ≤ 必要値 3.00% (上昇トレンド filter)')
-    expect(localizeReason('price 100 <= sma50 105')).toBe(
-      'entry 見送り: 価格 100 ≤ SMA50 105 (上昇トレンド filter)',
-    )
-    expect(
-      localizeReason('pullback 0.0023 > -0.01 (not deep enough)'),
-    ).toBe('entry 見送り: 押し目 0.23% が浅すぎる (閾値 -1.00%)')
-    expect(
-      localizeReason('pullback -0.08 < -0.06 (too deep)'),
-    ).toBe('entry 見送り: 押し目 -8.00% が深すぎる (閾値 -6.00%)')
+  describe('未保有 (様子見 / データ不足)', () => {
+    it('50d return unmet', () => {
+      expect(localizeReason('50d return 0.0108 <= 0.03 trend threshold')).toBe(
+        '様子見: 上昇トレンド未成立 (50日騰落率 +1.08% ≤ 条件 +3.00%)',
+      )
+    })
+
+    it('price <= sma50 → 移動平均線割れ', () => {
+      expect(localizeReason('price 100 <= sma50 105')).toBe(
+        '様子見: 50日移動平均線割れ (株価 100 ≤ 移動平均 105)',
+      )
+    })
+
+    it('pullback too shallow', () => {
+      expect(localizeReason('pullback 0.0023 > -0.01 (not deep enough)')).toBe(
+        '様子見: 押し目が浅い (下落率 +0.23% > 条件 -1.00%)',
+      )
+    })
+
+    it('pullback too deep', () => {
+      expect(localizeReason('pullback -0.08 < -0.06 (too deep)')).toBe(
+        '様子見: 押し目が深すぎる/下落転換懸念 (下落率 -8.00% < 許容 -6.00%)',
+      )
+    })
+
+    it('invalid 20d high', () => {
+      expect(localizeReason('invalid 20d high')).toBe(
+        'データ不足: 直近20日高値を算出できず',
+      )
+    })
   })
 
-  it('suffixes exit-side reasons with "(exit)"', () => {
-    expect(localizeReason('take-profit hit: pnl 0.08 >= 0.07')).toBe(
-      '利確到達 (pnl 8.00% ≥ 7.00%) (exit)',
-    )
-    expect(localizeReason('stop-loss hit: pnl -0.05 <= -0.04')).toBe(
-      '損切到達 (pnl -5.00% ≤ -4.00%) (exit)',
-    )
-    expect(localizeReason('time-stop hit: held 10d >= 10d')).toBe(
-      '時間切れ (保有 10d ≥ 10d) (exit)',
-    )
-    expect(localizeReason('holding: pnl 0.02 within (-0.04, 0.07)')).toBe(
-      '保有継続 (pnl 2.00%、範囲 -4.00% 〜 7.00%) (exit)',
-    )
+  describe('保有中 (利食い / 損切り / 時間切れ / 保有継続)', () => {
+    it('take-profit hit → 利食い (利確目標到達)', () => {
+      expect(localizeReason('take-profit hit: pnl 0.08 >= 0.07')).toBe(
+        '利食い: 利確目標到達 (含み損益 +8.00% ≥ 目標 +7.00%)',
+      )
+    })
+
+    it('stop-loss hit → 損切り (損切りライン到達)', () => {
+      expect(localizeReason('stop-loss hit: pnl -0.05 <= -0.04')).toBe(
+        '損切り: 損切りライン到達 (含み損益 -5.00% ≤ ライン -4.00%)',
+      )
+    })
+
+    it('time-stop → 保有期限到達', () => {
+      expect(localizeReason('time-stop hit: held 10d >= 10d')).toBe(
+        '時間切れ: 保有期限到達 (保有 10d ≥ 上限 10d)',
+      )
+    })
+
+    it('holding within envelope', () => {
+      expect(localizeReason('holding: pnl 0.02 within (-0.04, 0.07)')).toBe(
+        '保有継続: 含み損益 +2.00% (利食い +7.00% / 損切り -4.00% の範囲内)',
+      )
+    })
   })
 
-  it('translates BUY signal reason with % formatting', () => {
-    expect(
-      localizeReason('pullback -0.03 in uptrend (50d return 0.12)'),
-    ).toBe('BUY 判定: 押し目 -3.00%、上昇トレンド継続 (50日 return 12.00%)')
+  describe('BUY (押し目買い)', () => {
+    it('uptrend pullback → 買い', () => {
+      expect(localizeReason('pullback -0.03 in uptrend (50d return 0.12)')).toBe(
+        '買い: 上昇トレンド中の押し目買い (下落率 -3.00%、50日騰落率 +12.00%)',
+      )
+    })
   })
 
-  it('keeps sizing / scheduler / bucket reasons as-is (legacy forms)', () => {
-    expect(localizeReason('sizing rejected: lot-size-round')).toBe(
-      'サイジング拒否: ロット丸め後に最小取引単位未満',
-    )
-    expect(localizeReason('sizing rejected: insufficient-risk-budget')).toBe(
-      'サイジング拒否: リスク予算不足',
-    )
-    expect(localizeReason('SELL without position')).toBe('SELL 対象ポジションなし')
-    expect(
-      localizeReason('bucket cap: semi projected 500 > 300'),
-    ).toBe('バケット cap: semi 合計 500 が上限 300 を超過')
+  describe('発注スキップ / 発注中', () => {
+    it('lot-size-round with diagnostics → 建玉可 / 1単元', () => {
+      expect(
+        localizeReason(
+          'sizing rejected: lot-size-round (raw qty 98 < lot 100, stop 203.00, entry 2876)',
+        ),
+      ).toBe(
+        '発注スキップ: 売買単位未満 (建玉可 98 株 < 1単元 100 株、損切り幅 203.00/株、株価 2876)',
+      )
+    })
+
+    it('insufficient-risk-budget → リスク予算枯渇', () => {
+      expect(
+        localizeReason('sizing rejected: insufficient-risk-budget (budget 0.00)'),
+      ).toBe('発注スキップ: リスク予算枯渇 (残 0.00)')
+    })
+
+    it('invalid-stop', () => {
+      expect(localizeReason('sizing rejected: invalid-stop (stopDistance 0)')).toBe(
+        '発注スキップ: 損切り幅が算出不能 (0)',
+      )
+    })
+
+    it('atr-floor', () => {
+      expect(localizeReason('sizing rejected: atr-floor')).toBe(
+        '発注スキップ: ボラティリティ低下 (ATR 下限割れ)',
+      )
+    })
+
+    it('symbol-cap', () => {
+      expect(localizeReason('sizing rejected: symbol-cap')).toBe(
+        '発注スキップ: 銘柄別投資上限超過',
+      )
+    })
+
+    it('SELL without position → 手仕舞い対象の建玉なし', () => {
+      expect(localizeReason('SELL without position')).toBe(
+        '発注スキップ: 手仕舞い対象の建玉なし',
+      )
+    })
+
+    it('pending order in flight → 約定待ち', () => {
+      expect(localizeReason('pending order in flight')).toBe(
+        '発注中: 直前注文の約定待ち',
+      )
+    })
+
+    it('cooldown → 取引停止中 (JST 表記)', () => {
+      // UTC 2026-04-25T00:00:00.000Z → JST 2026-04-25 09:00:00
+      expect(
+        localizeReason('cooldown active until 2026-04-25T00:00:00.000Z'),
+      ).toBe('様子見: 取引停止中 (2026-04-25 09:00:00 JST まで)')
+    })
+
+    it('cooldown with unparseable timestamp falls back to raw', () => {
+      expect(localizeReason('cooldown active until not-a-date')).toBe(
+        '様子見: 取引停止中 (not-a-date まで)',
+      )
+    })
+
+    it('insufficient bars → 日柄不足', () => {
+      expect(localizeReason('insufficient bars for indicators')).toBe(
+        'データ不足: 指標計算に必要な日柄不足',
+      )
+    })
+
+    it('broker submit error → 証券会社側で拒否', () => {
+      expect(localizeReason('broker submit error: Webull 429')).toBe(
+        '発注エラー: 証券会社側で拒否 — Webull 429',
+      )
+    })
   })
 
-  it('localizes sizing rejects with diagnostic values', () => {
-    // lot-size-round with raw qty / stop / entry → operator can see how
-    // close we were to 1 lot.
-    expect(
-      localizeReason(
-        'sizing rejected: lot-size-round (raw qty 98 < lot 100, stop 203.00, entry 2876)',
-      ),
-    ).toBe('サイジング拒否: リスク予算で賄える上限 98 株が 1 lot (100 株) に届かず (stop 203.00/株、entry 2876)')
-    expect(
-      localizeReason('sizing rejected: insufficient-risk-budget (budget 0.00)'),
-    ).toBe('サイジング拒否: リスク予算不足 (予算 0.00)')
-    expect(
-      localizeReason('sizing rejected: invalid-stop (stopDistance 0)'),
-    ).toBe('サイジング拒否: stop 距離が無効 (0)')
+  describe('同グループ建玉上限 (bucket)', () => {
+    it('bucket cap projected over', () => {
+      expect(localizeReason('bucket cap: semi projected 500 > 300')).toBe(
+        '発注スキップ: 同グループ建玉上限超過 (semi 合計 500 > 上限 300)',
+      )
+    })
+
+    it('bucket cap invalid (non-finite / <=0)', () => {
+      // bucketExposureGate.ts の fail-closed reject 形式
+      expect(localizeReason('bucket cap: semi invalid cap 0')).toBe(
+        '発注スキップ: 同グループ建玉上限が無効 (semi の上限 0)',
+      )
+    })
+
+    it('bucket cap invalid addNotional', () => {
+      expect(localizeReason('bucket cap: semi invalid addNotional NaN')).toBe(
+        'データ不足: 同グループ発注金額が無効 (semi の金額 NaN)',
+      )
+    })
   })
 
-  it('does not touch unknown strings (forward-compat for new reason formats)', () => {
+  it('does not touch unknown strings', () => {
     expect(localizeReason('totally unknown reason text')).toBe(
       'totally unknown reason text',
     )
