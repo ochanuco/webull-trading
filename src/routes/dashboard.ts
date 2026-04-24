@@ -388,11 +388,15 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^take-profit hit: pnl (\S+) >= (\S+)$/, (_m, p, t) => `利確到達 (pnl ${fmtPct(p)} ≥ ${fmtPct(t)}) (exit)`)
   s = s.replace(/^stop-loss hit: pnl (\S+) <= (\S+)$/, (_m, p, t) => `損切到達 (pnl ${fmtPct(p)} ≤ ${fmtPct(t)}) (exit)`)
   s = s.replace(/^time-stop hit: held (\S+) >= (\S+)$/, '時間切れ (保有 $1 ≥ $2) (exit)')
-  s = s.replace(/^holding: pnl (\S+) within \(([^)]+)\)$/, (_m, p, r) => `保有継続 (pnl ${fmtPct(p)}、範囲 ${r}) (exit)`)
+  // holding の range 上下限も % 化して表示を統一 (CodeRabbit #133)。
+  s = s.replace(
+    /^holding: pnl (\S+) within \(([^,]+),\s*([^)]+)\)$/,
+    (_m, p, low, high) => `保有継続 (pnl ${fmtPct(p)}、範囲 ${fmtPct(low)} 〜 ${fmtPct(high)}) (exit)`,
+  )
   // Entry filter (未保有、entry 条件未達)
   s = s.replace(
     /^50d return (\S+) <= (\S+) trend threshold$/,
-    (_m, r, t) => `entry 見送り: 50日 return ${fmtPct(r)} < 必要値 ${fmtPct(t)} (上昇トレンド filter)`,
+    (_m, r, t) => `entry 見送り: 50日 return ${fmtPct(r)} ≤ 必要値 ${fmtPct(t)} (上昇トレンド filter)`,
   )
   s = s.replace(/^price (\S+) <= sma50 (\S+)$/, 'entry 見送り: 価格 $1 ≤ SMA50 $2 (上昇トレンド filter)')
   s = s.replace(/^invalid 20d high$/, 'entry 見送り: 20日高値が無効')

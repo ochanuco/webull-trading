@@ -12,7 +12,7 @@ describe('localizeReason', () => {
     // The dashboard reason that confused the operator in #132 (6971 HOLD).
     expect(
       localizeReason('50d return 0.0108 <= 0.03 trend threshold'),
-    ).toBe('entry 見送り: 50日 return 1.08% < 必要値 3.00% (上昇トレンド filter)')
+    ).toBe('entry 見送り: 50日 return 1.08% ≤ 必要値 3.00% (上昇トレンド filter)')
     expect(localizeReason('price 100 <= sma50 105')).toBe(
       'entry 見送り: 価格 100 ≤ SMA50 105 (上昇トレンド filter)',
     )
@@ -35,7 +35,7 @@ describe('localizeReason', () => {
       '時間切れ (保有 10d ≥ 10d) (exit)',
     )
     expect(localizeReason('holding: pnl 0.02 within (-0.04, 0.07)')).toBe(
-      '保有継続 (pnl 2.00%、範囲 -0.04, 0.07) (exit)',
+      '保有継続 (pnl 2.00%、範囲 -4.00% 〜 7.00%) (exit)',
     )
   })
 
