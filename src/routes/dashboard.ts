@@ -162,6 +162,7 @@ export const dashboard = new Hono<AppBindings>()
           decision: strategyDecisionLog.decision,
           reason: strategyDecisionLog.reason,
           price: strategyDecisionLog.price,
+          indicatorsJson: strategyDecisionLog.indicatorsJson,
           clientOrderId: strategyDecisionLog.clientOrderId,
           filledPrice: tradeJournal.filledPrice,
           filledQty: tradeJournal.filledQty,
@@ -264,6 +265,13 @@ const STYLE = `
   .footer{margin-top:24px;font-size:11px;color:#86868b}
   details{margin-top:16px}
   summary{cursor:pointer;padding:6px 0;font-weight:600}
+  .reason-details{margin:0;min-width:260px}
+  .reason-details summary{padding:0;color:#06c;font-weight:400}
+  .reason-panel{margin-top:8px;padding:10px;border:1px solid #e5e5ea;border-radius:6px;background:#fafafa;color:#1d1d1f;max-width:680px}
+  .reason-panel div{margin:0 0 8px}
+  .reason-panel div:last-child{margin-bottom:0}
+  .reason-panel code{white-space:pre-wrap;word-break:break-word}
+  .reason-panel pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px}
 `
 
 function layout(title: string, body: string): string {
@@ -794,6 +802,7 @@ function cronBody(
     decision: string
     reason: string | null
     price: number | null
+    indicatorsJson?: string | null
     clientOrderId?: string | null
     filledPrice?: number | null
     filledQty?: number | null
@@ -835,7 +844,7 @@ function cronBody(
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"><strong>${esc(r.symbol)}</strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
-        <td>${esc(localizeReason(r.reason))}</td>
+        <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
         <td class="muted">${esc(fillCell)}</td>
         <td>${realizedCell}</td>
@@ -849,6 +858,34 @@ function cronBody(
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
+}
+
+function cronReasonCell(row: {
+  id: number
+  requestId: string | null
+  reason: string | null
+  indicatorsJson?: string | null
+  clientOrderId?: string | null
+}): string {
+  const localized = localizeReason(row.reason)
+  const rawReason = row.reason ?? '-'
+  const requestLink = row.requestId
+    ? `<a href="/dashboard/cron/json?requestId=${encodeURIComponent(row.requestId)}" target="_blank" rel="noreferrer">${esc(row.requestId)}</a>`
+    : '-'
+  const indicators = row.indicatorsJson
+    ? JSON.stringify(parseJsonObject(row.indicatorsJson), null, 2)
+    : null
+
+  return `<details class="reason-details">
+    <summary>${esc(localized || '-')}</summary>
+    <div class="reason-panel">
+      <div><strong>decision id</strong><br><code>${row.id}</code></div>
+      <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
+      <div><strong>requestId / run JSON</strong><br>${requestLink}</div>
+      <div><strong>clientOrderId</strong><br><code>${esc(row.clientOrderId ?? '-')}</code></div>
+      <div><strong>indicators</strong><br>${indicators ? `<pre>${esc(indicators)}</pre>` : '<span class="muted">-</span>'}</div>
+    </div>
+  </details>`
 }
 
 /**
