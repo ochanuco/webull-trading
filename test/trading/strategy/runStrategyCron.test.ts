@@ -171,14 +171,23 @@ describe('resolvePortfolioForRiskScale', () => {
     expect(resolvePortfolioForRiskScale(p, Number.NaN).usedFallback).toBe(false)
   })
 
-  it('does NOT fallback when dailyStartEquity is negative', () => {
-    // Negative is treated as unseeded, and fallback activates — but the
-    // intent here is: any non-positive finite value is "not yet initialized"
-    // (differs from NaN which means corrupt).
+  it('treats negative dailyStartEquity as unseeded and falls back', () => {
+    // Negative finite value is treated as unseeded (not yet initialized),
+    // distinct from NaN which means corrupt.
     const r = resolvePortfolioForRiskScale(
       { dailyStartEquity: -1, dailyRealizedPnl: 0 },
       3333,
     )
     expect(r.usedFallback).toBe(true)
+  })
+
+  it('does NOT fallback when dailyRealizedPnl is non-finite (corrupt)', () => {
+    // CodeRabbit #131 review: if realizedPnl is NaN / Infinity, the portfolio
+    // snapshot is corrupt and must trigger fail-closed via drawdownRiskScale,
+    // not get silently zeroed by the fallback path.
+    const p = { dailyStartEquity: 0, dailyRealizedPnl: Number.NaN }
+    const r = resolvePortfolioForRiskScale(p, 3333)
+    expect(r.usedFallback).toBe(false)
+    expect(r.portfolio).toBe(p)
   })
 })

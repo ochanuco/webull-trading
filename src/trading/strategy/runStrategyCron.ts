@@ -270,8 +270,12 @@ export function resolvePortfolioForRiskScale<
 ): { portfolio: P; usedFallback: boolean } {
   // start > 0 ならそのまま
   if (portfolio.dailyStartEquity > 0) return { portfolio, usedFallback: false }
-  // NaN / 負値など壊れている場合は fallback しない (halt を期待)
+  // dailyStartEquity が NaN / Infinity → fallback しない (halt を期待)
   if (!Number.isFinite(portfolio.dailyStartEquity)) return { portfolio, usedFallback: false }
+  // dailyRealizedPnl が壊れている (NaN / Infinity) なら fallback しない。
+  // fallback 経路で勝手に 0 へ上書きすると壊れ値を fail-closed で捕まえ損ねる
+  // (CodeRabbit review #131)。
+  if (!Number.isFinite(portfolio.dailyRealizedPnl)) return { portfolio, usedFallback: false }
   if (
     totalCapitalUsd === null ||
     totalCapitalUsd === undefined ||
