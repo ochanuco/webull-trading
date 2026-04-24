@@ -364,7 +364,7 @@ function configBody(
       const meta = CONFIG_KEY_META[camelKey] ?? CONFIG_KEY_META[k]
       const label = meta?.label ?? '—'
       const detail = meta?.detail ?? '—'
-      return `<tr><th>${esc(camelKey)}</th><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td><td>${esc(formatConfigValue(v))}</td></tr>`
+      return `<tr><th>${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td></tr>`
     })
     .join('')
   const symRows = universe.allowedSymbols
@@ -381,7 +381,7 @@ function configBody(
   return `<details open>
     <summary>グローバル設定 (global_config)</summary>
     <table>
-      <thead><tr><th>列名 (列名で UPDATE 可)</th><th>説明</th><th>詳細</th><th>値</th></tr></thead>
+      <thead><tr><th>Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
       <tbody>${globalRows}</tbody>
     </table>
   </details>
