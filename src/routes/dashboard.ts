@@ -393,100 +393,104 @@ export function localizeReason(en: string | null | undefined): string {
   if (!en) return '-'
   let s = en
 
-  // === 発注中 / クールダウン (entry 前ガード) ===
-  s = s.replace(/^pending order in flight$/, '発注中: 直前注文の結果待ち')
-  s = s.replace(/^cooldown active until (.+)$/, '様子見: クールダウン中 ($1 まで取引停止)')
-  s = s.replace(/^pending order already in flight$/, '発注中: 同銘柄の注文が処理中')
+  // === 発注中 / 取引停止 (entry 前ガード) ===
+  s = s.replace(/^pending order in flight$/, '発注中: 直前注文の約定待ち')
+  s = s.replace(/^cooldown active until (.+)$/, '様子見: 取引停止中 ($1 まで)')
+  s = s.replace(/^pending order already in flight$/, '発注中: 同銘柄の注文処理中')
 
   // === 保有中の exit 判定 ===
+  // 「含み益/含み損」= 未実現損益の日本株標準語。strategy.ts の pnlPct は
+  // (現値 - 取得価格)/取得価格 で未実現なのでこちらを採用。
   s = s.replace(
     /^take-profit hit: pnl (\S+) >= (\S+)$/,
-    (_m, p, t) => `利食い: 目標到達 (損益 ${fmtPct(p)} ≥ 目標 ${fmtPct(t)})`,
+    (_m, p, t) => `利食い: 利確目標到達 (含み損益 ${fmtPct(p)} ≥ 目標 ${fmtPct(t)})`,
   )
   s = s.replace(
     /^stop-loss hit: pnl (\S+) <= (\S+)$/,
-    (_m, p, t) => `損切り: 下限到達 (損益 ${fmtPct(p)} ≤ 下限 ${fmtPct(t)})`,
+    (_m, p, t) => `損切り: 損切りライン到達 (含み損益 ${fmtPct(p)} ≤ ライン ${fmtPct(t)})`,
   )
   s = s.replace(
     /^time-stop hit: held (\S+) >= (\S+)$/,
-    '時間切れ: 最大保有期間到達 (保有 $1 ≥ 上限 $2)',
+    '時間切れ: 保有期限到達 (保有 $1 ≥ 上限 $2)',
   )
   s = s.replace(
     /^holding: pnl (\S+) within \(([^,]+),\s*([^)]+)\)$/,
     (_m, p, low, high) =>
-      `保有継続: 損益 ${fmtPct(p)} (利食い ${fmtPct(high)} / 損切り ${fmtPct(low)} の範囲内)`,
+      `保有継続: 含み損益 ${fmtPct(p)} (利食い ${fmtPct(high)} / 損切り ${fmtPct(low)} の範囲内)`,
   )
 
-  // === 未保有の entry 判定 ===
-  // "様子見" で「未保有 + 条件未成立」を表現 (以前の "entry 見送り" は
-  // 「試みた」と誤読されるのを回避)
+  // === 未保有の entry 判定 (様子見) ===
+  // 「移動平均線割れ」は日本株の慣用表現。
   s = s.replace(
     /^50d return (\S+) <= (\S+) trend threshold$/,
     (_m, r, t) =>
-      `様子見: 上昇トレンド不成立 (50日騰落率 ${fmtPct(r)} < 必要 ${fmtPct(t)})`,
+      `様子見: 上昇トレンド未成立 (50日騰落率 ${fmtPct(r)} < 条件 ${fmtPct(t)})`,
   )
   s = s.replace(
     /^price (\S+) <= sma50 (\S+)$/,
-    '様子見: 50日移動平均 (SMA50) を下回る (株価 $1 < SMA50 $2)',
+    '様子見: 50日移動平均線割れ (株価 $1 < 移動平均 $2)',
   )
   s = s.replace(/^invalid 20d high$/, 'データ不足: 直近20日高値を算出できず')
   s = s.replace(
     /^pullback (\S+) > (\S+) \(not deep enough\)$/,
-    (_m, p, t) => `様子見: 押し目が浅い (下落率 ${fmtPct(p)} > 必要 ${fmtPct(t)})`,
+    (_m, p, t) => `様子見: 押し目が浅い (下落率 ${fmtPct(p)} > 条件 ${fmtPct(t)})`,
   )
   s = s.replace(
     /^pullback (\S+) < (\S+) \(too deep\)$/,
-    (_m, p, t) => `様子見: 押し目が深すぎる/下落転換の恐れ (下落率 ${fmtPct(p)} < 許容 ${fmtPct(t)})`,
+    (_m, p, t) =>
+      `様子見: 押し目が深すぎる/下落転換懸念 (下落率 ${fmtPct(p)} < 許容 ${fmtPct(t)})`,
   )
 
-  // === BUY signal ===
+  // === BUY signal (押し目買い成立) ===
   s = s.replace(
     /^pullback (\S+) in uptrend \(50d return (\S+)\)$/,
-    (_m, p, r) => `買い: 上昇トレンド中の押し目 (下落率 ${fmtPct(p)}、50日騰落率 ${fmtPct(r)})`,
+    (_m, p, r) =>
+      `買い: 上昇トレンド中の押し目買い (下落率 ${fmtPct(p)}、50日騰落率 ${fmtPct(r)})`,
   )
 
-  // === Sizing 系 reject → "発注スキップ" ===
-  // POC なので legacy (診断値なし) bare 形は持たない — 現行 buildSizingRejectReason
-  // が diagnostic 値付きで emit するため。atr-floor / symbol-cap / zero qty は
-  // 診断情報が無いので bare のまま扱う。
+  // === Sizing 系 reject (発注スキップ) ===
+  // 「建玉可」= risk 予算で保有可能な建玉数 (信用取引等での "許容建玉" 用法)
   s = s.replace(
     /^sizing rejected: lot-size-round \(raw qty (\S+) < lot (\S+), stop (\S+), entry (\S+)\)$/,
-    '発注スキップ: 売買単位未満 (リスク許容 $1 株 < 1単元 $2 株、stop $3/株、株価 $4)',
+    '発注スキップ: 売買単位未満 (建玉可 $1 株 < 1単元 $2 株、損切り幅 $3/株、株価 $4)',
   )
   s = s.replace(
     /^sizing rejected: insufficient-risk-budget \(budget (\S+)\)$/,
-    '発注スキップ: リスク予算が枯渇 (残 $1)',
+    '発注スキップ: リスク予算枯渇 (残 $1)',
   )
   s = s.replace(/^sizing rejected: atr-floor$/, '発注スキップ: ボラティリティ低下 (ATR 下限割れ)')
-  s = s.replace(/^sizing rejected: symbol-cap$/, '発注スキップ: 銘柄別の投資上限超過')
+  s = s.replace(/^sizing rejected: symbol-cap$/, '発注スキップ: 銘柄別投資上限超過')
   s = s.replace(
     /^sizing rejected: invalid-stop \(stopDistance (\S+)\)$/,
-    '発注スキップ: 損切り幅を算出できず (stopDistance $1)',
+    '発注スキップ: 損切り幅が算出不能 ($1)',
   )
-  s = s.replace(/^sizing rejected: zero qty$/, '発注スキップ: 発注数量が 0 株')
+  s = s.replace(/^sizing rejected: zero qty$/, '発注スキップ: 発注株数が 0')
 
   // === Scheduler inline ===
-  s = s.replace(/^SELL without position$/, '発注スキップ: 売却対象のポジションなし')
-  s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄が揃わず')
-  s = s.replace(/^invalid price: (\S+)$/, 'データ不足: 価格が無効 ($1)')
-  s = s.replace(/^invalid notional:/, 'データ不足: 発注金額が無効:')
-  s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: ポジション数量が無効 ($1)')
+  s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の建玉なし')
+  s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄不足')
+  s = s.replace(/^invalid price: (\S+)$/, 'データ不足: 株価が無効 ($1)')
+  s = s.replace(/^invalid notional:/, 'データ不足: 約定代金が無効:')
+  s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: 建玉数が無効 ($1)')
   s = s.replace(/^invalid expiresAt/, 'データ不足: 注文有効期限が無効')
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
   s = s.replace(/^broker submit error: /, '発注エラー: 証券会社側で拒否 — ')
 
-  // === Bucket cap (セクター枠) ===
+  // === Bucket cap (同グループ建玉上限) ===
+  // "建玉上限" は信用取引で広く使われる正統用語。bucket は運用者が任意に
+  // 付けるグループタグ (半導体 3x / JP 自動車 等) で、必ずしも業種ではない
+  // ので「同グループ」で表現。
   s = s.replace(
     /^bucket cap: (\S+) projected (\S+) > (\S+)$/,
-    '発注スキップ: セクター枠超過 ($1 合計 $2 > 上限 $3)',
+    '発注スキップ: 同グループ建玉上限超過 ($1 合計 $2 > 上限 $3)',
   )
   s = s.replace(
     /^bucket cap: (\S+) cap (\S+) <= 0$/,
-    '発注スキップ: セクター枠が無効 ($1 の上限 $2 が 0 以下)',
+    '発注スキップ: 同グループ建玉上限が無効 ($1 の上限 $2 ≤ 0)',
   )
   s = s.replace(
     /^bucket cap: (\S+) invalid addNotional (\S+)$/,
-    'データ不足: セクター枠追加分が無効 ($1 の発注金額 $2)',
+    'データ不足: 同グループ発注代金が無効 ($1 の代金 $2)',
   )
   return s
 }
