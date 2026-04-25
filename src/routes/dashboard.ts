@@ -417,7 +417,13 @@ export function pickFreshQuote(
   if (yahoo === null) return { price: webull.price, source: webull.source, asOf: webull.asOf }
   const w = new Date(webull.asOf).getTime()
   const y = new Date(yahoo.asOf).getTime()
-  return y > w
+  // 不正な ISO は "より古い" 扱い: 有効な側があればそちらを採用、両方
+  // 不正なら webull にタイブレーク (既存挙動維持)。`y > w` だけだと
+  // w=NaN の時に false 評価で不正な webull を選んでしまう回帰がある。
+  const wValid = Number.isFinite(w)
+  const yValid = Number.isFinite(y)
+  const pickYahoo = yValid && (!wValid || y > w)
+  return pickYahoo
     ? { price: yahoo.price, source: 'yahoo-bars', asOf: yahoo.asOf }
     : { price: webull.price, source: webull.source, asOf: webull.asOf }
 }

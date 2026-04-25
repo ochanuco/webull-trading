@@ -354,4 +354,26 @@ describe('pickFreshQuote', () => {
     const y = { price: 99, asOf: '2026-04-25T03:00:00.000Z' }
     expect(pickFreshQuote(w, y)).toEqual(w)
   })
+
+  it('Webull の asOf が不正なら Yahoo を採用', () => {
+    const w = { price: 100, source: 'webull-snapshot', asOf: 'not-an-iso' }
+    const y = { price: 128.32, asOf: '2026-04-25T03:00:00.000Z' }
+    expect(pickFreshQuote(w, y)).toEqual({
+      price: 128.32,
+      source: 'yahoo-bars',
+      asOf: y.asOf,
+    })
+  })
+
+  it('Yahoo の asOf が不正なら Webull を採用', () => {
+    const w = { price: 105.64, source: 'webull-snapshot', asOf: '2026-04-25T03:00:00.000Z' }
+    const y = { price: 99, asOf: 'not-an-iso' }
+    expect(pickFreshQuote(w, y)).toEqual(w)
+  })
+
+  it('両方不正でも crash せず Webull にタイブレーク', () => {
+    const w = { price: 100, source: 'webull-snapshot', asOf: 'bad-w' }
+    const y = { price: 99, asOf: 'bad-y' }
+    expect(pickFreshQuote(w, y)).toEqual(w)
+  })
 })
