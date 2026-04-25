@@ -2486,14 +2486,61 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       });
       window.addEventListener('resize', function () { symChart.resize(); });
 
+      // visible 範囲 (zoom 後の x 軸 startMs〜endMs) 内の candle high/low /
+      // markers / position 線を集めて y 軸 range を再計算。zoom out / preset
+      // 切替で「縦に空白が広がる」現象を防ぎプロ chart 風のタイト fit に。
+      function recomputeYAxis() {
+        var opt = symChart.getOption();
+        var dz = opt.dataZoom && opt.dataZoom[0];
+        if (!dz) return;
+        var startMs = dz.startValue;
+        var endMs = dz.endValue;
+        if (startMs == null || endMs == null) return;
+        var visibleY = [];
+        function pushIfFinite(v) {
+          if (v != null && typeof v === 'number' && Number.isFinite(v)) visibleY.push(v);
+        }
+        (sc.intradayBars || []).forEach(function (b) {
+          var t = new Date(b.timestamp).getTime();
+          if (Number.isFinite(t) && t >= startMs && t <= endMs) {
+            pushIfFinite(b.high);
+            pushIfFinite(b.low);
+          }
+        });
+        sc.markers.forEach(function (m) {
+          var t = new Date(m.timestamp).getTime();
+          if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(m.price);
+        });
+        // 保有期間が visible 範囲と重なっていれば position 線を含める
+        if (sc.position) {
+          var openedAtMs = new Date(sc.position.openedAt).getTime();
+          if (Number.isFinite(openedAtMs) && openedAtMs <= endMs) {
+            var avg = sc.position.avgPrice;
+            pushIfFinite(avg);
+            pushIfFinite(avg * (1 + sc.rules.stopPct));
+            pushIfFinite(avg * (1 + sc.rules.takeProfitPct));
+          }
+        }
+        if (visibleY.length === 0) return;
+        var rawMin = Math.min.apply(null, visibleY);
+        var rawMax = Math.max.apply(null, visibleY);
+        if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax)) return;
+        var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
+        symChart.setOption({ yAxis: { min: rawMin - pad, max: rawMax + pad } });
+      }
+      // 初回 render 後に一度実行 (default zoom 範囲に y を tight fit)
+      recomputeYAxis();
+
       // dataZoom 変更で URL の ?from / ?to を更新 (replaceState なので history
       // 汚染なし)。debounce 200ms で連続操作中の URL flicker を抑制。
       // 同時に symbol picker / tab strip の '?tab=symbol' リンクの href も
       // 上書き → 銘柄切替で zoom が古い range に reset されない。
+      // y 軸も visible 範囲に再 fit (recomputeYAxis、debounce 内で)。
       var dzTimer = null;
       symChart.on('dataZoom', function () {
         if (dzTimer) clearTimeout(dzTimer);
         dzTimer = setTimeout(function () {
+          recomputeYAxis();
           var opt = symChart.getOption();
           var dz = opt.dataZoom && opt.dataZoom[0];
           if (!dz) return;
