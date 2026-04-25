@@ -348,11 +348,14 @@ function positionsBody(
           ? ((quote.price - pos.avgPrice) / pos.avgPrice) * 100
           : null
       const pnlClass = pnlPct === null ? 'muted' : pnlPct >= 0 ? 'ok' : 'err'
+      const quoteCell = quote
+        ? `${fmtNumber(quote.price, 2)} <span class="muted" style="font-size:11px">(${esc(quote.source)}, ${esc(formatQuoteAge(quote.asOf ?? quote.fetchedAt))})</span>`
+        : '<span class="muted">—</span>'
       return `<tr>
         <td><strong>${esc(s.symbol)}</strong></td>
         <td>${pos ? esc(pos.qty) : '<span class="muted">—</span>'}</td>
         <td>${pos ? fmtNumber(pos.avgPrice, 2) : '<span class="muted">—</span>'}</td>
-        <td>${quote ? fmtNumber(quote.price, 2) : '<span class="muted">—</span>'}</td>
+        <td>${quoteCell}</td>
         <td class="${pnlClass}">${pnlPct === null ? '—' : fmtNumber(pnlPct, 2) + '%'}</td>
         <td>${pendingSide ? esc(pendingSide) : '<span class="muted">—</span>'}</td>
         <td>${formatCooldown(s.cooldownUntil)}</td>
@@ -360,9 +363,16 @@ function positionsBody(
       </tr>`
     })
     .join('')
-  return `<table>
+  return `<p class="muted" style="font-size:12px">
+    現在値・評価損益は <strong>Yahoo Finance daily close</strong> ベース。
+    intraday は前日終値のままで実際の市場価格とは乖離します
+    (実約定損益は <a href="/dashboard/cron">/dashboard/cron</a> 「実 損益」列を参照)。
+    Webull last quote への切替は
+    <a href="https://github.com/ochanuco/webull-trading/issues/21">#21</a> 予定。
+  </p>
+  <table>
     <thead><tr>
-      <th>銘柄</th><th>数量</th><th>平均取得単価</th><th>現在値</th><th>評価損益</th>
+      <th>銘柄</th><th>数量</th><th>平均取得単価</th><th>現在値 (source, 鮮度)</th><th>評価損益</th>
       <th>未約定</th><th>クールダウン</th><th>更新時刻</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
@@ -638,6 +648,26 @@ function formatCooldown(cooldownUntil: string | null): string {
     return '<span class="muted">—</span>'
   }
   return `<span class="warn">${esc(fmtJst(cooldownUntil))}</span>`
+}
+
+/**
+ * QuoteSnapshot.asOf (ISO) を「NN分前 / NN時間前 / NN日前」相対表記に。
+ * 現在値の鮮度を一目で見せるための表示用ヘルパー。Yahoo daily close は
+ * 数時間〜半日遅延があるため、評価損益が intraday 価格と乖離し得る。
+ * Webull last quote 接続後は #21 でこのラベルごと撤去予定。
+ */
+export function formatQuoteAge(asOf: string, now: Date = new Date()): string {
+  const t = new Date(asOf).getTime()
+  if (!Number.isFinite(t)) return '?'
+  const diffMs = now.getTime() - t
+  if (diffMs < 0) return 'just now'
+  const min = Math.floor(diffMs / 60_000)
+  if (min < 1) return 'just now'
+  if (min < 60) return `${min}m前`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h前`
+  const day = Math.floor(hr / 24)
+  return `${day}d前`
 }
 
 function formatConfigValue(v: unknown): string {
