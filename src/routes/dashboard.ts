@@ -68,6 +68,13 @@ export const dashboard = new Hono<AppBindings>()
     ])
     return c.html(layout('設定', configBody(global, universe)))
   })
+  .get('/charts', async (c) => {
+    if (!c.env.DB) {
+      return c.html(layout('チャート', unavailable('DB not bound')))
+    }
+    const equity = await loadEquityCurve(c.env.DB)
+    return c.html(layout('チャート', chartsBody({ equity })))
+  })
   .get('/cron/json', async (c) => {
     if (!c.env.DB) {
       return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
@@ -294,6 +301,7 @@ function layout(title: string, body: string): string {
   <a href="/dashboard/trades">約定履歴</a>
   <a href="/dashboard/config">設定</a>
   <a href="/dashboard/cron">Cron</a>
+  <a href="/dashboard/charts">チャート</a>
 </nav>
 ${body}
 <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
@@ -329,6 +337,7 @@ function indexBody(): string {
   <li><a href="/dashboard/trades">約定履歴</a> — <code>trade_journal</code> 直近 (既定 50件、<code>?limit=N</code> で可変、最大 200)</li>
   <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
   <li><a href="/dashboard/cron">Cron 判定</a> — <code>strategy_decision_log</code> 直近 (<code>?symbol=SOXL</code> で絞り込み可)</li>
+  <li><a href="/dashboard/charts">チャート</a> — エクイティカーブ / ドローダウン (Phase 0+1)、以降のチャートは <a href="https://github.com/ochanuco/webull-trading/issues/158">#158</a> で順次追加</li>
 </ul>`
 }
 
@@ -1057,4 +1066,147 @@ function formatRealizedPnl(value: number): string {
   const sign = value > 0 ? '+' : ''
   const cls = value > 0 ? 'ok' : value < 0 ? 'err' : 'muted'
   return `<span class="${cls}">${sign}${value.toFixed(2)}</span>`
+}
+
+/**
+ * 戦略妥当性チャート (#158)。
+ *
+ * 設計方針:
+ * - ECharts CDN load (jsdelivr)、build step 導入しない (POC scope 維持)
+ * - データは `<script>` で window.__chartData に埋込、`</script>` を escape
+ * - CDN 失敗時は chart 部分のみ unavailable 表示で fail-graceful
+ *
+ * Phase 0+1 では equity curve + drawdown のみ。Phase 2-4 で追加予定。
+ */
+
+const ECHARTS_CDN = 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js'
+
+interface EquityPoint {
+  date: string // YYYY-MM-DD (JST)
+  dailyPnl: number
+  cumulativePnl: number
+  drawdownPct: number // 0 or 負 (peak からの低下率)
+}
+
+/**
+ * trade_journal の post_submit で realized_pnl が記録されている SELL fill を
+ * 日次集計し、累積 PnL とドローダウン率を計算する。
+ *
+ * - peak は cumulativePnl の rolling max
+ * - drawdownPct は peak が 0 以下のとき null 相当 (= 0%) として扱う
+ *   (peak が小さい初期は割り算が暴れるため)
+ */
+export async function loadEquityCurve(db: D1Database): Promise<EquityPoint[]> {
+  // SQLite の date(timestamp) はデフォルト UTC。JST 表示にするため +9h shift。
+  const result = await db
+    .prepare(
+      `SELECT date(timestamp, '+9 hours') AS day,
+              SUM(realized_pnl) AS daily_pnl
+       FROM trade_journal
+       WHERE realized_pnl IS NOT NULL
+         AND trade_event_type = 'post_submit'
+       GROUP BY day
+       ORDER BY day ASC`,
+    )
+    .all<{ day: string; daily_pnl: number }>()
+  const rows = result.results ?? []
+  return computeEquitySeries(rows.map((r) => ({ date: r.day, dailyPnl: Number(r.daily_pnl) })))
+}
+
+export function computeEquitySeries(
+  daily: Array<{ date: string; dailyPnl: number }>,
+): EquityPoint[] {
+  const points: EquityPoint[] = []
+  let cumulative = 0
+  let peak = 0
+  for (const d of daily) {
+    cumulative += d.dailyPnl
+    if (cumulative > peak) peak = cumulative
+    // peak が +側になるまでは drawdown を 0 表示 (シード資金規模が不明なので
+    // % 計算は意味をなさない。peak を絶対額として比較するのも手だが、トレーダー
+    // 視点では「最高益からの下落率」が読みたいので peak>0 で初めて非ゼロに)
+    const dd = peak > 0 ? (cumulative - peak) / peak : 0
+    points.push({ date: d.date, dailyPnl: d.dailyPnl, cumulativePnl: cumulative, drawdownPct: dd })
+  }
+  return points
+}
+
+/**
+ * `<script>...</script>` 内に埋め込む JSON を XSS 安全にする。
+ * ブラウザは `</script>` を「文字列の中でも」script 終端と解釈するので、
+ * `<` を unicode escape して中和する。
+ */
+export function safeJsonScript(varName: string, data: unknown): string {
+  const json = JSON.stringify(data).replace(/</g, '\\u003c')
+  return `<script>window.${varName} = ${json};</script>`
+}
+
+function chartsBody(args: { equity: EquityPoint[] }): string {
+  if (args.equity.length === 0) {
+    return `<p class="muted">まだ実 fill (realized_pnl) が無いためエクイティカーブを描けません。最初の SELL が約定すると表示されます。</p>`
+  }
+  const initScript = `
+    (function () {
+      if (typeof echarts === 'undefined') {
+        var el = document.getElementById('chart-status');
+        if (el) el.textContent = 'ECharts CDN を読み込めませんでした (ネットワーク or CSP 確認)';
+        return;
+      }
+      var data = window.__chartData;
+      var dates = data.equity.map(function (p) { return p.date; });
+      var equity = data.equity.map(function (p) { return p.cumulativePnl; });
+      var dd = data.equity.map(function (p) { return p.drawdownPct * 100; });
+
+      var equityChart = echarts.init(document.getElementById('equity-chart'));
+      equityChart.setOption({
+        title: { text: '累積 realized PnL', left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
+        grid: { left: 50, right: 20, top: 40, bottom: 40 },
+        xAxis: { type: 'category', data: dates },
+        yAxis: { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
+        series: [{ type: 'line', data: equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } }],
+      });
+
+      var ddChart = echarts.init(document.getElementById('dd-chart'));
+      ddChart.setOption({
+        title: { text: 'ドローダウン (peak からの下落率)', left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
+        grid: { left: 50, right: 20, top: 40, bottom: 40 },
+        xAxis: { type: 'category', data: dates },
+        yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
+        series: [
+          { type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } },
+          {
+            type: 'line', data: dates.map(function () { return -5; }), lineStyle: { color: '#888', type: 'dashed', width: 1 },
+            symbol: 'none', name: 'risk_dd_half_threshold (-5%)',
+          },
+          {
+            type: 'line', data: dates.map(function () { return -8; }), lineStyle: { color: '#b25000', type: 'dashed', width: 1 },
+            symbol: 'none', name: 'drawdown_kill_threshold (-8%)',
+          },
+          {
+            type: 'line', data: dates.map(function () { return -15; }), lineStyle: { color: '#c22', type: 'dashed', width: 1 },
+            symbol: 'none', name: 'risk_dd_halt_threshold (-15%)',
+          },
+        ],
+      });
+
+      window.addEventListener('resize', function () {
+        equityChart.resize();
+        ddChart.resize();
+      });
+    })();
+  `
+  return `<p class="muted" style="font-size:12px">
+    Phase 0+1: 累積 realized PnL とドローダウン。シード資金額を保持していないため
+    ドローダウンは「累積 PnL の peak からの低下率」で計算 (peak ≤ 0 のときは 0%)。
+    残りのチャート (decision breakdown / PnL 分布 / 銘柄チャート) は
+    <a href="https://github.com/ochanuco/webull-trading/issues/158">#158</a> で順次追加。
+  </p>
+  <div id="equity-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <div id="dd-chart" style="width:100%;height:280px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <p id="chart-status" class="warn" style="font-size:12px;margin-top:8px"></p>
+  ${safeJsonScript('__chartData', args)}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script defer>${initScript}</script>`
 }
