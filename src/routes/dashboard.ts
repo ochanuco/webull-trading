@@ -9,6 +9,7 @@ import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
+import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 
 /**
  * Read-only operator dashboard (#121). Server-rendered HTML via Hono — no
@@ -1585,14 +1586,40 @@ export async function loadSymbolChart(
     }))
   // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
-  // sloped trend lines: cron-eval price を JST 日次に dedupe → 5-bar fractal で
-  // swing pivot 検出 → 直近 2 pivots を結んで延長線 fit。pivots が 2 未満なら null。
-  const dailyCloses = aggregateDailyCloses(points)
+  // sloped trend lines: Yahoo daily bars を 60 日 fetch して fractal pivot 検出。
+  // POC 開始直後は strategy_decision_log が数日分しか無く cron-eval dedup では
+  // pivot 検出に必要な 5 日 (k=2) すら集まらないので、Yahoo の本物日足を使う。
+  // 失敗時は cron-eval dedup にフォールバック。
+  const yahooBars = await fetchYahooBarsForChart(symbol, 60)
+  const dailyCloses = yahooBars.length >= 5 ? yahooBars : aggregateDailyCloses(points)
   const pivots = detectFractalPivots(dailyCloses, 2)
   const lastTimestamp = points.length > 0 ? points[points.length - 1]!.timestamp : null
   const resistanceLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'high', lastTimestamp) : null
   const supportLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp) : null
   return { symbol, points, markers, position, rules, resistanceLine, supportLine, pivots }
+}
+
+/**
+ * Yahoo daily bars を chart 用に fetch (lookback 営業日)。失敗時は空配列で
+ * fallback を呼出元に伝える。timestamp は date 部分 + 16:00 UTC (≈ 1:00 JST
+ * 翌日 ≈ "evening of date") で擬似生成。trend line の傾き計算のための
+ * 相対位置は十分。
+ */
+export async function fetchYahooBarsForChart(
+  symbol: string,
+  lookback: number,
+): Promise<Array<{ jstDate: string; close: number; timestamp: string }>> {
+  const client = new YahooBarClient()
+  try {
+    const bars = await client.getDailyBars(symbol, lookback)
+    return bars.map((b) => ({
+      jstDate: b.date,
+      close: b.close,
+      timestamp: `${b.date}T16:00:00.000Z`,
+    }))
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -2110,7 +2137,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         legend: { top: 22, type: 'scroll' },
         grid: { left: 60, right: 20, top: 60, bottom: 40 },
         xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
-        yAxis: { type: 'value', min: yMin, max: yMax },
+        // showMinLabel/showMaxLabel: false で boundary label の異常表示を抑制。
+        // ECharts で時々 yAxis の min/max 位置に巨大数字 ("7711183" 等) が
+        // 描画される現象 (ECharts 内部の axis pointer 計算と markPoint coord
+        // 干渉が疑われる)。実際の plot 範囲は正常なので boundary label を
+        // 隠すだけで chart は読みやすくなる。
+        yAxis: { type: 'value', min: yMin, max: yMax, axisLabel: { showMinLabel: false, showMaxLabel: false } },
         series: [
           // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は淡く表示
           // (戦略 rule の参考、トレンドラインが主役なので opacity 0.4)。
