@@ -585,3 +585,34 @@ describe('parseChartsTab', () => {
     expect(parseChartsTab('OVERVIEW')).toBe('overview') // 大文字も既知扱いせず default に
   })
 })
+
+import { deriveOpenPosition } from '../../src/routes/dashboard'
+
+describe('deriveOpenPosition', () => {
+  const buy = (ts: string, price: number) => ({ timestamp: ts, side: 'BUY' as const, price, qty: 1, realizedPnl: null })
+  const sell = (ts: string, price: number, pnl: number) => ({ timestamp: ts, side: 'SELL' as const, price, qty: 1, realizedPnl: pnl })
+
+  it('空配列は null', () => {
+    expect(deriveOpenPosition([])).toBe(null)
+  })
+
+  it('BUY のみ → 現保有', () => {
+    expect(deriveOpenPosition([buy('2026-04-23', 100)])).toEqual({
+      avgPrice: 100,
+      openedAt: '2026-04-23',
+    })
+  })
+
+  it('BUY → SELL → 閉鎖済 (null)', () => {
+    expect(deriveOpenPosition([buy('2026-04-23', 100), sell('2026-04-24', 105, 5)])).toBe(null)
+  })
+
+  it('BUY → SELL → BUY → 直近 BUY が現保有', () => {
+    const ms = [buy('2026-04-20', 100), sell('2026-04-21', 95, -5), buy('2026-04-23', 110)]
+    expect(deriveOpenPosition(ms)).toEqual({ avgPrice: 110, openedAt: '2026-04-23' })
+  })
+
+  it('SELL のみ (POC で発生しないが defensively) → null', () => {
+    expect(deriveOpenPosition([sell('2026-04-23', 100, 5)])).toBe(null)
+  })
+})
