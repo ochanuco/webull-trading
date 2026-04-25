@@ -905,22 +905,16 @@ function cronReasonCell(row: {
   const localized = localizeReason(row.reason)
   const rawReason = row.reason ?? '-'
   const decisionJsonLink = `<a href="/dashboard/cron/json?decisionId=${row.id}" target="_blank" rel="noreferrer">この判定だけのJSON</a>`
-  const runJsonLink = row.requestId
-    ? `<a href="/dashboard/cron/json?requestId=${encodeURIComponent(row.requestId)}" target="_blank" rel="noreferrer">run全体JSON</a> <span class="muted">(${esc(row.requestId)})</span>`
-    : '-'
   const humanDetails = describeCronReason(row.reason)
-  const indicators = row.indicatorsJson
-    ? JSON.stringify(parseJsonObject(row.indicatorsJson), null, 2)
-    : null
 
   return `<details class="reason-details">
     <summary>${esc(localized || '-')}</summary>
     <div class="reason-panel">
       <div><strong>読み方</strong>${humanDetails}</div>
-      <div><strong>JSON</strong><br>${decisionJsonLink} / ${runJsonLink}</div>
+      <div><strong>RUNID</strong><br><code>${esc(row.requestId ?? '-')}</code></div>
       <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
       <div><strong>decision id / clientOrderId</strong><br><code>${row.id}</code> / <code>${esc(row.clientOrderId ?? '-')}</code></div>
-      <div><strong>indicators</strong><br>${indicators ? `<pre>${esc(indicators)}</pre>` : '<span class="muted">-</span>'}</div>
+      <div><strong>JSON</strong><br>${decisionJsonLink}</div>
     </div>
   </details>`
 }
