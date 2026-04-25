@@ -986,6 +986,107 @@ describe('densifyTrendLine', () => {
   })
 })
 
+import { densifyHorizontalLine } from '../../src/routes/dashboard'
+
+describe('densifyHorizontalLine', () => {
+  it('範囲内 sample を取り込み端点も含めて昇順 dense path にする', () => {
+    const out = densifyHorizontalLine(124.95, 0, 100, [10, 50, 80])
+    expect(out).toEqual([
+      [0, 124.95],
+      [10, 124.95],
+      [50, 124.95],
+      [80, 124.95],
+      [100, 124.95],
+    ])
+  })
+
+  it('samples が範囲外のものだけ → 端点 2 点のみ', () => {
+    const out = densifyHorizontalLine(120, 50, 100, [10, 20, 200, 300])
+    expect(out).toEqual([
+      [50, 120],
+      [100, 120],
+    ])
+  })
+
+  it('samples が空 → 端点 2 点のみ', () => {
+    const out = densifyHorizontalLine(120, 50, 100, [])
+    expect(out).toEqual([
+      [50, 120],
+      [100, 120],
+    ])
+  })
+
+  it('fromTs == toTs (degenerate、openedAt と最新が同 ms) → 2 点 fallback', () => {
+    // a >= b ブランチ。実用上は呼び元で endTs = max(latestTs, openedAt) clamp
+    // しているので fromTs == toTs は openedAt 直後 (latestTs == openedAt) の
+    // ケース。
+    const out = densifyHorizontalLine(120, 50, 50, [10, 50, 80])
+    expect(out).toEqual([
+      [50, 120],
+      [50, 120],
+    ])
+  })
+
+  it('fromTs > toTs (defensive) → 2 点 fallback', () => {
+    const out = densifyHorizontalLine(120, 100, 50, [60, 70])
+    expect(out).toEqual([
+      [100, 120],
+      [50, 120],
+    ])
+  })
+
+  it('samples が duplicate / 順序乱れ → ascending unique', () => {
+    const out = densifyHorizontalLine(120, 0, 100, [50, 10, 50, 10, 80])
+    expect(out).toEqual([
+      [0, 120],
+      [10, 120],
+      [50, 120],
+      [80, 120],
+      [100, 120],
+    ])
+  })
+
+  it('NaN / 不正 ISO の sample は除外', () => {
+    const out = densifyHorizontalLine(120, 0, 100, [
+      NaN,
+      'not-an-iso',
+      Number.POSITIVE_INFINITY,
+      50,
+    ])
+    expect(out).toEqual([
+      [0, 120],
+      [50, 120],
+      [100, 120],
+    ])
+  })
+
+  it('ISO string fromTs / toTs / samples を accept', () => {
+    const out = densifyHorizontalLine(
+      120,
+      new Date(0).toISOString(),
+      new Date(100).toISOString(),
+      [new Date(25).toISOString(), new Date(75).toISOString()],
+    )
+    expect(out).toEqual([
+      [0, 120],
+      [25, 120],
+      [75, 120],
+      [100, 120],
+    ])
+  })
+
+  it('yValue が NaN → null (描画 skip)', () => {
+    expect(densifyHorizontalLine(NaN, 0, 100, [50])).toBe(null)
+    expect(densifyHorizontalLine(Number.POSITIVE_INFINITY, 0, 100, [50])).toBe(null)
+  })
+
+  it('fromTs / toTs が不正なら null', () => {
+    expect(densifyHorizontalLine(120, 'not-an-iso', 100, [50])).toBe(null)
+    expect(densifyHorizontalLine(120, 0, 'not-an-iso', [50])).toBe(null)
+    expect(densifyHorizontalLine(120, NaN, 100, [50])).toBe(null)
+  })
+})
+
 import { mergeYahooAndCronPoints } from '../../src/routes/dashboard'
 
 describe('mergeYahooAndCronPoints', () => {
