@@ -616,3 +616,101 @@ describe('deriveOpenPosition', () => {
     expect(deriveOpenPosition([sell('2026-04-23', 100, 5)])).toBe(null)
   })
 })
+
+import { resolveFillSide } from '../../src/routes/dashboard'
+
+describe('resolveFillSide', () => {
+  it('pre_submit row の side ("BUY") があればそれを採用', () => {
+    expect(resolveFillSide('BUY', null)).toBe('BUY')
+    expect(resolveFillSide('BUY', 5)).toBe('BUY')
+  })
+
+  it('pre_submit row の side ("SELL") があればそれを採用', () => {
+    expect(resolveFillSide('SELL', null)).toBe('SELL')
+    expect(resolveFillSide('SELL', -3)).toBe('SELL')
+  })
+
+  it('pre_submit が無く realized_pnl が非 null なら SELL (exit trade)', () => {
+    expect(resolveFillSide(null, 5)).toBe('SELL')
+    expect(resolveFillSide(null, -10)).toBe('SELL')
+    expect(resolveFillSide(null, 0)).toBe('SELL') // pnl=0 でも SELL (break-even exit)
+  })
+
+  it('pre_submit が無く realized_pnl も null なら BUY (entry trade)', () => {
+    expect(resolveFillSide(null, null)).toBe('BUY')
+  })
+
+  it('未知の side 値 + realized_pnl で SELL 判定', () => {
+    expect(resolveFillSide('partial', 5)).toBe('SELL')
+  })
+
+  it('未知の side 値 + null pnl で BUY フォールバック', () => {
+    expect(resolveFillSide('weird', null)).toBe('BUY')
+  })
+
+  it('realized_pnl が NaN / Infinity の場合は null と同等扱い (BUY 推測)', () => {
+    expect(resolveFillSide(null, NaN)).toBe('BUY')
+    expect(resolveFillSide(null, Infinity)).toBe('BUY')
+  })
+})
+
+import { renderStrategyParamsPanel, type StrategyParamsSnapshot } from '../../src/routes/dashboard'
+
+const DEFAULT_PARAMS: StrategyParamsSnapshot = {
+  stopPct: -0.04,
+  takeProfitPct: 0.07,
+  timeStopDays: 10,
+  pullbackMax: -0.03,
+  pullbackMin: -0.06,
+  minReturn50d: 0.08,
+  requireAboveSma50: true,
+  kAtr: 2.0,
+}
+
+/** Count cells flagged as 変更済 (title attr ベースで識別、凡例 ⚠ と分離)。 */
+function countCellWarnings(html: string): number {
+  return (html.match(/title="default 値から変更"/g) ?? []).length
+}
+
+describe('renderStrategyParamsPanel', () => {
+  it('default 値のままなら cell 内 ⚠ flag は出ない (summary の凡例は別)', () => {
+    const html = renderStrategyParamsPanel({ ...DEFAULT_PARAMS })
+    expect(countCellWarnings(html)).toBe(0)
+  })
+
+  it('1 項目変更すると cell 内 ⚠ が 1 個', () => {
+    const html = renderStrategyParamsPanel({ ...DEFAULT_PARAMS, pullbackMax: 0 })
+    expect(countCellWarnings(html)).toBe(1)
+    expect(html).toContain('+0.0%')
+  })
+
+  it('複数変更でそれぞれ cell ⚠', () => {
+    const html = renderStrategyParamsPanel({
+      ...DEFAULT_PARAMS,
+      pullbackMax: 0,
+      pullbackMin: -0.15,
+      stopPct: -0.05,
+    })
+    expect(countCellWarnings(html)).toBe(3)
+  })
+
+  it('boolean (requireAboveSma50) 変更も flag', () => {
+    const html = renderStrategyParamsPanel({ ...DEFAULT_PARAMS, requireAboveSma50: false })
+    expect(countCellWarnings(html)).toBe(1)
+    expect(html).toContain('false')
+  })
+
+  it('integer (timeStopDays) は pct ではなく素直に表示', () => {
+    const html = renderStrategyParamsPanel({ ...DEFAULT_PARAMS, timeStopDays: 5 })
+    expect(html).toContain('5 営業日')
+    expect(html).toContain('10 営業日')
+    expect(countCellWarnings(html)).toBe(1)
+  })
+
+  it('panel は collapsible <details> ラップ + 凡例で ⚠ の意味を説明', () => {
+    const html = renderStrategyParamsPanel({ ...DEFAULT_PARAMS })
+    expect(html).toMatch(/^<details/)
+    expect(html).toContain('PullbackUptrendStrategy')
+    expect(html).toContain('default から変更されている')
+  })
+})
