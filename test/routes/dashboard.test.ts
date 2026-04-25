@@ -225,13 +225,15 @@ describe('dashboard', () => {
     expect(body).toContain('<details class="reason-details">')
     expect(body).toContain('発注スキップ: 売買単位未満')
     expect(body).toContain('計算上は 79 株まで建てられるが、必要な売買単位 100 株に届かないため発注しません。')
-    expect(body).toContain('/dashboard/cron/json?decisionId=123')
     expect(body).toContain('<strong>RUNID</strong>')
     expect(body).toContain('<code>req-1</code>')
     expect(body).toContain('<strong>raw reason</strong>')
     expect(body).toContain('<strong>JSON</strong>')
+    expect(body).toContain('&quot;id&quot;: 123')
+    expect(body).toContain('&quot;indicators&quot;: {')
+    expect(body).toContain('&quot;return50d&quot;: 0.45873692367299496')
+    expect(body).not.toContain('/dashboard/cron/json?decisionId=123')
     expect(body).not.toContain('run全体JSON')
-    expect(body).not.toContain('&quot;return50d&quot;: 0.45873692367299496')
   })
 
   it('exports a single cron decision JSON by decisionId', async () => {

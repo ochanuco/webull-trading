@@ -136,23 +136,7 @@ export const dashboard = new Hono<AppBindings>()
         exportedAt: new Date().toISOString(),
         ...(decisionId !== undefined ? { decisionId } : { requestId }),
         rowCount: rows.length,
-        decisions: rows.map((row) => ({
-          id: row.id,
-          timestamp: row.timestamp,
-          symbol: row.symbol,
-          decision: row.decision,
-          reason: row.reason,
-          localizedReason: localizeReason(row.reason),
-          price: row.price,
-          indicators: parseJsonObject(row.indicatorsJson),
-          clientOrderId: row.clientOrderId,
-          broker: {
-            status: row.brokerStatus,
-            filledPrice: row.filledPrice,
-            filledQty: row.filledQty,
-            realizedPnl: row.realizedPnl,
-          },
-        })),
+        decisions: rows.map(cronDecisionJson),
       })
     } catch (err) {
       return jsonPretty({ error: 'cron_json_export_failed', message: messageOf(err) }, 500)
@@ -985,14 +969,22 @@ function cronBody(
 
 function cronReasonCell(row: {
   id: number
+  timestamp: string
   requestId: string | null
+  symbol: string
+  decision: string
   reason: string | null
+  price: number | null
   indicatorsJson?: string | null
   clientOrderId?: string | null
+  filledPrice?: number | null
+  filledQty?: number | null
+  realizedPnl?: number | null
+  brokerStatus?: string | null
 }): string {
   const localized = localizeReason(row.reason)
   const rawReason = row.reason ?? '-'
-  const decisionJsonLink = `<a href="/dashboard/cron/json?decisionId=${row.id}" target="_blank" rel="noreferrer">この判定だけのJSON</a>`
+  const decisionJson = JSON.stringify(cronDecisionJson(row), null, 2)
   const humanDetails = describeCronReason(row.reason)
 
   return `<details class="reason-details">
@@ -1002,9 +994,42 @@ function cronReasonCell(row: {
       <div><strong>RUNID</strong><br><code>${esc(row.requestId ?? '-')}</code></div>
       <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
       <div><strong>decision id / clientOrderId</strong><br><code>${row.id}</code> / <code>${esc(row.clientOrderId ?? '-')}</code></div>
-      <div><strong>JSON</strong><br>${decisionJsonLink}</div>
+      <div><strong>JSON</strong><br><pre>${esc(decisionJson)}</pre></div>
     </div>
   </details>`
+}
+
+function cronDecisionJson(row: {
+  id: number
+  timestamp: string
+  symbol: string
+  decision: string
+  reason: string | null
+  price: number | null
+  indicatorsJson?: string | null
+  clientOrderId?: string | null
+  filledPrice?: number | null
+  filledQty?: number | null
+  realizedPnl?: number | null
+  brokerStatus?: string | null
+}) {
+  return {
+    id: row.id,
+    timestamp: row.timestamp,
+    symbol: row.symbol,
+    decision: row.decision,
+    reason: row.reason,
+    localizedReason: localizeReason(row.reason),
+    price: row.price,
+    indicators: parseJsonObject(row.indicatorsJson),
+    clientOrderId: row.clientOrderId,
+    broker: {
+      status: row.brokerStatus,
+      filledPrice: row.filledPrice,
+      filledQty: row.filledQty,
+      realizedPnl: row.realizedPnl,
+    },
+  }
 }
 
 function describeCronReason(reason: string | null | undefined): string {
