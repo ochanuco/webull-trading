@@ -1492,10 +1492,17 @@ export interface PivotPoint {
   type: 'high' | 'low'
 }
 
+/**
+ * 直線セグメント。
+ *
+ * 旧仕様 (pivot ベース) では `pivots` は「採用した 2 swing pivot」だったが、
+ * 現仕様 (linear regression) では `pivots[0]` = 線の左端、`pivots[1]` = 同じ
+ * slope 上の参照点 (densify では未使用) を入れる。`end` は線の右端 (= chart
+ * 最新 timestamp 上の外挿点)。`densifyTrendLine` は `pivots[0]` と `end` の
+ * 2 点だけを使うため、両用途で同じ型が再利用できる。
+ */
 export interface TrendLineSegment {
-  /** 採用した直近 2 pivots (古い → 新しい) */
   pivots: [PivotPoint, PivotPoint]
-  /** 延長線の終点 (最新 timestamp、price は線形外挿) */
   end: { timestamp: string; price: number }
 }
 
@@ -1516,11 +1523,15 @@ export interface SymbolChartData {
   /** 現保有 (BUY → SELL がまだない) ならその情報、なければ null */
   position: SymbolChartPosition | null
   rules: SymbolChartRules
-  /** 直近 swing pivots からの sloped 上値抵抗線 / 下値支持線 (数足りないと null) */
-  resistanceLine: TrendLineSegment | null
-  supportLine: TrendLineSegment | null
-  /** 検出された swing pivots (chart 上の小さな丸で表示する想定) */
-  pivots: PivotPoint[]
+  /**
+   * 直近 30 日 daily close の最小二乗 (linear regression) で fit した
+   * 「価格の中心トレンド線」。データ点が 2 未満なら null。
+   *
+   * 旧仕様 (resistanceLine / supportLine の上下 2 本) は、ローソク足の上下を
+   * flat に走る形で「価格の中心を辿る」という user の期待と乖離していた。
+   * regression で価格中央を best-fit する形に変更。
+   */
+  trendLine: TrendLineSegment | null
   /** Yahoo 日次 OHLC、candlestick 描画用 (空配列 = Yahoo fetch 失敗) */
   intradayBars: OhlcBar[]
 }
@@ -1626,98 +1637,33 @@ export async function loadSymbolChart(
   const lastTimestamp =
     mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.timestamp : null
 
-  // pivot 検出窓: 第一候補は直近 30 暦日 (regime shift を跨がない)。trend line
-  // を引くのに同 type pivot が 2 個必要。AAPL のように 30日でも k=2 (5-bar)
-  // 高 pivot が 2 個未満の銘柄では「描画されない」回帰になっていたため、
-  // 段階的に厳しさを緩める fallback を用意する:
-  //   tier 1: 30日 + k=2 (5-bar fractal) — strict
-  //   tier 2: 30日 + k=1 (3-bar fractal) — TradingView 等で標準的な短期 swing
-  //   tier 3: 60日 + k=2 — 古い swing も拾う (regime 跨ぎリスクは regime
-  //                       filter で吸収)
-  //   tier 4: 60日 + k=1 — 最終手段
-  // 各 tier に regime filter (±50%) と「filter 後 2 個未満なら raw に戻す」
-  // 副 fallback を畳み込む。同 type 2 個埋まった瞬間に採用。
-  const PIVOT_WINDOW_DAYS = 30
-  const PIVOT_WINDOW_DAYS_WIDE = 60
-  const cutoffMs = (days: number): number =>
-    lastTimestamp ? new Date(lastTimestamp).getTime() - days * 24 * 3600 * 1000 : 0
-  const cronDailyClosesAll = aggregateDailyCloses(points)
-  function dailyClosesIn(days: number): Array<{ jstDate: string; close: number; timestamp: string }> {
-    const cutoff = cutoffMs(days)
-    const fromYahoo = yahooBars.filter((b) => new Date(b.timestamp).getTime() >= cutoff)
+  // 価格トレンド: 直近 30 暦日 (regime shift を跨がない短期) の daily close
+  // を最小二乗で fit した linear regression line。pivot ベース (上値抵抗 /
+  // 下値支持) は candle の「上下を flat に走る bound 線」になりやすく、user
+  // 期待である「ローソク足の中心を辿る trend」を表現できなかったため、close
+  // の重心を通る best-fit 1 本に置き換えた (#190 系の見直し)。
+  //
+  // データ source: Yahoo daily が ≥5 本あればそれ、不足なら cron-eval 由来の
+  // 日次 close fallback。30 日に満たないデータでも残っている分すべて使う
+  // (< 2 なら null 返却 → 描画スキップ)。
+  const TREND_WINDOW_DAYS = 30
+  const trendCutoffMs = lastTimestamp
+    ? new Date(lastTimestamp).getTime() - TREND_WINDOW_DAYS * 24 * 3600 * 1000
+    : 0
+  const trendDailySource: Array<{ jstDate: string; close: number; timestamp: string }> = (() => {
+    if (!lastTimestamp) return []
+    const fromYahoo = yahooBars.filter((b) => new Date(b.timestamp).getTime() >= trendCutoffMs)
     if (fromYahoo.length >= 5) return fromYahoo
-    return cronDailyClosesAll.filter((p) => new Date(p.timestamp).getTime() >= cutoff)
-  }
-  const currentPrice =
-    mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.price : null
-  function applyRegimeFilter(pivotsAll: PivotPoint[]): PivotPoint[] {
-    if (currentPrice == null) return pivotsAll
-    return pivotsAll.filter(
-      (pv) => pv.price >= currentPrice * 0.5 && pv.price <= currentPrice * 1.5,
+    return aggregateDailyCloses(points).filter(
+      (p) => new Date(p.timestamp).getTime() >= trendCutoffMs,
     )
-  }
-  // tier 候補を順に評価し、type ごとに最初に「同 type ≥ 2」を満たす集合を採用。
-  // resistance / support 別々に異なる tier が当たることもありうる (片方だけ
-  // 厳しい場合)。
-  type Tier = { name: string; pivotsAll: PivotPoint[] }
-  const tiers: Tier[] = [
-    { name: '30d/k=2', pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS), 2) },
-    { name: '30d/k=1', pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS), 1) },
-    {
-      name: '60d/k=2',
-      pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS_WIDE), 2),
-    },
-    {
-      name: '60d/k=1',
-      pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS_WIDE), 1),
-    },
-  ]
-  // regime filter は意味のあるガード (現価格 ±50% 外の pivot は別 regime
-  // = 旧価格帯 = 直近の trend を表さない)。前版は filter 後 < 2 のとき raw に
-  // fallback していたが、SOXL のように 40→128 と急騰した銘柄では filter 後
-  // 0 個 → raw fallback → 旧 regime (40-60) pivot で線が引かれる回帰があった。
-  // 修正: 各 tier は filter 後の集合のみを使う。filter 後 < 2 ならその tier は
-  // skip して次 tier (より緩い detection) を試す。全 tier 不足なら null を
-  // 返し、trend line を「無理に引かない」(=描画スキップ) を選択する。誤った
-  // 線を描くより無描画のほうが UX 上望ましい。
-  function pivotsForType(type: 'high' | 'low'): PivotPoint[] | null {
-    for (const tier of tiers) {
-      const filtered = applyRegimeFilter(tier.pivotsAll)
-      if (filtered.filter((p) => p.type === type).length >= 2) return filtered
-    }
-    return null
-  }
-  const resistanceCandidate = pivotsForType('high')
-  const supportCandidate = pivotsForType('low')
-  const resistanceLine =
-    lastTimestamp && resistanceCandidate
-      ? fitTrendLineFromRecentPivots(resistanceCandidate, 'high', lastTimestamp)
-      : null
-  const supportLine =
-    lastTimestamp && supportCandidate
-      ? fitTrendLineFromRecentPivots(supportCandidate, 'low', lastTimestamp)
-      : null
-  // chart 上の pivot dots は trend line に採用した pivots に加え、各 tier の
-  // regime-filtered pivots を union (重複除去)。filter で除外された旧 regime
-  // pivot は意図的に表示しない (trend line と整合させる)。
-  const pivots: PivotPoint[] = (() => {
-    const seen = new Set<string>()
-    const out: PivotPoint[] = []
-    const sources: PivotPoint[][] = [
-      ...(resistanceCandidate ? [resistanceCandidate] : []),
-      ...(supportCandidate ? [supportCandidate] : []),
-      ...tiers.map((t) => applyRegimeFilter(t.pivotsAll)),
-    ]
-    for (const src of sources) {
-      for (const p of src) {
-        const key = `${p.timestamp}:${p.type}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        out.push(p)
-      }
-    }
-    return out.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))
   })()
+  const trendLine = lastTimestamp
+    ? computeLinearRegressionLine(
+        trendDailySource.map((d) => ({ timestamp: d.timestamp, close: d.close })),
+        lastTimestamp,
+      )
+    : null
   // candlestick: 1 時間足 (intraday) を Yahoo から fetch。15m は overnight gap
   // 後の clustering と barWidth 調整がシビアだったため、daily-trader 向けに
   // 1h を default 採用 (Pullback Uptrend のような multi-day 戦略では十分な
@@ -1748,9 +1694,7 @@ export async function loadSymbolChart(
     markers,
     position,
     rules,
-    resistanceLine,
-    supportLine,
-    pivots,
+    trendLine,
     intradayBars: intradayBars,
   }
 }
@@ -1909,54 +1853,96 @@ export function aggregateDailyCloses(
 }
 
 /**
- * fractal pivot: bar[i] が ±k 範囲で純粋に最大なら high pivot、純粋に最小なら
- * low pivot。k=2 で 5-bar fractal (標準的な短期 swing 検出)。同値タイは pivot に
- * しない (>= ではなく > で判定)。両端 k 個は pivot 候補にならない。
+ * Daily close の最小二乗 (ordinary least squares) で価格中央を best-fit する
+ * linear regression line を返す。「ローソク足の中心を辿るトレンド」を出すた
+ * めの実装で、pivot ベースの上下 bound 線とは目的が違う。
+ *
+ * 戻り値の形は既存 `TrendLineSegment` を再利用 (densifyTrendLine が `pivots[0]`
+ * と `end` の 2 点を読むだけ):
+ * - `pivots[0]`: regression line 上の最古 sample timestamp 上の点 (= 線の左端)
+ * - `pivots[1]`: 同じ slope を持つ参照点として `end` と同じ点を入れている
+ *               (densify では未使用、互換のため形を保つ)
+ * - `end`: `endTimestamp` (通常は chart の最新 timestamp) 上の外挿点
+ *
+ * 入力は `{ timestamp, close }` の配列 (順序不問、内部で時系列に並べる)。
+ * 以下のケースで null:
+ * - 有効な data point (Number.isFinite な timestamp / close) が 2 未満
+ * - 全 sample が同 timestamp (slope 不定)
+ * - `endTimestamp` が解釈不能
+ * - 計算結果が NaN / Infinity
+ *
+ * regime filter は意図的に持たない: regression は close 全体の重心を取るので
+ * 「別 regime の pivot」概念がそもそも存在しない。窓を 30 日程度に絞ること
+ * が regime 跨ぎ対策を兼ねる。
  */
-export function detectFractalPivots(
-  daily: Array<{ jstDate: string; close: number; timestamp: string }>,
-  k: number,
-): PivotPoint[] {
-  const out: PivotPoint[] = []
-  for (let i = k; i < daily.length - k; i += 1) {
-    const center = daily[i]!.close
-    let isHigh = true
-    let isLow = true
-    for (let j = i - k; j <= i + k; j += 1) {
-      if (j === i) continue
-      const other = daily[j]!.close
-      if (other >= center) isHigh = false
-      if (other <= center) isLow = false
-      if (!isHigh && !isLow) break
-    }
-    if (isHigh) out.push({ timestamp: daily[i]!.timestamp, price: center, type: 'high' })
-    if (isLow) out.push({ timestamp: daily[i]!.timestamp, price: center, type: 'low' })
-  }
-  return out
-}
-
-/**
- * 同 type pivots を時系列で並べ、直近 2 つを結んで `endTimestamp` まで線形外挿。
- * pivot が 2 未満 / 同時刻 / endTimestamp 解釈不能なら null。
- */
-export function fitTrendLineFromRecentPivots(
-  pivots: PivotPoint[],
-  type: 'high' | 'low',
+export function computeLinearRegressionLine(
+  samples: ReadonlyArray<{ timestamp: string; close: number }>,
   endTimestamp: string,
 ): TrendLineSegment | null {
-  const sameType = pivots.filter((p) => p.type === type)
-  if (sameType.length < 2) return null
-  const p1 = sameType[sameType.length - 2]!
-  const p2 = sameType[sameType.length - 1]!
-  const t1 = new Date(p1.timestamp).getTime()
-  const t2 = new Date(p2.timestamp).getTime()
+  // 有効値のみ抽出 (NaN / Infinity / 不正 timestamp は除外)
+  const points: Array<{ t: number; y: number; timestamp: string }> = []
+  for (const s of samples) {
+    const t = new Date(s.timestamp).getTime()
+    const y = s.close
+    if (!Number.isFinite(t)) continue
+    if (typeof y !== 'number' || !Number.isFinite(y)) continue
+    points.push({ t, y, timestamp: s.timestamp })
+  }
+  if (points.length < 2) return null
+  // 時系列で安定 sort (同 t は input 順を維持)
+  points.sort((a, b) => a.t - b.t)
+  // 全 sample が同 timestamp なら slope 不定
+  if (points[0]!.t === points[points.length - 1]!.t) return null
+
   const tEnd = new Date(endTimestamp).getTime()
-  if (!Number.isFinite(t1) || !Number.isFinite(t2) || !Number.isFinite(tEnd)) return null
-  if (t2 <= t1) return null
-  const slope = (p2.price - p1.price) / (t2 - t1)
-  const endPrice = p2.price + slope * (tEnd - t2)
-  if (!Number.isFinite(endPrice)) return null
-  return { pivots: [p1, p2], end: { timestamp: endTimestamp, price: endPrice } }
+  if (!Number.isFinite(tEnd)) return null
+
+  // OLS: y = a*t + b。t を「最古 sample 基準のオフセット」に正規化して
+  // epoch ms (~1.7e12) 由来の桁あふれを抑える (slope は同じ)。
+  const t0 = points[0]!.t
+  let sumT = 0
+  let sumY = 0
+  for (const p of points) {
+    sumT += p.t - t0
+    sumY += p.y
+  }
+  const n = points.length
+  const meanT = sumT / n
+  const meanY = sumY / n
+  let num = 0
+  let den = 0
+  for (const p of points) {
+    const dt = p.t - t0 - meanT
+    num += dt * (p.y - meanY)
+    den += dt * dt
+  }
+  if (den === 0) return null
+  const slope = num / den
+  const intercept = meanY - slope * meanT
+  if (!Number.isFinite(slope) || !Number.isFinite(intercept)) return null
+
+  // 線の左端 = 最古 sample timestamp 上の regression y
+  const startT = points[0]!.t
+  const startY = intercept + slope * (startT - t0)
+  // 右端 = endTimestamp 上の regression y (将来 / 既知点いずれでも線形外挿)
+  const endY = intercept + slope * (tEnd - t0)
+  if (!Number.isFinite(startY) || !Number.isFinite(endY)) return null
+
+  const startPoint: PivotPoint = {
+    timestamp: points[0]!.timestamp,
+    price: startY,
+    // type は描画上未使用。互換のため 'low' を入れておく (意味はない)
+    type: 'low',
+  }
+  const endPoint: PivotPoint = {
+    timestamp: endTimestamp,
+    price: endY,
+    type: 'low',
+  }
+  return {
+    pivots: [startPoint, endPoint],
+    end: { timestamp: endTimestamp, price: endY },
+  }
 }
 
 /**
@@ -2412,9 +2398,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMinMul];
       });
 
-      // sloped trend lines (server-side で fractal pivot 検出 + 直近 2 pivots
-      // を線形外挿)。教科書の「下値支持線 / 上値抵抗線」と同じ仕組み。
-      // 検出失敗 (pivots < 2) なら null → 描画スキップ。
+      // 価格トレンド線 (server-side で daily close の linear regression fit)。
+      // 旧仕様の「上値抵抗線 / 下値支持線」上下 2 本は、ローソク足の上下を
+      // flat に走り「価格の中心を辿る trend」という user 期待と乖離していた
+      // ため、close の重心を通る best-fit 1 本に統一した。
+      //
+      // 検出失敗 (sample < 2 / 同時刻のみ) なら null → 描画スキップ。
       //
       // 過去 #185 / #187 / #188 / #189 で「描画されない」回帰があったが、
       // 根因は ECharts の dataZoom + 2 点 line series が「片方の点が zoom
@@ -2470,14 +2459,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         if (out.length < 2) return [[t1, y1], [t2, y2]];
         return out;
       }
-      var resistanceXY = densifyTrendLine(sc.resistanceLine, ohlcTimestamps);
-      var supportTrendXY = densifyTrendLine(sc.supportLine, ohlcTimestamps);
-      var pivotHighDots = sc.pivots
-        .filter(function (pv) { return pv.type === 'high'; })
-        .map(function (pv) { return [pv.timestamp, pv.price]; });
-      var pivotLowDots = sc.pivots
-        .filter(function (pv) { return pv.type === 'low'; })
-        .map(function (pv) { return [pv.timestamp, pv.price]; });
+      var trendLineXY = densifyTrendLine(sc.trendLine, ohlcTimestamps);
 
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
       // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
@@ -2665,34 +2647,18 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.6, color: '#057a55', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
             { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.6, color: '#b25000', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
           ]),
-          // sloped trend lines: 直近 2 pivots → chart 末への線形外挿 trend
-          // を、intradayBars 各 timestamp で y 補間した「dense path」として
-          // 描画。dataZoom filterMode が 'filter' / 'weakFilter' のどちら
-          // でも、zoom 範囲内に複数点が必ず入るので確実に描画される (2 点
-          // line series で zoom 縮めると seg-droppable な ECharts 既知挙動
-          // への根本対処)。z:7 で candle (z:5) / SMA50 (z:6) より上に置き、
-          // 線本体を最前面に。symbol:'none' で点 marker は出さない (見た目
-          // は変わらず元と同じ滑らかな直線)。itemStyle.color は legend dot
-          // 色を lineStyle.color と揃えるため明示。
-          ...(resistanceXY ? [{
-            name: '上値抵抗線 (sloped, 直近 2 pivot fit)', type: 'line', data: resistanceXY,
-            lineStyle: { width: 1.8, color: '#1471a8', type: 'solid' }, symbol: 'none',
-            itemStyle: { color: '#1471a8' }, z: 7,
-          }] : []),
-          ...(supportTrendXY ? [{
-            name: '下値支持線 (sloped, 直近 2 pivot fit)', type: 'line', data: supportTrendXY,
-            lineStyle: { width: 1.8, color: '#c22', type: 'solid' }, symbol: 'none',
-            itemStyle: { color: '#c22' }, z: 7,
-          }] : []),
-          // swing pivot dots (見つけた pivot を可視化、debug + 教育用)。
-          // candle (z:5) より上に出さないと candle 帯と重なる pivot が消える。
-          ...(pivotHighDots.length > 0 ? [{
-            name: 'swing high', type: 'scatter', data: pivotHighDots,
-            symbolSize: 6, itemStyle: { color: '#1471a8', borderColor: '#fff', borderWidth: 1 }, z: 8,
-          }] : []),
-          ...(pivotLowDots.length > 0 ? [{
-            name: 'swing low', type: 'scatter', data: pivotLowDots,
-            symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 8,
+          // 価格トレンド (linear regression, 直近 30 日 daily close fit)。
+          // 1 本だけ。中間色 (紫 #9333ea) で「上値 / 下値どちらでもない、価格
+          // の重心」を表す。dense path (intradayBars 各 timestamp で y 補間)
+          // で zoom にかかわらず確実に描画される (2 点 line series で zoom
+          // 縮めると seg-droppable な ECharts 既知挙動 #3637 系への根本対処)。
+          // z:7 で candle (z:5) / SMA50 (z:6) より上に置き、線本体を最前面に。
+          // symbol:'none' で点 marker は出さない。itemStyle.color は legend
+          // dot 色を lineStyle.color と揃えるため明示。
+          ...(trendLineXY ? [{
+            name: '価格トレンド (linear regression, 30日)', type: 'line', data: trendLineXY,
+            lineStyle: { width: 1.8, color: '#9333ea', type: 'solid' }, symbol: 'none',
+            itemStyle: { color: '#9333ea' }, z: 7,
           }] : []),
           // candlestick: 15 分足 OHLC を表示。Western 規約 (close >= open = 緑、
           // candle: 主役。Western 規約 (close >= open = 緑、< = 赤)。
@@ -2781,11 +2747,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           var t = new Date(p.timestamp).getTime();
           if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(p.sma50);
         });
-        // trend line: 直近 2 pivots を chart 末端まで線形外挿した 2 点。
-        // visible 範囲内に endpoint または時間軸の交点が乗るときに y 値を
-        // 取り込んで axis 外にはみ出さないようにする。両 endpoint が
-        // 範囲外でも線分が visible 帯を横断するなら sample してその y を採用
-        // (= 単純な 2 点線形補間)。
+        // trend line: regression で fit した 1 本。pivots[0]→end の 2 点で
+        // 直線が定義される。visible 範囲内に endpoint または時間軸の交点が
+        // 乗るときに y 値を取り込んで axis 外にはみ出さないようにする。両
+        // endpoint が範囲外でも線分が visible 帯を横断するなら sample して
+        // その y を採用 (= 単純な 2 点線形補間)。
         function sampleTrendY(line) {
           if (!line) return;
           var p1 = line.pivots[0];
@@ -2801,8 +2767,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           pushIfFinite(p1.price + slope * (a - t1));
           pushIfFinite(p1.price + slope * (b - t1));
         }
-        sampleTrendY(sc.resistanceLine);
-        sampleTrendY(sc.supportLine);
+        sampleTrendY(sc.trendLine);
         // 保有期間が visible 範囲と重なっていれば position 線を含める
         if (sc.position) {
           var openedAtMs = new Date(sc.position.openedAt).getTime();
