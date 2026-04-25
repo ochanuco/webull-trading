@@ -1477,12 +1477,15 @@ export async function loadSymbolChart(
   if (!db) throw new Error('DB binding not available')
   const [logsResult, fillsResult, doPosition] = await Promise.all([
     db
+      // 14 日窓: timeStopDays=10 営業日を覆う + 数日バッファ。LIMIT 200 (約 50h)
+      // だと 04/21 BUY のような古い entry が chart 範囲外で pin が render されない。
+      // 14 日 × 15 分 cadence = 1344 行 ≒ 200KB JSON、ECharts time axis で許容範囲。
       .prepare(
         `SELECT timestamp, price, indicators_json
          FROM strategy_decision_log
          WHERE symbol = ?
-         ORDER BY id DESC
-         LIMIT 200`,
+           AND timestamp >= datetime('now', '-14 days')
+         ORDER BY id ASC`,
       )
       .bind(symbol)
       .all<{ timestamp: string; price: number | null; indicators_json: string | null }>(),
@@ -1516,7 +1519,7 @@ export async function loadSymbolChart(
       }>(),
     fetchDoPosition(env, symbol),
   ])
-  const logs = (logsResult.results ?? []).reverse() // ASC for chart
+  const logs = logsResult.results ?? [] // SQL は既に ASC で返している
   const points: SymbolChartPoint[] = logs
     .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
     .map((r) => {
@@ -1874,12 +1877,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       });
 
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
+      // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
+      // close-time fill (15 分以内) で label 重なりが起きにくい。pnl は SELL のみ
+      // 末尾に短く付与 (例: "120.19 +0.4")。詳細は hover tooltip で。
       var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
-        return { name: 'BUY', coord: [m.timestamp, m.price], label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
+        return { name: 'BUY', coord: [m.timestamp, m.price], value: m.price, label: { formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 }, itemStyle: { color: '#057a55' } };
       });
       var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
-        var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
-        return { name: 'SELL', coord: [m.timestamp, m.price], label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
+        var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
+        return { name: 'SELL', coord: [m.timestamp, m.price], value: m.price, label: { formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 }, itemStyle: { color: '#c22' } };
       });
 
       // 保有中なら avg / stop / take-profit を水平 markLine。
@@ -1898,28 +1904,35 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
 
       // ECharts の scale:true は markLine を yAxis range に含めないため、
-      // TP / stop が data 範囲外だと枠の外で見えなくなる (実際にスクショで TP が
-      // 130 上限を超えて消えた)。data 全体 + position lines + markers を考慮した
-      // explicit min/max を計算して padding を加える。
+      // TP / stop が data 範囲外だと枠の外で見えなくなる。data 全体 +
+      // position lines + markers を考慮した explicit min/max + padding。
+      // NaN / Infinity が混入すると Math.min/max が NaN を返し、
+      // 結果 yAxis が壊れる (axis label に巨大数が出る回帰例あり) ので
+      // pushIfFinite で防御。
       var allY = [];
+      function pushIfFinite(v) {
+        if (v != null && typeof v === 'number' && Number.isFinite(v)) allY.push(v);
+      }
       sc.points.forEach(function (p) {
-        if (p.price != null) allY.push(p.price);
-        if (p.sma50 != null) allY.push(p.sma50);
-        if (p.high20d != null) {
-          allY.push(p.high20d * pullbackMaxMul);
-          allY.push(p.high20d * pullbackMinMul);
+        pushIfFinite(p.price);
+        pushIfFinite(p.sma50);
+        if (p.high20d != null && Number.isFinite(p.high20d)) {
+          pushIfFinite(p.high20d * pullbackMaxMul);
+          pushIfFinite(p.high20d * pullbackMinMul);
         }
-        if (p.low20d != null) allY.push(p.low20d);
+        pushIfFinite(p.low20d);
       });
-      sc.markers.forEach(function (m) { if (m.price != null) allY.push(m.price); });
-      extraYValues.forEach(function (v) { allY.push(v); });
+      sc.markers.forEach(function (m) { pushIfFinite(m.price); });
+      extraYValues.forEach(function (v) { pushIfFinite(v); });
       var yMin, yMax;
       if (allY.length > 0) {
         var rawMin = Math.min.apply(null, allY);
         var rawMax = Math.max.apply(null, allY);
-        var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
-        yMin = rawMin - pad;
-        yMax = rawMax + pad;
+        if (Number.isFinite(rawMin) && Number.isFinite(rawMax)) {
+          var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
+          yMin = rawMin - pad;
+          yMax = rawMax + pad;
+        }
       }
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
@@ -1944,7 +1957,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           { name: '下値支持線 (20日安値)', type: 'line', data: supportXY, lineStyle: { width: 1, color: '#c22', type: 'solid' }, symbol: 'none', connectNulls: false, z: 1 },
           { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
-            markPoint: entries.length + exits.length > 0 ? { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) } : undefined,
+            markPoint: entries.length + exits.length > 0 ? { symbol: 'pin', symbolSize: 24, data: entries.concat(exits) } : undefined,
           },
           { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
