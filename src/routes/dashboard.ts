@@ -2218,6 +2218,10 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var ohlcXY = (sc.intradayBars || []).map(function (b) {
         return [b.timestamp, b.open, b.close, b.low, b.high];
       });
+      // SMA50 line: cron-eval points から取得 (daily で計算された値の推移)。
+      // y 軸 range には含めないので、軸範囲外なら ECharts が auto-clip。
+      // 軸内のときだけ price との位置関係 (上 / 下) が読める TradingView ライク。
+      var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
       // (close line は削除: candle が close を含むので冗長、overnight gap で
       //  斜めに横断する視覚ノイズが発生していたため #176 → #177 で除去)
 
@@ -2448,8 +2452,10 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               },
             } : undefined,
           }] : []),
-          // SMA50 line は chart 撤去 (15m chart の y 軸を引き伸ばすため)。
-          // 現在値は chart 上部 badge で表示する (renderCurrentIndicatorsBadge)。
+          // SMA50 line: y 軸 range は candle 範囲だけで決めるので、SMA50 が
+          // 範囲外なら ECharts が自動 clip する。範囲内なら price との位置
+          // 関係 (上 / 下) が読める。現在値は inline badge にも併記。
+          { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
@@ -2489,11 +2495,27 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           } catch (e) { /* noop */ }
         }, 200);
       });
+
+      // preset zoom buttons (1D / 5D / 1M / All) の click handler。
+      // dispatchAction で dataZoom を更新 → 既存の dataZoom listener が
+      // URL ?from / ?to も連動更新する。
+      var presetButtons = document.querySelectorAll('.zoom-preset');
+      for (var pi = 0; pi < presetButtons.length; pi += 1) {
+        presetButtons[pi].addEventListener('click', function (ev) {
+          var fromMs = Number(ev.currentTarget.getAttribute('data-from-ms'));
+          var toMs = Number(ev.currentTarget.getAttribute('data-to-ms'));
+          if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return;
+          // inside / slider 両方を同期更新
+          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: fromMs, endValue: toMs });
+          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: fromMs, endValue: toMs });
+        });
+      }
     });
   `
   return `${renderSymbolPickerForTab(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${renderZoomPresetButtons(args.symbolChart)}
   ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', {
     symbolChart: args.symbolChart,
@@ -2599,6 +2621,40 @@ export function renderStrategyParamsPanel(p: StrategyParamsSnapshot): string {
       per-symbol override は POC scope では未対応。
     </p>
   </details>`
+}
+
+/**
+ * dataZoom プリセット (1D / 5D / 1M / All)。TradingView ライクの 1 click ズーム。
+ * lastTimestamp 基準で from/to を data-attr に焼き、client 側 click handler で
+ * symChart.dispatchAction({ type: 'dataZoom', startValue, endValue }) を発火する。
+ * 既存の dataZoom listener が URL を replaceState で更新するので、preset でも
+ * URL ?from / ?to が同期される。
+ */
+export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
+  if (!chart || chart.points.length === 0) return ''
+  const lastPoint = chart.points[chart.points.length - 1]!
+  const lastMs = new Date(lastPoint.timestamp).getTime()
+  if (!Number.isFinite(lastMs)) return ''
+  const earliestMs = (() => {
+    const first = chart.points[0]
+    if (!first) return lastMs
+    const ms = new Date(first.timestamp).getTime()
+    return Number.isFinite(ms) ? ms : lastMs
+  })()
+  const day = 24 * 3600 * 1000
+  const presets: Array<{ label: string; fromMs: number; toMs: number }> = [
+    { label: '1D', fromMs: lastMs - 1 * day, toMs: lastMs },
+    { label: '5D', fromMs: lastMs - 5 * day, toMs: lastMs },
+    { label: '1M', fromMs: lastMs - 30 * day, toMs: lastMs },
+    { label: 'All', fromMs: earliestMs, toMs: lastMs },
+  ]
+  const buttons = presets
+    .map(
+      (p) =>
+        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}" style="margin-right:6px;padding:3px 10px;font-size:12px;background:#fafafa;border:1px solid #d0d0d5;border-radius:4px;cursor:pointer;color:#1d1d1f">${esc(p.label)}</button>`,
+    )
+    .join('')
+  return `<p style="margin:8px 0 0">${buttons}</p>`
 }
 
 /**
