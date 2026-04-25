@@ -1003,6 +1003,7 @@ describe('computeZoomRange', () => {
       resistanceLine: null,
       supportLine: null,
       pivots: [],
+      dailyBars: [],
     }
   }
 
@@ -1046,7 +1047,7 @@ describe('computeZoomRange', () => {
     const chart: SymbolChartData = {
       symbol: 'X', points: [], markers: [], position: null,
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
-      resistanceLine: null, supportLine: null, pivots: [],
+      resistanceLine: null, supportLine: null, pivots: [], dailyBars: [],
     }
     expect(computeZoomRange(null, null, chart)).toBeNull()
   })

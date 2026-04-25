@@ -1499,6 +1499,16 @@ export interface TrendLineSegment {
   end: { timestamp: string; price: number }
 }
 
+/** 日次 OHLC (Yahoo daily bars 由来)、candlestick 描画用 */
+export interface DailyOhlcBar {
+  /** ISO UTC: `YYYY-MM-DDT16:00:00Z` (≈ JST 翌 1:00 ≈ "evening of date") */
+  timestamp: string
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
 export interface SymbolChartData {
   symbol: string
   points: SymbolChartPoint[]
@@ -1511,6 +1521,8 @@ export interface SymbolChartData {
   supportLine: TrendLineSegment | null
   /** 検出された swing pivots (chart 上の小さな丸で表示する想定) */
   pivots: PivotPoint[]
+  /** Yahoo 日次 OHLC、candlestick 描画用 (空配列 = Yahoo fetch 失敗) */
+  dailyBars: DailyOhlcBar[]
 }
 
 /**
@@ -1645,6 +1657,15 @@ export async function loadSymbolChart(
   const supportLine = lastTimestamp
     ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp)
     : null
+  // candlestick: Yahoo bars (lastTimestamp フィルタ済) を OHLC 形に成形。
+  // pivot 検出と違い regime / window 制限は不要 (chart 全期間表示)。
+  const dailyBars: DailyOhlcBar[] = yahooBars.map((b) => ({
+    timestamp: b.timestamp,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+  }))
   return {
     symbol,
     points: mergedPoints,
@@ -1654,6 +1675,7 @@ export async function loadSymbolChart(
     resistanceLine,
     supportLine,
     pivots,
+    dailyBars,
   }
 }
 
@@ -1702,12 +1724,15 @@ export function mergeYahooAndCronPoints(
 export async function fetchYahooBarsForChart(
   symbol: string,
   lookback: number,
-): Promise<Array<{ jstDate: string; close: number; timestamp: string }>> {
+): Promise<Array<{ jstDate: string; open: number; high: number; low: number; close: number; timestamp: string }>> {
   const client = new YahooBarClient()
   try {
     const bars = await client.getDailyBars(symbol, lookback)
     return bars.map((b) => ({
       jstDate: b.date,
+      open: b.open,
+      high: b.high,
+      low: b.low,
       close: b.close,
       timestamp: `${b.date}T16:00:00.000Z`,
     }))
@@ -2160,8 +2185,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
 
       // [timestamp, value] のペアで time axis に渡す。null は connectNulls/sparse に。
-      var pricesXY = sc.points.map(function (p) { return [p.timestamp, p.price]; });
       var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
+      // candlestick の data shape: [timestamp, open, close, low, high]
+      // (ECharts 標準順序、Western 規約 OHLC とは順番違うので注意)。
+      var ohlcXY = (sc.dailyBars || []).map(function (b) {
+        return [b.timestamp, b.open, b.close, b.low, b.high];
+      });
 
       // 押し目買いゾーン:
       // - 上端 = high20d × (1 + pullbackMax)  ≒ 教科書の「上値抵抗線 (resistance)」
@@ -2272,6 +2301,10 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         }
         pushIfFinite(p.low20d);
       });
+      (sc.dailyBars || []).forEach(function (b) {
+        pushIfFinite(b.high);
+        pushIfFinite(b.low);
+      });
       if (sc.resistanceLine) {
         pushIfFinite(sc.resistanceLine.pivots[0].price);
         pushIfFinite(sc.resistanceLine.pivots[1].price);
@@ -2350,13 +2383,21 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             name: 'swing low', type: 'scatter', data: pivotLowDots,
             symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 4,
           }] : []),
-          { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
+          // candlestick: 日次 OHLC を表示。Western 規約 (close >= open = 緑、
+          // close < open = 赤)。markPoint / markLine もここに anchor。
+          // ohlcXY が空なら series 自体をスキップ (Yahoo fetch 失敗時の保険)。
+          ...(ohlcXY.length > 0 ? [{
+            name: 'price (OHLC)', type: 'candlestick', data: ohlcXY,
+            itemStyle: {
+              color: '#057a55',     // bullish (close >= open)
+              color0: '#c22',       // bearish (close < open)
+              borderColor: '#057a55',
+              borderColor0: '#c22',
+            },
+            z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
             markPoint: entries.length + exits.length > 0 ? {
               symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
-              // 個別 pin hover で full-precision の realized PnL / qty / 時刻を
-              // 表示。label は短縮表記なので、ここで補完情報を出す。
-              // 親 tooltip の trigger:'axis' に上書きされないよう trigger:'item'。
               tooltip: {
                 trigger: 'item',
                 formatter: function (p) {
@@ -2370,7 +2411,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
                 },
               },
             } : undefined,
-          },
+          }] : []),
           { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
       });
