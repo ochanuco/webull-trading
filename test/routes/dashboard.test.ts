@@ -1138,3 +1138,63 @@ describe('renderCurrentIndicatorsBadge', () => {
     expect(html).toContain('—') // high20d / low20d
   })
 })
+
+import { renderZoomPresetButtons } from '../../src/routes/dashboard'
+
+describe('renderZoomPresetButtons', () => {
+  function fakeChart(points: SymbolChartPoint[]): SymbolChartData {
+    return {
+      symbol: 'X', points, markers: [], position: null,
+      rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
+      resistanceLine: null, supportLine: null, pivots: [], intradayBars: [],
+    }
+  }
+
+  it('chart null / points 空なら空文字', () => {
+    expect(renderZoomPresetButtons(null)).toBe('')
+    expect(renderZoomPresetButtons(fakeChart([]))).toBe('')
+  })
+
+  it('points あれば 1D / 5D / 1M / All の 4 ボタン', () => {
+    const chart = fakeChart([
+      { timestamp: '2026-04-01T00:00:00.000Z', price: 100, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
+    ])
+    const html = renderZoomPresetButtons(chart)
+    expect(html).toContain('>1D<')
+    expect(html).toContain('>5D<')
+    expect(html).toContain('>1M<')
+    expect(html).toContain('>All<')
+    expect(html.match(/class="zoom-preset"/g)?.length).toBe(4)
+  })
+
+  it('1D ボタンの from は lastTimestamp - 1day、to は lastTimestamp', () => {
+    const chart = fakeChart([
+      { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
+    ])
+    const html = renderZoomPresetButtons(chart)
+    const lastMs = new Date('2026-04-25T00:00:00.000Z').getTime()
+    const day = 24 * 3600 * 1000
+    expect(html).toContain(`data-from-ms="${lastMs - day}"`)
+    expect(html).toContain(`data-to-ms="${lastMs}"`)
+  })
+
+  it('All ボタンは earliest 〜 latest を範囲に', () => {
+    const chart = fakeChart([
+      { timestamp: '2026-02-01T00:00:00.000Z', price: 50, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
+    ])
+    const html = renderZoomPresetButtons(chart)
+    const earliestMs = new Date('2026-02-01T00:00:00.000Z').getTime()
+    const lastMs = new Date('2026-04-25T00:00:00.000Z').getTime()
+    expect(html).toContain(`data-from-ms="${earliestMs}"`)
+    expect(html).toContain(`data-to-ms="${lastMs}"`)
+  })
+
+  it('lastPoint timestamp 不正なら空文字', () => {
+    const chart = fakeChart([
+      { timestamp: 'not-an-iso', price: 100, sma50: null, high20d: null, low20d: null },
+    ])
+    expect(renderZoomPresetButtons(chart)).toBe('')
+  })
+})
