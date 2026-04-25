@@ -102,13 +102,41 @@ export const dashboard = new Hono<AppBindings>()
           ),
         )
       }
-      // tab === 'symbol'
-      const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       // ?from / ?to (ISO UTC) で chart x-axis のズーム範囲を URL に持つ。
-      // 銘柄切替を跨いで維持される (picker URL に伝搬)。dataZoom slider 操作で
-      // client 側が history.replaceState で URL を更新する。
+      // grid / symbol 共通: tab 切替・銘柄切替を跨いで zoom range を維持。
       const zoomFrom = parseIsoTimestamp(c.req.query('from'))
       const zoomTo = parseIsoTimestamp(c.req.query('to'))
+      if (tab === 'grid') {
+        const [universe, global] = await Promise.all([
+          loadSymbolUniverse(c.env),
+          loadGlobalConfigFrom(c.env),
+        ])
+        const rules: SymbolChartRules = {
+          pullbackMax: global.pullbackDefaultPullbackMax,
+          pullbackMin: global.pullbackDefaultPullbackMin,
+          stopPct: global.pullbackDefaultStopPct,
+          takeProfitPct: global.pullbackDefaultTakeProfitPct,
+          timeStopDays: global.pullbackDefaultTimeStopDays,
+        }
+        const charts = await loadAllSymbolCharts(c.env, universe.allowedSymbols, rules)
+        // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
+        // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
+        // 採用する。URL ?from / ?to があればそれを優先 (既存と同挙動)。
+        const referenceChart = charts.find((c) => c.chart !== null)?.chart ?? null
+        const zoom = computeZoomRange(zoomFrom, zoomTo, referenceChart)
+        return c.html(
+          layout(
+            'チャート',
+            chartsBody({
+              tab,
+              charts,
+              zoom,
+            }),
+          ),
+        )
+      }
+      // tab === 'symbol'
+      const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(c.env),
         loadGlobalConfigFrom(c.env),
@@ -1700,6 +1728,46 @@ export async function loadSymbolChart(
 }
 
 /**
+ * 銘柄グリッドビュー用: ALLOWED_SYMBOLS 全銘柄の SymbolChartData を並列取得。
+ *
+ * 個別 symbol の `loadSymbolChart` 失敗 (Yahoo fetch error / D1 一時的エラー /
+ * DO unbound 等) は per-symbol で catch して `{ chart: null, error }` に落とす。
+ * 1 銘柄の失敗で grid 全画面が 500 にならないよう、grid view では panel 単位で
+ * 「データ取得失敗」を可視化する fallback に倒す (POC 段階で trader が生産に
+ * 戻れない事故を避ける)。
+ *
+ * 注意: Cloudflare Workers の subrequest 制限 (50 / request) を考慮。
+ * `loadSymbolChart` は 銘柄あたり ~5 subrequest (Yahoo daily + intraday + D1
+ * query + DO query) なので 9 銘柄で ~45 subrequest。ALLOWED_SYMBOLS が増えた
+ * 場合は paging or 段階表示が必要だが、POC 規模では十分に余裕がある前提。
+ *
+ * 並列度は `Promise.all` でフル並列。Workers の I/O concurrency 上限に当たる
+ * ようなら `p-limit` 等で絞ることになるが、現状 9 並列なら問題ない。
+ */
+export async function loadAllSymbolCharts(
+  env: Env,
+  symbols: string[],
+  rules: SymbolChartRules,
+): Promise<Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>> {
+  if (symbols.length === 0) return []
+  return await Promise.all(
+    symbols.map(async (symbol) => {
+      try {
+        const chart = await loadSymbolChart(env, symbol, rules)
+        return { symbol, chart, error: null as string | null }
+      } catch (err) {
+        // 個別失敗は audit log のため console.warn (Workers logs に流れる)。
+        // panel 側は error 文字列を表示して trader に「この 1 銘柄だけ取得失敗」
+        // を分からせる。
+        // eslint-disable-next-line no-console
+        console.warn('[dashboard] loadAllSymbolCharts symbol failed', { symbol, err: messageOf(err) })
+        return { symbol, chart: null, error: messageOf(err) }
+      }
+    }),
+  )
+}
+
+/**
  * Yahoo daily bars と cron-eval points をマージ。同 JST 日では cron-eval を
  * 優先 (indicators が乗っているため)、それ以外の日は Yahoo bar を price-only
  * の point として追加。timestamp 昇順で返す。
@@ -2152,16 +2220,18 @@ export function safeJsonScript(varName: string, data: unknown): string {
   return `<script>window.${varName} = ${json};</script>`
 }
 
-export type ChartsTab = 'overview' | 'quality' | 'symbol'
+export type ChartsTab = 'overview' | 'quality' | 'symbol' | 'grid'
 
 export function parseChartsTab(value: string | undefined): ChartsTab {
-  return value === 'quality' || value === 'symbol' ? value : 'overview'
+  if (value === 'quality' || value === 'symbol' || value === 'grid') return value
+  return 'overview'
 }
 
 const CHART_TABS: Array<{ id: ChartsTab; label: string; hint: string }> = [
   { id: 'overview', label: '概要', hint: 'エクイティカーブ + ドローダウン (戦略を続けるか止めるかの判断)' },
   { id: 'quality', label: '取引品質', hint: 'PnL 分布 + 統計 + Decision breakdown (エッジ / rule の機能性)' },
   { id: 'symbol', label: '個別銘柄', hint: '価格 + SMA50 + entry/exit (rule と現実の整合)' },
+  { id: 'grid', label: '銘柄グリッド', hint: 'ALLOWED_SYMBOLS を 4 列 grid で並列表示。dataZoom は全 panel 同期 (Datadog 風)' },
 ]
 
 interface ChartsBodyOverview {
@@ -2253,7 +2323,25 @@ interface ChartsBodySymbol {
   zoom: { from: Date; to: Date } | null
 }
 
-type ChartsBodyArgs = ChartsBodyOverview | ChartsBodyQuality | ChartsBodySymbol
+/**
+ * 銘柄グリッドビュー: ALLOWED_SYMBOLS を 4 列 (responsive) grid で並列表示。
+ * 各 panel は個別 mini chart で、Datadog dashboard 風に dataZoom と tooltip が
+ * `echarts.connect` 経由で全 panel 間で同期する。preset zoom (1D/5D/1M/All)
+ * は grid 全体共通の toolbar から発火し、全 chart へ dispatchAction される。
+ */
+interface ChartsBodyGrid {
+  tab: 'grid'
+  /** 全銘柄の SymbolChartData (load 失敗銘柄は値 null。1 銘柄失敗で全 grid を 500 にしない) */
+  charts: Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>
+  /** dataZoom 初期範囲。null なら全期間 */
+  zoom: { from: Date; to: Date } | null
+}
+
+type ChartsBodyArgs =
+  | ChartsBodyOverview
+  | ChartsBodyQuality
+  | ChartsBodySymbol
+  | ChartsBodyGrid
 
 /**
  * Chart 上部に出す tab strip。現在 tab には active 装飾、他は通常リンク。
@@ -2285,6 +2373,7 @@ function chartsBody(args: ChartsBodyArgs): string {
   const tabStrip = renderTabStrip(args.tab, focusSymbol)
   if (args.tab === 'overview') return tabStrip + renderOverviewTab(args)
   if (args.tab === 'quality') return tabStrip + renderQualityTab(args)
+  if (args.tab === 'grid') return tabStrip + renderGridTab(args)
   return tabStrip + renderSymbolTab(args)
 }
 
@@ -3184,6 +3273,512 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
   })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
+}
+
+/**
+ * 銘柄グリッドビュー (Datadog dashboard 風)。ALLOWED_SYMBOLS を 4 列 grid で
+ * 並列表示し、`echarts.connect('symbols-grid')` で全 panel の dataZoom と
+ * tooltip を同期させる。preset zoom (1D/5D/1M/All) は grid 共通 toolbar から
+ * 全 chart へ dispatchAction で broadcast。
+ *
+ * mini chart の構成 (個別銘柄タブの簡素版):
+ * - candle (1h OHLC)
+ * - 価格トレンド (linear regression)
+ * - 保有時の avg / stop / TP 水平線
+ * - BUY/SELL pin (markPoint)
+ * - session divider (vertical lines)
+ * - SMA50 / band / 詳細パネルは省略 (panel size に合わせて視認性を優先)
+ */
+export function renderGridTab(args: ChartsBodyGrid): string {
+  if (args.charts.length === 0) {
+    return `<p class="muted">ALLOWED_SYMBOLS が空です。<code>symbol_config</code> に少なくとも 1 銘柄登録してください。</p>`
+  }
+  // grid 共通 toolbar の preset zoom buttons。reference chart (最初に load 成功)
+  // の lastTimestamp を基準に from/to を計算。各 panel が個別に同 timestamp 軸
+  // を持つため、共通の ms 範囲で全 chart を dispatchAction で同期する。
+  const referenceChart = args.charts.find((c) => c.chart !== null)?.chart ?? null
+  const presetButtonsHtml = renderZoomPresetButtons(referenceChart)
+
+  // 各 panel の HTML container。chart 本体は client side で echarts.init される。
+  // panel header に symbol 名 (詳細タブへの link) と最新 indicators (price /
+  // SMA50 / high20d / low20d) を出して「市場全体ビュー」で trader が銘柄を
+  // 一目で識別できるようにする。
+  const panelsHtml = args.charts
+    .map((entry, idx) => {
+      const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
+      const headerLink = `<a href="${symbolLink}" style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(entry.symbol)}</a>`
+      if (entry.chart === null) {
+        const errMsg = entry.error ?? 'チャートデータ取得失敗'
+        return `<div class="grid-panel" style="border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            ${headerLink}
+            <span class="warn" style="font-size:11px">取得失敗</span>
+          </div>
+          <div class="muted" style="font-size:12px;padding:24px 8px;text-align:center">${esc(errMsg)}</div>
+        </div>`
+      }
+      const badge = renderGridPanelBadge(entry.chart)
+      return `<div class="grid-panel" style="border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
+          ${headerLink}
+          ${badge}
+        </div>
+        <div id="grid-chart-${idx}" style="width:100%;height:280px"></div>
+      </div>`
+    })
+    .join('')
+
+  // client 側に渡す全銘柄分の chart payload。各 panel が個別 echarts.init で
+  // 消費する。__chartData.charts は array of { symbol, chart } (chart は load
+  // 失敗で null)。zoomFromMs / zoomToMs は preset toolbar・初期 dataZoom で共有。
+  const payload = {
+    charts: args.charts.map((c) => ({ symbol: c.symbol, chart: c.chart, error: c.error })),
+    zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
+    zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
+  }
+
+  const initScript = `
+    document.addEventListener('DOMContentLoaded', function () {
+      if (typeof echarts === 'undefined') return;
+      var data = window.__chartData;
+      if (!data || !Array.isArray(data.charts)) return;
+
+      // mini chart factory: 1 panel 分の echarts instance を build して返す。
+      // 単一銘柄タブの主要要素 (candle / 価格トレンド / position lines /
+      // session divider / BUY-SELL pin) を引き継ぎつつ、SMA50 / band /
+      // legend / chart 内 title は panel size のため省略する。
+      function buildPanel(elId, sc) {
+        if (!sc || !Array.isArray(sc.points) || sc.points.length === 0) return null;
+        var el = document.getElementById(elId);
+        if (!el) return null;
+        var ohlcBars = sc.intradayBars || [];
+        var useCategoryAxis = ohlcBars.length > 0;
+        var ohlcMs = ohlcBars.map(function (b) { return new Date(b.timestamp).getTime(); });
+        var categories = ohlcBars.map(function (b) { return b.timestamp; });
+
+        var sessionOpenIndices = [];
+        if (useCategoryAxis) {
+          var SESSION_GAP_MS = 90 * 60 * 1000;
+          for (var si = 1; si < ohlcMs.length; si++) {
+            if (ohlcMs[si] - ohlcMs[si - 1] >= SESSION_GAP_MS) sessionOpenIndices.push(si);
+          }
+        }
+
+        function nearestIndex(ms) {
+          if (!Number.isFinite(ms) || ohlcMs.length === 0) return -1;
+          var lo = 0, hi = ohlcMs.length - 1;
+          if (ms <= ohlcMs[0]) return 0;
+          if (ms >= ohlcMs[hi]) return hi;
+          while (lo < hi) {
+            var mid = (lo + hi) >> 1;
+            if (ohlcMs[mid] < ms) lo = mid + 1; else hi = mid;
+          }
+          if (lo > 0 && (ms - ohlcMs[lo - 1]) <= (ohlcMs[lo] - ms)) return lo - 1;
+          return lo;
+        }
+        function xForTimestamp(ts) {
+          if (useCategoryAxis) return nearestIndex(new Date(ts).getTime());
+          return ts;
+        }
+
+        var jstFmt = new Intl.DateTimeFormat('ja-JP', {
+          timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        function jstLabel(value) {
+          return jstFmt.format(new Date(value)).replace(/\\//g, '/');
+        }
+        function jstLabelForX(value) {
+          if (useCategoryAxis && typeof value === 'number') {
+            var i = Math.round(value);
+            if (i < 0 || i >= categories.length) return '';
+            return jstLabel(categories[i]);
+          }
+          return jstLabel(value);
+        }
+
+        var ohlcXY = useCategoryAxis
+          ? ohlcBars.map(function (b) { return [b.open, b.close, b.low, b.high]; })
+          : ohlcBars.map(function (b) { return [b.timestamp, b.open, b.close, b.low, b.high]; });
+
+        // dense trend line (個別銘柄タブと同アルゴリズム)
+        var ohlcTimestamps = ohlcMs.slice();
+        function densifyTrendLine(line, sampleTimestamps) {
+          if (!line) return null;
+          var t1 = new Date(line.pivots[0].timestamp).getTime();
+          var t2 = new Date(line.end.timestamp).getTime();
+          var y1 = line.pivots[0].price;
+          var y2 = line.end.price;
+          if (!Number.isFinite(t1) || !Number.isFinite(t2)) return null;
+          if (!Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+          if (t1 === t2) return [[t1, y1], [t2, y2]];
+          var slope = (y2 - y1) / (t2 - t1);
+          var seen = Object.create(null);
+          var arr = [];
+          for (var i = 0; i < sampleTimestamps.length; i += 1) {
+            var t = sampleTimestamps[i];
+            if (!Number.isFinite(t)) continue;
+            if (seen[t]) continue;
+            seen[t] = true;
+            arr.push(t);
+          }
+          if (!seen[t1]) { seen[t1] = true; arr.push(t1); }
+          if (!seen[t2]) { seen[t2] = true; arr.push(t2); }
+          arr.sort(function (a, b) { return a - b; });
+          if (arr.length < 2) return [[t1, y1], [t2, y2]];
+          var out = [];
+          for (var j = 0; j < arr.length; j += 1) {
+            var tj = arr[j];
+            var yj = y1 + slope * (tj - t1);
+            if (Number.isFinite(yj)) out.push([tj, yj]);
+          }
+          if (out.length < 2) return [[t1, y1], [t2, y2]];
+          return out;
+        }
+        function toCategoryXY(tyArr) {
+          if (!tyArr) return null;
+          if (!useCategoryAxis) return tyArr;
+          var seenIdx = Object.create(null);
+          var out = [];
+          for (var i = 0; i < tyArr.length; i += 1) {
+            var t = tyArr[i][0];
+            var y = tyArr[i][1];
+            var idx = nearestIndex(t);
+            if (idx < 0) continue;
+            if (seenIdx[idx]) continue;
+            seenIdx[idx] = true;
+            out.push([idx, y]);
+          }
+          out.sort(function (a, b) { return a[0] - b[0]; });
+          return out.length > 0 ? out : null;
+        }
+        var trendLineXY = toCategoryXY(densifyTrendLine(sc.trendLine, ohlcTimestamps));
+
+        // BUY/SELL pin: 個別銘柄タブと同形 (label は最新の fill 1 件のみ表示)
+        var buys = (sc.markers || []).filter(function (m) { return m.side === 'BUY'; });
+        var sells = (sc.markers || []).filter(function (m) { return m.side === 'SELL'; });
+        var latestFillTs = sc.markers && sc.markers.length > 0
+          ? sc.markers[sc.markers.length - 1].timestamp
+          : null;
+        var entries = buys.map(function (m) {
+          var showLabel = m.timestamp === latestFillTs;
+          return {
+            name: 'BUY', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
+            label: { show: showLabel, formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 4, fontSize: 10 },
+            itemStyle: { color: '#057a55' },
+          };
+        });
+        var exits = sells.map(function (m) {
+          var showLabel = m.timestamp === latestFillTs;
+          var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
+          return {
+            name: 'SELL', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
+            label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 4, fontSize: 10 },
+            itemStyle: { color: '#c22' },
+          };
+        });
+
+        // 保有時の avg / stop / TP 水平線 (個別銘柄タブと同 dense path 方式)
+        function densifyHorizontalLine(yValue, fromTs, toTs, samples) {
+          if (!Number.isFinite(yValue)) return null;
+          var a = typeof fromTs === 'number' ? fromTs : new Date(fromTs).getTime();
+          var b = typeof toTs === 'number' ? toTs : new Date(toTs).getTime();
+          if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+          if (a >= b) return [[a, yValue], [b, yValue]];
+          var seen = Object.create(null);
+          var arr = [];
+          function push(t) { if (seen[t]) return; seen[t] = true; arr.push(t); }
+          push(a); push(b);
+          for (var i = 0; i < samples.length; i += 1) {
+            var t = samples[i];
+            if (!Number.isFinite(t)) continue;
+            if (t < a || t > b) continue;
+            push(t);
+          }
+          arr.sort(function (x, y) { return x - y; });
+          var out = [];
+          for (var j = 0; j < arr.length; j += 1) out.push([arr[j], yValue]);
+          return out;
+        }
+        var avgLineXY = null, stopLineXY = null, tpLineXY = null;
+        var extraYValues = [];
+        if (sc.position) {
+          var avg = sc.position.avgPrice;
+          var stopPrice = avg * (1 + sc.rules.stopPct);
+          var tpPrice = avg * (1 + sc.rules.takeProfitPct);
+          extraYValues.push(avg, stopPrice, tpPrice);
+          var openedAt = sc.position.openedAt;
+          var latestTs = sc.points.length > 0 ? sc.points[sc.points.length - 1].timestamp : openedAt;
+          var endTs = new Date(latestTs).getTime() >= new Date(openedAt).getTime() ? latestTs : openedAt;
+          var fromMs = new Date(openedAt).getTime();
+          var toMs = new Date(endTs).getTime();
+          avgLineXY = toCategoryXY(densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps));
+          stopLineXY = toCategoryXY(densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps));
+          tpLineXY = toCategoryXY(densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps));
+        }
+
+        // y 軸 range (candle + markers + position lines のみ。SMA50/band は除外)
+        var allY = [];
+        function pushIfFinite(v) {
+          if (v != null && typeof v === 'number' && Number.isFinite(v)) allY.push(v);
+        }
+        ohlcBars.forEach(function (b) { pushIfFinite(b.high); pushIfFinite(b.low); });
+        (sc.markers || []).forEach(function (m) { pushIfFinite(m.price); });
+        extraYValues.forEach(function (v) { pushIfFinite(v); });
+        var yMin, yMax;
+        if (allY.length > 0) {
+          var rawMin = Math.min.apply(null, allY);
+          var rawMax = Math.max.apply(null, allY);
+          if (Number.isFinite(rawMin) && Number.isFinite(rawMax)) {
+            var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
+            yMin = rawMin - pad;
+            yMax = rawMax + pad;
+          }
+        }
+
+        // dataZoom 初期範囲。connect 経由で他 panel と同期するため、最初の
+        // setOption 直後に echarts.connect('symbols-grid') を呼ぶ (panel 構築
+        // ループの末尾)。filterMode は trend / position line の dropping 防止
+        // 目的で 'weakFilter' (個別銘柄タブと同方針)。
+        var dzInitial = (function () {
+          if (data.zoomFromMs == null || data.zoomToMs == null) return {};
+          if (useCategoryAxis) {
+            var fromIdx = nearestIndex(data.zoomFromMs);
+            var toIdx = nearestIndex(data.zoomToMs);
+            if (fromIdx < 0 || toIdx < 0) return {};
+            if (fromIdx > toIdx) { var tmp = fromIdx; fromIdx = toIdx; toIdx = tmp; }
+            return { startValue: fromIdx, endValue: toIdx };
+          }
+          return { startValue: data.zoomFromMs, endValue: data.zoomToMs };
+        })();
+        var dzCommon = {
+          labelFormatter: function (value) { return jstLabelForX(value); },
+          filterMode: 'weakFilter',
+        };
+        var dzInside = { filterMode: 'weakFilter' };
+        var dataZoomCfg = [
+          Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInside, dzInitial),
+          Object.assign({ type: 'slider', xAxisIndex: 0, height: 18, bottom: 4, showDetail: false }, dzCommon, dzInitial),
+        ];
+
+        var chart = echarts.init(el);
+        chart.setOption({
+          animation: false,
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
+            formatter: function (params) {
+              if (!Array.isArray(params) || params.length === 0) return '';
+              var ts = params[0].axisValue;
+              var lines = ['<div style="font-weight:600;font-size:11px">' + sc.symbol + ' ' + jstLabelForX(ts) + '</div>'];
+              for (var i = 0; i < params.length; i += 1) {
+                var p = params[i];
+                if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
+                  var off = p.value.length >= 5 ? 1 : 0;
+                  lines.push('<div style="font-size:11px">' + p.marker + ' OHLC ' +
+                    Number(p.value[off]).toFixed(2) + ' / ' +
+                    Number(p.value[off + 3]).toFixed(2) + ' / ' +
+                    Number(p.value[off + 2]).toFixed(2) + ' / ' +
+                    Number(p.value[off + 1]).toFixed(2) + '</div>');
+                }
+              }
+              return lines.join('');
+            },
+          },
+          legend: { show: false },
+          grid: { left: 40, right: 8, top: 8, bottom: 28 },
+          dataZoom: dataZoomCfg,
+          xAxis: useCategoryAxis ? {
+            type: 'category', data: categories,
+            axisLabel: { formatter: function (value) { return jstLabel(value); }, hideOverlap: true, fontSize: 10 },
+            axisLine: { show: false },
+            splitLine: { show: false },
+          } : {
+            type: 'time',
+            axisLabel: { formatter: function (value) { return jstLabel(value); }, fontSize: 10 },
+            axisLine: { show: false },
+            splitLine: { show: false },
+          },
+          yAxis: {
+            type: 'value', min: yMin, max: yMax,
+            axisLabel: { showMinLabel: false, showMaxLabel: false, fontSize: 10 },
+            axisLine: { show: false },
+            splitLine: { show: true, lineStyle: { opacity: 0.1 } },
+          },
+          series: [
+            ...(trendLineXY ? [{
+              name: 'trend', type: 'line', data: trendLineXY,
+              lineStyle: { width: 1.2, color: '#9333ea' }, symbol: 'none',
+              itemStyle: { color: '#9333ea' }, z: 7,
+            }] : []),
+            ...(ohlcXY.length > 0 ? [{
+              name: 'price', type: 'candlestick', data: ohlcXY,
+              barWidth: 6,
+              itemStyle: {
+                color: '#057a55', color0: '#c22',
+                borderColor: '#057a55', borderColor0: '#c22', borderWidth: 1,
+              },
+              z: 5,
+              markLine: sessionOpenIndices.length > 0 ? {
+                symbol: 'none', silent: true, label: { show: false },
+                lineStyle: { color: '#bbb', width: 1, type: 'dashed' }, z: 1,
+                data: sessionOpenIndices.map(function (idx) { return { xAxis: idx }; }),
+              } : undefined,
+              markPoint: entries.length + exits.length > 0 ? {
+                symbol: 'pin', symbolSize: 18, data: entries.concat(exits),
+              } : undefined,
+            }] : []),
+            ...(avgLineXY ? [{
+              name: 'avg', type: 'line', data: avgLineXY,
+              lineStyle: { width: 1, color: '#444' }, symbol: 'none',
+              silent: true, emphasis: { disabled: true }, z: 8,
+            }] : []),
+            ...(stopLineXY ? [{
+              name: 'stop', type: 'line', data: stopLineXY,
+              lineStyle: { width: 1, color: '#c22', type: 'dashed' }, symbol: 'none',
+              silent: true, emphasis: { disabled: true }, z: 8,
+            }] : []),
+            ...(tpLineXY ? [{
+              name: 'tp', type: 'line', data: tpLineXY,
+              lineStyle: { width: 1, color: '#057a55', type: 'dashed' }, symbol: 'none',
+              silent: true, emphasis: { disabled: true }, z: 8,
+            }] : []),
+          ],
+        });
+        return { chart: chart, useCategoryAxis: useCategoryAxis, nearestIndex: nearestIndex, categories: categories, ohlcMs: ohlcMs };
+      }
+
+      // 各 panel を build。null (load 失敗) は skip。
+      var panels = [];
+      for (var i = 0; i < data.charts.length; i += 1) {
+        var entry = data.charts[i];
+        var built = buildPanel('grid-chart-' + i, entry.chart);
+        if (built) panels.push(built);
+      }
+      // echarts.connect で全 panel の dataZoom / tooltip / legend を同期。
+      // Datadog dashboard と同様、1 panel で zoom/pan するだけで他 panel が
+      // 連動して同じ時間帯にスクロール。
+      var instances = panels.map(function (p) { return p.chart; });
+      if (instances.length > 0) echarts.connect(instances);
+
+      // resize 時は全 panel を resize (responsive)
+      window.addEventListener('resize', function () {
+        for (var i = 0; i < instances.length; i += 1) instances[i].resize();
+      });
+
+      // 1 panel の dataZoom event を listen して URL ?from / ?to を更新
+      // (個別銘柄タブと同方針)。connect 越しに他 panel の dataZoom も同期し
+      // 全 panel が同じイベントを発火しうるが、debounce 200ms でまとめる。
+      // 起点 panel は category mode / time mode のどちらでも構わない (同一
+      // ms 範囲を URL に書き戻す)。
+      function panelDataZoomToMs(panel) {
+        var opt = panel.chart.getOption();
+        var dz = opt.dataZoom && opt.dataZoom[0];
+        if (!dz) return null;
+        var sv = dz.startValue, ev = dz.endValue;
+        if (sv == null || ev == null) return null;
+        if (panel.useCategoryAxis) {
+          var sIdx = Math.max(0, Math.min(panel.categories.length - 1, Math.round(sv)));
+          var eIdx = Math.max(0, Math.min(panel.categories.length - 1, Math.round(ev)));
+          var fromMs = new Date(panel.categories[sIdx]).getTime();
+          var toMs = new Date(panel.categories[eIdx]).getTime();
+          if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+          return { fromMs: fromMs, toMs: toMs };
+        }
+        return { fromMs: sv, toMs: ev };
+      }
+      var dzTimer = null;
+      function onDz() {
+        if (dzTimer) clearTimeout(dzTimer);
+        dzTimer = setTimeout(function () {
+          if (panels.length === 0) return;
+          var range = panelDataZoomToMs(panels[0]);
+          if (!range) return;
+          try {
+            var fromIso = new Date(range.fromMs).toISOString();
+            var toIso = new Date(range.toMs).toISOString();
+            var url = new URL(window.location.href);
+            url.searchParams.set('from', fromIso);
+            url.searchParams.set('to', toIso);
+            window.history.replaceState({}, '', url.toString());
+          } catch (e) { /* noop */ }
+        }, 200);
+      }
+      for (var pi2 = 0; pi2 < panels.length; pi2 += 1) {
+        panels[pi2].chart.on('dataZoom', onDz);
+      }
+
+      // preset zoom buttons (1D/5D/1M/All): 全 panel に dispatchAction で
+      // 共通 ms 範囲を broadcast。category mode panel では nearestIndex で
+      // index に snap してから dispatch (panel 個別)。connect でも同期するが、
+      // panel 毎に category 軸の index が異なるので明示 dispatch が確実。
+      var presetButtons = document.querySelectorAll('.zoom-preset');
+      for (var pj = 0; pj < presetButtons.length; pj += 1) {
+        presetButtons[pj].addEventListener('click', function (ev) {
+          var fromMs = Number(ev.currentTarget.getAttribute('data-from-ms'));
+          var toMs = Number(ev.currentTarget.getAttribute('data-to-ms'));
+          if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return;
+          for (var pk = 0; pk < panels.length; pk += 1) {
+            var p = panels[pk];
+            var sv, eV;
+            if (p.useCategoryAxis) {
+              sv = p.nearestIndex(fromMs);
+              eV = p.nearestIndex(toMs);
+              if (sv < 0 || eV < 0) continue;
+              if (sv > eV) { var tmp = sv; sv = eV; eV = tmp; }
+            } else {
+              sv = fromMs; eV = toMs;
+            }
+            p.chart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: sv, endValue: eV });
+            p.chart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: sv, endValue: eV });
+          }
+        });
+      }
+    });
+  `
+
+  return `<p class="muted" style="font-size:12px">
+    ALLOWED_SYMBOLS の全銘柄を 4 列 grid で並列表示 (Datadog dashboard 風)。
+    ズーム / パン (slider drag, wheel) と tooltip は全 panel 間で同期します。
+    panel 左上の銘柄名をクリックすると個別銘柄タブの詳細表示に遷移。
+  </p>
+  ${presetButtonsHtml}
+  <div class="symbols-grid" style="display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:8px;margin-top:12px">
+    ${panelsHtml}
+  </div>
+  <style>
+    @media (max-width: 1280px) {
+      .symbols-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+    }
+    @media (max-width: 768px) {
+      .symbols-grid { grid-template-columns: 1fr !important; }
+    }
+  </style>
+  ${safeJsonScript('__chartData', payload)}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script>${initScript}</script>`
+}
+
+/**
+ * grid panel header の右肩に出す軽量 indicators badge (price / SMA50)。
+ * 個別銘柄タブの `renderCurrentIndicatorsBadge` の縮小版。
+ * 「市場全体ビュー」で trader が「現在価格と SMA50 の位置関係」を一目で
+ * 判断するための最小限情報。high20d / low20d / atr は省略 (panel 幅優先)。
+ */
+function renderGridPanelBadge(chart: SymbolChartData): string {
+  let latest: SymbolChartPoint | null = null
+  for (let i = chart.points.length - 1; i >= 0; i -= 1) {
+    const p = chart.points[i]!
+    if (p.sma50 !== null || p.high20d !== null || p.low20d !== null) {
+      latest = p
+      break
+    }
+  }
+  if (!latest) return ''
+  const fmt = (v: number | null): string => (v == null ? '—' : v.toFixed(2))
+  return `<span style="font-size:11px;white-space:nowrap">
+    <span class="muted">px:</span> <strong>${esc(fmt(latest.price))}</strong>
+    <span class="muted" style="margin-left:6px">SMA50:</span> ${esc(fmt(latest.sma50))}
+  </span>`
 }
 
 /**
