@@ -311,3 +311,47 @@ describe('formatQuoteAsOf', () => {
     expect(formatQuoteAsOf('not-an-iso')).toBe('?')
   })
 })
+
+import { pickFreshQuote } from '../../src/routes/dashboard'
+
+describe('pickFreshQuote', () => {
+  const webullOld = { price: 105.64, source: 'webull-snapshot', asOf: '2026-04-23T02:50:00.000Z' }
+  const yahooNew = { price: 128.32, asOf: '2026-04-25T03:00:00.000Z' }
+
+  it('Webull が新しいときは Webull を採用', () => {
+    const w = { price: 100, source: 'webull-snapshot', asOf: '2026-04-25T05:00:00.000Z' }
+    const y = { price: 99, asOf: '2026-04-25T03:00:00.000Z' }
+    expect(pickFreshQuote(w, y)).toEqual(w)
+  })
+
+  it('Yahoo が新しいときは Yahoo を採用 (bridge 障害シナリオ)', () => {
+    const result = pickFreshQuote(webullOld, yahooNew)
+    expect(result).toEqual({ price: 128.32, source: 'yahoo-bars', asOf: yahooNew.asOf })
+  })
+
+  it('Webull のみの場合は Webull', () => {
+    expect(pickFreshQuote(webullOld, null)).toEqual({
+      price: 105.64,
+      source: 'webull-snapshot',
+      asOf: '2026-04-23T02:50:00.000Z',
+    })
+  })
+
+  it('Yahoo のみの場合は Yahoo', () => {
+    expect(pickFreshQuote(null, yahooNew)).toEqual({
+      price: 128.32,
+      source: 'yahoo-bars',
+      asOf: yahooNew.asOf,
+    })
+  })
+
+  it('両方 null は null', () => {
+    expect(pickFreshQuote(null, null)).toBe(null)
+  })
+
+  it('asOf 同値なら Webull (intraday の方が信頼性が高い前提)', () => {
+    const w = { price: 100, source: 'webull-snapshot', asOf: '2026-04-25T03:00:00.000Z' }
+    const y = { price: 99, asOf: '2026-04-25T03:00:00.000Z' }
+    expect(pickFreshQuote(w, y)).toEqual(w)
+  })
+})
