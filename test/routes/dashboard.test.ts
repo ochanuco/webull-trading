@@ -186,3 +186,27 @@ describe('dashboard', () => {
     expect(res.status).toBe(401)
   })
 })
+
+import { formatQuoteAge } from '../../src/routes/dashboard'
+
+describe('formatQuoteAge', () => {
+  const now = new Date('2026-04-25T10:00:00.000Z')
+  it('< 1 min → "just now"', () => {
+    expect(formatQuoteAge('2026-04-25T09:59:30.000Z', now)).toBe('just now')
+  })
+  it('minutes', () => {
+    expect(formatQuoteAge('2026-04-25T09:45:00.000Z', now)).toBe('15m前')
+  })
+  it('hours', () => {
+    expect(formatQuoteAge('2026-04-25T07:00:00.000Z', now)).toBe('3h前')
+  })
+  it('days', () => {
+    expect(formatQuoteAge('2026-04-23T10:00:00.000Z', now)).toBe('2d前')
+  })
+  it('future timestamp → "just now"', () => {
+    expect(formatQuoteAge('2026-04-26T00:00:00.000Z', now)).toBe('just now')
+  })
+  it('invalid → "?"', () => {
+    expect(formatQuoteAge('not-an-iso', now)).toBe('?')
+  })
+})
