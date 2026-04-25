@@ -1589,21 +1589,29 @@ export async function loadSymbolChart(
   // sloped trend lines: Yahoo daily bars を 60 日 fetch して fractal pivot 検出。
   // POC 開始直後は strategy_decision_log が数日分しか無く cron-eval dedup では
   // pivot 検出に必要な 5 日 (k=2) すら集まらないので、Yahoo の本物日足を使う。
-  // 失敗時は cron-eval dedup にフォールバック。
-  const yahooBars = await fetchYahooBarsForChart(symbol, 60)
+  // 失敗時 (network 等) は cron-eval dedup にフォールバック。
+  const lastTimestamp = points.length > 0 ? points[points.length - 1]!.timestamp : null
+  const yahooBarsRaw = await fetchYahooBarsForChart(symbol, 60)
+  // Yahoo bars が chart 表示範囲 (lastTimestamp) より新しい日を含むと、
+  // pivot dot / trend line 終点が表示範囲外に extend される。表示範囲を超える
+  // bar は除外。lastTimestamp が無い (chart 自体空) なら filtering 不要。
+  const yahooBars =
+    lastTimestamp == null ? yahooBarsRaw : yahooBarsRaw.filter((b) => b.timestamp <= lastTimestamp)
   const dailyCloses = yahooBars.length >= 5 ? yahooBars : aggregateDailyCloses(points)
   const pivots = detectFractalPivots(dailyCloses, 2)
-  const lastTimestamp = points.length > 0 ? points[points.length - 1]!.timestamp : null
   const resistanceLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'high', lastTimestamp) : null
   const supportLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp) : null
   return { symbol, points, markers, position, rules, resistanceLine, supportLine, pivots }
 }
 
 /**
- * Yahoo daily bars を chart 用に fetch (lookback 営業日)。失敗時は空配列で
- * fallback を呼出元に伝える。timestamp は date 部分 + 16:00 UTC (≈ 1:00 JST
- * 翌日 ≈ "evening of date") で擬似生成。trend line の傾き計算のための
- * 相対位置は十分。
+ * Yahoo daily bars を chart 用に fetch (lookback 営業日)。timestamp は date
+ * 部分 + 16:00 UTC (≈ 1:00 JST 翌日 ≈ "evening of date") で擬似生成、
+ * trend line の傾き計算には相対精度として十分。
+ *
+ * エラー方針: caller contract 違反 (RangeError = lookback 不正) は呼出元の
+ * 実装バグなので throw 再送出する。それ以外 (network / parse / 一時的
+ * fetch 失敗) のみ空配列で fallback を呼出元に伝える。
  */
 export async function fetchYahooBarsForChart(
   symbol: string,
@@ -1617,7 +1625,10 @@ export async function fetchYahooBarsForChart(
       close: b.close,
       timestamp: `${b.date}T16:00:00.000Z`,
     }))
-  } catch {
+  } catch (err) {
+    // RangeError は呼出元コード側の lookback 不正 (実装ミス)。silent fallback で
+    // 隠さず再送出して dashboard handler の try/catch まで伝える。
+    if (err instanceof RangeError) throw err
     return []
   }
 }
