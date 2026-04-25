@@ -116,13 +116,22 @@ export const dashboard = new Hono<AppBindings>()
             ? defaultSymbol
             : universe.allowedSymbols[0] ?? null
       // ルール閾値は global_config から。per-symbol override は POC で未対応
-      // (symbol_rules table を引かない)。トレーダーが「だいたい同じ目安」を
-      // 視覚化したいのが要件なので global で十分、override 対応は follow-up
-      const rules: SymbolChartRules = {
-        pullbackMax: global.pullbackDefaultPullbackMax,
-        pullbackMin: global.pullbackDefaultPullbackMin,
+      // (symbol_rules table が無い、env-var 経由なので動的反映困難)。
+      const strategyParams: StrategyParamsSnapshot = {
         stopPct: global.pullbackDefaultStopPct,
         takeProfitPct: global.pullbackDefaultTakeProfitPct,
+        timeStopDays: global.pullbackDefaultTimeStopDays,
+        pullbackMax: global.pullbackDefaultPullbackMax,
+        pullbackMin: global.pullbackDefaultPullbackMin,
+        minReturn50d: global.pullbackDefaultMinReturn50d,
+        requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+        kAtr: global.pullbackDefaultKAtr,
+      }
+      const rules: SymbolChartRules = {
+        pullbackMax: strategyParams.pullbackMax,
+        pullbackMin: strategyParams.pullbackMin,
+        stopPct: strategyParams.stopPct,
+        takeProfitPct: strategyParams.takeProfitPct,
       }
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
@@ -138,6 +147,7 @@ export const dashboard = new Hono<AppBindings>()
             focusSymbol,
             symbolChart,
             availableSymbols: universe.allowedSymbols,
+            strategyParams,
           }),
         ),
       )
@@ -1477,18 +1487,29 @@ export async function loadSymbolChart(
       .bind(symbol)
       .all<{ timestamp: string; price: number | null; indicators_json: string | null }>(),
     db
+      // post_submit 行は side が null (writer は pre_submit にしか side を入れない)。
+      // client_order_id で pre_submit と self-JOIN して side を引く。古い fill で
+      // pre_submit が無い場合は realized_pnl の有無から推測 (null=BUY, 非 null=SELL)。
       .prepare(
-        `SELECT timestamp, side, filled_price, filled_qty, realized_pnl
-         FROM trade_journal
-         WHERE symbol = ?
-           AND trade_event_type = 'post_submit'
-           AND filled_price IS NOT NULL
-         ORDER BY id ASC`,
+        `SELECT
+           ps.timestamp AS timestamp,
+           pre.side AS pre_side,
+           ps.filled_price AS filled_price,
+           ps.filled_qty AS filled_qty,
+           ps.realized_pnl AS realized_pnl
+         FROM trade_journal AS ps
+         LEFT JOIN trade_journal AS pre
+           ON pre.client_order_id = ps.client_order_id
+           AND pre.trade_event_type = 'pre_submit'
+         WHERE ps.symbol = ?
+           AND ps.trade_event_type = 'post_submit'
+           AND ps.filled_price IS NOT NULL
+         ORDER BY ps.id ASC`,
       )
       .bind(symbol)
       .all<{
         timestamp: string
-        side: string | null
+        pre_side: string | null
         filled_price: number | null
         filled_qty: number | null
         realized_pnl: number | null
@@ -1509,10 +1530,10 @@ export async function loadSymbolChart(
       }
     })
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
-    .filter((r) => (r.side === 'BUY' || r.side === 'SELL') && r.filled_price !== null)
+    .filter((r) => r.filled_price !== null)
     .map((r) => ({
       timestamp: r.timestamp,
-      side: r.side as 'BUY' | 'SELL',
+      side: resolveFillSide(r.pre_side, r.realized_pnl),
       price: Number(r.filled_price),
       qty: r.filled_qty === null ? null : Number(r.filled_qty),
       realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),
@@ -1520,6 +1541,24 @@ export async function loadSymbolChart(
   // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
   return { symbol, points, markers, position, rules }
+}
+
+/**
+ * fill 行の BUY/SELL を決定する。
+ * - 1st: pre_submit 行から JOIN で取得した side ('BUY'/'SELL') を採用
+ * - 2nd: それも無い場合は realized_pnl の有無で推測
+ *   - realized_pnl が null = entry trade (= BUY)
+ *   - realized_pnl が非 null = exit trade (= SELL、reconcileFills が
+ *     `(filled_price - prior avg) * filled_qty` で計算する)
+ * - 3rd (defensive): どちらでも判断できなければ BUY (entry が圧倒的多数)
+ */
+export function resolveFillSide(
+  preSide: string | null,
+  realizedPnl: number | null,
+): 'BUY' | 'SELL' {
+  if (preSide === 'BUY' || preSide === 'SELL') return preSide
+  if (realizedPnl !== null && Number.isFinite(realizedPnl)) return 'SELL'
+  return 'BUY'
 }
 
 /**
@@ -1624,11 +1663,28 @@ interface ChartsBodyQuality {
   histogram: PnlHistogramBin[]
 }
 
+/**
+ * 戦略パラメータの現在値スナップショット (PullbackUptrendStrategy)。
+ * チャート併置パネルで「今どのルールで動いているか」を見せるための
+ * read-only view (#168)。default 値からの変更はパネル側で ⚠ flag。
+ */
+export interface StrategyParamsSnapshot {
+  stopPct: number
+  takeProfitPct: number
+  timeStopDays: number
+  pullbackMax: number
+  pullbackMin: number
+  minReturn50d: number
+  requireAboveSma50: boolean
+  kAtr: number
+}
+
 interface ChartsBodySymbol {
   tab: 'symbol'
   focusSymbol: string | null
   symbolChart: SymbolChartData | null
   availableSymbols: string[]
+  strategyParams: StrategyParamsSnapshot
 }
 
 type ChartsBodyArgs = ChartsBodyOverview | ChartsBodyQuality | ChartsBodySymbol
@@ -1774,7 +1830,8 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
   if (noData) {
     return (
       renderSymbolPickerForTab(args) +
-      `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>`
+      `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>` +
+      renderStrategyParamsPanel(args.strategyParams)
     )
   }
   const initScript = `
@@ -1827,15 +1884,42 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
 
       // 保有中なら avg / stop / take-profit を水平 markLine。
       var positionMarkLines = [];
+      var extraYValues = [];
       if (sc.position) {
         var avg = sc.position.avgPrice;
         var stopPrice = avg * (1 + sc.rules.stopPct);
         var tpPrice = avg * (1 + sc.rules.takeProfitPct);
+        extraYValues.push(avg, stopPrice, tpPrice);
         positionMarkLines = [
           { yAxis: avg, lineStyle: { color: '#444', type: 'solid', width: 1 }, label: { formatter: 'avg ' + avg.toFixed(2), position: 'insideStartTop', color: '#444' } },
           { yAxis: stopPrice, lineStyle: { color: '#c22', type: 'dashed', width: 1 }, label: { formatter: 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)', position: 'insideStartBottom', color: '#c22' } },
           { yAxis: tpPrice, lineStyle: { color: '#057a55', type: 'dashed', width: 1 }, label: { formatter: 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)', position: 'insideStartTop', color: '#057a55' } },
         ];
+      }
+
+      // ECharts の scale:true は markLine を yAxis range に含めないため、
+      // TP / stop が data 範囲外だと枠の外で見えなくなる (実際にスクショで TP が
+      // 130 上限を超えて消えた)。data 全体 + position lines + markers を考慮した
+      // explicit min/max を計算して padding を加える。
+      var allY = [];
+      sc.points.forEach(function (p) {
+        if (p.price != null) allY.push(p.price);
+        if (p.sma50 != null) allY.push(p.sma50);
+        if (p.high20d != null) {
+          allY.push(p.high20d * pullbackMaxMul);
+          allY.push(p.high20d * pullbackMinMul);
+        }
+        if (p.low20d != null) allY.push(p.low20d);
+      });
+      sc.markers.forEach(function (m) { if (m.price != null) allY.push(m.price); });
+      extraYValues.forEach(function (v) { allY.push(v); });
+      var yMin, yMax;
+      if (allY.length > 0) {
+        var rawMin = Math.min.apply(null, allY);
+        var rawMax = Math.max.apply(null, allY);
+        var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
+        yMin = rawMin - pad;
+        yMax = rawMax + pad;
       }
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
@@ -1848,7 +1932,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         legend: { top: 22, type: 'scroll' },
         grid: { left: 60, right: 20, top: 60, bottom: 40 },
         xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
-        yAxis: { type: 'value', scale: true },
+        yAxis: { type: 'value', min: yMin, max: yMax },
         series: [
           // 保有時は band 非表示 (avg/stop/TP の 3 線に集中)、非保有時は band 表示
           // (entry trigger 圏内かを見る局面)。下値支持線 (low20d) は常時表示で
@@ -1870,9 +1954,107 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
   `
   return `${renderSymbolPickerForTab(args)}
   <div id="symbol-chart" style="width:100%;height:420px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', { symbolChart: args.symbolChart })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
+}
+
+/**
+ * PullbackUptrendStrategy の TEST_DEFAULT_RULE と一致 (=コード上の default)。
+ * チャートパネルで「default 値から変更されている項目」を ⚠ で flag するための
+ * 比較対象。schema 側の default も同値 (pullback_default_*)。
+ */
+const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
+  stopPct: -0.04,
+  takeProfitPct: 0.07,
+  timeStopDays: 10,
+  pullbackMax: -0.03,
+  pullbackMin: -0.06,
+  minReturn50d: 0.08,
+  requireAboveSma50: true,
+  kAtr: 2.0,
+}
+
+/**
+ * チャート併置の戦略パラメータパネル (#168)。チャート上のラベル
+ * (押し目 ×N、stop -4% 等) はオーバーレイ 4 本制限のため限定的なので、
+ * 補助情報として全パラメータを一覧表示。default からの変更を ⚠ で強調し
+ * 「設定の意図しない残存」(例: pullback_max=0 のデバッグ残骸) に運用者が
+ * 気づきやすくする。
+ */
+export function renderStrategyParamsPanel(p: StrategyParamsSnapshot): string {
+  const flag = (current: number | boolean, def: number | boolean): string =>
+    current === def ? '' : ' <span class="warn" title="default 値から変更">⚠</span>'
+  const pct = (n: number): string =>
+    (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
+  const rows: Array<{ label: string; current: string; def: string; flag: string }> = [
+    {
+      label: '損切ライン (stopPct)',
+      current: pct(p.stopPct),
+      def: pct(STRATEGY_DEFAULTS.stopPct),
+      flag: flag(p.stopPct, STRATEGY_DEFAULTS.stopPct),
+    },
+    {
+      label: '利食ライン (takeProfitPct)',
+      current: pct(p.takeProfitPct),
+      def: pct(STRATEGY_DEFAULTS.takeProfitPct),
+      flag: flag(p.takeProfitPct, STRATEGY_DEFAULTS.takeProfitPct),
+    },
+    {
+      label: '時間切れ (timeStopDays)',
+      current: `${p.timeStopDays} 営業日`,
+      def: `${STRATEGY_DEFAULTS.timeStopDays} 営業日`,
+      flag: flag(p.timeStopDays, STRATEGY_DEFAULTS.timeStopDays),
+    },
+    {
+      label: '押し目 上限 (pullbackMax)',
+      current: pct(p.pullbackMax),
+      def: pct(STRATEGY_DEFAULTS.pullbackMax),
+      flag: flag(p.pullbackMax, STRATEGY_DEFAULTS.pullbackMax),
+    },
+    {
+      label: '押し目 下限 (pullbackMin)',
+      current: pct(p.pullbackMin),
+      def: pct(STRATEGY_DEFAULTS.pullbackMin),
+      flag: flag(p.pullbackMin, STRATEGY_DEFAULTS.pullbackMin),
+    },
+    {
+      label: '50日騰落率 閾値 (minReturn50d)',
+      current: pct(p.minReturn50d),
+      def: pct(STRATEGY_DEFAULTS.minReturn50d),
+      flag: flag(p.minReturn50d, STRATEGY_DEFAULTS.minReturn50d),
+    },
+    {
+      label: 'SMA50 上 必須 (requireAboveSma50)',
+      current: p.requireAboveSma50 ? 'true' : 'false',
+      def: STRATEGY_DEFAULTS.requireAboveSma50 ? 'true' : 'false',
+      flag: flag(p.requireAboveSma50, STRATEGY_DEFAULTS.requireAboveSma50),
+    },
+    {
+      label: 'ATR 倍率 (kAtr、サイジング用)',
+      current: p.kAtr.toFixed(2),
+      def: STRATEGY_DEFAULTS.kAtr.toFixed(2),
+      flag: flag(p.kAtr, STRATEGY_DEFAULTS.kAtr),
+    },
+  ]
+  const tbody = rows
+    .map(
+      (r) =>
+        `<tr><th>${esc(r.label)}</th><td>${esc(r.current)}${r.flag}</td><td class="muted">${esc(r.def)}</td></tr>`,
+    )
+    .join('')
+  return `<details open style="margin-top:12px">
+    <summary style="cursor:pointer;font-size:13px">戦略パラメータ (PullbackUptrendStrategy) — <span class="muted">⚠ は default から変更されている項目</span></summary>
+    <table style="margin-top:8px">
+      <thead><tr><th>項目</th><th>現在値</th><th>default</th></tr></thead>
+      <tbody>${tbody}</tbody>
+    </table>
+    <p class="muted" style="font-size:11px;margin-top:6px">
+      設定変更は <code>UPDATE global_config SET pullback_default_* = ... WHERE id = 'default'</code> で。
+      per-symbol override は POC scope では未対応。
+    </p>
+  </details>`
 }
 
 function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
