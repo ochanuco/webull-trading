@@ -714,3 +714,28 @@ describe('renderStrategyParamsPanel', () => {
     expect(html).toContain('default から変更されている')
   })
 })
+
+import { computeChartWindowDays } from '../../src/routes/dashboard'
+
+describe('computeChartWindowDays', () => {
+  it('default 10 営業日 → 24 カレンダー日', () => {
+    expect(computeChartWindowDays(10)).toBe(24)
+  })
+
+  it('短い保持 (5 営業日) でも最低 14 日確保', () => {
+    expect(computeChartWindowDays(5)).toBe(14)
+  })
+
+  it('長期保持 (20 営業日) → 44 日 (祝日 / 連休跨ぎを覆う)', () => {
+    expect(computeChartWindowDays(20)).toBe(44)
+  })
+
+  it('1 営業日 → floor 14 日', () => {
+    expect(computeChartWindowDays(1)).toBe(14)
+  })
+
+  it('小数 (4.5 営業日) でも切り上げ', () => {
+    expect(computeChartWindowDays(4.5)).toBe(14) // 13 < 14 floor
+    expect(computeChartWindowDays(5.5)).toBe(15) // ceil(15) = 15
+  })
+})

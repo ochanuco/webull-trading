@@ -132,6 +132,7 @@ export const dashboard = new Hono<AppBindings>()
         pullbackMin: strategyParams.pullbackMin,
         stopPct: strategyParams.stopPct,
         takeProfitPct: strategyParams.takeProfitPct,
+        timeStopDays: strategyParams.timeStopDays,
       }
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
@@ -1449,6 +1450,18 @@ export interface SymbolChartRules {
   stopPct: number
   /** 0.07 = +7% (利食ライン) */
   takeProfitPct: number
+  /** 営業日。chart の SQL window 計算に使う (chart logic では非使用) */
+  timeStopDays: number
+}
+
+/**
+ * Chart SQL の window 日数を timeStopDays から動的に決める。
+ * 営業日 N → カレンダー N×7/5 + 祝日バッファ + 安全マージン ≈ 2N+4。
+ * timeStopDays=10 → 24 日。年末年始 / 大型連休跨ぎでも entry 取りこぼさない。
+ */
+export function computeChartWindowDays(timeStopDays: number): number {
+  const dynamic = Math.ceil(timeStopDays * 2 + 4)
+  return Math.max(dynamic, 14)
 }
 
 export interface SymbolChartData {
@@ -1475,23 +1488,21 @@ export async function loadSymbolChart(
 ): Promise<SymbolChartData> {
   const db = env.DB
   if (!db) throw new Error('DB binding not available')
+  const windowDays = computeChartWindowDays(rules.timeStopDays)
   const [logsResult, fillsResult, doPosition] = await Promise.all([
     db
-      // 14 日窓: timeStopDays=10 営業日を覆う + 数日バッファ。LIMIT 200 (約 50h)
-      // だと 04/21 BUY のような古い entry が chart 範囲外で pin が render されない。
-      // 14 日 × 15 分 cadence = 1344 行 ≒ 200KB JSON、ECharts time axis で許容範囲。
+      // 動的 window: timeStopDays から computeChartWindowDays(N) で計算
+      // (default 10 営業日 → 24 カレンダー日)。祝日 / 連休跨ぎでも entry を
+      // 取りこぼさない。strftime で右辺を ISO UTC 形式 ("...T...:...Z") に
+      // 揃える (default datetime() の空白区切りでは stored ISO と境界がぶれる)。
       .prepare(
-        // strftime で右辺を ISO UTC 形式 ("...T...:...Z") に揃える。
-        // datetime() のデフォルト出力は "YYYY-MM-DD HH:MM:SS" (空白区切り)
-        // で、stored 形式 "YYYY-MM-DDTHH:MM:SS.SSSZ" との文字列比較では境界が
-        // 約 1 日ぶれる (cutoff 当日の時刻前 row が誤って included される)。
         `SELECT timestamp, price, indicators_json
          FROM strategy_decision_log
          WHERE symbol = ?
-           AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
+           AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
          ORDER BY id ASC`,
       )
-      .bind(symbol)
+      .bind(symbol, `-${windowDays} days`)
       .all<{ timestamp: string; price: number | null; indicators_json: string | null }>(),
     db
       // post_submit 行は side が null (writer は pre_submit にしか side を入れない)。
@@ -1857,6 +1868,14 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       function jstLabel(value) {
         return jstFmt.format(new Date(value)).replace(/\\//g, '/');
       }
+      // fill 時刻は秒精度で表示 (同分内 fills を区別するため)。axisLabel は
+      // 分単位で密度を保つ (秒まで出すと x 軸ラベルが詰まる)。
+      var jstFmtSec = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+      function jstLabelSec(value) {
+        return jstFmtSec.format(new Date(value)).replace(/\\//g, '/');
+      }
 
       // [timestamp, value] のペアで time axis に渡す。null は connectNulls/sparse に。
       var pricesXY = sc.points.map(function (p) { return [p.timestamp, p.price]; });
@@ -1987,7 +2006,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
                     ? ''
                     : '<br/>realized PnL: ' + (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
                   var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
-                  var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabel(d.fillTimestamp);
+                  var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabelSec(d.fillTimestamp);
                   return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts;
                 },
               },
