@@ -2362,9 +2362,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var dzInitial = data.zoomFromMs != null && data.zoomToMs != null
         ? { startValue: data.zoomFromMs, endValue: data.zoomToMs }
         : {};
+      // dataZoom slider 両端ラベルも JST で表示 (default だと UTC date string)
+      var dzCommon = { labelFormatter: function (value) { return jstLabel(value); } };
       var dataZoomCfg = [
         Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInitial),
-        Object.assign({ type: 'slider', xAxisIndex: 0, height: 24, bottom: 8 }, dzInitial),
+        Object.assign({ type: 'slider', xAxisIndex: 0, height: 24, bottom: 8 }, dzCommon, dzInitial),
       ];
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
@@ -2373,6 +2375,30 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
+          // 既定の trigger:'axis' tooltip は header に axis value (時刻) を
+          // UTC 文字列で出すため、JST formatter を当てた custom formatter で上書き。
+          // candlestick 値は [open, close, low, high]、line は scalar として処理。
+          formatter: function (params) {
+            if (!Array.isArray(params) || params.length === 0) return '';
+            var ts = params[0].axisValue;
+            var lines = ['<div style="font-weight:600;font-size:11px">' + jstLabel(ts) + '</div>'];
+            for (var i = 0; i < params.length; i += 1) {
+              var p = params[i];
+              if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
+                lines.push('<div style="font-size:11px">' + p.marker + ' ' + p.seriesName +
+                  '  O ' + Number(p.value[1]).toFixed(2) +
+                  '  H ' + Number(p.value[4]).toFixed(2) +
+                  '  L ' + Number(p.value[3]).toFixed(2) +
+                  '  C ' + Number(p.value[2]).toFixed(2) + '</div>');
+              } else {
+                var v = Array.isArray(p.value) ? p.value[1] : p.value;
+                if (v == null) continue;
+                lines.push('<div style="font-size:11px">' + p.marker + ' ' + p.seriesName +
+                  ': ' + Number(v).toFixed(2) + '</div>');
+              }
+            }
+            return lines.join('');
+          },
         },
         legend: { top: 22, type: 'scroll' },
         // plot 面積最大化: grid 余白を絞り、splitLine 淡く、axisLine 非表示で
