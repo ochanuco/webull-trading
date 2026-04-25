@@ -71,11 +71,18 @@ export const dashboard = new Hono<AppBindings>()
     }
     const db = createDb(c.env.DB)
     const requestedRequestId = c.req.query('requestId')?.trim()
+    const requestedDecisionId = c.req.query('decisionId')?.trim()
     try {
+      const decisionId = requestedDecisionId && requestedDecisionId.length > 0
+        ? Number.parseInt(requestedDecisionId, 10)
+        : undefined
+      if (requestedDecisionId && (!Number.isFinite(decisionId) || decisionId === undefined || decisionId <= 0)) {
+        return jsonPretty({ error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, 400)
+      }
       let requestId = requestedRequestId && requestedRequestId.length > 0
         ? requestedRequestId
         : undefined
-      if (!requestId) {
+      if (!requestId && decisionId === undefined) {
         const latest = await db
           .select({ requestId: strategyDecisionLog.requestId })
           .from(strategyDecisionLog)
@@ -83,10 +90,13 @@ export const dashboard = new Hono<AppBindings>()
           .limit(50)
         requestId = latest.find((row) => row.requestId !== null)?.requestId ?? undefined
       }
-      if (!requestId) {
+      if (!requestId && decisionId === undefined) {
         return jsonPretty({ error: 'no_cron_logs', message: 'strategy_decision_log has no request_id rows' }, 404)
       }
 
+      const filter = decisionId !== undefined
+        ? eq(strategyDecisionLog.id, decisionId)
+        : eq(strategyDecisionLog.requestId, requestId as string)
       const rows = await db
         .select({
           id: strategyDecisionLog.id,
@@ -111,13 +121,13 @@ export const dashboard = new Hono<AppBindings>()
             eq(tradeJournal.tradeEventType, 'post_submit'),
           ),
         )
-        .where(eq(strategyDecisionLog.requestId, requestId))
+        .where(filter)
         .orderBy(asc(strategyDecisionLog.id))
 
       return jsonPretty({
         schema: 'dashboard_cron_export.v1',
         exportedAt: new Date().toISOString(),
-        requestId,
+        ...(decisionId !== undefined ? { decisionId } : { requestId }),
         rowCount: rows.length,
         decisions: rows.map((row) => ({
           id: row.id,
@@ -270,6 +280,7 @@ const STYLE = `
   .reason-panel{margin-top:8px;padding:10px;border:1px solid #e5e5ea;border-radius:6px;background:#fafafa;color:#1d1d1f;max-width:680px}
   .reason-panel div{margin:0 0 8px}
   .reason-panel div:last-child{margin-bottom:0}
+  .reason-panel ul{margin:4px 0 10px;padding-left:20px}
   .reason-panel code{white-space:pre-wrap;word-break:break-word}
   .reason-panel pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px}
 `
@@ -889,9 +900,11 @@ function cronReasonCell(row: {
 }): string {
   const localized = localizeReason(row.reason)
   const rawReason = row.reason ?? '-'
-  const requestLink = row.requestId
-    ? `<a href="/dashboard/cron/json?requestId=${encodeURIComponent(row.requestId)}" target="_blank" rel="noreferrer">${esc(row.requestId)}</a>`
+  const decisionJsonLink = `<a href="/dashboard/cron/json?decisionId=${row.id}" target="_blank" rel="noreferrer">この判定だけのJSON</a>`
+  const runJsonLink = row.requestId
+    ? `<a href="/dashboard/cron/json?requestId=${encodeURIComponent(row.requestId)}" target="_blank" rel="noreferrer">run全体JSON</a> <span class="muted">(${esc(row.requestId)})</span>`
     : '-'
+  const humanDetails = describeCronReason(row.reason)
   const indicators = row.indicatorsJson
     ? JSON.stringify(parseJsonObject(row.indicatorsJson), null, 2)
     : null
@@ -899,13 +912,31 @@ function cronReasonCell(row: {
   return `<details class="reason-details">
     <summary>${esc(localized || '-')}</summary>
     <div class="reason-panel">
-      <div><strong>decision id</strong><br><code>${row.id}</code></div>
+      <div><strong>読み方</strong>${humanDetails}</div>
+      <div><strong>JSON</strong><br>${decisionJsonLink} / ${runJsonLink}</div>
       <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
-      <div><strong>requestId / run JSON</strong><br>${requestLink}</div>
-      <div><strong>clientOrderId</strong><br><code>${esc(row.clientOrderId ?? '-')}</code></div>
+      <div><strong>decision id / clientOrderId</strong><br><code>${row.id}</code> / <code>${esc(row.clientOrderId ?? '-')}</code></div>
       <div><strong>indicators</strong><br>${indicators ? `<pre>${esc(indicators)}</pre>` : '<span class="muted">-</span>'}</div>
     </div>
   </details>`
+}
+
+function describeCronReason(reason: string | null | undefined): string {
+  if (!reason) return '<p class="muted">詳細理由なし</p>'
+
+  const lotSizeRound = reason.match(
+    /^sizing rejected: lot-size-round \(raw qty (\S+) < lot (\S+), stop (\S+), entry (\S+)\)$/,
+  )
+  if (lotSizeRound) {
+    const [, rawQty, lot, stop, entry] = lotSizeRound
+    return `<ul>
+      <li>計算上は ${esc(rawQty)} 株まで建てられるが、必要な売買単位 ${esc(lot)} 株に届かないため発注しません。</li>
+      <li>評価時の株価は ${esc(entry)}、損切り幅は ${esc(stop)} / 株です。</li>
+      <li>このままだと単元未満なので、リスク予算・銘柄上限・売買単位のいずれかが変わらない限り発注されません。</li>
+    </ul>`
+  }
+
+  return `<p>${esc(localizeReason(reason))}</p>`
 }
 
 /**

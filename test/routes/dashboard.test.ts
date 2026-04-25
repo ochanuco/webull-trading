@@ -69,6 +69,7 @@ function fakeCronDb(rows: unknown[]) {
     where: vi.fn(() => query),
     orderBy: vi.fn(() => query),
     limit: vi.fn(async () => rows),
+    then: (resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(rows)),
   }
   return {
     select: vi.fn(() => query),
@@ -204,12 +205,12 @@ describe('dashboard', () => {
           id: 123,
           timestamp: '2026-04-23T00:00:00.000Z',
           requestId: 'req-1',
-          symbol: 'SOXL',
-          decision: 'BUY',
-          reason: 'pullback -0.0500 in uptrend (50d return 0.1000)',
-          price: 10,
-          indicatorsJson: '{"price":10,"return50d":0.1}',
-          clientOrderId: 'coid-1',
+          symbol: '7203',
+          decision: 'REJECT',
+          reason: 'sizing rejected: lot-size-round (raw qty 79 < lot 100, stop 286.00, entry 3765)',
+          price: 3765,
+          indicatorsJson: '{"price":3765,"return50d":0.45873692367299496}',
+          clientOrderId: null,
           filledPrice: null,
           filledQty: null,
           realizedPnl: null,
@@ -222,10 +223,48 @@ describe('dashboard', () => {
     const body = await res.text()
 
     expect(body).toContain('<details class="reason-details">')
-    expect(body).toContain('買い: 上昇トレンド中の押し目買い')
+    expect(body).toContain('発注スキップ: 売買単位未満')
+    expect(body).toContain('計算上は 79 株まで建てられるが、必要な売買単位 100 株に届かないため発注しません。')
+    expect(body).toContain('/dashboard/cron/json?decisionId=123')
     expect(body).toContain('<strong>raw reason</strong>')
-    expect(body).toContain('/dashboard/cron/json?requestId=req-1')
-    expect(body).toContain('&quot;return50d&quot;: 0.1')
+    expect(body).toContain('run全体JSON')
+    expect(body).toContain('&quot;return50d&quot;: 0.45873692367299496')
+  })
+
+  it('exports a single cron decision JSON by decisionId', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeCronDb([
+        {
+          id: 868,
+          timestamp: '2026-04-23T00:00:00.000Z',
+          requestId: 'req-1',
+          symbol: '7203',
+          decision: 'REJECT',
+          reason: 'sizing rejected: lot-size-round (raw qty 79 < lot 100, stop 286.00, entry 3765)',
+          price: 3765,
+          indicatorsJson: '{"price":3765}',
+          clientOrderId: null,
+          filledPrice: null,
+          filledQty: null,
+          realizedPnl: null,
+          brokerStatus: null,
+        },
+      ]) as unknown as ReturnType<typeof createDb>,
+    )
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/cron/json?decisionId=868',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({
+      decisionId: 868,
+      rowCount: 1,
+      decisions: [{ id: 868, symbol: '7203' }],
+    })
   })
 
   it('cron page requires basic auth', async () => {
