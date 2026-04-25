@@ -1883,13 +1883,26 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
       // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
       // close-time fill (15 分以内) で label 重なりが起きにくい。pnl は SELL のみ
-      // 末尾に短く付与 (例: "120.19 +0.4")。詳細は hover tooltip で。
+      // 末尾に小数 1 桁で付与 (例: "120.19 +0.4")。詳細 (full-precision PnL /
+      // qty / timestamp) は markPoint hover tooltip で表示。
+      // realizedPnl と filledQty を data に保持し tooltip.formatter から
+      // full-precision で読む (label の toFixed(1) で丸めた値とは独立)。
       var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
-        return { name: 'BUY', coord: [m.timestamp, m.price], value: m.price, label: { formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 }, itemStyle: { color: '#057a55' } };
+        return {
+          name: 'BUY', coord: [m.timestamp, m.price], value: m.price,
+          realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
+          label: { formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
+          itemStyle: { color: '#057a55' },
+        };
       });
       var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
         var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
-        return { name: 'SELL', coord: [m.timestamp, m.price], value: m.price, label: { formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 }, itemStyle: { color: '#c22' } };
+        return {
+          name: 'SELL', coord: [m.timestamp, m.price], value: m.price,
+          realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
+          label: { formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
+          itemStyle: { color: '#c22' },
+        };
       });
 
       // 保有中なら avg / stop / take-profit を水平 markLine。
@@ -1961,7 +1974,24 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           { name: '下値支持線 (20日安値)', type: 'line', data: supportXY, lineStyle: { width: 1, color: '#c22', type: 'solid' }, symbol: 'none', connectNulls: false, z: 1 },
           { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
-            markPoint: entries.length + exits.length > 0 ? { symbol: 'pin', symbolSize: 24, data: entries.concat(exits) } : undefined,
+            markPoint: entries.length + exits.length > 0 ? {
+              symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
+              // 個別 pin hover で full-precision の realized PnL / qty / 時刻を
+              // 表示。label は短縮表記なので、ここで補完情報を出す。
+              // 親 tooltip の trigger:'axis' に上書きされないよう trigger:'item'。
+              tooltip: {
+                trigger: 'item',
+                formatter: function (p) {
+                  var d = p.data;
+                  var pnl = d.realizedPnl == null
+                    ? ''
+                    : '<br/>realized PnL: ' + (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
+                  var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
+                  var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabel(d.fillTimestamp);
+                  return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts;
+                },
+              },
+            } : undefined,
           },
           { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
