@@ -1960,6 +1960,66 @@ export function fitTrendLineFromRecentPivots(
 }
 
 /**
+ * Trend line を「描画用の密点列」に展開する。
+ *
+ * 背景: ECharts の dataZoom + 2 点 line series は「片方の点が zoom 範囲外
+ * になると線が引かれない」既知挙動が widely 報告されている (issue #3637 系)。
+ * #189 で `filterMode: 'weakFilter'` に変更したが、それでもユーザ環境で
+ * trend line が描画されないケースが残った。
+ *
+ * 最も robust な解決策は line の data 自体を「常に zoom 範囲内に複数点が
+ * 入る粒度」にすること。ここでは intradayBars (1h candle、60 日で ~720 点)
+ * の各 timestamp で trend line の y 値を線形補間して、`[[t, y], ...]` の
+ * dense path に展開する。これで 5D (~120 点) や 1D zoom でも常に複数点が
+ * visible になり filterMode 不問で確実に描画される。
+ *
+ * 線形外挿: trend line は本来両側に伸びる概念線なので、p1 より過去側 / end
+ * より未来側の sample timestamp も同じ slope で外挿する (chart の見た目で
+ * 線が早期に「途切れる」のを避ける)。
+ *
+ * Fallback: sampleTimestamps が空 (Yahoo intraday fetch 失敗時 = 0 件) の
+ * とき、または line の 2 点が degenerate (t1 == t2) のときは 2 点
+ * endpoint をそのまま返す (旧挙動 = 描画は zoom 不安定だが少なくとも
+ * 全期間表示では出る)。
+ */
+export function densifyTrendLine(
+  line: TrendLineSegment | null,
+  sampleTimestamps: ReadonlyArray<string | number>,
+): Array<[number, number]> | null {
+  if (!line) return null
+  const t1 = new Date(line.pivots[0].timestamp).getTime()
+  const t2 = new Date(line.end.timestamp).getTime()
+  const y1 = line.pivots[0].price
+  const y2 = line.end.price
+  if (!Number.isFinite(t1) || !Number.isFinite(t2)) return null
+  if (!Number.isFinite(y1) || !Number.isFinite(y2)) return null
+  // degenerate: 2 点が同 timestamp → 線の slope 不定。fallback で 2 点返し。
+  if (t1 === t2) return [[t1, y1], [t2, y2]]
+  const slope = (y2 - y1) / (t2 - t1)
+  // sample timestamps を epoch ms に正規化、無効値は除外、unique + 昇順
+  const tsSet = new Set<number>()
+  for (const s of sampleTimestamps) {
+    const t = typeof s === 'number' ? s : new Date(s).getTime()
+    if (Number.isFinite(t)) tsSet.add(t)
+  }
+  // line の 2 点も常に含めて「pivot / end ちょうどでの y」を保証
+  tsSet.add(t1)
+  tsSet.add(t2)
+  const sorted = Array.from(tsSet).sort((a, b) => a - b)
+  // sample 0 件 (intradayBars 空) のときは 2 点 fallback
+  if (sorted.length < 2) return [[t1, y1], [t2, y2]]
+  const out: Array<[number, number]> = []
+  for (const t of sorted) {
+    const y = y1 + slope * (t - t1)
+    if (Number.isFinite(y)) out.push([t, y])
+  }
+  // out が空になることは tsSet に t1/t2 を入れているのでまず無いが、
+  // 安全のため最終 fallback。
+  if (out.length < 2) return [[t1, y1], [t2, y2]]
+  return out
+}
+
+/**
  * fill 行の BUY/SELL を決定する。
  * - 1st: pre_submit 行から JOIN で取得した side ('BUY'/'SELL') を採用
  * - 2nd: それも無い場合は realized_pnl の有無で推測
@@ -2356,23 +2416,62 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // を線形外挿)。教科書の「下値支持線 / 上値抵抗線」と同じ仕組み。
       // 検出失敗 (pivots < 2) なら null → 描画スキップ。
       //
-      // 過去 #185 / #187 / #188 で「描画されない」回帰があったが、根因は
-      // dataZoom の filterMode default 'filter' が 2 点しかない trend line
-      // series で 1 点 (古い pivot) が zoom 範囲外 → 点ごと filter → 残り
-      // 1 点で線が引けないというもの (ECharts issue #3637)。dataZoom 側で
-      // filterMode: 'weakFilter' にして両端いずれかが範囲内なら描画される
-      // ようにし、ここは 2 点 [oldPivot, chartEnd] の独立 line series で
-      // canonical に描く (markLine 経由は legend に出ないなど不便があった)。
-      // 数値 epoch ms に統一 (time axis の ISO 解釈揺らぎを排除)。
-      function trendLineXY(line) {
+      // 過去 #185 / #187 / #188 / #189 で「描画されない」回帰があったが、
+      // 根因は ECharts の dataZoom + 2 点 line series が「片方の点が zoom
+      // 範囲外になると線が引かれない」既知挙動 (issue #3637 系)。#189 で
+      // dataZoom の filterMode を 'weakFilter' に変えて改善したが、それでも
+      // ユーザ環境で残ケースがあった。本質的に robust にするため、line の
+      // data 自体を「常に zoom 範囲内に複数点が入る粒度」に展開する。
+      //
+      // 具体的には intradayBars (1h candle、60 日で ~720 点) の各 timestamp
+      // で trend line の y 値を線形補間し、[[t, y], ...] の dense path にす
+      // る。これで 5D (~120 点) や 1D zoom でも複数点が必ず visible になり
+      // filterMode 不問で線分が描画される。intradayBars が空 (Yahoo fetch
+      // 失敗) のときは 2 点 endpoint fallback (旧挙動)。
+      //
+      // 線形外挿: trend line は概念上両側に伸びる線なので、p1 より過去側 /
+      // end より未来側の sample も同じ slope で外挿する。
+      //
+      // ※ Server-side densifyTrendLine (export) と同じアルゴリズム。
+      //    unit test はそちらで担保する。client 側に inline するのは sc.*
+      //    オブジェクトを HTML script に埋めて echarts.init で消費するため。
+      var ohlcTimestamps = (sc.intradayBars || []).map(function (b) {
+        return new Date(b.timestamp).getTime();
+      });
+      function densifyTrendLine(line, sampleTimestamps) {
         if (!line) return null;
-        return [
-          [new Date(line.pivots[0].timestamp).getTime(), line.pivots[0].price],
-          [new Date(line.end.timestamp).getTime(), line.end.price],
-        ];
+        var t1 = new Date(line.pivots[0].timestamp).getTime();
+        var t2 = new Date(line.end.timestamp).getTime();
+        var y1 = line.pivots[0].price;
+        var y2 = line.end.price;
+        if (!Number.isFinite(t1) || !Number.isFinite(t2)) return null;
+        if (!Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+        if (t1 === t2) return [[t1, y1], [t2, y2]];
+        var slope = (y2 - y1) / (t2 - t1);
+        var seen = Object.create(null);
+        var arr = [];
+        for (var i = 0; i < sampleTimestamps.length; i += 1) {
+          var t = sampleTimestamps[i];
+          if (!Number.isFinite(t)) continue;
+          if (seen[t]) continue;
+          seen[t] = true;
+          arr.push(t);
+        }
+        if (!seen[t1]) { seen[t1] = true; arr.push(t1); }
+        if (!seen[t2]) { seen[t2] = true; arr.push(t2); }
+        arr.sort(function (a, b) { return a - b; });
+        if (arr.length < 2) return [[t1, y1], [t2, y2]];
+        var out = [];
+        for (var j = 0; j < arr.length; j += 1) {
+          var tj = arr[j];
+          var yj = y1 + slope * (tj - t1);
+          if (Number.isFinite(yj)) out.push([tj, yj]);
+        }
+        if (out.length < 2) return [[t1, y1], [t2, y2]];
+        return out;
       }
-      var resistanceXY = trendLineXY(sc.resistanceLine);
-      var supportTrendXY = trendLineXY(sc.supportLine);
+      var resistanceXY = densifyTrendLine(sc.resistanceLine, ohlcTimestamps);
+      var supportTrendXY = densifyTrendLine(sc.supportLine, ohlcTimestamps);
       var pivotHighDots = sc.pivots
         .filter(function (pv) { return pv.type === 'high'; })
         .map(function (pv) { return [pv.timestamp, pv.price]; });
@@ -2566,13 +2665,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.6, color: '#057a55', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
             { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.6, color: '#b25000', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
           ]),
-          // sloped trend lines: 直近 2 pivots を chart 末まで線形外挿した
-          // 2 点を独立 type:'line' series として描画。dataZoom filterMode は
-          // 上方で 'weakFilter' に設定済 → 古い pivot 端が zoom 範囲外でも
-          // line 自体は描画される (default 'filter' だと点ごと filter されて
-          // 残り 1 点で線が引けない既知症状)。z:7 で candle (z:5) / SMA50
-          // (z:6) より上に置き、線本体を最前面に。itemStyle.color は legend
-          // dot 色を lineStyle.color と揃えるため明示。
+          // sloped trend lines: 直近 2 pivots → chart 末への線形外挿 trend
+          // を、intradayBars 各 timestamp で y 補間した「dense path」として
+          // 描画。dataZoom filterMode が 'filter' / 'weakFilter' のどちら
+          // でも、zoom 範囲内に複数点が必ず入るので確実に描画される (2 点
+          // line series で zoom 縮めると seg-droppable な ECharts 既知挙動
+          // への根本対処)。z:7 で candle (z:5) / SMA50 (z:6) より上に置き、
+          // 線本体を最前面に。symbol:'none' で点 marker は出さない (見た目
+          // は変わらず元と同じ滑らかな直線)。itemStyle.color は legend dot
+          // 色を lineStyle.color と揃えるため明示。
           ...(resistanceXY ? [{
             name: '上値抵抗線 (sloped, 直近 2 pivot fit)', type: 'line', data: resistanceXY,
             lineStyle: { width: 1.8, color: '#1471a8', type: 'solid' }, symbol: 'none',

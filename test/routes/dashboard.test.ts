@@ -742,10 +742,12 @@ describe('computeChartWindowDays', () => {
 
 import {
   aggregateDailyCloses,
+  densifyTrendLine,
   detectFractalPivots,
   fitTrendLineFromRecentPivots,
   type SymbolChartPoint,
   type PivotPoint,
+  type TrendLineSegment,
 } from '../../src/routes/dashboard'
 
 describe('aggregateDailyCloses', () => {
@@ -879,6 +881,112 @@ describe('fitTrendLineFromRecentPivots', () => {
 
   it('endTimestamp 不正なら null', () => {
     expect(fitTrendLineFromRecentPivots([high1, high2], 'high', 'not-an-iso')).toBe(null)
+  })
+})
+
+describe('densifyTrendLine', () => {
+  // p1 = (t=0, y=100), end = (t=10, y=110) → slope 1/ms
+  // 実際の dashboard では epoch ms (~1.7e12) だが、線形補間の数学は
+  // origin 不変なので小さい数で test しても等価。
+  const baseLine: TrendLineSegment = {
+    pivots: [
+      { timestamp: new Date(0).toISOString(), price: 100, type: 'high' },
+      { timestamp: new Date(10).toISOString(), price: 110, type: 'high' },
+    ],
+    end: { timestamp: new Date(10).toISOString(), price: 110 },
+  }
+
+  it('line が null なら null', () => {
+    expect(densifyTrendLine(null, [0, 1, 2])).toBe(null)
+  })
+
+  it('intradayBars 各 timestamp で y を線形補間', () => {
+    const samples = [0, 2, 5, 8, 10]
+    const out = densifyTrendLine(baseLine, samples)
+    // slope = (110-100)/(10-0) = 1 → y = 100 + 1*t
+    expect(out).toEqual([
+      [0, 100],
+      [2, 102],
+      [5, 105],
+      [8, 108],
+      [10, 110],
+    ])
+  })
+
+  it('p1 / end の外側でも extrapolate (両側に伸びる)', () => {
+    // sample に -5 と 15 を含めると外挿される
+    const samples = [-5, 0, 10, 15]
+    const out = densifyTrendLine(baseLine, samples)
+    expect(out).toEqual([
+      [-5, 95],
+      [0, 100],
+      [10, 110],
+      [15, 115],
+    ])
+  })
+
+  it('intradayBars 空 (Yahoo fetch 失敗) のとき 2 点 endpoint fallback', () => {
+    const out = densifyTrendLine(baseLine, [])
+    expect(out).toEqual([
+      [0, 100],
+      [10, 110],
+    ])
+  })
+
+  it('ISO string sample timestamps も accept (各 b.timestamp は ISO)', () => {
+    const samples = [
+      new Date(0).toISOString(),
+      new Date(5).toISOString(),
+      new Date(10).toISOString(),
+    ]
+    const out = densifyTrendLine(baseLine, samples)
+    expect(out).toEqual([
+      [0, 100],
+      [5, 105],
+      [10, 110],
+    ])
+  })
+
+  it('重複 timestamp は dedupe + 昇順 sort', () => {
+    const samples = [10, 0, 5, 5, 10, 0]
+    const out = densifyTrendLine(baseLine, samples)
+    expect(out).toEqual([
+      [0, 100],
+      [5, 105],
+      [10, 110],
+    ])
+  })
+
+  it('NaN / 不正 timestamp は除外する', () => {
+    const samples: Array<string | number> = [
+      NaN,
+      'not-an-iso',
+      0,
+      5,
+      Number.POSITIVE_INFINITY,
+      10,
+    ]
+    const out = densifyTrendLine(baseLine, samples)
+    expect(out).toEqual([
+      [0, 100],
+      [5, 105],
+      [10, 110],
+    ])
+  })
+
+  it('p1 == end (degenerate) のとき 2 点 fallback (slope 不定)', () => {
+    const degenerate: TrendLineSegment = {
+      pivots: [
+        { timestamp: new Date(5).toISOString(), price: 100, type: 'high' },
+        { timestamp: new Date(5).toISOString(), price: 100, type: 'high' },
+      ],
+      end: { timestamp: new Date(5).toISOString(), price: 100 },
+    }
+    const out = densifyTrendLine(degenerate, [0, 5, 10])
+    expect(out).toEqual([
+      [5, 100],
+      [5, 100],
+    ])
   })
 })
 
