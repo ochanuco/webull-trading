@@ -1003,6 +1003,7 @@ describe('computeZoomRange', () => {
       resistanceLine: null,
       supportLine: null,
       pivots: [],
+      dailyBars: [],
     }
   }
 
@@ -1046,7 +1047,7 @@ describe('computeZoomRange', () => {
     const chart: SymbolChartData = {
       symbol: 'X', points: [], markers: [], position: null,
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
-      resistanceLine: null, supportLine: null, pivots: [],
+      resistanceLine: null, supportLine: null, pivots: [], dailyBars: [],
     }
     expect(computeZoomRange(null, null, chart)).toBeNull()
   })
@@ -1054,5 +1055,31 @@ describe('computeZoomRange', () => {
   it('lastPoint timestamp 不正 → null (defensive)', () => {
     const chart = fakeChart('not-an-iso')
     expect(computeZoomRange(null, null, chart)).toBeNull()
+  })
+})
+
+import { anchorJstMidnight } from '../../src/routes/dashboard'
+
+describe('anchorJstMidnight', () => {
+  it('YYYY-MM-DD を JST 00:00 に anchor して ISO Z を返す', () => {
+    // JST 04/25 00:00 = UTC 04/24 15:00
+    expect(anchorJstMidnight('2026-04-25')).toBe('2026-04-24T15:00:00.000Z')
+  })
+
+  it('JST formatter (Asia/Tokyo) でレンダリングすると同じ b.date 日に表示される', () => {
+    const iso = anchorJstMidnight('2026-04-25')
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Tokyo',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    })
+    expect(fmt.format(new Date(iso))).toBe('2026-04-25')
+  })
+
+  it('複数日の anchor は時系列順にソート可能 (lexical = chronological)', () => {
+    const a = anchorJstMidnight('2026-04-23')
+    const b = anchorJstMidnight('2026-04-24')
+    const c = anchorJstMidnight('2026-04-25')
+    expect(a < b).toBe(true)
+    expect(b < c).toBe(true)
   })
 })
