@@ -1524,19 +1524,31 @@ type ChartsBodyArgs = ChartsBodyOverview | ChartsBodyQuality | ChartsBodySymbol
 /**
  * Chart 上部に出す tab strip。現在 tab には active 装飾、他は通常リンク。
  */
-function renderTabStrip(active: ChartsTab): string {
+function renderTabStrip(active: ChartsTab, focusSymbol?: string): string {
   const tabs = CHART_TABS.map((t) => {
     const style =
       t.id === active
         ? 'font-weight:600;text-decoration:underline;background:#fff;border-color:#06c;color:#06c'
         : ''
-    return `<a href="/dashboard/charts?tab=${t.id}" title="${esc(t.hint)}" style="display:inline-block;padding:4px 12px;margin-right:6px;border:1px solid #d0d0d5;border-radius:6px;background:#fafafa;color:#1d1d1f;text-decoration:none;${style}">${esc(t.label)}</a>`
+    const baseStyle = 'display:inline-block;padding:4px 12px;margin-right:6px;border:1px solid #d0d0d5;border-radius:6px;background:#fafafa;color:#1d1d1f;text-decoration:none;'
+
+    if (t.id === active) {
+      return `<span title="${esc(t.hint)}" style="${baseStyle}${style}">${esc(t.label)}</span>`
+    }
+
+    let href = `/dashboard/charts?tab=${t.id}`
+    if (t.id === 'symbol' && focusSymbol) {
+      href += `&symbol=${encodeURIComponent(focusSymbol)}`
+    }
+
+    return `<a href="${href}" title="${esc(t.hint)}" style="${baseStyle}${style}">${esc(t.label)}</a>`
   }).join('')
   return `<nav style="margin:0 0 12px 0">${tabs}</nav>`
 }
 
 function chartsBody(args: ChartsBodyArgs): string {
-  const tabStrip = renderTabStrip(args.tab)
+  const focusSymbol = args.tab === 'symbol' ? args.focusSymbol ?? undefined : undefined
+  const tabStrip = renderTabStrip(args.tab, focusSymbol)
   if (args.tab === 'overview') return tabStrip + renderOverviewTab(args)
   if (args.tab === 'quality') return tabStrip + renderQualityTab(args)
   return tabStrip + renderSymbolTab(args)
@@ -1646,7 +1658,7 @@ function renderQualityTab(args: ChartsBodyQuality): string {
 function renderSymbolTab(args: ChartsBodySymbol): string {
   const noData =
     args.symbolChart === null ||
-    (args.symbolChart.points.length === 0 && args.symbolChart.markers.length === 0)
+    args.symbolChart.points.length === 0
   if (noData) {
     return (
       renderSymbolPickerForTab(args) +
