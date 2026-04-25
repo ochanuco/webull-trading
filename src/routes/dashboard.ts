@@ -2211,17 +2211,13 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
 
       // [timestamp, value] のペアで time axis に渡す。null は connectNulls/sparse に。
-      var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
       // candlestick の data shape: [timestamp, open, close, low, high]
       // (ECharts 標準順序、Western 規約 OHLC とは順番違うので注意)。
       var ohlcXY = (sc.intradayBars || []).map(function (b) {
         return [b.timestamp, b.open, b.close, b.low, b.high];
       });
-      // price line: candle と共存する読みやすい close-trace。intraday bar が
-      // あれば close を、無ければ cron-eval mergedPoints の price を採用。
-      var priceLineXY = (sc.intradayBars && sc.intradayBars.length > 0)
-        ? sc.intradayBars.map(function (b) { return [b.timestamp, b.close]; })
-        : sc.points.map(function (p) { return [p.timestamp, p.price]; });
+      // (close line は削除: candle が close を含むので冗長、overnight gap で
+      //  斜めに横断する視覚ノイズが発生していたため #176 → #177 で除去)
 
       // 押し目買いゾーン:
       // - 上端 = high20d × (1 + pullbackMax)  ≒ 教科書の「上値抵抗線 (resistance)」
@@ -2261,20 +2257,29 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // qty / timestamp) は markPoint hover tooltip で表示。
       // realizedPnl と filledQty を data に保持し tooltip.formatter から
       // full-precision で読む (label の toFixed(1) で丸めた値とは独立)。
-      var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
+      // pin label は最新 BUY 1 個 + 最新 SELL 1 個だけ表示。それより古いのは
+      // pin marker のみ (label.show: false)。chart 上の label 重なりを抑制し、
+      // 過去の fill 詳細は hover tooltip (full-precision PnL / qty / 時刻) で確認。
+      var buys = sc.markers.filter(function (m) { return m.side === 'BUY'; });
+      var sells = sc.markers.filter(function (m) { return m.side === 'SELL'; });
+      var latestBuyTs = buys.length > 0 ? buys[buys.length - 1].timestamp : null;
+      var latestSellTs = sells.length > 0 ? sells[sells.length - 1].timestamp : null;
+      var entries = buys.map(function (m) {
+        var showLabel = m.timestamp === latestBuyTs;
         return {
           name: 'BUY', coord: [m.timestamp, m.price], value: m.price,
           realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
-          label: { formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
+          label: { show: showLabel, formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
           itemStyle: { color: '#057a55' },
         };
       });
-      var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
+      var exits = sells.map(function (m) {
+        var showLabel = m.timestamp === latestSellTs;
         var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
         return {
           name: 'SELL', coord: [m.timestamp, m.price], value: m.price,
           realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
-          label: { formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
+          label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
           itemStyle: { color: '#c22' },
         };
       });
@@ -2323,29 +2328,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       function pushIfFinite(v) {
         if (v != null && typeof v === 'number' && Number.isFinite(v)) allY.push(v);
       }
-      sc.points.forEach(function (p) {
-        pushIfFinite(p.price);
-        pushIfFinite(p.sma50);
-        if (p.high20d != null && Number.isFinite(p.high20d)) {
-          pushIfFinite(p.high20d * pullbackMaxMul);
-          pushIfFinite(p.high20d * pullbackMinMul);
-        }
-        pushIfFinite(p.low20d);
-      });
+      // y軸は candle の高低 + markers + position 線だけで decide。
+      // SMA50 (long-term、現在価格と乖離大) / band / low20d / trend line を
+      // 入れると軸 range が必要以上に広がり candle が縦圧縮される
+      // (trader-strategist 助言)。これらは line として描画はする
+      // (auto-clip で軸外は切れる) が、軸 range には影響させない。
       (sc.intradayBars || []).forEach(function (b) {
         pushIfFinite(b.high);
         pushIfFinite(b.low);
       });
-      if (sc.resistanceLine) {
-        pushIfFinite(sc.resistanceLine.pivots[0].price);
-        pushIfFinite(sc.resistanceLine.pivots[1].price);
-        pushIfFinite(sc.resistanceLine.end.price);
-      }
-      if (sc.supportLine) {
-        pushIfFinite(sc.supportLine.pivots[0].price);
-        pushIfFinite(sc.supportLine.pivots[1].price);
-        pushIfFinite(sc.supportLine.end.price);
-      }
       sc.markers.forEach(function (m) { pushIfFinite(m.price); });
       extraYValues.forEach(function (v) { pushIfFinite(v); });
       var yMin, yMax;
@@ -2378,16 +2369,22 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
         },
         legend: { top: 22, type: 'scroll' },
-        // bottom slider 用に grid.bottom を確保 (slider 24px + 余白)
-        grid: { left: 60, right: 20, top: 60, bottom: 64 },
+        // plot 面積最大化: grid 余白を絞り、splitLine 淡く、axisLine 非表示で
+        // candle が映える背景に (trader-strategist 助言)。bottom は slider 用 64px キープ。
+        grid: { left: 50, right: 20, top: 56, bottom: 64 },
         dataZoom: dataZoomCfg,
-        xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
-        // showMinLabel/showMaxLabel: false で boundary label の異常表示を抑制。
-        // ECharts で時々 yAxis の min/max 位置に巨大数字 ("7711183" 等) が
-        // 描画される現象 (ECharts 内部の axis pointer 計算と markPoint coord
-        // 干渉が疑われる)。実際の plot 範囲は正常なので boundary label を
-        // 隠すだけで chart は読みやすくなる。
-        yAxis: { type: 'value', min: yMin, max: yMax, axisLabel: { showMinLabel: false, showMaxLabel: false } },
+        xAxis: {
+          type: 'time',
+          axisLabel: { formatter: function (value) { return jstLabel(value); } },
+          axisLine: { show: false },
+          splitLine: { show: true, lineStyle: { opacity: 0.15 } },
+        },
+        yAxis: {
+          type: 'value', min: yMin, max: yMax,
+          axisLabel: { showMinLabel: false, showMaxLabel: false },
+          axisLine: { show: false },
+          splitLine: { show: true, lineStyle: { opacity: 0.15 } },
+        },
         series: [
           // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は淡く表示
           // (戦略 rule の参考、トレンドラインが主役なので opacity 0.4)。
@@ -2415,20 +2412,19 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 4,
           }] : []),
           // candlestick: 15 分足 OHLC を表示。Western 規約 (close >= open = 緑、
-          // close < open = 赤)。markPoint / markLine もここに anchor。
-          // ohlcXY が空なら series 自体をスキップ (Yahoo fetch 失敗時の保険)。
-          // price 線 (close trace、薄い青、z=3) を candle の上に重ねて
-          // 「全体の流れ」を読みやすくする (#175 後の user request)。
-          { name: 'price (close)', type: 'line', data: priceLineXY,
-            lineStyle: { width: 1, color: '#1471a8', opacity: 0.6 },
-            symbol: 'none', connectNulls: false, z: 3 },
+          // candle: 主役。Western 規約 (close >= open = 緑、< = 赤)。
+          // markPoint / markLine もここに anchor。barWidth 明示で overnight
+          // gap 後の細い candle を視認可能に。borderWidth 強めて
+          // body と wick の対比を確保。
           ...(ohlcXY.length > 0 ? [{
             name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
+            barWidth: 8,
             itemStyle: {
               color: '#057a55',     // bullish (close >= open)
               color0: '#c22',       // bearish (close < open)
               borderColor: '#057a55',
               borderColor0: '#c22',
+              borderWidth: 1.5,
             },
             z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
@@ -2448,7 +2444,8 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               },
             } : undefined,
           }] : []),
-          { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
+          // SMA50 line は chart 撤去 (15m chart の y 軸を引き伸ばすため)。
+          // 現在値は chart 上部 badge で表示する (renderCurrentIndicatorsBadge)。
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
@@ -2491,6 +2488,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
     });
   `
   return `${renderSymbolPickerForTab(args)}
+  ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', {
@@ -2597,6 +2595,40 @@ export function renderStrategyParamsPanel(p: StrategyParamsSnapshot): string {
       per-symbol override は POC scope では未対応。
     </p>
   </details>`
+}
+
+/**
+ * チャート上に「現在の主要 indicator (price / SMA50 / high20d / low20d / atr20)」
+ * を inline badge で表示。trader-strategist 助言で SMA50 を chart line から
+ * 撤去 (15m chart の y軸を引き伸ばさないため) した代替表示。最新の cron-eval
+ * point から取得し、null は em-dash (—) で fallback。
+ */
+export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): string {
+  if (!chart) return ''
+  // 最新の indicator 付き point を末尾から探す (Yahoo filler は indicators null)
+  let latest: SymbolChartPoint | null = null
+  for (let i = chart.points.length - 1; i >= 0; i -= 1) {
+    const p = chart.points[i]!
+    if (p.sma50 !== null || p.high20d !== null || p.low20d !== null) {
+      latest = p
+      break
+    }
+  }
+  if (!latest) return ''
+  const fmt = (v: number | null): string => (v == null ? '—' : v.toFixed(2))
+  const items: Array<[string, string]> = [
+    ['price', fmt(latest.price)],
+    ['SMA50', fmt(latest.sma50)],
+    ['high20d', fmt(latest.high20d)],
+    ['low20d', fmt(latest.low20d)],
+  ]
+  const badges = items
+    .map(
+      ([k, v]) =>
+        `<span style="display:inline-block;margin-right:10px;font-size:12px"><span class="muted">${esc(k)}:</span> <strong>${esc(v)}</strong></span>`,
+    )
+    .join('')
+  return `<p style="margin:6px 0 0">${badges}</p>`
 }
 
 function renderSymbolPickerForTab(args: ChartsBodySymbol): string {

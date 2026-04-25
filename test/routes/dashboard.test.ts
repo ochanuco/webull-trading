@@ -1083,3 +1083,58 @@ describe('anchorJstMidnight', () => {
     expect(b < c).toBe(true)
   })
 })
+
+import { renderCurrentIndicatorsBadge } from '../../src/routes/dashboard'
+
+describe('renderCurrentIndicatorsBadge', () => {
+  function fakeChartWith(points: SymbolChartPoint[]): SymbolChartData {
+    return {
+      symbol: 'X', points, markers: [], position: null,
+      rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
+      resistanceLine: null, supportLine: null, pivots: [], intradayBars: [],
+    }
+  }
+
+  it('chart が null なら空文字', () => {
+    expect(renderCurrentIndicatorsBadge(null)).toBe('')
+  })
+
+  it('points 空なら空文字', () => {
+    expect(renderCurrentIndicatorsBadge(fakeChartWith([]))).toBe('')
+  })
+
+  it('全 indicator null の point しか無ければ空文字', () => {
+    const chart = fakeChartWith([
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
+    ])
+    expect(renderCurrentIndicatorsBadge(chart)).toBe('')
+  })
+
+  it('最新の indicator 付き point から price/SMA50/high20d/low20d を表示', () => {
+    const chart = fakeChartWith([
+      { timestamp: '2026-04-23T05:00:00.000Z', price: 100, sma50: 60, high20d: 105, low20d: 90 },
+      // Yahoo filler (indicators null) — skip
+      { timestamp: '2026-04-24T16:00:00.000Z', price: 110, sma50: null, high20d: null, low20d: null },
+      // 末尾から探して 04/23 の point を採用
+    ])
+    const html = renderCurrentIndicatorsBadge(chart)
+    expect(html).toContain('price')
+    expect(html).toContain('100.00')
+    expect(html).toContain('SMA50')
+    expect(html).toContain('60.00')
+    expect(html).toContain('high20d')
+    expect(html).toContain('105.00')
+    expect(html).toContain('low20d')
+    expect(html).toContain('90.00')
+  })
+
+  it('一部 indicator が null でも em-dash で fallback', () => {
+    const chart = fakeChartWith([
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: 60, high20d: null, low20d: null },
+    ])
+    const html = renderCurrentIndicatorsBadge(chart)
+    expect(html).toContain('120.00')
+    expect(html).toContain('60.00')
+    expect(html).toContain('—') // high20d / low20d
+  })
+})
