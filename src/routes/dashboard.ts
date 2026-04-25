@@ -146,11 +146,12 @@ export const dashboard = new Hono<AppBindings>()
       const symbolChart = focusSymbol
         ? await loadSymbolChart(c.env, focusSymbol, rules)
         : null
-      // zoom range の妥当性: from < to を保証、不整合なら null fallback
-      const zoom =
-        zoomFrom !== null && zoomTo !== null && zoomFrom < zoomTo
-          ? { from: zoomFrom, to: zoomTo }
-          : null
+      // zoom range: ?from / ?to が valid (from < to) ならそれを使う、なければ
+      // chart の最終 point から逆算で「直近 7 日」をデフォルト。理由:
+      // - 60 日全体表示は trend / pin / SMA50 が見えづらい (#15 で指摘)
+      // - 7 日は cron / 押し目 / 直近 fill 確認に最適な daily-trader の窓
+      // - lastTimestamp 基準なので休場や POC 開始直後でも broken にならない
+      const zoom = computeZoomRange(zoomFrom, zoomTo, symbolChart)
       return c.html(
         layout(
           'チャート',
@@ -1944,6 +1945,36 @@ export function parseIsoTimestamp(raw: string | undefined): Date | null {
   const d = new Date(s)
   if (!Number.isFinite(d.getTime())) return null
   return d
+}
+
+/** chart の zoom 初期 window 既定: 直近 7 日 (UI で zoom 操作可能) */
+export const DEFAULT_ZOOM_WINDOW_MS = 7 * 24 * 3600 * 1000
+
+/**
+ * chart x-axis の zoom 範囲を決める:
+ * 1. URL params (zoomFrom / zoomTo) が valid (from < to) → それを採用
+ * 2. URL に無い + chart に points がある → 直近 7 日 (lastTimestamp - 7d ～ lastTimestamp)
+ * 3. それ以外 (chart 自体空) → null (= 全体表示 / no zoom)
+ *
+ * lastTimestamp 基準なので、休場日や POC 開始直後で `now()` 基準が data
+ * 範囲外になるケースでも broken にならない。
+ */
+export function computeZoomRange(
+  zoomFrom: Date | null,
+  zoomTo: Date | null,
+  chart: SymbolChartData | null,
+): { from: Date; to: Date } | null {
+  if (zoomFrom !== null && zoomTo !== null && zoomFrom < zoomTo) {
+    return { from: zoomFrom, to: zoomTo }
+  }
+  if (!chart || chart.points.length === 0) return null
+  const lastPoint = chart.points[chart.points.length - 1]!
+  const lastMs = new Date(lastPoint.timestamp).getTime()
+  if (!Number.isFinite(lastMs)) return null
+  return {
+    from: new Date(lastMs - DEFAULT_ZOOM_WINDOW_MS),
+    to: new Date(lastMs),
+  }
 }
 
 interface ChartsBodySymbol {

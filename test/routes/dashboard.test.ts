@@ -989,3 +989,70 @@ describe('parseIsoTimestamp', () => {
     expect(parseIsoTimestamp('1777705200000')).toBeNull()
   })
 })
+
+import { computeZoomRange, DEFAULT_ZOOM_WINDOW_MS, type SymbolChartData } from '../../src/routes/dashboard'
+
+describe('computeZoomRange', () => {
+  function fakeChart(lastTs: string): SymbolChartData {
+    return {
+      symbol: 'X',
+      points: [{ timestamp: lastTs, price: 100, sma50: null, high20d: null, low20d: null }],
+      markers: [],
+      position: null,
+      rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
+      resistanceLine: null,
+      supportLine: null,
+      pivots: [],
+    }
+  }
+
+  it('valid URL params なら from < to をそのまま採用', () => {
+    const from = new Date('2026-04-15T00:00:00Z')
+    const to = new Date('2026-04-22T00:00:00Z')
+    const out = computeZoomRange(from, to, null)
+    expect(out).toEqual({ from, to })
+  })
+
+  it('URL params 無 + points 有 → lastTimestamp 基準で直近 7 日', () => {
+    const chart = fakeChart('2026-04-25T00:00:00Z')
+    const out = computeZoomRange(null, null, chart)
+    expect(out).not.toBeNull()
+    expect(out!.to.toISOString()).toBe('2026-04-25T00:00:00.000Z')
+    // 7 日前 = 2026-04-18
+    expect(out!.from.getTime()).toBe(out!.to.getTime() - DEFAULT_ZOOM_WINDOW_MS)
+    expect(out!.from.toISOString()).toBe('2026-04-18T00:00:00.000Z')
+  })
+
+  it('from >= to (不整合) は default 7 日にフォールバック', () => {
+    const chart = fakeChart('2026-04-25T00:00:00Z')
+    const reversedFrom = new Date('2026-04-25T00:00:00Z')
+    const reversedTo = new Date('2026-04-15T00:00:00Z')
+    const out = computeZoomRange(reversedFrom, reversedTo, chart)
+    expect(out).not.toBeNull()
+    expect(out!.from.toISOString()).toBe('2026-04-18T00:00:00.000Z')
+  })
+
+  it('chart が null でも params あれば valid', () => {
+    const from = new Date('2026-04-15T00:00:00Z')
+    const to = new Date('2026-04-22T00:00:00Z')
+    expect(computeZoomRange(from, to, null)).toEqual({ from, to })
+  })
+
+  it('chart 空 + params 無 → null (zoom なし)', () => {
+    expect(computeZoomRange(null, null, null)).toBeNull()
+  })
+
+  it('points 配列空 + params 無 → null', () => {
+    const chart: SymbolChartData = {
+      symbol: 'X', points: [], markers: [], position: null,
+      rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
+      resistanceLine: null, supportLine: null, pivots: [],
+    }
+    expect(computeZoomRange(null, null, chart)).toBeNull()
+  })
+
+  it('lastPoint timestamp 不正 → null (defensive)', () => {
+    const chart = fakeChart('not-an-iso')
+    expect(computeZoomRange(null, null, chart)).toBeNull()
+  })
+})
