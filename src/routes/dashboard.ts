@@ -1499,9 +1499,9 @@ export interface TrendLineSegment {
   end: { timestamp: string; price: number }
 }
 
-/** 日次 OHLC (Yahoo daily bars 由来)、candlestick 描画用 */
-export interface DailyOhlcBar {
-  /** ISO UTC: `YYYY-MM-DDT16:00:00Z` (≈ JST 翌 1:00 ≈ "evening of date") */
+/** 15 分足 OHLC (Yahoo intraday bars 由来)、candlestick 描画用 */
+export interface OhlcBar {
+  /** ISO UTC (Yahoo intraday は秒精度の bar 開始時刻) */
   timestamp: string
   open: number
   high: number
@@ -1522,7 +1522,7 @@ export interface SymbolChartData {
   /** 検出された swing pivots (chart 上の小さな丸で表示する想定) */
   pivots: PivotPoint[]
   /** Yahoo 日次 OHLC、candlestick 描画用 (空配列 = Yahoo fetch 失敗) */
-  dailyBars: DailyOhlcBar[]
+  intradayBars: OhlcBar[]
 }
 
 /**
@@ -1657,15 +1657,28 @@ export async function loadSymbolChart(
   const supportLine = lastTimestamp
     ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp)
     : null
-  // candlestick: Yahoo bars (lastTimestamp フィルタ済) を OHLC 形に成形。
-  // pivot 検出と違い regime / window 制限は不要 (chart 全期間表示)。
-  const dailyBars: DailyOhlcBar[] = yahooBars.map((b) => ({
-    timestamp: b.timestamp,
-    open: b.open,
-    high: b.high,
-    low: b.low,
-    close: b.close,
-  }))
+  // candlestick: 15 分足 (intraday) を Yahoo から fetch。daily より細かい
+  // 動きが見える + cron が 15 分間隔で動くのと cadence が一致。失敗 (network /
+  // Yahoo intraday range 制限など) なら空配列で line だけ表示にフォールバック。
+  let intradayBars: OhlcBar[] = []
+  try {
+    const intraday = await new YahooBarClient().getIntradayBars(symbol, '15m')
+    // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
+    // を除外。lastTimestamp が無いときは全件採用。
+    intradayBars = (cronLastTs == null
+      ? intraday
+      : intraday.filter((b) => b.timestamp <= cronLastTs)
+    ).map((b) => ({
+      timestamp: b.timestamp,
+      open: b.open,
+      high: b.high,
+      low: b.low,
+      close: b.close,
+    }))
+  } catch (err) {
+    if (err instanceof RangeError) throw err
+    // network / parse error → 空 fallback
+  }
   return {
     symbol,
     points: mergedPoints,
@@ -1675,7 +1688,7 @@ export async function loadSymbolChart(
     resistanceLine,
     supportLine,
     pivots,
-    dailyBars,
+    intradayBars: intradayBars,
   }
 }
 
@@ -2201,9 +2214,14 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
       // candlestick の data shape: [timestamp, open, close, low, high]
       // (ECharts 標準順序、Western 規約 OHLC とは順番違うので注意)。
-      var ohlcXY = (sc.dailyBars || []).map(function (b) {
+      var ohlcXY = (sc.intradayBars || []).map(function (b) {
         return [b.timestamp, b.open, b.close, b.low, b.high];
       });
+      // price line: candle と共存する読みやすい close-trace。intraday bar が
+      // あれば close を、無ければ cron-eval mergedPoints の price を採用。
+      var priceLineXY = (sc.intradayBars && sc.intradayBars.length > 0)
+        ? sc.intradayBars.map(function (b) { return [b.timestamp, b.close]; })
+        : sc.points.map(function (p) { return [p.timestamp, p.price]; });
 
       // 押し目買いゾーン:
       // - 上端 = high20d × (1 + pullbackMax)  ≒ 教科書の「上値抵抗線 (resistance)」
@@ -2314,7 +2332,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         }
         pushIfFinite(p.low20d);
       });
-      (sc.dailyBars || []).forEach(function (b) {
+      (sc.intradayBars || []).forEach(function (b) {
         pushIfFinite(b.high);
         pushIfFinite(b.low);
       });
@@ -2396,11 +2414,16 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             name: 'swing low', type: 'scatter', data: pivotLowDots,
             symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 4,
           }] : []),
-          // candlestick: 日次 OHLC を表示。Western 規約 (close >= open = 緑、
+          // candlestick: 15 分足 OHLC を表示。Western 規約 (close >= open = 緑、
           // close < open = 赤)。markPoint / markLine もここに anchor。
           // ohlcXY が空なら series 自体をスキップ (Yahoo fetch 失敗時の保険)。
+          // price 線 (close trace、薄い青、z=3) を candle の上に重ねて
+          // 「全体の流れ」を読みやすくする (#175 後の user request)。
+          { name: 'price (close)', type: 'line', data: priceLineXY,
+            lineStyle: { width: 1, color: '#1471a8', opacity: 0.6 },
+            symbol: 'none', connectNulls: false, z: 3 },
           ...(ohlcXY.length > 0 ? [{
-            name: 'price (OHLC)', type: 'candlestick', data: ohlcXY,
+            name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
             itemStyle: {
               color: '#057a55',     // bullish (close >= open)
               color0: '#c22',       // bearish (close < open)
