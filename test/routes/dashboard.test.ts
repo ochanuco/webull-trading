@@ -568,3 +568,20 @@ describe('extractSma50', () => {
     expect(extractSma50('{"sma50":1e9999}')).toBe(null)
   })
 })
+
+import { parseChartsTab } from '../../src/routes/dashboard'
+
+describe('parseChartsTab', () => {
+  it('既知の tab 値はそのまま', () => {
+    expect(parseChartsTab('overview')).toBe('overview')
+    expect(parseChartsTab('quality')).toBe('quality')
+    expect(parseChartsTab('symbol')).toBe('symbol')
+  })
+
+  it('未知 / undefined / 空文字 は overview にフォールバック', () => {
+    expect(parseChartsTab(undefined)).toBe('overview')
+    expect(parseChartsTab('')).toBe('overview')
+    expect(parseChartsTab('xss')).toBe('overview')
+    expect(parseChartsTab('OVERVIEW')).toBe('overview') // 大文字も既知扱いせず default に
+  })
+})
