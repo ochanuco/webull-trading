@@ -73,12 +73,37 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('チャート', unavailable('DB not bound')))
     }
     try {
+      const tab = parseChartsTab(c.req.query('tab'))
+      // 各 tab で必要な D1 query だけ走らせる軽量化:
+      // - overview: equity (drawdown は equity から派生)
+      // - quality:  pnls (= stats / histogram) + decisions
+      // - symbol:   universe + symbolChart
+      if (tab === 'overview') {
+        const equity = await loadEquityCurve(c.env.DB)
+        return c.html(layout('チャート', chartsBody({ tab, equity })))
+      }
+      if (tab === 'quality') {
+        const [decisions, pnls] = await Promise.all([
+          loadDecisionBreakdown(c.env.DB),
+          loadTradePnls(c.env.DB),
+        ])
+        return c.html(
+          layout(
+            'チャート',
+            chartsBody({
+              tab,
+              decisions,
+              pnls,
+              stats: computeTradeStats(pnls),
+              histogram: computePnlHistogram(pnls),
+            }),
+          ),
+        )
+      }
+      // tab === 'symbol'
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       const universe = await loadSymbolUniverse(c.env)
       const allowed = new Set(universe.allowedSymbols)
-      // pickDefaultSymbol は trade_journal を見るので、過去に約定したが
-      // 現 universe から外れた銘柄を返しうる (例: SPY 無効化後)。
-      // allowed で再検証して universe 整合を保つ。
       const defaultSymbol = await pickDefaultSymbol(c.env.DB)
       const focusSymbol =
         symbolParam && allowed.has(symbolParam)
@@ -86,23 +111,12 @@ export const dashboard = new Hono<AppBindings>()
           : defaultSymbol && allowed.has(defaultSymbol)
             ? defaultSymbol
             : universe.allowedSymbols[0] ?? null
-      const [equity, decisions, pnls, symbolChart] = await Promise.all([
-        loadEquityCurve(c.env.DB),
-        loadDecisionBreakdown(c.env.DB),
-        loadTradePnls(c.env.DB),
-        focusSymbol ? loadSymbolChart(c.env.DB, focusSymbol) : Promise.resolve(null),
-      ])
-      const stats = computeTradeStats(pnls)
-      const histogram = computePnlHistogram(pnls)
+      const symbolChart = focusSymbol ? await loadSymbolChart(c.env.DB, focusSymbol) : null
       return c.html(
         layout(
           'チャート',
           chartsBody({
-            equity,
-            decisions,
-            pnls,
-            stats,
-            histogram,
+            tab,
             focusSymbol,
             symbolChart,
             availableSymbols: universe.allowedSymbols,
@@ -375,7 +389,7 @@ function indexBody(): string {
   <li><a href="/dashboard/trades">約定履歴</a> — <code>trade_journal</code> 直近 (既定 50件、<code>?limit=N</code> で可変、最大 200)</li>
   <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
   <li><a href="/dashboard/cron">Cron 判定</a> — <code>strategy_decision_log</code> 直近 (<code>?symbol=SOXL</code> で絞り込み可)</li>
-  <li><a href="/dashboard/charts">チャート</a> — エクイティカーブ / ドローダウン (Phase 0+1)、以降のチャートは <a href="https://github.com/ochanuco/webull-trading/issues/158">#158</a> で順次追加</li>
+  <li><a href="/dashboard/charts">チャート</a> — 概要 (エクイティカーブ + ドローダウン) / 取引品質 (PnL 分布 + 統計 + Decision breakdown) / 個別銘柄 (price + SMA50 + entry/exit) を tab 切替</li>
 </ul>`
 }
 
@@ -1431,17 +1445,19 @@ export async function loadSymbolChart(db: D1Database, symbol: string): Promise<S
       }>(),
   ])
   const logs = (logsResult.results ?? []).reverse() // ASC for chart
+  // timestamp は DB 上 UTC ISO で記録されているので、表示用に JST へ変換。
+  // markPoint の xAxis 一致のため points / markers 両方で同じ formatter を使う。
   const points: SymbolChartPoint[] = logs
     .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
     .map((r) => ({
-      timestamp: r.timestamp,
+      timestamp: fmtJst(r.timestamp),
       price: Number(r.price),
       sma50: extractSma50(r.indicators_json),
     }))
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
     .filter((r) => (r.side === 'BUY' || r.side === 'SELL') && r.filled_price !== null)
     .map((r) => ({
-      timestamp: r.timestamp,
+      timestamp: fmtJst(r.timestamp),
       side: r.side as 'BUY' | 'SELL',
       price: Number(r.filled_price),
       qty: r.filled_qty === null ? null : Number(r.filled_qty),
@@ -1461,25 +1477,6 @@ export function extractSma50(indicatorsJson: string | null): number | null {
   }
 }
 
-function renderSymbolPicker(args: ChartsViewModel): string {
-  if (args.availableSymbols.length === 0) return ''
-  const opts = args.availableSymbols
-    .map(
-      (s) =>
-        // symbol は href の URL 文字列なので encodeURIComponent
-        // (esc は HTML 用、& や # を含む symbol で query が壊れる)。
-        // 表示テキスト側は esc のままで XSS 対策を維持。
-        `<a href="/dashboard/charts?symbol=${encodeURIComponent(s)}" style="margin-right:6px;${
-          s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
-        }">${esc(s)}</a>`,
-    )
-    .join('')
-  const focusLabel = args.focusSymbol ?? '—'
-  return `<p class="muted" style="font-size:12px;margin-top:18px">
-    銘柄: <strong>${esc(focusLabel)}</strong> | 切替: ${opts}
-  </p>`
-}
-
 /**
  * `<script>...</script>` 内に埋め込む JSON を XSS 安全にする。
  * ブラウザは `</script>` を「文字列の中でも」script 終端と解釈するので、
@@ -1490,43 +1487,114 @@ export function safeJsonScript(varName: string, data: unknown): string {
   return `<script>window.${varName} = ${json};</script>`
 }
 
-interface ChartsViewModel {
+export type ChartsTab = 'overview' | 'quality' | 'symbol'
+
+export function parseChartsTab(value: string | undefined): ChartsTab {
+  return value === 'quality' || value === 'symbol' ? value : 'overview'
+}
+
+const CHART_TABS: Array<{ id: ChartsTab; label: string; hint: string }> = [
+  { id: 'overview', label: '概要', hint: 'エクイティカーブ + ドローダウン (戦略を続けるか止めるかの判断)' },
+  { id: 'quality', label: '取引品質', hint: 'PnL 分布 + 統計 + Decision breakdown (エッジ / rule の機能性)' },
+  { id: 'symbol', label: '個別銘柄', hint: '価格 + SMA50 + entry/exit (rule と現実の整合)' },
+]
+
+interface ChartsBodyOverview {
+  tab: 'overview'
   equity: EquityPoint[]
+}
+
+interface ChartsBodyQuality {
+  tab: 'quality'
   decisions: DecisionBreakdownPoint[]
   pnls: number[]
   stats: TradeStats
   histogram: PnlHistogramBin[]
+}
+
+interface ChartsBodySymbol {
+  tab: 'symbol'
   focusSymbol: string | null
   symbolChart: SymbolChartData | null
   availableSymbols: string[]
 }
 
-function chartsBody(args: ChartsViewModel): string {
-  // loadSymbolChart は データなしでも空配列入りオブジェクトを返すので、
-  // null か中身空かの両方をチェックして empty state 判定を厳密化。
-  const noSymbolChartData =
-    args.symbolChart === null ||
-    (args.symbolChart.points.length === 0 && args.symbolChart.markers.length === 0)
-  if (args.equity.length === 0 && args.decisions.length === 0 && noSymbolChartData) {
-    return `<p class="muted">まだ判定ログも実 fill も無いためチャートを描けません。最初の cron 実行 / SELL 約定後に表示されます。</p>`
+type ChartsBodyArgs = ChartsBodyOverview | ChartsBodyQuality | ChartsBodySymbol
+
+/**
+ * Chart 上部に出す tab strip。現在 tab には active 装飾、他は通常リンク。
+ */
+function renderTabStrip(active: ChartsTab): string {
+  const tabs = CHART_TABS.map((t) => {
+    const style =
+      t.id === active
+        ? 'font-weight:600;text-decoration:underline;background:#fff;border-color:#06c;color:#06c'
+        : ''
+    return `<a href="/dashboard/charts?tab=${t.id}" title="${esc(t.hint)}" style="display:inline-block;padding:4px 12px;margin-right:6px;border:1px solid #d0d0d5;border-radius:6px;background:#fafafa;color:#1d1d1f;text-decoration:none;${style}">${esc(t.label)}</a>`
+  }).join('')
+  return `<nav style="margin:0 0 12px 0">${tabs}</nav>`
+}
+
+function chartsBody(args: ChartsBodyArgs): string {
+  const tabStrip = renderTabStrip(args.tab)
+  if (args.tab === 'overview') return tabStrip + renderOverviewTab(args)
+  if (args.tab === 'quality') return tabStrip + renderQualityTab(args)
+  return tabStrip + renderSymbolTab(args)
+}
+
+function renderOverviewTab(args: ChartsBodyOverview): string {
+  if (args.equity.length === 0) {
+    return `<p class="muted">まだ実 fill (realized_pnl) が無いためエクイティカーブを描けません。最初の SELL が約定すると表示されます。</p>`
   }
-  // インライン script の defer 属性は HTML 仕様で無視される (defer は src 必須)。
-  // 同期実行されると外部 ECharts (defer 付) より前に走り常に「未読込」になるため、
-  // DOMContentLoaded を待つ。defer 付き外部 script は DOMContentLoaded 前に
-  // 実行完了するので、このタイミングで echarts は確実に利用可能。
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') {
-        var el = document.getElementById('chart-status');
-        if (el) el.textContent = 'ECharts CDN を読み込めませんでした (ネットワーク or CSP 確認)';
-        return;
-      }
+      if (typeof echarts === 'undefined') return;
       var data = window.__chartData;
       var dates = data.equity.map(function (p) { return p.date; });
       var equity = data.equity.map(function (p) { return p.cumulativePnl; });
       var dd = data.equity.map(function (p) { return p.drawdownPct * 100; });
+      var equityChart = echarts.init(document.getElementById('equity-chart'));
+      equityChart.setOption({
+        title: { text: '累積 realized PnL', left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
+        grid: { left: 50, right: 20, top: 40, bottom: 40 },
+        xAxis: { type: 'category', data: dates },
+        yAxis: { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
+        series: [{ type: 'line', data: equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } }],
+      });
+      var ddChart = echarts.init(document.getElementById('dd-chart'));
+      ddChart.setOption({
+        title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
+        grid: { left: 50, right: 20, top: 40, bottom: 40 },
+        xAxis: { type: 'category', data: dates },
+        yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
+        series: [{ type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } }],
+      });
+      window.addEventListener('resize', function () { equityChart.resize(); ddChart.resize(); });
+    });
+  `
+  return `<p class="muted" style="font-size:12px">
+    累積 realized PnL と peak からの下落率 (MaxDD)。戦略の長期パフォーマンス指標。
+    シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算
+    (peak ≤ 0 のときは 0%)。当日 intraday の risk halt 閾値 (drawdown_kill /
+    risk_dd_halt) は別概念のため重畳しない。
+  </p>
+  <div id="equity-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <div id="dd-chart" style="width:100%;height:280px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${safeJsonScript('__chartData', { equity: args.equity })}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script>${initScript}</script>`
+}
 
-      // ---- decision breakdown stacked bar (#158 Phase 2) ----
+function renderQualityTab(args: ChartsBodyQuality): string {
+  if (args.pnls.length === 0 && args.decisions.length === 0) {
+    return `<p class="muted">まだ判定ログも実 fill も無いため取引品質を描けません。cron が動き出すと judgement breakdown、SELL が約定すると PnL 分布が出ます。</p>`
+  }
+  const initScript = `
+    document.addEventListener('DOMContentLoaded', function () {
+      if (typeof echarts === 'undefined') return;
+      var data = window.__chartData;
       var DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'REJECT', 'ERROR'];
       var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', HOLD: '#aaa', REJECT: '#b25000', ERROR: '#c22' };
       var dbDates = data.decisions.map(function (p) { return p.date; });
@@ -1541,131 +1609,103 @@ function chartsBody(args: ChartsViewModel): string {
           xAxis: { type: 'category', data: dbDates },
           yAxis: { type: 'value', name: '判定数' },
           series: DECISION_KEYS.map(function (k) {
-            return {
-              name: k,
-              type: 'bar',
-              stack: 'decisions',
+            return { name: k, type: 'bar', stack: 'decisions',
               data: data.decisions.map(function (p) { return p.counts[k] || 0; }),
-              itemStyle: { color: DECISION_COLORS[k] },
-            };
+              itemStyle: { color: DECISION_COLORS[k] } };
           }),
         });
         window.addEventListener('resize', function () { dbChart.resize(); });
       }
-
-      // ---- PnL 分布 histogram (#158 Phase 3) ----
       var pnlHistEl = document.getElementById('pnl-hist-chart');
       if (pnlHistEl && data.histogram && data.histogram.length > 0) {
         var pnlHist = echarts.init(pnlHistEl);
         pnlHist.setOption({
           title: { text: 'Per-trade realized PnL 分布', left: 'center', textStyle: { fontSize: 14 } },
-          tooltip: {
-            trigger: 'axis',
-            axisPointer: { type: 'shadow' },
-            formatter: function (params) {
-              var p = params[0];
-              return p.name + ': ' + p.value + ' trades';
-            },
-          },
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+            formatter: function (params) { var p = params[0]; return p.name + ': ' + p.value + ' trades'; } },
           grid: { left: 50, right: 20, top: 40, bottom: 40 },
           xAxis: { type: 'category', data: data.histogram.map(function (b) { return b.label; }) },
           yAxis: { type: 'value', name: 'trades' },
-          series: [{
-            type: 'bar',
+          series: [{ type: 'bar',
             data: data.histogram.map(function (b) {
               return { value: b.count, itemStyle: { color: b.binCenter >= 0 ? '#057a55' : '#c22' } };
-            }),
-          }],
+            }) }],
         });
         window.addEventListener('resize', function () { pnlHist.resize(); });
       }
-
-      // ---- Per-symbol price + SMA + entry/exit markers (#158 Phase 4) ----
-      var symEl = document.getElementById('symbol-chart');
-      if (symEl && data.symbolChart && data.symbolChart.points.length > 0) {
-        var sc = data.symbolChart;
-        var ts = sc.points.map(function (p) { return p.timestamp; });
-        var prices = sc.points.map(function (p) { return p.price; });
-        var smas = sc.points.map(function (p) { return p.sma50 == null ? null : p.sma50; });
-        var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
-          return { name: 'BUY', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
-        });
-        var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
-          var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
-          return { name: 'SELL', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
-        });
-        var symChart = echarts.init(symEl);
-        symChart.setOption({
-          title: { text: sc.symbol + ' price + SMA50 + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
-          tooltip: { trigger: 'axis' },
-          legend: { top: 22 },
-          grid: { left: 60, right: 20, top: 60, bottom: 40 },
-          xAxis: { type: 'category', data: ts },
-          yAxis: { type: 'value', scale: true },
-          series: [
-            { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none' },
-            { name: 'SMA50', type: 'line', data: smas, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true },
-            {
-              name: 'entry/exit', type: 'scatter', data: [],
-              markPoint: {
-                symbol: 'pin', symbolSize: 36,
-                data: entries.concat(exits),
-              },
-            },
-          ],
-        });
-        window.addEventListener('resize', function () { symChart.resize(); });
-      }
-
-      var equityEl = document.getElementById('equity-chart');
-      var ddEl = document.getElementById('dd-chart');
-      if (equityEl && ddEl && data.equity.length > 0) {
-        var equityChart = echarts.init(equityEl);
-        equityChart.setOption({
-          title: { text: '累積 realized PnL', left: 'center', textStyle: { fontSize: 14 } },
-          tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
-          grid: { left: 50, right: 20, top: 40, bottom: 40 },
-          xAxis: { type: 'category', data: dates },
-          yAxis: { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
-          series: [{ type: 'line', data: equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } }],
-        });
-
-        var ddChart = echarts.init(ddEl);
-        ddChart.setOption({
-          title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
-          tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
-          grid: { left: 50, right: 20, top: 40, bottom: 40 },
-          xAxis: { type: 'category', data: dates },
-          yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
-          series: [
-            { type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } },
-          ],
-        });
-
-        window.addEventListener('resize', function () {
-          equityChart.resize();
-          ddChart.resize();
-        });
-      }
     });
   `
-  return `<p class="muted" style="font-size:12px">
-    累積 realized PnL と peak からの下落率 (MaxDD)。戦略の長期パフォーマンス指標。
-    シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算
-    (peak ≤ 0 のときは 0%)。当日 intraday の risk halt 閾値 (drawdown_kill /
-    risk_dd_halt) は別概念のため重畳しない。
-    残りのチャート (decision breakdown / PnL 分布 / 銘柄チャート) は
-    <a href="https://github.com/ochanuco/webull-trading/issues/158">#158</a> で順次追加。
-  </p>
-  <div id="equity-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  <div id="dd-chart" style="width:100%;height:280px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  <div id="decision-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  <div id="pnl-hist-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  return `<div id="pnl-hist-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   ${renderTradeStatsTable(args.stats)}
-  ${renderSymbolPicker(args)}
-  <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  <p id="chart-status" class="warn" style="font-size:12px;margin-top:8px"></p>
-  ${safeJsonScript('__chartData', args)}
+  <div id="decision-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${safeJsonScript('__chartData', { decisions: args.decisions, histogram: args.histogram })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
+}
+
+function renderSymbolTab(args: ChartsBodySymbol): string {
+  const noData =
+    args.symbolChart === null ||
+    (args.symbolChart.points.length === 0 && args.symbolChart.markers.length === 0)
+  if (noData) {
+    return (
+      renderSymbolPickerForTab(args) +
+      `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>`
+    )
+  }
+  const initScript = `
+    document.addEventListener('DOMContentLoaded', function () {
+      if (typeof echarts === 'undefined') return;
+      var data = window.__chartData;
+      var sc = data.symbolChart;
+      if (!sc || sc.points.length === 0) return;
+      var ts = sc.points.map(function (p) { return p.timestamp; });
+      var prices = sc.points.map(function (p) { return p.price; });
+      var smas = sc.points.map(function (p) { return p.sma50 == null ? null : p.sma50; });
+      var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
+        return { name: 'BUY', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
+      });
+      var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
+        var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
+        return { name: 'SELL', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
+      });
+      var symChart = echarts.init(document.getElementById('symbol-chart'));
+      symChart.setOption({
+        title: { text: sc.symbol + ' price + SMA50 + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis' },
+        legend: { top: 22 },
+        grid: { left: 60, right: 20, top: 60, bottom: 40 },
+        xAxis: { type: 'category', data: ts },
+        yAxis: { type: 'value', scale: true },
+        series: [
+          { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none' },
+          { name: 'SMA50', type: 'line', data: smas, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true },
+          { name: 'entry/exit', type: 'scatter', data: [],
+            markPoint: { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) } },
+        ],
+      });
+      window.addEventListener('resize', function () { symChart.resize(); });
+    });
+  `
+  return `${renderSymbolPickerForTab(args)}
+  <div id="symbol-chart" style="width:100%;height:420px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${safeJsonScript('__chartData', { symbolChart: args.symbolChart })}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script>${initScript}</script>`
+}
+
+function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
+  if (args.availableSymbols.length === 0) return ''
+  const opts = args.availableSymbols
+    .map(
+      (s) =>
+        `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}" style="margin-right:6px;${
+          s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
+        }">${esc(s)}</a>`,
+    )
+    .join('')
+  const focusLabel = args.focusSymbol ?? '—'
+  return `<p class="muted" style="font-size:12px">
+    銘柄: <strong>${esc(focusLabel)}</strong> | 切替: ${opts}
+  </p>`
 }
