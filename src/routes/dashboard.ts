@@ -104,6 +104,11 @@ export const dashboard = new Hono<AppBindings>()
       }
       // tab === 'symbol'
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
+      // ?from / ?to (ISO UTC) で chart x-axis のズーム範囲を URL に持つ。
+      // 銘柄切替を跨いで維持される (picker URL に伝搬)。dataZoom slider 操作で
+      // client 側が history.replaceState で URL を更新する。
+      const zoomFrom = parseIsoTimestamp(c.req.query('from'))
+      const zoomTo = parseIsoTimestamp(c.req.query('to'))
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(c.env),
         loadGlobalConfigFrom(c.env),
@@ -141,6 +146,11 @@ export const dashboard = new Hono<AppBindings>()
       const symbolChart = focusSymbol
         ? await loadSymbolChart(c.env, focusSymbol, rules)
         : null
+      // zoom range の妥当性: from < to を保証、不整合なら null fallback
+      const zoom =
+        zoomFrom !== null && zoomTo !== null && zoomFrom < zoomTo
+          ? { from: zoomFrom, to: zoomTo }
+          : null
       return c.html(
         layout(
           'チャート',
@@ -150,6 +160,7 @@ export const dashboard = new Hono<AppBindings>()
             symbolChart,
             availableSymbols: universe.allowedSymbols,
             strategyParams,
+            zoom,
           }),
         ),
       )
@@ -1915,12 +1926,25 @@ export interface StrategyParamsSnapshot {
   kAtr: number
 }
 
+/**
+ * ISO UTC timestamp (例: "2026-04-15T00:00:00Z" / 末尾 Z 無し可) として
+ * パース可能なら Date を返し、不正なら null。Number.isFinite で防御。
+ */
+export function parseIsoTimestamp(raw: string | undefined): Date | null {
+  if (!raw || raw.trim() === '') return null
+  const d = new Date(raw)
+  if (!Number.isFinite(d.getTime())) return null
+  return d
+}
+
 interface ChartsBodySymbol {
   tab: 'symbol'
   focusSymbol: string | null
   symbolChart: SymbolChartData | null
   availableSymbols: string[]
   strategyParams: StrategyParamsSnapshot
+  /** dataZoom 初期範囲。null なら全期間 (full data) */
+  zoom: { from: Date; to: Date } | null
 }
 
 type ChartsBodyArgs = ChartsBodyOverview | ChartsBodyQuality | ChartsBodySymbol
@@ -2231,6 +2255,17 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         }
       }
 
+      // dataZoom: 下部 slider + inside (wheel/pinch zoom)。初期 zoom 範囲は
+      // ?from / ?to URL params (data.zoomFromMs / zoomToMs)。zoom 操作時に
+      // history.replaceState で URL を更新 → 銘柄切替を跨いでも range を維持。
+      var dzInitial = data.zoomFromMs != null && data.zoomToMs != null
+        ? { startValue: data.zoomFromMs, endValue: data.zoomToMs }
+        : {};
+      var dataZoomCfg = [
+        Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInitial),
+        Object.assign({ type: 'slider', xAxisIndex: 0, height: 24, bottom: 8 }, dzInitial),
+      ];
+
       var symChart = echarts.init(document.getElementById('symbol-chart'));
       symChart.setOption({
         title: { text: sc.symbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
@@ -2239,7 +2274,9 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
         },
         legend: { top: 22, type: 'scroll' },
-        grid: { left: 60, right: 20, top: 60, bottom: 40 },
+        // bottom slider 用に grid.bottom を確保 (slider 24px + 余白)
+        grid: { left: 60, right: 20, top: 60, bottom: 64 },
+        dataZoom: dataZoomCfg,
         xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
         // showMinLabel/showMaxLabel: false で boundary label の異常表示を抑制。
         // ECharts で時々 yAxis の min/max 位置に巨大数字 ("7711183" 等) が
@@ -2298,12 +2335,37 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
+
+      // dataZoom 変更で URL の ?from / ?to を更新 (replaceState なので history
+      // 汚染なし)。debounce 200ms で連続操作中の URL flicker を抑制。
+      var dzTimer = null;
+      symChart.on('dataZoom', function () {
+        if (dzTimer) clearTimeout(dzTimer);
+        dzTimer = setTimeout(function () {
+          var opt = symChart.getOption();
+          var dz = opt.dataZoom && opt.dataZoom[0];
+          if (!dz) return;
+          var sv = dz.startValue;
+          var ev = dz.endValue;
+          if (sv == null || ev == null) return;
+          try {
+            var url = new URL(window.location.href);
+            url.searchParams.set('from', new Date(sv).toISOString());
+            url.searchParams.set('to', new Date(ev).toISOString());
+            window.history.replaceState({}, '', url.toString());
+          } catch (e) { /* noop */ }
+        }, 200);
+      });
     });
   `
   return `${renderSymbolPickerForTab(args)}
-  <div id="symbol-chart" style="width:100%;height:420px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   ${renderStrategyParamsPanel(args.strategyParams)}
-  ${safeJsonScript('__chartData', { symbolChart: args.symbolChart })}
+  ${safeJsonScript('__chartData', {
+    symbolChart: args.symbolChart,
+    zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
+    zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
+  })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
 }
@@ -2407,10 +2469,14 @@ export function renderStrategyParamsPanel(p: StrategyParamsSnapshot): string {
 
 function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
   if (args.availableSymbols.length === 0) return ''
+  // 銘柄切替時にズーム範囲を維持するため、現在の from/to を picker URL に伝搬
+  const zoomQs = args.zoom
+    ? `&from=${encodeURIComponent(args.zoom.from.toISOString())}&to=${encodeURIComponent(args.zoom.to.toISOString())}`
+    : ''
   const opts = args.availableSymbols
     .map(
       (s) =>
-        `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}" style="margin-right:6px;${
+        `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}" style="margin-right:6px;${
           s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
         }">${esc(s)}</a>`,
     )
