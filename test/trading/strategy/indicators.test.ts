@@ -43,6 +43,42 @@ describe('computePullbackIndicators', () => {
     const r = computePullbackIndicators(bars)!
     expect(r.low20d).toBeCloseTo(50, 4)
   })
+
+  describe('intradayPrice override', () => {
+    const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
+    const bars = makeBars(closes)
+    // daily close ベースの fixture 値: last = 159, sma50 = 134.5, return50d = (159-110)/110
+    const dailyOnly = computePullbackIndicators(bars)!
+
+    it('uses intradayPrice as price when provided and positive', () => {
+      const r = computePullbackIndicators(bars, 200)!
+      expect(r.price).toBe(200)
+      // daily 系 indicator は intraday の影響を受けない
+      expect(r.sma50).toBeCloseTo(dailyOnly.sma50, 4)
+      expect(r.return50d).toBeCloseTo(dailyOnly.return50d, 4)
+      expect(r.high20d).toBeCloseTo(dailyOnly.high20d, 4)
+      expect(r.low20d).toBeCloseTo(dailyOnly.low20d, 4)
+      expect(r.atr20).toBeCloseTo(dailyOnly.atr20, 4)
+      expect(r.baselineAtr20).toBeCloseTo(dailyOnly.baselineAtr20, 4)
+    })
+
+    it('falls back to daily close when intradayPrice is omitted', () => {
+      const r = computePullbackIndicators(bars)!
+      expect(r.price).toBe(159)
+    })
+
+    it('falls back to daily close when intradayPrice is null', () => {
+      const r = computePullbackIndicators(bars, null)!
+      expect(r.price).toBe(159)
+    })
+
+    it('falls back to daily close on NaN / Infinity / 0 / negative', () => {
+      expect(computePullbackIndicators(bars, Number.NaN)!.price).toBe(159)
+      expect(computePullbackIndicators(bars, Number.POSITIVE_INFINITY)!.price).toBe(159)
+      expect(computePullbackIndicators(bars, 0)!.price).toBe(159)
+      expect(computePullbackIndicators(bars, -10)!.price).toBe(159)
+    })
+  })
 })
 
 describe('computeHoldBusinessDays', () => {
