@@ -881,3 +881,66 @@ describe('fitTrendLineFromRecentPivots', () => {
     expect(fitTrendLineFromRecentPivots([high1, high2], 'high', 'not-an-iso')).toBe(null)
   })
 })
+
+import { mergeYahooAndCronPoints } from '../../src/routes/dashboard'
+
+describe('mergeYahooAndCronPoints', () => {
+  it('Yahoo bar の日が cron-eval にあれば cron 優先 (indicators 保持)', () => {
+    const yahoo = [
+      { jstDate: '2026-04-23', close: 100, timestamp: '2026-04-23T16:00:00.000Z' },
+      { jstDate: '2026-04-24', close: 105, timestamp: '2026-04-24T16:00:00.000Z' },
+    ]
+    const cron: SymbolChartPoint[] = [
+      { timestamp: '2026-04-24T05:00:00.000Z', price: 104, sma50: 90, high20d: 110, low20d: 80 }, // JST 04/24
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, cron)
+    // 04/23: Yahoo, 04/24: cron (preferred)
+    expect(merged.length).toBe(2)
+    expect(merged[0]!.price).toBe(100) // Yahoo
+    expect(merged[0]!.sma50).toBe(null)
+    expect(merged[1]!.price).toBe(104) // cron preferred
+    expect(merged[1]!.sma50).toBe(90)
+  })
+
+  it('Yahoo に無い cron eval は保持される', () => {
+    const yahoo = [{ jstDate: '2026-04-23', close: 100, timestamp: '2026-04-23T16:00:00.000Z' }]
+    const cron: SymbolChartPoint[] = [
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 110, sma50: null, high20d: null, low20d: null },
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, cron)
+    expect(merged.length).toBe(2)
+    expect(merged.map((p) => p.price)).toEqual([100, 110])
+  })
+
+  it('timestamp 昇順でソート', () => {
+    const yahoo = [
+      { jstDate: '2026-04-25', close: 110, timestamp: '2026-04-25T16:00:00.000Z' },
+      { jstDate: '2026-04-23', close: 100, timestamp: '2026-04-23T16:00:00.000Z' },
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, [])
+    expect(merged.map((p) => p.timestamp)).toEqual([
+      '2026-04-23T16:00:00.000Z',
+      '2026-04-25T16:00:00.000Z',
+    ])
+  })
+
+  it('空入力は空', () => {
+    expect(mergeYahooAndCronPoints([], [])).toEqual([])
+  })
+
+  it('不正 timestamp の cron point は merged からも除外される', () => {
+    const yahoo = [{ jstDate: '2026-04-23', close: 100, timestamp: '2026-04-23T16:00:00.000Z' }]
+    const cron: SymbolChartPoint[] = [
+      { timestamp: 'not-an-iso', price: 110, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, cron)
+    // Yahoo は残る + 有効な cron (04/25) は残る + 不正 cron は完全に除外
+    expect(merged.length).toBe(2)
+    expect(merged.some((p) => p.timestamp === 'not-an-iso')).toBe(false)
+    expect(merged.map((p) => p.timestamp)).toEqual([
+      '2026-04-23T16:00:00.000Z',
+      '2026-04-25T05:00:00.000Z',
+    ])
+  })
+})
