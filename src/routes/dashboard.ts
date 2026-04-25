@@ -1472,6 +1472,20 @@ export function computeChartWindowDays(timeStopDays: number): number {
   return Math.min(Math.max(dynamic, 14), MAX_WINDOW_DAYS)
 }
 
+export interface PivotPoint {
+  /** ISO UTC timestamp of the daily bar */
+  timestamp: string
+  price: number
+  type: 'high' | 'low'
+}
+
+export interface TrendLineSegment {
+  /** 採用した直近 2 pivots (古い → 新しい) */
+  pivots: [PivotPoint, PivotPoint]
+  /** 延長線の終点 (最新 timestamp、price は線形外挿) */
+  end: { timestamp: string; price: number }
+}
+
 export interface SymbolChartData {
   symbol: string
   points: SymbolChartPoint[]
@@ -1479,6 +1493,11 @@ export interface SymbolChartData {
   /** 現保有 (BUY → SELL がまだない) ならその情報、なければ null */
   position: SymbolChartPosition | null
   rules: SymbolChartRules
+  /** 直近 swing pivots からの sloped 上値抵抗線 / 下値支持線 (数足りないと null) */
+  resistanceLine: TrendLineSegment | null
+  supportLine: TrendLineSegment | null
+  /** 検出された swing pivots (chart 上の小さな丸で表示する想定) */
+  pivots: PivotPoint[]
 }
 
 /**
@@ -1566,7 +1585,86 @@ export async function loadSymbolChart(
     }))
   // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
-  return { symbol, points, markers, position, rules }
+  // sloped trend lines: cron-eval price を JST 日次に dedupe → 5-bar fractal で
+  // swing pivot 検出 → 直近 2 pivots を結んで延長線 fit。pivots が 2 未満なら null。
+  const dailyCloses = aggregateDailyCloses(points)
+  const pivots = detectFractalPivots(dailyCloses, 2)
+  const lastTimestamp = points.length > 0 ? points[points.length - 1]!.timestamp : null
+  const resistanceLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'high', lastTimestamp) : null
+  const supportLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp) : null
+  return { symbol, points, markers, position, rules, resistanceLine, supportLine, pivots }
+}
+
+/**
+ * cron-eval price (Yahoo daily close を 15 分毎に複製したもの) を JST 日次で
+ * dedupe して、その日の最終 cron eval を「日次 close」として採用。
+ * trend line / pivot 検出は日足ベースで行うのが標準。
+ */
+export function aggregateDailyCloses(
+  points: SymbolChartPoint[],
+): Array<{ jstDate: string; close: number; timestamp: string }> {
+  const byDay = new Map<string, { jstDate: string; close: number; timestamp: string }>()
+  for (const p of points) {
+    if (p.price == null || !Number.isFinite(p.price)) continue
+    const ms = new Date(p.timestamp).getTime()
+    if (!Number.isFinite(ms)) continue
+    // JST date = UTC + 9h、ISO の前 10 文字
+    const jstDate = new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10)
+    // last write wins → その日の最終 cron eval
+    byDay.set(jstDate, { jstDate, close: p.price, timestamp: p.timestamp })
+  }
+  return [...byDay.values()].sort((a, b) => (a.jstDate < b.jstDate ? -1 : 1))
+}
+
+/**
+ * fractal pivot: bar[i] が ±k 範囲で純粋に最大なら high pivot、純粋に最小なら
+ * low pivot。k=2 で 5-bar fractal (標準的な短期 swing 検出)。同値タイは pivot に
+ * しない (>= ではなく > で判定)。両端 k 個は pivot 候補にならない。
+ */
+export function detectFractalPivots(
+  daily: Array<{ jstDate: string; close: number; timestamp: string }>,
+  k: number,
+): PivotPoint[] {
+  const out: PivotPoint[] = []
+  for (let i = k; i < daily.length - k; i += 1) {
+    const center = daily[i]!.close
+    let isHigh = true
+    let isLow = true
+    for (let j = i - k; j <= i + k; j += 1) {
+      if (j === i) continue
+      const other = daily[j]!.close
+      if (other >= center) isHigh = false
+      if (other <= center) isLow = false
+      if (!isHigh && !isLow) break
+    }
+    if (isHigh) out.push({ timestamp: daily[i]!.timestamp, price: center, type: 'high' })
+    if (isLow) out.push({ timestamp: daily[i]!.timestamp, price: center, type: 'low' })
+  }
+  return out
+}
+
+/**
+ * 同 type pivots を時系列で並べ、直近 2 つを結んで `endTimestamp` まで線形外挿。
+ * pivot が 2 未満 / 同時刻 / endTimestamp 解釈不能なら null。
+ */
+export function fitTrendLineFromRecentPivots(
+  pivots: PivotPoint[],
+  type: 'high' | 'low',
+  endTimestamp: string,
+): TrendLineSegment | null {
+  const sameType = pivots.filter((p) => p.type === type)
+  if (sameType.length < 2) return null
+  const p1 = sameType[sameType.length - 2]!
+  const p2 = sameType[sameType.length - 1]!
+  const t1 = new Date(p1.timestamp).getTime()
+  const t2 = new Date(p2.timestamp).getTime()
+  const tEnd = new Date(endTimestamp).getTime()
+  if (!Number.isFinite(t1) || !Number.isFinite(t2) || !Number.isFinite(tEnd)) return null
+  if (t2 <= t1) return null
+  const slope = (p2.price - p1.price) / (t2 - t1)
+  const endPrice = p2.price + slope * (tEnd - t2)
+  if (!Number.isFinite(endPrice)) return null
+  return { pivots: [p1, p2], end: { timestamp: endTimestamp, price: endPrice } }
 }
 
 /**
@@ -1901,11 +1999,24 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMinMul];
       });
 
-      // 下値支持線 (= 20 日安値、教科書の support line)。high20d と対称な指標で、
-      // ここを下回ると「直近 20 日のレンジ崩壊」= トレンド転換のサイン。
-      var supportXY = sc.points.map(function (p) {
-        return [p.timestamp, p.low20d == null ? null : p.low20d];
-      });
+      // sloped trend lines (server-side で fractal pivot 検出 + 直近 2 pivots
+      // を線形外挿)。教科書の「下値支持線 / 上値抵抗線」と同じ仕組み。
+      // 検出失敗 (pivots < 2) なら null → 描画スキップ。
+      function trendLineXY(line) {
+        if (!line) return null;
+        return [
+          [line.pivots[0].timestamp, line.pivots[0].price],
+          [line.end.timestamp, line.end.price],
+        ];
+      }
+      var resistanceXY = trendLineXY(sc.resistanceLine);
+      var supportTrendXY = trendLineXY(sc.supportLine);
+      var pivotHighDots = sc.pivots
+        .filter(function (pv) { return pv.type === 'high'; })
+        .map(function (pv) { return [pv.timestamp, pv.price]; });
+      var pivotLowDots = sc.pivots
+        .filter(function (pv) { return pv.type === 'low'; })
+        .map(function (pv) { return [pv.timestamp, pv.price]; });
 
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
       // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
@@ -1966,6 +2077,16 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         }
         pushIfFinite(p.low20d);
       });
+      if (sc.resistanceLine) {
+        pushIfFinite(sc.resistanceLine.pivots[0].price);
+        pushIfFinite(sc.resistanceLine.pivots[1].price);
+        pushIfFinite(sc.resistanceLine.end.price);
+      }
+      if (sc.supportLine) {
+        pushIfFinite(sc.supportLine.pivots[0].price);
+        pushIfFinite(sc.supportLine.pivots[1].price);
+        pushIfFinite(sc.supportLine.end.price);
+      }
       sc.markers.forEach(function (m) { pushIfFinite(m.price); });
       extraYValues.forEach(function (v) { pushIfFinite(v); });
       var yMin, yMax;
@@ -1981,7 +2102,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
       symChart.setOption({
-        title: { text: sc.symbol + ' price + 抵抗/支持線 + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: sc.symbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
@@ -1991,14 +2112,31 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
         yAxis: { type: 'value', min: yMin, max: yMax },
         series: [
-          // 保有時は band 非表示 (avg/stop/TP の 3 線に集中)、非保有時は band 表示
-          // (entry trigger 圏内かを見る局面)。下値支持線 (low20d) は常時表示で
-          // 「直近レンジ崩壊」を見える化。
+          // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は淡く表示
+          // (戦略 rule の参考、トレンドラインが主役なので opacity 0.4)。
           ...(sc.position ? [] : [
-            { name: '上値抵抗線 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
-            { name: '押し目買い下限 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.8, color: '#b25000', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.6, color: '#057a55', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.6, color: '#b25000', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
           ]),
-          { name: '下値支持線 (20日安値)', type: 'line', data: supportXY, lineStyle: { width: 1, color: '#c22', type: 'solid' }, symbol: 'none', connectNulls: false, z: 1 },
+          // sloped trend lines (5-bar fractal pivot fit)。教科書「下値支持線 /
+          // 上値抵抗線」相当。pivots が 2 未満なら data: null で render skip。
+          ...(resistanceXY ? [{
+            name: '上値抵抗線 (sloped, 直近 2 pivot fit)', type: 'line', data: resistanceXY,
+            lineStyle: { width: 1.5, color: '#1471a8', type: 'solid' }, symbol: 'none', z: 3,
+          }] : []),
+          ...(supportTrendXY ? [{
+            name: '下値支持線 (sloped, 直近 2 pivot fit)', type: 'line', data: supportTrendXY,
+            lineStyle: { width: 1.5, color: '#c22', type: 'solid' }, symbol: 'none', z: 3,
+          }] : []),
+          // swing pivot dots (見つけた pivot を可視化、debug + 教育用)
+          ...(pivotHighDots.length > 0 ? [{
+            name: 'swing high', type: 'scatter', data: pivotHighDots,
+            symbolSize: 6, itemStyle: { color: '#1471a8', borderColor: '#fff', borderWidth: 1 }, z: 4,
+          }] : []),
+          ...(pivotLowDots.length > 0 ? [{
+            name: 'swing low', type: 'scatter', data: pivotLowDots,
+            symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 4,
+          }] : []),
           { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
             markPoint: entries.length + exits.length > 0 ? {
