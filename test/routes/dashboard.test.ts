@@ -928,13 +928,19 @@ describe('mergeYahooAndCronPoints', () => {
     expect(mergeYahooAndCronPoints([], [])).toEqual([])
   })
 
-  it('cron timestamp が不正でも crash せず Yahoo は保持', () => {
+  it('不正 timestamp の cron point は merged からも除外される', () => {
     const yahoo = [{ jstDate: '2026-04-23', close: 100, timestamp: '2026-04-23T16:00:00.000Z' }]
     const cron: SymbolChartPoint[] = [
       { timestamp: 'not-an-iso', price: 110, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
     ]
     const merged = mergeYahooAndCronPoints(yahoo, cron)
-    // Yahoo は残る (jstDate 集合に bad cron 由来は入らない)
-    expect(merged.some((p) => p.timestamp === '2026-04-23T16:00:00.000Z')).toBe(true)
+    // Yahoo は残る + 有効な cron (04/25) は残る + 不正 cron は完全に除外
+    expect(merged.length).toBe(2)
+    expect(merged.some((p) => p.timestamp === 'not-an-iso')).toBe(false)
+    expect(merged.map((p) => p.timestamp)).toEqual([
+      '2026-04-23T16:00:00.000Z',
+      '2026-04-25T05:00:00.000Z',
+    ])
   })
 })

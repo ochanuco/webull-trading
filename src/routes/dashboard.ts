@@ -1611,7 +1611,13 @@ export async function loadSymbolChart(
     ? new Date(lastTimestamp).getTime() - PIVOT_WINDOW_DAYS * 24 * 3600 * 1000
     : 0
   const recentBars = yahooBars.filter((b) => new Date(b.timestamp).getTime() >= pivotCutoffMs)
-  const dailyCloses = recentBars.length >= 5 ? recentBars : aggregateDailyCloses(points)
+  // Yahoo fetch 失敗時の cron-eval fallback でも cutoff を維持。timeStopDays
+  // が大きい設定で chart window が 30 日を超えるケースで、旧 regime の cron
+  // 日足が pivot 候補に紛れ込まないよう同じ cutoff を適用。
+  const recentCronCloses = aggregateDailyCloses(points).filter(
+    (p) => new Date(p.timestamp).getTime() >= pivotCutoffMs,
+  )
+  const dailyCloses = recentBars.length >= 5 ? recentBars : recentCronCloses
   const pivotsRaw = detectFractalPivots(dailyCloses, 2)
   // regime filter: 現在価格の ±50% を超える pivot は別 regime (3x rally など)
   // と判定して除外。「直近に類似する価格帯」の pivot だけ trend line に使う。
@@ -1648,14 +1654,15 @@ export function mergeYahooAndCronPoints(
   yahooBars: Array<{ jstDate: string; close: number; timestamp: string }>,
   cronPoints: SymbolChartPoint[],
 ): SymbolChartPoint[] {
+  // 不正 timestamp の cron point は最初に除外。残すと ECharts time 軸 / chart
+  // 末尾判定 (lastTimestamp = mergedPoints[-1]) が壊れる。
+  const validCronPoints = cronPoints.filter((p) =>
+    Number.isFinite(new Date(p.timestamp).getTime()),
+  )
   const cronJstDates = new Set(
-    cronPoints
-      .map((p) => {
-        const ms = new Date(p.timestamp).getTime()
-        if (!Number.isFinite(ms)) return null
-        return new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10)
-      })
-      .filter((d): d is string => d !== null),
+    validCronPoints.map((p) =>
+      new Date(new Date(p.timestamp).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10),
+    ),
   )
   const yahooFiller: SymbolChartPoint[] = yahooBars
     .filter((b) => !cronJstDates.has(b.jstDate))
@@ -1666,7 +1673,7 @@ export function mergeYahooAndCronPoints(
       high20d: null,
       low20d: null,
     }))
-  return [...yahooFiller, ...cronPoints].sort((a, b) =>
+  return [...yahooFiller, ...validCronPoints].sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
   )
 }
@@ -2159,7 +2166,13 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         var tpPrice = avg * (1 + sc.rules.takeProfitPct);
         extraYValues.push(avg, stopPrice, tpPrice);
         var openedAt = sc.position.openedAt;
-        var endTs = sc.points.length > 0 ? sc.points[sc.points.length - 1].timestamp : openedAt;
+        // openedAt > 最新 point (chart データが古い / position 直後でまだ
+        // strategy_decision_log に記録されていない) のとき、endTs が openedAt
+        // より過去に出ると markLine が逆向き (左側) に伸びる。max で clamp。
+        var latestTs = sc.points.length > 0 ? sc.points[sc.points.length - 1].timestamp : openedAt;
+        var endTs = new Date(latestTs).getTime() >= new Date(openedAt).getTime()
+          ? latestTs
+          : openedAt;
         positionMarkLines = [
           [
             { coord: [openedAt, avg], symbol: 'none', lineStyle: { color: '#444', type: 'solid', width: 1 }, label: { formatter: 'avg ' + avg.toFixed(2), position: 'start', color: '#444' } },
