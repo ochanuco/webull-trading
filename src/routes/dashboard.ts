@@ -2263,15 +2263,18 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // qty / timestamp) は markPoint hover tooltip で表示。
       // realizedPnl と filledQty を data に保持し tooltip.formatter から
       // full-precision で読む (label の toFixed(1) で丸めた値とは独立)。
-      // pin label は最新 BUY 1 個 + 最新 SELL 1 個だけ表示。それより古いのは
-      // pin marker のみ (label.show: false)。chart 上の label 重なりを抑制し、
-      // 過去の fill 詳細は hover tooltip (full-precision PnL / qty / 時刻) で確認。
+      // pin label は「全 fill 中で最新」の 1 個だけ表示。それより古いのは
+      // 全部 marker のみで label.show: false。BUY と SELL を別々に最新採用
+      // していた旧仕様だと近接する BUY→SELL pair で label が重なる回帰が
+      // あったため、現保有 status を表す「最後のアクション」だけ強調。
+      // 過去の fill 詳細は hover tooltip (full-precision PnL / qty / 時刻) で。
       var buys = sc.markers.filter(function (m) { return m.side === 'BUY'; });
       var sells = sc.markers.filter(function (m) { return m.side === 'SELL'; });
-      var latestBuyTs = buys.length > 0 ? buys[buys.length - 1].timestamp : null;
-      var latestSellTs = sells.length > 0 ? sells[sells.length - 1].timestamp : null;
+      var latestFillTs = sc.markers.length > 0
+        ? sc.markers[sc.markers.length - 1].timestamp
+        : null;
       var entries = buys.map(function (m) {
-        var showLabel = m.timestamp === latestBuyTs;
+        var showLabel = m.timestamp === latestFillTs;
         return {
           name: 'BUY', coord: [m.timestamp, m.price], value: m.price,
           realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
@@ -2280,7 +2283,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         };
       });
       var exits = sells.map(function (m) {
-        var showLabel = m.timestamp === latestSellTs;
+        var showLabel = m.timestamp === latestFillTs;
         var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
         return {
           name: 'SELL', coord: [m.timestamp, m.price], value: m.price,
@@ -2510,6 +2513,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         sc.markers.forEach(function (m) {
           var t = new Date(m.timestamp).getTime();
           if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(m.price);
+        });
+        // visible 範囲内の SMA50 値も含める。SMA50 が candle と離れた水準
+        // (例: SOXL は 3x rally で SMA50=65 / 価格=128) の銘柄では candle が
+        // 縦方向に圧縮されるが、SMA50 line が常時可視になる方を優先する
+        // (#181 後の user request)。zoom out すれば candle にとって過剰な
+        // 引き伸ばしも緩和される。
+        sc.points.forEach(function (p) {
+          var t = new Date(p.timestamp).getTime();
+          if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(p.sma50);
         });
         // 保有期間が visible 範囲と重なっていれば position 線を含める
         if (sc.position) {
