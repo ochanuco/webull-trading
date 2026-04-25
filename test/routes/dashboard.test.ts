@@ -944,3 +944,48 @@ describe('mergeYahooAndCronPoints', () => {
     ])
   })
 })
+
+import { parseIsoTimestamp } from '../../src/routes/dashboard'
+
+describe('parseIsoTimestamp', () => {
+  it('valid ISO UTC は Date を返す', () => {
+    const d = parseIsoTimestamp('2026-04-25T13:00:00.000Z')
+    expect(d).not.toBeNull()
+    expect(d!.toISOString()).toBe('2026-04-25T13:00:00.000Z')
+  })
+
+  it('Z 無し ISO は UTC と解釈 (local time として 9 時間ずれない)', () => {
+    const d = parseIsoTimestamp('2026-04-25T13:00:00')
+    expect(d).not.toBeNull()
+    // runner の TZ に関わらず UTC 13:00 として解釈される
+    expect(d!.toISOString()).toBe('2026-04-25T13:00:00.000Z')
+  })
+
+  it('±HH:MM offset 付き ISO は offset 通り解釈', () => {
+    const d = parseIsoTimestamp('2026-04-25T13:00:00+09:00')
+    expect(d!.toISOString()).toBe('2026-04-25T04:00:00.000Z')
+  })
+
+  it('date-only 文字列は ECMAScript 仕様で UTC 解釈', () => {
+    const d = parseIsoTimestamp('2026-04-25')
+    expect(d!.toISOString()).toBe('2026-04-25T00:00:00.000Z')
+  })
+
+  it('undefined / 空文字列 / 空白は null', () => {
+    expect(parseIsoTimestamp(undefined)).toBeNull()
+    expect(parseIsoTimestamp('')).toBeNull()
+    expect(parseIsoTimestamp('   ')).toBeNull()
+  })
+
+  it('壊れた文字列は null', () => {
+    expect(parseIsoTimestamp('not-an-iso')).toBeNull()
+    expect(parseIsoTimestamp('2026-99-99')).toBeNull()
+  })
+
+  it('数字のみ文字列は invalid (Date は ISO format string のみ accept)', () => {
+    // new Date('1777705200000') は Invalid Date。URL から数字の timestamp ms を
+    // 渡されても reject される (ISO format でないので意図的)。client 側は
+    // 必ず ISO で URL を更新するので運用上問題なし。
+    expect(parseIsoTimestamp('1777705200000')).toBeNull()
+  })
+})
