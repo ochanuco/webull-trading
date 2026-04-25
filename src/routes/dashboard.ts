@@ -24,16 +24,19 @@ export const dashboard = new Hono<AppBindings>()
     }
     const universe = await loadSymbolUniverse(c.env)
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
-    const rows = await Promise.all(
-      universe.allowedSymbols.map(async (sym) => {
-        try {
-          return { sym, state: await client.getState(sym), error: null as string | null }
-        } catch (err) {
-          return { sym, state: null as SymbolState | null, error: messageOf(err) }
-        }
-      }),
-    )
-    return c.html(layout('保有状況', positionsBody(rows)))
+    const [rows, strategyPriceMap] = await Promise.all([
+      Promise.all(
+        universe.allowedSymbols.map(async (sym) => {
+          try {
+            return { sym, state: await client.getState(sym), error: null as string | null }
+          } catch (err) {
+            return { sym, state: null as SymbolState | null, error: messageOf(err) }
+          }
+        }),
+      ),
+      loadLatestStrategyPrices(c.env.DB, universe.allowedSymbols),
+    ])
+    return c.html(layout('保有状況', positionsBody(rows, strategyPriceMap)))
   })
   .get('/portfolio', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
@@ -345,8 +348,89 @@ function indexBody(): string {
 </ul>`
 }
 
+/**
+ * 各銘柄の「strategy が直近に判定で使った価格」を取得。
+ * Yahoo daily bars から計算された `indicators.price` が
+ * strategy_decision_log.price に書き出されているので、最新行を引く。
+ *
+ * Webull bridge が落ちて lastQuote が古い場合、こちらが新しければ
+ * dashboard の現在値表示に採用される (pickFreshQuote で比較)。
+ *
+ * 実装: D1 の `(symbol, id)` 複合 index を活かして symbol 並列で
+ * `ORDER BY id DESC LIMIT 1` を打つ。1 銘柄あたり 1 row のみ転送。
+ */
+async function loadLatestStrategyPrices(
+  db: D1Database,
+  symbols: string[],
+): Promise<Map<string, { price: number; asOf: string }>> {
+  if (symbols.length === 0) return new Map()
+  const drizzle = createDb(db)
+  // 個別 symbol の失敗で全体を 500 にしないよう per-symbol で catch。
+  // strategy_decision_log がまだ空の銘柄や DB 一時的エラーは「Yahoo 価格なし」
+  // として扱い、Webull lastQuote にフォールバックさせる。
+  const entries = await Promise.all(
+    symbols.map(async (sym) => {
+      try {
+        const row = await drizzle
+          .select({
+            symbol: strategyDecisionLog.symbol,
+            price: strategyDecisionLog.price,
+            timestamp: strategyDecisionLog.timestamp,
+          })
+          .from(strategyDecisionLog)
+          .where(eq(strategyDecisionLog.symbol, sym))
+          .orderBy(desc(strategyDecisionLog.id))
+          .limit(1)
+        const r = row[0]
+        if (!r || r.price === null || r.price === undefined) return null
+        return [r.symbol, { price: r.price, asOf: r.timestamp }] as const
+      } catch {
+        return null
+      }
+    }),
+  )
+  return new Map(entries.filter((e): e is readonly [string, { price: number; asOf: string }] => e !== null))
+}
+
+/**
+ * 表示用「現在値」の決定。dashboard が見せる現在値の source は
+ * 2 系統あり、bridge 障害などで Webull snapshot が古くなる場合がある:
+ *
+ * - webull-snapshot: SymbolStateDO.lastQuote (Webull bridge の 5 分 cron)
+ * - yahoo-bars: strategy_decision_log.price (Yahoo daily bars 経由、15 分 cron)
+ *
+ * 両方あれば asOf が新しい方を採用。strategy が判定に使う価格と表示が
+ * 一致するのが UX 上の正なので、片方だけしか無い場合もそちらを採る。
+ */
+interface ResolvedQuote {
+  price: number
+  source: string
+  asOf: string
+}
+
+export function pickFreshQuote(
+  webull: { price: number; source: string; asOf: string } | null,
+  yahoo: { price: number; asOf: string } | null,
+): ResolvedQuote | null {
+  if (webull === null && yahoo === null) return null
+  if (webull === null) return { price: yahoo!.price, source: 'yahoo-bars', asOf: yahoo!.asOf }
+  if (yahoo === null) return { price: webull.price, source: webull.source, asOf: webull.asOf }
+  const w = new Date(webull.asOf).getTime()
+  const y = new Date(yahoo.asOf).getTime()
+  // 不正な ISO は "より古い" 扱い: 有効な側があればそちらを採用、両方
+  // 不正なら webull にタイブレーク (既存挙動維持)。`y > w` だけだと
+  // w=NaN の時に false 評価で不正な webull を選んでしまう回帰がある。
+  const wValid = Number.isFinite(w)
+  const yValid = Number.isFinite(y)
+  const pickYahoo = yValid && (!wValid || y > w)
+  return pickYahoo
+    ? { price: yahoo.price, source: 'yahoo-bars', asOf: yahoo.asOf }
+    : { price: webull.price, source: webull.source, asOf: webull.asOf }
+}
+
 function positionsBody(
   rows: Array<{ sym: string; state: SymbolState | null; error: string | null }>,
+  strategyPriceMap: Map<string, { price: number; asOf: string }>,
 ): string {
   if (rows.length === 0) return `<p class="muted">有効な銘柄がありません。</p>`
   const tbody = rows
@@ -356,7 +440,11 @@ function positionsBody(
       }
       const s = r.state
       const pos = s.position
-      const quote = s.lastQuote
+      const webull = s.lastQuote
+        ? { price: s.lastQuote.price, source: s.lastQuote.source, asOf: s.lastQuote.asOf ?? s.lastQuote.fetchedAt }
+        : null
+      const yahoo = strategyPriceMap.get(s.symbol) ?? null
+      const quote = pickFreshQuote(webull, yahoo)
       const pendingSide = s.pendingOrder?.side
       const pnlPct =
         pos !== null && quote !== null && pos.avgPrice > 0
@@ -364,7 +452,7 @@ function positionsBody(
           : null
       const pnlClass = pnlPct === null ? 'muted' : pnlPct >= 0 ? 'ok' : 'err'
       const quoteCell = quote
-        ? `${fmtNumber(quote.price, 2)} <span class="muted" style="font-size:11px">(${esc(quote.source)}, ${esc(formatQuoteAsOf(quote.asOf ?? quote.fetchedAt))})</span>`
+        ? `${fmtNumber(quote.price, 2)} <span class="muted" style="font-size:11px">(${esc(quote.source)}, ${esc(formatQuoteAsOf(quote.asOf))})</span>`
         : '<span class="muted">—</span>'
       return `<tr>
         <td><strong>${esc(s.symbol)}</strong></td>
