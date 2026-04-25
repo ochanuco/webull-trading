@@ -235,26 +235,21 @@ describe('dashboard', () => {
   })
 })
 
-import { formatQuoteAge } from '../../src/routes/dashboard'
+import { formatQuoteAsOf } from '../../src/routes/dashboard'
 
-describe('formatQuoteAge', () => {
-  const now = new Date('2026-04-25T10:00:00.000Z')
-  it('< 1 min → "just now"', () => {
-    expect(formatQuoteAge('2026-04-25T09:59:30.000Z', now)).toBe('just now')
+describe('formatQuoteAsOf', () => {
+  it('US 金曜引け 16:00 ET → JST 翌 05:00', () => {
+    // 2026-04-24 20:00 UTC = 2026-04-25 05:00 JST (DST 中: ET = UTC-4)
+    expect(formatQuoteAsOf('2026-04-24T20:00:00.000Z')).toBe('04/25 05:00 JST')
   })
-  it('minutes', () => {
-    expect(formatQuoteAge('2026-04-25T09:45:00.000Z', now)).toBe('15m前')
+  it('JP 金曜引け 15:00 JST', () => {
+    // 2026-04-24 06:00 UTC = 2026-04-24 15:00 JST
+    expect(formatQuoteAsOf('2026-04-24T06:00:00.000Z')).toBe('04/24 15:00 JST')
   })
-  it('hours', () => {
-    expect(formatQuoteAge('2026-04-25T07:00:00.000Z', now)).toBe('3h前')
-  })
-  it('days', () => {
-    expect(formatQuoteAge('2026-04-23T10:00:00.000Z', now)).toBe('2d前')
-  })
-  it('future timestamp → "just now"', () => {
-    expect(formatQuoteAge('2026-04-26T00:00:00.000Z', now)).toBe('just now')
+  it('zero-pads month / day / hour', () => {
+    expect(formatQuoteAsOf('2026-01-05T00:00:00.000Z')).toBe('01/05 09:00 JST')
   })
   it('invalid → "?"', () => {
-    expect(formatQuoteAge('not-an-iso', now)).toBe('?')
+    expect(formatQuoteAsOf('not-an-iso')).toBe('?')
   })
 })
