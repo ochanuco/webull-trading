@@ -2364,6 +2364,25 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
       var resistanceXY = trendLineXY(sc.resistanceLine);
       var supportTrendXY = trendLineXY(sc.supportLine);
+      // ECharts time axis + candlestick mixed の rendering で、独立 type:'line'
+      // series の trend line が candle (z:5) の上 (z:7) に置いても visual に
+      // 描画されないユースケースがあった (legend には出るが線本体だけ描かれない)。
+      // candle series の markLine は仕様上必ず series 上層に描かれるので、
+      // 同じ 2 点を candle.markLine.data に重ねて描画ロバストネスを担保する。
+      // line series は legend / hover tooltip 用に残す (描画されてもされなくても
+      // markLine と完全重なるので overdraw は無視できる)。
+      function trendMarkLine(line, color) {
+        if (!line) return null;
+        return [
+          { coord: [line.pivots[0].timestamp, line.pivots[0].price], lineStyle: { color: color, width: 1.8, type: 'solid' } },
+          { coord: [line.end.timestamp, line.end.price] },
+        ];
+      }
+      var trendMarkLineData = [];
+      var rmark = trendMarkLine(sc.resistanceLine, '#1471a8');
+      if (rmark) trendMarkLineData.push(rmark);
+      var smark = trendMarkLine(sc.supportLine, '#c22');
+      if (smark) trendMarkLineData.push(smark);
       var pivotHighDots = sc.pivots
         .filter(function (pv) { return pv.type === 'high'; })
         .map(function (pv) { return [pv.timestamp, pv.price]; });
@@ -2584,7 +2603,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               borderWidth: 1.5,
             },
             z: 5,
-            markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
+            markLine: (positionMarkLines.length + trendMarkLineData.length) > 0 ? {
+              silent: true,
+              symbol: 'none',
+              // position lines (avg/stop/TP) と sloped trend lines を 1 つの
+              // markLine.data に集約。markLine は ECharts 仕様上 series 上層に
+              // 描かれるので、独立 line series で起きていた candle 隠蔽問題を
+              // 回避できる。
+              data: positionMarkLines.concat(trendMarkLineData),
+            } : undefined,
             markPoint: entries.length + exits.length > 0 ? {
               symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
               tooltip: {
