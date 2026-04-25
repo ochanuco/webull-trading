@@ -73,16 +73,8 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('チャート', unavailable('DB not bound')))
     }
     try {
-      const [equity, global] = await Promise.all([
-        loadEquityCurve(c.env.DB),
-        loadGlobalConfigFrom(c.env),
-      ])
-      const thresholds = {
-        half: global.riskDdHalfThreshold,
-        kill: global.drawdownKillThreshold,
-        halt: global.riskDdHaltThreshold,
-      }
-      return c.html(layout('チャート', chartsBody({ equity, thresholds })))
+      const equity = await loadEquityCurve(c.env.DB)
+      return c.html(layout('チャート', chartsBody({ equity })))
     } catch (err) {
       return c.html(layout('チャート', unavailable(messageOf(err))))
     }
@@ -1153,14 +1145,7 @@ export function safeJsonScript(varName: string, data: unknown): string {
   return `<script>window.${varName} = ${json};</script>`
 }
 
-interface DrawdownThresholds {
-  /** 比率 (-0.05 = -5%)。global_config から動的に読む */
-  half: number
-  kill: number
-  halt: number
-}
-
-function chartsBody(args: { equity: EquityPoint[]; thresholds: DrawdownThresholds }): string {
+function chartsBody(args: { equity: EquityPoint[] }): string {
   if (args.equity.length === 0) {
     return `<p class="muted">まだ実 fill (realized_pnl) が無いためエクイティカーブを描けません。最初の SELL が約定すると表示されます。</p>`
   }
@@ -1179,11 +1164,6 @@ function chartsBody(args: { equity: EquityPoint[]; thresholds: DrawdownThreshold
       var dates = data.equity.map(function (p) { return p.date; });
       var equity = data.equity.map(function (p) { return p.cumulativePnl; });
       var dd = data.equity.map(function (p) { return p.drawdownPct * 100; });
-      var halfPct = data.thresholds.half * 100;
-      var killPct = data.thresholds.kill * 100;
-      var haltPct = data.thresholds.halt * 100;
-      function flat(v) { return dates.map(function () { return v; }); }
-      function lbl(name, v) { return name + ' (' + v.toFixed(2) + '%)'; }
 
       var equityChart = echarts.init(document.getElementById('equity-chart'));
       equityChart.setOption({
@@ -1197,16 +1177,13 @@ function chartsBody(args: { equity: EquityPoint[]; thresholds: DrawdownThreshold
 
       var ddChart = echarts.init(document.getElementById('dd-chart'));
       ddChart.setOption({
-        title: { text: 'ドローダウン (peak からの下落率)', left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
         grid: { left: 50, right: 20, top: 40, bottom: 40 },
         xAxis: { type: 'category', data: dates },
         yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
         series: [
           { type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } },
-          { type: 'line', data: flat(halfPct), lineStyle: { color: '#888', type: 'dashed', width: 1 }, symbol: 'none', name: lbl('risk_dd_half_threshold', halfPct) },
-          { type: 'line', data: flat(killPct), lineStyle: { color: '#b25000', type: 'dashed', width: 1 }, symbol: 'none', name: lbl('drawdown_kill_threshold', killPct) },
-          { type: 'line', data: flat(haltPct), lineStyle: { color: '#c22', type: 'dashed', width: 1 }, symbol: 'none', name: lbl('risk_dd_halt_threshold', haltPct) },
         ],
       });
 
@@ -1217,8 +1194,10 @@ function chartsBody(args: { equity: EquityPoint[]; thresholds: DrawdownThreshold
     });
   `
   return `<p class="muted" style="font-size:12px">
-    Phase 0+1: 累積 realized PnL とドローダウン。シード資金額を保持していないため
-    ドローダウンは「累積 PnL の peak からの低下率」で計算 (peak ≤ 0 のときは 0%)。
+    累積 realized PnL と peak からの下落率 (MaxDD)。戦略の長期パフォーマンス指標。
+    シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算
+    (peak ≤ 0 のときは 0%)。当日 intraday の risk halt 閾値 (drawdown_kill /
+    risk_dd_halt) は別概念のため重畳しない。
     残りのチャート (decision breakdown / PnL 分布 / 銘柄チャート) は
     <a href="https://github.com/ochanuco/webull-trading/issues/158">#158</a> で順次追加。
   </p>
