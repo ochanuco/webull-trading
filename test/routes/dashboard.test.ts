@@ -998,6 +998,23 @@ describe('computeRollingSma', () => {
   })
 })
 
+import { fetchYahooBarsForChart } from '../../src/routes/dashboard'
+
+describe('fetchYahooBarsForChart', () => {
+  // warmup を足してから getDailyBars に渡す実装で contract leak していたケース
+  // (lookback=0 / 負値 / 非整数) を caller contract のままで弾けることを確認。
+  // 実 fetch には行かないので mock 不要 (validation で先に throw)。
+  it('lookback=0 で RangeError', async () => {
+    await expect(fetchYahooBarsForChart('AAPL', 0)).rejects.toBeInstanceOf(RangeError)
+  })
+  it('lookback 負値で RangeError', async () => {
+    await expect(fetchYahooBarsForChart('AAPL', -10)).rejects.toBeInstanceOf(RangeError)
+  })
+  it('lookback 非整数で RangeError', async () => {
+    await expect(fetchYahooBarsForChart('AAPL', 1.5)).rejects.toBeInstanceOf(RangeError)
+  })
+})
+
 import { parseIsoTimestamp } from '../../src/routes/dashboard'
 
 describe('parseIsoTimestamp', () => {

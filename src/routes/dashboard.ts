@@ -1780,6 +1780,16 @@ export async function fetchYahooBarsForChart(
   symbol: string,
   lookback: number,
 ): Promise<Array<{ jstDate: string; open: number; high: number; low: number; close: number; sma50: number | null; timestamp: string }>> {
+  // warmup を足してから getDailyBars に渡す方式だと lookback=0 / 小さな負値で
+  // も内側の lookback (lookback+warmup) が正の整数になり validation を素通り
+  // してしまう (slice(-0)=slice(0) で warmup 区間が全部返る等)。caller contract
+  // を維持するためここで先に弾く。整数性は getDailyBars 側の `Number.isInteger`
+  // と整合させる。
+  if (!Number.isInteger(lookback) || lookback <= 0) {
+    throw new RangeError(
+      `fetchYahooBarsForChart: lookback must be a positive integer, got ${lookback}`,
+    )
+  }
   const client = new YahooBarClient()
   try {
     // SMA50 を「先頭の chart 表示日」から埋めたいので、表示 lookback に加えて
