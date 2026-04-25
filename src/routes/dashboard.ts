@@ -2355,11 +2355,17 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // sloped trend lines (server-side で fractal pivot 検出 + 直近 2 pivots
       // を線形外挿)。教科書の「下値支持線 / 上値抵抗線」と同じ仕組み。
       // 検出失敗 (pivots < 2) なら null → 描画スキップ。
+      //
+      // 過去 #185 / #187 / #188 で「描画されない」回帰があったが、根因は
+      // dataZoom の filterMode default 'filter' が 2 点しかない trend line
+      // series で 1 点 (古い pivot) が zoom 範囲外 → 点ごと filter → 残り
+      // 1 点で線が引けないというもの (ECharts issue #3637)。dataZoom 側で
+      // filterMode: 'weakFilter' にして両端いずれかが範囲内なら描画される
+      // ようにし、ここは 2 点 [oldPivot, chartEnd] の独立 line series で
+      // canonical に描く (markLine 経由は legend に出ないなど不便があった)。
+      // 数値 epoch ms に統一 (time axis の ISO 解釈揺らぎを排除)。
       function trendLineXY(line) {
         if (!line) return null;
-        // ECharts time axis は ISO string も accept するが、markLine + candle 上で
-        // 描画されない事例があったため数値 epoch ms に変換。line series の data
-        // 側も同形式に揃える (axis 解釈の揺らぎを排除)。
         return [
           [new Date(line.pivots[0].timestamp).getTime(), line.pivots[0].price],
           [new Date(line.end.timestamp).getTime(), line.end.price],
@@ -2367,29 +2373,6 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
       var resistanceXY = trendLineXY(sc.resistanceLine);
       var supportTrendXY = trendLineXY(sc.supportLine);
-      // ECharts の独立 type:'line' series は #185 で z:7 (candle z:5 上) に
-      // しても visual に描画されない症状があった (legend は出るが線本体抜け)。
-      // #187 で candle.markLine 経由で描画させたが解消せず — candlestick の
-      // markLine が slanted line を期待通りに描かないか coord 解釈が異なる
-      // 可能性。SMA50 (type:'line', z:6) を host にして markLine を載せ替える。
-      // 一般 line series の markLine は slanted [start, end] coord を確実に
-      // 描画するため (ECharts 通常用例)。
-      function trendMarkLine(line, color) {
-        if (!line) return null;
-        return [
-          {
-            coord: [new Date(line.pivots[0].timestamp).getTime(), line.pivots[0].price],
-            symbol: 'none',
-            lineStyle: { color: color, width: 1.8, type: 'solid' },
-          },
-          { coord: [new Date(line.end.timestamp).getTime(), line.end.price], symbol: 'none' },
-        ];
-      }
-      var trendMarkLineData = [];
-      var rmark = trendMarkLine(sc.resistanceLine, '#1471a8');
-      if (rmark) trendMarkLineData.push(rmark);
-      var smark = trendMarkLine(sc.supportLine, '#c22');
-      if (smark) trendMarkLineData.push(smark);
       var pivotHighDots = sc.pivots
         .filter(function (pv) { return pv.type === 'high'; })
         .map(function (pv) { return [pv.timestamp, pv.price]; });
@@ -2506,10 +2489,25 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var dzInitial = data.zoomFromMs != null && data.zoomToMs != null
         ? { startValue: data.zoomFromMs, endValue: data.zoomToMs }
         : {};
-      // dataZoom slider 両端ラベルも JST で表示 (default だと UTC date string)
-      var dzCommon = { labelFormatter: function (value) { return jstLabel(value); } };
+      // dataZoom slider 両端ラベルも JST で表示 (default だと UTC date string)。
+      // filterMode: 'weakFilter' は line / markLine など複数点で 1 figure を
+      // 構成する series 用。default の 'filter' は data item 単位で評価し、
+      // 1 dimension でも zoom 外なら点ごと除外する → 直近 2 pivot を chart 末
+      // まで延長する trend line ([oldPivot(~30d 前), chartEnd] の 2 点) は 5D
+      // zoom で oldPivot が範囲外 → 1 点だけ残り「線が引けない」回帰になる。
+      // 'weakFilter' は同 group 内の全点が同じ側に外れた時のみ filter する
+      // ため、片端が範囲内なら線分は描画される (公式 issue #3637 / official
+      // PR で line chart が zoom 中に消える問題の対策として実装された挙動)。
+      // candle / line / scatter / markLine / markPoint / markArea すべてで
+      // 「1 点が範囲外でも視覚的に切れて表示される」のが期待動作なので
+      // wide chart (1 銘柄 / 数千点) でも問題ない。
+      var dzCommon = {
+        labelFormatter: function (value) { return jstLabel(value); },
+        filterMode: 'weakFilter',
+      };
+      var dzInside = { filterMode: 'weakFilter' };
       var dataZoomCfg = [
-        Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInitial),
+        Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInside, dzInitial),
         Object.assign({ type: 'slider', xAxisIndex: 0, height: 24, bottom: 8 }, dzCommon, dzInitial),
       ];
 
@@ -2568,19 +2566,22 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.6, color: '#057a55', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
             { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.6, color: '#b25000', type: 'dashed', opacity: 0.4 }, symbol: 'none', connectNulls: false, z: 1 },
           ]),
-          // sloped trend lines は SMA50 series の markLine に host (下方)。
-          // 凡例表示用に空 line series を 1 個ずつ並べておく (markLine は legend に
-          // 出ない、独立 type:'line' series は描画されない既知症状を回避)。
+          // sloped trend lines: 直近 2 pivots を chart 末まで線形外挿した
+          // 2 点を独立 type:'line' series として描画。dataZoom filterMode は
+          // 上方で 'weakFilter' に設定済 → 古い pivot 端が zoom 範囲外でも
+          // line 自体は描画される (default 'filter' だと点ごと filter されて
+          // 残り 1 点で線が引けない既知症状)。z:7 で candle (z:5) / SMA50
+          // (z:6) より上に置き、線本体を最前面に。itemStyle.color は legend
+          // dot 色を lineStyle.color と揃えるため明示。
           ...(resistanceXY ? [{
-            name: '上値抵抗線 (sloped, 直近 2 pivot fit)', type: 'line', data: [],
+            name: '上値抵抗線 (sloped, 直近 2 pivot fit)', type: 'line', data: resistanceXY,
             lineStyle: { width: 1.8, color: '#1471a8', type: 'solid' }, symbol: 'none',
-            // legend で同じ色の dot を出すため itemStyle.color も指定。
-            itemStyle: { color: '#1471a8' },
+            itemStyle: { color: '#1471a8' }, z: 7,
           }] : []),
           ...(supportTrendXY ? [{
-            name: '下値支持線 (sloped, 直近 2 pivot fit)', type: 'line', data: [],
+            name: '下値支持線 (sloped, 直近 2 pivot fit)', type: 'line', data: supportTrendXY,
             lineStyle: { width: 1.8, color: '#c22', type: 'solid' }, symbol: 'none',
-            itemStyle: { color: '#c22' },
+            itemStyle: { color: '#c22' }, z: 7,
           }] : []),
           // swing pivot dots (見つけた pivot を可視化、debug + 教育用)。
           // candle (z:5) より上に出さないと candle 帯と重なる pivot が消える。
@@ -2634,19 +2635,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           // 行間も Yahoo 日次で線が繋がる)。candle (z:5) より上に置いて細い
           // candle 帯に重なっても見えるようにする。色は TradingView 系で
           // SMA に多用される orange (#f59e0b)、solid 1.4px。
+          // trend line は独立 series で描画する (上方参照)。markLine 方式は
+          // legend に出ないため legend と series の対応が崩れる。
           {
             name: 'SMA50', type: 'line', data: smasXY,
             lineStyle: { width: 1.4, color: '#f59e0b', type: 'solid' },
             symbol: 'none', connectNulls: true, z: 6,
-            // trend lines を SMA50 line series の markLine に host。
-            // type:'line' series の markLine は slanted [start, end] coord を
-            // 公式に supported (candlestick の markLine は #187 で host にしたが
-            // 描画されず)。silent で hover 反応無効にし overdraw を最小化。
-            markLine: trendMarkLineData.length > 0 ? {
-              silent: true,
-              symbol: 'none',
-              data: trendMarkLineData,
-            } : undefined,
           },
         ],
       });
