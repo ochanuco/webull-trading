@@ -439,3 +439,41 @@ describe('safeJsonScript', () => {
     expect(html.match(/<a>/g)).toBeNull()
   })
 })
+
+import { aggregateDecisionRows } from '../../src/routes/dashboard'
+
+describe('aggregateDecisionRows', () => {
+  it('日付ごとに decision を集計', () => {
+    const out = aggregateDecisionRows([
+      { day: '2026-04-23', decision: 'BUY', n: 1 },
+      { day: '2026-04-23', decision: 'HOLD', n: 5 },
+      { day: '2026-04-23', decision: 'REJECT', n: 2 },
+      { day: '2026-04-24', decision: 'HOLD', n: 8 },
+      { day: '2026-04-24', decision: 'SELL', n: 1 },
+    ])
+    expect(out).toEqual([
+      { date: '2026-04-23', counts: { BUY: 1, SELL: 0, HOLD: 5, REJECT: 2, ERROR: 0 } },
+      { date: '2026-04-24', counts: { BUY: 0, SELL: 1, HOLD: 8, REJECT: 0, ERROR: 0 } },
+    ])
+  })
+
+  it('未知 decision は ERROR バケットに寄せる (将来の追加に備える)', () => {
+    const out = aggregateDecisionRows([
+      { day: '2026-04-23', decision: 'WAT', n: 3 },
+    ])
+    expect(out[0]!.counts.ERROR).toBe(3)
+  })
+
+  it('空配列は空配列', () => {
+    expect(aggregateDecisionRows([])).toEqual([])
+  })
+
+  it('日付順にソート', () => {
+    const out = aggregateDecisionRows([
+      { day: '2026-04-25', decision: 'HOLD', n: 1 },
+      { day: '2026-04-23', decision: 'HOLD', n: 1 },
+      { day: '2026-04-24', decision: 'HOLD', n: 1 },
+    ])
+    expect(out.map((p) => p.date)).toEqual(['2026-04-23', '2026-04-24', '2026-04-25'])
+  })
+})
