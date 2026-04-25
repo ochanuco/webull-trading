@@ -382,3 +382,60 @@ describe('pickFreshQuote', () => {
     expect(pickFreshQuote(w, y)).toEqual(w)
   })
 })
+
+import { computeEquitySeries, safeJsonScript } from '../../src/routes/dashboard'
+
+describe('computeEquitySeries', () => {
+  it('累積 PnL を順に積み上げる', () => {
+    const out = computeEquitySeries([
+      { date: '2026-04-20', dailyPnl: 10 },
+      { date: '2026-04-21', dailyPnl: -3 },
+      { date: '2026-04-22', dailyPnl: 5 },
+    ])
+    expect(out.map((p) => p.cumulativePnl)).toEqual([10, 7, 12])
+  })
+
+  it('drawdown は peak からの下落率', () => {
+    const out = computeEquitySeries([
+      { date: '2026-04-20', dailyPnl: 100 }, // peak=100
+      { date: '2026-04-21', dailyPnl: -25 }, // cum=75, dd=-25%
+      { date: '2026-04-22', dailyPnl: 50 }, // cum=125 = new peak, dd=0
+    ])
+    expect(out[1]!.drawdownPct).toBeCloseTo(-0.25)
+    expect(out[2]!.drawdownPct).toBe(0)
+  })
+
+  it('peak が 0 以下の間は drawdown=0 (% 計算が無意味なため)', () => {
+    const out = computeEquitySeries([
+      { date: '2026-04-20', dailyPnl: -10 },
+      { date: '2026-04-21', dailyPnl: -5 },
+    ])
+    expect(out.every((p) => p.drawdownPct === 0)).toBe(true)
+  })
+
+  it('空配列は空配列', () => {
+    expect(computeEquitySeries([])).toEqual([])
+  })
+})
+
+describe('safeJsonScript', () => {
+  it('通常データを <script> でラップ', () => {
+    const html = safeJsonScript('__d', { a: 1 })
+    expect(html).toBe('<script>window.__d = {"a":1};</script>')
+  })
+
+  it('</script> 攻撃を遮断 (`<` のみ escape で十分、`>` は無害)', () => {
+    const html = safeJsonScript('__d', { evil: '</script><img src=x>' })
+    // データ内の </script> が早期 script 終端として解釈されない
+    // (ラッパー側の `</script>` は末尾の 1 個だけ残る)
+    expect(html.match(/<\/script>/g)?.length).toBe(1)
+    expect(html).toContain('\\u003c/script>\\u003cimg src=x>')
+  })
+
+  it('単独の "<" も escape (HTML タグ解釈を抑止)', () => {
+    const html = safeJsonScript('__d', { html: '<a>' })
+    expect(html).toContain('\\u003ca>')
+    // <a> という HTML タグとして混入しない
+    expect(html.match(/<a>/g)).toBeNull()
+  })
+})
