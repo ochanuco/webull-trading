@@ -2407,9 +2407,51 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var sc = data.symbolChart;
       if (!sc || sc.points.length === 0) return;
 
-      // xAxis は time type (UTC ISO timestamp 受け、JST 表示は Intl.DateTimeFormat)。
-      // category axis だと fill 時刻 (秒精度) と strategy log 時刻 (15 分粒度) が
-      // 一致せず markPoint が消える問題を解消。SMA50 / 押し目バンドも実時刻で描画。
+      // xAxis 戦略:
+      //   intradayBars が揃っているとき → category axis (categories = 各 bar の
+      //     ISO timestamp)。overnight / 週末 / 米国祝日の空白を「詰めて」表示する
+      //     (TradingView 等と同様の挙動)。ECharts の time axis では非取引時間を
+      //     skip する native 機能が無いため、category 化が standard 解。
+      //   intradayBars が空 (Yahoo intraday fetch 失敗) → time axis fallback。
+      //     candle が無いので gap も発生せず、line / markPoint だけ実時刻で描画。
+      // category mode では「category index」を全 series の x として揃える。
+      // markPoint も coord に [categoryIndex, price] を渡す。
+      var ohlcBars = sc.intradayBars || [];
+      var useCategoryAxis = ohlcBars.length > 0;
+      var ohlcMs = ohlcBars.map(function (b) { return new Date(b.timestamp).getTime(); });
+      var categories = ohlcBars.map(function (b) { return b.timestamp; });
+
+      // Map a millisecond timestamp to the nearest category index.
+      // ohlcMs は intradayBars の順序 (= Yahoo の昇順) を保つ前提。binary search
+      // で近接 index を返す。ohlcMs 空 (= time axis fallback) なら -1。
+      function nearestIndex(ms) {
+        if (!Number.isFinite(ms) || ohlcMs.length === 0) return -1;
+        var lo = 0, hi = ohlcMs.length - 1;
+        if (ms <= ohlcMs[0]) return 0;
+        if (ms >= ohlcMs[hi]) return hi;
+        while (lo < hi) {
+          var mid = (lo + hi) >> 1;
+          if (ohlcMs[mid] < ms) lo = mid + 1; else hi = mid;
+        }
+        // lo は ms 以上の最初の index。一つ前と比べて近い方を採用。
+        if (lo > 0 && (ms - ohlcMs[lo - 1]) <= (ohlcMs[lo] - ms)) return lo - 1;
+        return lo;
+      }
+
+      // category mode では x = category index、time mode では x = ISO timestamp
+      // (= category 値そのもの)。両 mode を同じ shape (x, y) で扱えるよう抽象化。
+      function xForTimestamp(ts) {
+        if (useCategoryAxis) {
+          var idx = nearestIndex(new Date(ts).getTime());
+          return idx;
+        }
+        return ts;
+      }
+      function xForMs(ms) {
+        if (useCategoryAxis) return nearestIndex(ms);
+        return ms;
+      }
+
       var jstFmt = new Intl.DateTimeFormat('ja-JP', {
         timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
       });
@@ -2424,17 +2466,36 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       function jstLabelSec(value) {
         return jstFmtSec.format(new Date(value)).replace(/\\//g, '/');
       }
+      // category index → 表示 label。category 値は ISO timestamp なのでそのまま JST 化。
+      function jstLabelForX(value) {
+        if (useCategoryAxis) {
+          // value は category 値 (ISO string) または index。axisLabel formatter に
+          // 来るのは index/value (params.value=ISO)、dataZoom labelFormatter は
+          // value=ISO string が来る (slider 端点の category 値)。
+          if (typeof value === 'number') {
+            // index として渡される場合 (recomputeYAxis 由来等)
+            var i = Math.round(value);
+            if (i < 0 || i >= categories.length) return '';
+            return jstLabel(categories[i]);
+          }
+          return jstLabel(value);
+        }
+        return jstLabel(value);
+      }
 
-      // [timestamp, value] のペアで time axis に渡す。null は connectNulls/sparse に。
-      // candlestick の data shape: [timestamp, open, close, low, high]
-      // (ECharts 標準順序、Western 規約 OHLC とは順番違うので注意)。
-      var ohlcXY = (sc.intradayBars || []).map(function (b) {
-        return [b.timestamp, b.open, b.close, b.low, b.high];
-      });
+      // candlestick の data shape: [open, close, low, high]。category mode では
+      // index ベースなので 4 値だけ並べれば ECharts が categories 配列と対応付ける。
+      // time mode では [timestamp, open, close, low, high] の 5 値タプル。
+      var ohlcXY = useCategoryAxis
+        ? ohlcBars.map(function (b) { return [b.open, b.close, b.low, b.high]; })
+        : ohlcBars.map(function (b) { return [b.timestamp, b.open, b.close, b.low, b.high]; });
       // SMA50 line: cron-eval points から取得 (daily で計算された値の推移)。
-      // y 軸 range には含めないので、軸範囲外なら ECharts が auto-clip。
-      // 軸内のときだけ price との位置関係 (上 / 下) が読める TradingView ライク。
-      var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
+      // category mode では point の timestamp を最近接 ohlc index に snap して
+      // [index, value] で渡す。時間軸の連続性は category 上で保たれる。
+      var smasXY = sc.points.map(function (p) {
+        if (p.sma50 == null) return [xForTimestamp(p.timestamp), null];
+        return [xForTimestamp(p.timestamp), p.sma50];
+      });
       // (close line は削除: candle が close を含むので冗長、overnight gap で
       //  斜めに横断する視覚ノイズが発生していたため #176 → #177 で除去)
 
@@ -2444,10 +2505,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var pullbackMaxMul = 1 + sc.rules.pullbackMax;
       var pullbackMinMul = 1 + sc.rules.pullbackMin;
       var bandUpperXY = sc.points.map(function (p) {
-        return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMaxMul];
+        var x = xForTimestamp(p.timestamp);
+        return [x, p.high20d == null ? null : p.high20d * pullbackMaxMul];
       });
       var bandLowerXY = sc.points.map(function (p) {
-        return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMinMul];
+        var x = xForTimestamp(p.timestamp);
+        return [x, p.high20d == null ? null : p.high20d * pullbackMinMul];
       });
 
       // 価格トレンド線 (server-side で daily close の linear regression fit)。
@@ -2476,9 +2539,10 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // ※ Server-side densifyTrendLine (export) と同じアルゴリズム。
       //    unit test はそちらで担保する。client 側に inline するのは sc.*
       //    オブジェクトを HTML script に埋めて echarts.init で消費するため。
-      var ohlcTimestamps = (sc.intradayBars || []).map(function (b) {
-        return new Date(b.timestamp).getTime();
-      });
+      // category mode では sample を「各 ohlc bar の ms」として展開した後、
+      // 結果の [t, y] 配列を index ベース [i, y] に変換する (ohlcMs[i] === t を
+      // 満たすので 1:1 対応)。time mode では従来通り [t, y] のまま渡す。
+      var ohlcTimestamps = ohlcMs.slice();
       function densifyTrendLine(line, sampleTimestamps) {
         if (!line) return null;
         var t1 = new Date(line.pivots[0].timestamp).getTime();
@@ -2511,7 +2575,29 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         if (out.length < 2) return [[t1, y1], [t2, y2]];
         return out;
       }
-      var trendLineXY = densifyTrendLine(sc.trendLine, ohlcTimestamps);
+      // category mode 用: [t, y] 配列を [index, y] に変換。t が ohlcMs に
+      // 一致しない (= line endpoint が intradayBars の外) なら最近接 index に
+      // snap される。line の中で同じ index に複数 y が落ちる場合は最初の y
+      // のみ採用 (理論上 slope=0 の degenerate / endpoint クランプ時のみ発生)。
+      function toCategoryXY(tyArr) {
+        if (!tyArr) return null;
+        if (!useCategoryAxis) return tyArr;
+        var seenIdx = Object.create(null);
+        var out = [];
+        for (var i = 0; i < tyArr.length; i += 1) {
+          var t = tyArr[i][0];
+          var y = tyArr[i][1];
+          var idx = nearestIndex(t);
+          if (idx < 0) continue;
+          if (seenIdx[idx]) continue;
+          seenIdx[idx] = true;
+          out.push([idx, y]);
+        }
+        // sort by index (nearest snap might reorder when endpoints clamp to same idx)
+        out.sort(function (a, b) { return a[0] - b[0]; });
+        return out.length > 0 ? out : null;
+      }
+      var trendLineXY = toCategoryXY(densifyTrendLine(sc.trendLine, ohlcTimestamps));
 
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
       // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
@@ -2530,10 +2616,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var latestFillTs = sc.markers.length > 0
         ? sc.markers[sc.markers.length - 1].timestamp
         : null;
+      // category mode では markPoint coord に [categoryIndex, price] を渡す。
+      // fill 時刻を最近接 ohlc bar (= 1h 粒度) の index に snap するため、同 1h
+      // 内の複数 fill は同じ index に重なる。pin label は側 (top/bottom) と色で
+      // 区別するため重なっても 1 件は読める。fillTimestamp は秒精度を保持して
+      // hover tooltip で full-precision 時刻として表示される (情報損失なし)。
       var entries = buys.map(function (m) {
         var showLabel = m.timestamp === latestFillTs;
         return {
-          name: 'BUY', coord: [m.timestamp, m.price], value: m.price,
+          name: 'BUY', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
           realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
           label: { show: showLabel, formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
           itemStyle: { color: '#057a55' },
@@ -2543,7 +2634,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         var showLabel = m.timestamp === latestFillTs;
         var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
         return {
-          name: 'SELL', coord: [m.timestamp, m.price], value: m.price,
+          name: 'SELL', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
           realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
           label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
           itemStyle: { color: '#c22' },
@@ -2610,9 +2701,9 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           : openedAt;
         var fromMs = new Date(openedAt).getTime();
         var toMs = new Date(endTs).getTime();
-        avgLineXY = densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps);
-        stopLineXY = densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps);
-        tpLineXY = densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps);
+        avgLineXY = toCategoryXY(densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps));
+        stopLineXY = toCategoryXY(densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps));
+        tpLineXY = toCategoryXY(densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps));
         avgLabel = 'avg ' + avg.toFixed(2);
         stopLabel = 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
         tpLabel = 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
@@ -2653,10 +2744,23 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // dataZoom: 下部 slider + inside (wheel/pinch zoom)。初期 zoom 範囲は
       // ?from / ?to URL params (data.zoomFromMs / zoomToMs)。zoom 操作時に
       // history.replaceState で URL を更新 → 銘柄切替を跨いでも range を維持。
-      var dzInitial = data.zoomFromMs != null && data.zoomToMs != null
-        ? { startValue: data.zoomFromMs, endValue: data.zoomToMs }
-        : {};
+      // category mode では startValue/endValue が「category index」を指す。
+      // URL 由来の ms 範囲は最近接 index に snap して dataZoom に渡す。
+      // time mode (intradayBars 空) では従来通り ms をそのまま startValue に。
+      var dzInitial = (function () {
+        if (data.zoomFromMs == null || data.zoomToMs == null) return {};
+        if (useCategoryAxis) {
+          var fromIdx = nearestIndex(data.zoomFromMs);
+          var toIdx = nearestIndex(data.zoomToMs);
+          if (fromIdx < 0 || toIdx < 0) return {};
+          if (fromIdx > toIdx) { var tmp = fromIdx; fromIdx = toIdx; toIdx = tmp; }
+          return { startValue: fromIdx, endValue: toIdx };
+        }
+        return { startValue: data.zoomFromMs, endValue: data.zoomToMs };
+      })();
       // dataZoom slider 両端ラベルも JST で表示 (default だと UTC date string)。
+      // category mode では labelFormatter に category 値 (= ISO timestamp 文字列)
+      // が渡されるので jstLabel に直接通せばよい (内部で Date(value) parse)。
       // filterMode: 'weakFilter' は line / markLine など複数点で 1 figure を
       // 構成する series 用。default の 'filter' は data item 単位で評価し、
       // 1 dimension でも zoom 外なら点ごと除外する → 直近 2 pivot を chart 末
@@ -2669,7 +2773,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // 「1 点が範囲外でも視覚的に切れて表示される」のが期待動作なので
       // wide chart (1 銘柄 / 数千点) でも問題ない。
       var dzCommon = {
-        labelFormatter: function (value) { return jstLabel(value); },
+        labelFormatter: function (value) { return jstLabelForX(value); },
         filterMode: 'weakFilter',
       };
       var dzInside = { filterMode: 'weakFilter' };
@@ -2683,22 +2787,27 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         title: { text: sc.symbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: {
           trigger: 'axis',
-          axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
+          axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
           // 既定の trigger:'axis' tooltip は header に axis value (時刻) を
           // UTC 文字列で出すため、JST formatter を当てた custom formatter で上書き。
           // candlestick 値は [open, close, low, high]、line は scalar として処理。
+          // category mode では axisValue は category 値 (= ISO timestamp string)。
           formatter: function (params) {
             if (!Array.isArray(params) || params.length === 0) return '';
             var ts = params[0].axisValue;
-            var lines = ['<div style="font-weight:600;font-size:11px">' + jstLabel(ts) + '</div>'];
+            var lines = ['<div style="font-weight:600;font-size:11px">' + jstLabelForX(ts) + '</div>'];
             for (var i = 0; i < params.length; i += 1) {
               var p = params[i];
               if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
+                // ECharts は candlestick の p.value 先頭に系列の x (timestamp/index)
+                // を入れて返すことがあるため、長さで分岐。length===4 の場合は
+                // [O, C, L, H]、5 以上は [x, O, C, L, H]。
+                var off = p.value.length >= 5 ? 1 : 0;
                 lines.push('<div style="font-size:11px">' + p.marker + ' ' + p.seriesName +
-                  '  O ' + Number(p.value[1]).toFixed(2) +
-                  '  H ' + Number(p.value[4]).toFixed(2) +
-                  '  L ' + Number(p.value[3]).toFixed(2) +
-                  '  C ' + Number(p.value[2]).toFixed(2) + '</div>');
+                  '  O ' + Number(p.value[off]).toFixed(2) +
+                  '  H ' + Number(p.value[off + 3]).toFixed(2) +
+                  '  L ' + Number(p.value[off + 2]).toFixed(2) +
+                  '  C ' + Number(p.value[off + 1]).toFixed(2) + '</div>');
               } else {
                 var v = Array.isArray(p.value) ? p.value[1] : p.value;
                 if (v == null) continue;
@@ -2714,7 +2823,23 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         // candle が映える背景に (trader-strategist 助言)。bottom は slider 用 64px キープ。
         grid: { left: 50, right: 20, top: 56, bottom: 64 },
         dataZoom: dataZoomCfg,
-        xAxis: {
+        // category mode: categories = intradayBars 各 bar の ISO timestamp。
+        // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
+        // 同等)、time axis ではなく category axis を採用。category 間隔は等間隔
+        // なので「金曜 16:00 ET 引け」と「月曜 09:30 ET 寄り」が隣接する。これは
+        // 「同じ 1 hour 進んだように見える」が、休場で値が動いていない gap を
+        // 詰める方が視認性で勝る (user 要望)。
+        // time mode (intradayBars 空) では従来の time axis にフォールバック。
+        xAxis: useCategoryAxis ? {
+          type: 'category',
+          data: categories,
+          // 連続する category を密に並べた候補の中から ECharts が省略間引きする
+          // ので、明示的な intervals 不要。formatter で個々の category 値 (ISO
+          // timestamp) を JST に整形。
+          axisLabel: { formatter: function (value) { return jstLabel(value); }, hideOverlap: true },
+          axisLine: { show: false },
+          splitLine: { show: true, lineStyle: { opacity: 0.15 } },
+        } : {
           type: 'time',
           axisLabel: { formatter: function (value) { return jstLabel(value); } },
           axisLine: { show: false },
@@ -2826,30 +2951,47 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       });
       window.addEventListener('resize', function () { symChart.resize(); });
 
-      // visible 範囲 (zoom 後の x 軸 startMs〜endMs) 内の candle high/low /
-      // markers / position 線を集めて y 軸 range を再計算。zoom out / preset
-      // 切替で「縦に空白が広がる」現象を防ぎプロ chart 風のタイト fit に。
+      // visible 範囲 (zoom 後の x 軸) 内の candle high/low / markers / position
+      // 線を集めて y 軸 range を再計算。zoom out / preset 切替で「縦に空白が
+      // 広がる」現象を防ぎプロ chart 風のタイト fit に。
+      // category mode では dataZoom.startValue/endValue は category index、
+      // time mode では ms。各 bar / marker / point について
+      // 「visible 範囲内か」を判定する関数を mode で切り替える。
       function recomputeYAxis() {
         var opt = symChart.getOption();
         var dz = opt.dataZoom && opt.dataZoom[0];
         if (!dz) return;
-        var startMs = dz.startValue;
-        var endMs = dz.endValue;
-        if (startMs == null || endMs == null) return;
+        var startVal = dz.startValue;
+        var endVal = dz.endValue;
+        if (startVal == null || endVal == null) return;
+        // mode 共通: 「ts (ISO string) または ms が visible か」を返す。
+        // category mode では nearestIndex で snap した index を range と比較。
+        // time mode では ms を range と比較。
+        function inRangeMs(ms) {
+          if (!Number.isFinite(ms)) return false;
+          if (useCategoryAxis) {
+            var idx = nearestIndex(ms);
+            return idx >= startVal && idx <= endVal;
+          }
+          return ms >= startVal && ms <= endVal;
+        }
+        // category index ベースの直接判定 (intradayBars iterate 用)
+        function inRangeIdx(idx) {
+          if (useCategoryAxis) return idx >= startVal && idx <= endVal;
+          return true; // time mode では使わない (intradayBars iterate 側で ms 判定)
+        }
         var visibleY = [];
         function pushIfFinite(v) {
           if (v != null && typeof v === 'number' && Number.isFinite(v)) visibleY.push(v);
         }
-        (sc.intradayBars || []).forEach(function (b) {
-          var t = new Date(b.timestamp).getTime();
-          if (Number.isFinite(t) && t >= startMs && t <= endMs) {
+        (sc.intradayBars || []).forEach(function (b, i) {
+          if (useCategoryAxis ? inRangeIdx(i) : inRangeMs(new Date(b.timestamp).getTime())) {
             pushIfFinite(b.high);
             pushIfFinite(b.low);
           }
         });
         sc.markers.forEach(function (m) {
-          var t = new Date(m.timestamp).getTime();
-          if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(m.price);
+          if (inRangeMs(new Date(m.timestamp).getTime())) pushIfFinite(m.price);
         });
         // visible 範囲内の SMA50 値も含める。SMA50 が candle と離れた水準
         // (例: SOXL は 3x rally で SMA50=65 / 価格=128) の銘柄では candle が
@@ -2857,14 +2999,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         // (#181 後の user request)。zoom out すれば candle にとって過剰な
         // 引き伸ばしも緩和される。
         sc.points.forEach(function (p) {
-          var t = new Date(p.timestamp).getTime();
-          if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(p.sma50);
+          if (inRangeMs(new Date(p.timestamp).getTime())) pushIfFinite(p.sma50);
         });
         // trend line: regression で fit した 1 本。pivots[0]→end の 2 点で
         // 直線が定義される。visible 範囲内に endpoint または時間軸の交点が
         // 乗るときに y 値を取り込んで axis 外にはみ出さないようにする。両
         // endpoint が範囲外でも線分が visible 帯を横断するなら sample して
         // その y を採用 (= 単純な 2 点線形補間)。
+        // category mode では index 基準の visible range を ms に変換して
+        // 既存の ms 補間ロジックをそのまま再利用する。
         function sampleTrendY(line) {
           if (!line) return;
           var p1 = line.pivots[0];
@@ -2873,6 +3016,16 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           var t2 = new Date(p2.timestamp).getTime();
           if (!Number.isFinite(t1) || !Number.isFinite(t2) || t1 === t2) return;
           var slope = (p2.price - p1.price) / (t2 - t1);
+          var startMs, endMs;
+          if (useCategoryAxis) {
+            var sIdx = Math.max(0, Math.min(categories.length - 1, Math.round(startVal)));
+            var eIdx = Math.max(0, Math.min(categories.length - 1, Math.round(endVal)));
+            startMs = ohlcMs[sIdx];
+            endMs = ohlcMs[eIdx];
+          } else {
+            startMs = startVal;
+            endMs = endVal;
+          }
           // visible 範囲と線分の交差区間を [a, b] にクリップして両端を採用
           var a = Math.max(startMs, Math.min(t1, t2));
           var b = Math.min(endMs, Math.max(t1, t2));
@@ -2881,10 +3034,20 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           pushIfFinite(p1.price + slope * (b - t1));
         }
         sampleTrendY(sc.trendLine);
-        // 保有期間が visible 範囲と重なっていれば position 線を含める
+        // 保有期間が visible 範囲と重なっていれば position 線を含める。
+        // category mode では openedAt の最近接 index と endVal を比較。
         if (sc.position) {
           var openedAtMs = new Date(sc.position.openedAt).getTime();
-          if (Number.isFinite(openedAtMs) && openedAtMs <= endMs) {
+          var openedVisible = false;
+          if (Number.isFinite(openedAtMs)) {
+            if (useCategoryAxis) {
+              var oIdx = nearestIndex(openedAtMs);
+              openedVisible = oIdx <= endVal;
+            } else {
+              openedVisible = openedAtMs <= endVal;
+            }
+          }
+          if (openedVisible) {
             var avg = sc.position.avgPrice;
             pushIfFinite(avg);
             pushIfFinite(avg * (1 + sc.rules.stopPct));
@@ -2918,8 +3081,20 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           var ev = dz.endValue;
           if (sv == null || ev == null) return;
           try {
-            var fromIso = new Date(sv).toISOString();
-            var toIso = new Date(ev).toISOString();
+            // category mode: sv/ev は category index → categories[i] (ISO string)
+            // を取り出して ms に変換。time mode: sv/ev は ms (number)。
+            var fromMsLocal, toMsLocal;
+            if (useCategoryAxis) {
+              var sIdx = Math.max(0, Math.min(categories.length - 1, Math.round(sv)));
+              var eIdx = Math.max(0, Math.min(categories.length - 1, Math.round(ev)));
+              fromMsLocal = new Date(categories[sIdx]).getTime();
+              toMsLocal = new Date(categories[eIdx]).getTime();
+            } else {
+              fromMsLocal = sv;
+              toMsLocal = ev;
+            }
+            var fromIso = new Date(fromMsLocal).toISOString();
+            var toIso = new Date(toMsLocal).toISOString();
             var url = new URL(window.location.href);
             url.searchParams.set('from', fromIso);
             url.searchParams.set('to', toIso);
@@ -2942,15 +3117,26 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // preset zoom buttons (1D / 5D / 1M / All) の click handler。
       // dispatchAction で dataZoom を更新 → 既存の dataZoom listener が
       // URL ?from / ?to も連動更新する。
+      // category mode では ms 範囲を最近接 index に snap してから dispatch。
       var presetButtons = document.querySelectorAll('.zoom-preset');
       for (var pi = 0; pi < presetButtons.length; pi += 1) {
         presetButtons[pi].addEventListener('click', function (ev) {
           var fromMs = Number(ev.currentTarget.getAttribute('data-from-ms'));
           var toMs = Number(ev.currentTarget.getAttribute('data-to-ms'));
           if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return;
+          var sv, eV;
+          if (useCategoryAxis) {
+            sv = nearestIndex(fromMs);
+            eV = nearestIndex(toMs);
+            if (sv < 0 || eV < 0) return;
+            if (sv > eV) { var tmp = sv; sv = eV; eV = tmp; }
+          } else {
+            sv = fromMs;
+            eV = toMs;
+          }
           // inside / slider 両方を同期更新
-          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: fromMs, endValue: toMs });
-          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: fromMs, endValue: toMs });
+          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: sv, endValue: eV });
+          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: sv, endValue: eV });
         });
       }
     });
