@@ -1734,7 +1734,11 @@ export async function fetchYahooBarsForChart(
       high: b.high,
       low: b.low,
       close: b.close,
-      timestamp: `${b.date}T16:00:00.000Z`,
+      // JST 00:00 anchor: ECharts time axis (UTC) で JST formatter にかけると
+      // b.date と同じ JST カレンダー日に column が配置される。
+      // 旧実装 `${b.date}T16:00Z` だと JST 翌 01:00 に shift し、
+      // 例えば US bar "04/25" が JST 04/26 列に表示される回帰があった。
+      timestamp: anchorJstMidnight(b.date),
     }))
   } catch (err) {
     // RangeError は呼出元コード側の lookback 不正 (実装ミス)。silent fallback で
@@ -1742,6 +1746,15 @@ export async function fetchYahooBarsForChart(
     if (err instanceof RangeError) throw err
     return []
   }
+}
+
+/**
+ * "YYYY-MM-DD" を「その日の JST 00:00 = UTC -9h 前日 15:00」の ISO Z 文字列に。
+ * 例: "2026-04-25" → "2026-04-24T15:00:00.000Z" (JST 04/25 00:00)。
+ * Yahoo bar / 他のロジックとの timestamp 比較を Z 形式で揃えるため。
+ */
+export function anchorJstMidnight(date: string): string {
+  return new Date(`${date}T00:00:00+09:00`).toISOString()
 }
 
 /**
