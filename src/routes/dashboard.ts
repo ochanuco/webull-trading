@@ -1672,33 +1672,41 @@ export async function loadSymbolChart(
       pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS_WIDE), 1),
     },
   ]
-  function pivotsForType(type: 'high' | 'low'): PivotPoint[] {
+  // regime filter は意味のあるガード (現価格 ±50% 外の pivot は別 regime
+  // = 旧価格帯 = 直近の trend を表さない)。前版は filter 後 < 2 のとき raw に
+  // fallback していたが、SOXL のように 40→128 と急騰した銘柄では filter 後
+  // 0 個 → raw fallback → 旧 regime (40-60) pivot で線が引かれる回帰があった。
+  // 修正: 各 tier は filter 後の集合のみを使う。filter 後 < 2 ならその tier は
+  // skip して次 tier (より緩い detection) を試す。全 tier 不足なら null を
+  // 返し、trend line を「無理に引かない」(=描画スキップ) を選択する。誤った
+  // 線を描くより無描画のほうが UX 上望ましい。
+  function pivotsForType(type: 'high' | 'low'): PivotPoint[] | null {
     for (const tier of tiers) {
       const filtered = applyRegimeFilter(tier.pivotsAll)
-      // 第一に regime filter 後で同 type 2 個。だめなら同 tier の raw で再試行。
       if (filtered.filter((p) => p.type === type).length >= 2) return filtered
-      if (tier.pivotsAll.filter((p) => p.type === type).length >= 2) return tier.pivotsAll
     }
-    // 全 tier 不足: 一番ゆるい tier 4 raw を返す (fitTrendLine 側で null になる
-    // 可能性は残るが、pivot dots だけでも表示する)
-    return tiers[tiers.length - 1]!.pivotsAll
+    return null
   }
-  const resistanceLine = lastTimestamp
-    ? fitTrendLineFromRecentPivots(pivotsForType('high'), 'high', lastTimestamp)
-    : null
-  const supportLine = lastTimestamp
-    ? fitTrendLineFromRecentPivots(pivotsForType('low'), 'low', lastTimestamp)
-    : null
-  // chart 上の pivot dots は実際に trend line に使った両 type の pivots 集合を
-  // union (重複除去)。filter で消えた pivot も含めると context が読みやすい
-  // ので tier ごとの raw も全部混ぜる。
+  const resistanceCandidate = pivotsForType('high')
+  const supportCandidate = pivotsForType('low')
+  const resistanceLine =
+    lastTimestamp && resistanceCandidate
+      ? fitTrendLineFromRecentPivots(resistanceCandidate, 'high', lastTimestamp)
+      : null
+  const supportLine =
+    lastTimestamp && supportCandidate
+      ? fitTrendLineFromRecentPivots(supportCandidate, 'low', lastTimestamp)
+      : null
+  // chart 上の pivot dots は trend line に採用した pivots に加え、各 tier の
+  // regime-filtered pivots を union (重複除去)。filter で除外された旧 regime
+  // pivot は意図的に表示しない (trend line と整合させる)。
   const pivots: PivotPoint[] = (() => {
     const seen = new Set<string>()
     const out: PivotPoint[] = []
     const sources: PivotPoint[][] = [
-      pivotsForType('high'),
-      pivotsForType('low'),
-      ...tiers.map((t) => t.pivotsAll),
+      ...(resistanceCandidate ? [resistanceCandidate] : []),
+      ...(supportCandidate ? [supportCandidate] : []),
+      ...tiers.map((t) => applyRegimeFilter(t.pivotsAll)),
     ]
     for (const src of sources) {
       for (const p of src) {
