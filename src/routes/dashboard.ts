@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
+import type { Env } from '../config/env'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
@@ -123,8 +124,11 @@ export const dashboard = new Hono<AppBindings>()
         stopPct: global.pullbackDefaultStopPct,
         takeProfitPct: global.pullbackDefaultTakeProfitPct,
       }
+      // SymbolStateDO の position が ground truth (avgPrice / openedAt が
+      // partial fill / position add も反映済)。trade_journal からの derive は
+      // 直近 BUY 単体しか拾えないので fallback 専用。
       const symbolChart = focusSymbol
-        ? await loadSymbolChart(c.env.DB, focusSymbol, rules)
+        ? await loadSymbolChart(c.env, focusSymbol, rules)
         : null
       return c.html(
         layout(
@@ -1447,15 +1451,20 @@ export interface SymbolChartData {
 
 /**
  * 直近 200 件の strategy_decision_log と全 fill markers + 現保有 + ルール閾値を返す。
- * sma50 / high20d は indicators_json から抜く — JSON.parse 失敗は null fallback
- * (履歴の indicators スキーマが変わっていても落ちない fail-graceful)。
+ * - sma50 / high20d は indicators_json から抜く (JSON.parse 失敗は null fallback)
+ * - timestamp は DB 上の UTC ISO をそのまま保持し、ECharts time axis に渡す。
+ *   JST 表示は client 側 Intl.DateTimeFormat (Asia/Tokyo) でやる
+ * - position は SymbolStateDO の値を最優先 (partial fill / position add 対応)、
+ *   binding 無し or 失敗時は trade_journal からの derive にフォールバック
  */
 export async function loadSymbolChart(
-  db: D1Database,
+  env: Env,
   symbol: string,
   rules: SymbolChartRules,
 ): Promise<SymbolChartData> {
-  const [logsResult, fillsResult] = await Promise.all([
+  const db = env.DB
+  if (!db) throw new Error('DB binding not available')
+  const [logsResult, fillsResult, doPosition] = await Promise.all([
     db
       .prepare(
         `SELECT timestamp, price, indicators_json
@@ -1483,16 +1492,15 @@ export async function loadSymbolChart(
         filled_qty: number | null
         realized_pnl: number | null
       }>(),
+    fetchDoPosition(env, symbol),
   ])
   const logs = (logsResult.results ?? []).reverse() // ASC for chart
-  // timestamp は DB 上 UTC ISO で記録されているので、表示用に JST へ変換。
-  // markPoint の xAxis 一致のため points / markers 両方で同じ formatter を使う。
   const points: SymbolChartPoint[] = logs
     .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
     .map((r) => {
       const indicators = parseIndicators(r.indicators_json)
       return {
-        timestamp: fmtJst(r.timestamp),
+        timestamp: r.timestamp,
         price: Number(r.price),
         sma50: indicators.sma50,
         high20d: indicators.high20d,
@@ -1501,13 +1509,33 @@ export async function loadSymbolChart(
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
     .filter((r) => (r.side === 'BUY' || r.side === 'SELL') && r.filled_price !== null)
     .map((r) => ({
-      timestamp: fmtJst(r.timestamp),
+      timestamp: r.timestamp,
       side: r.side as 'BUY' | 'SELL',
       price: Number(r.filled_price),
       qty: r.filled_qty === null ? null : Number(r.filled_qty),
       realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),
     }))
-  return { symbol, points, markers, position: deriveOpenPosition(markers), rules }
+  // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
+  const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
+  return { symbol, points, markers, position, rules }
+}
+
+/**
+ * SymbolStateDO から現保有を引く。binding 無し / 失敗時は undefined を返して
+ * 呼び元に「derive にフォールバックすべき」と伝える (null は「DO 上明示的に無保有」)。
+ */
+async function fetchDoPosition(
+  env: Env,
+  symbol: string,
+): Promise<SymbolChartPosition | null | undefined> {
+  if (!env.SYMBOL_STATE) return undefined
+  try {
+    const state = await new SymbolStateClient(env.SYMBOL_STATE).getState(symbol)
+    if (!state.position) return null
+    return { avgPrice: state.position.avgPrice, openedAt: state.position.openedAt }
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -1744,28 +1772,42 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var data = window.__chartData;
       var sc = data.symbolChart;
       if (!sc || sc.points.length === 0) return;
-      var ts = sc.points.map(function (p) { return p.timestamp; });
-      var prices = sc.points.map(function (p) { return p.price; });
-      var smas = sc.points.map(function (p) { return p.sma50 == null ? null : p.sma50; });
+
+      // xAxis は time type (UTC ISO timestamp 受け、JST 表示は Intl.DateTimeFormat)。
+      // category axis だと fill 時刻 (秒精度) と strategy log 時刻 (15 分粒度) が
+      // 一致せず markPoint が消える問題を解消。SMA50 / 押し目バンドも実時刻で描画。
+      var jstFmt = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      function jstLabel(value) {
+        return jstFmt.format(new Date(value)).replace(/\\//g, '/');
+      }
+
+      // [timestamp, value] のペアで time axis に渡す。null は connectNulls/sparse に。
+      var pricesXY = sc.points.map(function (p) { return [p.timestamp, p.price]; });
+      var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
 
       // 押し目買いゾーン (high20d × (1 + pullbackMax) 〜 high20d × (1 + pullbackMin))。
       // -3〜-15% の押し目レンジを time-series band として可視化。
-      // band の中に price が入ると entry trigger 圏内、というのが戦略の心臓部。
       var pullbackMaxMul = 1 + sc.rules.pullbackMax;
       var pullbackMinMul = 1 + sc.rules.pullbackMin;
-      var bandUpper = sc.points.map(function (p) { return p.high20d == null ? null : p.high20d * pullbackMaxMul; });
-      var bandLower = sc.points.map(function (p) { return p.high20d == null ? null : p.high20d * pullbackMinMul; });
+      var bandUpperXY = sc.points.map(function (p) {
+        return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMaxMul];
+      });
+      var bandLowerXY = sc.points.map(function (p) {
+        return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMinMul];
+      });
 
+      // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
       var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
-        return { name: 'BUY', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
+        return { name: 'BUY', coord: [m.timestamp, m.price], label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
       });
       var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
         var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
-        return { name: 'SELL', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
+        return { name: 'SELL', coord: [m.timestamp, m.price], label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
       });
 
-      // 保有中なら avg / stop / take-profit を水平 markLine で。
-      // 横線は markLine の yAxis 値で固定 (xAxis はチャート全幅)。
+      // 保有中なら avg / stop / take-profit を水平 markLine。
       var positionMarkLines = [];
       if (sc.position) {
         var avg = sc.position.avgPrice;
@@ -1781,22 +1823,26 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var symChart = echarts.init(document.getElementById('symbol-chart'));
       symChart.setOption({
         title: { text: sc.symbol + ' price + SMA50 + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
-        tooltip: { trigger: 'axis' },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
+        },
         legend: { top: 22 },
         grid: { left: 60, right: 20, top: 60, bottom: 40 },
-        xAxis: { type: 'category', data: ts },
+        xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
         yAxis: { type: 'value', scale: true },
         series: [
-          // 押し目ゾーン band は保有時は非表示 (overlay 4 本制限対策)
+          // overlay 4 本制限のため、保有時は band を非表示 (avg/stop/TP に集中)。
+          // 非保有時は band 表示 (entry trigger 圏内かを見る局面)。
           ...(sc.position ? [] : [
-            { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpper, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
-            { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLower, lineStyle: { width: 0.8, color: '#c22', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.8, color: '#c22', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
           ]),
-          { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
+          { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
-            markPoint: { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) },
+            markPoint: entries.length + exits.length > 0 ? { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) } : undefined,
           },
-          { name: 'SMA50', type: 'line', data: smas, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
+          { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
