@@ -30,8 +30,18 @@ export interface PullbackIndicatorSnapshot {
  * Computes the inputs PullbackUptrendStrategy needs from the last ~60 daily
  * bars. `bars` must be oldest-first. Returns `null` when the window is too
  * short — strategy stays HOLD rather than fire on half-initialized data.
+ *
+ * `intradayPrice` (optional) は cron が当日最新 1h close を渡す経路。指定が
+ * あればそれを `price` として採用 (= chart 表示の candle と整合する fill 価格)。
+ * NaN / Infinity / 0 / 負値 / null / undefined はすべて無視して daily close
+ * (前日終値) に fallback し、既存挙動と等価になる。SMA50 / ATR / return50d /
+ * high20d / low20d は引き続き daily bars から計算する (intradayPrice は影響
+ * しない)。
  */
-export function computePullbackIndicators(bars: DailyBar[]): PullbackIndicatorSnapshot | null {
+export function computePullbackIndicators(
+  bars: DailyBar[],
+  intradayPrice?: number | null,
+): PullbackIndicatorSnapshot | null {
   if (bars.length < 50) return null
 
   const closes = bars.map((b) => b.close)
@@ -53,7 +63,14 @@ export function computePullbackIndicators(bars: DailyBar[]): PullbackIndicatorSn
   // against to decide whether to floor the size. 60 bars ≈ ~3 months daily.
   const baselineAtr20 = average(trueRanges.slice(-Math.min(trueRanges.length, 60)))
 
-  return { price: last, sma50, return50d, high20d, low20d, atr20, baselineAtr20 }
+  // intradayPrice がきちんと正値の有限数なら採用、そうでなければ daily close。
+  // `> 0` で 0 / 負値もはじき、Number.isFinite で NaN / Infinity をはじく。
+  const price =
+    typeof intradayPrice === 'number' && Number.isFinite(intradayPrice) && intradayPrice > 0
+      ? intradayPrice
+      : last
+
+  return { price, sma50, return50d, high20d, low20d, atr20, baselineAtr20 }
 }
 
 export function computeHoldBusinessDays(

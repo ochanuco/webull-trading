@@ -17,8 +17,32 @@ function resolveBarCategory(symbol: string): BarCategory {
   return US_ETF_SYMBOLS.has(symbol) ? 'US_ETF' : 'US_STOCK'
 }
 
+/**
+ * 5/15/30/60 分足。Yahoo `/v8/finance/chart` の `interval` enum と一致。
+ * 戦略 cron は最新 1h close を indicators.price として使うため `60m` を渡す。
+ */
+export type IntradayInterval = '5m' | '15m' | '30m' | '60m'
+
+/**
+ * Intraday OHLC bar。`timestamp` は秒精度の ISO UTC (Yahoo の epoch second を
+ * `new Date(ts*1000).toISOString()` 化したもの)。
+ */
+export interface IntradayBar {
+  timestamp: string
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
 export interface BarClient {
   getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]>
+  /**
+   * Optional intraday fetch。strategy cron が「当日最新 1h close」を fill 価格
+   * として使う際に呼び出す。未実装の client (Webull 等) は省略可で、cron 側は
+   * fallback して daily close を使う。
+   */
+  getIntradayBars?(symbol: string, interval: IntradayInterval): Promise<IntradayBar[]>
 }
 
 export interface WebullBarClientEnv {

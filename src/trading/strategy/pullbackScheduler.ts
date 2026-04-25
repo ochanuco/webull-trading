@@ -204,15 +204,28 @@ export async function runPullbackScheduler(
     summary.evaluated += 1
     const upper = symbol.toUpperCase()
     let bars: DailyBar[]
+    let intradayPrice: number | null = null
     try {
-      bars = await options.barClient.getDailyBars(symbol, lookback)
+      // Daily と intraday は別エンドポイント。並行で叩いて intraday 失敗は
+      // null fallback (= daily close 採用、既存挙動と等価)。daily 失敗は致命
+      // (indicators が出ない) なので throw のまま。
+      const dailyP = options.barClient.getDailyBars(symbol, lookback)
+      const intradayP = options.barClient.getIntradayBars
+        ? options.barClient.getIntradayBars(symbol, '60m').catch(() => [])
+        : Promise.resolve([])
+      const [dailyBars, intradayBars] = await Promise.all([dailyP, intradayP])
+      bars = dailyBars
+      // 最新 1h bar の close を fill 価格として使う。chart UI も同じ
+      // intraday endpoint を見ているので BUY pin と candle がズレない。
+      const lastIntraday = intradayBars[intradayBars.length - 1]
+      intradayPrice = lastIntraday ? lastIntraday.close : null
     } catch (error) {
       summary.errors.push({ symbol: upper, message: messageOf(error) })
       await emitDecision({ symbol: upper, decision: 'ERROR', reason: `bar fetch: ${messageOf(error)}` })
       continue
     }
 
-    const indicators = computePullbackIndicators(bars)
+    const indicators = computePullbackIndicators(bars, intradayPrice)
     if (!indicators) {
       summary.rejected.push({ symbol: upper, reason: 'insufficient bars for indicators' })
       await emitDecision({ symbol: upper, decision: 'REJECT', reason: 'insufficient bars for indicators' })

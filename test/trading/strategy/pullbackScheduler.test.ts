@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { BarClient } from '../../../src/infrastructure/quotes/BarClient'
+import type { BarClient, IntradayBar } from '../../../src/infrastructure/quotes/BarClient'
 import type { Execution } from '../../../src/trading/execution/Execution'
 import type { PositionStore } from '../../../src/trading/state/PositionStore'
 import { emptySymbolState, type SymbolState } from '../../../src/trading/state/types'
@@ -150,5 +150,62 @@ describe('runPullbackScheduler', () => {
 
     expect(summary.errors).toEqual([{ symbol: 'BROKEN', message: 'upstream 500' }])
     expect(summary.buys).toBe(1)
+  })
+
+  it('uses intraday 1h close as fill price when getIntradayBars resolves', async () => {
+    // 既存 BUY fixture (uptrendBars) は daily last close = 117.5。chart UI と
+    // 整合させるため cron は intraday の最新 close を採用するのが今回の挙動。
+    // 117.5 とは別の値 (118.25) を返して fill 価格 (= intent.price) がそちらに
+    // なることを確認する。
+    const intradayBars: IntradayBar[] = [
+      { timestamp: '2026-04-20T13:00:00.000Z', open: 117.6, high: 118.4, low: 117.4, close: 118.0 },
+      { timestamp: '2026-04-20T14:00:00.000Z', open: 118.0, high: 118.5, low: 117.9, close: 118.25 },
+    ]
+    const store = makeStore({})
+    const execution = mockExecution()
+    const barClient: BarClient = {
+      getDailyBars: vi.fn(async () => uptrendBars()),
+      getIntradayBars: vi.fn(async () => intradayBars),
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient,
+      positionStore: store,
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const intent = execution.calls[0] as { side: string; price: number }
+    expect(intent.side).toBe('BUY')
+    expect(intent.price).toBe(118.25)
+    // decision sink に渡る price も intraday 由来のものになっていること
+    expect(summary.decisions[0]?.price).toBe(118.25)
+  })
+
+  it('falls back to daily close when getIntradayBars rejects', async () => {
+    const store = makeStore({})
+    const execution = mockExecution()
+    const barClient: BarClient = {
+      getDailyBars: vi.fn(async () => uptrendBars()),
+      getIntradayBars: vi.fn(async () => {
+        throw new Error('yahoo 429')
+      }),
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient,
+      positionStore: store,
+      execution,
+      now: () => now,
+    })
+
+    // intraday 失敗は致命扱いせず daily close (= 117.5) で fallback。
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { side: string; price: number }
+    expect(intent.price).toBe(117.5)
   })
 })

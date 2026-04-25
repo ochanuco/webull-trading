@@ -1,7 +1,12 @@
 import type { DailyBar } from '../../trading/strategy/indicators'
 import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { inferWebullMarket } from '../webull/mapper'
-import type { BarClient } from './BarClient'
+import type { BarClient, IntradayBar, IntradayInterval } from './BarClient'
+
+// Re-export so existing dashboard / chart code that imports these types
+// from `YahooBarClient` keeps working. Source-of-truth lives in BarClient
+// to avoid a circular import (YahooBarClient implements BarClient).
+export type { IntradayBar, IntradayInterval }
 
 const DEFAULT_BASE_URL = 'https://query1.finance.yahoo.com'
 const DEFAULT_TIMEOUT_MS = 5_000
@@ -158,17 +163,6 @@ export class YahooBarClient implements BarClient {
     const json = (await response.json()) as YahooChartResponse
     return normalizeIntradayChart(json)
   }
-}
-
-export type IntradayInterval = '5m' | '15m' | '30m' | '60m'
-
-export interface IntradayBar {
-  /** ISO UTC timestamp (Yahoo は epoch second を返す → ms 化して toISOString) */
-  timestamp: string
-  open: number
-  high: number
-  low: number
-  close: number
 }
 
 /**
