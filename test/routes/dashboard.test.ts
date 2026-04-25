@@ -440,7 +440,7 @@ describe('safeJsonScript', () => {
   })
 })
 
-import { aggregateDecisionRows } from '../../src/routes/dashboard'
+import { aggregateDecisionRows, computeTradeStats, computePnlHistogram } from '../../src/routes/dashboard'
 
 describe('aggregateDecisionRows', () => {
   it('日付ごとに decision を集計', () => {
@@ -475,5 +475,71 @@ describe('aggregateDecisionRows', () => {
       { day: '2026-04-24', decision: 'HOLD', n: 1 },
     ])
     expect(out.map((p) => p.date)).toEqual(['2026-04-23', '2026-04-24', '2026-04-25'])
+  })
+})
+
+describe('computeTradeStats', () => {
+  it('空配列はゼロ統計', () => {
+    const s = computeTradeStats([])
+    expect(s).toEqual({ count: 0, wins: 0, losses: 0, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, expectancy: 0, total: 0 })
+  })
+
+  it('勝率 / 平均利益・損失 / profit factor', () => {
+    const s = computeTradeStats([10, -5, 8, -3, 12])
+    expect(s.count).toBe(5)
+    expect(s.wins).toBe(3)
+    expect(s.losses).toBe(2)
+    expect(s.winRate).toBeCloseTo(0.6)
+    expect(s.avgWin).toBeCloseTo(10) // (10+8+12)/3
+    expect(s.avgLoss).toBeCloseTo(-4) // (-5 + -3) / 2
+    expect(s.profitFactor).toBeCloseTo(30 / 8)
+    expect(s.total).toBe(22)
+    expect(s.expectancy).toBeGreaterThan(0)
+  })
+
+  it('全勝なら profit factor は Infinity', () => {
+    const s = computeTradeStats([10, 5])
+    expect(s.profitFactor).toBe(Infinity)
+  })
+
+  it('全敗なら profit factor は 0、expectancy は負', () => {
+    const s = computeTradeStats([-10, -5])
+    expect(s.profitFactor).toBe(0)
+    expect(s.expectancy).toBeLessThan(0)
+  })
+
+  it('break-even (pnl=0) は勝負カウントに入れず expectancy 中立', () => {
+    const s = computeTradeStats([0, 0, 0])
+    expect(s.wins).toBe(0)
+    expect(s.losses).toBe(0)
+    expect(s.winRate).toBe(0)
+    expect(s.expectancy).toBe(0)
+  })
+})
+
+describe('computePnlHistogram', () => {
+  it('空は空', () => {
+    expect(computePnlHistogram([])).toEqual([])
+  })
+
+  it('absMax の対称範囲でビン分割し全件分類', () => {
+    const out = computePnlHistogram([1, 2, -1, -2, 0, 3, -3])
+    const total = out.reduce((acc, b) => acc + b.count, 0)
+    expect(total).toBe(7)
+    expect(out.length).toBeGreaterThanOrEqual(3)
+    // 範囲は ±3 で対称
+    expect(out[0]!.binStart).toBeCloseTo(-3)
+    expect(out[out.length - 1]!.binEnd).toBeCloseTo(3)
+  })
+
+  it('全 0 は単一ビン', () => {
+    const out = computePnlHistogram([0, 0])
+    expect(out).toEqual([{ label: '0', binStart: 0, binEnd: 0, binCenter: 0, count: 2 }])
+  })
+
+  it('境界値 (max abs ちょうど) も末尾ビンに入る', () => {
+    const out = computePnlHistogram([5, -5])
+    const total = out.reduce((acc, b) => acc + b.count, 0)
+    expect(total).toBe(2)
   })
 })
