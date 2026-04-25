@@ -1647,16 +1647,39 @@ export async function loadSymbolChart(
   // と判定して除外。「直近に類似する価格帯」の pivot だけ trend line に使う。
   const currentPrice =
     mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.price : null
-  const pivots =
+  const pivotsFiltered =
     currentPrice == null
       ? pivotsRaw
       : pivotsRaw.filter((pv) => pv.price >= currentPrice * 0.5 && pv.price <= currentPrice * 1.5)
+  // filter 後に同 type pivot が 2 個未満になると trend line が引けない
+  // (= 何も表示されない)。連続トレンド相場やレンジが極端に狭い局面で
+  // 起きやすい。0 表示よりは「regime filter 抜きの直近 pivot で fit した
+  // 参考線」を出した方が UX がマシなので、必要な type だけ raw に fallback。
+  function pivotsFor(type: 'high' | 'low'): PivotPoint[] {
+    const filteredOfType = pivotsFiltered.filter((p) => p.type === type)
+    if (filteredOfType.length >= 2) return pivotsFiltered
+    return pivotsRaw
+  }
   const resistanceLine = lastTimestamp
-    ? fitTrendLineFromRecentPivots(pivots, 'high', lastTimestamp)
+    ? fitTrendLineFromRecentPivots(pivotsFor('high'), 'high', lastTimestamp)
     : null
   const supportLine = lastTimestamp
-    ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp)
+    ? fitTrendLineFromRecentPivots(pivotsFor('low'), 'low', lastTimestamp)
     : null
+  // chart 上の pivot dots は filtered + raw fallback の和集合 (ただし sortable
+  // にするため timestamp 重複を除く)。filter で消えた pivot も「regime 跨ぎ
+  // の参考点」として表示しておく方が trend line の文脈が読める。
+  const pivots: PivotPoint[] = (() => {
+    const seen = new Set<string>()
+    const out: PivotPoint[] = []
+    for (const p of [...pivotsFiltered, ...pivotsRaw]) {
+      const key = `${p.timestamp}:${p.type}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(p)
+    }
+    return out.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))
+  })()
   // candlestick: 1 時間足 (intraday) を Yahoo から fetch。15m は overnight gap
   // 後の clustering と barWidth 調整がシビアだったため、daily-trader 向けに
   // 1h を default 採用 (Pullback Uptrend のような multi-day 戦略では十分な
@@ -1700,7 +1723,7 @@ export async function loadSymbolChart(
  * の point として追加。timestamp 昇順で返す。
  */
 export function mergeYahooAndCronPoints(
-  yahooBars: Array<{ jstDate: string; close: number; timestamp: string }>,
+  yahooBars: Array<{ jstDate: string; close: number; sma50?: number | null; timestamp: string }>,
   cronPoints: SymbolChartPoint[],
 ): SymbolChartPoint[] {
   // 不正 timestamp の cron point は最初に除外。残すと ECharts time 軸 / chart
@@ -1708,21 +1731,38 @@ export function mergeYahooAndCronPoints(
   const validCronPoints = cronPoints.filter((p) =>
     Number.isFinite(new Date(p.timestamp).getTime()),
   )
+  // cron eval は同 JST 日の sma50 が null になりうる (古い row)。Yahoo 側で
+  // 算出した sma50 を JST 日キーで参照できるよう Map にしておく。同 JST 日
+  // 内の cron eval が複数あっても全部に同じ Yahoo SMA50 が振られる。
+  const yahooSmaByJstDate = new Map<string, number | null>(
+    yahooBars.map((b) => [b.jstDate, b.sma50 ?? null]),
+  )
   const cronJstDates = new Set(
     validCronPoints.map((p) =>
       new Date(new Date(p.timestamp).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10),
     ),
   )
+  // Yahoo bar の SMA50 を cron point にも反映 (cron 側 indicators_json の sma50
+  // が null の古い row でも線が途切れない)。cron 側が既に sma50 を持っていれば
+  // それを優先 (より最新かつ rules と整合する)。
+  const enrichedCronPoints: SymbolChartPoint[] = validCronPoints.map((p) => {
+    if (p.sma50 != null) return p
+    const jstDate = new Date(new Date(p.timestamp).getTime() + 9 * 3600 * 1000)
+      .toISOString()
+      .slice(0, 10)
+    const fallback = yahooSmaByJstDate.get(jstDate) ?? null
+    return fallback == null ? p : { ...p, sma50: fallback }
+  })
   const yahooFiller: SymbolChartPoint[] = yahooBars
     .filter((b) => !cronJstDates.has(b.jstDate))
     .map((b) => ({
       timestamp: b.timestamp,
       price: b.close,
-      sma50: null,
+      sma50: b.sma50 ?? null,
       high20d: null,
       low20d: null,
     }))
-  return [...yahooFiller, ...validCronPoints].sort((a, b) =>
+  return [...yahooFiller, ...enrichedCronPoints].sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
   )
 }
@@ -1739,28 +1779,55 @@ export function mergeYahooAndCronPoints(
 export async function fetchYahooBarsForChart(
   symbol: string,
   lookback: number,
-): Promise<Array<{ jstDate: string; open: number; high: number; low: number; close: number; timestamp: string }>> {
+): Promise<Array<{ jstDate: string; open: number; high: number; low: number; close: number; sma50: number | null; timestamp: string }>> {
   const client = new YahooBarClient()
   try {
-    const bars = await client.getDailyBars(symbol, lookback)
-    return bars.map((b) => ({
+    // SMA50 を「先頭の chart 表示日」から埋めたいので、表示 lookback に加えて
+    // SMA50 warmup の 50 日を上乗せして fetch する。表示時に lookback 件分を
+    // 末尾から切り出す。
+    const warmup = 50
+    const bars = await client.getDailyBars(symbol, lookback + warmup)
+    const closes = bars.map((b) => b.close)
+    const smaSeries = computeRollingSma(closes, 50)
+    const enriched = bars.map((b, i) => ({
       jstDate: b.date,
       open: b.open,
       high: b.high,
       low: b.low,
       close: b.close,
+      sma50: smaSeries[i] ?? null,
       // JST 00:00 anchor: ECharts time axis (UTC) で JST formatter にかけると
       // b.date と同じ JST カレンダー日に column が配置される。
       // 旧実装 `${b.date}T16:00Z` だと JST 翌 01:00 に shift し、
       // 例えば US bar "04/25" が JST 04/26 列に表示される回帰があった。
       timestamp: anchorJstMidnight(b.date),
     }))
+    // 表示は lookback 件分のみ (warmup 区間は SMA50 算出に使い切ったので破棄)。
+    // bars が要求件数より少ない (上場初日近辺など) ケースもそのまま素通し。
+    return enriched.length > lookback ? enriched.slice(-lookback) : enriched
   } catch (err) {
     // RangeError は呼出元コード側の lookback 不正 (実装ミス)。silent fallback で
     // 隠さず再送出して dashboard handler の try/catch まで伝える。
     if (err instanceof RangeError) throw err
     return []
   }
+}
+
+/**
+ * `values[i]` を window 期間の単純移動平均に変換。i < window-1 は null。
+ * SMA50 に流用するが任意 window で使える素朴実装。NaN/Infinity が混じった
+ * 場合 sum が壊れるので入力側で予め弾く前提。
+ */
+export function computeRollingSma(values: number[], window: number): Array<number | null> {
+  if (window <= 0) return values.map(() => null)
+  const out: Array<number | null> = new Array(values.length).fill(null)
+  let sum = 0
+  for (let i = 0; i < values.length; i += 1) {
+    sum += values[i]!
+    if (i >= window) sum -= values[i - window]!
+    if (i >= window - 1) out[i] = sum / window
+  }
+  return out
 }
 
 /**
@@ -2481,10 +2548,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               },
             } : undefined,
           }] : []),
-          // SMA50 line: y 軸 range は candle 範囲だけで決めるので、SMA50 が
-          // 範囲外なら ECharts が自動 clip する。範囲内なら price との位置
-          // 関係 (上 / 下) が読める。現在値は inline badge にも併記。
-          { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
+          // SMA50 line: Yahoo daily bars から server-side で連続計算 (cron eval
+          // 行間も Yahoo 日次で線が繋がる)。candle (z:5) より上に置いて細い
+          // candle 帯に重なっても見えるようにする。色は TradingView 系で
+          // SMA に多用される orange (#f59e0b)、solid 1.4px。
+          { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1.4, color: '#f59e0b', type: 'solid' }, symbol: 'none', connectNulls: true, z: 6 },
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
@@ -2523,6 +2591,28 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           var t = new Date(p.timestamp).getTime();
           if (Number.isFinite(t) && t >= startMs && t <= endMs) pushIfFinite(p.sma50);
         });
+        // trend line: 直近 2 pivots を chart 末端まで線形外挿した 2 点。
+        // visible 範囲内に endpoint または時間軸の交点が乗るときに y 値を
+        // 取り込んで axis 外にはみ出さないようにする。両 endpoint が
+        // 範囲外でも線分が visible 帯を横断するなら sample してその y を採用
+        // (= 単純な 2 点線形補間)。
+        function sampleTrendY(line) {
+          if (!line) return;
+          var p1 = line.pivots[0];
+          var p2 = line.end;
+          var t1 = new Date(p1.timestamp).getTime();
+          var t2 = new Date(p2.timestamp).getTime();
+          if (!Number.isFinite(t1) || !Number.isFinite(t2) || t1 === t2) return;
+          var slope = (p2.price - p1.price) / (t2 - t1);
+          // visible 範囲と線分の交差区間を [a, b] にクリップして両端を採用
+          var a = Math.max(startMs, Math.min(t1, t2));
+          var b = Math.min(endMs, Math.max(t1, t2));
+          if (a > b) return; // 重なりなし
+          pushIfFinite(p1.price + slope * (a - t1));
+          pushIfFinite(p1.price + slope * (b - t1));
+        }
+        sampleTrendY(sc.resistanceLine);
+        sampleTrendY(sc.supportLine);
         // 保有期間が visible 範囲と重なっていれば position 線を含める
         if (sc.position) {
           var openedAtMs = new Date(sc.position.openedAt).getTime();
