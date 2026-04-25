@@ -4,7 +4,7 @@ import type { Env } from '../config/env'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
-import { strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
+import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
 import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -132,6 +132,7 @@ export const dashboard = new Hono<AppBindings>()
         pullbackMin: strategyParams.pullbackMin,
         stopPct: strategyParams.stopPct,
         takeProfitPct: strategyParams.takeProfitPct,
+        timeStopDays: strategyParams.timeStopDays,
       }
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
@@ -1449,6 +1450,26 @@ export interface SymbolChartRules {
   stopPct: number
   /** 0.07 = +7% (利食ライン) */
   takeProfitPct: number
+  /** 営業日。chart の SQL window 計算に使う (chart logic では非使用) */
+  timeStopDays: number
+}
+
+/**
+ * Chart window の上限日数。schema の MAX_TIME_STOP_DAYS (365) から計算。
+ * timeStopDays が大きくても肥大化を防ぐ。
+ * MAX_TIME_STOP_DAYS=365 → 2*365+4 = 734 カレンダー日。
+ */
+const MAX_WINDOW_DAYS = Math.ceil(MAX_TIME_STOP_DAYS * 2 + 4)
+
+/**
+ * Chart SQL の window 日数を timeStopDays から動的に決める。
+ * 営業日 N → カレンダー N×7/5 + 祝日バッファ + 安全マージン ≈ 2N+4。
+ * timeStopDays=10 → 24 日。年末年始 / 大型連休跨ぎでも entry 取りこぼさない。
+ * floor=14, ceiling=MAX_WINDOW_DAYS で clamp してカレンダー window の肥大化を防ぐ。
+ */
+export function computeChartWindowDays(timeStopDays: number): number {
+  const dynamic = Math.ceil(timeStopDays * 2 + 4)
+  return Math.min(Math.max(dynamic, 14), MAX_WINDOW_DAYS)
 }
 
 export interface SymbolChartData {
@@ -1475,16 +1496,21 @@ export async function loadSymbolChart(
 ): Promise<SymbolChartData> {
   const db = env.DB
   if (!db) throw new Error('DB binding not available')
+  const windowDays = computeChartWindowDays(rules.timeStopDays)
   const [logsResult, fillsResult, doPosition] = await Promise.all([
     db
+      // 動的 window: timeStopDays から computeChartWindowDays(N) で計算
+      // (default 10 営業日 → 24 カレンダー日)。祝日 / 連休跨ぎでも entry を
+      // 取りこぼさない。strftime で右辺を ISO UTC 形式 ("...T...:...Z") に
+      // 揃える (default datetime() の空白区切りでは stored ISO と境界がぶれる)。
       .prepare(
         `SELECT timestamp, price, indicators_json
          FROM strategy_decision_log
          WHERE symbol = ?
-         ORDER BY id DESC
-         LIMIT 200`,
+           AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+         ORDER BY id ASC`,
       )
-      .bind(symbol)
+      .bind(symbol, `-${windowDays} days`)
       .all<{ timestamp: string; price: number | null; indicators_json: string | null }>(),
     db
       // post_submit 行は side が null (writer は pre_submit にしか side を入れない)。
@@ -1516,7 +1542,7 @@ export async function loadSymbolChart(
       }>(),
     fetchDoPosition(env, symbol),
   ])
-  const logs = (logsResult.results ?? []).reverse() // ASC for chart
+  const logs = logsResult.results ?? [] // SQL は既に ASC で返している
   const points: SymbolChartPoint[] = logs
     .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
     .map((r) => {
@@ -1850,6 +1876,14 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       function jstLabel(value) {
         return jstFmt.format(new Date(value)).replace(/\\//g, '/');
       }
+      // fill 時刻は秒精度で表示 (同分内 fills を区別するため)。axisLabel は
+      // 分単位で密度を保つ (秒まで出すと x 軸ラベルが詰まる)。
+      var jstFmtSec = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+      function jstLabelSec(value) {
+        return jstFmtSec.format(new Date(value)).replace(/\\//g, '/');
+      }
 
       // [timestamp, value] のペアで time axis に渡す。null は connectNulls/sparse に。
       var pricesXY = sc.points.map(function (p) { return [p.timestamp, p.price]; });
@@ -1874,12 +1908,28 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       });
 
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
+      // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
+      // close-time fill (15 分以内) で label 重なりが起きにくい。pnl は SELL のみ
+      // 末尾に小数 1 桁で付与 (例: "120.19 +0.4")。詳細 (full-precision PnL /
+      // qty / timestamp) は markPoint hover tooltip で表示。
+      // realizedPnl と filledQty を data に保持し tooltip.formatter から
+      // full-precision で読む (label の toFixed(1) で丸めた値とは独立)。
       var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
-        return { name: 'BUY', coord: [m.timestamp, m.price], label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
+        return {
+          name: 'BUY', coord: [m.timestamp, m.price], value: m.price,
+          realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
+          label: { formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
+          itemStyle: { color: '#057a55' },
+        };
       });
       var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
-        var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
-        return { name: 'SELL', coord: [m.timestamp, m.price], label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
+        var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
+        return {
+          name: 'SELL', coord: [m.timestamp, m.price], value: m.price,
+          realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
+          label: { formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
+          itemStyle: { color: '#c22' },
+        };
       });
 
       // 保有中なら avg / stop / take-profit を水平 markLine。
@@ -1898,28 +1948,35 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
 
       // ECharts の scale:true は markLine を yAxis range に含めないため、
-      // TP / stop が data 範囲外だと枠の外で見えなくなる (実際にスクショで TP が
-      // 130 上限を超えて消えた)。data 全体 + position lines + markers を考慮した
-      // explicit min/max を計算して padding を加える。
+      // TP / stop が data 範囲外だと枠の外で見えなくなる。data 全体 +
+      // position lines + markers を考慮した explicit min/max + padding。
+      // NaN / Infinity が混入すると Math.min/max が NaN を返し、
+      // 結果 yAxis が壊れる (axis label に巨大数が出る回帰例あり) ので
+      // pushIfFinite で防御。
       var allY = [];
+      function pushIfFinite(v) {
+        if (v != null && typeof v === 'number' && Number.isFinite(v)) allY.push(v);
+      }
       sc.points.forEach(function (p) {
-        if (p.price != null) allY.push(p.price);
-        if (p.sma50 != null) allY.push(p.sma50);
-        if (p.high20d != null) {
-          allY.push(p.high20d * pullbackMaxMul);
-          allY.push(p.high20d * pullbackMinMul);
+        pushIfFinite(p.price);
+        pushIfFinite(p.sma50);
+        if (p.high20d != null && Number.isFinite(p.high20d)) {
+          pushIfFinite(p.high20d * pullbackMaxMul);
+          pushIfFinite(p.high20d * pullbackMinMul);
         }
-        if (p.low20d != null) allY.push(p.low20d);
+        pushIfFinite(p.low20d);
       });
-      sc.markers.forEach(function (m) { if (m.price != null) allY.push(m.price); });
-      extraYValues.forEach(function (v) { allY.push(v); });
+      sc.markers.forEach(function (m) { pushIfFinite(m.price); });
+      extraYValues.forEach(function (v) { pushIfFinite(v); });
       var yMin, yMax;
       if (allY.length > 0) {
         var rawMin = Math.min.apply(null, allY);
         var rawMax = Math.max.apply(null, allY);
-        var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
-        yMin = rawMin - pad;
-        yMax = rawMax + pad;
+        if (Number.isFinite(rawMin) && Number.isFinite(rawMax)) {
+          var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
+          yMin = rawMin - pad;
+          yMax = rawMax + pad;
+        }
       }
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
@@ -1944,7 +2001,24 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           { name: '下値支持線 (20日安値)', type: 'line', data: supportXY, lineStyle: { width: 1, color: '#c22', type: 'solid' }, symbol: 'none', connectNulls: false, z: 1 },
           { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
-            markPoint: entries.length + exits.length > 0 ? { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) } : undefined,
+            markPoint: entries.length + exits.length > 0 ? {
+              symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
+              // 個別 pin hover で full-precision の realized PnL / qty / 時刻を
+              // 表示。label は短縮表記なので、ここで補完情報を出す。
+              // 親 tooltip の trigger:'axis' に上書きされないよう trigger:'item'。
+              tooltip: {
+                trigger: 'item',
+                formatter: function (p) {
+                  var d = p.data;
+                  var pnl = d.realizedPnl == null
+                    ? ''
+                    : '<br/>realized PnL: ' + (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
+                  var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
+                  var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabelSec(d.fillTimestamp);
+                  return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts;
+                },
+              },
+            } : undefined,
           },
           { name: 'SMA50', type: 'line', data: smasXY, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
