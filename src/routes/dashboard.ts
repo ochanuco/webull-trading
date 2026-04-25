@@ -2536,22 +2536,27 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           ]),
           // sloped trend lines (5-bar fractal pivot fit)。教科書「下値支持線 /
           // 上値抵抗線」相当。pivots が 2 未満なら data: null で render skip。
+          // z は candle (5) より上。candle が密集している range では
+          // z<5 の trend line がほぼ全て candle に隠れて見えない回帰があった
+          // (legend には出るが線本体が rendered out)。SMA50 (z:6) と同様に
+          // candle の上に持ち上げ、線幅も少し太くする。
           ...(resistanceXY ? [{
             name: '上値抵抗線 (sloped, 直近 2 pivot fit)', type: 'line', data: resistanceXY,
-            lineStyle: { width: 1.5, color: '#1471a8', type: 'solid' }, symbol: 'none', z: 3,
+            lineStyle: { width: 1.8, color: '#1471a8', type: 'solid' }, symbol: 'none', z: 7,
           }] : []),
           ...(supportTrendXY ? [{
             name: '下値支持線 (sloped, 直近 2 pivot fit)', type: 'line', data: supportTrendXY,
-            lineStyle: { width: 1.5, color: '#c22', type: 'solid' }, symbol: 'none', z: 3,
+            lineStyle: { width: 1.8, color: '#c22', type: 'solid' }, symbol: 'none', z: 7,
           }] : []),
-          // swing pivot dots (見つけた pivot を可視化、debug + 教育用)
+          // swing pivot dots (見つけた pivot を可視化、debug + 教育用)。
+          // candle (z:5) より上に出さないと candle 帯と重なる pivot が消える。
           ...(pivotHighDots.length > 0 ? [{
             name: 'swing high', type: 'scatter', data: pivotHighDots,
-            symbolSize: 6, itemStyle: { color: '#1471a8', borderColor: '#fff', borderWidth: 1 }, z: 4,
+            symbolSize: 6, itemStyle: { color: '#1471a8', borderColor: '#fff', borderWidth: 1 }, z: 8,
           }] : []),
           ...(pivotLowDots.length > 0 ? [{
             name: 'swing low', type: 'scatter', data: pivotLowDots,
-            symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 4,
+            symbolSize: 6, itemStyle: { color: '#c22', borderColor: '#fff', borderWidth: 1 }, z: 8,
           }] : []),
           // candlestick: 15 分足 OHLC を表示。Western 規約 (close >= open = 緑、
           // candle: 主役。Western 規約 (close >= open = 緑、< = 赤)。
