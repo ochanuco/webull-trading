@@ -1454,14 +1454,18 @@ export interface SymbolChartRules {
   timeStopDays: number
 }
 
+/** Chart window の上限日数。timeStopDays が大きくても肥大化を防ぐ */
+const MAX_WINDOW_DAYS = 90
+
 /**
  * Chart SQL の window 日数を timeStopDays から動的に決める。
  * 営業日 N → カレンダー N×7/5 + 祝日バッファ + 安全マージン ≈ 2N+4。
  * timeStopDays=10 → 24 日。年末年始 / 大型連休跨ぎでも entry 取りこぼさない。
+ * floor=14, ceiling=MAX_WINDOW_DAYS で clamp してカレンダー window の肥大化を防ぐ。
  */
 export function computeChartWindowDays(timeStopDays: number): number {
   const dynamic = Math.ceil(timeStopDays * 2 + 4)
-  return Math.max(dynamic, 14)
+  return Math.min(Math.max(dynamic, 14), MAX_WINDOW_DAYS)
 }
 
 export interface SymbolChartData {
