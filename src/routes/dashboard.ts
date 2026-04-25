@@ -1408,10 +1408,11 @@ export async function pickDefaultSymbol(db: D1Database): Promise<string | null> 
 }
 
 export interface SymbolChartPoint {
-  timestamp: string // JST display string
+  timestamp: string // ISO UTC (time axis 用、client 側 Intl で JST 表示)
   price: number
   sma50: number | null
   high20d: number | null
+  low20d: number | null
 }
 
 export interface SymbolChartMarker {
@@ -1504,6 +1505,7 @@ export async function loadSymbolChart(
         price: Number(r.price),
         sma50: indicators.sma50,
         high20d: indicators.high20d,
+        low20d: indicators.low20d,
       }
     })
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
@@ -1558,23 +1560,32 @@ export function extractSma50(indicatorsJson: string | null): number | null {
 interface ExtractedIndicators {
   sma50: number | null
   high20d: number | null
+  low20d: number | null
 }
 
 /**
  * indicators_json から chart で使う数値を一括抽出。JSON.parse 失敗 / 数値外は null。
+ * low20d は #158 follow-up で追加されたため、既存の indicators_json には未収録 →
+ * 古い行は null fallback で grace 化。新しい cron 実行から徐々に出揃う。
  */
 function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
-  if (!indicatorsJson) return { sma50: null, high20d: null }
+  if (!indicatorsJson) return { sma50: null, high20d: null, low20d: null }
   try {
-    const obj = JSON.parse(indicatorsJson) as { sma50?: unknown; high20d?: unknown }
+    const obj = JSON.parse(indicatorsJson) as {
+      sma50?: unknown
+      high20d?: unknown
+      low20d?: unknown
+    }
     return {
       sma50:
         typeof obj.sma50 === 'number' && Number.isFinite(obj.sma50) ? obj.sma50 : null,
       high20d:
         typeof obj.high20d === 'number' && Number.isFinite(obj.high20d) ? obj.high20d : null,
+      low20d:
+        typeof obj.low20d === 'number' && Number.isFinite(obj.low20d) ? obj.low20d : null,
     }
   } catch {
-    return { sma50: null, high20d: null }
+    return { sma50: null, high20d: null, low20d: null }
   }
 }
 
@@ -1787,8 +1798,9 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var pricesXY = sc.points.map(function (p) { return [p.timestamp, p.price]; });
       var smasXY = sc.points.map(function (p) { return p.sma50 == null ? [p.timestamp, null] : [p.timestamp, p.sma50]; });
 
-      // 押し目買いゾーン (high20d × (1 + pullbackMax) 〜 high20d × (1 + pullbackMin))。
-      // -3〜-15% の押し目レンジを time-series band として可視化。
+      // 押し目買いゾーン:
+      // - 上端 = high20d × (1 + pullbackMax)  ≒ 教科書の「上値抵抗線 (resistance)」
+      // - 下端 = high20d × (1 + pullbackMin)  = 押し目買いの下限 (-15% 以下は深すぎ)
       var pullbackMaxMul = 1 + sc.rules.pullbackMax;
       var pullbackMinMul = 1 + sc.rules.pullbackMin;
       var bandUpperXY = sc.points.map(function (p) {
@@ -1796,6 +1808,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       });
       var bandLowerXY = sc.points.map(function (p) {
         return [p.timestamp, p.high20d == null ? null : p.high20d * pullbackMinMul];
+      });
+
+      // 下値支持線 (= 20 日安値、教科書の support line)。high20d と対称な指標で、
+      // ここを下回ると「直近 20 日のレンジ崩壊」= トレンド転換のサイン。
+      var supportXY = sc.points.map(function (p) {
+        return [p.timestamp, p.low20d == null ? null : p.low20d];
       });
 
       // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
@@ -1822,22 +1840,24 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
       symChart.setOption({
-        title: { text: sc.symbol + ' price + SMA50 + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: sc.symbol + ' price + 抵抗/支持線 + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabel(p.value); } } },
         },
-        legend: { top: 22 },
+        legend: { top: 22, type: 'scroll' },
         grid: { left: 60, right: 20, top: 60, bottom: 40 },
         xAxis: { type: 'time', axisLabel: { formatter: function (value) { return jstLabel(value); } } },
         yAxis: { type: 'value', scale: true },
         series: [
-          // overlay 4 本制限のため、保有時は band を非表示 (avg/stop/TP に集中)。
-          // 非保有時は band 表示 (entry trigger 圏内かを見る局面)。
+          // 保有時は band 非表示 (avg/stop/TP の 3 線に集中)、非保有時は band 表示
+          // (entry trigger 圏内かを見る局面)。下値支持線 (low20d) は常時表示で
+          // 「直近レンジ崩壊」を見える化。
           ...(sc.position ? [] : [
-            { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
-            { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.8, color: '#c22', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '上値抵抗線 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpperXY, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '押し目買い下限 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLowerXY, lineStyle: { width: 0.8, color: '#b25000', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
           ]),
+          { name: '下値支持線 (20日安値)', type: 'line', data: supportXY, lineStyle: { width: 1, color: '#c22', type: 'solid' }, symbol: 'none', connectNulls: false, z: 1 },
           { name: 'price', type: 'line', data: pricesXY, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
             markPoint: entries.length + exits.length > 0 ? { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) } : undefined,
