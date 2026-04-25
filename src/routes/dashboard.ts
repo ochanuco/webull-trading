@@ -1586,22 +1586,89 @@ export async function loadSymbolChart(
     }))
   // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
-  // sloped trend lines: Yahoo daily bars を 60 日 fetch して fractal pivot 検出。
-  // POC 開始直後は strategy_decision_log が数日分しか無く cron-eval dedup では
-  // pivot 検出に必要な 5 日 (k=2) すら集まらないので、Yahoo の本物日足を使う。
-  // 失敗時 (network 等) は cron-eval dedup にフォールバック。
-  const lastTimestamp = points.length > 0 ? points[points.length - 1]!.timestamp : null
+
+  // Yahoo daily bars 60 日: chart 全体の price line + pivot 検出に使う。
+  // Yahoo fetch 失敗時は cron-eval points のみで描画 (短い price line になるが
+  // 致命的ではない)。lastTimestamp が無い (chart 自体空) なら filtering 不要。
   const yahooBarsRaw = await fetchYahooBarsForChart(symbol, 60)
-  // Yahoo bars が chart 表示範囲 (lastTimestamp) より新しい日を含むと、
-  // pivot dot / trend line 終点が表示範囲外に extend される。表示範囲を超える
-  // bar は除外。lastTimestamp が無い (chart 自体空) なら filtering 不要。
+  const cronLastTs = points.length > 0 ? points[points.length - 1]!.timestamp : null
   const yahooBars =
-    lastTimestamp == null ? yahooBarsRaw : yahooBarsRaw.filter((b) => b.timestamp <= lastTimestamp)
-  const dailyCloses = yahooBars.length >= 5 ? yahooBars : aggregateDailyCloses(points)
-  const pivots = detectFractalPivots(dailyCloses, 2)
-  const resistanceLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'high', lastTimestamp) : null
-  const supportLine = lastTimestamp ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp) : null
-  return { symbol, points, markers, position, rules, resistanceLine, supportLine, pivots }
+    cronLastTs == null ? yahooBarsRaw : yahooBarsRaw.filter((b) => b.timestamp <= cronLastTs)
+
+  // Yahoo bar を points にマージして全期間 price line を実現。同 timestamp で
+  // 既に cron-eval point があればそちらを優先 (indicators が乗っているため)。
+  // Yahoo bar 由来の point は indicators フィールド全 null。
+  const mergedPoints = mergeYahooAndCronPoints(yahooBars, points)
+  const lastTimestamp =
+    mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.timestamp : null
+
+  // pivot 検出窓: 直近 30 暦日に絞ることで regime shift (例: 04/22 SOXL 3x
+  // rally) を跨ぐ無意味な trend line を避ける。30 日内に純粋 pivot が出ない
+  // = 直近で swing 構造が無い = trend line 不適用 (連続上昇 / 下降フェーズ)
+  // が正しい挙動。
+  const PIVOT_WINDOW_DAYS = 30
+  const pivotCutoffMs = lastTimestamp
+    ? new Date(lastTimestamp).getTime() - PIVOT_WINDOW_DAYS * 24 * 3600 * 1000
+    : 0
+  const recentBars = yahooBars.filter((b) => new Date(b.timestamp).getTime() >= pivotCutoffMs)
+  const dailyCloses = recentBars.length >= 5 ? recentBars : aggregateDailyCloses(points)
+  const pivotsRaw = detectFractalPivots(dailyCloses, 2)
+  // regime filter: 現在価格の ±50% を超える pivot は別 regime (3x rally など)
+  // と判定して除外。「直近に類似する価格帯」の pivot だけ trend line に使う。
+  const currentPrice =
+    mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.price : null
+  const pivots =
+    currentPrice == null
+      ? pivotsRaw
+      : pivotsRaw.filter((pv) => pv.price >= currentPrice * 0.5 && pv.price <= currentPrice * 1.5)
+  const resistanceLine = lastTimestamp
+    ? fitTrendLineFromRecentPivots(pivots, 'high', lastTimestamp)
+    : null
+  const supportLine = lastTimestamp
+    ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp)
+    : null
+  return {
+    symbol,
+    points: mergedPoints,
+    markers,
+    position,
+    rules,
+    resistanceLine,
+    supportLine,
+    pivots,
+  }
+}
+
+/**
+ * Yahoo daily bars と cron-eval points をマージ。同 JST 日では cron-eval を
+ * 優先 (indicators が乗っているため)、それ以外の日は Yahoo bar を price-only
+ * の point として追加。timestamp 昇順で返す。
+ */
+export function mergeYahooAndCronPoints(
+  yahooBars: Array<{ jstDate: string; close: number; timestamp: string }>,
+  cronPoints: SymbolChartPoint[],
+): SymbolChartPoint[] {
+  const cronJstDates = new Set(
+    cronPoints
+      .map((p) => {
+        const ms = new Date(p.timestamp).getTime()
+        if (!Number.isFinite(ms)) return null
+        return new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10)
+      })
+      .filter((d): d is string => d !== null),
+  )
+  const yahooFiller: SymbolChartPoint[] = yahooBars
+    .filter((b) => !cronJstDates.has(b.jstDate))
+    .map((b) => ({
+      timestamp: b.timestamp,
+      price: b.close,
+      sma50: null,
+      high20d: null,
+      low20d: null,
+    }))
+  return [...yahooFiller, ...cronPoints].sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  )
 }
 
 /**
@@ -2081,7 +2148,9 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         };
       });
 
-      // 保有中なら avg / stop / take-profit を水平 markLine。
+      // 保有中なら avg / stop / take-profit を markLine。openedAt から最新まで
+      // のみ描画 (chart 全幅に伸ばすと「ずっと前から avg だった」と誤読される)。
+      // ECharts markLine の data は [start, end] の 2 点配列で線分指定。
       var positionMarkLines = [];
       var extraYValues = [];
       if (sc.position) {
@@ -2089,10 +2158,21 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         var stopPrice = avg * (1 + sc.rules.stopPct);
         var tpPrice = avg * (1 + sc.rules.takeProfitPct);
         extraYValues.push(avg, stopPrice, tpPrice);
+        var openedAt = sc.position.openedAt;
+        var endTs = sc.points.length > 0 ? sc.points[sc.points.length - 1].timestamp : openedAt;
         positionMarkLines = [
-          { yAxis: avg, lineStyle: { color: '#444', type: 'solid', width: 1 }, label: { formatter: 'avg ' + avg.toFixed(2), position: 'insideStartTop', color: '#444' } },
-          { yAxis: stopPrice, lineStyle: { color: '#c22', type: 'dashed', width: 1 }, label: { formatter: 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)', position: 'insideStartBottom', color: '#c22' } },
-          { yAxis: tpPrice, lineStyle: { color: '#057a55', type: 'dashed', width: 1 }, label: { formatter: 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)', position: 'insideStartTop', color: '#057a55' } },
+          [
+            { coord: [openedAt, avg], symbol: 'none', lineStyle: { color: '#444', type: 'solid', width: 1 }, label: { formatter: 'avg ' + avg.toFixed(2), position: 'start', color: '#444' } },
+            { coord: [endTs, avg], symbol: 'none' },
+          ],
+          [
+            { coord: [openedAt, stopPrice], symbol: 'none', lineStyle: { color: '#c22', type: 'dashed', width: 1 }, label: { formatter: 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)', position: 'start', color: '#c22' } },
+            { coord: [endTs, stopPrice], symbol: 'none' },
+          ],
+          [
+            { coord: [openedAt, tpPrice], symbol: 'none', lineStyle: { color: '#057a55', type: 'dashed', width: 1 }, label: { formatter: 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)', position: 'start', color: '#057a55' } },
+            { coord: [endTs, tpPrice], symbol: 'none' },
+          ],
         ];
       }
 
