@@ -1787,8 +1787,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         xAxis: { type: 'category', data: ts },
         yAxis: { type: 'value', scale: true },
         series: [
-          { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpper, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 1 },
-          { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLower, lineStyle: { width: 0.8, color: '#c22', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 1 },
+          // 押し目ゾーン band は保有時は非表示 (overlay 4 本制限対策)
+          ...(sc.position ? [] : [
+            { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpper, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+            { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLower, lineStyle: { width: 0.8, color: '#c22', type: 'dashed' }, symbol: 'none', connectNulls: false, z: 1 },
+          ]),
           { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
             markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
             markPoint: { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) },
