@@ -1657,12 +1657,14 @@ export async function loadSymbolChart(
   const supportLine = lastTimestamp
     ? fitTrendLineFromRecentPivots(pivots, 'low', lastTimestamp)
     : null
-  // candlestick: 15 分足 (intraday) を Yahoo から fetch。daily より細かい
-  // 動きが見える + cron が 15 分間隔で動くのと cadence が一致。失敗 (network /
-  // Yahoo intraday range 制限など) なら空配列で line だけ表示にフォールバック。
+  // candlestick: 1 時間足 (intraday) を Yahoo から fetch。15m は overnight gap
+  // 後の clustering と barWidth 調整がシビアだったため、daily-trader 向けに
+  // 1h を default 採用 (Pullback Uptrend のような multi-day 戦略では十分な
+  // granularity)。Yahoo intraday range 制限 60d で chart 全期間カバー可能。
+  // 失敗 (network 等) なら空配列で fallback (candle 自体スキップ)。
   let intradayBars: OhlcBar[] = []
   try {
-    const intraday = await new YahooBarClient().getIntradayBars(symbol, '15m')
+    const intraday = await new YahooBarClient().getIntradayBars(symbol, '60m')
     // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
     // を除外。lastTimestamp が無いときは全件採用。
     intradayBars = (cronLastTs == null
@@ -2417,8 +2419,10 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           // gap 後の細い candle を視認可能に。borderWidth 強めて
           // body と wick の対比を確保。
           ...(ohlcXY.length > 0 ? [{
-            name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
-            barWidth: 8,
+            name: 'price (1h OHLC)', type: 'candlestick', data: ohlcXY,
+            // 1h は 15m より時間軸の間隔が 4 倍広いので、barWidth も少し
+            // 広めに (相対的に gap 比率を一定に保つ)。
+            barWidth: 10,
             itemStyle: {
               color: '#057a55',     // bullish (close >= open)
               color0: '#c22',       // bearish (close < open)
