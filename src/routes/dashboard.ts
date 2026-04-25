@@ -364,11 +364,8 @@ function positionsBody(
     })
     .join('')
   return `<p class="muted" style="font-size:12px">
-    現在値・評価損益は <strong>Yahoo Finance daily close</strong> ベース。
-    intraday は前日終値のままで実際の市場価格とは乖離します
-    (実約定損益は <a href="/dashboard/cron">/dashboard/cron</a> 「実 損益」列を参照)。
-    Webull last quote への切替は
-    <a href="https://github.com/ochanuco/webull-trading/issues/21">#21</a> 予定。
+    評価損益は未実現 (現在値 vs 平均取得単価)。実約定損益は
+    <a href="/dashboard/cron">/dashboard/cron</a> 「実 損益」列を参照。
   </p>
   <table>
     <thead><tr>
@@ -654,7 +651,6 @@ function formatCooldown(cooldownUntil: string | null): string {
  * QuoteSnapshot.asOf (ISO) を JST の絶対表記 `MM/DD HH:MM JST` に。
  * 相対表記 (NN日前) は週末・場外で必ず古く見えてしまい「壊れている風」に
  * 誤読されやすいため、絶対時刻を出して「金曜引け」と一目で分かるようにする。
- * Webull last quote が intraday で更新されるようになったら撤去対象。
  */
 export function formatQuoteAsOf(asOf: string): string {
   const d = new Date(asOf)
