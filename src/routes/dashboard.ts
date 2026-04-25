@@ -1626,57 +1626,87 @@ export async function loadSymbolChart(
   const lastTimestamp =
     mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.timestamp : null
 
-  // pivot 検出窓: 直近 30 暦日に絞ることで regime shift (例: 04/22 SOXL 3x
-  // rally) を跨ぐ無意味な trend line を避ける。30 日内に純粋 pivot が出ない
-  // = 直近で swing 構造が無い = trend line 不適用 (連続上昇 / 下降フェーズ)
-  // が正しい挙動。
+  // pivot 検出窓: 第一候補は直近 30 暦日 (regime shift を跨がない)。trend line
+  // を引くのに同 type pivot が 2 個必要。AAPL のように 30日でも k=2 (5-bar)
+  // 高 pivot が 2 個未満の銘柄では「描画されない」回帰になっていたため、
+  // 段階的に厳しさを緩める fallback を用意する:
+  //   tier 1: 30日 + k=2 (5-bar fractal) — strict
+  //   tier 2: 30日 + k=1 (3-bar fractal) — TradingView 等で標準的な短期 swing
+  //   tier 3: 60日 + k=2 — 古い swing も拾う (regime 跨ぎリスクは regime
+  //                       filter で吸収)
+  //   tier 4: 60日 + k=1 — 最終手段
+  // 各 tier に regime filter (±50%) と「filter 後 2 個未満なら raw に戻す」
+  // 副 fallback を畳み込む。同 type 2 個埋まった瞬間に採用。
   const PIVOT_WINDOW_DAYS = 30
-  const pivotCutoffMs = lastTimestamp
-    ? new Date(lastTimestamp).getTime() - PIVOT_WINDOW_DAYS * 24 * 3600 * 1000
-    : 0
-  const recentBars = yahooBars.filter((b) => new Date(b.timestamp).getTime() >= pivotCutoffMs)
-  // Yahoo fetch 失敗時の cron-eval fallback でも cutoff を維持。timeStopDays
-  // が大きい設定で chart window が 30 日を超えるケースで、旧 regime の cron
-  // 日足が pivot 候補に紛れ込まないよう同じ cutoff を適用。
-  const recentCronCloses = aggregateDailyCloses(points).filter(
-    (p) => new Date(p.timestamp).getTime() >= pivotCutoffMs,
-  )
-  const dailyCloses = recentBars.length >= 5 ? recentBars : recentCronCloses
-  const pivotsRaw = detectFractalPivots(dailyCloses, 2)
-  // regime filter: 現在価格の ±50% を超える pivot は別 regime (3x rally など)
-  // と判定して除外。「直近に類似する価格帯」の pivot だけ trend line に使う。
+  const PIVOT_WINDOW_DAYS_WIDE = 60
+  const cutoffMs = (days: number): number =>
+    lastTimestamp ? new Date(lastTimestamp).getTime() - days * 24 * 3600 * 1000 : 0
+  const cronDailyClosesAll = aggregateDailyCloses(points)
+  function dailyClosesIn(days: number): Array<{ jstDate: string; close: number; timestamp: string }> {
+    const cutoff = cutoffMs(days)
+    const fromYahoo = yahooBars.filter((b) => new Date(b.timestamp).getTime() >= cutoff)
+    if (fromYahoo.length >= 5) return fromYahoo
+    return cronDailyClosesAll.filter((p) => new Date(p.timestamp).getTime() >= cutoff)
+  }
   const currentPrice =
     mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.price : null
-  const pivotsFiltered =
-    currentPrice == null
-      ? pivotsRaw
-      : pivotsRaw.filter((pv) => pv.price >= currentPrice * 0.5 && pv.price <= currentPrice * 1.5)
-  // filter 後に同 type pivot が 2 個未満になると trend line が引けない
-  // (= 何も表示されない)。連続トレンド相場やレンジが極端に狭い局面で
-  // 起きやすい。0 表示よりは「regime filter 抜きの直近 pivot で fit した
-  // 参考線」を出した方が UX がマシなので、必要な type だけ raw に fallback。
-  function pivotsFor(type: 'high' | 'low'): PivotPoint[] {
-    const filteredOfType = pivotsFiltered.filter((p) => p.type === type)
-    if (filteredOfType.length >= 2) return pivotsFiltered
-    return pivotsRaw
+  function applyRegimeFilter(pivotsAll: PivotPoint[]): PivotPoint[] {
+    if (currentPrice == null) return pivotsAll
+    return pivotsAll.filter(
+      (pv) => pv.price >= currentPrice * 0.5 && pv.price <= currentPrice * 1.5,
+    )
+  }
+  // tier 候補を順に評価し、type ごとに最初に「同 type ≥ 2」を満たす集合を採用。
+  // resistance / support 別々に異なる tier が当たることもありうる (片方だけ
+  // 厳しい場合)。
+  type Tier = { name: string; pivotsAll: PivotPoint[] }
+  const tiers: Tier[] = [
+    { name: '30d/k=2', pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS), 2) },
+    { name: '30d/k=1', pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS), 1) },
+    {
+      name: '60d/k=2',
+      pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS_WIDE), 2),
+    },
+    {
+      name: '60d/k=1',
+      pivotsAll: detectFractalPivots(dailyClosesIn(PIVOT_WINDOW_DAYS_WIDE), 1),
+    },
+  ]
+  function pivotsForType(type: 'high' | 'low'): PivotPoint[] {
+    for (const tier of tiers) {
+      const filtered = applyRegimeFilter(tier.pivotsAll)
+      // 第一に regime filter 後で同 type 2 個。だめなら同 tier の raw で再試行。
+      if (filtered.filter((p) => p.type === type).length >= 2) return filtered
+      if (tier.pivotsAll.filter((p) => p.type === type).length >= 2) return tier.pivotsAll
+    }
+    // 全 tier 不足: 一番ゆるい tier 4 raw を返す (fitTrendLine 側で null になる
+    // 可能性は残るが、pivot dots だけでも表示する)
+    return tiers[tiers.length - 1]!.pivotsAll
   }
   const resistanceLine = lastTimestamp
-    ? fitTrendLineFromRecentPivots(pivotsFor('high'), 'high', lastTimestamp)
+    ? fitTrendLineFromRecentPivots(pivotsForType('high'), 'high', lastTimestamp)
     : null
   const supportLine = lastTimestamp
-    ? fitTrendLineFromRecentPivots(pivotsFor('low'), 'low', lastTimestamp)
+    ? fitTrendLineFromRecentPivots(pivotsForType('low'), 'low', lastTimestamp)
     : null
-  // chart 上の pivot dots は filtered + raw fallback の和集合 (ただし sortable
-  // にするため timestamp 重複を除く)。filter で消えた pivot も「regime 跨ぎ
-  // の参考点」として表示しておく方が trend line の文脈が読める。
+  // chart 上の pivot dots は実際に trend line に使った両 type の pivots 集合を
+  // union (重複除去)。filter で消えた pivot も含めると context が読みやすい
+  // ので tier ごとの raw も全部混ぜる。
   const pivots: PivotPoint[] = (() => {
     const seen = new Set<string>()
     const out: PivotPoint[] = []
-    for (const p of [...pivotsFiltered, ...pivotsRaw]) {
-      const key = `${p.timestamp}:${p.type}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push(p)
+    const sources: PivotPoint[][] = [
+      pivotsForType('high'),
+      pivotsForType('low'),
+      ...tiers.map((t) => t.pivotsAll),
+    ]
+    for (const src of sources) {
+      for (const p of src) {
+        const key = `${p.timestamp}:${p.type}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push(p)
+      }
     }
     return out.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))
   })()
