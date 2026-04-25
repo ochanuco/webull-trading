@@ -739,3 +739,145 @@ describe('computeChartWindowDays', () => {
     expect(computeChartWindowDays(5.5)).toBe(15) // ceil(15) = 15
   })
 })
+
+import {
+  aggregateDailyCloses,
+  detectFractalPivots,
+  fitTrendLineFromRecentPivots,
+  type SymbolChartPoint,
+  type PivotPoint,
+} from '../../src/routes/dashboard'
+
+describe('aggregateDailyCloses', () => {
+  it('JST 日付で dedupe、その日の最終 cron eval を採用', () => {
+    const points: SymbolChartPoint[] = [
+      { timestamp: '2026-04-23T05:00:00.000Z', price: 100, sma50: null, high20d: null, low20d: null }, // 04/23 14:00 JST
+      { timestamp: '2026-04-23T08:00:00.000Z', price: 102, sma50: null, high20d: null, low20d: null }, // 04/23 17:00 JST (last of day)
+      { timestamp: '2026-04-24T05:00:00.000Z', price: 105, sma50: null, high20d: null, low20d: null }, // 04/24 14:00 JST
+    ]
+    const out = aggregateDailyCloses(points)
+    expect(out).toEqual([
+      { jstDate: '2026-04-23', close: 102, timestamp: '2026-04-23T08:00:00.000Z' },
+      { jstDate: '2026-04-24', close: 105, timestamp: '2026-04-24T05:00:00.000Z' },
+    ])
+  })
+
+  it('null / Infinity / 不正 timestamp は skip', () => {
+    const points: SymbolChartPoint[] = [
+      { timestamp: '2026-04-23T08:00:00.000Z', price: NaN, sma50: null, high20d: null, low20d: null },
+      { timestamp: 'not-an-iso', price: 100, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-24T05:00:00.000Z', price: 105, sma50: null, high20d: null, low20d: null },
+    ]
+    expect(aggregateDailyCloses(points)).toEqual([
+      { jstDate: '2026-04-24', close: 105, timestamp: '2026-04-24T05:00:00.000Z' },
+    ])
+  })
+
+  it('空配列は空', () => {
+    expect(aggregateDailyCloses([])).toEqual([])
+  })
+})
+
+describe('detectFractalPivots', () => {
+  function dailyClose(jstDate: string, close: number) {
+    return { jstDate, close, timestamp: `${jstDate}T05:00:00.000Z` }
+  }
+
+  it('5-bar fractal で純粋な high / low を検出', () => {
+    // closes: 1, 2, 3, 2, 1 — index 2 (close=3) が純粋 high
+    const daily = [
+      dailyClose('2026-01-01', 1),
+      dailyClose('2026-01-02', 2),
+      dailyClose('2026-01-03', 3), // ← high pivot
+      dailyClose('2026-01-04', 2),
+      dailyClose('2026-01-05', 1),
+    ]
+    const out = detectFractalPivots(daily, 2)
+    expect(out).toEqual([{ timestamp: '2026-01-03T05:00:00.000Z', price: 3, type: 'high' }])
+  })
+
+  it('純粋 low の検出', () => {
+    const daily = [
+      dailyClose('2026-01-01', 5),
+      dailyClose('2026-01-02', 4),
+      dailyClose('2026-01-03', 3), // ← low pivot
+      dailyClose('2026-01-04', 4),
+      dailyClose('2026-01-05', 5),
+    ]
+    const out = detectFractalPivots(daily, 2)
+    expect(out).toEqual([{ timestamp: '2026-01-03T05:00:00.000Z', price: 3, type: 'low' }])
+  })
+
+  it('同値タイは pivot にしない (>= 判定)', () => {
+    const daily = [
+      dailyClose('2026-01-01', 1),
+      dailyClose('2026-01-02', 3), // tie with index 2
+      dailyClose('2026-01-03', 3),
+      dailyClose('2026-01-04', 2),
+      dailyClose('2026-01-05', 1),
+    ]
+    expect(detectFractalPivots(daily, 2)).toEqual([])
+  })
+
+  it('両端 k 個は pivot 候補にならない', () => {
+    const daily = [
+      dailyClose('2026-01-01', 9), // boundary
+      dailyClose('2026-01-02', 1),
+      dailyClose('2026-01-03', 0),
+      dailyClose('2026-01-04', 1),
+      dailyClose('2026-01-05', 9), // boundary
+    ]
+    // index 2 は純粋 low (0 < both neighbors)
+    expect(detectFractalPivots(daily, 2)).toEqual([
+      { timestamp: '2026-01-03T05:00:00.000Z', price: 0, type: 'low' },
+    ])
+  })
+
+  it('入力が短すぎ (k+k+1 未満) なら空', () => {
+    const daily = [
+      dailyClose('2026-01-01', 1),
+      dailyClose('2026-01-02', 2),
+      dailyClose('2026-01-03', 1),
+    ]
+    expect(detectFractalPivots(daily, 2)).toEqual([])
+  })
+})
+
+describe('fitTrendLineFromRecentPivots', () => {
+  const high1: PivotPoint = { timestamp: '2026-01-05T00:00:00.000Z', price: 100, type: 'high' }
+  const high2: PivotPoint = { timestamp: '2026-01-15T00:00:00.000Z', price: 110, type: 'high' }
+
+  it('直近 2 high pivots を結んで延長線を fit', () => {
+    const out = fitTrendLineFromRecentPivots([high1, high2], 'high', '2026-01-25T00:00:00.000Z')
+    expect(out).not.toBeNull()
+    expect(out!.pivots).toEqual([high1, high2])
+    // slope = (110-100) / 10d = 1/d → 25日 (10 日後) で 110 + 10 = 120
+    expect(out!.end.price).toBeCloseTo(120, 4)
+  })
+
+  it('pivot 1 つしか無い type は null', () => {
+    expect(fitTrendLineFromRecentPivots([high1], 'high', '2026-01-25T00:00:00.000Z')).toBe(null)
+  })
+
+  it('reverse 時系列 (t2 <= t1) は null (defensive)', () => {
+    const reversed: PivotPoint[] = [
+      { timestamp: '2026-01-15T00:00:00.000Z', price: 110, type: 'high' },
+      { timestamp: '2026-01-15T00:00:00.000Z', price: 110, type: 'high' }, // same time
+    ]
+    expect(fitTrendLineFromRecentPivots(reversed, 'high', '2026-01-25T00:00:00.000Z')).toBe(null)
+  })
+
+  it('低い type が混在しても high のみ採用', () => {
+    const mix: PivotPoint[] = [
+      high1,
+      { timestamp: '2026-01-10T00:00:00.000Z', price: 90, type: 'low' },
+      high2,
+    ]
+    const out = fitTrendLineFromRecentPivots(mix, 'high', '2026-01-25T00:00:00.000Z')
+    expect(out!.pivots).toEqual([high1, high2])
+  })
+
+  it('endTimestamp 不正なら null', () => {
+    expect(fitTrendLineFromRecentPivots([high1, high2], 'high', 'not-an-iso')).toBe(null)
+  })
+})
