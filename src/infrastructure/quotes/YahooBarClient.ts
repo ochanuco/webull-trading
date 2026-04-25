@@ -118,6 +118,89 @@ export class YahooBarClient implements BarClient {
     const bars = normalizeYahooChart(json, lookback)
     return bars
   }
+
+  /**
+   * 15 分足 (またはその他 intraday) bars を取得。Yahoo `interval=15m` の
+   * range 上限は 60d。dashboard chart の candlestick / 短期 trend 可視化用。
+   * trend / SMA50 等の indicator は引き続き daily で計算するので getDailyBars
+   * と用途を分ける。timestamp は ISO UTC (秒精度)。
+   */
+  async getIntradayBars(symbol: string, interval: IntradayInterval): Promise<IntradayBar[]> {
+    const yahooSymbol = toYahooSymbol(symbol)
+    const url = new URL(`/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`, this.baseUrl)
+    url.searchParams.set('interval', interval)
+    url.searchParams.set('range', '60d')
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
+    let response: Response
+    try {
+      response = await this.fetchFn(url.href, {
+        method: 'GET',
+        headers: { Accept: 'application/json', 'User-Agent': this.userAgent },
+        signal: controller.signal,
+      })
+    } catch (error) {
+      throw new BrokerRequestError(
+        `Yahoo intraday bar fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+        `GET /v8/finance/chart/${yahooSymbol}?interval=${interval}`,
+        { cause: error instanceof Error ? error : undefined },
+      )
+    } finally {
+      clearTimeout(timeoutId)
+    }
+    if (!response.ok) {
+      throw brokerErrorForStatus(
+        response.status,
+        `Yahoo intraday bar request failed with status ${response.status}`,
+        `GET /v8/finance/chart/${yahooSymbol}?interval=${interval}`,
+      )
+    }
+    const json = (await response.json()) as YahooChartResponse
+    return normalizeIntradayChart(json)
+  }
+}
+
+export type IntradayInterval = '5m' | '15m' | '30m' | '60m'
+
+export interface IntradayBar {
+  /** ISO UTC timestamp (Yahoo は epoch second を返す → ms 化して toISOString) */
+  timestamp: string
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+/**
+ * Intraday 用 normalize。daily と違い `slice(-lookback)` の trim は不要
+ * (Yahoo intraday は元から 60d 程度なので)。timestamp は秒精度 ISO UTC を保持。
+ */
+function normalizeIntradayChart(json: YahooChartResponse): IntradayBar[] {
+  const result = json.chart?.result?.[0]
+  const timestamps = result?.timestamp
+  const q = result?.indicators?.quote?.[0]
+  if (!timestamps || !q) return []
+  const opens = q.open ?? []
+  const highs = q.high ?? []
+  const lows = q.low ?? []
+  const closes = q.close ?? []
+  const bars: IntradayBar[] = []
+  for (let i = 0; i < timestamps.length; i += 1) {
+    const open = opens[i]
+    const high = highs[i]
+    const low = lows[i]
+    const close = closes[i]
+    if (!isPositiveFinite(open) || !isPositiveFinite(high) || !isPositiveFinite(low) || !isPositiveFinite(close)) {
+      continue
+    }
+    if (low > high) continue
+    const ts = timestamps[i]
+    if (typeof ts !== 'number' || !Number.isFinite(ts)) continue
+    const timestamp = new Date(ts * 1000).toISOString()
+    bars.push({ timestamp, open, high, low, close })
+  }
+  bars.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0))
+  return bars
 }
 
 /**
