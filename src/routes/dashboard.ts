@@ -1481,10 +1481,14 @@ export async function loadSymbolChart(
       // だと 04/21 BUY のような古い entry が chart 範囲外で pin が render されない。
       // 14 日 × 15 分 cadence = 1344 行 ≒ 200KB JSON、ECharts time axis で許容範囲。
       .prepare(
+        // strftime で右辺を ISO UTC 形式 ("...T...:...Z") に揃える。
+        // datetime() のデフォルト出力は "YYYY-MM-DD HH:MM:SS" (空白区切り)
+        // で、stored 形式 "YYYY-MM-DDTHH:MM:SS.SSSZ" との文字列比較では境界が
+        // 約 1 日ぶれる (cutoff 当日の時刻前 row が誤って included される)。
         `SELECT timestamp, price, indicators_json
          FROM strategy_decision_log
          WHERE symbol = ?
-           AND timestamp >= datetime('now', '-14 days')
+           AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
          ORDER BY id ASC`,
       )
       .bind(symbol)
