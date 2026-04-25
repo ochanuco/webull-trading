@@ -267,6 +267,25 @@ describe('dashboard', () => {
     })
   })
 
+  it('rejects non-whole cron decisionId values', async () => {
+    const app = createApp()
+
+    for (const decisionId of ['123abc', '1.5', '0', '-1', '9007199254740992']) {
+      const res = await app.request(
+        `/dashboard/cron/json?decisionId=${encodeURIComponent(decisionId)}`,
+        { headers: authHeader },
+        { ...baseEnv, DB: {} as D1Database },
+      )
+      const body = await res.json()
+
+      expect(res.status).toBe(400)
+      expect(body).toEqual({
+        error: 'invalid_decision_id',
+        message: 'decisionId must be a positive integer',
+      })
+    }
+  })
+
   it('cron page requires basic auth', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/cron', {}, baseEnv)

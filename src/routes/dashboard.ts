@@ -73,11 +73,15 @@ export const dashboard = new Hono<AppBindings>()
     const requestedRequestId = c.req.query('requestId')?.trim()
     const requestedDecisionId = c.req.query('decisionId')?.trim()
     try {
-      const decisionId = requestedDecisionId && requestedDecisionId.length > 0
-        ? Number.parseInt(requestedDecisionId, 10)
-        : undefined
-      if (requestedDecisionId && (!Number.isFinite(decisionId) || decisionId === undefined || decisionId <= 0)) {
-        return jsonPretty({ error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, 400)
+      let decisionId: number | undefined
+      if (requestedDecisionId && requestedDecisionId.length > 0) {
+        if (!/^[1-9]\d*$/.test(requestedDecisionId)) {
+          return jsonPretty({ error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, 400)
+        }
+        decisionId = Number(requestedDecisionId)
+        if (!Number.isSafeInteger(decisionId) || decisionId <= 0) {
+          return jsonPretty({ error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, 400)
+        }
       }
       let requestId = requestedRequestId && requestedRequestId.length > 0
         ? requestedRequestId
