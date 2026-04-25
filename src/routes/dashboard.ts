@@ -102,7 +102,10 @@ export const dashboard = new Hono<AppBindings>()
       }
       // tab === 'symbol'
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
-      const universe = await loadSymbolUniverse(c.env)
+      const [universe, global] = await Promise.all([
+        loadSymbolUniverse(c.env),
+        loadGlobalConfigFrom(c.env),
+      ])
       const allowed = new Set(universe.allowedSymbols)
       const defaultSymbol = await pickDefaultSymbol(c.env.DB)
       const focusSymbol =
@@ -111,7 +114,18 @@ export const dashboard = new Hono<AppBindings>()
           : defaultSymbol && allowed.has(defaultSymbol)
             ? defaultSymbol
             : universe.allowedSymbols[0] ?? null
-      const symbolChart = focusSymbol ? await loadSymbolChart(c.env.DB, focusSymbol) : null
+      // ルール閾値は global_config から。per-symbol override は POC で未対応
+      // (symbol_rules table を引かない)。トレーダーが「だいたい同じ目安」を
+      // 視覚化したいのが要件なので global で十分、override 対応は follow-up
+      const rules: SymbolChartRules = {
+        pullbackMax: global.pullbackDefaultPullbackMax,
+        pullbackMin: global.pullbackDefaultPullbackMin,
+        stopPct: global.pullbackDefaultStopPct,
+        takeProfitPct: global.pullbackDefaultTakeProfitPct,
+      }
+      const symbolChart = focusSymbol
+        ? await loadSymbolChart(c.env.DB, focusSymbol, rules)
+        : null
       return c.html(
         layout(
           'チャート',
@@ -1393,6 +1407,7 @@ export interface SymbolChartPoint {
   timestamp: string // JST display string
   price: number
   sma50: number | null
+  high20d: number | null
 }
 
 export interface SymbolChartMarker {
@@ -1403,18 +1418,43 @@ export interface SymbolChartMarker {
   realizedPnl: number | null
 }
 
+export interface SymbolChartPosition {
+  /** 平均取得単価 (= 直近 BUY filled_price、partial fill / add は未対応 POC) */
+  avgPrice: number
+  /** entry timestamp (JST 表示用文字列) */
+  openedAt: string
+}
+
+export interface SymbolChartRules {
+  /** -0.03 = -3% (押し目浅すぎ閾値) */
+  pullbackMax: number
+  /** -0.15 = -15% (押し目深すぎ閾値) */
+  pullbackMin: number
+  /** -0.04 = -4% (損切ライン) */
+  stopPct: number
+  /** 0.07 = +7% (利食ライン) */
+  takeProfitPct: number
+}
+
 export interface SymbolChartData {
   symbol: string
   points: SymbolChartPoint[]
   markers: SymbolChartMarker[]
+  /** 現保有 (BUY → SELL がまだない) ならその情報、なければ null */
+  position: SymbolChartPosition | null
+  rules: SymbolChartRules
 }
 
 /**
- * 直近 200 件の strategy_decision_log と全 fill markers を返す。
- * sma50 は indicators_json (JSON) から抜く — JSON.parse が失敗したら null
+ * 直近 200 件の strategy_decision_log と全 fill markers + 現保有 + ルール閾値を返す。
+ * sma50 / high20d は indicators_json から抜く — JSON.parse 失敗は null fallback
  * (履歴の indicators スキーマが変わっていても落ちない fail-graceful)。
  */
-export async function loadSymbolChart(db: D1Database, symbol: string): Promise<SymbolChartData> {
+export async function loadSymbolChart(
+  db: D1Database,
+  symbol: string,
+  rules: SymbolChartRules,
+): Promise<SymbolChartData> {
   const [logsResult, fillsResult] = await Promise.all([
     db
       .prepare(
@@ -1449,11 +1489,15 @@ export async function loadSymbolChart(db: D1Database, symbol: string): Promise<S
   // markPoint の xAxis 一致のため points / markers 両方で同じ formatter を使う。
   const points: SymbolChartPoint[] = logs
     .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
-    .map((r) => ({
-      timestamp: fmtJst(r.timestamp),
-      price: Number(r.price),
-      sma50: extractSma50(r.indicators_json),
-    }))
+    .map((r) => {
+      const indicators = parseIndicators(r.indicators_json)
+      return {
+        timestamp: fmtJst(r.timestamp),
+        price: Number(r.price),
+        sma50: indicators.sma50,
+        high20d: indicators.high20d,
+      }
+    })
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
     .filter((r) => (r.side === 'BUY' || r.side === 'SELL') && r.filled_price !== null)
     .map((r) => ({
@@ -1463,17 +1507,46 @@ export async function loadSymbolChart(db: D1Database, symbol: string): Promise<S
       qty: r.filled_qty === null ? null : Number(r.filled_qty),
       realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),
     }))
-  return { symbol, points, markers }
+  return { symbol, points, markers, position: deriveOpenPosition(markers), rules }
+}
+
+/**
+ * 直近 fills を時系列で巻き戻し、最後に「BUY → SELL」で閉じていなければ
+ * 現保有とみなす。partial fill / position add は POC 未対応 (直近 BUY だけ採用)。
+ */
+export function deriveOpenPosition(markers: SymbolChartMarker[]): SymbolChartPosition | null {
+  let latestBuy: SymbolChartMarker | null = null
+  for (const m of markers) {
+    if (m.side === 'BUY') latestBuy = m
+    else if (m.side === 'SELL') latestBuy = null
+  }
+  return latestBuy ? { avgPrice: latestBuy.price, openedAt: latestBuy.timestamp } : null
 }
 
 export function extractSma50(indicatorsJson: string | null): number | null {
-  if (!indicatorsJson) return null
+  return parseIndicators(indicatorsJson).sma50
+}
+
+interface ExtractedIndicators {
+  sma50: number | null
+  high20d: number | null
+}
+
+/**
+ * indicators_json から chart で使う数値を一括抽出。JSON.parse 失敗 / 数値外は null。
+ */
+function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
+  if (!indicatorsJson) return { sma50: null, high20d: null }
   try {
-    const obj = JSON.parse(indicatorsJson) as { sma50?: unknown }
-    if (typeof obj.sma50 === 'number' && Number.isFinite(obj.sma50)) return obj.sma50
-    return null
+    const obj = JSON.parse(indicatorsJson) as { sma50?: unknown; high20d?: unknown }
+    return {
+      sma50:
+        typeof obj.sma50 === 'number' && Number.isFinite(obj.sma50) ? obj.sma50 : null,
+      high20d:
+        typeof obj.high20d === 'number' && Number.isFinite(obj.high20d) ? obj.high20d : null,
+    }
   } catch {
-    return null
+    return { sma50: null, high20d: null }
   }
 }
 
@@ -1674,6 +1747,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var ts = sc.points.map(function (p) { return p.timestamp; });
       var prices = sc.points.map(function (p) { return p.price; });
       var smas = sc.points.map(function (p) { return p.sma50 == null ? null : p.sma50; });
+
+      // 押し目買いゾーン (high20d × (1 + pullbackMax) 〜 high20d × (1 + pullbackMin))。
+      // -3〜-15% の押し目レンジを time-series band として可視化。
+      // band の中に price が入ると entry trigger 圏内、というのが戦略の心臓部。
+      var pullbackMaxMul = 1 + sc.rules.pullbackMax;
+      var pullbackMinMul = 1 + sc.rules.pullbackMin;
+      var bandUpper = sc.points.map(function (p) { return p.high20d == null ? null : p.high20d * pullbackMaxMul; });
+      var bandLower = sc.points.map(function (p) { return p.high20d == null ? null : p.high20d * pullbackMinMul; });
+
       var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
         return { name: 'BUY', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
       });
@@ -1681,19 +1763,37 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
         return { name: 'SELL', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
       });
+
+      // 保有中なら avg / stop / take-profit を水平 markLine で。
+      // 横線は markLine の yAxis 値で固定 (xAxis はチャート全幅)。
+      var positionMarkLines = [];
+      if (sc.position) {
+        var avg = sc.position.avgPrice;
+        var stopPrice = avg * (1 + sc.rules.stopPct);
+        var tpPrice = avg * (1 + sc.rules.takeProfitPct);
+        positionMarkLines = [
+          { yAxis: avg, lineStyle: { color: '#444', type: 'solid', width: 1 }, label: { formatter: 'avg ' + avg.toFixed(2), position: 'insideStartTop', color: '#444' } },
+          { yAxis: stopPrice, lineStyle: { color: '#c22', type: 'dashed', width: 1 }, label: { formatter: 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)', position: 'insideStartBottom', color: '#c22' } },
+          { yAxis: tpPrice, lineStyle: { color: '#057a55', type: 'dashed', width: 1 }, label: { formatter: 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)', position: 'insideStartTop', color: '#057a55' } },
+        ];
+      }
+
       var symChart = echarts.init(document.getElementById('symbol-chart'));
       symChart.setOption({
-        title: { text: sc.symbol + ' price + SMA50 + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: sc.symbol + ' price + SMA50 + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: { trigger: 'axis' },
         legend: { top: 22 },
         grid: { left: 60, right: 20, top: 60, bottom: 40 },
         xAxis: { type: 'category', data: ts },
         yAxis: { type: 'value', scale: true },
         series: [
-          { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none' },
-          { name: 'SMA50', type: 'line', data: smas, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true },
-          { name: 'entry/exit', type: 'scatter', data: [],
-            markPoint: { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) } },
+          { name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')', type: 'line', data: bandUpper, lineStyle: { width: 0.8, color: '#057a55', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 1 },
+          { name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')', type: 'line', data: bandLower, lineStyle: { width: 0.8, color: '#c22', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 1 },
+          { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none', z: 5,
+            markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
+            markPoint: { symbol: 'pin', symbolSize: 36, data: entries.concat(exits) },
+          },
+          { name: 'SMA50', type: 'line', data: smas, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true, z: 2 },
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
