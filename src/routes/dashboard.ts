@@ -73,8 +73,11 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('チャート', unavailable('DB not bound')))
     }
     try {
-      const equity = await loadEquityCurve(c.env.DB)
-      return c.html(layout('チャート', chartsBody({ equity })))
+      const [equity, decisions] = await Promise.all([
+        loadEquityCurve(c.env.DB),
+        loadDecisionBreakdown(c.env.DB),
+      ])
+      return c.html(layout('チャート', chartsBody({ equity, decisions })))
     } catch (err) {
       return c.html(layout('チャート', unavailable(messageOf(err))))
     }
@@ -1136,6 +1139,60 @@ export function computeEquitySeries(
 }
 
 /**
+ * Decision breakdown chart 用の日次集計 (#158 Phase 2)。
+ *
+ * strategy_decision_log を JST 日次でグルーピングし、各 decision
+ * (BUY/SELL/HOLD/REJECT/ERROR) のカウントを返す。トレーダーは
+ * 「BUY/SELL が出すぎ・出なさすぎ」「REJECT が偏ってないか」を一目で
+ * 見たいので、1 日 1 行 × 5 系列の stacked bar 用のデータ形にする。
+ *
+ * 直近 90 日のみ (それ以上はチャートが詰まって読めない)。
+ */
+const DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'REJECT', 'ERROR'] as const
+type DecisionKey = (typeof DECISION_KEYS)[number]
+
+export interface DecisionBreakdownPoint {
+  date: string
+  counts: Record<DecisionKey, number>
+}
+
+export async function loadDecisionBreakdown(db: D1Database): Promise<DecisionBreakdownPoint[]> {
+  const result = await db
+    .prepare(
+      `SELECT date(timestamp, '+9 hours') AS day,
+              decision,
+              COUNT(*) AS n
+       FROM strategy_decision_log
+       WHERE timestamp >= date('now', '-90 days')
+       GROUP BY day, decision
+       ORDER BY day ASC`,
+    )
+    .all<{ day: string; decision: string; n: number }>()
+  return aggregateDecisionRows(result.results ?? [])
+}
+
+export function aggregateDecisionRows(
+  rows: Array<{ day: string; decision: string; n: number }>,
+): DecisionBreakdownPoint[] {
+  const map = new Map<string, Record<DecisionKey, number>>()
+  for (const r of rows) {
+    let bucket = map.get(r.day)
+    if (!bucket) {
+      bucket = { BUY: 0, SELL: 0, HOLD: 0, REJECT: 0, ERROR: 0 }
+      map.set(r.day, bucket)
+    }
+    // 想定外 decision (将来追加など) は ERROR バケットに寄せて見落とし防止
+    const key: DecisionKey = (DECISION_KEYS as readonly string[]).includes(r.decision)
+      ? (r.decision as DecisionKey)
+      : 'ERROR'
+    bucket[key] += Number(r.n)
+  }
+  return [...map.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([date, counts]) => ({ date, counts }))
+}
+
+/**
  * `<script>...</script>` 内に埋め込む JSON を XSS 安全にする。
  * ブラウザは `</script>` を「文字列の中でも」script 終端と解釈するので、
  * `<` を unicode escape して中和する。
@@ -1145,9 +1202,9 @@ export function safeJsonScript(varName: string, data: unknown): string {
   return `<script>window.${varName} = ${json};</script>`
 }
 
-function chartsBody(args: { equity: EquityPoint[] }): string {
-  if (args.equity.length === 0) {
-    return `<p class="muted">まだ実 fill (realized_pnl) が無いためエクイティカーブを描けません。最初の SELL が約定すると表示されます。</p>`
+function chartsBody(args: { equity: EquityPoint[]; decisions: DecisionBreakdownPoint[] }): string {
+  if (args.equity.length === 0 && args.decisions.length === 0) {
+    return `<p class="muted">まだ判定ログも実 fill も無いためチャートを描けません。最初の cron 実行 / SELL 約定後に表示されます。</p>`
   }
   // インライン script の defer 属性は HTML 仕様で無視される (defer は src 必須)。
   // 同期実行されると外部 ECharts (defer 付) より前に走り常に「未読込」になるため、
@@ -1165,32 +1222,63 @@ function chartsBody(args: { equity: EquityPoint[] }): string {
       var equity = data.equity.map(function (p) { return p.cumulativePnl; });
       var dd = data.equity.map(function (p) { return p.drawdownPct * 100; });
 
-      var equityChart = echarts.init(document.getElementById('equity-chart'));
-      equityChart.setOption({
-        title: { text: '累積 realized PnL', left: 'center', textStyle: { fontSize: 14 } },
-        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
-        grid: { left: 50, right: 20, top: 40, bottom: 40 },
-        xAxis: { type: 'category', data: dates },
-        yAxis: { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
-        series: [{ type: 'line', data: equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } }],
-      });
+      // ---- decision breakdown stacked bar (#158 Phase 2) ----
+      var DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'REJECT', 'ERROR'];
+      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', HOLD: '#aaa', REJECT: '#b25000', ERROR: '#c22' };
+      var dbDates = data.decisions.map(function (p) { return p.date; });
+      var dbEl = document.getElementById('decision-chart');
+      if (dbEl && dbDates.length > 0) {
+        var dbChart = echarts.init(dbEl);
+        dbChart.setOption({
+          title: { text: '日次 Decision breakdown (BUY / SELL / HOLD / REJECT / ERROR)', left: 'center', textStyle: { fontSize: 14 } },
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+          legend: { top: 22 },
+          grid: { left: 50, right: 20, top: 60, bottom: 40 },
+          xAxis: { type: 'category', data: dbDates },
+          yAxis: { type: 'value', name: '判定数' },
+          series: DECISION_KEYS.map(function (k) {
+            return {
+              name: k,
+              type: 'bar',
+              stack: 'decisions',
+              data: data.decisions.map(function (p) { return p.counts[k] || 0; }),
+              itemStyle: { color: DECISION_COLORS[k] },
+            };
+          }),
+        });
+        window.addEventListener('resize', function () { dbChart.resize(); });
+      }
 
-      var ddChart = echarts.init(document.getElementById('dd-chart'));
-      ddChart.setOption({
-        title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
-        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
-        grid: { left: 50, right: 20, top: 40, bottom: 40 },
-        xAxis: { type: 'category', data: dates },
-        yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
-        series: [
-          { type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } },
-        ],
-      });
+      var equityEl = document.getElementById('equity-chart');
+      var ddEl = document.getElementById('dd-chart');
+      if (equityEl && ddEl && data.equity.length > 0) {
+        var equityChart = echarts.init(equityEl);
+        equityChart.setOption({
+          title: { text: '累積 realized PnL', left: 'center', textStyle: { fontSize: 14 } },
+          tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
+          grid: { left: 50, right: 20, top: 40, bottom: 40 },
+          xAxis: { type: 'category', data: dates },
+          yAxis: { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
+          series: [{ type: 'line', data: equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } }],
+        });
 
-      window.addEventListener('resize', function () {
-        equityChart.resize();
-        ddChart.resize();
-      });
+        var ddChart = echarts.init(ddEl);
+        ddChart.setOption({
+          title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
+          tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
+          grid: { left: 50, right: 20, top: 40, bottom: 40 },
+          xAxis: { type: 'category', data: dates },
+          yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
+          series: [
+            { type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } },
+          ],
+        });
+
+        window.addEventListener('resize', function () {
+          equityChart.resize();
+          ddChart.resize();
+        });
+      }
     });
   `
   return `<p class="muted" style="font-size:12px">
@@ -1203,6 +1291,7 @@ function chartsBody(args: { equity: EquityPoint[] }): string {
   </p>
   <div id="equity-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   <div id="dd-chart" style="width:100%;height:280px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <div id="decision-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   <p id="chart-status" class="warn" style="font-size:12px;margin-top:8px"></p>
   ${safeJsonScript('__chartData', args)}
   <script src="${ECHARTS_CDN}" defer></script>
