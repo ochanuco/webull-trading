@@ -2,6 +2,12 @@ import { sql } from 'drizzle-orm'
 import { check, index, integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 /**
+ * Schema-level max for pullbackDefaultTimeStopDays. Exported so chart window
+ * logic can stay consistent with DB constraint.
+ */
+export const MAX_TIME_STOP_DAYS = 365
+
+/**
  * append-only trade decision / order lifecycle log. A single row per logical
  * event (`decision` → `intent` → `pre_submit` → `post_submit` → `fill` /
  * `exit`). Column shape is intentionally flat — schema mirrors
@@ -228,7 +234,7 @@ export const globalConfig = sqliteTable(
     ),
     pullbackDefaultTimeStopDaysRange: check(
       'global_config_pullback_default_time_stop_days_range',
-      sql`${t.pullbackDefaultTimeStopDays} > 0 AND ${t.pullbackDefaultTimeStopDays} <= 365`,
+      sql`${t.pullbackDefaultTimeStopDays} > 0 AND ${t.pullbackDefaultTimeStopDays} <= ${MAX_TIME_STOP_DAYS}`,
     ),
     pullbackDefaultPullbackMaxRange: check(
       'global_config_pullback_default_pullback_max_range',

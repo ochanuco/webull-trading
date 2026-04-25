@@ -4,7 +4,7 @@ import type { Env } from '../config/env'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
-import { strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
+import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
 import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -1454,8 +1454,12 @@ export interface SymbolChartRules {
   timeStopDays: number
 }
 
-/** Chart window の上限日数。timeStopDays が大きくても肥大化を防ぐ */
-const MAX_WINDOW_DAYS = 90
+/**
+ * Chart window の上限日数。schema の MAX_TIME_STOP_DAYS (365) から計算。
+ * timeStopDays が大きくても肥大化を防ぐ。
+ * MAX_TIME_STOP_DAYS=365 → 2*365+4 = 734 カレンダー日。
+ */
+const MAX_WINDOW_DAYS = Math.ceil(MAX_TIME_STOP_DAYS * 2 + 4)
 
 /**
  * Chart SQL の window 日数を timeStopDays から動的に決める。
