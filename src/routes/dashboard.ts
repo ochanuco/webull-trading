@@ -72,8 +72,20 @@ export const dashboard = new Hono<AppBindings>()
     if (!c.env.DB) {
       return c.html(layout('チャート', unavailable('DB not bound')))
     }
-    const equity = await loadEquityCurve(c.env.DB)
-    return c.html(layout('チャート', chartsBody({ equity })))
+    try {
+      const [equity, global] = await Promise.all([
+        loadEquityCurve(c.env.DB),
+        loadGlobalConfigFrom(c.env),
+      ])
+      const thresholds = {
+        half: global.riskDdHalfThreshold,
+        kill: global.drawdownKillThreshold,
+        halt: global.riskDdHaltThreshold,
+      }
+      return c.html(layout('チャート', chartsBody({ equity, thresholds })))
+    } catch (err) {
+      return c.html(layout('チャート', unavailable(messageOf(err))))
+    }
   })
   .get('/cron/json', async (c) => {
     if (!c.env.DB) {
@@ -1141,12 +1153,23 @@ export function safeJsonScript(varName: string, data: unknown): string {
   return `<script>window.${varName} = ${json};</script>`
 }
 
-function chartsBody(args: { equity: EquityPoint[] }): string {
+interface DrawdownThresholds {
+  /** 比率 (-0.05 = -5%)。global_config から動的に読む */
+  half: number
+  kill: number
+  halt: number
+}
+
+function chartsBody(args: { equity: EquityPoint[]; thresholds: DrawdownThresholds }): string {
   if (args.equity.length === 0) {
     return `<p class="muted">まだ実 fill (realized_pnl) が無いためエクイティカーブを描けません。最初の SELL が約定すると表示されます。</p>`
   }
+  // インライン script の defer 属性は HTML 仕様で無視される (defer は src 必須)。
+  // 同期実行されると外部 ECharts (defer 付) より前に走り常に「未読込」になるため、
+  // DOMContentLoaded を待つ。defer 付き外部 script は DOMContentLoaded 前に
+  // 実行完了するので、このタイミングで echarts は確実に利用可能。
   const initScript = `
-    (function () {
+    document.addEventListener('DOMContentLoaded', function () {
       if (typeof echarts === 'undefined') {
         var el = document.getElementById('chart-status');
         if (el) el.textContent = 'ECharts CDN を読み込めませんでした (ネットワーク or CSP 確認)';
@@ -1156,6 +1179,11 @@ function chartsBody(args: { equity: EquityPoint[] }): string {
       var dates = data.equity.map(function (p) { return p.date; });
       var equity = data.equity.map(function (p) { return p.cumulativePnl; });
       var dd = data.equity.map(function (p) { return p.drawdownPct * 100; });
+      var halfPct = data.thresholds.half * 100;
+      var killPct = data.thresholds.kill * 100;
+      var haltPct = data.thresholds.halt * 100;
+      function flat(v) { return dates.map(function () { return v; }); }
+      function lbl(name, v) { return name + ' (' + v.toFixed(2) + '%)'; }
 
       var equityChart = echarts.init(document.getElementById('equity-chart'));
       equityChart.setOption({
@@ -1176,18 +1204,9 @@ function chartsBody(args: { equity: EquityPoint[] }): string {
         yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
         series: [
           { type: 'line', data: dd, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } },
-          {
-            type: 'line', data: dates.map(function () { return -5; }), lineStyle: { color: '#888', type: 'dashed', width: 1 },
-            symbol: 'none', name: 'risk_dd_half_threshold (-5%)',
-          },
-          {
-            type: 'line', data: dates.map(function () { return -8; }), lineStyle: { color: '#b25000', type: 'dashed', width: 1 },
-            symbol: 'none', name: 'drawdown_kill_threshold (-8%)',
-          },
-          {
-            type: 'line', data: dates.map(function () { return -15; }), lineStyle: { color: '#c22', type: 'dashed', width: 1 },
-            symbol: 'none', name: 'risk_dd_halt_threshold (-15%)',
-          },
+          { type: 'line', data: flat(halfPct), lineStyle: { color: '#888', type: 'dashed', width: 1 }, symbol: 'none', name: lbl('risk_dd_half_threshold', halfPct) },
+          { type: 'line', data: flat(killPct), lineStyle: { color: '#b25000', type: 'dashed', width: 1 }, symbol: 'none', name: lbl('drawdown_kill_threshold', killPct) },
+          { type: 'line', data: flat(haltPct), lineStyle: { color: '#c22', type: 'dashed', width: 1 }, symbol: 'none', name: lbl('risk_dd_halt_threshold', haltPct) },
         ],
       });
 
@@ -1195,7 +1214,7 @@ function chartsBody(args: { equity: EquityPoint[] }): string {
         equityChart.resize();
         ddChart.resize();
       });
-    })();
+    });
   `
   return `<p class="muted" style="font-size:12px">
     Phase 0+1: 累積 realized PnL とドローダウン。シード資金額を保持していないため
@@ -1208,5 +1227,5 @@ function chartsBody(args: { equity: EquityPoint[] }): string {
   <p id="chart-status" class="warn" style="font-size:12px;margin-top:8px"></p>
   ${safeJsonScript('__chartData', args)}
   <script src="${ECHARTS_CDN}" defer></script>
-  <script defer>${initScript}</script>`
+  <script>${initScript}</script>`
 }
