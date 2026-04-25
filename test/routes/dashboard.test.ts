@@ -440,7 +440,7 @@ describe('safeJsonScript', () => {
   })
 })
 
-import { aggregateDecisionRows, computeTradeStats, computePnlHistogram } from '../../src/routes/dashboard'
+import { aggregateDecisionRows, computeTradeStats, computePnlHistogram, extractSma50 } from '../../src/routes/dashboard'
 
 describe('aggregateDecisionRows', () => {
   it('日付ごとに decision を集計', () => {
@@ -541,5 +541,30 @@ describe('computePnlHistogram', () => {
     const out = computePnlHistogram([5, -5])
     const total = out.reduce((acc, b) => acc + b.count, 0)
     expect(total).toBe(2)
+  })
+})
+
+describe('extractSma50', () => {
+  it('正常な JSON から sma50 を返す', () => {
+    expect(extractSma50('{"sma50":123.45,"price":120}')).toBe(123.45)
+  })
+
+  it('null / 空文字 / undefined は null', () => {
+    expect(extractSma50(null)).toBe(null)
+    expect(extractSma50('')).toBe(null)
+  })
+
+  it('壊れた JSON は null (履歴の schema 変動でも落ちない)', () => {
+    expect(extractSma50('not-json')).toBe(null)
+  })
+
+  it('sma50 が無い / 数値でないと null', () => {
+    expect(extractSma50('{"price":100}')).toBe(null)
+    expect(extractSma50('{"sma50":"foo"}')).toBe(null)
+    expect(extractSma50('{"sma50":null}')).toBe(null)
+  })
+
+  it('Infinity / NaN は null (JSON では NaN は parse 不可、Infinity は文字列)', () => {
+    expect(extractSma50('{"sma50":1e9999}')).toBe(null)
   })
 })

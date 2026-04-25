@@ -73,14 +73,42 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('チャート', unavailable('DB not bound')))
     }
     try {
-      const [equity, decisions, pnls] = await Promise.all([
+      const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
+      const universe = await loadSymbolUniverse(c.env)
+      const allowed = new Set(universe.allowedSymbols)
+      // pickDefaultSymbol は trade_journal を見るので、過去に約定したが
+      // 現 universe から外れた銘柄を返しうる (例: SPY 無効化後)。
+      // allowed で再検証して universe 整合を保つ。
+      const defaultSymbol = await pickDefaultSymbol(c.env.DB)
+      const focusSymbol =
+        symbolParam && allowed.has(symbolParam)
+          ? symbolParam
+          : defaultSymbol && allowed.has(defaultSymbol)
+            ? defaultSymbol
+            : universe.allowedSymbols[0] ?? null
+      const [equity, decisions, pnls, symbolChart] = await Promise.all([
         loadEquityCurve(c.env.DB),
         loadDecisionBreakdown(c.env.DB),
         loadTradePnls(c.env.DB),
+        focusSymbol ? loadSymbolChart(c.env.DB, focusSymbol) : Promise.resolve(null),
       ])
       const stats = computeTradeStats(pnls)
       const histogram = computePnlHistogram(pnls)
-      return c.html(layout('チャート', chartsBody({ equity, decisions, pnls, stats, histogram })))
+      return c.html(
+        layout(
+          'チャート',
+          chartsBody({
+            equity,
+            decisions,
+            pnls,
+            stats,
+            histogram,
+            focusSymbol,
+            symbolChart,
+            availableSymbols: universe.allowedSymbols,
+          }),
+        ),
+      )
     } catch (err) {
       return c.html(layout('チャート', unavailable(messageOf(err))))
     }
@@ -1328,6 +1356,131 @@ function renderTradeStatsTable(s: TradeStats): string {
 }
 
 /**
+ * 銘柄チャートで focus する銘柄を決める (#158 Phase 4)。
+ * クエリ ?symbol=X が universe にあればそれ、無ければ「直近で BUY/SELL
+ * fill のあった銘柄」、それも無ければ universe の先頭。
+ *
+ * 「実際に売買したことがある銘柄」を優先する理由: トレーダーが
+ * 「rule の解釈が現実と合ってるか」を最初に見たいのは、エントリーが
+ * あった銘柄だから。
+ */
+export async function pickDefaultSymbol(db: D1Database): Promise<string | null> {
+  const result = await db
+    .prepare(
+      `SELECT symbol FROM trade_journal
+       WHERE trade_event_type = 'post_submit' AND filled_qty IS NOT NULL
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .all<{ symbol: string }>()
+  return result.results?.[0]?.symbol ?? null
+}
+
+export interface SymbolChartPoint {
+  timestamp: string // JST display string
+  price: number
+  sma50: number | null
+}
+
+export interface SymbolChartMarker {
+  timestamp: string
+  side: 'BUY' | 'SELL'
+  price: number
+  qty: number | null
+  realizedPnl: number | null
+}
+
+export interface SymbolChartData {
+  symbol: string
+  points: SymbolChartPoint[]
+  markers: SymbolChartMarker[]
+}
+
+/**
+ * 直近 200 件の strategy_decision_log と全 fill markers を返す。
+ * sma50 は indicators_json (JSON) から抜く — JSON.parse が失敗したら null
+ * (履歴の indicators スキーマが変わっていても落ちない fail-graceful)。
+ */
+export async function loadSymbolChart(db: D1Database, symbol: string): Promise<SymbolChartData> {
+  const [logsResult, fillsResult] = await Promise.all([
+    db
+      .prepare(
+        `SELECT timestamp, price, indicators_json
+         FROM strategy_decision_log
+         WHERE symbol = ?
+         ORDER BY id DESC
+         LIMIT 200`,
+      )
+      .bind(symbol)
+      .all<{ timestamp: string; price: number | null; indicators_json: string | null }>(),
+    db
+      .prepare(
+        `SELECT timestamp, side, filled_price, filled_qty, realized_pnl
+         FROM trade_journal
+         WHERE symbol = ?
+           AND trade_event_type = 'post_submit'
+           AND filled_price IS NOT NULL
+         ORDER BY id ASC`,
+      )
+      .bind(symbol)
+      .all<{
+        timestamp: string
+        side: string | null
+        filled_price: number | null
+        filled_qty: number | null
+        realized_pnl: number | null
+      }>(),
+  ])
+  const logs = (logsResult.results ?? []).reverse() // ASC for chart
+  const points: SymbolChartPoint[] = logs
+    .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
+    .map((r) => ({
+      timestamp: r.timestamp,
+      price: Number(r.price),
+      sma50: extractSma50(r.indicators_json),
+    }))
+  const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
+    .filter((r) => (r.side === 'BUY' || r.side === 'SELL') && r.filled_price !== null)
+    .map((r) => ({
+      timestamp: r.timestamp,
+      side: r.side as 'BUY' | 'SELL',
+      price: Number(r.filled_price),
+      qty: r.filled_qty === null ? null : Number(r.filled_qty),
+      realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),
+    }))
+  return { symbol, points, markers }
+}
+
+export function extractSma50(indicatorsJson: string | null): number | null {
+  if (!indicatorsJson) return null
+  try {
+    const obj = JSON.parse(indicatorsJson) as { sma50?: unknown }
+    if (typeof obj.sma50 === 'number' && Number.isFinite(obj.sma50)) return obj.sma50
+    return null
+  } catch {
+    return null
+  }
+}
+
+function renderSymbolPicker(args: ChartsViewModel): string {
+  if (args.availableSymbols.length === 0) return ''
+  const opts = args.availableSymbols
+    .map(
+      (s) =>
+        // symbol は href の URL 文字列なので encodeURIComponent
+        // (esc は HTML 用、& や # を含む symbol で query が壊れる)。
+        // 表示テキスト側は esc のままで XSS 対策を維持。
+        `<a href="/dashboard/charts?symbol=${encodeURIComponent(s)}" style="margin-right:6px;${
+          s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
+        }">${esc(s)}</a>`,
+    )
+    .join('')
+  const focusLabel = args.focusSymbol ?? '—'
+  return `<p class="muted" style="font-size:12px;margin-top:18px">
+    銘柄: <strong>${esc(focusLabel)}</strong> | 切替: ${opts}
+  </p>`
+}
+
+/**
  * `<script>...</script>` 内に埋め込む JSON を XSS 安全にする。
  * ブラウザは `</script>` を「文字列の中でも」script 終端と解釈するので、
  * `<` を unicode escape して中和する。
@@ -1343,10 +1496,18 @@ interface ChartsViewModel {
   pnls: number[]
   stats: TradeStats
   histogram: PnlHistogramBin[]
+  focusSymbol: string | null
+  symbolChart: SymbolChartData | null
+  availableSymbols: string[]
 }
 
 function chartsBody(args: ChartsViewModel): string {
-  if (args.equity.length === 0 && args.decisions.length === 0) {
+  // loadSymbolChart は データなしでも空配列入りオブジェクトを返すので、
+  // null か中身空かの両方をチェックして empty state 判定を厳密化。
+  const noSymbolChartData =
+    args.symbolChart === null ||
+    (args.symbolChart.points.length === 0 && args.symbolChart.markers.length === 0)
+  if (args.equity.length === 0 && args.decisions.length === 0 && noSymbolChartData) {
     return `<p class="muted">まだ判定ログも実 fill も無いためチャートを描けません。最初の cron 実行 / SELL 約定後に表示されます。</p>`
   }
   // インライン script の defer 属性は HTML 仕様で無視される (defer は src 必須)。
@@ -1419,6 +1580,43 @@ function chartsBody(args: ChartsViewModel): string {
         window.addEventListener('resize', function () { pnlHist.resize(); });
       }
 
+      // ---- Per-symbol price + SMA + entry/exit markers (#158 Phase 4) ----
+      var symEl = document.getElementById('symbol-chart');
+      if (symEl && data.symbolChart && data.symbolChart.points.length > 0) {
+        var sc = data.symbolChart;
+        var ts = sc.points.map(function (p) { return p.timestamp; });
+        var prices = sc.points.map(function (p) { return p.price; });
+        var smas = sc.points.map(function (p) { return p.sma50 == null ? null : p.sma50; });
+        var entries = sc.markers.filter(function (m) { return m.side === 'BUY'; }).map(function (m) {
+          return { name: 'BUY', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'BUY @' + m.price.toFixed(2), color: '#057a55', position: 'top' }, itemStyle: { color: '#057a55' } };
+        });
+        var exits = sc.markers.filter(function (m) { return m.side === 'SELL'; }).map(function (m) {
+          var pnlLabel = m.realizedPnl == null ? '' : ' (' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(2) + ')';
+          return { name: 'SELL', xAxis: m.timestamp, yAxis: m.price, label: { formatter: 'SELL @' + m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom' }, itemStyle: { color: '#c22' } };
+        });
+        var symChart = echarts.init(symEl);
+        symChart.setOption({
+          title: { text: sc.symbol + ' price + SMA50 + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
+          tooltip: { trigger: 'axis' },
+          legend: { top: 22 },
+          grid: { left: 60, right: 20, top: 60, bottom: 40 },
+          xAxis: { type: 'category', data: ts },
+          yAxis: { type: 'value', scale: true },
+          series: [
+            { name: 'price', type: 'line', data: prices, lineStyle: { width: 1.5, color: '#1471a8' }, symbol: 'none' },
+            { name: 'SMA50', type: 'line', data: smas, lineStyle: { width: 1, color: '#888', type: 'dashed' }, symbol: 'none', connectNulls: true },
+            {
+              name: 'entry/exit', type: 'scatter', data: [],
+              markPoint: {
+                symbol: 'pin', symbolSize: 36,
+                data: entries.concat(exits),
+              },
+            },
+          ],
+        });
+        window.addEventListener('resize', function () { symChart.resize(); });
+      }
+
       var equityEl = document.getElementById('equity-chart');
       var ddEl = document.getElementById('dd-chart');
       if (equityEl && ddEl && data.equity.length > 0) {
@@ -1464,6 +1662,8 @@ function chartsBody(args: ChartsViewModel): string {
   <div id="decision-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   <div id="pnl-hist-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   ${renderTradeStatsTable(args.stats)}
+  ${renderSymbolPicker(args)}
+  <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   <p id="chart-status" class="warn" style="font-size:12px;margin-top:8px"></p>
   ${safeJsonScript('__chartData', args)}
   <script src="${ECHARTS_CDN}" defer></script>
