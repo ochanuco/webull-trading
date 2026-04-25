@@ -1927,12 +1927,21 @@ export interface StrategyParamsSnapshot {
 }
 
 /**
- * ISO UTC timestamp (例: "2026-04-15T00:00:00Z" / 末尾 Z 無し可) として
- * パース可能なら Date を返し、不正なら null。Number.isFinite で防御。
+ * ISO UTC timestamp (例: "2026-04-15T00:00:00Z") をパースして Date を返す。
+ * timezone marker (末尾 Z または ±HH:MM offset) が無い datetime 文字列は
+ * `new Date` だと local time 扱いになり (JST runner で意図しないシフト)、
+ * JSDoc の "UTC timestamp" 約束に違反する。`T` を含むのに tz が無ければ
+ * `Z` を補って UTC と解釈させる。date-only ("2026-04-15") は ECMAScript
+ * 仕様で既に UTC 解釈なので変更不要。
  */
 export function parseIsoTimestamp(raw: string | undefined): Date | null {
   if (!raw || raw.trim() === '') return null
-  const d = new Date(raw)
+  let s = raw.trim()
+  const hasTz = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(s)
+  if (s.includes('T') && !hasTz) {
+    s = `${s}Z`
+  }
+  const d = new Date(s)
   if (!Number.isFinite(d.getTime())) return null
   return d
 }
@@ -2338,6 +2347,8 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
 
       // dataZoom 変更で URL の ?from / ?to を更新 (replaceState なので history
       // 汚染なし)。debounce 200ms で連続操作中の URL flicker を抑制。
+      // 同時に symbol picker / tab strip の '?tab=symbol' リンクの href も
+      // 上書き → 銘柄切替で zoom が古い range に reset されない。
       var dzTimer = null;
       symChart.on('dataZoom', function () {
         if (dzTimer) clearTimeout(dzTimer);
@@ -2349,10 +2360,23 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           var ev = dz.endValue;
           if (sv == null || ev == null) return;
           try {
+            var fromIso = new Date(sv).toISOString();
+            var toIso = new Date(ev).toISOString();
             var url = new URL(window.location.href);
-            url.searchParams.set('from', new Date(sv).toISOString());
-            url.searchParams.set('to', new Date(ev).toISOString());
+            url.searchParams.set('from', fromIso);
+            url.searchParams.set('to', toIso);
             window.history.replaceState({}, '', url.toString());
+            // server-render 時の picker / tab strip リンクは古い from/to を
+            // 持っているので、ここで href を新値に書き換える。
+            var symbolLinks = document.querySelectorAll('a[href*="tab=symbol"]');
+            for (var i = 0; i < symbolLinks.length; i += 1) {
+              try {
+                var linkUrl = new URL(symbolLinks[i].href);
+                linkUrl.searchParams.set('from', fromIso);
+                linkUrl.searchParams.set('to', toIso);
+                symbolLinks[i].href = linkUrl.toString();
+              } catch (e) { /* noop per-link */ }
+            }
           } catch (e) { /* noop */ }
         }, 200);
       });

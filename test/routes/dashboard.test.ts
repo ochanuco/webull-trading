@@ -954,8 +954,21 @@ describe('parseIsoTimestamp', () => {
     expect(d!.toISOString()).toBe('2026-04-25T13:00:00.000Z')
   })
 
-  it('Z 無し ISO も valid', () => {
-    expect(parseIsoTimestamp('2026-04-25T13:00:00')).not.toBeNull()
+  it('Z 無し ISO は UTC と解釈 (local time として 9 時間ずれない)', () => {
+    const d = parseIsoTimestamp('2026-04-25T13:00:00')
+    expect(d).not.toBeNull()
+    // runner の TZ に関わらず UTC 13:00 として解釈される
+    expect(d!.toISOString()).toBe('2026-04-25T13:00:00.000Z')
+  })
+
+  it('±HH:MM offset 付き ISO は offset 通り解釈', () => {
+    const d = parseIsoTimestamp('2026-04-25T13:00:00+09:00')
+    expect(d!.toISOString()).toBe('2026-04-25T04:00:00.000Z')
+  })
+
+  it('date-only 文字列は ECMAScript 仕様で UTC 解釈', () => {
+    const d = parseIsoTimestamp('2026-04-25')
+    expect(d!.toISOString()).toBe('2026-04-25T00:00:00.000Z')
   })
 
   it('undefined / 空文字列 / 空白は null', () => {
