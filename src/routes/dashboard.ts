@@ -76,10 +76,16 @@ export const dashboard = new Hono<AppBindings>()
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       const universe = await loadSymbolUniverse(c.env)
       const allowed = new Set(universe.allowedSymbols)
+      // pickDefaultSymbol は trade_journal を見るので、過去に約定したが
+      // 現 universe から外れた銘柄を返しうる (例: SPY 無効化後)。
+      // allowed で再検証して universe 整合を保つ。
+      const defaultSymbol = await pickDefaultSymbol(c.env.DB)
       const focusSymbol =
         symbolParam && allowed.has(symbolParam)
           ? symbolParam
-          : (await pickDefaultSymbol(c.env.DB)) ?? universe.allowedSymbols[0] ?? null
+          : defaultSymbol && allowed.has(defaultSymbol)
+            ? defaultSymbol
+            : universe.allowedSymbols[0] ?? null
       const [equity, decisions, pnls, symbolChart] = await Promise.all([
         loadEquityCurve(c.env.DB),
         loadDecisionBreakdown(c.env.DB),
@@ -1460,7 +1466,10 @@ function renderSymbolPicker(args: ChartsViewModel): string {
   const opts = args.availableSymbols
     .map(
       (s) =>
-        `<a href="/dashboard/charts?symbol=${esc(s)}" style="margin-right:6px;${
+        // symbol は href の URL 文字列なので encodeURIComponent
+        // (esc は HTML 用、& や # を含む symbol で query が壊れる)。
+        // 表示テキスト側は esc のままで XSS 対策を維持。
+        `<a href="/dashboard/charts?symbol=${encodeURIComponent(s)}" style="margin-right:6px;${
           s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
         }">${esc(s)}</a>`,
     )
@@ -1493,7 +1502,12 @@ interface ChartsViewModel {
 }
 
 function chartsBody(args: ChartsViewModel): string {
-  if (args.equity.length === 0 && args.decisions.length === 0 && args.symbolChart === null) {
+  // loadSymbolChart は データなしでも空配列入りオブジェクトを返すので、
+  // null か中身空かの両方をチェックして empty state 判定を厳密化。
+  const noSymbolChartData =
+    args.symbolChart === null ||
+    (args.symbolChart.points.length === 0 && args.symbolChart.markers.length === 0)
+  if (args.equity.length === 0 && args.decisions.length === 0 && noSymbolChartData) {
     return `<p class="muted">まだ判定ログも実 fill も無いためチャートを描けません。最初の cron 実行 / SELL 約定後に表示されます。</p>`
   }
   // インライン script の defer 属性は HTML 仕様で無視される (defer は src 必須)。
