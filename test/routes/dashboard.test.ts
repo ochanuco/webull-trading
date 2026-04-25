@@ -943,6 +943,76 @@ describe('mergeYahooAndCronPoints', () => {
       '2026-04-25T05:00:00.000Z',
     ])
   })
+
+  it('Yahoo bar の sma50 を cron eval (sma50=null) に埋め込む', () => {
+    const yahoo = [
+      { jstDate: '2026-04-24', close: 105, sma50: 92, timestamp: '2026-04-24T16:00:00.000Z' },
+    ]
+    const cron: SymbolChartPoint[] = [
+      // 同 JST 日かつ sma50 null → Yahoo SMA50 で埋める
+      { timestamp: '2026-04-24T05:00:00.000Z', price: 104, sma50: null, high20d: null, low20d: null },
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, cron)
+    expect(merged.length).toBe(1) // 同 JST 日なので cron 優先 + Yahoo は filler skip
+    expect(merged[0]!.sma50).toBe(92)
+  })
+
+  it('cron eval が sma50 を持っていれば Yahoo より優先', () => {
+    const yahoo = [
+      { jstDate: '2026-04-24', close: 105, sma50: 92, timestamp: '2026-04-24T16:00:00.000Z' },
+    ]
+    const cron: SymbolChartPoint[] = [
+      { timestamp: '2026-04-24T05:00:00.000Z', price: 104, sma50: 88, high20d: null, low20d: null },
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, cron)
+    expect(merged[0]!.sma50).toBe(88) // cron 優先
+  })
+
+  it('Yahoo only の日は yahoo.sma50 がそのまま filler に乗る', () => {
+    const yahoo = [
+      { jstDate: '2026-04-23', close: 100, sma50: 90, timestamp: '2026-04-23T16:00:00.000Z' },
+    ]
+    const merged = mergeYahooAndCronPoints(yahoo, [])
+    expect(merged[0]!.sma50).toBe(90)
+  })
+})
+
+import { computeRollingSma } from '../../src/routes/dashboard'
+
+describe('computeRollingSma', () => {
+  it('window より少ない先頭は null、window 到達後に平均', () => {
+    const out = computeRollingSma([1, 2, 3, 4, 5], 3)
+    expect(out).toEqual([null, null, 2, 3, 4])
+  })
+
+  it('window=1 は値そのまま', () => {
+    expect(computeRollingSma([10, 20, 30], 1)).toEqual([10, 20, 30])
+  })
+
+  it('空入力は空', () => {
+    expect(computeRollingSma([], 5)).toEqual([])
+  })
+
+  it('window <= 0 は全 null (defensive)', () => {
+    expect(computeRollingSma([1, 2, 3], 0)).toEqual([null, null, null])
+  })
+})
+
+import { fetchYahooBarsForChart } from '../../src/routes/dashboard'
+
+describe('fetchYahooBarsForChart', () => {
+  // warmup を足してから getDailyBars に渡す実装で contract leak していたケース
+  // (lookback=0 / 負値 / 非整数) を caller contract のままで弾けることを確認。
+  // 実 fetch には行かないので mock 不要 (validation で先に throw)。
+  it('lookback=0 で RangeError', async () => {
+    await expect(fetchYahooBarsForChart('AAPL', 0)).rejects.toBeInstanceOf(RangeError)
+  })
+  it('lookback 負値で RangeError', async () => {
+    await expect(fetchYahooBarsForChart('AAPL', -10)).rejects.toBeInstanceOf(RangeError)
+  })
+  it('lookback 非整数で RangeError', async () => {
+    await expect(fetchYahooBarsForChart('AAPL', 1.5)).rejects.toBeInstanceOf(RangeError)
+  })
 })
 
 import { parseIsoTimestamp } from '../../src/routes/dashboard'
