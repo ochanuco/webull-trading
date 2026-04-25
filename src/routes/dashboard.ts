@@ -2421,6 +2421,21 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var ohlcMs = ohlcBars.map(function (b) { return new Date(b.timestamp).getTime(); });
       var categories = ohlcBars.map(function (b) { return b.timestamp; });
 
+      // セッション境界 (休場 → 開場) 検出:
+      // category axis 化で休場 gap が詰まった結果 (#193)、視覚的に
+      // 「どこから新セッションか」が分かりにくくなった。1h interval なので
+      // 隣接 bar は通常 60 分差。週末 / 夜間 closed 後の最初の bar は数時間〜
+      // 数十時間ぶんの差が空く。閾値 90 分 (= 1.5h) で safe に検出し、後ろ側
+      // category index を「新セッションの開場点」として markLine 描画する。
+      // useCategoryAxis === false (intradayBars 空) の場合は描画 skip。
+      var sessionOpenIndices = [];
+      if (useCategoryAxis) {
+        var SESSION_GAP_MS = 90 * 60 * 1000;
+        for (var si = 1; si < ohlcMs.length; si++) {
+          if (ohlcMs[si] - ohlcMs[si - 1] >= SESSION_GAP_MS) sessionOpenIndices.push(si);
+        }
+      }
+
       // Map a millisecond timestamp to the nearest category index.
       // ohlcMs は intradayBars の順序 (= Yahoo の昇順) を保つ前提。binary search
       // で近接 index を返す。ohlcMs 空 (= time axis fallback) なら -1。
@@ -2893,6 +2908,22 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             // として描画する (下方参照、densifyHorizontalLine 適用)。
             // candlestick の markLine は trend line / position line いずれも
             // dataZoom + 2 点だと「片端外で線が消える」回帰があるため使わない。
+            //
+            // ただしセッション境界の縦点線は xAxis: <category index> 指定で
+            // y 軸全幅にまたがる「真の vertical markLine」となり、ECharts の
+            // 描画 path が trend line (slanted 2-point markLine) とは別系統。
+            // 縦線方向は zoom 範囲外でも描画ロバスト (#193 follow-up)。
+            // category 軸モード時のみ data を積む (time axis fallback では空)。
+            markLine: sessionOpenIndices.length > 0 ? {
+              symbol: 'none',
+              silent: true,
+              label: { show: false },
+              lineStyle: { color: '#bbb', width: 1, type: 'dashed' },
+              z: 1,
+              data: sessionOpenIndices.map(function (idx) {
+                return { xAxis: idx };
+              }),
+            } : undefined,
             markPoint: entries.length + exits.length > 0 ? {
               symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
               tooltip: {
