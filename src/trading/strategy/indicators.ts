@@ -17,6 +17,11 @@ export interface PullbackIndicatorSnapshot {
   sma50: number
   return50d: number
   high20d: number
+  /**
+   * 20 日安値 (low20d) — 戦略 ロジック上は未使用、dashboard 個別銘柄チャートで
+   * 「下値支持線」として可視化するために計算 (`high20d` と対称な指標)。
+   */
+  low20d: number
   atr20: number
   baselineAtr20: number
 }
@@ -31,12 +36,14 @@ export function computePullbackIndicators(bars: DailyBar[]): PullbackIndicatorSn
 
   const closes = bars.map((b) => b.close)
   const highs = bars.map((b) => b.high)
+  const lows = bars.map((b) => b.low)
   const last = closes[closes.length - 1]!
   const baseline = closes[closes.length - 50]!
   if (baseline <= 0) return null
 
   const sma50 = average(closes.slice(-50))
   const high20d = Math.max(...highs.slice(-20))
+  const low20d = Math.min(...lows.slice(-20))
   const return50d = (last - baseline) / baseline
 
   const trueRanges = computeTrueRanges(bars)
@@ -46,7 +53,7 @@ export function computePullbackIndicators(bars: DailyBar[]): PullbackIndicatorSn
   // against to decide whether to floor the size. 60 bars ≈ ~3 months daily.
   const baselineAtr20 = average(trueRanges.slice(-Math.min(trueRanges.length, 60)))
 
-  return { price: last, sma50, return50d, high20d, atr20, baselineAtr20 }
+  return { price: last, sma50, return50d, high20d, low20d, atr20, baselineAtr20 }
 }
 
 export function computeHoldBusinessDays(

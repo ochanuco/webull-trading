@@ -17,7 +17,7 @@ describe('computePullbackIndicators', () => {
     expect(computePullbackIndicators(makeBars([1, 2, 3]))).toBeNull()
   })
 
-  it('computes sma50 / return50d / high20d from the tail window', () => {
+  it('computes sma50 / return50d / high20d / low20d from the tail window', () => {
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const result = computePullbackIndicators(makeBars(closes))
     expect(result).not.toBeNull()
@@ -29,6 +29,19 @@ describe('computePullbackIndicators', () => {
     expect(r.return50d).toBeCloseTo((159 - 110) / 110, 4)
     // high20d = max of highs for last 20 bars. highs are close*1.01.
     expect(r.high20d).toBeCloseTo(159 * 1.01, 4)
+    // low20d = min of lows for last 20 bars. lows are close*0.99, last 20 closes
+    // are 140..159 → min = 140 * 0.99
+    expect(r.low20d).toBeCloseTo(140 * 0.99, 4)
+  })
+
+  it('low20d picks the smallest low even when not the most recent bar', () => {
+    // 60 closes mostly increasing, but last 20 includes a dip to enforce the
+    // 20-bar window semantics. Set bar[55].low artificially low.
+    const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
+    const bars = makeBars(closes)
+    bars[55]!.low = 50 // dip in last 20
+    const r = computePullbackIndicators(bars)!
+    expect(r.low20d).toBeCloseTo(50, 4)
   })
 })
 
