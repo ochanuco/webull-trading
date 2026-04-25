@@ -2006,6 +2006,58 @@ export function densifyTrendLine(
 }
 
 /**
+ * 保有中の avg / stop / take-profit のような「水平線分」を「描画用の密点列」
+ * に展開する (`densifyTrendLine` と同じ目的の slope=0 特殊化)。
+ *
+ * 背景: 旧実装では candlestick の `markLine` に [{coord:[fromTs,y]}, {coord:[toTs,y]}]
+ * の 2 点だけを渡していたが、ECharts の dataZoom + markLine は trend line と
+ * 同様に「片端が zoom 範囲外になると markLine 全体が描画されない」回帰が
+ * 起きる (#190 / #191 の trend line と同根、issue #3637 系)。1D zoom in で
+ * `openedAt` が範囲外になり avg / stop / TP が一斉に消えるユーザ報告に
+ * 対応するため、本関数で fromTs〜toTs を intradayBars timestamps で密化した
+ * `[[t, y], ...]` に展開し、独立 `type: 'line'` series として描画する。
+ *
+ * 仕様:
+ * - 戻り値は ascending order の `[t, y]` 配列。`fromTs` と `toTs` は端点として
+ *   常に含む (sample に存在しなくても)。`samples` のうち `[fromTs, toTs]`
+ *   範囲内のものを併合してユニーク化 + 昇順 sort。
+ * - 水平線なので y は常に `yValue` (一定)。
+ * - `fromTs > toTs` の degenerate ケース (openedAt > 最新 timestamp、cron が
+ *   未だ走っていない直後) は 2 点 fallback `[[fromTs, y], [toTs, y]]`。
+ *   呼び元側で既に `endTs = max(latestTs, openedAt)` の clamp をかけている
+ *   ため通常は通らないが防御。
+ * - `yValue` / `fromTs` / `toTs` が NaN / Infinity / 不正 ISO string なら null
+ *   (描画 skip)。
+ * - `samples` の不正値 (NaN / non-ISO string) は除外。
+ */
+export function densifyHorizontalLine(
+  yValue: number,
+  fromTs: string | number,
+  toTs: string | number,
+  samples: ReadonlyArray<string | number>,
+): Array<[number, number]> | null {
+  if (!Number.isFinite(yValue)) return null
+  const a = typeof fromTs === 'number' ? fromTs : new Date(fromTs).getTime()
+  const b = typeof toTs === 'number' ? toTs : new Date(toTs).getTime()
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null
+  // degenerate: fromTs >= toTs。端点 2 点だけ返す (描画は実質 1 点と同等
+  // だが series.data が空にならないようにする)。
+  if (a >= b) return [[a, yValue], [b, yValue]]
+  const tsSet = new Set<number>()
+  // 端点を必ず含める
+  tsSet.add(a)
+  tsSet.add(b)
+  for (const s of samples) {
+    const t = typeof s === 'number' ? s : new Date(s).getTime()
+    if (!Number.isFinite(t)) continue
+    if (t < a || t > b) continue
+    tsSet.add(t)
+  }
+  const sorted = Array.from(tsSet).sort((x, y) => x - y)
+  return sorted.map((t) => [t, yValue] as [number, number])
+}
+
+/**
  * fill 行の BUY/SELL を決定する。
  * - 1st: pre_submit 行から JOIN で取得した side ('BUY'/'SELL') を採用
  * - 2nd: それも無い場合は realized_pnl の有無で推測
@@ -2498,10 +2550,50 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         };
       });
 
-      // 保有中なら avg / stop / take-profit を markLine。openedAt から最新まで
-      // のみ描画 (chart 全幅に伸ばすと「ずっと前から avg だった」と誤読される)。
-      // ECharts markLine の data は [start, end] の 2 点配列で線分指定。
-      var positionMarkLines = [];
+      // 保有中なら avg / stop / take-profit を「dense path の独立 line series」
+      // として描画。openedAt から最新までのみ描画 (chart 全幅に伸ばすと
+      // 「ずっと前から avg だった」と誤読される) のは旧仕様 (markLine 方式) と
+      // 同じだが、ECharts dataZoom + 2 点 markLine は trend line と同様
+      // 「片端が zoom 範囲外になると線が消える」回帰があるため (#190 / #191
+      // と同根、issue #3637 系)、densifyHorizontalLine で intradayBars
+      // 各 timestamp に y を割り当てた dense path に展開する。これで 1D zoom
+      // でも複数点が必ず visible になり filterMode 不問で線が描画される。
+      // ※ Server-side densifyHorizontalLine (export) と同じアルゴリズム。
+      //    unit test はそちらで担保する。
+      function densifyHorizontalLine(yValue, fromTs, toTs, samples) {
+        if (!Number.isFinite(yValue)) return null;
+        var a = typeof fromTs === 'number' ? fromTs : new Date(fromTs).getTime();
+        var b = typeof toTs === 'number' ? toTs : new Date(toTs).getTime();
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+        if (a >= b) return [[a, yValue], [b, yValue]];
+        var seen = Object.create(null);
+        var arr = [];
+        function push(t) {
+          if (seen[t]) return;
+          seen[t] = true;
+          arr.push(t);
+        }
+        push(a);
+        push(b);
+        for (var i = 0; i < samples.length; i += 1) {
+          var t = samples[i];
+          if (!Number.isFinite(t)) continue;
+          if (t < a || t > b) continue;
+          push(t);
+        }
+        arr.sort(function (x, y) { return x - y; });
+        var out = [];
+        for (var j = 0; j < arr.length; j += 1) {
+          out.push([arr[j], yValue]);
+        }
+        return out;
+      }
+      var avgLineXY = null;
+      var stopLineXY = null;
+      var tpLineXY = null;
+      var avgLabel = '';
+      var stopLabel = '';
+      var tpLabel = '';
       var extraYValues = [];
       if (sc.position) {
         var avg = sc.position.avgPrice;
@@ -2511,25 +2603,19 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         var openedAt = sc.position.openedAt;
         // openedAt > 最新 point (chart データが古い / position 直後でまだ
         // strategy_decision_log に記録されていない) のとき、endTs が openedAt
-        // より過去に出ると markLine が逆向き (左側) に伸びる。max で clamp。
+        // より過去に出ると線が逆向き (左側) に伸びる。max で clamp。
         var latestTs = sc.points.length > 0 ? sc.points[sc.points.length - 1].timestamp : openedAt;
         var endTs = new Date(latestTs).getTime() >= new Date(openedAt).getTime()
           ? latestTs
           : openedAt;
-        positionMarkLines = [
-          [
-            { coord: [openedAt, avg], symbol: 'none', lineStyle: { color: '#444', type: 'solid', width: 1 }, label: { formatter: 'avg ' + avg.toFixed(2), position: 'start', color: '#444' } },
-            { coord: [endTs, avg], symbol: 'none' },
-          ],
-          [
-            { coord: [openedAt, stopPrice], symbol: 'none', lineStyle: { color: '#c22', type: 'dashed', width: 1 }, label: { formatter: 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)', position: 'start', color: '#c22' } },
-            { coord: [endTs, stopPrice], symbol: 'none' },
-          ],
-          [
-            { coord: [openedAt, tpPrice], symbol: 'none', lineStyle: { color: '#057a55', type: 'dashed', width: 1 }, label: { formatter: 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)', position: 'start', color: '#057a55' } },
-            { coord: [endTs, tpPrice], symbol: 'none' },
-          ],
-        ];
+        var fromMs = new Date(openedAt).getTime();
+        var toMs = new Date(endTs).getTime();
+        avgLineXY = densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps);
+        stopLineXY = densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps);
+        tpLineXY = densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps);
+        avgLabel = 'avg ' + avg.toFixed(2);
+        stopLabel = 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
+        tpLabel = 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
       }
 
       // ECharts の scale:true は markLine を yAxis range に含めないため、
@@ -2678,10 +2764,10 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               borderWidth: 1.5,
             },
             z: 5,
-            // position lines (avg/stop/TP) は candle 上 markLine。trend lines
-            // は candlestick の markLine では描画 robust ではなかったため SMA50
-            // 側の markLine に移動 (下方参照)。
-            markLine: positionMarkLines.length > 0 ? { silent: true, symbol: 'none', data: positionMarkLines } : undefined,
+            // position lines (avg/stop/TP) は dense path の独立 line series
+            // として描画する (下方参照、densifyHorizontalLine 適用)。
+            // candlestick の markLine は trend line / position line いずれも
+            // dataZoom + 2 点だと「片端外で線が消える」回帰があるため使わない。
             markPoint: entries.length + exits.length > 0 ? {
               symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
               tooltip: {
@@ -2709,6 +2795,33 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             lineStyle: { width: 1.4, color: '#f59e0b', type: 'solid' },
             symbol: 'none', connectNulls: true, z: 6,
           },
+          // 保有時の avg / stop / TP 水平線。densifyHorizontalLine で
+          // openedAt〜最新の dense path に展開済み (上方参照)。endLabel で
+          // 右端に「avg 124.95」等のラベルを出す (zoom in しても右端は常に
+          // 描画範囲内なので consistently 見える)。z:8 で candle / SMA50 /
+          // trend line のすべてより上に置き、保有 status を最優先で可視化。
+          // tooltip / hover には介入させたくないので silent + emphasis disabled。
+          ...(avgLineXY ? [{
+            name: avgLabel, type: 'line', data: avgLineXY,
+            lineStyle: { width: 1, color: '#444', type: 'solid' }, symbol: 'none',
+            itemStyle: { color: '#444' },
+            endLabel: { show: true, formatter: avgLabel, color: '#444', fontSize: 11 },
+            silent: true, emphasis: { disabled: true }, z: 8,
+          }] : []),
+          ...(stopLineXY ? [{
+            name: stopLabel, type: 'line', data: stopLineXY,
+            lineStyle: { width: 1, color: '#c22', type: 'dashed' }, symbol: 'none',
+            itemStyle: { color: '#c22' },
+            endLabel: { show: true, formatter: stopLabel, color: '#c22', fontSize: 11 },
+            silent: true, emphasis: { disabled: true }, z: 8,
+          }] : []),
+          ...(tpLineXY ? [{
+            name: tpLabel, type: 'line', data: tpLineXY,
+            lineStyle: { width: 1, color: '#057a55', type: 'dashed' }, symbol: 'none',
+            itemStyle: { color: '#057a55' },
+            endLabel: { show: true, formatter: tpLabel, color: '#057a55', fontSize: 11 },
+            silent: true, emphasis: { disabled: true }, z: 8,
+          }] : []),
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
