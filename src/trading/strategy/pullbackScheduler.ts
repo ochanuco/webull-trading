@@ -1,5 +1,6 @@
 import type { BarClient } from '../../infrastructure/quotes/BarClient'
 import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
+import { classifyBrokerErrorCause } from '../../infrastructure/notification/brokerErrorSurge'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
 import type { DecisionTraceStep } from '../domain/Signal'
 import { inferTradingMarket } from '../domain/tradingCalendar'
@@ -692,7 +693,10 @@ export async function runPullbackScheduler(
         type: 'ERROR',
         symbol: upper,
         message: messageOf(error),
-        cause: 'broker submit',
+        // surge detector が cause で count するため (#209)、broker submit
+        // failure を 4xx / 429 / 5xx / other に分類する。`null` (= broker
+        // error ではない) なら legacy の `'broker submit'` に戻す。
+        cause: classifyBrokerErrorCause(error) ?? 'broker submit',
       })
       try {
         logPostSubmit({

@@ -3,6 +3,7 @@ import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
+import { notifyBrokerErrorSurgeIfChanged } from '../../infrastructure/notification/brokerErrorSurge'
 import {
   detectAndNotifyConfigStateChanges,
   type WatchedConfig,
@@ -172,6 +173,25 @@ export async function runStrategyCron(
       }),
     )
   })
+
+  // Broker 4xx/5xx/429 急増検知 (#209)。`notification_emit_log` を集計し、
+  // surge 開始 / 解消の遷移時に 1 件 STATE_CHANGE 通知。env.DB が無いと
+  // surge 検知は成立しないので skip。fail-silent で cron は止めない。
+  if (env.DB) {
+    await notifyBrokerErrorSurgeIfChanged({
+      db: env.DB,
+      notifier,
+      requestId: options.requestId,
+    }).catch((err) => {
+      console.warn(
+        JSON.stringify({
+          event: 'broker_error_surge_detect_failed',
+          requestId: options.requestId,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    })
+  }
 
   const defaultRule = {
     stopPct: global.pullbackDefaultStopPct,
