@@ -496,3 +496,316 @@ describe('Earnings calendar admin endpoints (#196)', () => {
     })
   })
 })
+
+describe('Macro event calendar admin endpoints (#196 2/3)', () => {
+  type MacroRow = {
+    id: number
+    eventType: string
+    eventDate: string
+    eventTime: string | null
+    notes: string | null
+    createdAt: string
+  }
+  function fakeMacroRepo() {
+    return {
+      bulkUpsert: vi.fn<(records: unknown) => Promise<{ inserted: number; skipped: number }>>(
+        async () => ({ inserted: 0, skipped: 0 }),
+      ),
+      fetchAll: vi.fn<(filter: unknown) => Promise<MacroRow[]>>(async () => []),
+      fetchByDateRange: vi.fn<
+        (from: string, to: string, type?: string) => Promise<MacroRow[]>
+      >(async () => []),
+      deleteById: vi.fn<(id: number) => Promise<boolean>>(async () => false),
+    }
+  }
+
+  async function withFakeMacroRepo<T>(
+    repo: ReturnType<typeof fakeMacroRepo>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const mod = await import('../../src/infrastructure/calendar/macroEventCalendarRepo')
+    const spy = vi.spyOn(mod, 'createMacroEventCalendarRepo').mockReturnValue(repo as never)
+    try {
+      return await fn()
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
+  describe('POST /admin/macro-events/seed', () => {
+    it('401s without Basic Auth', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events/seed',
+        {
+          method: 'POST',
+          body: JSON.stringify([{ event_type: 'FOMC', event_date: '2026-06-17' }]),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(401)
+    })
+
+    it('400s when DB binding is missing', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify([{ event_type: 'FOMC', event_date: '2026-06-17' }]),
+        },
+        baseEnv,
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('400s when body is not an array', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ event_type: 'FOMC' }),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('400s on empty body array', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify([]),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it.each([
+      'has space',
+      'lower-case-with-dash',
+      '$INVALID',
+      'a'.repeat(33), // exceeds 32 chars
+    ])('400s on invalid event_type %s', async (badType) => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify([{ event_type: badType, event_date: '2026-06-17' }]),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it.each(['2026-02-30', '2026-13-01', '06/17/2026'])(
+      '400s on invalid event_date %s',
+      async (badDate) => {
+        const app = createApp()
+        const res = await app.request(
+          '/admin/macro-events/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([{ event_type: 'FOMC', event_date: badDate }]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+        expect(res.status).toBe(400)
+      },
+    )
+
+    it.each(['8:30', '08:30:00', '24:00', '08:60', 'morning'])(
+      '400s on invalid event_time %s',
+      async (badTime) => {
+        const app = createApp()
+        const res = await app.request(
+          '/admin/macro-events/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([
+              { event_type: 'CPI', event_date: '2026-06-12', event_time: badTime },
+            ]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+        expect(res.status).toBe(400)
+      },
+    )
+
+    it('200s and forwards entries (uppercased) to bulkUpsert', async () => {
+      const repo = fakeMacroRepo()
+      repo.bulkUpsert.mockResolvedValueOnce({ inserted: 2, skipped: 0 })
+      const res = await withFakeMacroRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/macro-events/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([
+              { event_type: 'fomc', event_date: '2026-06-17', event_time: '14:00', notes: 'June' },
+              { event_type: 'GDP', event_date: '2026-07-01' },
+            ]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { inserted: number; skipped: number; total: number }
+      expect(body).toEqual({ inserted: 2, skipped: 0, total: 2 })
+      expect(repo.bulkUpsert).toHaveBeenCalledWith([
+        { eventType: 'FOMC', eventDate: '2026-06-17', eventTime: '14:00', notes: 'June' },
+        { eventType: 'GDP', eventDate: '2026-07-01', eventTime: null, notes: null },
+      ])
+    })
+
+    it('treats event_time === null and event_time === "" as null', async () => {
+      const repo = fakeMacroRepo()
+      repo.bulkUpsert.mockResolvedValueOnce({ inserted: 2, skipped: 0 })
+      const res = await withFakeMacroRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/macro-events/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([
+              { event_type: 'GDP', event_date: '2026-07-01', event_time: null },
+              { event_type: 'ISM', event_date: '2026-07-01', event_time: '' },
+            ]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      expect(repo.bulkUpsert).toHaveBeenCalledWith([
+        { eventType: 'GDP', eventDate: '2026-07-01', eventTime: null, notes: null },
+        { eventType: 'ISM', eventDate: '2026-07-01', eventTime: null, notes: null },
+      ])
+    })
+  })
+
+  describe('GET /admin/macro-events', () => {
+    it('200s with rows and applies filter', async () => {
+      const repo = fakeMacroRepo()
+      repo.fetchAll.mockResolvedValueOnce([
+        {
+          id: 1,
+          eventType: 'FOMC',
+          eventDate: '2026-06-17',
+          eventTime: '14:00',
+          notes: null,
+          createdAt: '2026-04-21T00:00:00.000Z',
+        },
+      ])
+      const res = await withFakeMacroRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/macro-events?from=2026-06-01&to=2026-06-30&type=fomc',
+          { headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        filter: { from: string | null; to: string | null; type: string | null }
+        rows: Array<{ eventType: string }>
+      }
+      expect(body.filter).toEqual({ from: '2026-06-01', to: '2026-06-30', type: 'FOMC' })
+      expect(body.rows).toHaveLength(1)
+      expect(repo.fetchAll).toHaveBeenCalledWith({
+        fromYmd: '2026-06-01',
+        toYmd: '2026-06-30',
+        eventType: 'FOMC',
+      })
+    })
+
+    it('200s with no filter (returns all)', async () => {
+      const repo = fakeMacroRepo()
+      repo.fetchAll.mockResolvedValueOnce([])
+      const res = await withFakeMacroRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/macro-events',
+          { headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      expect(repo.fetchAll).toHaveBeenCalledWith({})
+    })
+
+    it('400s on invalid from date', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events?from=2026-13-01',
+        { headers: { ...authHeader } },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('400s on invalid type', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events?type=has%20space',
+        { headers: { ...authHeader } },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+  })
+
+  describe('DELETE /admin/macro-events/:id', () => {
+    it('400s on non-numeric id', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events/abc',
+        { method: 'DELETE', headers: { ...authHeader } },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('404 when row does not exist', async () => {
+      const repo = fakeMacroRepo()
+      repo.deleteById.mockResolvedValueOnce(false)
+      const res = await withFakeMacroRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/macro-events/42',
+          { method: 'DELETE', headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(404)
+    })
+
+    it('200 and forwards id when deletion succeeds', async () => {
+      const repo = fakeMacroRepo()
+      repo.deleteById.mockResolvedValueOnce(true)
+      const res = await withFakeMacroRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/macro-events/9',
+          { method: 'DELETE', headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ deleted: true, id: 9 })
+      expect(repo.deleteById).toHaveBeenCalledWith(9)
+    })
+  })
+})

@@ -465,3 +465,54 @@ export const earningsCalendar = sqliteTable(
 
 export type EarningsCalendarRow = typeof earningsCalendar.$inferSelect
 export type EarningsCalendarInsert = typeof earningsCalendar.$inferInsert
+
+/**
+ * Macro economic event calendar (issue #196 2/3)。`earningsCalendar` と
+ * 同じく avoid 用 risk gate のソース。FOMC / CPI / NFP / PCE / GDP / ISM 等の
+ * 重要発表 当日 ±N 時間に被る BUY エントリを `macroEventGate` が凍結する
+ * (シグナル源ではない、BUY を *止める* だけ)。
+ *
+ * POC では外部 API 取得は別 issue で、`/admin/macro-events/seed` 経由で
+ * operator が手動 seed する想定。`UNIQUE (event_type, event_date)` で同一
+ * event の重複 insert を物理的に弾く。
+ *
+ * `event_time` (HH:MM ET) は optional — 未設定なら「当日全日凍結」、設定
+ * されていれば 発表時刻 ± N 時間で window 判定 (簡略 ET tz: `Intl.DateTimeFormat`
+ * with `America/New_York`)。
+ */
+export const macroEventCalendar = sqliteTable(
+  'macro_event_calendar',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /**
+     * Event 種別 (例: 'FOMC' / 'CPI' / 'NFP' / 'PCE' / 'GDP' / 'ISM')。
+     * upper-case 前提で repo 側が正規化する。reason 文字列に含めるので
+     * operator が dashboard で読みやすい短い記号を使う。
+     */
+    eventType: text('event_type').notNull(),
+    /** 発表日 ISO date "YYYY-MM-DD" (ET base — 米国経済指標の慣習)。 */
+    eventDate: text('event_date').notNull(),
+    /**
+     * 発表時刻 ISO time "HH:MM" (ET base、24h)。NULL なら時刻不明 = 当日全日
+     * 凍結扱い (例: 一部 ISM / GDP の正確な分単位が事前未確定なケース)。
+     * 例: CPI '08:30', FOMC '14:00', NFP '08:30'。
+     */
+    eventTime: text('event_time'),
+    /** 自由 text。'June FOMC' / 'June CPI release' / source 等。 */
+    notes: text('notes'),
+    createdAt: text('created_at')
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    // 同一 event_type × 同一日の重複を物理的に防ぐ。bulk seed は
+    // INSERT OR IGNORE (drizzle `.onConflictDoNothing()`) で skip。
+    typeDateUnique: uniqueIndex('macro_event_calendar_type_date_unique').on(t.eventType, t.eventDate),
+    // gate 側の range read (event_date 範囲) を加速する。type_date_unique は
+    // (type, date) の複合 index なので date 単独 prefix では使えない。
+    dateIdx: index('macro_event_calendar_date_idx').on(t.eventDate),
+  }),
+)
+
+export type MacroEventCalendarRow = typeof macroEventCalendar.$inferSelect
+export type MacroEventCalendarInsert = typeof macroEventCalendar.$inferInsert

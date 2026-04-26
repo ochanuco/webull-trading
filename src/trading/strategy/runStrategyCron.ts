@@ -23,6 +23,10 @@ import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
 } from '../../infrastructure/calendar/earningsCalendarRepo'
+import {
+  createMacroEventCalendarDb,
+  createMacroEventCalendarRepo,
+} from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -399,6 +403,17 @@ export async function runStrategyCron(
       }),
     )
   }
+  // Macro event gate (issue #196 2/3): 同じ理由で 0014 未適用環境では gate を
+  // 無効化 (table 不在 → fetch 失敗 → fail-closed で全 BUY reject の連鎖を回避)。
+  const macroEventGateReady = env.DB ? await isMacroEventCalendarReady(env.DB) : false
+  if (env.DB && !macroEventGateReady) {
+    console.warn(
+      JSON.stringify({
+        event: 'macro_event_gate_disabled_table_missing',
+        requestId: options.requestId,
+      }),
+    )
+  }
 
   // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
   // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
@@ -477,6 +492,15 @@ export async function runStrategyCron(
             earningsGate: {
               repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
               freezeBusinessDays: 1,
+            },
+          }
+        : {}),
+      // Macro event gate (issue #196 2/3)。同様に env.DB / 0014 適用の双方が
+      // あるときだけ注入。config は default (±1h, full-day=true) で POC 運用。
+      ...(env.DB && macroEventGateReady
+        ? {
+            macroEventGate: {
+              repo: createMacroEventCalendarRepo(createMacroEventCalendarDb(env.DB)),
             },
           }
         : {}),
@@ -623,6 +647,24 @@ async function isEarningsCalendarReady(db: D1Database): Promise<boolean> {
     const row = await db
       .prepare(
         "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='earnings_calendar' LIMIT 1",
+      )
+      .first<{ ok: number }>()
+    return row?.ok === 1
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 0014 migration (`macro_event_calendar`) が当該 D1 で適用済みかを判定する
+ * (issue #196 2/3)。`isEarningsCalendarReady` と同じ理由 — 未 migrate な
+ * preview / 新環境では gate を 無効化 して fail-closed の連鎖 reject を回避。
+ */
+async function isMacroEventCalendarReady(db: D1Database): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='macro_event_calendar' LIMIT 1",
       )
       .first<{ ok: number }>()
     return row?.ok === 1

@@ -16,6 +16,11 @@ import {
   createEarningsCalendarRepo,
   type EarningsCalendarSeedInput,
 } from '../infrastructure/calendar/earningsCalendarRepo'
+import {
+  createMacroEventCalendarDb,
+  createMacroEventCalendarRepo,
+  type MacroEventCalendarSeedInput,
+} from '../infrastructure/calendar/macroEventCalendarRepo'
 import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
@@ -362,6 +367,192 @@ export const admin = new Hono<AppBindings>()
     }
     return c.json({ deleted: true, id })
   })
+  /**
+   * Bulk seed `macro_event_calendar` rows (issue #196 2/3)。POC では外部 API
+   * 連携を持たず、operator が手動で curl 経由で seed する。重複 (event_type ×
+   * event_date) は `INSERT OR IGNORE` で skip し、件数を返す。
+   *
+   * Body: `[{ event_type: "FOMC", event_date: "2026-06-17",
+   *           event_time?: "14:00", notes?: "June FOMC" }, ...]`
+   */
+  .post('/macro-events/seed', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const body = (await c.req.json().catch(() => null)) as unknown
+    if (!Array.isArray(body)) {
+      throw new ValidationError(
+        'body must be an array of { event_type, event_date, event_time?, notes? }',
+        { field: 'body' },
+      )
+    }
+    if (body.length === 0) {
+      throw new ValidationError('body must contain at least one entry', { field: 'body' })
+    }
+    if (body.length > 1000) {
+      // POC では年 50 件 (FOMC + CPI + NFP + ...) × 数年で十分上限。桁違いの
+      // 誤入力を弾く目的。
+      throw new ValidationError('body cannot exceed 1000 entries per request', { field: 'body' })
+    }
+    const records: MacroEventCalendarSeedInput[] = []
+    body.forEach((raw, idx) => {
+      records.push(parseMacroEventSeedRow(raw, idx))
+    })
+    const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+    const result = await repo.bulkUpsert(records)
+    return c.json({ inserted: result.inserted, skipped: result.skipped, total: records.length })
+  })
+  /**
+   * Read `macro_event_calendar` rows (operator inspect)。`?from`/`?to` は
+   * いずれも YYYY-MM-DD で optional。`?type` で event_type filter (大文字化)。
+   */
+  .get('/macro-events', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const fromRaw = c.req.query('from')?.trim()
+    const toRaw = c.req.query('to')?.trim()
+    const typeRaw = c.req.query('type')?.trim()
+    if (fromRaw !== undefined && fromRaw !== '' && !isYmd(fromRaw)) {
+      throw new ValidationError("'from' must be ISO 'YYYY-MM-DD'", { field: 'from' })
+    }
+    if (toRaw !== undefined && toRaw !== '' && !isYmd(toRaw)) {
+      throw new ValidationError("'to' must be ISO 'YYYY-MM-DD'", { field: 'to' })
+    }
+    if (typeRaw !== undefined && typeRaw !== '' && !isMacroEventType(typeRaw)) {
+      throw new ValidationError("'type' must be 1-32 chars [A-Z0-9_]", { field: 'type' })
+    }
+    const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+    const rows = await repo.fetchAll({
+      ...(fromRaw && fromRaw !== '' ? { fromYmd: fromRaw } : {}),
+      ...(toRaw && toRaw !== '' ? { toYmd: toRaw } : {}),
+      ...(typeRaw && typeRaw !== '' ? { eventType: typeRaw.toUpperCase() } : {}),
+    })
+    return c.json({
+      filter: {
+        from: fromRaw ?? null,
+        to: toRaw ?? null,
+        type: typeRaw ? typeRaw.toUpperCase() : null,
+      },
+      rows,
+    })
+  })
+  /**
+   * Delete a single macro event row by `id`。誤 seed の取り消し用。
+   */
+  .delete('/macro-events/:id', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const idRaw = c.req.param('id').trim()
+    const id = Number(idRaw)
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ValidationError("'id' must be a positive integer path param", { field: 'id' })
+    }
+    const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+    const ok = await repo.deleteById(id)
+    if (!ok) {
+      return c.json({ error: 'macro_event_row_not_found', id }, 404)
+    }
+    return c.json({ deleted: true, id })
+  })
+
+/**
+ * Validate a single `/admin/macro-events/seed` body entry。
+ *
+ *   - `event_type`: 1〜32 chars, `[A-Z0-9_]` のみ (大文字化前提) — operator が
+ *     'FOMC' / 'CPI' / 'NFP_REV' のような短い記号で seed する想定
+ *   - `event_date`: ISO 'YYYY-MM-DD' で round-trip validation (`isYmd`)
+ *   - `event_time` (optional): `HH:MM` (00:00〜23:59 のみ受理)。null / 省略 OK
+ *   - `notes` (optional): 256 chars 上限
+ */
+function parseMacroEventSeedRow(raw: unknown, idx: number): MacroEventCalendarSeedInput {
+  if (raw === null || typeof raw !== 'object') {
+    throw new ValidationError(`entry [${idx}]: must be an object`, { field: `body[${idx}]` })
+  }
+  const obj = raw as {
+    event_type?: unknown
+    event_date?: unknown
+    event_time?: unknown
+    notes?: unknown
+  }
+  const eventTypeRaw = typeof obj.event_type === 'string' ? obj.event_type.trim() : ''
+  if (!isMacroEventType(eventTypeRaw)) {
+    throw new ValidationError(
+      `entry [${idx}]: 'event_type' must be 1-32 chars [A-Z0-9_]`,
+      { field: `body[${idx}].event_type` },
+    )
+  }
+  const eventDate = typeof obj.event_date === 'string' ? obj.event_date.trim() : ''
+  if (!isYmd(eventDate)) {
+    throw new ValidationError(
+      `entry [${idx}]: 'event_date' must be ISO 'YYYY-MM-DD'`,
+      { field: `body[${idx}].event_date` },
+    )
+  }
+  let eventTime: string | null = null
+  if (obj.event_time !== undefined && obj.event_time !== null) {
+    if (typeof obj.event_time !== 'string') {
+      throw new ValidationError(
+        `entry [${idx}]: 'event_time' must be string when present`,
+        { field: `body[${idx}].event_time` },
+      )
+    }
+    const trimmed = obj.event_time.trim()
+    if (trimmed === '') {
+      eventTime = null
+    } else if (!isHourMinute(trimmed)) {
+      throw new ValidationError(
+        `entry [${idx}]: 'event_time' must be 'HH:MM' (24h)`,
+        { field: `body[${idx}].event_time` },
+      )
+    } else {
+      eventTime = trimmed
+    }
+  }
+  let notes: string | null = null
+  if (obj.notes !== undefined && obj.notes !== null) {
+    if (typeof obj.notes !== 'string') {
+      throw new ValidationError(`entry [${idx}]: 'notes' must be string when present`, {
+        field: `body[${idx}].notes`,
+      })
+    }
+    if (obj.notes.length > 256) {
+      throw new ValidationError(`entry [${idx}]: 'notes' must be <= 256 chars`, {
+        field: `body[${idx}].notes`,
+      })
+    }
+    notes = obj.notes
+  }
+  return {
+    eventType: eventTypeRaw.toUpperCase(),
+    eventDate,
+    eventTime,
+    notes,
+  }
+}
+
+/**
+ * 'FOMC' / 'CPI' / 'NFP' 等の短い event_type 記号として受理可能か。
+ * 1〜32 chars、`[A-Za-z0-9_]` のみ (大文字化は呼び出し側で行う)。
+ */
+function isMacroEventType(value: string): boolean {
+  return /^[A-Za-z0-9_]{1,32}$/.test(value)
+}
+
+/**
+ * 'HH:MM' (00:00〜23:59) として受理可能か。秒は持たない (POC では分単位で十分)。
+ */
+function isHourMinute(value: string): boolean {
+  if (!/^\d{2}:\d{2}$/.test(value)) return false
+  const [hh, mm] = value.split(':') as [string, string]
+  const h = Number(hh)
+  const m = Number(mm)
+  if (!Number.isInteger(h) || !Number.isInteger(m)) return false
+  if (h < 0 || h > 23) return false
+  if (m < 0 || m > 59) return false
+  return true
+}
 
 function parseEarningsSeedRow(raw: unknown, idx: number): EarningsCalendarSeedInput {
   if (raw === null || typeof raw !== 'object') {

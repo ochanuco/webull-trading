@@ -21,7 +21,13 @@ import {
 } from './strategies/PullbackUptrendStrategy'
 import { decideBucketGate } from '../risk/bucketExposureGate'
 import { evaluateEarningsGate } from '../risk/earningsGate'
+import {
+  DEFAULT_MACRO_GATE_CONFIG,
+  evaluateMacroEventGate,
+  type MacroEventGateConfig,
+} from '../risk/macroEventGate'
 import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
+import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
 
 const DEFAULT_BAR_LOOKBACK = 60
@@ -101,6 +107,12 @@ export interface PullbackSchedulerOptions {
    * (`runStrategyCron`) が D1 から repo を作って渡す。
    */
   earningsGate?: EarningsScheduleConfig
+  /**
+   * Macro event gate (issue #196 2/3)。FOMC / CPI / NFP 等の発表 ±N 時間で
+   * 全銘柄 BUY を凍結。`repo` 未注入なら skip (POC 後方互換)。earnings gate
+   * より後ろで評価される (両方 reject なら earnings reason が先に確定する)。
+   */
+  macroEventGate?: MacroEventScheduleConfig
   now?: () => Date
 }
 
@@ -108,6 +120,16 @@ export interface EarningsScheduleConfig {
   repo: EarningsCalendarRepo
   /** ±N 営業日。default 1。 */
   freezeBusinessDays?: number
+}
+
+export interface MacroEventScheduleConfig {
+  repo: MacroEventCalendarRepo
+  /**
+   * Gate config (freeze hours / full-day fallback)。Partial で渡せて、
+   * 未指定の field は `DEFAULT_MACRO_GATE_CONFIG` (±1 時間, full-day=true) で
+   * 補う。
+   */
+  config?: Partial<MacroEventGateConfig>
 }
 
 export interface PerSymbolRiskScheduleConfig {
@@ -504,6 +526,35 @@ export async function runPullbackScheduler(
       }
     }
 
+    // Macro event gate (issue #196 2/3)。FOMC / CPI / NFP 等の発表 ±N 時間
+    // (default 1h) は全銘柄 BUY を凍結する。earnings gate より後で評価する
+    // ので、両方 reject なら earnings reason が先に確定する (task 指定の
+    // 優先順位)。`macroEventGate` 未注入なら skip (POC 後方互換)。
+    if (options.macroEventGate && intent.side === 'BUY') {
+      const evalTimestamp = now().toISOString()
+      const macroDecision = await evaluateMacroEventGate(
+        { evalTimestamp, side: 'BUY' },
+        options.macroEventGate.repo,
+        { ...DEFAULT_MACRO_GATE_CONFIG, ...(options.macroEventGate.config ?? {}) },
+      )
+      if (!macroDecision.approved) {
+        const reason = `risk: ${macroDecision.reason ?? 'macro_event_gate'}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('risk.macro_event', false, undefined, undefined, undefined, macroDecision.reason),
+          ),
+        })
+        continue
+      }
+    }
+
     // Per-symbol risk gate (issue #138)。manual `/trade/execute` (TradingService)
     // と同じ pure function を呼ぶことで gate parity を取る。perSymbolRisk が
     // 未注入の場合は POC 後方互換で skip。Inverse pair の SymbolState は同期
@@ -557,10 +608,10 @@ export async function runPullbackScheduler(
       }
     }
 
-    // 全 gate (bucket / earnings / perSymbolRisk) を通過したので、ここで初めて
-    // bucketExposure を新 exposure に置き換える。これより前 (= bucket gate 直後)
-    // で commit すると、reject された BUY が同 bucket の後続銘柄を誤って弾く
-    // (CodeRabbit #196 review)。
+    // 全 gate (bucket / earnings / macro / perSymbolRisk) を通過したので、
+    // ここで初めて bucketExposure を新 exposure に置き換える。これより前
+    // (= bucket gate 直後) で commit すると、reject された BUY が同 bucket の
+    // 後続銘柄を誤って弾く (CodeRabbit #196 review)。
     if (pendingBucketUpdate) {
       bucketExposure[pendingBucketUpdate.bucket] = pendingBucketUpdate.newExposure
     }
@@ -793,6 +844,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'scheduler.pending_lock_acquired': '注文ロックを取得できた',
   'risk.bucket_cap': '同グループ建玉上限内',
   'risk.earnings_calendar': '決算日カレンダーゲート',
+  'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'broker.submit': '証券会社への発注送信',
 }
