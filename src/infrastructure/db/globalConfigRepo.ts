@@ -119,6 +119,92 @@ export async function loadGlobalConfig(
           message,
         }),
       )
+      // 段階デプロイ救済: VIX 3 列だけ defaults で埋め、他の列は legacy row から
+      // 読み出す。`{ ...GLOBAL_CONFIG_DEFAULTS }` で全部上書きすると
+      // `tradingEnabled: false` のような既存運用値が `tradingEnabled: true` (default)
+      // で踏み潰されるリスクがある。明示的に vix_ 以外の列だけを select し、
+      // defaults と shallow-merge する。
+      try {
+        const legacyRows = await db
+          .select({
+            id: globalConfig.id,
+            dryRun: globalConfig.dryRun,
+            tradingEnabled: globalConfig.tradingEnabled,
+            marketHoursCheck: globalConfig.marketHoursCheck,
+            maxOrderNotional: globalConfig.maxOrderNotional,
+            maxOrderNotionalUsd: globalConfig.maxOrderNotionalUsd,
+            maxOrderNotionalJpy: globalConfig.maxOrderNotionalJpy,
+            totalCapitalUsd: globalConfig.totalCapitalUsd,
+            totalCapitalJpy: globalConfig.totalCapitalJpy,
+            maxPortfolioExposurePct: globalConfig.maxPortfolioExposurePct,
+            drawdownKillThreshold: globalConfig.drawdownKillThreshold,
+            staleQuoteMs: globalConfig.staleQuoteMs,
+            gapRejectPct: globalConfig.gapRejectPct,
+            spreadLimitPctUs: globalConfig.spreadLimitPctUs,
+            spreadLimitPctJp: globalConfig.spreadLimitPctJp,
+            pullbackDefaultStopPct: globalConfig.pullbackDefaultStopPct,
+            pullbackDefaultTakeProfitPct: globalConfig.pullbackDefaultTakeProfitPct,
+            pullbackDefaultTimeStopDays: globalConfig.pullbackDefaultTimeStopDays,
+            pullbackDefaultPullbackMax: globalConfig.pullbackDefaultPullbackMax,
+            pullbackDefaultPullbackMin: globalConfig.pullbackDefaultPullbackMin,
+            pullbackDefaultMinReturn50d: globalConfig.pullbackDefaultMinReturn50d,
+            pullbackDefaultRequireAboveSma50: globalConfig.pullbackDefaultRequireAboveSma50,
+            pullbackDefaultKAtr: globalConfig.pullbackDefaultKAtr,
+            riskBasePerTradePct: globalConfig.riskBasePerTradePct,
+            riskDdHalfThreshold: globalConfig.riskDdHalfThreshold,
+            riskDdHaltThreshold: globalConfig.riskDdHaltThreshold,
+            bucketExposurePct: globalConfig.bucketExposurePct,
+          })
+          .from(globalConfig)
+          .where(eq(globalConfig.id, 'default'))
+          .limit(1)
+        const legacyRow = legacyRows[0]
+        if (legacyRow) {
+          return {
+            dryRun: legacyRow.dryRun,
+            tradingEnabled: legacyRow.tradingEnabled,
+            marketHoursCheck: legacyRow.marketHoursCheck,
+            maxOrderNotional: legacyRow.maxOrderNotional,
+            maxOrderNotionalUsd: legacyRow.maxOrderNotionalUsd,
+            maxOrderNotionalJpy: legacyRow.maxOrderNotionalJpy,
+            totalCapitalUsd: legacyRow.totalCapitalUsd,
+            totalCapitalJpy: legacyRow.totalCapitalJpy,
+            maxPortfolioExposurePct: legacyRow.maxPortfolioExposurePct,
+            drawdownKillThreshold: legacyRow.drawdownKillThreshold,
+            staleQuoteMs: legacyRow.staleQuoteMs,
+            gapRejectPct: legacyRow.gapRejectPct,
+            spreadLimitPctUs: legacyRow.spreadLimitPctUs,
+            spreadLimitPctJp: legacyRow.spreadLimitPctJp,
+            pullbackDefaultStopPct: legacyRow.pullbackDefaultStopPct,
+            pullbackDefaultTakeProfitPct: legacyRow.pullbackDefaultTakeProfitPct,
+            pullbackDefaultTimeStopDays: legacyRow.pullbackDefaultTimeStopDays,
+            pullbackDefaultPullbackMax: legacyRow.pullbackDefaultPullbackMax,
+            pullbackDefaultPullbackMin: legacyRow.pullbackDefaultPullbackMin,
+            pullbackDefaultMinReturn50d: legacyRow.pullbackDefaultMinReturn50d,
+            pullbackDefaultRequireAboveSma50: legacyRow.pullbackDefaultRequireAboveSma50,
+            pullbackDefaultKAtr: legacyRow.pullbackDefaultKAtr,
+            riskBasePerTradePct: legacyRow.riskBasePerTradePct,
+            riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
+            riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
+            bucketExposurePct: legacyRow.bucketExposurePct,
+            // VIX 3 項目だけ defaults (列が存在しないので legacy row には無い)
+            vixWarningThreshold: GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
+            vixCriticalThreshold: GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
+            vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
+          }
+        }
+      } catch (legacyError) {
+        // legacy fetch も失敗 → 想定外の double failure。ここまで来たら全 defaults
+        // で fail-open を選ぶ (cron 全停止より既知 default で動かす)。
+        console.warn(
+          JSON.stringify({
+            event: 'global_config_legacy_load_failed',
+            requestId: requestId ?? null,
+            message: legacyError instanceof Error ? legacyError.message : String(legacyError),
+          }),
+        )
+      }
+      // legacy row なし or legacy fetch 失敗 → 全 defaults
       return { ...GLOBAL_CONFIG_DEFAULTS }
     }
     throw error
