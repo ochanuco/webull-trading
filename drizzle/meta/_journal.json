@@ -92,6 +92,13 @@
       "when": 1777206141621,
       "tag": "0012_observability_alerts",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1777210015055,
+      "tag": "0013_earnings_calendar",
+      "breakpoints": true
     }
   ]
 }

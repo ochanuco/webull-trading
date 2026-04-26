@@ -459,3 +459,169 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     expect(execution.calls).toHaveLength(1)
   })
 })
+
+describe('runPullbackScheduler earnings calendar gate (#196)', () => {
+  it('rejects BUY when an earnings_calendar row is within ±1 BD', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      earningsGate: {
+        repo: {
+          async fetchByRange() {
+            // Always returns one row whose date matches the eval day.
+            return [
+              {
+                id: 1,
+                symbol: 'AAPL',
+                earningsDate: now.toISOString().slice(0, 10),
+                notes: null,
+                createdAt: now.toISOString(),
+              },
+            ]
+          },
+          async fetchBySymbol() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+        freezeBusinessDays: 1,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('risk: earnings_within_1bd')
+  })
+
+  it('approves BUY when earnings repo returns no rows', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      earningsGate: {
+        repo: {
+          async fetchByRange() {
+            return []
+          },
+          async fetchBySymbol() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+        freezeBusinessDays: 1,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('skips the earnings gate when option is omitted (back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+  })
+
+  it('does not commit bucketExposure when earnings gate rejects the BUY (#196 review)', async () => {
+    // CodeRabbit #196 review: bucketExposure は bucket cap check 直後ではなく
+    // 全 gate (earnings + perSymbolRisk) 通過後に commit する。同 bucket の
+    // 後続銘柄が、reject された BUY の notional を「占有済」と誤解しないように。
+    //
+    // Setup: 2 銘柄 (AAPL, MSFT) を同 'tech' bucket に置き、bucketCap を
+    // 「BUY 1 件分の notional × 1.5」に設定。AAPL は earnings reject、
+    // MSFT は通常通過。修正後は MSFT が 1 件 BUY 成立する (cap 余裕あり)。
+    // 修正前 (バグ) は AAPL の notional が exposure に積まれて MSFT も bucket
+    // cap reject になる。
+    const repo = {
+      async fetchByRange(symbol: string) {
+        if (symbol === 'AAPL') {
+          return [
+            {
+              id: 1,
+              symbol: 'AAPL',
+              earningsDate: now.toISOString().slice(0, 10),
+              notes: null,
+              createdAt: now.toISOString(),
+            },
+          ]
+        }
+        return []
+      },
+      async fetchBySymbol() {
+        return []
+      },
+      async bulkUpsert() {
+        return { inserted: 0, skipped: 0 }
+      },
+      async deleteById() {
+        return false
+      },
+    }
+
+    // Probe: 単一 BUY の notional を確定値で取得し、bucketCap を 1.5× にする。
+    // uptrendBars + equity 100k の qty / price は決定的なので probe → cap 算出。
+    const probeExecution = mockExecution()
+    const probe = await runPullbackScheduler({
+      symbols: ['MSFT'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: probeExecution,
+      now: () => now,
+    })
+    expect(probe.buys).toBe(1)
+    const probeNotional = probe.decisions[0]?.order?.notional ?? 0
+    expect(probeNotional).toBeGreaterThan(0)
+    const bucketCap = Math.floor(probeNotional * 1.5)
+
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL', 'MSFT'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolBucketMap: { AAPL: 'tech', MSFT: 'tech' },
+      bucketCapMap: { tech: bucketCap },
+      earningsGate: { repo, freezeBusinessDays: 1 },
+      now: () => now,
+    })
+
+    // AAPL は earnings reject、MSFT は bucket pass + execute。
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect((execution.calls[0] as { symbol: string }).symbol).toBe('MSFT')
+
+    const aaplDecision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aaplDecision?.decision).toBe('REJECT')
+    expect(aaplDecision?.reason).toContain('earnings_within_1bd')
+
+    const msftDecision = summary.decisions.find((d) => d.symbol === 'MSFT')
+    expect(msftDecision?.decision).toBe('BUY')
+  })
+})

@@ -20,6 +20,8 @@ import {
   type SymbolRule,
 } from './strategies/PullbackUptrendStrategy'
 import { decideBucketGate } from '../risk/bucketExposureGate'
+import { evaluateEarningsGate } from '../risk/earningsGate'
+import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
 
 const DEFAULT_BAR_LOOKBACK = 60
@@ -93,7 +95,19 @@ export interface PullbackSchedulerOptions {
    * (`runStrategyCron`) は global_config / symbolUniverse から fully populate する。
    */
   perSymbolRisk?: PerSymbolRiskScheduleConfig
+  /**
+   * Earnings calendar gate (issue #196 1/3)。±N 営業日で BUY を凍結。
+   * `repo` 未注入なら gate skip (POC 後方互換)。production
+   * (`runStrategyCron`) が D1 から repo を作って渡す。
+   */
+  earningsGate?: EarningsScheduleConfig
   now?: () => Date
+}
+
+export interface EarningsScheduleConfig {
+  repo: EarningsCalendarRepo
+  /** ±N 営業日。default 1。 */
+  freezeBusinessDays?: number
 }
 
 export interface PerSymbolRiskScheduleConfig {
@@ -319,6 +333,12 @@ export async function runPullbackScheduler(
     }
 
     let intent: OrderIntent
+    // BUY 経路で bucketCap check が pass した場合のみ set される pending update。
+    // 後続 gate (earnings / perSymbolRisk) が reject すると未 commit のまま破棄、
+    // pass で初めて bucketExposure に反映する (CodeRabbit #196 review)。
+    // 過去仕様では check 直後に commit していたため、reject された BUY が同一
+    // bucket の後続銘柄に「占有済」とみなされる over-counting bug があった。
+    let pendingBucketUpdate: { bucket: string; newExposure: number } | null = null
     if (signal.action === 'BUY') {
       const rule = strategy.resolveRule(upper)
       const sizing = computePullbackSizing({
@@ -393,8 +413,11 @@ export async function runPullbackScheduler(
         })
         continue
       }
+      // bucketExposure の commit はまだ行わない。後続の earnings / perSymbolRisk
+      // gate が reject する可能性があり、その場合に同 bucket 後続銘柄の判定を
+      // over-count させてはいけない。実 commit は全 gate pass 後に下で行う。
       if (bucket && bucketDecision.newExposure !== undefined) {
-        bucketExposure[bucket] = bucketDecision.newExposure
+        pendingBucketUpdate = { bucket, newExposure: bucketDecision.newExposure }
       }
       intent = buildIntent(upper, 'BUY', sizing.quantity, indicators.price)
     } else {
@@ -451,6 +474,36 @@ export async function runPullbackScheduler(
       intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
     }
 
+    // Earnings calendar gate (issue #196 1/3)。BUY の場合のみ評価し、
+    // ±N 営業日内に earnings_calendar 行があれば reject。SELL は撤退路を
+    // 妨げないよう gate 対象外。`earningsGate` 未注入なら skip (POC 後方互換)。
+    // perSymbolRisk より先に評価することで、broker / spread 系より上位の
+    // 「そもそもエントリしない」判断として cron 経路から見える。
+    if (options.earningsGate && intent.side === 'BUY') {
+      const evalDate = now().toISOString().slice(0, 10)
+      const earningsDecision = await evaluateEarningsGate(
+        { symbol: upper, evalDate, side: 'BUY' },
+        options.earningsGate.repo,
+        { freezeBusinessDays: options.earningsGate.freezeBusinessDays ?? 1 },
+      )
+      if (!earningsDecision.approved) {
+        const reason = `risk: ${earningsDecision.reason ?? 'earnings_gate'}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('risk.earnings_calendar', false, undefined, undefined, undefined, earningsDecision.reason),
+          ),
+        })
+        continue
+      }
+    }
+
     // Per-symbol risk gate (issue #138)。manual `/trade/execute` (TradingService)
     // と同じ pure function を呼ぶことで gate parity を取る。perSymbolRisk が
     // 未注入の場合は POC 後方互換で skip。Inverse pair の SymbolState は同期
@@ -502,6 +555,14 @@ export async function runPullbackScheduler(
         })
         continue
       }
+    }
+
+    // 全 gate (bucket / earnings / perSymbolRisk) を通過したので、ここで初めて
+    // bucketExposure を新 exposure に置き換える。これより前 (= bucket gate 直後)
+    // で commit すると、reject された BUY が同 bucket の後続銘柄を誤って弾く
+    // (CodeRabbit #196 review)。
+    if (pendingBucketUpdate) {
+      bucketExposure[pendingBucketUpdate.bucket] = pendingBucketUpdate.newExposure
     }
 
     const expiresAtMs = now().getTime() + pendingLockTtlMs
@@ -731,6 +792,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'scheduler.pending_lock_expiry_valid': '注文ロック期限が有効',
   'scheduler.pending_lock_acquired': '注文ロックを取得できた',
   'risk.bucket_cap': '同グループ建玉上限内',
+  'risk.earnings_calendar': '決算日カレンダーゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'broker.submit': '証券会社への発注送信',
 }

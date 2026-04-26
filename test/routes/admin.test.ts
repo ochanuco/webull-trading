@@ -266,3 +266,233 @@ describe('POST /admin/symbols/:symbol/clear-cooldown', () => {
     expect(captured.calls).toEqual([{ symbol: 'SOXL', untilIso: '1970-01-01T00:00:00.000Z' }])
   })
 })
+
+describe('Earnings calendar admin endpoints (#196)', () => {
+  type EarningsRow = {
+    id: number
+    symbol: string
+    earningsDate: string
+    notes: string | null
+    createdAt: string
+  }
+  function fakeRepo() {
+    return {
+      bulkUpsert: vi.fn<(records: unknown) => Promise<{ inserted: number; skipped: number }>>(
+        async () => ({ inserted: 0, skipped: 0 }),
+      ),
+      fetchBySymbol: vi.fn<(symbol: string) => Promise<EarningsRow[]>>(async () => []),
+      fetchByRange: vi.fn<(symbol: string, from: string, to: string) => Promise<EarningsRow[]>>(
+        async () => [],
+      ),
+      deleteById: vi.fn<(id: number) => Promise<boolean>>(async () => false),
+    }
+  }
+
+  async function withFakeRepo<T>(repo: ReturnType<typeof fakeRepo>, fn: () => Promise<T>): Promise<T> {
+    const mod = await import('../../src/infrastructure/calendar/earningsCalendarRepo')
+    const spy = vi.spyOn(mod, 'createEarningsCalendarRepo').mockReturnValue(repo as never)
+    try {
+      return await fn()
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
+  describe('POST /admin/earnings/seed', () => {
+    it('401s without Basic Auth', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings/seed',
+        {
+          method: 'POST',
+          body: JSON.stringify([{ symbol: 'AAPL', earnings_date: '2026-04-30' }]),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(401)
+    })
+
+    it('400s when DB binding is missing', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify([{ symbol: 'AAPL', earnings_date: '2026-04-30' }]),
+        },
+        baseEnv,
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('400s when body is not an array', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ symbol: 'AAPL' }),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('400s on invalid earnings_date format', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify([{ symbol: 'AAPL', earnings_date: '04/30/2026' }]),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it.each(['2026-02-30', '2026-13-01', '2026-00-15', '2026-04-31', '2025-02-29'])(
+      'rejects calendar-impossible date %s (round-trip validation)',
+      async (badDate) => {
+        // CodeRabbit #196 review: 単純な regex + Date.parse() では
+        // `2026-02-30` が `2026-03-02` に normalize されて DB に保存される。
+        // round-trip で実在日付のみ通すよう validator が直っていることを確認。
+        const app = createApp()
+        const res = await app.request(
+          '/admin/earnings/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([{ symbol: 'AAPL', earnings_date: badDate }]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+        expect(res.status).toBe(400)
+      },
+    )
+
+    it('400s on empty body array', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify([]),
+        },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('200s and forwards entries (uppercased) to bulkUpsert', async () => {
+      const repo = fakeRepo()
+      repo.bulkUpsert.mockResolvedValueOnce({ inserted: 2, skipped: 0 })
+      const res = await withFakeRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/earnings/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([
+              { symbol: 'aapl', earnings_date: '2026-04-30', notes: 'Q2' },
+              { symbol: 'MSFT', earnings_date: '2026-04-29' },
+            ]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { inserted: number; skipped: number; total: number }
+      expect(body).toEqual({ inserted: 2, skipped: 0, total: 2 })
+      expect(repo.bulkUpsert).toHaveBeenCalledWith([
+        { symbol: 'AAPL', earningsDate: '2026-04-30', notes: 'Q2' },
+        { symbol: 'MSFT', earningsDate: '2026-04-29', notes: null },
+      ])
+    })
+  })
+
+  describe('GET /admin/earnings', () => {
+    it('400s when symbol query param missing', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings',
+        { headers: { ...authHeader } },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('200s with rows for the symbol', async () => {
+      const repo = fakeRepo()
+      repo.fetchBySymbol.mockResolvedValueOnce([
+        {
+          id: 1,
+          symbol: 'AAPL',
+          earningsDate: '2026-04-30',
+          notes: null,
+          createdAt: '2026-04-21T00:00:00.000Z',
+        },
+      ])
+      const res = await withFakeRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/earnings?symbol=aapl',
+          { headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { symbol: string; rows: Array<{ symbol: string }> }
+      expect(body.symbol).toBe('AAPL')
+      expect(body.rows).toHaveLength(1)
+      expect(repo.fetchBySymbol).toHaveBeenCalledWith('AAPL')
+    })
+  })
+
+  describe('DELETE /admin/earnings/:id', () => {
+    it('400s on non-numeric id', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/earnings/abc',
+        { method: 'DELETE', headers: { ...authHeader } },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('404 when row does not exist', async () => {
+      const repo = fakeRepo()
+      repo.deleteById.mockResolvedValueOnce(false)
+      const res = await withFakeRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/earnings/42',
+          { method: 'DELETE', headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(404)
+    })
+
+    it('200 and forwards id when deletion succeeds', async () => {
+      const repo = fakeRepo()
+      repo.deleteById.mockResolvedValueOnce(true)
+      const res = await withFakeRepo(repo, async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/earnings/9',
+          { method: 'DELETE', headers: { ...authHeader } },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ deleted: true, id: 9 })
+      expect(repo.deleteById).toHaveBeenCalledWith(9)
+    })
+  })
+})
