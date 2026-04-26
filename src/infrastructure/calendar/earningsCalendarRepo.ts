@@ -74,28 +74,33 @@ export function createEarningsCalendarRepo(db: EarningsCalendarDb): EarningsCale
     },
 
     async bulkUpsert(records) {
+      // CodeRabbit #196 review: 1 row 1 INSERT は 1000 行で 1000 D1 writes/req
+      // 相当の subrequest を発生させ Worker 制限に当たる。`db.insert().values([...])`
+      // で multi-row INSERT (chunk) にまとめ、`onConflictDoNothing()` で UNIQUE
+      // 違反 row のみ skip する挙動は維持。drizzle d1 driver は VALUES (?,?), (?,?), ...
+      // の prepared statement を 1 statement で送るため、chunk あたり 1 subrequest。
       let inserted = 0
       let skipped = 0
-      // drizzle d1 driver の `.onConflictDoNothing()` を使う。bulk values で
-      // 1 statement にまとめても良いが、UNIQUE 違反 row だけ skip して残りを
-      // insert する挙動は drizzle 側で吸収してくれる。
-      for (const r of records) {
+      if (records.length === 0) return { inserted, skipped }
+      const CHUNK = 50
+      for (let i = 0; i < records.length; i += CHUNK) {
+        const chunk = records.slice(i, i + CHUNK)
+        const values = chunk.map((r) => ({
+          symbol: r.symbol.toUpperCase(),
+          earningsDate: r.earningsDate,
+          notes: r.notes ?? null,
+        }))
         const result = await db
           .insert(earningsCalendar)
-          .values({
-            symbol: r.symbol.toUpperCase(),
-            earningsDate: r.earningsDate,
-            notes: r.notes ?? null,
-          })
+          .values(values)
           .onConflictDoNothing({
             target: [earningsCalendar.symbol, earningsCalendar.earningsDate],
           })
           .returning({ id: earningsCalendar.id })
-        if (result.length > 0) {
-          inserted += 1
-        } else {
-          skipped += 1
-        }
+        // `result.length` = 実際に INSERT された row 数。差分が UNIQUE 違反 skip。
+        const insertedInChunk = result.length
+        inserted += insertedInChunk
+        skipped += chunk.length - insertedInChunk
       }
       return { inserted, skipped }
     },

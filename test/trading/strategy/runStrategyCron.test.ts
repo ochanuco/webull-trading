@@ -148,6 +148,60 @@ describe('runStrategyCron', () => {
     expect(result.skipReason).toBe('portfolio_halted')
   })
 
+  // CodeRabbit #196 review: 0013 未 migrate な D1 で earnings gate を有効化すると
+  // `fetchByRange()` が `no such table` を吐き全 BUY が fail-closed reject される。
+  // 起動時 sqlite_master チェックで table 不在を検知し、gate 自体を **注入しない**
+  // ことを確認する (= 過去挙動 / approve all へ fallback)。`tradingDisabledUntil`
+  // を未来時刻にして scheduler は起動させず、probe + warn だけ評価する。
+  it('disables earnings gate when earnings_calendar table is missing (#196 review)', async () => {
+    // sqlite_master を SELECT してくる prepare 呼び出し用 fake D1。
+    // - SELECT 1 ... sqlite_master ... earnings_calendar → first() が null
+    //   (table 未存在) → earningsGateReady=false で gate skip
+    const firstSpy = vi.fn(async () => null)
+    const fakeDb = {
+      prepare: vi.fn(() => ({
+        first: firstSpy,
+      })),
+    } as unknown as D1Database
+    const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const envWithMissingTable = {
+        DB: fakeDb,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 10_000,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+
+      await runStrategyCron(envWithMissingTable, { requestId: 'req-no-table' }).catch(
+        // scheduler 内部 (bar fetch / DO etc.) は本テストのスコープ外なので
+        // 例外は握りつぶす。重要なのは sqlite_master probe + warn ログ。
+        () => undefined,
+      )
+
+      const calls = (fakeDb.prepare as ReturnType<typeof vi.fn>).mock.calls as Array<[string]>
+      const probedSqliteMaster = calls.some(
+        (c) => c[0].includes('sqlite_master') && c[0].includes('earnings_calendar'),
+      )
+      expect(probedSqliteMaster).toBe(true)
+      // table 不在の warn ログが出る (operator が追跡できるよう)。
+      const warnLines = warnSpy2.mock.calls.map((c) => String(c[0]))
+      expect(
+        warnLines.some((l) => l.includes('earnings_gate_disabled_table_missing')),
+      ).toBe(true)
+    } finally {
+      warnSpy2.mockRestore()
+    }
+  })
+
   // #141: critical な skip reason は Notifier 経由で push 通知される。
   // env.SLACK_WEBHOOK_URL を設定して fetch を spy し、webhook 行きの POST が
   // 1 回入ることだけ確認する (formatter は WebhookNotifier.test に分離済み)。

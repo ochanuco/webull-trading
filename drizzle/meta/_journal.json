@@ -99,13 +99,6 @@
       "when": 1777210015055,
       "tag": "0013_earnings_calendar",
       "breakpoints": true
-    },
-    {
-      "idx": 14,
-      "version": "6",
-      "when": 1777210084921,
-      "tag": "0014_gigantic_true_believers",
-      "breakpoints": true
     }
   ]
 }

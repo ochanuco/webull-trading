@@ -444,8 +444,18 @@ function parseTruthyQuery(value: string | undefined): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes'
 }
 
+/**
+ * `YYYY-MM-DD` の文法チェック + **実在しない日付の弾き**。`Date` の自動
+ * normalize ('2026-02-30' → '2026-03-02') を逆手に取り、parse 後の Date を
+ * 同じ形式で書き戻して入力と一致するか比較する。これで `2026-02-30` や
+ * `2026-13-01` が DB に保存される事故を防ぐ (CodeRabbit #196 review)。
+ */
 function isYmd(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00.000Z`))
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const ms = Date.parse(`${value}T00:00:00.000Z`)
+  if (!Number.isFinite(ms)) return false
+  const roundTrip = new Date(ms).toISOString().slice(0, 10)
+  return roundTrip === value
 }
 
 /**

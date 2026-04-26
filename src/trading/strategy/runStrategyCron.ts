@@ -384,6 +384,22 @@ export async function runStrategyCron(
   // market-data API (see #84). Webull is still the order-execution path.
   const barClient = new YahooBarClient()
 
+  // Earnings calendar gate (issue #196 1/3): table 未 migrate な環境で
+  // `fetchByRange()` が `no such table` を吐くと fail-closed で全 BUY が
+  // `earnings_gate_fetch_failed` reject になる。新環境 / preview deploy 等で
+  // 0013 未適用の状態を許容するため、起動時に 1 回 sqlite_master を見て
+  // table の有無を判定し、無ければ gate を 注入しない (= 過去挙動 = 全通過)
+  // (CodeRabbit #196 review)。
+  const earningsGateReady = env.DB ? await isEarningsCalendarReady(env.DB) : false
+  if (env.DB && !earningsGateReady) {
+    console.warn(
+      JSON.stringify({
+        event: 'earnings_gate_disabled_table_missing',
+        requestId: options.requestId,
+      }),
+    )
+  }
+
   // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
   // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
   const summary = emptySummary()
@@ -452,10 +468,11 @@ export async function runStrategyCron(
         staleQuoteMs: global.staleQuoteMs,
         gapRejectPct: global.gapRejectPct,
       },
-      // Earnings calendar gate (issue #196 1/3)。env.DB が無ければ skip
-      // (POC 後方互換)。freezeBusinessDays は POC 段階では default 1 固定。
-      // 将来 global_config に出すなら別 PR (#196 follow-up)。
-      ...(env.DB
+      // Earnings calendar gate (issue #196 1/3)。env.DB が無い OR table 未
+      // migrate なら skip (POC 後方互換 / CodeRabbit #196 review)。
+      // freezeBusinessDays は POC 段階では default 1 固定。将来 global_config に
+      // 出すなら別 PR (#196 follow-up)。
+      ...(env.DB && earningsGateReady
         ? {
             earningsGate: {
               repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
@@ -585,6 +602,32 @@ export function emitStaleRollWarningIfNeeded(args: {
         thresholdHours: STALE_ROLL_WARNING_HOURS,
       }),
     )
+  }
+}
+
+/**
+ * 0013 migration (`earnings_calendar`) が当該 D1 で適用済みかを判定する。
+ *
+ * 新環境 / preview deploy 等で 0013 未適用の状態に対し earnings gate を有効化
+ * すると、`fetchByRange()` が `no such table` を吐き fail-closed で全 BUY が
+ * reject される (CodeRabbit #196 review)。それを避けるため、cron 起動時に
+ * `sqlite_master` を 1 回参照し、table が存在しなければ gate を **注入しない**
+ * (過去挙動 = 全通過 へ fallback)。
+ *
+ * クエリ自体が throw した場合 (DB 接続失敗 / corruption 等) も「未 ready」
+ * 扱い。これは「earnings 評価ができない壊れた D1 で gate を有効化しない」
+ * という選択で、安全側の fallback として bucket / perSymbolRisk gate に任せる。
+ */
+async function isEarningsCalendarReady(db: D1Database): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='earnings_calendar' LIMIT 1",
+      )
+      .first<{ ok: number }>()
+    return row?.ok === 1
+  } catch {
+    return false
   }
 }
 

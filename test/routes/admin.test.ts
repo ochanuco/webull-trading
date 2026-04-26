@@ -354,6 +354,26 @@ describe('Earnings calendar admin endpoints (#196)', () => {
       expect(res.status).toBe(400)
     })
 
+    it.each(['2026-02-30', '2026-13-01', '2026-00-15', '2026-04-31', '2025-02-29'])(
+      'rejects calendar-impossible date %s (round-trip validation)',
+      async (badDate) => {
+        // CodeRabbit #196 review: 単純な regex + Date.parse() では
+        // `2026-02-30` が `2026-03-02` に normalize されて DB に保存される。
+        // round-trip で実在日付のみ通すよう validator が直っていることを確認。
+        const app = createApp()
+        const res = await app.request(
+          '/admin/earnings/seed',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify([{ symbol: 'AAPL', earnings_date: badDate }]),
+          },
+          { ...baseEnv, DB: {} as unknown as D1Database },
+        )
+        expect(res.status).toBe(400)
+      },
+    )
+
     it('400s on empty body array', async () => {
       const app = createApp()
       const res = await app.request(
