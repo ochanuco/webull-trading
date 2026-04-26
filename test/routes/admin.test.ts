@@ -765,6 +765,16 @@ describe('Macro event calendar admin endpoints (#196 2/3)', () => {
       )
       expect(res.status).toBe(400)
     })
+
+    it("400s when 'from' > 'to' (operator typo, distinct from empty result)", async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/admin/macro-events?from=2026-07-10&to=2026-07-01',
+        { headers: { ...authHeader } },
+        { ...baseEnv, DB: {} as unknown as D1Database },
+      )
+      expect(res.status).toBe(400)
+    })
   })
 
   describe('DELETE /admin/macro-events/:id', () => {

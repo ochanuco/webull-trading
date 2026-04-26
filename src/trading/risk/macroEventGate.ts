@@ -41,7 +41,10 @@ export interface MacroEventGateInput {
 export interface MacroEventGateConfig {
   /** 発表前の凍結時間 (hours)。default 1。 */
   freezeHoursBefore: number
-  /** 発表後の凍結時間 (hours)。default 1。 */
+  /**
+   * 発表後の凍結時間 (hours)。default 6 (発表直後の volatility / drift を回避)。
+   * 上限は `sanitizeHours` で 6h クランプ。
+   */
   freezeHoursAfter: number
   /**
    * `event_time` が NULL の event を全日凍結するか。default true。
@@ -57,6 +60,7 @@ export interface MacroEventGateDecision {
    *   - `macro_event_gate: FOMC 2026-06-17 14:00ET` (時刻指定あり)
    *   - `macro_event_gate: ISM 2026-07-01 (full-day)` (時刻不明)
    *   - `macro_event_gate_invalid_eval_timestamp: <raw>`
+   *   - `macro_event_gate_invalid_calendar_row: <type> <date> <time>` (event_time が不正)
    *   - `macro_event_gate_fetch_failed: <error>`
    */
   reason?: string
@@ -66,7 +70,7 @@ export interface MacroEventGateDecision {
 
 export const DEFAULT_MACRO_GATE_CONFIG: MacroEventGateConfig = {
   freezeHoursBefore: 1,
-  freezeHoursAfter: 1,
+  freezeHoursAfter: 6,
   freezeFullDayWhenTimeUnknown: true,
 }
 
@@ -136,7 +140,19 @@ export async function evaluateMacroEventGate(
       // 発表時刻指定あり: ET wall-clock で `event_date + event_time` を UTC ms
       // に変換 (簡略 ET tz: `America/New_York` の現時点 offset を Intl で取得)。
       const eventMs = etWallClockToUtcMs(row.eventDate, row.eventTime)
-      if (eventMs === null) continue
+      if (eventMs === null) {
+        // 不正な event_date / event_time の row を silent skip すると
+        // その event だけ BUY 素通り = fail-open になるため fail-closed reject。
+        return {
+          approved: false,
+          reason: `macro_event_gate_invalid_calendar_row: ${row.eventType} ${row.eventDate} ${row.eventTime}`,
+          triggeringEvent: {
+            type: row.eventType,
+            date: row.eventDate,
+            time: row.eventTime,
+          },
+        }
+      }
       const delta = evalMs - eventMs // > 0 なら eval が event より後
       if (delta >= -beforeMs && delta <= afterMs) {
         return {

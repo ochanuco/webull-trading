@@ -14,12 +14,13 @@ import type { MacroEventCalendarRow } from '../../../src/infrastructure/db/schem
  * Tests for the macro event gate (#196 2/3)。
  *
  * 観点:
- *   - event_time 指定: 発表 ±1h 内 reject、外 approve
+ *   - event_time 指定: 発表前 1h / 発表後 6h 内 reject、外 approve (default)
  *   - event_time NULL: 当日全日 reject (default)
  *   - 範囲外 → approve
  *   - DB 失敗 → fail-closed reject
  *   - SELL は常に approve (撤退路を妨げない)
  *   - 不正 timestamp → fail-closed reject
+ *   - 不正 event_time row → fail-closed reject (silent fail-open 防止)
  */
 
 const baseConfig: MacroEventGateConfig = { ...DEFAULT_MACRO_GATE_CONFIG }
@@ -120,7 +121,7 @@ describe('evaluateMacroEventGate — event_time specified', () => {
     expect(decision.reason).toContain('CPI 2026-06-12 08:30ET')
   })
 
-  it('rejects 30min after event (within freezeHoursAfter=1)', async () => {
+  it('rejects 30min after event (within freezeHoursAfter=6 default)', async () => {
     const repo = fakeRepo([row('NFP', '2026-06-05', '08:30')])
     // 09:00 ET (EDT) = 13:00 UTC
     const decision = await evaluateMacroEventGate(
@@ -130,6 +131,30 @@ describe('evaluateMacroEventGate — event_time specified', () => {
     )
     expect(decision.approved).toBe(false)
     expect(decision.reason).toContain('NFP 2026-06-05 08:30ET')
+  })
+
+  it('rejects 5h after event with default freezeHoursAfter=6', async () => {
+    // CPI 08:30 ET (EDT) = 12:30 UTC、5h 後 = 17:30 UTC は default 6h 内で reject。
+    const repo = fakeRepo([row('CPI', '2026-06-12', '08:30')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-06-12T17:30:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('CPI 2026-06-12 08:30ET')
+  })
+
+  it('approves >6h after event (outside default freezeHoursAfter=6)', async () => {
+    // NFP 08:30 ET (EDT) = 12:30 UTC、6h+1min 後 = 18:31 UTC は default 6h を
+    // 超えるので approve。
+    const repo = fakeRepo([row('NFP', '2026-06-05', '08:30')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-06-05T18:31:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(true)
   })
 
   it('approves 90min before event (outside ±1h window)', async () => {
@@ -143,13 +168,14 @@ describe('evaluateMacroEventGate — event_time specified', () => {
     expect(decision.approved).toBe(true)
   })
 
-  it('approves 90min after event (outside ±1h window)', async () => {
+  it('approves 90min after event when freezeHoursAfter=1 override', async () => {
+    // default は 6h だが、explicit 1h override で 90 分後は window 外。
     const repo = fakeRepo([row('NFP', '2026-06-05', '08:30')])
     // 10:00 ET (EDT) = 14:00 UTC
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-06-05T14:00:00.000Z', side: 'BUY' },
       repo,
-      baseConfig,
+      { freezeHoursBefore: 1, freezeHoursAfter: 1, freezeFullDayWhenTimeUnknown: true },
     )
     expect(decision.approved).toBe(true)
   })
@@ -260,6 +286,38 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
     )
     expect(decision.approved).toBe(false)
     expect(decision.reason).toContain('macro_event_gate_invalid_eval_timestamp')
+  })
+
+  it('rejects when calendar row has invalid event_time (silent fail-open prevention)', async () => {
+    // event_time が `HH:MM` 規格を満たさない row は parse できない。
+    // continue (silent skip) すると当該 event だけ BUY 素通り = fail-open に
+    // なるため、fail-closed で reject させる。
+    const repo = fakeRepo([row('CPI', '2026-06-12', 'invalid-time')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-06-12T12:30:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('CPI 2026-06-12 invalid-time')
+    expect(decision.triggeringEvent).toEqual({
+      type: 'CPI',
+      date: '2026-06-12',
+      time: 'invalid-time',
+    })
+  })
+
+  it('rejects when calendar row has malformed event_time like "8:30" (silent fail-open prevention)', async () => {
+    // 規格は `HH:MM` (2 桁:2 桁)。`8:30` のような 1 桁時間は弾く。
+    const repo = fakeRepo([row('NFP', '2026-06-05', '8:30')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-06-05T12:30:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
   })
 })
 

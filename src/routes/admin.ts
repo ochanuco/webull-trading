@@ -419,6 +419,17 @@ export const admin = new Hono<AppBindings>()
     if (toRaw !== undefined && toRaw !== '' && !isYmd(toRaw)) {
       throw new ValidationError("'to' must be ISO 'YYYY-MM-DD'", { field: 'to' })
     }
+    if (
+      fromRaw !== undefined &&
+      fromRaw !== '' &&
+      toRaw !== undefined &&
+      toRaw !== '' &&
+      fromRaw > toRaw
+    ) {
+      // `?from=2026-07-10&to=2026-07-01` のような operator 入力ミスを 400 で
+      // 弾く (空配列 200 だと「データなし」と区別がつかないため)。
+      throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
+    }
     if (typeRaw !== undefined && typeRaw !== '' && !isMacroEventType(typeRaw)) {
       throw new ValidationError("'type' must be 1-32 chars [A-Z0-9_]", { field: 'type' })
     }

@@ -126,8 +126,8 @@ export interface MacroEventScheduleConfig {
   repo: MacroEventCalendarRepo
   /**
    * Gate config (freeze hours / full-day fallback)。Partial で渡せて、
-   * 未指定の field は `DEFAULT_MACRO_GATE_CONFIG` (±1 時間, full-day=true) で
-   * 補う。
+   * 未指定の field は `DEFAULT_MACRO_GATE_CONFIG` (発表前 1h / 発表後 6h /
+   * full-day=true) で補う。
    */
   config?: Partial<MacroEventGateConfig>
 }

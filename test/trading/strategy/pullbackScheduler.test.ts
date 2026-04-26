@@ -627,7 +627,7 @@ describe('runPullbackScheduler earnings calendar gate (#196)', () => {
 })
 
 describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
-  it('rejects BUY when a macro event is within ±1h of eval timestamp', async () => {
+  it('rejects BUY when a macro event is within the freeze window of eval timestamp', async () => {
     // FOMC 14:00 ET (= 18:30 UTC EDT) を `now` (= 14:30 UTC EDT に近い) と
     // 同瞬間に置く simple repo。`now` 経由で 14:30 UTC が渡るので CPI 08:30 ET
     // (= 12:30 UTC) を window 内に置く。
