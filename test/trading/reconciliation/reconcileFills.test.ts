@@ -115,6 +115,7 @@ function makeFakeDb(rows: CandidateRow[]): {
     from: () => selectChain,
     leftJoin: () => selectChain,
     where: () => selectChain,
+    groupBy: () => selectChain,
     orderBy: () => selectChain,
     limit: async () => rows,
     // Drizzle's chain is also thenable; not exercised here but kept for
@@ -427,6 +428,63 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(updates).toHaveLength(1)
     expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     expect(updates[0]!.set.stateApplyError).toBeNull()
+  })
+
+  it('repair cohort: processes duplicate joined pre_submit rows at most once', async () => {
+    const duplicateRows: CandidateRow[] = [
+      {
+        id: 12,
+        clientOrderId: 'coid-repair-duplicate-pre-side',
+        symbol: 'SOXL',
+        side: null,
+        preSubmitSide: null,
+        brokerStatus: 'FILLED',
+        filledQty: 4,
+        filledPrice: 124.95,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 33,
+      },
+      {
+        id: 12,
+        clientOrderId: 'coid-repair-duplicate-pre-side',
+        symbol: 'SOXL',
+        side: null,
+        preSubmitSide: 'BUY',
+        brokerStatus: 'FILLED',
+        filledQty: 4,
+        filledPrice: 124.95,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 33,
+      },
+    ]
+    const { db, updates } = makeFakeDb(duplicateRows)
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+      retryStateApply: true,
+    })
+
+    expect(summary.inspected).toBe(1)
+    expect(summary.errors).toEqual([])
+    expect(summary.stateApplied).toBe(1)
+    expect(symbolStub.recordFill).toHaveBeenCalledTimes(1)
+    expect(symbolStub.recordFill).toHaveBeenCalledWith('SOXL', {
+      side: 'BUY',
+      qty: 4,
+      price: 124.95,
+    })
+    expect(updates).toHaveLength(1)
   })
 
   it('repair cohort with no apply prerequisites: records error and skips DO call', async () => {

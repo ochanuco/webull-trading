@@ -185,15 +185,17 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         ),
       ),
     )
+    .groupBy(tradeJournal.id)
     .orderBy(desc(tradeJournal.id))
     .limit(limit)
 
-  if (candidates.length === 0) return summary
+  const uniqueCandidates = dedupeCandidatesByRowId(candidates)
+  if (uniqueCandidates.length === 0) return summary
 
-  summary.inspected = candidates.length
+  summary.inspected = uniqueCandidates.length
   const client = createWebullHttpClient(options.env)
 
-  for (const row of candidates) {
+  for (const row of uniqueCandidates) {
     const coid = row.clientOrderId
     if (!coid) {
       // In practice a post_submit row with submitted=1 always has a coid
@@ -553,6 +555,27 @@ function resolveJournalSide(
   if (primary === 'BUY' || primary === 'SELL') return primary
   if (fallback === 'BUY' || fallback === 'SELL') return fallback
   return null
+}
+
+function dedupeCandidatesByRowId<T extends { id: number; side: string | null; preSubmitSide?: string | null }>(
+  rows: T[],
+): T[] {
+  const byId = new Map<number, T>()
+  for (const row of rows) {
+    const existing = byId.get(row.id)
+    if (!existing) {
+      byId.set(row.id, row)
+      continue
+    }
+    // Defensive fallback for malformed append-only journals. If a duplicate
+    // join row has the only usable pre_submit side, keep that one while still
+    // processing the post_submit row at most once.
+    if (resolveJournalSide(existing.side, existing.preSubmitSide) === null &&
+      resolveJournalSide(row.side, row.preSubmitSide) !== null) {
+      byId.set(row.id, row)
+    }
+  }
+  return [...byId.values()]
 }
 
 async function recordApplyFailure(
