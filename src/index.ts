@@ -2,6 +2,7 @@ import { createApp } from './app'
 import type { Env } from './config/env'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
+import { createNotifier } from './infrastructure/notification/createNotifier'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
@@ -61,12 +62,21 @@ export default {
             )
           },
           (error) => {
+            const message = error instanceof Error ? error.message : String(error)
             console.error(
               JSON.stringify({
                 event: 'strategy_cron_error',
                 requestId,
-                message: error instanceof Error ? error.message : String(error),
+                message,
               }),
+            )
+            // cron 全体が落ちた時 (D1 失敗 / unexpected throw 等) も通知 (#199)。
+            // ctx.waitUntil で wrap して isolate terminate 前に webhook fetch を
+            // 完了させる。Notifier 実装側は silent fallback なので catch は保険。
+            ctx.waitUntil(
+              createNotifier(env)
+                .notify({ type: 'ERROR', message, cause: 'strategy_cron' })
+                .catch(() => undefined),
             )
           },
         ),

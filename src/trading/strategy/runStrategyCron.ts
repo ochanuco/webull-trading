@@ -3,6 +3,7 @@ import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
+import { createNotifier } from '../../infrastructure/notification/createNotifier'
 import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
 import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
@@ -299,6 +300,8 @@ export async function runStrategyCron(
   const execution = global.dryRun
     ? new MockExecution()
     : new WebullExecution(createWebullHttpClient(env))
+  // Slack/Discord webhook 通知 (#199)。env 未設定なら NoopNotifier。
+  const notifier = createNotifier(env)
   // Yahoo Finance /v8/finance/chart is free, no auth, covers US + JP (7267.T
   // style) in one endpoint — chosen over Webull's JP-subscription-gated
   // market-data API (see #84). Webull is still the order-execution path.
@@ -359,6 +362,7 @@ export async function runStrategyCron(
       defaultRule,
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
+      notifier,
       onDecision: (record) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
