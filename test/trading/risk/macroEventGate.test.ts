@@ -402,6 +402,94 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
     expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
     expect(decision.reason).toContain('GDP 2026-06-12 00:60')
   })
+
+  it('rejects event_time=NULL with nonexistent date 2026-02-30 (full-day branch round-trip)', async () => {
+    // event_time NULL 経路は単純文字列一致しか見ないため、`2026-02-30` のような
+    // 実在しない暦日が DB に入っていると一致せず silent pass = fail-open する。
+    // ループ先頭の `isStrictYmd` で reject されることを保証。
+    const malformedRow = row('GDP', '2026-02-30', null)
+    const repo: MacroEventCalendarRepo = {
+      async fetchByDateRange() {
+        return [malformedRow]
+      },
+      async fetchAll() {
+        return [malformedRow]
+      },
+      async bulkUpsert() {
+        return { inserted: 0, skipped: 0 }
+      },
+      async deleteById() {
+        return false
+      },
+    }
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-02-28T13:30:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('GDP 2026-02-30 null')
+    expect(decision.triggeringEvent).toEqual({
+      type: 'GDP',
+      date: '2026-02-30',
+      time: null,
+    })
+  })
+
+  it('rejects event_time=NULL with nonexistent month 2026-13-01 (full-day branch round-trip)', async () => {
+    // 月 > 12 の row が full-day freeze 経路で素通りしないことを保証。
+    const malformedRow = row('FOMC', '2026-13-01', null)
+    const repo: MacroEventCalendarRepo = {
+      async fetchByDateRange() {
+        return [malformedRow]
+      },
+      async fetchAll() {
+        return [malformedRow]
+      },
+      async bulkUpsert() {
+        return { inserted: 0, skipped: 0 }
+      },
+      async deleteById() {
+        return false
+      },
+    }
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-12-15T19:00:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('FOMC 2026-13-01 null')
+  })
+
+  it('rejects event_time=NULL with nonexistent day 2026-04-31 (full-day branch round-trip)', async () => {
+    // 4 月 31 日は存在しない (normalize で 5/1)。round-trip で reject されること。
+    const malformedRow = row('NFP', '2026-04-31', null)
+    const repo: MacroEventCalendarRepo = {
+      async fetchByDateRange() {
+        return [malformedRow]
+      },
+      async fetchAll() {
+        return [malformedRow]
+      },
+      async bulkUpsert() {
+        return { inserted: 0, skipped: 0 }
+      },
+      async deleteById() {
+        return false
+      },
+    }
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-04-30T13:00:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('NFP 2026-04-31 null')
+  })
 })
 
 describe('evaluateMacroEventGate — config sanitisation', () => {

@@ -136,6 +136,23 @@ export async function evaluateMacroEventGate(
   const afterMs = freezeAfter * MS_PER_HOUR
 
   for (const row of rows) {
+    // event_time あり / NULL の両分岐を通す前に event_date を round-trip validate。
+    // event_time NULL 分岐は単純文字列一致 (`row.eventDate === evalEtYmd`) しか
+    // しないため、不正な event_date (e.g., `2026-02-30`, `2026-13-01`) が来ても
+    // 一致する可能性が無く silent pass = fail-open する。両分岐で対称な
+    // fail-closed validation を保証するため、ループ先頭で reject する。
+    if (!isStrictYmd(row.eventDate)) {
+      return {
+        approved: false,
+        reason: `macro_event_gate_invalid_calendar_row: ${row.eventType} ${row.eventDate} ${row.eventTime ?? 'null'}`,
+        triggeringEvent: {
+          type: row.eventType,
+          date: row.eventDate,
+          time: row.eventTime ?? null,
+        },
+      }
+    }
+
     if (row.eventTime !== null && row.eventTime !== undefined && row.eventTime !== '') {
       // 発表時刻指定あり: ET wall-clock で `event_date + event_time` を UTC ms
       // に変換 (簡略 ET tz: `America/New_York` の現時点 offset を Intl で取得)。
@@ -209,6 +226,24 @@ function formatEtYmd(date: Date): string {
     day: '2-digit',
   })
   return fmt.format(date)
+}
+
+/**
+ * "YYYY-MM-DD" を厳密 validate (round-trip)。
+ *
+ * JS Date は不正な暦日 (e.g. `2026-02-30`, `2026-13-01`, `2026-04-31`) を
+ * silent normalize するため、`Date.parse` だけでは fail-open する。`toISOString`
+ * に戻して入力文字列と一致するか比較し、実在する暦日のみ true を返す。
+ *
+ * `etWallClockToUtcMs` は event_time あり経路で同等 round-trip を内部で行うが、
+ * event_time NULL 経路 (full-day freeze) ではこの helper を使って対称な
+ * fail-closed validation を行う。
+ */
+function isStrictYmd(ymd: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return false
+  const ms = Date.parse(`${ymd}T00:00:00.000Z`)
+  if (!Number.isFinite(ms)) return false
+  return new Date(ms).toISOString().slice(0, 10) === ymd
 }
 
 /**
