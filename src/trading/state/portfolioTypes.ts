@@ -3,6 +3,8 @@ export interface PortfolioState {
   dailyStartEquity: number
   /** Cumulative realized PnL since `dailyStartEquity` was seeded. */
   dailyRealizedPnl: number
+  /** Client order ids whose realized PnL has already been applied. */
+  appliedClientOrderIds: string[]
   /** ISO timestamp until which the kill switch blocks submits, or `null` when inactive. */
   tradingDisabledUntil: string | null
   /**
@@ -18,6 +20,7 @@ export function emptyPortfolioState(now: () => Date = () => new Date()): Portfol
   return {
     dailyStartEquity: 0,
     dailyRealizedPnl: 0,
+    appliedClientOrderIds: [],
     tradingDisabledUntil: null,
     lastRolledAt: null,
     updatedAt: now().toISOString(),

@@ -4,6 +4,7 @@ import {
   clearPendingOrder,
   lockPendingOrder,
   recordFill,
+  recordFillOnce,
   recordSignal,
   rollSettlements,
   setCooldown,
@@ -159,6 +160,52 @@ describe('recordFill', () => {
     expect(() => {
       recordFill(state, { side: 'BUY', qty: 2, price: -9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
     }).toThrow('Invalid fill.price')
+  })
+})
+
+describe('recordFillOnce', () => {
+  it('applies a new clientOrderId once and records it in the ledger', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    const result = recordFillOnce(
+      state,
+      'coid-1',
+      { side: 'BUY', qty: 2, price: 9 },
+      { now: fixedNow('2026-04-18T10:05:00.000Z') },
+    )
+
+    expect(result.applied).toBe(true)
+    expect(result.state.position?.qty).toBe(2)
+    expect(result.state.appliedClientOrderIds).toEqual(['coid-1'])
+  })
+
+  it('skips a duplicate clientOrderId without changing position', () => {
+    const state = {
+      ...emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z')),
+      appliedClientOrderIds: ['coid-1'],
+      position: { qty: 2, avgPrice: 9, openedAt: '2026-04-18T10:05:00.000Z' },
+    }
+    const result = recordFillOnce(
+      state,
+      'coid-1',
+      { side: 'BUY', qty: 2, price: 11 },
+      { now: fixedNow('2026-04-18T11:00:00.000Z') },
+    )
+
+    expect(result.applied).toBe(false)
+    expect(result.state).toBe(state)
+    expect(result.state.position).toEqual(state.position)
+  })
+
+  it('rejects an empty clientOrderId', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() => {
+      recordFillOnce(
+        state,
+        ' ',
+        { side: 'BUY', qty: 2, price: 9 },
+        { now: fixedNow('2026-04-18T10:05:00.000Z') },
+      )
+    }).toThrow('Invalid recordFillOnce clientOrderId')
   })
 })
 

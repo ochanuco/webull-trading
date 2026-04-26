@@ -11,6 +11,7 @@ export interface PortfolioTransitionContext {
 }
 
 const defaultCtx: PortfolioTransitionContext = { now: () => new Date() }
+const MAX_APPLIED_CLIENT_ORDER_IDS = 1000
 
 /**
  * Overwrites `dailyStartEquity` with an operator- or EOD-cron-provided value
@@ -48,6 +49,28 @@ export function applyRealizedPnl(
     ...state,
     dailyRealizedPnl: state.dailyRealizedPnl + delta,
     updatedAt: ctx.now().toISOString(),
+  }
+}
+
+export function applyRealizedPnlOnce(
+  state: PortfolioState,
+  clientOrderId: string,
+  delta: number,
+  ctx: PortfolioTransitionContext = defaultCtx,
+): { state: PortfolioState; applied: boolean } {
+  if (clientOrderId.trim().length === 0) {
+    throw new Error('Invalid applyRealizedPnlOnce clientOrderId: must be non-empty')
+  }
+  if (state.appliedClientOrderIds.includes(clientOrderId)) {
+    return { state, applied: false }
+  }
+  const next = applyRealizedPnl(state, delta, ctx)
+  return {
+    state: {
+      ...next,
+      appliedClientOrderIds: appendAppliedClientOrderId(state.appliedClientOrderIds, clientOrderId),
+    },
+    applied: true,
   }
 }
 
@@ -93,4 +116,8 @@ export function rollDaily(
     updatedAt: nowIso,
   }
   return { before, after }
+}
+
+function appendAppliedClientOrderId(ids: string[], clientOrderId: string): string[] {
+  return [...ids, clientOrderId].slice(-MAX_APPLIED_CLIENT_ORDER_IDS)
 }

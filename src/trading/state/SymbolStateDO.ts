@@ -4,6 +4,7 @@ import {
   clearPendingOrder,
   lockPendingOrder,
   recordFill,
+  recordFillOnce,
   recordSignal,
   rollSettlements,
   seedSettledCash,
@@ -67,6 +68,17 @@ export class SymbolStateDO extends DurableObject<object> {
     return next
   }
 
+  async recordFillOnce(
+    symbol: string,
+    clientOrderId: string,
+    fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
+  ): Promise<{ state: SymbolState; applied: boolean }> {
+    const state = await this.load(symbol)
+    const result = recordFillOnce(state, clientOrderId, fill, this.transitionCtx)
+    if (result.applied) await this.save(result.state)
+    return result
+  }
+
   async setCooldown(symbol: string, untilIso: string): Promise<SymbolState> {
     const state = await this.load(symbol)
     const next = setCooldown(state, untilIso, this.transitionCtx)
@@ -109,7 +121,7 @@ export class SymbolStateDO extends DurableObject<object> {
     const stored = await this.ctx.storage.get<SymbolState>(STATE_KEY)
     // Check symbol matches; if mismatch, overwrite with correct empty state
     if (stored !== undefined && stored.symbol === symbol) {
-      return stored
+      return this.normalize(stored)
     }
     // Mismatched or missing: return empty and clear storage
     const empty = emptySymbolState(symbol, this.transitionCtx.now)
@@ -122,5 +134,13 @@ export class SymbolStateDO extends DurableObject<object> {
 
   private async save(state: SymbolState): Promise<void> {
     await this.ctx.storage.put(STATE_KEY, state)
+  }
+
+  private normalize(state: SymbolState): SymbolState {
+    if (!('appliedClientOrderIds' in state) ||
+      !Array.isArray((state as { appliedClientOrderIds?: unknown }).appliedClientOrderIds)) {
+      return { ...state, appliedClientOrderIds: [] }
+    }
+    return state
   }
 }

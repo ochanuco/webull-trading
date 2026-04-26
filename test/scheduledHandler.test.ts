@@ -69,6 +69,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     const before: PortfolioState = {
       dailyStartEquity: 10_000,
       dailyRealizedPnl: -50,
+      appliedClientOrderIds: [],
       tradingDisabledUntil: null,
       lastRolledAt: null,
       updatedAt: '2026-04-25T22:00:00.000Z',
@@ -76,6 +77,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     const after: PortfolioState = {
       dailyStartEquity: 9_950,
       dailyRealizedPnl: 0,
+      appliedClientOrderIds: [],
       tradingDisabledUntil: null,
       lastRolledAt: '2026-04-25T22:00:00.000Z',
       updatedAt: '2026-04-25T22:00:00.000Z',
@@ -116,6 +118,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     const before: PortfolioState = {
       dailyStartEquity: 10_000,
       dailyRealizedPnl: 0,
+      appliedClientOrderIds: [],
       tradingDisabledUntil: null,
       lastRolledAt: null,
       updatedAt: '2026-04-25T22:00:00.000Z',
