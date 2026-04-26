@@ -36,6 +36,14 @@ export class SymbolStateClient implements PositionStore {
     return this.stub(symbol).recordFill(symbol, fill)
   }
 
+  recordFillOnce(
+    symbol: string,
+    clientOrderId: string,
+    fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
+  ): Promise<{ state: SymbolState; applied: boolean }> {
+    return this.stub(symbol).recordFillOnce(symbol, clientOrderId, fill)
+  }
+
   addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState> {
     return this.stub(symbol).addPendingSettlement(symbol, settlement)
   }

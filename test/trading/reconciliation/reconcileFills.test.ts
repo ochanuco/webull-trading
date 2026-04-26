@@ -105,11 +105,12 @@ interface UpdateCall {
  * the `where` predicate but we capture the row id from the most recent
  * `.set` call that was followed by `.where`.
  */
-function makeFakeDb(rows: CandidateRow[]): {
+function makeFakeDb(rows: CandidateRow[], options: { failStateAppliedAtOnce?: boolean } = {}): {
   db: ReturnType<typeof createDb>
   updates: UpdateCall[]
 } {
   const updates: UpdateCall[] = []
+  let failStateAppliedAtOnce = options.failStateAppliedAtOnce ?? false
 
   const selectChain = {
     from: () => selectChain,
@@ -139,7 +140,12 @@ function makeFakeDb(rows: CandidateRow[]): {
             // id in any UPDATE we issue.
             const rowId = extractRowId(predicate)
             updates.push({ rowId, set: pendingSet ?? {} })
+            const shouldFail = failStateAppliedAtOnce && pendingSet?.stateAppliedAt !== undefined
             pendingSet = null
+            if (shouldFail) {
+              failStateAppliedAtOnce = false
+              return Promise.reject(new Error('marker update unavailable'))
+            }
             return Promise.resolve()
           },
         }
@@ -171,6 +177,7 @@ function extractRowId(predicate: unknown): number {
 
 interface SymbolStateStub {
   recordFill: ReturnType<typeof vi.fn>
+  recordFillOnce: ReturnType<typeof vi.fn>
   setCooldown: ReturnType<typeof vi.fn>
   getState: ReturnType<typeof vi.fn>
   clearPendingOrder: ReturnType<typeof vi.fn>
@@ -185,6 +192,7 @@ function makeSymbolStateNamespace(stub: SymbolStateStub): unknown {
 
 interface PortfolioStateStub {
   applyRealizedPnl: ReturnType<typeof vi.fn>
+  applyRealizedPnlOnce: ReturnType<typeof vi.fn>
 }
 
 function makePortfolioNamespace(stub: PortfolioStateStub): unknown {
@@ -203,10 +211,12 @@ function makeWebullStub(detailByCoid: Record<string, unknown>) {
 function emptySymbolStateStub(): SymbolStateStub {
   return {
     recordFill: vi.fn(async () => ({})),
+    recordFillOnce: vi.fn(async () => ({ state: {}, applied: true })),
     setCooldown: vi.fn(async () => ({})),
     getState: vi.fn(async () => ({
       symbol: 'SOXL',
       position: null,
+      appliedClientOrderIds: [],
       pendingOrder: null,
       lastSignalAt: null,
       cooldownUntil: null,
@@ -274,7 +284,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(summary.stateApplied).toBe(1)
     expect(summary.stateApplyFailed).toBe(0)
     expect(summary.repaired).toBe(0)
-    expect(symbolStub.recordFill).toHaveBeenCalledWith('SOXL', {
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-buy-1', {
       side: 'BUY',
       qty: 10,
       price: 50,
@@ -315,7 +325,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       }) as unknown as ReturnType<typeof createWebullHttpClient>,
     )
     const symbolStub = emptySymbolStateStub()
-    symbolStub.recordFill.mockRejectedValueOnce(new Error('DO unavailable'))
+    symbolStub.recordFillOnce.mockRejectedValueOnce(new Error('DO unavailable'))
 
     const summary = await reconcileFills({
       env: {
@@ -371,7 +381,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     // Repair-mode rows must NOT trigger a fresh Webull poll — the canonical
     // status/qty/price are already on the row.
     expect(webullStub.findOrderByClientId).not.toHaveBeenCalled()
-    expect(symbolStub.recordFill).toHaveBeenCalledWith('SOXL', {
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-repair-1', {
       side: 'BUY',
       qty: 3,
       price: 40,
@@ -416,7 +426,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
 
     expect(webullStub.findOrderByClientId).not.toHaveBeenCalled()
-    expect(symbolStub.recordFill).toHaveBeenCalledWith('SOXL', {
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-repair-pre-side', {
       side: 'BUY',
       qty: 4,
       price: 124.95,
@@ -478,8 +488,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(summary.inspected).toBe(1)
     expect(summary.errors).toEqual([])
     expect(summary.stateApplied).toBe(1)
-    expect(symbolStub.recordFill).toHaveBeenCalledTimes(1)
-    expect(symbolStub.recordFill).toHaveBeenCalledWith('SOXL', {
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledTimes(1)
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-repair-duplicate-pre-side', {
       side: 'BUY',
       qty: 4,
       price: 124.95,
@@ -516,7 +526,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       retryStateApply: true,
     })
 
-    expect(symbolStub.recordFill).not.toHaveBeenCalled()
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
     expect(summary.stateApplyFailed).toBe(1)
     expect(summary.repaired).toBe(0)
     expect(summary.errors).toEqual([
@@ -558,6 +568,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     symbolStub.getState.mockResolvedValueOnce({
       symbol: 'SOXL',
       position: { qty: 4, avgPrice: 50, openedAt: '2026-04-20T00:00:00.000Z' },
+      appliedClientOrderIds: [],
       pendingOrder: null,
       lastSignalAt: null,
       cooldownUntil: null,
@@ -569,6 +580,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
     const portfolioStub: PortfolioStateStub = {
       applyRealizedPnl: vi.fn(async () => ({})),
+      applyRealizedPnlOnce: vi.fn(async () => ({ state: {}, applied: true })),
     }
 
     const summary = await reconcileFills({
@@ -584,9 +596,65 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(summary.updated).toEqual([
       { clientOrderId: 'coid-sell-1', status: 'FILLED', realizedPnl: 40 },
     ])
-    expect(portfolioStub.applyRealizedPnl).toHaveBeenCalledWith(40)
+    expect(portfolioStub.applyRealizedPnlOnce).toHaveBeenCalledWith('coid-sell-1', 40)
     expect(summary.stateApplied).toBe(1)
     expect(updates.at(-1)!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+  })
+
+  it('repair retry after marker update failure does not double-apply DO state', async () => {
+    const row: CandidateRow = {
+      id: 17,
+      clientOrderId: 'coid-marker-race',
+      symbol: 'SOXL',
+      side: 'SELL',
+      brokerStatus: 'FILLED',
+      filledQty: 4,
+      filledPrice: 40,
+      realizedPnl: -20,
+      stateAppliedAt: null,
+      stateApplyAttempts: 1,
+    }
+    const first = makeFakeDb([row], { failStateAppliedAtOnce: true })
+    const second = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValueOnce(first.db).mockReturnValueOnce(second.db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+    symbolStub.recordFillOnce
+      .mockResolvedValueOnce({ state: {}, applied: true })
+      .mockResolvedValueOnce({ state: {}, applied: false })
+    const portfolioStub: PortfolioStateStub = {
+      applyRealizedPnl: vi.fn(async () => ({})),
+      applyRealizedPnlOnce: vi.fn()
+        .mockResolvedValueOnce({ state: {}, applied: true })
+        .mockResolvedValueOnce({ state: {}, applied: false }),
+    }
+
+    const env = {
+      DB: FAKE_DB_BINDING,
+      SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      PORTFOLIO_STATE: makePortfolioNamespace(portfolioStub) as never,
+    } as never
+    const firstSummary = await reconcileFills({
+      env,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+      retryStateApply: true,
+    })
+    const secondSummary = await reconcileFills({
+      env,
+      now: () => new Date('2026-04-25T12:05:00.000Z'),
+      retryStateApply: true,
+    })
+
+    expect(firstSummary.stateApplied).toBe(0)
+    expect(firstSummary.stateApplyFailed).toBe(1)
+    expect(secondSummary.stateApplied).toBe(1)
+    expect(secondSummary.stateApplyFailed).toBe(0)
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledTimes(2)
+    expect(portfolioStub.applyRealizedPnlOnce).toHaveBeenCalledTimes(2)
+    expect(symbolStub.setCooldown).toHaveBeenCalledTimes(1)
+    expect(second.updates.at(-1)!.set.stateAppliedAt).toBe('2026-04-25T12:05:00.000Z')
   })
 
   it('throws when env.DB binding is missing', async () => {

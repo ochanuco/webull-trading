@@ -17,6 +17,7 @@ export interface TransitionContext {
 }
 
 const defaultCtx: TransitionContext = { now: () => new Date() }
+const MAX_APPLIED_CLIENT_ORDER_IDS = 1000
 
 export function lockPendingOrder(
   state: SymbolState,
@@ -66,6 +67,28 @@ export function recordFill(
     pendingOrder: null,
     lastExecutedPrice: fill.price,
     updatedAt: ctx.now().toISOString(),
+  }
+}
+
+export function recordFillOnce(
+  state: SymbolState,
+  clientOrderId: string,
+  fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
+  ctx: TransitionContext = defaultCtx,
+): { state: SymbolState; applied: boolean } {
+  if (clientOrderId.trim().length === 0) {
+    throw new Error('Invalid recordFillOnce clientOrderId: must be non-empty')
+  }
+  if (state.appliedClientOrderIds.includes(clientOrderId)) {
+    return { state, applied: false }
+  }
+  const next = recordFill(state, fill, ctx)
+  return {
+    state: {
+      ...next,
+      appliedClientOrderIds: appendAppliedClientOrderId(state.appliedClientOrderIds, clientOrderId),
+    },
+    applied: true,
   }
 }
 
@@ -197,6 +220,10 @@ function applyFillToPosition(
   }
   if (remaining === 0) return null
   return { ...position, qty: remaining }
+}
+
+function appendAppliedClientOrderId(ids: string[], clientOrderId: string): string[] {
+  return [...ids, clientOrderId].slice(-MAX_APPLIED_CLIENT_ORDER_IDS)
 }
 
 function isExpired(expiresAtIso: string, now: () => Date): boolean {

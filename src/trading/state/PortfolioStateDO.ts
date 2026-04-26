@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
+  applyRealizedPnlOnce,
   applyRealizedPnl,
   rollDaily,
   seedDailyStartEquity,
@@ -36,6 +37,16 @@ export class PortfolioStateDO extends DurableObject<object> {
     return next
   }
 
+  async applyRealizedPnlOnce(
+    clientOrderId: string,
+    delta: number,
+  ): Promise<{ state: PortfolioState; applied: boolean }> {
+    const state = await this.load()
+    const result = applyRealizedPnlOnce(state, clientOrderId, delta, this.transitionCtx)
+    if (result.applied) await this.save(result.state)
+    return result
+  }
+
   async setTradingDisabledUntil(iso: string | null): Promise<PortfolioState> {
     const state = await this.load()
     const next = setTradingDisabledUntil(state, iso, this.transitionCtx)
@@ -58,15 +69,24 @@ export class PortfolioStateDO extends DurableObject<object> {
       // back as `undefined`, which we normalize to `null`. We do not write the
       // backfilled row here — it will be persisted on the next state-mutating
       // call to keep `load()` side-effect free.
-      if (!('lastRolledAt' in stored) || (stored as { lastRolledAt?: unknown }).lastRolledAt === undefined) {
-        return { ...stored, lastRolledAt: null }
-      }
-      return stored
+      return this.normalize(stored)
     }
     return emptyPortfolioState(this.transitionCtx.now)
   }
 
   private async save(state: PortfolioState): Promise<void> {
     await this.ctx.storage.put(STATE_KEY, state)
+  }
+
+  private normalize(state: PortfolioState): PortfolioState {
+    return {
+      ...state,
+      appliedClientOrderIds: Array.isArray((state as { appliedClientOrderIds?: unknown }).appliedClientOrderIds)
+        ? state.appliedClientOrderIds
+        : [],
+      lastRolledAt: !('lastRolledAt' in state) || (state as { lastRolledAt?: unknown }).lastRolledAt === undefined
+        ? null
+        : state.lastRolledAt,
+    }
   }
 }

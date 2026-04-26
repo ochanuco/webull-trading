@@ -29,6 +29,7 @@ export interface QuoteSnapshot {
 export interface SymbolState {
   symbol: string
   position: PositionState | null
+  appliedClientOrderIds: string[]
   pendingOrder: PendingOrderLock | null
   lastSignalAt: string | null
   cooldownUntil: string | null
@@ -43,6 +44,7 @@ export function emptySymbolState(symbol: string, now: () => Date = () => new Dat
   return {
     symbol,
     position: null,
+    appliedClientOrderIds: [],
     pendingOrder: null,
     lastSignalAt: null,
     cooldownUntil: null,

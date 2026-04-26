@@ -619,19 +619,23 @@ async function applyFillToState(args: {
   runNow: Date
 }): Promise<void> {
   const { env, requestId, clientOrderId, symbol, side, filledQty, filledPrice, realizedPnl, runNow } = args
+  let symbolApplied = false
+  let portfolioApplied = false
 
   if (env.SYMBOL_STATE) {
     // Throws on DO failure — caller records `state_apply_error` and will
     // retry on the next reconcile tick.
-    await new SymbolStateClient(env.SYMBOL_STATE).recordFill(symbol, {
+    const result = await new SymbolStateClient(env.SYMBOL_STATE).recordFillOnce(symbol, clientOrderId, {
       side,
       qty: filledQty,
       price: filledPrice,
     })
+    symbolApplied = result.applied
   }
 
   if (side === 'SELL' && realizedPnl !== null && env.PORTFOLIO_STATE) {
-    await new PortfolioStateClient(env.PORTFOLIO_STATE).applyRealizedPnl(realizedPnl)
+    const result = await new PortfolioStateClient(env.PORTFOLIO_STATE).applyRealizedPnlOnce(clientOrderId, realizedPnl)
+    portfolioApplied = result.applied
   }
 
   // Stop-out cooldown: a losing exit parks the symbol until the next trading
@@ -650,7 +654,8 @@ async function applyFillToState(args: {
     side === 'SELL' &&
     realizedPnl !== null &&
     realizedPnl < 0 &&
-    env.SYMBOL_STATE
+    env.SYMBOL_STATE &&
+    (symbolApplied || portfolioApplied)
   ) {
     try {
       const market = inferTradingMarket(symbol)

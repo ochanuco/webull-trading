@@ -28,6 +28,10 @@ export class PortfolioStateClient implements PortfolioStore {
     return this.stub().applyRealizedPnl(delta)
   }
 
+  applyRealizedPnlOnce(clientOrderId: string, delta: number): Promise<{ state: PortfolioState; applied: boolean }> {
+    return this.stub().applyRealizedPnlOnce(clientOrderId, delta)
+  }
+
   setTradingDisabledUntil(iso: string | null): Promise<PortfolioState> {
     return this.stub().setTradingDisabledUntil(iso)
   }

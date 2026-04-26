@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyRealizedPnl,
+  applyRealizedPnlOnce,
   rollDaily,
   seedDailyStartEquity,
   setTradingDisabledUntil,
@@ -45,6 +46,36 @@ describe('portfolioStateTransitions', () => {
       expect(() =>
         applyRealizedPnl(emptyPortfolioState(fixedNow), Number.POSITIVE_INFINITY, { now: fixedNow }),
       ).toThrow('Invalid applyRealizedPnl')
+    })
+  })
+
+  describe('applyRealizedPnlOnce', () => {
+    it('applies a new clientOrderId once and records it in the ledger', () => {
+      const s0 = emptyPortfolioState(fixedNow)
+      const result = applyRealizedPnlOnce(s0, 'coid-sell-1', -1_000, { now: fixedNow })
+
+      expect(result.applied).toBe(true)
+      expect(result.state.dailyRealizedPnl).toBe(-1_000)
+      expect(result.state.appliedClientOrderIds).toEqual(['coid-sell-1'])
+    })
+
+    it('skips a duplicate clientOrderId without changing PnL', () => {
+      const s0 = {
+        ...emptyPortfolioState(fixedNow),
+        dailyRealizedPnl: -1_000,
+        appliedClientOrderIds: ['coid-sell-1'],
+      }
+      const result = applyRealizedPnlOnce(s0, 'coid-sell-1', -500, { now: fixedNow })
+
+      expect(result.applied).toBe(false)
+      expect(result.state).toBe(s0)
+      expect(result.state.dailyRealizedPnl).toBe(-1_000)
+    })
+
+    it('rejects an empty clientOrderId', () => {
+      expect(() =>
+        applyRealizedPnlOnce(emptyPortfolioState(fixedNow), '', 1, { now: fixedNow }),
+      ).toThrow('Invalid applyRealizedPnlOnce clientOrderId')
     })
   })
 
