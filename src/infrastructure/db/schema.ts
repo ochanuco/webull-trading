@@ -206,6 +206,23 @@ export const globalConfig = sqliteTable(
      * `equity * bucket_exposure_pct` で算出 (#23 Lane 3)。POC default 0.30。
      */
     bucketExposurePct: real('bucket_exposure_pct').notNull().default(0.30),
+    /**
+     * VIX regime filter (issue #196 3/3)。`^VIX` 最新値がこの閾値を超えたら
+     * BUY size を `vix_warning_size_scale` 倍に縮小 (default 25 → x0.5)。
+     * 25 以下は normal (size scale 1.0)、SELL は閾値関係なく通す。
+     */
+    vixWarningThreshold: real('vix_warning_threshold').notNull().default(25.0),
+    /**
+     * VIX が `vix_critical_threshold` を超えたら BUY を全停止 (sizeScale=0)。
+     * SELL は VIX 関係なく通す (= existing position の exit を妨げない)。
+     * default 30。
+     */
+    vixCriticalThreshold: real('vix_critical_threshold').notNull().default(30.0),
+    /**
+     * VIX warning 領域 (warning < VIX <= critical) で適用する size 倍率。
+     * default 0.5 (= 半分に縮小)。0..1 で運用想定。
+     */
+    vixWarningSizeScale: real('vix_warning_size_scale').notNull().default(0.5),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -310,6 +327,26 @@ export const globalConfig = sqliteTable(
     bucketExposurePctRange: check(
       'global_config_bucket_exposure_pct_range',
       sql`${t.bucketExposurePct} > 0 AND ${t.bucketExposurePct} <= 1`,
+    ),
+    // VIX 閾値は実数値 (10..100 程度の運用想定だが余裕を持って 0..200)。
+    // 0 以下 / 上限超 / 順序逆 (warning > critical) を弾く。
+    vixWarningThresholdRange: check(
+      'global_config_vix_warning_threshold_range',
+      sql`${t.vixWarningThreshold} > 0 AND ${t.vixWarningThreshold} <= 200`,
+    ),
+    vixCriticalThresholdRange: check(
+      'global_config_vix_critical_threshold_range',
+      sql`${t.vixCriticalThreshold} > 0 AND ${t.vixCriticalThreshold} <= 200`,
+    ),
+    // warning ≤ critical の順序を強制。逆転すると warning 領域が空集合になり
+    // 「critical を超えていないのに sizeScale が 0」みたいな矛盾が出る。
+    vixThresholdOrder: check(
+      'global_config_vix_threshold_order',
+      sql`${t.vixWarningThreshold} <= ${t.vixCriticalThreshold}`,
+    ),
+    vixWarningSizeScaleRange: check(
+      'global_config_vix_warning_size_scale_range',
+      sql`${t.vixWarningSizeScale} >= 0 AND ${t.vixWarningSizeScale} <= 1`,
     ),
   }),
 )

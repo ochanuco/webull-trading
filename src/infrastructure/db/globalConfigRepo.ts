@@ -40,6 +40,15 @@ export interface GlobalConfigSnapshot {
   riskDdHaltThreshold: number
   /** 同一 bucket の open 合計 notional 上限 = equity × この比率。#23 Lane 3。 */
   bucketExposurePct: number
+  /**
+   * VIX regime filter (issue #196 3/3)。`^VIX` 最新値がこの閾値超で BUY size を
+   * `vixWarningSizeScale` 倍に縮小 (default 25 → x0.5)。
+   */
+  vixWarningThreshold: number
+  /** VIX がこの閾値超で BUY 全停止 (sizeScale=0)。default 30。 */
+  vixCriticalThreshold: number
+  /** warning 領域の size 倍率。default 0.5。 */
+  vixWarningSizeScale: number
 }
 
 /**
@@ -74,6 +83,9 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
   bucketExposurePct: 0.30,
+  vixWarningThreshold: 25.0,
+  vixCriticalThreshold: 30.0,
+  vixWarningSizeScale: 0.5,
 })
 
 export async function loadGlobalConfig(
@@ -109,5 +121,13 @@ export async function loadGlobalConfig(
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,
     bucketExposurePct: row.bucketExposurePct,
+    // VIX 列は 0015 で追加。古い D1 (snapshot 取得失敗 / ALTER 直前 race) では
+    // undefined になり得るため、defaults へ畳む (snapshot 経由 read だが safety)。
+    vixWarningThreshold:
+      row.vixWarningThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
+    vixCriticalThreshold:
+      row.vixCriticalThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
+    vixWarningSizeScale:
+      row.vixWarningSizeScale ?? GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
   }
 }
