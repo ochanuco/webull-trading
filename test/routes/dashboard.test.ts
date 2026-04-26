@@ -1686,3 +1686,33 @@ describe('renderLastRolledCell (issue #140)', () => {
     expect(html).toContain('parse 不能')
   })
 })
+
+import { renderAlertFilterPills } from '../../src/routes/dashboard'
+
+describe('renderAlertFilterPills', () => {
+  it('preserves unrelated query params (e.g. limit) when switching severity', () => {
+    const current = new URLSearchParams('limit=500&severity=warning')
+    const html = renderAlertFilterPills(['warning'], undefined, current)
+    // critical pill should switch severity but keep limit=500.
+    expect(html).toContain('href="/dashboard/alerts?limit=500&amp;severity=critical"')
+    // warning pill should be the active one (currently selected).
+    expect(html).toContain('href="/dashboard/alerts?limit=500&amp;severity=warning"')
+    // 全 severity pill drops the severity key but keeps limit.
+    expect(html).toContain('href="/dashboard/alerts?limit=500"')
+  })
+
+  it('drops severity entirely when 全 severity is selected (no stale severity param)', () => {
+    const current = new URLSearchParams('severity=info')
+    const html = renderAlertFilterPills(['info'], undefined, current)
+    expect(html).toContain('href="/dashboard/alerts"')
+  })
+
+  it('includes both severity and eventType keys when current url already has both', () => {
+    const current = new URLSearchParams('limit=200&severity=critical&eventType=ERROR')
+    const html = renderAlertFilterPills(['critical'], 'ERROR', current)
+    // Switching to TRADE event type should keep limit and severity.
+    expect(html).toContain(
+      'href="/dashboard/alerts?limit=200&amp;severity=critical&amp;eventType=TRADE"',
+    )
+  })
+})

@@ -101,7 +101,12 @@ export async function loadRecentAlerts(
   } else if (options.severities && options.severities.length > 0) {
     query = query.where(inArray(notificationEmitLog.severity, options.severities))
   }
-  return await query.orderBy(desc(notificationEmitLog.id)).limit(limit)
+  // `waitUntil` 配下の INSERT が前後すると id 順は実発生順とずれることが
+  // ある。timestamp (ISO 文字列) DESC を first key にし、同 timestamp は
+  // id DESC で tiebreak する (CodeRabbit #210)。
+  return await query
+    .orderBy(desc(notificationEmitLog.timestamp), desc(notificationEmitLog.id))
+    .limit(limit)
 }
 
 function clampLimit(raw: number | undefined): number {

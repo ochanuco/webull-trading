@@ -461,18 +461,28 @@
         }
       },
       "indexes": {
-        "notification_emit_log_severity_id_idx": {
-          "name": "notification_emit_log_severity_id_idx",
+        "notification_emit_log_timestamp_id_idx": {
+          "name": "notification_emit_log_timestamp_id_idx",
           "columns": [
-            "severity",
+            "timestamp",
             "id"
           ],
           "isUnique": false
         },
-        "notification_emit_log_event_type_id_idx": {
-          "name": "notification_emit_log_event_type_id_idx",
+        "notification_emit_log_severity_timestamp_id_idx": {
+          "name": "notification_emit_log_severity_timestamp_id_idx",
+          "columns": [
+            "severity",
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "notification_emit_log_event_type_timestamp_id_idx": {
+          "name": "notification_emit_log_event_type_timestamp_id_idx",
           "columns": [
             "event_type",
+            "timestamp",
             "id"
           ],
           "isUnique": false

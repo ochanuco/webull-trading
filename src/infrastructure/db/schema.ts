@@ -387,11 +387,22 @@ export const notificationEmitLog = sqliteTable(
     message: text('message').notNull(),
   },
   (t) => ({
-    // dashboard `/dashboard/alerts` は WHERE severity IN ('critical','warning')
-    // ORDER BY id DESC で読む。
-    severityIdIdx: index('notification_emit_log_severity_id_idx').on(t.severity, t.id),
+    // dashboard `/dashboard/alerts` は ORDER BY timestamp DESC, id DESC で読む。
+    // `waitUntil` 配下の INSERT が前後して id 順と発生順がずれるケースを
+    // tiebreak で吸収するため、timestamp を first key にする (CodeRabbit #210)。
+    timestampIdIdx: index('notification_emit_log_timestamp_id_idx').on(t.timestamp, t.id),
+    // severity フィルタ + timestamp DESC ソートを 1 本でカバー。
+    severityTimestampIdIdx: index('notification_emit_log_severity_timestamp_id_idx').on(
+      t.severity,
+      t.timestamp,
+      t.id,
+    ),
     // event type 別フィルタ ('strategy_cron_error' のような cause も同 index で覆える)。
-    eventTypeIdIdx: index('notification_emit_log_event_type_id_idx').on(t.eventType, t.id),
+    eventTypeTimestampIdIdx: index('notification_emit_log_event_type_timestamp_id_idx').on(
+      t.eventType,
+      t.timestamp,
+      t.id,
+    ),
   }),
 )
 

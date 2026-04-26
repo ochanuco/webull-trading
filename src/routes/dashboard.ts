@@ -335,6 +335,7 @@ export const dashboard = new Hono<AppBindings>()
     const limit = clampAlertLimit(c.req.query('limit'))
     const severityFilter = parseSeverityFilter(c.req.query('severity'))
     const eventTypeFilter = parseEventTypeFilter(c.req.query('eventType'))
+    const currentQuery = parseAlertsQuery(c.req.url)
     const options: LoadAlertOptions = { limit }
     if (eventTypeFilter) {
       options.eventType = eventTypeFilter
@@ -346,7 +347,7 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(
         layout(
           'アラート',
-          alertsBody({ rows, limit, severityFilter, eventTypeFilter }),
+          alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery }),
         ),
       )
     } catch (err) {
@@ -1113,6 +1114,20 @@ function clampAlertLimit(raw: string | undefined): number {
   return Math.min(n, 500)
 }
 
+/**
+ * `c.req.url` から `URLSearchParams` を取り出す。filter pill が他の query
+ * (例: `limit=500`) を保持するために使う (CodeRabbit #210)。
+ *
+ * URL 構築失敗時は空 URLSearchParams にフォールバック。
+ */
+function parseAlertsQuery(rawUrl: string): URLSearchParams {
+  try {
+    return new URL(rawUrl).searchParams
+  } catch {
+    return new URLSearchParams()
+  }
+}
+
 const SEVERITY_VALUES: ReadonlyArray<NotificationSeverity> = ['critical', 'warning', 'info']
 
 function parseSeverityFilter(raw: string | undefined): NotificationSeverity[] {
@@ -1142,6 +1157,8 @@ interface AlertsBodyArgs {
   limit: number
   severityFilter: NotificationSeverity[]
   eventTypeFilter: NotificationEvent['type'] | undefined
+  /** 現在の query string。filter pill が他の param (limit 等) を保持するために使う。 */
+  currentQuery: URLSearchParams
 }
 
 /**
@@ -1153,7 +1170,7 @@ interface AlertsBodyArgs {
  *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
  */
 function alertsBody(args: AlertsBodyArgs): string {
-  const { rows, limit, severityFilter, eventTypeFilter } = args
+  const { rows, limit, severityFilter, eventTypeFilter, currentQuery } = args
   const filterDescription =
     severityFilter.length === 0 && eventTypeFilter === undefined
       ? '全件'
@@ -1164,7 +1181,7 @@ function alertsBody(args: AlertsBodyArgs): string {
           .filter((s): s is string => s !== null)
           .join(' / ')
   const header = `<p class="muted">直近 ${rows.length} 件のアラート (${esc(filterDescription)}, limit=${limit}, max 500)。Webhook が未設定でも D1 には記録されています。</p>`
-  const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter)
+  const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
   if (rows.length === 0) {
     return `${header}${filterPills}<p class="muted">該当するアラートは見つかりませんでした。</p>`
   }
@@ -1199,26 +1216,56 @@ function alertsBody(args: AlertsBodyArgs): string {
   </table>`
 }
 
-function renderAlertFilterPills(
+/**
+ * `/dashboard/alerts` の severity / eventType filter ピルを描画する。
+ *
+ * `currentQuery` の他 param (例: `limit=500`) は preserve したまま、対象 key
+ * のみを差し替える / 削除する (CodeRabbit #210)。
+ *
+ * Exported for unit test (URL preservation).
+ */
+export function renderAlertFilterPills(
   active: NotificationSeverity[],
   activeEventType: NotificationEvent['type'] | undefined,
+  currentQuery: URLSearchParams,
 ): string {
-  const sevPill = (label: string, query: string, isActive: boolean): string =>
-    `<a href="/dashboard/alerts${query}" style="margin-right:6px;${isActive ? 'background:#1d1d1f;color:#fff;' : ''}">${esc(label)}</a>`
+  const buildHref = (updatedKey: string, updatedValue: string | null): string => {
+    const next = new URLSearchParams(currentQuery)
+    if (updatedValue === null) next.delete(updatedKey)
+    else next.set(updatedKey, updatedValue)
+    const qs = next.toString()
+    return qs.length === 0 ? '/dashboard/alerts' : `/dashboard/alerts?${qs}`
+  }
+  const pill = (label: string, href: string, isActive: boolean): string =>
+    `<a href="${esc(href)}" style="margin-right:6px;${isActive ? 'background:#1d1d1f;color:#fff;' : ''}">${esc(label)}</a>`
   const sev = [
-    sevPill('全 severity', '', active.length === 0),
-    sevPill('critical', '?severity=critical', active.length === 1 && active[0] === 'critical'),
-    sevPill('warning', '?severity=warning', active.length === 1 && active[0] === 'warning'),
-    sevPill('critical+warning', '?severity=critical,warning', active.length === 2 && active.includes('critical') && active.includes('warning')),
-    sevPill('info', '?severity=info', active.length === 1 && active[0] === 'info'),
+    pill('全 severity', buildHref('severity', null), active.length === 0),
+    pill(
+      'critical',
+      buildHref('severity', 'critical'),
+      active.length === 1 && active[0] === 'critical',
+    ),
+    pill(
+      'warning',
+      buildHref('severity', 'warning'),
+      active.length === 1 && active[0] === 'warning',
+    ),
+    pill(
+      'critical+warning',
+      buildHref('severity', 'critical,warning'),
+      active.length === 2 && active.includes('critical') && active.includes('warning'),
+    ),
+    pill('info', buildHref('severity', 'info'), active.length === 1 && active[0] === 'info'),
   ].join('')
-  const evPill = (label: string, query: string, isActive: boolean): string =>
-    `<a href="/dashboard/alerts${query}" style="margin-right:6px;${isActive ? 'background:#1d1d1f;color:#fff;' : ''}">${esc(label)}</a>`
   const ev = [
-    evPill('全 type', '', activeEventType === undefined),
-    evPill('ERROR', '?eventType=ERROR', activeEventType === 'ERROR'),
-    evPill('TRADE', '?eventType=TRADE', activeEventType === 'TRADE'),
-    evPill('STATE_CHANGE', '?eventType=STATE_CHANGE', activeEventType === 'STATE_CHANGE'),
+    pill('全 type', buildHref('eventType', null), activeEventType === undefined),
+    pill('ERROR', buildHref('eventType', 'ERROR'), activeEventType === 'ERROR'),
+    pill('TRADE', buildHref('eventType', 'TRADE'), activeEventType === 'TRADE'),
+    pill(
+      'STATE_CHANGE',
+      buildHref('eventType', 'STATE_CHANGE'),
+      activeEventType === 'STATE_CHANGE',
+    ),
   ].join('')
   return `<nav style="margin-bottom:12px">${sev}<span class="muted" style="margin:0 8px">|</span>${ev}</nav>`
 }

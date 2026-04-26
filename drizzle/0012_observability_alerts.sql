@@ -16,5 +16,6 @@ CREATE TABLE `notification_emit_log` (
 	`message` text NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX `notification_emit_log_severity_id_idx` ON `notification_emit_log` (`severity`,`id`);--> statement-breakpoint
-CREATE INDEX `notification_emit_log_event_type_id_idx` ON `notification_emit_log` (`event_type`,`id`);
+CREATE INDEX `notification_emit_log_timestamp_id_idx` ON `notification_emit_log` (`timestamp`,`id`);--> statement-breakpoint
+CREATE INDEX `notification_emit_log_severity_timestamp_id_idx` ON `notification_emit_log` (`severity`,`timestamp`,`id`);--> statement-breakpoint
+CREATE INDEX `notification_emit_log_event_type_timestamp_id_idx` ON `notification_emit_log` (`event_type`,`timestamp`,`id`);
