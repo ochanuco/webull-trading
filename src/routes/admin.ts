@@ -6,6 +6,10 @@ import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import { reconcileFills } from '../trading/reconciliation/reconcileFills'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
+import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
+import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
+import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
+import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
 /**
  * Operator-only endpoints. Basic-auth-protected by the same middleware as
@@ -63,6 +67,113 @@ export const admin = new Hono<AppBindings>()
    */
   .post('/strategy/run', async (c) => {
     const result = await runStrategyCron(c.env)
+    return c.json(result)
+  })
+  /**
+   * Offline backtest harness for PullbackUptrendStrategy (issue #198)。
+   *
+   * Yahoo Finance daily bars を取って `runBacktest` に流し込み、結果 JSON を
+   * 返す。POC で `pullback_default_*` の妥当性を data-driven に評価するための
+   * tool — 実発注は **しない** (純粋計算)。
+   *
+   * Query:
+   *   - `symbol`         (required)  e.g. AAPL / 7203
+   *   - `from`, `to`     (required)  ISO date "YYYY-MM-DD"
+   *   - `initialCash`    (optional)  default 10000
+   *   - `stopPct`, `takeProfitPct`, `timeStopDays`, `pullbackMax`,
+   *     `pullbackMin`, `minReturn50d`, `kAtr` (optional)  global_config 既定
+   *     を override
+   *
+   * 返り値は `BacktestResult` をそのまま JSON 化したもの。in-memory only、
+   * D1 永続化は別 PR (issue #198 の `backtest_run` / `backtest_trade`)。
+   */
+  .get('/backtest', async (c) => {
+    const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
+    const from = readRequiredParam(c.req.query('from'), 'from')
+    const to = readRequiredParam(c.req.query('to'), 'to')
+    if (!isYmd(from)) throw new ValidationError("'from' must be YYYY-MM-DD", { field: 'from' })
+    if (!isYmd(to)) throw new ValidationError("'to' must be YYYY-MM-DD", { field: 'to' })
+    if (from > to) {
+      throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
+    }
+    const initialCash = readOptionalNumber(c.req.query('initialCash'), 'initialCash', 10_000, {
+      mustBePositive: true,
+    })
+
+    const global = await loadGlobalConfigFrom(c.env)
+    const rule: SymbolRule = {
+      stopPct: readOptionalNumber(
+        c.req.query('stopPct'),
+        'stopPct',
+        global.pullbackDefaultStopPct,
+        {},
+      ),
+      takeProfitPct: readOptionalNumber(
+        c.req.query('takeProfitPct'),
+        'takeProfitPct',
+        global.pullbackDefaultTakeProfitPct,
+        {},
+      ),
+      timeStopDays: readOptionalNumber(
+        c.req.query('timeStopDays'),
+        'timeStopDays',
+        global.pullbackDefaultTimeStopDays,
+        { mustBePositive: true },
+      ),
+      pullbackMax: readOptionalNumber(
+        c.req.query('pullbackMax'),
+        'pullbackMax',
+        global.pullbackDefaultPullbackMax,
+        {},
+      ),
+      pullbackMin: readOptionalNumber(
+        c.req.query('pullbackMin'),
+        'pullbackMin',
+        global.pullbackDefaultPullbackMin,
+        {},
+      ),
+      minReturn50d: readOptionalNumber(
+        c.req.query('minReturn50d'),
+        'minReturn50d',
+        global.pullbackDefaultMinReturn50d,
+        {},
+      ),
+      requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+      kAtr: readOptionalNumber(c.req.query('kAtr'), 'kAtr', global.pullbackDefaultKAtr, {
+        mustBePositive: true,
+      }),
+    }
+
+    // Need at least 50 warmup bars before `from` for SMA50; estimate generous
+    // lookback in calendar days then trim with `from`/`to`. ~1.6× fudge to
+    // cover holidays.
+    const lookbackDays = estimateLookbackDays(from, to)
+    const barClient = new YahooBarClient()
+    const allBars = await barClient.getDailyBars(symbol, lookbackDays)
+    const bars = allBars.filter((b) => b.date <= to)
+    // Keep at least the first 60 bars before `from` as warmup; if available
+    // we slice to (from - warmup_buffer)..to. Yahoo already returned them
+    // oldest-first.
+    const liveStartIdx = bars.findIndex((b) => b.date >= from)
+    if (liveStartIdx === -1) {
+      // No bars within [from, to]: Yahoo had no daily data for the requested
+      // window (e.g. `from` is in the future, or symbol delisted before
+      // `from`). Reject with 400 instead of silently running on the entire
+      // pre-`from` history (which would compute against an unrelated window
+      // and return a misleading 200).
+      throw new ValidationError('no bars found in requested range', { field: 'from' })
+    }
+    const warmupKeep = 60
+    const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
+
+    const params: BacktestParams = {
+      symbol,
+      from,
+      to,
+      initialCash,
+      rule,
+    }
+    const result = await runBacktest(sliced, params)
     return c.json(result)
   })
   /**
@@ -154,4 +265,48 @@ function readAmount(body: unknown): number {
     throw new ValidationError('amount must be a finite number >= 0', { field: 'amount' })
   }
   return value
+}
+
+function readRequiredParam(value: string | undefined, field: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ValidationError(`'${field}' query param is required`, { field })
+  }
+  return value.trim()
+}
+
+function readOptionalNumber(
+  value: string | undefined,
+  field: string,
+  defaultValue: number,
+  opts: { mustBePositive?: boolean },
+): number {
+  if (value === undefined || value === '') return defaultValue
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    throw new ValidationError(`'${field}' must be a finite number`, { field })
+  }
+  if (opts.mustBePositive && parsed <= 0) {
+    throw new ValidationError(`'${field}' must be > 0`, { field })
+  }
+  return parsed
+}
+
+function isYmd(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00.000Z`))
+}
+
+/**
+ * Yahoo `getDailyBars` takes a bar count (lookback). Translate the requested
+ * date range into a generous bar count covering 60 warmup bars + (to-from)
+ * trading days plus a 50% holiday/weekend fudge factor. Capped at the largest
+ * Yahoo bucket (5y / ~1300 bars).
+ */
+function estimateLookbackDays(fromYmd: string, toYmd: string): number {
+  const a = Date.parse(`${fromYmd}T00:00:00.000Z`)
+  const b = Date.parse(`${toYmd}T00:00:00.000Z`)
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 200
+  const calendarDays = Math.max(1, Math.round((b - a) / 86_400_000) + 1)
+  // Trading days ≈ calendar * 5/7. Add 60 warmup + 20 buffer.
+  const tradingDays = Math.ceil(calendarDays * (5 / 7)) + 60 + 20
+  return Math.min(1300, Math.max(80, tradingDays))
 }
