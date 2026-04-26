@@ -2,6 +2,7 @@ import { createApp } from './app'
 import type { Env } from './config/env'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
+import { createNotifier } from './infrastructure/notification/createNotifier'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
@@ -61,13 +62,19 @@ export default {
             )
           },
           (error) => {
+            const message = error instanceof Error ? error.message : String(error)
             console.error(
               JSON.stringify({
                 event: 'strategy_cron_error',
                 requestId,
-                message: error instanceof Error ? error.message : String(error),
+                message,
               }),
             )
+            // cron 全体が落ちた時 (D1 失敗 / unexpected throw 等) も通知 (#199)。
+            // fire-and-forget。Notifier 実装側で silent fallback。
+            createNotifier(env)
+              .notify({ type: 'ERROR', message, cause: 'strategy_cron' })
+              .catch(() => undefined)
           },
         ),
       )

@@ -1,5 +1,6 @@
 import type { BarClient } from '../../infrastructure/quotes/BarClient'
 import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
+import type { Notifier } from '../../infrastructure/notification/Notifier'
 import type { DecisionTraceStep } from '../domain/Signal'
 import { inferTradingMarket } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
@@ -77,6 +78,12 @@ export interface PullbackSchedulerOptions {
    * `crypto.randomUUID()` を渡す。
    */
   requestId?: string
+  /**
+   * Slack/Discord webhook 通知用 sink (#199)。BUY/SELL emit 時と cron error 時に
+   * fire-and-forget で叩く。実装は失敗を握りつぶす責務 (silent fallback) なので
+   * scheduler 側は `.catch()` を付けるだけで cron を blocking しない。
+   */
+  notifier?: Notifier
   now?: () => Date
 }
 
@@ -138,6 +145,34 @@ export async function runPullbackScheduler(
     rejected: [],
     errors: [],
     decisions: [],
+  }
+
+  // Notifier helper: fire-and-forget。Notifier 実装側で silent fallback する
+  // 約束だが、念のため二重 catch して cron を絶対に落とさない (#199)。
+  const emitNotify = (event: Parameters<NonNullable<typeof options.notifier>['notify']>[0]): void => {
+    if (!options.notifier) return
+    try {
+      const p = options.notifier.notify(event)
+      if (p && typeof (p as Promise<unknown>).catch === 'function') {
+        ;(p as Promise<unknown>).catch((err) => {
+          console.warn(
+            JSON.stringify({
+              event: 'notifier_emit_failed',
+              requestId: options.requestId ?? null,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          )
+        })
+      }
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          event: 'notifier_emit_failed',
+          requestId: options.requestId ?? null,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    }
   }
 
   // Logging helper: sink が投げても本体を落とさない (logging failure isolation)。
@@ -222,6 +257,7 @@ export async function runPullbackScheduler(
     } catch (error) {
       summary.errors.push({ symbol: upper, message: messageOf(error) })
       await emitDecision({ symbol: upper, decision: 'ERROR', reason: `bar fetch: ${messageOf(error)}` })
+      emitNotify({ type: 'ERROR', symbol: upper, message: messageOf(error), cause: 'bar fetch' })
       continue
     }
 
@@ -467,6 +503,12 @@ export async function runPullbackScheduler(
         price: indicators.price,
         trace: appendTrace(signal.trace, traceStep('broker.submit', false, messageOf(error), '==', 'submitted')),
       })
+      emitNotify({
+        type: 'ERROR',
+        symbol: upper,
+        message: messageOf(error),
+        cause: 'broker submit',
+      })
       try {
         logPostSubmit({
           clientOrderId: intent.clientOrderId,
@@ -524,6 +566,23 @@ export async function runPullbackScheduler(
         quantity: intent.quantity,
         notional: intent.notional,
       },
+    })
+
+    // SELL の realizedPnl は state.position.avgPrice (existing) と
+    // intent.price (exit) の差から推定。BUY 時は undefined。avgPrice が無い
+    // SELL は不正経路 (上で reject 済) なので発生しないはずだが defensive。
+    const realizedPnl =
+      intent.side === 'SELL' && state.position && Number.isFinite(state.position.avgPrice)
+        ? (intent.price - state.position.avgPrice) * intent.quantity
+        : undefined
+    emitNotify({
+      type: 'TRADE',
+      side: intent.side,
+      symbol: upper,
+      qty: intent.quantity,
+      price: intent.price,
+      ...(realizedPnl !== undefined ? { realizedPnl } : {}),
+      mode: result.mode,
     })
 
     if (result.mode === 'DRY_RUN') {

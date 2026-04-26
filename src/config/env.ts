@@ -297,3 +297,22 @@ export interface Env {
    */
   DB?: D1Database
 }
+
+// Notification webhook config (#199 append)
+export interface Env {
+  /**
+   * Slack incoming webhook URL。未設定なら Slack 通知無効。
+   * `wrangler secret put SLACK_WEBHOOK_URL` で設定する。
+   */
+  SLACK_WEBHOOK_URL?: string
+  /**
+   * Discord webhook URL。未設定なら Discord 通知無効。
+   * `wrangler secret put DISCORD_WEBHOOK_URL` で設定する。
+   */
+  DISCORD_WEBHOOK_URL?: string
+  /**
+   * 通知メッセージに付ける dashboard link の base URL
+   * (例: `https://webull-trading.example.workers.dev`)。未設定なら link 省略。
+   */
+  DASHBOARD_BASE_URL?: string
+}

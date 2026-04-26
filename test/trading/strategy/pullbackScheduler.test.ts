@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { BarClient, IntradayBar } from '../../../src/infrastructure/quotes/BarClient'
+import type { Notifier, NotificationEvent } from '../../../src/infrastructure/notification/Notifier'
 import type { Execution } from '../../../src/trading/execution/Execution'
 import type { PositionStore } from '../../../src/trading/state/PositionStore'
 import { emptySymbolState, type SymbolState } from '../../../src/trading/state/types'
@@ -207,5 +208,99 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
     const intent = execution.calls[0] as { side: string; price: number }
     expect(intent.price).toBe(117.5)
+  })
+
+  it('fires notifier with TRADE event on a successful BUY (#199)', async () => {
+    const events: NotificationEvent[] = []
+    const notifier: Notifier = {
+      async notify(event) {
+        events.push(event)
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      notifier,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    // microtask drain so fire-and-forget notify は test 完了前に reach する
+    await Promise.resolve()
+    const trade = events.find((e) => e.type === 'TRADE') as Extract<NotificationEvent, { type: 'TRADE' }> | undefined
+    expect(trade).toBeDefined()
+    expect(trade?.side).toBe('BUY')
+    expect(trade?.symbol).toBe('AAPL')
+    expect(trade?.mode).toBe('DRY_RUN')
+    expect(trade?.realizedPnl).toBeUndefined()
+  })
+
+  it('fires notifier with ERROR event on bar fetch failure (#199)', async () => {
+    const events: NotificationEvent[] = []
+    const notifier: Notifier = {
+      async notify(event) {
+        events.push(event)
+      },
+    }
+    const crashingClient: BarClient = {
+      async getDailyBars() {
+        throw new Error('upstream 500')
+      },
+    }
+    await runPullbackScheduler({
+      symbols: ['BROKEN'],
+      equity: 100_000,
+      barClient: crashingClient,
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      notifier,
+      now: () => now,
+    })
+
+    await Promise.resolve()
+    const err = events.find((e) => e.type === 'ERROR') as Extract<NotificationEvent, { type: 'ERROR' }> | undefined
+    expect(err).toBeDefined()
+    expect(err?.symbol).toBe('BROKEN')
+    expect(err?.cause).toBe('bar fetch')
+    expect(err?.message).toContain('upstream 500')
+  })
+
+  it('does not let a throwing notifier break the scheduler (silent fallback) (#199)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const notifier: Notifier = {
+      async notify() {
+        throw new Error('notifier exploded')
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      notifier,
+      now: () => now,
+    })
+
+    // notifier failure must not block the BUY path.
+    expect(summary.buys).toBe(1)
+    await Promise.resolve()
+    warnSpy.mockRestore()
+  })
+
+  it('does not call notifier when one is not provided (back-compat) (#199)', async () => {
+    // Sanity: existing call sites without `notifier` keep working.
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
   })
 })

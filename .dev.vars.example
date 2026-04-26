@@ -30,3 +30,10 @@ SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
 # #38-C risk knobs (optional, both default to sane values):
 # STALE_QUOTE_MS=900000
 # GAP_REJECT_PCT=0.03
+
+# Notification webhooks (#199, optional). 未設定なら通知 no-op。
+# Slack incoming webhook と Discord webhook はそれぞれ単独 / 両方設定可能。
+SLACK_WEBHOOK_URL=
+DISCORD_WEBHOOK_URL=
+# dashboard 通知 link の base URL (例: https://webull-trading.example.workers.dev)。
+DASHBOARD_BASE_URL=
