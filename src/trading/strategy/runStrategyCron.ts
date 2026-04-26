@@ -19,6 +19,10 @@ import {
   logStrategyDecision,
   strategyDecisionDbOrUndefined,
 } from '../../infrastructure/logger/strategyDecisionLog'
+import {
+  createEarningsCalendarDb,
+  createEarningsCalendarRepo,
+} from '../../infrastructure/calendar/earningsCalendarRepo'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -448,6 +452,17 @@ export async function runStrategyCron(
         staleQuoteMs: global.staleQuoteMs,
         gapRejectPct: global.gapRejectPct,
       },
+      // Earnings calendar gate (issue #196 1/3)。env.DB が無ければ skip
+      // (POC 後方互換)。freezeBusinessDays は POC 段階では default 1 固定。
+      // 将来 global_config に出すなら別 PR (#196 follow-up)。
+      ...(env.DB
+        ? {
+            earningsGate: {
+              repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
+              freezeBusinessDays: 1,
+            },
+          }
+        : {}),
       onDecision: (record) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),

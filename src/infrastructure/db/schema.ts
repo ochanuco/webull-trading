@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { check, index, integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { check, index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 /**
  * Schema-level max for pullbackDefaultTimeStopDays. Exported so chart window
@@ -429,3 +429,39 @@ export const configStateSnapshot = sqliteTable('config_state_snapshot', {
 
 export type ConfigStateSnapshotRow = typeof configStateSnapshot.$inferSelect
 export type ConfigStateSnapshotInsert = typeof configStateSnapshot.$inferInsert
+
+/**
+ * Per-symbol earnings calendar (issue #196 1/3)。entry を avoid させる用途
+ * の risk gate ソース。`earningsGate` が evalDate ± freezeBusinessDays を
+ * 範囲で読み、該当日があれば BUY を reject する (シグナル源ではなく avoid 用)。
+ *
+ * POC では外部 API 取得は別 issue で、`/admin/earnings/seed` 経由で operator が
+ * 手動 seed する想定。`UNIQUE (symbol, earnings_date)` で重複 insert は弾く。
+ */
+export const earningsCalendar = sqliteTable(
+  'earnings_calendar',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** 銘柄コード (例: 'AAPL', '7203')。upper-case 前提で repo 側が正規化する。 */
+    symbol: text('symbol').notNull(),
+    /**
+     * 決算発表日 ISO date "YYYY-MM-DD"。BMO (Before Market Open) / AMC
+     * (After Market Close) の区別は POC では持たない (±N 営業日窓で十分粗い)。
+     */
+    earningsDate: text('earnings_date').notNull(),
+    /** 自由 text。'Q2 2026' / 'BMO' / news source 等を operator が任意で残す。 */
+    notes: text('notes'),
+    createdAt: text('created_at')
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    // 同一銘柄 × 同一日の重複を物理的に防ぐ。bulk seed は INSERT OR IGNORE で skip。
+    // unique index は gate の (symbol, earnings_date) range read もカバーするので
+    // 通常の index は別建てしない (drop-in covering)。
+    symbolDateUnique: uniqueIndex('earnings_calendar_symbol_date_unique').on(t.symbol, t.earningsDate),
+  }),
+)
+
+export type EarningsCalendarRow = typeof earningsCalendar.$inferSelect
+export type EarningsCalendarInsert = typeof earningsCalendar.$inferInsert

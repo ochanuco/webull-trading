@@ -20,6 +20,8 @@ import {
   type SymbolRule,
 } from './strategies/PullbackUptrendStrategy'
 import { decideBucketGate } from '../risk/bucketExposureGate'
+import { evaluateEarningsGate } from '../risk/earningsGate'
+import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
 
 const DEFAULT_BAR_LOOKBACK = 60
@@ -93,7 +95,19 @@ export interface PullbackSchedulerOptions {
    * (`runStrategyCron`) は global_config / symbolUniverse から fully populate する。
    */
   perSymbolRisk?: PerSymbolRiskScheduleConfig
+  /**
+   * Earnings calendar gate (issue #196 1/3)。±N 営業日で BUY を凍結。
+   * `repo` 未注入なら gate skip (POC 後方互換)。production
+   * (`runStrategyCron`) が D1 から repo を作って渡す。
+   */
+  earningsGate?: EarningsScheduleConfig
   now?: () => Date
+}
+
+export interface EarningsScheduleConfig {
+  repo: EarningsCalendarRepo
+  /** ±N 営業日。default 1。 */
+  freezeBusinessDays?: number
 }
 
 export interface PerSymbolRiskScheduleConfig {
@@ -451,6 +465,36 @@ export async function runPullbackScheduler(
       intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
     }
 
+    // Earnings calendar gate (issue #196 1/3)。BUY の場合のみ評価し、
+    // ±N 営業日内に earnings_calendar 行があれば reject。SELL は撤退路を
+    // 妨げないよう gate 対象外。`earningsGate` 未注入なら skip (POC 後方互換)。
+    // perSymbolRisk より先に評価することで、broker / spread 系より上位の
+    // 「そもそもエントリしない」判断として cron 経路から見える。
+    if (options.earningsGate && intent.side === 'BUY') {
+      const evalDate = now().toISOString().slice(0, 10)
+      const earningsDecision = await evaluateEarningsGate(
+        { symbol: upper, evalDate, side: 'BUY' },
+        options.earningsGate.repo,
+        { freezeBusinessDays: options.earningsGate.freezeBusinessDays ?? 1 },
+      )
+      if (!earningsDecision.approved) {
+        const reason = `risk: ${earningsDecision.reason ?? 'earnings_gate'}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('risk.earnings_calendar', false, undefined, undefined, undefined, earningsDecision.reason),
+          ),
+        })
+        continue
+      }
+    }
+
     // Per-symbol risk gate (issue #138)。manual `/trade/execute` (TradingService)
     // と同じ pure function を呼ぶことで gate parity を取る。perSymbolRisk が
     // 未注入の場合は POC 後方互換で skip。Inverse pair の SymbolState は同期
@@ -731,6 +775,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'scheduler.pending_lock_expiry_valid': '注文ロック期限が有効',
   'scheduler.pending_lock_acquired': '注文ロックを取得できた',
   'risk.bucket_cap': '同グループ建玉上限内',
+  'risk.earnings_calendar': '決算日カレンダーゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'broker.submit': '証券会社への発注送信',
 }

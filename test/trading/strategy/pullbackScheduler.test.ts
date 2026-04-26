@@ -459,3 +459,91 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     expect(execution.calls).toHaveLength(1)
   })
 })
+
+describe('runPullbackScheduler earnings calendar gate (#196)', () => {
+  it('rejects BUY when an earnings_calendar row is within ±1 BD', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      earningsGate: {
+        repo: {
+          async fetchByRange() {
+            // Always returns one row whose date matches the eval day.
+            return [
+              {
+                id: 1,
+                symbol: 'AAPL',
+                earningsDate: now.toISOString().slice(0, 10),
+                notes: null,
+                createdAt: now.toISOString(),
+              },
+            ]
+          },
+          async fetchBySymbol() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+        freezeBusinessDays: 1,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('risk: earnings_within_1bd')
+  })
+
+  it('approves BUY when earnings repo returns no rows', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      earningsGate: {
+        repo: {
+          async fetchByRange() {
+            return []
+          },
+          async fetchBySymbol() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+        freezeBusinessDays: 1,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('skips the earnings gate when option is omitted (back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+  })
+})

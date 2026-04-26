@@ -11,6 +11,11 @@ import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../infrastructure/db/schema'
+import {
+  createEarningsCalendarDb,
+  createEarningsCalendarRepo,
+  type EarningsCalendarSeedInput,
+} from '../infrastructure/calendar/earningsCalendarRepo'
 import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
@@ -294,6 +299,104 @@ export const admin = new Hono<AppBindings>()
       updatedAt: state.updatedAt,
     })
   })
+  /**
+   * Bulk seed `earnings_calendar` rows (issue #196 1/3)。POC では外部 API 連携を
+   * 持たず、operator が手動で curl 経由で seed する。重複 (symbol × earnings_date)
+   * は `INSERT OR IGNORE` で skip し、件数を返す。
+   *
+   * Body: `[{ symbol: "AAPL", earnings_date: "2026-04-30", notes?: "Q2" }, ...]`
+   */
+  .post('/earnings/seed', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const body = (await c.req.json().catch(() => null)) as unknown
+    if (!Array.isArray(body)) {
+      throw new ValidationError('body must be an array of { symbol, earnings_date, notes? }', { field: 'body' })
+    }
+    if (body.length === 0) {
+      throw new ValidationError('body must contain at least one entry', { field: 'body' })
+    }
+    if (body.length > 1000) {
+      // 桁違いの誤入力を弾く。1 cron 環境で扱う universe は十数銘柄 × 4 半期分
+      // (せいぜい 100 行) を想定。
+      throw new ValidationError('body cannot exceed 1000 entries per request', { field: 'body' })
+    }
+    const records: EarningsCalendarSeedInput[] = []
+    body.forEach((raw, idx) => {
+      records.push(parseEarningsSeedRow(raw, idx))
+    })
+    const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+    const result = await repo.bulkUpsert(records)
+    return c.json({ inserted: result.inserted, skipped: result.skipped, total: records.length })
+  })
+  /**
+   * Read `earnings_calendar` rows for a symbol (operator inspect)。`?symbol=AAPL`
+   * 必須。NULL / 0 件でも 200 を返す (空配列)。
+   */
+  .get('/earnings', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
+    const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+    const rows = await repo.fetchBySymbol(symbol)
+    return c.json({ symbol, rows })
+  })
+  /**
+   * Delete a single earnings row by `id`。誤 seed の取り消し用。404 if not found。
+   */
+  .delete('/earnings/:id', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const idRaw = c.req.param('id').trim()
+    const id = Number(idRaw)
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ValidationError("'id' must be a positive integer path param", { field: 'id' })
+    }
+    const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+    const ok = await repo.deleteById(id)
+    if (!ok) {
+      return c.json({ error: 'earnings_row_not_found', id }, 404)
+    }
+    return c.json({ deleted: true, id })
+  })
+
+function parseEarningsSeedRow(raw: unknown, idx: number): EarningsCalendarSeedInput {
+  if (raw === null || typeof raw !== 'object') {
+    throw new ValidationError(`entry [${idx}]: must be an object`, { field: `body[${idx}]` })
+  }
+  const obj = raw as { symbol?: unknown; earnings_date?: unknown; notes?: unknown }
+  const symbol = typeof obj.symbol === 'string' ? obj.symbol.trim() : ''
+  if (symbol.length === 0 || symbol.length > 16) {
+    throw new ValidationError(`entry [${idx}]: 'symbol' must be a non-empty string <= 16 chars`, {
+      field: `body[${idx}].symbol`,
+    })
+  }
+  const earningsDate = typeof obj.earnings_date === 'string' ? obj.earnings_date.trim() : ''
+  if (!isYmd(earningsDate)) {
+    throw new ValidationError(
+      `entry [${idx}]: 'earnings_date' must be ISO 'YYYY-MM-DD'`,
+      { field: `body[${idx}].earnings_date` },
+    )
+  }
+  let notes: string | null = null
+  if (obj.notes !== undefined && obj.notes !== null) {
+    if (typeof obj.notes !== 'string') {
+      throw new ValidationError(`entry [${idx}]: 'notes' must be string when present`, {
+        field: `body[${idx}].notes`,
+      })
+    }
+    if (obj.notes.length > 256) {
+      throw new ValidationError(`entry [${idx}]: 'notes' must be <= 256 chars`, {
+        field: `body[${idx}].notes`,
+      })
+    }
+    notes = obj.notes
+  }
+  return { symbol: symbol.toUpperCase(), earningsDate, notes }
+}
 
 function readAmount(body: unknown): number {
   if (body === null || typeof body !== 'object') {
