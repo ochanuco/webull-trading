@@ -1,3 +1,4 @@
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import { ValidationError } from '../shared/errors'
@@ -8,6 +9,8 @@ import { reconcileFills } from '../trading/reconciliation/reconcileFills'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
 import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
+import { createDb } from '../infrastructure/db/tradeJournalRepo'
+import { tradeJournal } from '../infrastructure/db/schema'
 import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
@@ -191,12 +194,46 @@ export const admin = new Hono<AppBindings>()
    * `filled_qty / filled_price / broker_status`. Safe to call on demand —
    * idempotent (terminal rows are already excluded by the WHERE clause).
    *
-   * PnL roll-up into PortfolioStateDO is a follow-up; this just makes sure
-   * the journal reflects what Webull says about each order.
+   * Optional `?retryStateApply=1` mode (issue #142): also sweep
+   * `broker_status='FILLED' AND state_applied_at IS NULL` rows that have
+   * aged out of the cron lookback window. Use to manually unstick legacy
+   * split-brain rows after deploying the marker columns.
    */
   .post('/orders/reconcile', async (c) => {
-    const summary = await reconcileFills({ env: c.env, requestId: c.get('requestId') })
+    const retryStateApply = parseTruthyQuery(c.req.query('retryStateApply'))
+    const summary = await reconcileFills({
+      env: c.env,
+      requestId: c.get('requestId'),
+      retryStateApply,
+    })
     return c.json(summary)
+  })
+  /**
+   * Read-only count of `broker_status='FILLED' AND state_applied_at IS NULL`
+   * rows — i.e. the split-brain backlog that issue #142 tracks. A non-zero
+   * `pendingApply` is the operator's signal to invoke
+   * `POST /admin/orders/reconcile?retryStateApply=1`.
+   *
+   * Cheap (single COUNT(*) query) so safe to scrape from a dashboard. Does
+   * not mutate state.
+   */
+  .get('/orders/repair-status', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const db = createDb(c.env.DB)
+    const rows = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(tradeJournal)
+      .where(
+        and(
+          eq(tradeJournal.tradeEventType, 'post_submit'),
+          eq(tradeJournal.brokerStatus, 'FILLED'),
+          isNull(tradeJournal.stateAppliedAt),
+        ),
+      )
+    const pendingApply = Number(rows[0]?.count ?? 0)
+    return c.json({ pendingApply })
   })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
@@ -289,6 +326,17 @@ function readOptionalNumber(
     throw new ValidationError(`'${field}' must be > 0`, { field })
   }
   return parsed
+}
+
+/**
+ * Treat `1` / `true` / `yes` (case-insensitive) as truthy. Anything else —
+ * including missing — is false. Kept narrow so an operator typo on a flag
+ * fails closed (the safer default for a "do extra work" toggle).
+ */
+function parseTruthyQuery(value: string | undefined): boolean {
+  if (value === undefined) return false
+  const normalized = value.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
 }
 
 function isYmd(value: string): boolean {

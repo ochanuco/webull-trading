@@ -44,6 +44,37 @@ export const tradeJournal = sqliteTable('trade_journal', {
   exitReason: text('exit_reason'),
   errorClass: text('error_class'),
   errorMessage: text('error_message'),
+  /**
+   * ISO timestamp when the FILLED row was successfully applied to the DO
+   * layer (SymbolStateDO position / PortfolioStateDO realized PnL / cooldown).
+   * NULL means apply has not yet succeeded — either because broker_status is
+   * not yet FILLED, or because a previous DO apply attempt threw.
+   *
+   * Acts as an idempotent-apply ledger for `reconcileFills`: rows where
+   * `broker_status='FILLED' AND state_applied_at IS NULL` are picked up by
+   * the next reconcile tick (or the `?retryStateApply=1` repair mode) and
+   * re-attempted. Once stamped, the row is never re-applied, even if it is
+   * re-selected.
+   *
+   * Closes the split-brain that issue #142 tracked: D1 row was marked FILLED
+   * but the DO position never updated because the DO call threw between the
+   * UPDATE and the apply.
+   */
+  stateAppliedAt: text('state_applied_at'),
+  /**
+   * Last DO-apply error message captured while attempting to apply this
+   * FILLED row. NULL when apply has never failed (or has succeeded since the
+   * last failure). Only useful in conjunction with `state_applied_at IS NULL`
+   * — a non-NULL value with `state_applied_at` set means the most recent
+   * attempt eventually succeeded after a prior failure.
+   */
+  stateApplyError: text('state_apply_error'),
+  /**
+   * Number of DO-apply attempts (success or failure). Bumped on every retry.
+   * Used by ops to spot rows stuck in a retry loop (`attempts >> 1` with
+   * `state_applied_at IS NULL` is an alert signal).
+   */
+  stateApplyAttempts: integer('state_apply_attempts').notNull().default(0),
 })
 
 export type TradeJournalRow = typeof tradeJournal.$inferSelect
