@@ -339,7 +339,8 @@ export const dashboard = new Hono<AppBindings>()
     const options: LoadAlertOptions = { limit }
     if (eventTypeFilter) {
       options.eventType = eventTypeFilter
-    } else if (severityFilter.length > 0) {
+    }
+    if (severityFilter.length > 0) {
       options.severities = severityFilter
     }
     try {

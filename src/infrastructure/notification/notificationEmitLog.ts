@@ -1,4 +1,4 @@
-import { desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, type SQL } from 'drizzle-orm'
 import {
   notificationEmitLog,
   type NotificationEmitLogInsert,
@@ -86,8 +86,9 @@ export type AlertRow = NotificationEmitLogRow
 
 /**
  * dashboard `/dashboard/alerts` 用 SELECT。timestamp DESC で最新から limit
- * 件返す。severity / eventType フィルタは複合 index がカバーする方を優先
- * (severity 単独 / event_type 単独 のみ index あり)。
+ * 件返す。severity と eventType は両方指定された場合 AND で組み合わせる
+ * (CodeRabbit #210): UI 側で両 filter の同時選択 URL が成立可能なため、
+ * data 側でも両方を反映して silently drop しないようにする。
  */
 export async function loadRecentAlerts(
   db: D1Database,
@@ -96,10 +97,15 @@ export async function loadRecentAlerts(
   const limit = clampLimit(options.limit)
   const drizzle = createDb(db)
   let query = drizzle.select().from(notificationEmitLog).$dynamic()
+  const conditions: SQL[] = []
   if (options.eventType) {
-    query = query.where(eq(notificationEmitLog.eventType, options.eventType))
-  } else if (options.severities && options.severities.length > 0) {
-    query = query.where(inArray(notificationEmitLog.severity, options.severities))
+    conditions.push(eq(notificationEmitLog.eventType, options.eventType))
+  }
+  if (options.severities && options.severities.length > 0) {
+    conditions.push(inArray(notificationEmitLog.severity, options.severities))
+  }
+  if (conditions.length > 0) {
+    query = query.where(conditions.length === 1 ? conditions[0] : and(...conditions))
   }
   // `waitUntil` 配下の INSERT が前後すると id 順は実発生順とずれることが
   // ある。timestamp (ISO 文字列) DESC を first key にし、同 timestamp は
