@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
+import { reconcileFills } from '../../src/trading/reconciliation/reconcileFills'
+
+vi.mock('../../src/trading/reconciliation/reconcileFills', () => ({
+  reconcileFills: vi.fn(),
+}))
 
 const baseEnv = {
   BASIC_AUTH_USER: 'admin',
@@ -100,6 +105,118 @@ describe('POST /admin/symbols/:symbol/seed-cash', () => {
       updatedAt: '2026-04-21T10:00:00.000Z',
     })
     expect(captured.calls).toEqual([{ symbol: 'SOXL', amount: 12_345 }])
+  })
+})
+
+describe('POST /admin/orders/reconcile', () => {
+  afterEach(() => vi.resetAllMocks())
+
+  function emptySummary() {
+    return {
+      inspected: 0,
+      updated: [],
+      stillPending: [],
+      notFound: [],
+      errors: [],
+      stateApplied: 0,
+      stateApplyFailed: 0,
+      repaired: 0,
+    }
+  }
+
+  it('forwards retryStateApply=false to reconcileFills by default', async () => {
+    vi.mocked(reconcileFills).mockResolvedValueOnce(emptySummary())
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/reconcile',
+      { method: 'POST', headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    expect(reconcileFills).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(reconcileFills).mock.calls[0]![0]).toMatchObject({
+      retryStateApply: false,
+    })
+  })
+
+  it.each(['1', 'true', 'TRUE', 'yes'])(
+    'enables repair sweep when ?retryStateApply=%s',
+    async (value) => {
+      vi.mocked(reconcileFills).mockResolvedValueOnce(emptySummary())
+      const app = createApp()
+      const res = await app.request(
+        `/admin/orders/reconcile?retryStateApply=${value}`,
+        { method: 'POST', headers: { ...authHeader } },
+        baseEnv,
+      )
+      expect(res.status).toBe(200)
+      expect(vi.mocked(reconcileFills).mock.calls[0]![0]).toMatchObject({
+        retryStateApply: true,
+      })
+    },
+  )
+
+  it('treats unknown ?retryStateApply values as false (fail-closed)', async () => {
+    vi.mocked(reconcileFills).mockResolvedValueOnce(emptySummary())
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/reconcile?retryStateApply=please',
+      { method: 'POST', headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    expect(vi.mocked(reconcileFills).mock.calls[0]![0]).toMatchObject({
+      retryStateApply: false,
+    })
+  })
+})
+
+describe('GET /admin/orders/repair-status', () => {
+  function fakeDbReturning(count: number) {
+    const chain = {
+      from: () => chain,
+      where: async () => [{ count }],
+    }
+    return { select: () => chain }
+  }
+
+  it('401s without Basic Auth', async () => {
+    const app = createApp()
+    const res = await app.request('/admin/orders/repair-status', {}, {
+      ...baseEnv,
+      DB: fakeDbReturning(3) as unknown as D1Database,
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('200s with the count of FILLED rows missing state_applied_at', async () => {
+    // Stub createDb so we can inject the query result without spinning up a
+    // real D1. The wrapper just receives the env.DB reference and forwards
+    // a typed drizzle handle, but here we want the chain we control.
+    const dbModule = await import('../../src/infrastructure/db/tradeJournalRepo')
+    const spy = vi
+      .spyOn(dbModule, 'createDb')
+      .mockReturnValue(fakeDbReturning(7) as never)
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/repair-status',
+      { headers: { ...authHeader } },
+      { ...baseEnv, DB: {} as unknown as D1Database },
+    )
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ pendingApply: 7 })
+    spy.mockRestore()
+  })
+
+  it('400s when DB binding is missing', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/repair-status',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
   })
 })
 

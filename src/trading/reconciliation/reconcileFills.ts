@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull } from 'drizzle-orm'
+import { and, desc, eq, gte, isNull, or, sql } from 'drizzle-orm'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
@@ -30,6 +30,24 @@ export interface ReconcileSummary {
   stillPending: Array<{ clientOrderId: string; status?: string }>
   notFound: string[]
   errors: Array<{ clientOrderId: string; message: string }>
+  /**
+   * Number of rows where the DO state apply succeeded on this run (whether
+   * the row was first-seen-FILLED or a repair retry of a previously-failed
+   * apply). Bumped after `state_applied_at` is stamped.
+   */
+  stateApplied: number
+  /**
+   * Number of rows where the DO state apply attempt threw on this run. The
+   * journal row keeps `state_applied_at = NULL` and gets `state_apply_error`
+   * recorded so the next reconcile / repair tick can retry.
+   */
+  stateApplyFailed: number
+  /**
+   * Of `stateApplied`, how many were repair-mode rows (already FILLED in the
+   * journal but not previously applied). Useful to spot persistent split-brain
+   * recovery activity in cron logs.
+   */
+  repaired: number
 }
 
 interface ReconcileOptions {
@@ -45,6 +63,14 @@ interface ReconcileOptions {
   /** Cap on rows inspected per call so a single invocation doesn't fan out. */
   limit?: number
   now?: () => Date
+  /**
+   * When true, the SELECT also picks up `broker_status='FILLED' AND
+   * state_applied_at IS NULL` rows that fall **outside** the lookback window
+   * — i.e. anything ever stuck in split-brain. Used by the
+   * `/admin/orders/reconcile?retryStateApply=1` repair endpoint. Default
+   * `false`: cron-triggered runs only retry rows still inside `lookbackMs`.
+   */
+  retryStateApply?: boolean
 }
 
 /**
@@ -61,12 +87,21 @@ interface ReconcileOptions {
  *     applyRealizedPnl. The computed delta is also persisted on the
  *     trade_journal row (realized_pnl column).
  *
- * Idempotency note: the SELECT filter `broker_status IS NULL` prevents
- * double processing in the common case. If the journal UPDATE succeeds but
- * the subsequent DO apply throws, the row is marked reconciled and the DO
- * won't auto-repair on the next tick — the error is logged loudly so an
- * operator can fix it manually. Proper idempotency would need a separate
- * `applied_at` marker column; out of scope for this change.
+ * Idempotency / split-brain repair (issue #142):
+ *   - The SELECT picks up `broker_status IS NULL` (first-seen) AND
+ *     `broker_status='FILLED' AND state_applied_at IS NULL` (DO apply
+ *     previously failed). The latter ensures a single failed DO call does
+ *     not strand the row forever — the next cron tick retries.
+ *   - After a successful DO apply, `state_applied_at` is stamped on the
+ *     row, which removes it from future SELECT candidates. Already-applied
+ *     rows are also defensively skipped at the loop level.
+ *   - On apply failure the journal keeps `state_applied_at = NULL` and
+ *     records `state_apply_error` + bumps `state_apply_attempts` so an
+ *     operator can see how many retries it has taken.
+ *
+ * The previous implementation marked the row reconciled and trusted that
+ * any DO failure would be repaired manually — split-brain (D1 = FILLED, DO
+ * position = stale) was the result.
  */
 export async function reconcileFills(options: ReconcileOptions): Promise<ReconcileSummary> {
   // Fail-closed on a missing DB binding to match loadGlobalConfigFrom /
@@ -81,6 +116,9 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     stillPending: [],
     notFound: [],
     errors: [],
+    stateApplied: 0,
+    stateApplyFailed: 0,
+    repaired: 0,
   }
 
   const now = options.now ?? (() => new Date())
@@ -93,20 +131,48 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   const limit = options.limit ?? 50
 
   const db = createDb(options.env.DB)
+  // Two cohorts in one query:
+  //   (a) `broker_status IS NULL` — never-reconciled, the original case.
+  //   (b) `broker_status='FILLED' AND state_applied_at IS NULL` — D1 says
+  //       FILLED but DO apply previously threw (or was never attempted on a
+  //       row that was UPDATEd before this code shipped).
+  //
+  // For cohort (b), the `retryStateApply` flag controls whether the
+  // `lookbackMs` bound applies. Cron-triggered runs leave it false and
+  // only repair rows still inside the lookback window (match the original
+  // 48h scope). The repair endpoint sets it true to sweep older split-brain
+  // rows that have aged out of the window.
+  const repairFilter = and(
+    eq(tradeJournal.brokerStatus, 'FILLED'),
+    isNull(tradeJournal.stateAppliedAt),
+  )
   const candidates = await db
     .select({
       id: tradeJournal.id,
       clientOrderId: tradeJournal.clientOrderId,
       symbol: tradeJournal.symbol,
       side: tradeJournal.side,
+      brokerStatus: tradeJournal.brokerStatus,
+      filledQty: tradeJournal.filledQty,
+      filledPrice: tradeJournal.filledPrice,
+      realizedPnl: tradeJournal.realizedPnl,
+      stateAppliedAt: tradeJournal.stateAppliedAt,
+      stateApplyAttempts: tradeJournal.stateApplyAttempts,
     })
     .from(tradeJournal)
     .where(
       and(
         eq(tradeJournal.tradeEventType, 'post_submit'),
         eq(tradeJournal.submitted, true),
-        isNull(tradeJournal.brokerStatus),
-        gte(tradeJournal.timestamp, since),
+        // Always require the lookback window for the "fresh poll" cohort.
+        // Repair-mode (retryStateApply=true) drops it for cohort (b) only,
+        // applied via the OR below.
+        or(
+          and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since)),
+          options.retryStateApply
+            ? repairFilter
+            : and(repairFilter, gte(tradeJournal.timestamp, since)),
+        ),
       ),
     )
     .orderBy(desc(tradeJournal.id))
@@ -129,6 +195,70 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       })
       continue
     }
+
+    // Distinguish the two cohorts so we can:
+    //   - skip the Webull poll for already-FILLED repair rows (we already
+    //     have the canonical fill data on the journal row),
+    //   - count the repair stat correctly for ops visibility.
+    //
+    // `broker_status='FILLED' AND state_applied_at IS NULL` is the repair
+    // case: status is canonical, only the DO apply needs retry. Any other
+    // shape (NULL broker_status) means we still need a fresh status from
+    // the broker.
+    const isRepair = row.brokerStatus === 'FILLED' && row.stateAppliedAt === null
+
+    if (isRepair) {
+      // Use the canonical fill data already on the row. We must not
+      // re-poll Webull — orders/history can rotate the row off the first
+      // page after a few days, and re-polling would also waste a quota.
+      const symbol = row.symbol
+      const side = row.side as 'BUY' | 'SELL' | null
+      const filledQty = row.filledQty ?? null
+      const filledPrice = row.filledPrice ?? null
+      if (
+        symbol === null ||
+        side === null ||
+        filledQty === null || filledQty <= 0 ||
+        filledPrice === null || filledPrice <= 0
+      ) {
+        // The row was stamped FILLED earlier but is missing one of the
+        // fields required to apply the fill (impossibility under the
+        // current code path, but defensive). Mark the apply as
+        // permanently-skipped via an error so an operator can investigate.
+        const message = `repair_skipped_invalid_row: symbol=${symbol} side=${side} qty=${filledQty} price=${filledPrice}`
+        await recordApplyFailure(db, row.id, message)
+        summary.errors.push({ clientOrderId: coid, message })
+        summary.stateApplyFailed += 1
+        continue
+      }
+      const realizedPnl = row.realizedPnl ?? null
+      const ok = await tryApplyAndStamp({
+        env: options.env,
+        requestId: options.requestId,
+        db,
+        rowId: row.id,
+        clientOrderId: coid,
+        symbol,
+        side,
+        filledQty,
+        filledPrice,
+        realizedPnl,
+        runNow,
+        nowIso: runNow.toISOString(),
+      })
+      if (ok) {
+        summary.stateApplied += 1
+        summary.repaired += 1
+      } else {
+        summary.stateApplyFailed += 1
+        summary.errors.push({
+          clientOrderId: coid,
+          message: 'state_apply_failed (see reconcile_state_apply_error log)',
+        })
+      }
+      continue
+    }
+
     let detail: WebullOrderDetailDto | undefined
     try {
       detail = await client.findOrderByClientId(coid)
@@ -202,8 +332,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       summary.updated.push({ clientOrderId: coid, status, ...(realizedPnl !== null ? { realizedPnl } : {}) })
 
       // After the journal is stamped reconciled, push the fill into the DO
-      // layer. Any DO failure here is logged but does NOT retry — see the
-      // idempotency note in the module docstring.
+      // layer. Failure here records `state_apply_error` and leaves
+      // `state_applied_at = NULL` so the next reconcile tick will retry.
       if (
         status === 'FILLED' &&
         side !== null &&
@@ -211,9 +341,11 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         filledQty !== null && filledQty > 0 &&
         filledPrice !== null && filledPrice > 0
       ) {
-        await applyFillToState({
+        const ok = await tryApplyAndStamp({
           env: options.env,
           requestId: options.requestId,
+          db,
+          rowId: row.id,
           clientOrderId: coid,
           symbol,
           side,
@@ -221,7 +353,29 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           filledPrice,
           realizedPnl,
           runNow,
+          nowIso: runNow.toISOString(),
         })
+        if (ok) {
+          summary.stateApplied += 1
+        } else {
+          summary.stateApplyFailed += 1
+          summary.errors.push({
+            clientOrderId: coid,
+            message: 'state_apply_failed (see reconcile_state_apply_error log)',
+          })
+        }
+      } else if (status === 'FILLED') {
+        // FILLED but missing one of the apply prerequisites. Mark
+        // `state_applied_at` anyway so we don't retry forever — there's
+        // nothing to apply.
+        await db
+          .update(tradeJournal)
+          .set({
+            stateAppliedAt: runNow.toISOString(),
+            stateApplyError: null,
+            stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+          })
+          .where(eq(tradeJournal.id, row.id))
       }
 
       // Release the pending-order lock on every terminal status — FILLED,
@@ -271,12 +425,142 @@ function toNumberOrNull(value: string | undefined): number | null {
 }
 
 /**
+ * Apply a terminal FILLED order into SymbolStateDO + PortfolioStateDO and,
+ * on success, stamp `state_applied_at` on the journal row. On failure the
+ * row keeps `state_applied_at = NULL` and gets `state_apply_error` recorded
+ * so the next reconcile tick (or `?retryStateApply=1` repair sweep) can
+ * pick it back up.
+ *
+ * Returns `true` on success (marker stamped), `false` on failure.
+ */
+async function tryApplyAndStamp(args: {
+  env: Env
+  requestId?: string
+  db: ReturnType<typeof createDb>
+  rowId: number
+  clientOrderId: string
+  symbol: string
+  side: 'BUY' | 'SELL'
+  filledQty: number
+  filledPrice: number
+  realizedPnl: number | null
+  runNow: Date
+  nowIso: string
+}): Promise<boolean> {
+  const {
+    env,
+    requestId,
+    db,
+    rowId,
+    clientOrderId,
+    symbol,
+    side,
+    filledQty,
+    filledPrice,
+    realizedPnl,
+    runNow,
+    nowIso,
+  } = args
+
+  try {
+    await applyFillToState({
+      env,
+      requestId,
+      clientOrderId,
+      symbol,
+      side,
+      filledQty,
+      filledPrice,
+      realizedPnl,
+      runNow,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(
+      JSON.stringify({
+        event: 'reconcile_state_apply_error',
+        requestId,
+        rowId,
+        clientOrderId,
+        symbol,
+        side,
+        message,
+      }),
+    )
+    await recordApplyFailure(db, rowId, message)
+    return false
+  }
+
+  // Apply succeeded. Stamp the marker so the row is excluded from future
+  // SELECT candidates.
+  try {
+    await db
+      .update(tradeJournal)
+      .set({
+        stateAppliedAt: nowIso,
+        stateApplyError: null,
+        stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+      })
+      .where(eq(tradeJournal.id, rowId))
+    console.log(
+      JSON.stringify({
+        event: 'reconcile_state_applied',
+        requestId,
+        rowId,
+        clientOrderId,
+        symbol,
+        side,
+      }),
+    )
+  } catch (error) {
+    // Marker UPDATE failed *after* DO apply succeeded — log loudly. The DO
+    // is now ahead of the journal; the row will be re-selected next tick
+    // and the apply will run a second time. SymbolStateDO.recordFill is
+    // not idempotent on its own, so this is a real risk and operator
+    // intervention may be needed.
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(
+      JSON.stringify({
+        event: 'reconcile_state_marker_update_error',
+        requestId,
+        rowId,
+        clientOrderId,
+        symbol,
+        side,
+        message,
+      }),
+    )
+    return false
+  }
+  return true
+}
+
+async function recordApplyFailure(
+  db: ReturnType<typeof createDb>,
+  rowId: number,
+  message: string,
+): Promise<void> {
+  // Best-effort. If even this UPDATE fails the row simply keeps its prior
+  // attempts/error state and gets re-tried next tick — no need to escalate.
+  try {
+    await db
+      .update(tradeJournal)
+      .set({
+        stateApplyError: message,
+        stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+      })
+      .where(eq(tradeJournal.id, rowId))
+  } catch {
+    // Swallow — logged at the call site already.
+  }
+}
+
+/**
  * Apply a terminal FILLED order into SymbolStateDO (position tracking) and,
  * for SELL legs, PortfolioStateDO (realized PnL aggregation).
  *
- * Failures here are logged but not rethrown — the journal row is already
- * marked reconciled at this point, so the next cron tick would skip it.
- * Proper repair would need an `applied_at` column; see module docstring.
+ * Throws on any underlying DO call failure — caller (`tryApplyAndStamp`)
+ * catches and records the error so the row stays repair-able.
  */
 async function applyFillToState(args: {
   env: Env
@@ -294,41 +578,17 @@ async function applyFillToState(args: {
   const { env, requestId, clientOrderId, symbol, side, filledQty, filledPrice, realizedPnl, runNow } = args
 
   if (env.SYMBOL_STATE) {
-    try {
-      await new SymbolStateClient(env.SYMBOL_STATE).recordFill(symbol, {
-        side,
-        qty: filledQty,
-        price: filledPrice,
-      })
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          event: 'reconcile_symbol_state_apply_error',
-          requestId,
-          clientOrderId,
-          symbol,
-          side,
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      )
-    }
+    // Throws on DO failure — caller records `state_apply_error` and will
+    // retry on the next reconcile tick.
+    await new SymbolStateClient(env.SYMBOL_STATE).recordFill(symbol, {
+      side,
+      qty: filledQty,
+      price: filledPrice,
+    })
   }
 
   if (side === 'SELL' && realizedPnl !== null && env.PORTFOLIO_STATE) {
-    try {
-      await new PortfolioStateClient(env.PORTFOLIO_STATE).applyRealizedPnl(realizedPnl)
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          event: 'reconcile_portfolio_apply_error',
-          requestId,
-          clientOrderId,
-          symbol,
-          realizedPnl,
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      )
-    }
+    await new PortfolioStateClient(env.PORTFOLIO_STATE).applyRealizedPnl(realizedPnl)
   }
 
   // Stop-out cooldown: a losing exit parks the symbol until the next trading
@@ -336,6 +596,13 @@ async function applyFillToState(args: {
   // removed TradeEventHandler — pullbackScheduler reads `state.cooldownUntil`
   // for its signal decision, so without this write the strategy never
   // backs off after a losing sell.
+  //
+  // Cooldown failures are intentionally NON-fatal (caught + logged) because
+  // the position itself has already been correctly recorded, and a missed
+  // cooldown only loosens a re-entry guard rather than producing
+  // double-counted state. We don't want a transient cooldown failure to
+  // strand the row in retry forever after position+pnl have already
+  // applied.
   if (
     side === 'SELL' &&
     realizedPnl !== null &&
