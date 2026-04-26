@@ -53,6 +53,14 @@ export class PortfolioStateDO extends DurableObject<object> {
   private async load(): Promise<PortfolioState> {
     const stored = await this.ctx.storage.get<PortfolioState>(STATE_KEY)
     if (stored !== undefined) {
+      // Backfill `lastRolledAt` for DO instances persisted before issue #140.
+      // The field is added forward-compatibly: existing rows missing it read
+      // back as `undefined`, which we normalize to `null`. We do not write the
+      // backfilled row here — it will be persisted on the next state-mutating
+      // call to keep `load()` side-effect free.
+      if (!('lastRolledAt' in stored) || (stored as { lastRolledAt?: unknown }).lastRolledAt === undefined) {
+        return { ...stored, lastRolledAt: null }
+      }
       return stored
     }
     return emptyPortfolioState(this.transitionCtx.now)

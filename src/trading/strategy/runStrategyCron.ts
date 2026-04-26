@@ -72,6 +72,7 @@ export interface StrategyCronAnalysis {
     dailyStartEquity: number
     dailyRealizedPnl: number
     tradingDisabledUntil: string | null
+    lastRolledAt: string | null
     updatedAt: string
   }
   drawdownScale?: {
@@ -205,15 +206,24 @@ export async function runStrategyCron(
   let analysis = analysisBase()
   try {
     portfolioSnapshot = await portfolioStore.getPortfolio()
+    // `lastRolledAt` は #140 で追加した forward-compat フィールド。古い DO row
+    // / fixture に欠けている場合 `undefined` で読めるので null に正規化する
+    // (`null` = 「未 roll」扱いで stale 判定は skip)。
+    const lastRolledAt = portfolioSnapshot.lastRolledAt ?? null
     analysis = {
       ...analysis,
       portfolio: {
         dailyStartEquity: portfolioSnapshot.dailyStartEquity,
         dailyRealizedPnl: portfolioSnapshot.dailyRealizedPnl,
         tradingDisabledUntil: portfolioSnapshot.tradingDisabledUntil,
+        lastRolledAt,
         updatedAt: portfolioSnapshot.updatedAt,
       },
     }
+    // Stale roll detection (issue #140)。`lastRolledAt` から 24h 以上経過して
+    // いれば warning ログ。POC 段階では fail-closed までは行かず、operator が
+    // dashboard で気付ける可視化に留める。
+    emitStaleRollWarningIfNeeded({ lastRolledAt, requestId: options.requestId })
     const now = Date.now()
     if (portfolioSnapshot.tradingDisabledUntil) {
       const disabledUntilMs = new Date(portfolioSnapshot.tradingDisabledUntil).getTime()
@@ -435,5 +445,55 @@ export function resolvePortfolioForRiskScale<
       dailyRealizedPnl: 0, // 未 seed = 未実現損益もゼロ扱い
     },
     usedFallback: true,
+  }
+}
+
+/**
+ * Issue #140: stale roll の閾値 (hours)。
+ *
+ * 24h 以上経過 → `event: 'portfolio_roll_stale'` を warning ログ出力。
+ *  - 22:00 UTC daily cron が 1 回 miss すると 24h を超えるので、最初の miss で
+ *    operator が気付ける粒度にしている。
+ *  - `lastRolledAt === null` (= まだ一度も roll が走っていない) は **stale 扱い
+ *    しない**。新規環境 / DO 永続化前の state は EOD cron が初回成功するまで
+ *    null のままなので、ここで毎 cron tick warn すると noise になる。代わりに
+ *    dashboard 側で「未実行」を別表記する。
+ *  - `Date.now()` をベースにするので呼び出し側の test は `vi.useFakeTimers` で
+ *    時刻を固定する。
+ */
+const STALE_ROLL_WARNING_HOURS = 24
+
+export function emitStaleRollWarningIfNeeded(args: {
+  lastRolledAt: string | null
+  requestId?: string
+  now?: () => number
+}): void {
+  if (args.lastRolledAt === null) return
+  const lastMs = new Date(args.lastRolledAt).getTime()
+  if (!Number.isFinite(lastMs)) {
+    // Corrupt timestamp。silent pass を避けて warn を出すが、stale_hours は
+    // 計算不能なので "unparseable" を載せる。
+    console.warn(
+      JSON.stringify({
+        event: 'portfolio_roll_stale',
+        requestId: args.requestId,
+        lastRolledAt: args.lastRolledAt,
+        reason: 'unparseable_lastRolledAt',
+      }),
+    )
+    return
+  }
+  const nowMs = (args.now ?? Date.now)()
+  const elapsedHours = (nowMs - lastMs) / 3_600_000
+  if (elapsedHours >= STALE_ROLL_WARNING_HOURS) {
+    console.warn(
+      JSON.stringify({
+        event: 'portfolio_roll_stale',
+        requestId: args.requestId,
+        lastRolledAt: args.lastRolledAt,
+        staleHours: Number(elapsedHours.toFixed(2)),
+        thresholdHours: STALE_ROLL_WARNING_HOURS,
+      }),
+    )
   }
 }

@@ -3,6 +3,7 @@ import type { Env } from './config/env'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { createNotifier } from './infrastructure/notification/createNotifier'
+import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
@@ -13,6 +14,11 @@ const CRON_QUOTE_RECONCILE = '*/5 * * * *'
 // の quote 更新後、:15/:30/:45/:00 に判定が走る (quote と strategy の 5 分ズレ
 // を維持するため HH:00 ではなく +15 相当の */15 にしている)。
 const CRON_STRATEGY = '*/15 * * * *'
+// EOD 自動 rollover cron (issue #140)。22:00 UTC ≈ NY 17:00 ET / 18:00 EDT で
+// US 通常立会終了後、JP 朝立会前に発火。`PortfolioStateDO.rollDaily()` を呼んで
+// `dailyRealizedPnl` を翌日の `dailyStartEquity` に畳み、drawdown kill / risk
+// scale が「今日の」基準で動くよう毎日アンカーし直す。
+const CRON_PORTFOLIO_ROLL = '0 22 * * *'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 export { PortfolioStateDO } from './trading/state/PortfolioStateDO'
@@ -43,6 +49,11 @@ export default {
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     attachTradeJournalDb(env, ctx)
     const requestId = crypto.randomUUID()
+
+    if (event.cron === CRON_PORTFOLIO_ROLL) {
+      ctx.waitUntil(runPortfolioRoll(env, requestId))
+      return
+    }
 
     if (event.cron === CRON_STRATEGY) {
       ctx.waitUntil(
@@ -144,3 +155,4 @@ export default {
     )
   },
 }
+

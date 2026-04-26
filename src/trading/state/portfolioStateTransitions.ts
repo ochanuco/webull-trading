@@ -84,11 +84,13 @@ export function rollDaily(
 ): { before: PortfolioState; after: PortfolioState } {
   const before = state
   const nextStart = state.dailyStartEquity + state.dailyRealizedPnl
+  const nowIso = ctx.now().toISOString()
   const after: PortfolioState = {
     ...state,
     dailyStartEquity: nextStart,
     dailyRealizedPnl: 0,
-    updatedAt: ctx.now().toISOString(),
+    lastRolledAt: nowIso,
+    updatedAt: nowIso,
   }
   return { before, after }
 }
