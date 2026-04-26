@@ -1,0 +1,190 @@
+/**
+ * Per-symbol risk gate (pure).
+ *
+ * 7 つの per-symbol guard を一つの pure function に集約する。manual
+ * `/trade/execute` 経路 (TradingService) と cron (`runPullbackScheduler`) の
+ * 両方が同じ判定を通るよう unify する目的 (issue #138)。
+ *
+ * 含まれる gate:
+ *   1. settled cash (BUY only): notional > settledCash で reject
+ *   2. inverse pair (BUY only): inverse 銘柄の建玉が残っていれば reject
+ *   3. quote freshness (halt fallback): lastQuote.fetchedAt が staleQuoteMs を超えれば reject
+ *   4. spread guard: bid/ask 欠損 / 異常 / spread% が limit 超で reject
+ *   5. gap re-eval: avgPrice と lastQuote.price の |gap| > gapRejectPct で reject
+ *   6. JP 値幅制限: JP 銘柄かつ band 外 limit price で reject
+ *   7. (option) cooldown: state.cooldownUntil が未来なら reject
+ *
+ * 含まれない gate (orchestrator 層が直接持つ):
+ *   - portfolio-wide drawdown kill
+ *   - tradingDisabledUntil
+ *   - pending lock TTL (副作用持ちなので呼び出し側に残す)
+ *   - bucket cap (cron 側で pre-scan が必要)
+ *
+ * Inverse pair 評価は同期化のため、呼び出し側が事前に inverse 銘柄の SymbolState
+ * を読み出して `inverseState` として渡す責務を負う (cron は per-symbol loop の
+ * 中で fetch、TradingService は async wrapper で fetch)。
+ */
+import type { QuoteSnapshot, SymbolState } from '../state/types'
+import { inferWebullMarket } from '../../infrastructure/webull/mapper'
+import { isWithinJpPriceBand } from './jpPriceBand'
+import { computeSpreadPct } from './spreadGuard'
+
+export interface PerSymbolRiskInput {
+  symbol: string
+  side: 'BUY' | 'SELL'
+  /** Order limit price (used for JP price band). */
+  intentPrice: number
+  /** Order notional (qty × price), used for settled-cash gate. */
+  intentNotional: number
+  /** Latest known SymbolState for `symbol` (cooldown / position / lastQuote / settledCash). */
+  state: SymbolState
+  /**
+   * Pre-fetched SymbolState for the inverse symbol (per `config.inversePairs`).
+   * `null` when the symbol has no inverse mapping or fetch failed (fail-open
+   * for inverse only — fetch errors are not the gate's responsibility).
+   */
+  inverseState?: SymbolState | null
+  /** Wall clock for cooldown / freshness comparisons. */
+  now: Date
+}
+
+export interface PerSymbolRiskConfig {
+  /**
+   * Symbol → inverse symbol map (already upper-cased keys). When BUY is
+   * requested for `symbol` and `inverseState.position.qty > 0`, reject.
+   */
+  inversePairs: Record<string, string>
+  /** Per-market spread limits as fractions of mid (e.g. 0.0025 = 0.25%). */
+  spreadLimits: { US: number; JP: number }
+  /** lastQuote.fetchedAt より古い経過時間 (ms) を超えれば halt 扱い。 */
+  staleQuoteMs: number
+  /** position.avgPrice と lastQuote.price の |gap| 比率閾値。 */
+  gapRejectPct: number
+  /**
+   * `true` のとき state.cooldownUntil の評価も行う。manual TradingService 経路
+   * は従来 applyStateGate 内で評価していたので互換のため有効化、cron 経路は
+   * Strategy.decide() が同等判定を持つので冗長。両方 true でも behaviour 一致。
+   */
+  evaluateCooldown?: boolean
+}
+
+export interface PerSymbolRiskDecision {
+  approved: boolean
+  /**
+   * Approved=false のときの reject 理由。複数 gate が同時に reject しても
+   * **最初に当たった一つだけ** を返す (既存 TradingService の挙動と同じ:
+   * `appendReason` で 1 回 return)。cron 側 dashboard も先勝ちで表示する。
+   */
+  reasons: string[]
+}
+
+const APPROVED: PerSymbolRiskDecision = Object.freeze({ approved: true, reasons: [] })
+
+export function evaluatePerSymbolRisk(
+  input: PerSymbolRiskInput,
+  config: PerSymbolRiskConfig,
+): PerSymbolRiskDecision {
+  const { state, side, symbol, now, intentNotional, intentPrice } = input
+
+  // 1. cooldown (option): TradingService 互換のため最初に評価。
+  if (config.evaluateCooldown && state.cooldownUntil) {
+    const until = new Date(state.cooldownUntil).getTime()
+    if (Number.isFinite(until) && until > now.getTime()) {
+      return reject(`cooldown active until ${state.cooldownUntil}`)
+    }
+  }
+
+  // 2. settled cash (BUY only)。settledCash=0 は未 seed 扱いで skip。
+  if (side === 'BUY' && state.settledCash > 0 && intentNotional > state.settledCash) {
+    return reject(
+      `insufficient settled cash: notional ${intentNotional} exceeds settledCash ${state.settledCash}`,
+    )
+  }
+
+  // 3. inverse pair (BUY only)。呼び出し側が pre-fetch した inverseState を見る。
+  if (side === 'BUY') {
+    const inverseSymbol = config.inversePairs[symbol.toUpperCase()]
+    if (inverseSymbol && input.inverseState) {
+      const inversePos = input.inverseState.position
+      if (inversePos !== null && inversePos.qty > 0) {
+        return reject(
+          `inverse-pair exposure: ${inverseSymbol} position (qty ${inversePos.qty}) blocks BUY ${symbol}`,
+        )
+      }
+    }
+  }
+
+  // 4. halt / stale quote。lastQuote=null は未 seed 扱いで skip (POC 後方互換)。
+  if (state.lastQuote) {
+    const ageMs = now.getTime() - new Date(state.lastQuote.fetchedAt).getTime()
+    if (!Number.isFinite(ageMs) || ageMs > config.staleQuoteMs) {
+      return reject(
+        `halt or stale quote: lastQuote ${state.lastQuote.fetchedAt} exceeds staleQuoteMs ${config.staleQuoteMs}`,
+      )
+    }
+  }
+
+  // 5. spread guard: bid/ask 欠損は fail-closed (lastQuote 有り前提)。
+  const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits)
+  if (spreadReason !== null) {
+    return reject(spreadReason)
+  }
+
+  // 6. gap re-eval。open position が無い / avgPrice が不正なら skip。
+  const gapReason = evaluateGap(state, config.gapRejectPct)
+  if (gapReason !== null) {
+    return reject(gapReason)
+  }
+
+  // 7. JP price band。JP 銘柄かつ lastQuote 有りで limit が band 外なら reject。
+  if (
+    inferWebullMarket(symbol) === 'JP' &&
+    state.lastQuote &&
+    !isWithinJpPriceBand(state.lastQuote.price, intentPrice)
+  ) {
+    return reject(
+      `JP price band: order price ${intentPrice} outside band for reference ${state.lastQuote.price}`,
+    )
+  }
+
+  return APPROVED
+}
+
+function reject(reason: string): PerSymbolRiskDecision {
+  return { approved: false, reasons: [reason] }
+}
+
+function evaluateSpreadGate(
+  symbol: string,
+  lastQuote: QuoteSnapshot | null,
+  limits: { US: number; JP: number },
+): string | null {
+  if (lastQuote === null) return null
+  const bid = lastQuote.bid
+  const ask = lastQuote.ask
+  if (bid === undefined || ask === undefined) {
+    return 'spread unknown, bid/ask missing'
+  }
+  const market = inferWebullMarket(symbol)
+  const limit = market === 'JP' ? limits.JP : limits.US
+  const spreadPct = computeSpreadPct(bid, ask)
+  if (spreadPct === null) {
+    return 'spread invalid: crossed book, non-finite, or non-positive bid/ask'
+  }
+  if (spreadPct > limit) {
+    return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%`
+  }
+  return null
+}
+
+function evaluateGap(state: SymbolState, thresholdPct: number): string | null {
+  const position = state.position
+  const quote = state.lastQuote
+  if (!position || !quote) return null
+  if (!Number.isFinite(position.avgPrice) || position.avgPrice <= 0) return null
+  const gap = (quote.price - position.avgPrice) / position.avgPrice
+  if (Math.abs(gap) > thresholdPct) {
+    return `gap re-eval: |${gap.toFixed(4)}| > ${thresholdPct} (avgPrice ${position.avgPrice} vs quote ${quote.price})`
+  }
+  return null
+}

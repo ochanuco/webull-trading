@@ -304,3 +304,158 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
   })
 })
+
+describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
+  // Default risk config matches global_config defaults; production wires this
+  // through runStrategyCron so cron / `/trade/execute` evaluate the same gates.
+  const baseRiskConfig = {
+    inversePairs: {} as Record<string, string>,
+    spreadLimits: { US: 0.0025, JP: 0.006 },
+    staleQuoteMs: 15 * 60 * 1_000,
+    gapRejectPct: 0.03,
+  }
+
+  it('rejects BUY when settledCash is insufficient (gate parity)', async () => {
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      // tiny settledCash → uptrendBars BUY notional (qty>0 × ~$118) exceeds it
+      settledCash: 1,
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: state }),
+      execution,
+      perSymbolRisk: baseRiskConfig,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('insufficient settled cash')
+  })
+
+  it('rejects BUY when lastQuote is stale (halt fallback)', async () => {
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      lastQuote: {
+        price: 118,
+        asOf: new Date(now.getTime() - 16 * 60 * 1_000).toISOString(),
+        fetchedAt: new Date(now.getTime() - 16 * 60 * 1_000).toISOString(),
+        source: 'test',
+        bid: 117.9,
+        ask: 118.1,
+      },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: state }),
+      execution,
+      perSymbolRisk: baseRiskConfig,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('halt or stale quote')
+  })
+
+  it('rejects BUY when spread exceeds the US limit (fail-closed missing bid)', async () => {
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      lastQuote: {
+        price: 118,
+        asOf: now.toISOString(),
+        fetchedAt: now.toISOString(),
+        source: 'test',
+        // bid missing → fail-closed reject
+        bid: undefined,
+        ask: 118.1,
+      },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: state }),
+      execution,
+      perSymbolRisk: baseRiskConfig,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('bid/ask missing')
+  })
+
+  it('rejects BUY when inverseState shows an open position', async () => {
+    const inverse: SymbolState = {
+      ...emptySymbolState('SQQQ', () => now),
+      position: { qty: 5, avgPrice: 10, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['QQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SQQQ: inverse }),
+      execution,
+      perSymbolRisk: { ...baseRiskConfig, inversePairs: { QQQ: 'SQQQ' } },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('inverse-pair exposure')
+  })
+
+  it('approves BUY when no per-symbol gate fires', async () => {
+    // settledCash 0 (unseeded) + lastQuote null (unseeded) → all gates skip;
+    // proves the gate is wired but does not block clean inputs.
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      perSymbolRisk: baseRiskConfig,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('skips the gate when perSymbolRisk option is omitted (back-compat)', async () => {
+    // No perSymbolRisk → existing behaviour, even when state would trip
+    // the gate (stale quote here) the BUY proceeds.
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      lastQuote: {
+        price: 118,
+        asOf: new Date(now.getTime() - 16 * 60 * 1_000).toISOString(),
+        fetchedAt: new Date(now.getTime() - 16 * 60 * 1_000).toISOString(),
+        source: 'test',
+        bid: 117.9,
+        ask: 118.1,
+      },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: state }),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+})

@@ -5,6 +5,7 @@ import type { DecisionTraceStep } from '../domain/Signal'
 import { inferTradingMarket } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
+import type { SymbolState } from '../state/types'
 import {
   computeHoldBusinessDays,
   computePullbackIndicators,
@@ -19,6 +20,7 @@ import {
   type SymbolRule,
 } from './strategies/PullbackUptrendStrategy'
 import { decideBucketGate } from '../risk/bucketExposureGate'
+import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
 
 const DEFAULT_BAR_LOOKBACK = 60
 
@@ -84,7 +86,25 @@ export interface PullbackSchedulerOptions {
    * scheduler 側は `.catch()` を付けるだけで cron を blocking しない。
    */
   notifier?: Notifier
+  /**
+   * Per-symbol risk gate config (issue #138 — TradingService と unify)。未指定で
+   * cron 経路を無 gate のままにできるよう、deps すべてが有効値なら gate 適用、
+   * 一つでも欠けると skip にして既存挙動を保つ (POC 後方互換)。production
+   * (`runStrategyCron`) は global_config / symbolUniverse から fully populate する。
+   */
+  perSymbolRisk?: PerSymbolRiskScheduleConfig
   now?: () => Date
+}
+
+export interface PerSymbolRiskScheduleConfig {
+  /**
+   * BUY symbol → inverse symbol map。production は symbol_universe.inversePairs。
+   * 大文字 key 前提で渡す。
+   */
+  inversePairs: Record<string, string>
+  spreadLimits: { US: number; JP: number }
+  staleQuoteMs: number
+  gapRejectPct: number
 }
 
 export interface PullbackRunSummary {
@@ -431,6 +451,59 @@ export async function runPullbackScheduler(
       intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
     }
 
+    // Per-symbol risk gate (issue #138)。manual `/trade/execute` (TradingService)
+    // と同じ pure function を呼ぶことで gate parity を取る。perSymbolRisk が
+    // 未注入の場合は POC 後方互換で skip。Inverse pair の SymbolState は同期
+    // pure 関数で要求されるため、BUY のみ事前 fetch する。
+    if (options.perSymbolRisk) {
+      let inverseState: SymbolState | null = null
+      const inverseSymbol =
+        intent.side === 'BUY' ? options.perSymbolRisk.inversePairs[upper] : undefined
+      if (inverseSymbol) {
+        try {
+          inverseState = await options.positionStore.getState(inverseSymbol)
+        } catch {
+          // fetch 失敗は inverse gate fail-open。inverse 銘柄の state read 失敗
+          // で BUY ごと止めると universe 全体が連鎖 reject になり得るため、
+          // 他の gate (settled cash / spread / freshness など) に任せる。
+          inverseState = null
+        }
+      }
+      const riskDecision = evaluatePerSymbolRisk(
+        {
+          symbol: upper,
+          side: intent.side,
+          intentPrice: intent.price,
+          intentNotional: intent.notional,
+          state,
+          inverseState,
+          now: now(),
+        },
+        {
+          inversePairs: options.perSymbolRisk.inversePairs,
+          spreadLimits: options.perSymbolRisk.spreadLimits,
+          staleQuoteMs: options.perSymbolRisk.staleQuoteMs,
+          gapRejectPct: options.perSymbolRisk.gapRejectPct,
+          // Strategy.decide() が cooldown を既に評価しているので冗長 (両者
+          // 同義)。重複させても挙動は変わらないが、cron 経路では skip。
+          evaluateCooldown: false,
+        },
+      )
+      if (!riskDecision.approved) {
+        const reason = `risk: ${riskDecision.reasons.join(', ')}`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(signal.trace, traceStep('risk.per_symbol_gate', false, undefined, undefined, undefined, riskDecision.reasons.join(', '))),
+        })
+        continue
+      }
+    }
+
     const expiresAtMs = now().getTime() + pendingLockTtlMs
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
       const reason = `invalid expiresAt computed from pendingLockTtlMs: ${pendingLockTtlMs}`
@@ -658,6 +731,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'scheduler.pending_lock_expiry_valid': '注文ロック期限が有効',
   'scheduler.pending_lock_acquired': '注文ロックを取得できた',
   'risk.bucket_cap': '同グループ建玉上限内',
+  'risk.per_symbol_gate': '銘柄別リスクゲート',
   'broker.submit': '証券会社への発注送信',
 }
 

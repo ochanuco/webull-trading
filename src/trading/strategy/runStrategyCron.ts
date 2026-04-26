@@ -99,8 +99,9 @@ export interface StrategyCronAnalysis {
  *
  * Risk gate のうち **portfolio-wide な pre-flight 判定** (tradingDisabledUntil
  * と drawdown_kill) は本関数で適用する。per-symbol gate (spread / halt / gap /
- * JP band / inverse_pair / settled_cash) は TradingService 側が持っており、
- * 本 cron 経路では未統合 — follow-up で gate parity を取る予定。
+ * JP band / inverse_pair / settled_cash) は `evaluatePerSymbolRisk` を介して
+ * `runPullbackScheduler` に注入し、TradingService と判定が一致するよう unify
+ * 済み (issue #138)。
  *
  * JP 銘柄は 100 株ロットで round-down される。bar 取得は Yahoo Finance の
  * `<code>.T` サフィックス (YahooBarClient 内で自動付与)。
@@ -373,6 +374,18 @@ export async function runStrategyCron(
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,
+      // Per-symbol risk gate (issue #138 — TradingService と unify)。
+      // global_config / symbol_universe から populate。manual route と同じ
+      // deps なので、cron / `/trade/execute` の判定が一致する。
+      perSymbolRisk: {
+        inversePairs: universe.inversePairs,
+        spreadLimits: {
+          US: global.spreadLimitPctUs,
+          JP: global.spreadLimitPctJp,
+        },
+        staleQuoteMs: global.staleQuoteMs,
+        gapRejectPct: global.gapRejectPct,
+      },
       onDecision: (record) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
