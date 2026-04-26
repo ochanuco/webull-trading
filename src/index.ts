@@ -71,10 +71,13 @@ export default {
               }),
             )
             // cron 全体が落ちた時 (D1 失敗 / unexpected throw 等) も通知 (#199)。
-            // fire-and-forget。Notifier 実装側で silent fallback。
-            createNotifier(env)
-              .notify({ type: 'ERROR', message, cause: 'strategy_cron' })
-              .catch(() => undefined)
+            // ctx.waitUntil で wrap して isolate terminate 前に webhook fetch を
+            // 完了させる。Notifier 実装側は silent fallback なので catch は保険。
+            ctx.waitUntil(
+              createNotifier(env)
+                .notify({ type: 'ERROR', message, cause: 'strategy_cron' })
+                .catch(() => undefined),
+            )
           },
         ),
       )

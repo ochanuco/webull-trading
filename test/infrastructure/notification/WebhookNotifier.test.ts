@@ -155,6 +155,35 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('https://dash.example.com/dashboard/charts?tab=symbol&symbol=AAPL')
   })
 
+  it('trims leading/trailing whitespace from URLs before POSTing', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({
+      slackUrl: '  https://hooks.slack.test/x  \n',
+      discordUrl: '\thttps://discord.test/webhooks/abc ',
+      dashboardBaseUrl: '  https://dash.example.com/  ',
+      fetchImpl: fn,
+    })
+
+    await notifier.notify({
+      type: 'TRADE',
+      side: 'BUY',
+      symbol: 'AAPL',
+      qty: 1,
+      price: 100,
+      mode: 'DRY_RUN',
+    })
+
+    const urls = calls.map((c) => c.url).sort()
+    expect(urls).toEqual([
+      'https://discord.test/webhooks/abc',
+      'https://hooks.slack.test/x',
+    ])
+    // dashboard link も trim 済みの base から組み立てられること。
+    const slackCall = calls.find((c) => c.url === 'https://hooks.slack.test/x')
+    const slackBody = JSON.parse(String(slackCall?.init.body))
+    expect(slackBody.text).toContain('https://dash.example.com/dashboard/charts?tab=symbol&symbol=AAPL')
+  })
+
   it('omits dashboard link when DASHBOARD_BASE_URL is unset', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({

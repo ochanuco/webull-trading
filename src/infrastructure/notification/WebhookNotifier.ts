@@ -36,12 +36,15 @@ export class WebhookNotifier implements Notifier {
   private readonly fetchImpl: typeof fetch
 
   constructor(options: WebhookNotifierOptions) {
-    // 空文字列も「未設定」扱い。env loader が `?? ''` した時に静かに無効化する。
-    this.slackUrl = options.slackUrl?.trim() ? options.slackUrl : undefined
-    this.discordUrl = options.discordUrl?.trim() ? options.discordUrl : undefined
-    this.dashboardBaseUrl = options.dashboardBaseUrl?.trim()
-      ? stripTrailingSlash(options.dashboardBaseUrl)
-      : undefined
+    // 空文字列 / 空白のみ も「未設定」扱い。env loader が `?? ''` した時に静かに
+    // 無効化する。trim 値を保存することで、前後空白付き URL が webhook fetch を
+    // 失敗させてサイレントに通知が落ちる事故を防ぐ。
+    const slack = options.slackUrl?.trim()
+    const discord = options.discordUrl?.trim()
+    const dashboard = options.dashboardBaseUrl?.trim()
+    this.slackUrl = slack ? slack : undefined
+    this.discordUrl = discord ? discord : undefined
+    this.dashboardBaseUrl = dashboard ? stripTrailingSlash(dashboard) : undefined
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
   }
 
