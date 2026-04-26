@@ -79,6 +79,7 @@ interface CandidateRow {
   clientOrderId: string | null
   symbol: string | null
   side: string | null
+  preSubmitSide?: string | null
   brokerStatus: string | null
   filledQty: number | null
   filledPrice: number | null
@@ -112,6 +113,7 @@ function makeFakeDb(rows: CandidateRow[]): {
 
   const selectChain = {
     from: () => selectChain,
+    leftJoin: () => selectChain,
     where: () => selectChain,
     orderBy: () => selectChain,
     limit: async () => rows,
@@ -376,6 +378,52 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(summary.stateApplied).toBe(1)
     expect(summary.repaired).toBe(1)
     // Only one UPDATE on the repair path: the marker stamp.
+    expect(updates).toHaveLength(1)
+    expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+    expect(updates[0]!.set.stateApplyError).toBeNull()
+  })
+
+  it('repair cohort: resolves side from matching pre_submit when post_submit side is NULL', async () => {
+    const row: CandidateRow = {
+      id: 12,
+      clientOrderId: 'coid-repair-pre-side',
+      symbol: 'SOXL',
+      side: null,
+      preSubmitSide: 'BUY',
+      brokerStatus: 'FILLED',
+      filledQty: 4,
+      filledPrice: 124.95,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 33,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    const webullStub = makeWebullStub({})
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+      retryStateApply: true,
+    })
+
+    expect(webullStub.findOrderByClientId).not.toHaveBeenCalled()
+    expect(symbolStub.recordFill).toHaveBeenCalledWith('SOXL', {
+      side: 'BUY',
+      qty: 4,
+      price: 124.95,
+    })
+    expect(summary.errors).toEqual([])
+    expect(summary.stateApplied).toBe(1)
+    expect(summary.stateApplyFailed).toBe(0)
+    expect(summary.repaired).toBe(1)
     expect(updates).toHaveLength(1)
     expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     expect(updates[0]!.set.stateApplyError).toBeNull()
