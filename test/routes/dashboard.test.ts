@@ -49,6 +49,7 @@ function fakePortfolioNamespace(portfolio: {
   dailyStartEquity: number
   dailyRealizedPnl: number
   tradingDisabledUntil: string | null
+  lastRolledAt?: string | null
   updatedAt: string
 }) {
   const stub = {
@@ -153,6 +154,7 @@ describe('dashboard', () => {
         dailyStartEquity: 10_000,
         dailyRealizedPnl: -150,
         tradingDisabledUntil: null,
+        lastRolledAt: null,
         updatedAt: '2026-04-23T00:00:00.000Z',
       }),
     }
@@ -164,6 +166,9 @@ describe('dashboard', () => {
     expect(body).toContain('-1.50%')
     // 2026-04-23T00:00:00Z → 2026-04-23 09:00:00 JST
     expect(body).toContain('2026-04-23 09:00:00 JST')
+    // issue #140: lastRolledAt = null は「未実行」表示
+    expect(body).toContain('lastRolledAt')
+    expect(body).toContain('未実行')
   })
 
   it('renders config page with global_config + symbol table', async () => {
@@ -1568,5 +1573,49 @@ describe('renderGridTab', () => {
   it('charts 空 → ALLOWED_SYMBOLS が空である旨を案内', () => {
     const html = renderGridTab({ tab: 'grid', charts: [], zoom: null })
     expect(html).toContain('ALLOWED_SYMBOLS が空')
+  })
+})
+
+import { renderLastRolledCell } from '../../src/routes/dashboard'
+
+describe('renderLastRolledCell (issue #140)', () => {
+  // 2026-04-25T00:00:00Z = 09:00 JST。3 ケースの elapsed を相対計算するための
+  // anchor。
+  const fixedNowMs = Date.parse('2026-04-25T00:00:00.000Z')
+  const now = () => fixedNowMs
+
+  it('renders 「未実行」 with warn class when lastRolledAt is null', () => {
+    const html = renderLastRolledCell(null, now)
+    expect(html).toContain('class="warn"')
+    expect(html).toContain('未実行')
+  })
+
+  it('renders ok badge when lastRolledAt is recent (< 24h)', () => {
+    const recent = new Date(fixedNowMs - 1 * 3_600_000).toISOString()
+    const html = renderLastRolledCell(recent, now)
+    expect(html).toContain('class="ok"')
+    expect(html).toContain('1.0h 前')
+  })
+
+  it('renders warn badge when lastRolledAt is 24h–48h old', () => {
+    const stale = new Date(fixedNowMs - 30 * 3_600_000).toISOString()
+    const html = renderLastRolledCell(stale, now)
+    expect(html).toContain('class="warn"')
+    expect(html).toContain('30.0h 前')
+    expect(html).toContain('24h 超')
+  })
+
+  it('renders err badge when lastRolledAt is >= 48h old', () => {
+    const veryStale = new Date(fixedNowMs - 50 * 3_600_000).toISOString()
+    const html = renderLastRolledCell(veryStale, now)
+    expect(html).toContain('class="err"')
+    expect(html).toContain('50.0h 前')
+    expect(html).toContain('48h 超')
+  })
+
+  it('renders err badge when lastRolledAt is unparseable', () => {
+    const html = renderLastRolledCell('not-an-iso', now)
+    expect(html).toContain('class="err"')
+    expect(html).toContain('parse 不能')
   })
 })

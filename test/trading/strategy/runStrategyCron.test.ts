@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadGlobalConfigFrom } from '../../../src/infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../../src/infrastructure/db/symbolUniverse'
-import { resolvePortfolioForRiskScale, runStrategyCron } from '../../../src/trading/strategy/runStrategyCron'
+import {
+  emitStaleRollWarningIfNeeded,
+  resolvePortfolioForRiskScale,
+  runStrategyCron,
+} from '../../../src/trading/strategy/runStrategyCron'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../../helpers/configFixtures'
 
 vi.mock('../../../src/infrastructure/db/globalConfigLoader', () => ({
@@ -192,5 +196,53 @@ describe('resolvePortfolioForRiskScale', () => {
     const r = resolvePortfolioForRiskScale(p, 3333)
     expect(r.usedFallback).toBe(false)
     expect(r.portfolio).toBe(p)
+  })
+})
+
+describe('emitStaleRollWarningIfNeeded (issue #140)', () => {
+  // 2026-04-25T00:00:00Z を「現在」とみなして、24h 前 / 23h 前 / 48h 前 の
+  // 3 ケースを単純化。Date.now の代わりに `now` 注入で時刻 mock。
+  const fixedNowMs = Date.parse('2026-04-25T00:00:00.000Z')
+  const now = () => fixedNowMs
+
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+  })
+
+  it('does NOT warn when lastRolledAt is null (greenfield / first run)', () => {
+    emitStaleRollWarningIfNeeded({ lastRolledAt: null, now })
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('does NOT warn when lastRolledAt is fresh (< 24h)', () => {
+    const fresh = new Date(fixedNowMs - 23 * 3_600_000).toISOString()
+    emitStaleRollWarningIfNeeded({ lastRolledAt: fresh, now })
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('warns when lastRolledAt is >= 24h old (stale)', () => {
+    const stale = new Date(fixedNowMs - 25 * 3_600_000).toISOString()
+    emitStaleRollWarningIfNeeded({ lastRolledAt: stale, now, requestId: 'req-1' })
+    expect(warnSpy).toHaveBeenCalledOnce()
+    const firstCall = warnSpy.mock.calls[0]
+    if (!firstCall) throw new Error('warn was not called')
+    const payload = JSON.parse(firstCall[0] as string) as Record<string, unknown>
+    expect(payload.event).toBe('portfolio_roll_stale')
+    expect(payload.requestId).toBe('req-1')
+    expect(payload.staleHours).toBe(25)
+    expect(payload.thresholdHours).toBe(24)
+  })
+
+  it('warns with reason=unparseable_lastRolledAt for malformed timestamp', () => {
+    emitStaleRollWarningIfNeeded({ lastRolledAt: 'garbage', now })
+    expect(warnSpy).toHaveBeenCalledOnce()
+    const firstCall = warnSpy.mock.calls[0]
+    if (!firstCall) throw new Error('warn was not called')
+    const payload = JSON.parse(firstCall[0] as string) as Record<string, unknown>
+    expect(payload.reason).toBe('unparseable_lastRolledAt')
   })
 })

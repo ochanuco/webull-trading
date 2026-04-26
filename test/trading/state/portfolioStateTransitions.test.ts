@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyRealizedPnl,
+  rollDaily,
   seedDailyStartEquity,
   setTradingDisabledUntil,
 } from '../../../src/trading/state/portfolioStateTransitions'
@@ -70,6 +71,34 @@ describe('portfolioStateTransitions', () => {
       expect(() =>
         setTradingDisabledUntil(emptyPortfolioState(fixedNow), 'not-a-date', { now: fixedNow }),
       ).toThrow('Invalid setTradingDisabledUntil')
+    })
+  })
+
+  describe('rollDaily', () => {
+    it('rolls dailyRealizedPnl into nextStart and stamps lastRolledAt', () => {
+      const seeded = {
+        ...emptyPortfolioState(fixedNow),
+        dailyStartEquity: 10_000,
+        dailyRealizedPnl: -250,
+      }
+      const { before, after } = rollDaily(seeded, { now: fixedNow })
+      expect(before).toBe(seeded)
+      expect(after.dailyStartEquity).toBe(9_750)
+      expect(after.dailyRealizedPnl).toBe(0)
+      // issue #140: lastRolledAt は updatedAt と同じ ISO に set される
+      expect(after.lastRolledAt).toBe('2026-04-21T10:00:00.000Z')
+      expect(after.updatedAt).toBe('2026-04-21T10:00:00.000Z')
+    })
+
+    it('preserves tradingDisabledUntil through the roll', () => {
+      const armed = {
+        ...emptyPortfolioState(fixedNow),
+        dailyStartEquity: 10_000,
+        dailyRealizedPnl: -100,
+        tradingDisabledUntil: '2026-04-22T00:00:00.000Z',
+      }
+      const { after } = rollDaily(armed, { now: fixedNow })
+      expect(after.tradingDisabledUntil).toBe('2026-04-22T00:00:00.000Z')
     })
   })
 })

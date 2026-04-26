@@ -265,6 +265,7 @@ export const admin = new Hono<AppBindings>()
     return c.json({
       rolledAt: after.updatedAt,
       rolledDelta: before.dailyRealizedPnl,
+      lastRolledAt: after.lastRolledAt,
       before: {
         dailyStartEquity: before.dailyStartEquity,
         dailyRealizedPnl: before.dailyRealizedPnl,
@@ -289,6 +290,7 @@ export const admin = new Hono<AppBindings>()
       dailyStartEquity: state.dailyStartEquity,
       dailyRealizedPnl: state.dailyRealizedPnl,
       tradingDisabledUntil: state.tradingDisabledUntil,
+      lastRolledAt: state.lastRolledAt,
       updatedAt: state.updatedAt,
     })
   })

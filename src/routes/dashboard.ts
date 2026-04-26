@@ -598,21 +598,58 @@ function portfolioBody(p: {
   dailyStartEquity: number
   dailyRealizedPnl: number
   tradingDisabledUntil: string | null
+  lastRolledAt?: string | null
   updatedAt: string
 }): string {
   const drawdownPct =
     p.dailyStartEquity > 0 ? (p.dailyRealizedPnl / p.dailyStartEquity) * 100 : null
   const ddClass = drawdownPct === null ? 'muted' : drawdownPct >= 0 ? 'ok' : 'err'
   const kill = p.tradingDisabledUntil
+  const lastRolledCell = renderLastRolledCell(p.lastRolledAt ?? null)
   return `<table>
     <tbody>
       <tr><th>当日始値資産 (dailyStartEquity)</th><td>${fmtNumber(p.dailyStartEquity, 2)}</td></tr>
       <tr><th>当日実現損益 (dailyRealizedPnl)</th><td class="${ddClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</td></tr>
       <tr><th>ドローダウン (drawdown)</th><td class="${ddClass}">${drawdownPct === null ? '—' : fmtNumber(drawdownPct, 2) + '%'}</td></tr>
       <tr><th>取引停止解除時刻 (tradingDisabledUntil)</th><td>${kill ? `<span class="warn">${esc(fmtJst(kill))}</span>` : '<span class="ok">稼働中</span>'}</td></tr>
+      <tr><th>EOD ロールオーバー実行時刻 (lastRolledAt)</th><td>${lastRolledCell}</td></tr>
       <tr><th>更新時刻 (updatedAt)</th><td class="muted">${esc(fmtJst(p.updatedAt))}</td></tr>
     </tbody>
   </table>`
+}
+
+/**
+ * Issue #140: `lastRolledAt` の経過時間で badge 色を切替。
+ *  - null:       未実行 (muted)
+ *  - <24h:       OK (ok)
+ *  - 24h–48h:    warning (warn)
+ *  - >=48h:      error  (err)
+ *
+ * EOD cron は毎日 22:00 UTC に走るので 24h 以内なら正常、48h 超は **2 日連続
+ * miss** で要調査。閾値は `runStrategyCron.emitStaleRollWarningIfNeeded` の
+ * 24h と一貫させている。
+ */
+export function renderLastRolledCell(
+  lastRolledAt: string | null,
+  now: () => number = Date.now,
+): string {
+  if (lastRolledAt === null) {
+    return `<span class="warn">未実行 (EOD cron 未到達 or PORTFOLIO_STATE 未配線)</span>`
+  }
+  const ms = new Date(lastRolledAt).getTime()
+  if (!Number.isFinite(ms)) {
+    return `<span class="err">${esc(lastRolledAt)} (parse 不能)</span>`
+  }
+  const elapsedHours = (now() - ms) / 3_600_000
+  const formatted = esc(fmtJst(lastRolledAt))
+  const elapsedLabel = `${elapsedHours.toFixed(1)}h 前`
+  if (elapsedHours >= 48) {
+    return `<span class="err">${formatted} <small>(${esc(elapsedLabel)}, 48h 超 — EOD cron 要確認)</small></span>`
+  }
+  if (elapsedHours >= 24) {
+    return `<span class="warn">${formatted} <small>(${esc(elapsedLabel)}, 24h 超)</small></span>`
+  }
+  return `<span class="ok">${formatted} <small class="muted">(${esc(elapsedLabel)})</small></span>`
 }
 
 function tradesBody(
