@@ -203,4 +203,88 @@ describe('WebhookNotifier', () => {
     const body = JSON.parse(String(calls[0]?.init.body))
     expect(body.text).not.toContain('/dashboard/charts')
   })
+
+  // #141: severity / STATE_CHANGE 拡張
+  it('renders ERROR with severity=critical using a critical icon and CRITICAL label', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'ERROR',
+      message: 'cron skipped: portfolio_halted',
+      cause: 'portfolio_halted',
+      severity: 'critical',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toContain('🚨')
+    expect(body.text).toContain('CRITICAL')
+    expect(body.text).toContain('portfolio_halted')
+  })
+
+  it('renders ERROR with default severity=warning using ⚠️ icon (back-compat)', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'ERROR',
+      symbol: 'NVDA',
+      message: 'upstream 500',
+      cause: 'bar fetch',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toContain('⚠️')
+    expect(body.text).toContain('cron error')
+    expect(body.text).not.toContain('CRITICAL')
+  })
+
+  it('renders STATE_CHANGE event with critical icon and field/from/to', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'STATE_CHANGE',
+      field: 'dryRun',
+      from: true,
+      to: false,
+      severity: 'critical',
+      note: 'requestId=abc',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toContain('🚨')
+    expect(body.text).toContain('state change: dryRun true → false')
+    expect(body.text).toContain('requestId=abc')
+  })
+
+  it('renders STATE_CHANGE with info severity using ℹ️ icon', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'STATE_CHANGE',
+      field: 'tradingEnabled',
+      from: true,
+      to: false,
+      severity: 'info',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toContain('ℹ️')
+    expect(body.text).toContain('state change: tradingEnabled true → false')
+  })
+
+  it('formatMessage is exposed for LoggingNotifier reuse (#141)', () => {
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x' })
+    const text = notifier.formatMessage({
+      type: 'ERROR',
+      message: 'reconcile fails',
+      cause: 'reconcile_fills',
+      severity: 'critical',
+    })
+    expect(text).toContain('🚨')
+    expect(text).toContain('CRITICAL')
+    expect(text).toContain('reconcile fails')
+  })
 })

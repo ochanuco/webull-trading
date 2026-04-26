@@ -81,12 +81,17 @@ export default {
                 message,
               }),
             )
-            // cron 全体が落ちた時 (D1 失敗 / unexpected throw 等) も通知 (#199)。
-            // ctx.waitUntil で wrap して isolate terminate 前に webhook fetch を
-            // 完了させる。Notifier 実装側は silent fallback なので catch は保険。
+            // cron 全体が落ちた時 (D1 失敗 / unexpected throw 等) も通知 (#199 → #141)。
+            // severity: critical で push する。waitUntil で wrap して isolate
+            // terminate 前に webhook fetch を完了させる。
             ctx.waitUntil(
-              createNotifier(env)
-                .notify({ type: 'ERROR', message, cause: 'strategy_cron' })
+              createNotifier(env, { requestId })
+                .notify({
+                  type: 'ERROR',
+                  message,
+                  cause: 'strategy_cron',
+                  severity: 'critical',
+                })
                 .catch(() => undefined),
             )
           },
@@ -96,6 +101,8 @@ export default {
     }
 
     // default: CRON_QUOTE_RECONCILE (`*/5 * * * *`) — quote feed + fill reconcile.
+    // 5 分 cron は quote と reconcile が独立に走るので、片方の error 経路で
+    // notifier を 1 回ずつ作る (overhead は無視できる: createNotifier は薄い)。
     ctx.waitUntil(
       runQuoteFeed({ env }).then(
         (summary) => {
@@ -111,12 +118,25 @@ export default {
           )
         },
         (error) => {
+          const message = error instanceof Error ? error.message : String(error)
           console.error(
             JSON.stringify({
               event: 'quote_feed_error',
               requestId,
-              message: error instanceof Error ? error.message : String(error),
+              message,
             }),
+          )
+          // quote feed の global throw は warning (per-symbol skip と区別)。
+          // 連続 fail で operator が気付けるよう push 通知 (#141)。
+          ctx.waitUntil(
+            createNotifier(env, { requestId })
+              .notify({
+                type: 'ERROR',
+                message,
+                cause: 'quote_feed',
+                severity: 'warning',
+              })
+              .catch(() => undefined),
           )
         },
       ),
@@ -141,14 +161,41 @@ export default {
               errorCount: summary.errors.length,
             }),
           )
+          // reconcile の per-row error が出ていれば 1 件まとめて通知 (#141)。
+          // 1 row 1 通知だと polling tick で連発するので summary 単位で 1 件。
+          if (summary.errors.length > 0) {
+            ctx.waitUntil(
+              createNotifier(env, { requestId })
+                .notify({
+                  type: 'ERROR',
+                  message: `reconcile fills had ${summary.errors.length} error(s) across ${summary.inspected} row(s)`,
+                  cause: 'reconcile_fills_partial',
+                  severity: 'warning',
+                })
+                .catch(() => undefined),
+            )
+          }
         },
         (error) => {
+          const message = error instanceof Error ? error.message : String(error)
           console.error(
             JSON.stringify({
               event: 'reconcile_fills_error',
               requestId,
-              message: error instanceof Error ? error.message : String(error),
+              message,
             }),
+          )
+          // reconcile 全体 throw は critical (split-brain リスク、#142 系列の
+          // 修復が走らない)。
+          ctx.waitUntil(
+            createNotifier(env, { requestId })
+              .notify({
+                type: 'ERROR',
+                message,
+                cause: 'reconcile_fills',
+                severity: 'critical',
+              })
+              .catch(() => undefined),
           )
         },
       ),
