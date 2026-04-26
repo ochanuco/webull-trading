@@ -84,19 +84,11 @@ describe('webull routes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('calls Webull and returns the raw broker DTO when dryRun=false', async () => {
+  it('returns 403 and never contacts Webull when dryRun=false (issue #137)', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ dryRun: false }),
     )
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          client_order_id: 'cli-123',
-          order_id: 'ord-123',
-        }),
-        { status: 200 },
-      ),
-    )
+    const fetchMock = vi.fn<typeof fetch>()
     vi.stubGlobal('fetch', fetchMock)
     const app = createApp()
 
@@ -119,16 +111,16 @@ describe('webull routes', () => {
         ...baseEnv,
         WEBULL_APP_KEY: 'app-key',
         WEBULL_APP_SECRET: 'app-secret',
-        
+
         WEBULL_ACCOUNT_ID_JP_CASH: 'acct-jp-1',
       },
     )
 
-    expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({
-      client_order_id: 'cli-123',
-      order_id: 'ord-123',
-    })
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(403)
+    const body = (await response.json()) as { error: string; message: string }
+    expect(body.error).toBe('live_execution_forbidden')
+    expect(body.message).toMatch(/\/trade\/execute/)
+    expect(body.message).toMatch(/\/admin\/strategy\/run/)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

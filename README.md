@@ -133,7 +133,7 @@ cd bridge && pnpm install && pnpm run typecheck
 | GET | `/health` | none | `{status, timestamp}` |
 | POST | `/trade/decide` | Basic | Signal + OrderIntent + RiskDecision を返す (発注しない) |
 | POST | `/trade/execute` | Basic | 上記 + ExecutionResult (`dry_run=1` で Mock、0 で Webull) |
-| POST | `/webull/order/place` | Basic | 低レベル疎通 endpoint (`dry_run=1` で synthetic response) |
+| POST | `/webull/order/place` | Basic | 低レベル疎通 endpoint (`dry_run=1` で synthetic response、`dry_run=0` は 403 で拒否。実発注は `/trade/execute` か `/admin/strategy/run` 経由) |
 | POST | `/events/trade` | secret header | bridge からの trade event ingest |
 | POST | `/admin/symbols/:symbol/seed-cash` | Basic | `settled_cash` の初期値投入 |
 | POST | `/admin/portfolio/seed-equity` | Basic | `daily_start_equity` 投入 |

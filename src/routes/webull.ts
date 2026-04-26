@@ -1,12 +1,20 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
-import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import type { WebullPlaceOrderResponseDto } from '../infrastructure/webull/dto'
 import { logPostSubmit, logPreSubmit } from '../infrastructure/logger/tradeJournal'
 import { ValidationError } from '../shared/errors'
 import type { OrderIntent, OrderSide } from '../trading/domain/OrderIntent'
 
+/**
+ * Low-level Webull connectivity endpoint. Intentionally limited to dry-run
+ * mode so it cannot bypass the TradingService risk gate (allowed_symbols /
+ * max_order_notional / pending lock / spread / drawdown kill, etc).
+ *
+ * Live execution must go through `/trade/execute` or `/admin/strategy/run`,
+ * which run the full risk pipeline before talking to the broker. See
+ * issue #137 for the rationale.
+ */
 export const webull = new Hono<AppBindings>().post('/order/place', async (c) => {
   const intent = await parseOrderIntent(c.req.json())
   const requestId = c.get('requestId')
@@ -14,40 +22,44 @@ export const webull = new Hono<AppBindings>().post('/order/place', async (c) => 
   logPreSubmit({ requestId, clientOrderId: intent.clientOrderId, intent })
 
   const global = await loadGlobalConfigFrom(c.env)
-  if (global.dryRun) {
-    const dto = createDryRunResponse(intent)
+  if (!global.dryRun) {
     logPostSubmit({
       requestId,
       clientOrderId: intent.clientOrderId,
       symbol: intent.symbol,
-      result: { mode: 'DRY_RUN', submitted: true, brokerOrderId: dto.order_id },
+      result: { mode: 'LIVE', submitted: false, errorReason: 'webull_place_blocked_live' },
       latencyMs: 0,
     })
-    return c.json(dto)
+    console.log(
+      JSON.stringify({
+        event: 'webull_place_blocked_live',
+        request_id: requestId,
+        client_order_id: intent.clientOrderId,
+        symbol: intent.symbol,
+        side: intent.side,
+        quantity: intent.quantity,
+        notional: intent.notional,
+      }),
+    )
+    return c.json(
+      {
+        error: 'live_execution_forbidden',
+        message:
+          'low-level live execution is forbidden; use /trade/execute or /admin/strategy/run',
+      },
+      403,
+    )
   }
 
-  const client = createWebullHttpClient(c.env)
-  const startedAt = Date.now()
-  let dto: WebullPlaceOrderResponseDto | undefined
-  let error: Error | undefined
-  try {
-    dto = await client.placeOrder(intent)
-    return c.json(dto)
-  } catch (err) {
-    error = err instanceof Error ? err : new Error(String(err))
-    throw err
-  } finally {
-    logPostSubmit({
-      requestId,
-      clientOrderId: intent.clientOrderId,
-      symbol: intent.symbol,
-      result: dto
-        ? { mode: 'LIVE', submitted: !!dto.order_id, brokerOrderId: dto.order_id, errorReason: dto.message }
-        : undefined,
-      latencyMs: Date.now() - startedAt,
-      error,
-    })
-  }
+  const dto = createDryRunResponse(intent)
+  logPostSubmit({
+    requestId,
+    clientOrderId: intent.clientOrderId,
+    symbol: intent.symbol,
+    result: { mode: 'DRY_RUN', submitted: true, brokerOrderId: dto.order_id },
+    latencyMs: 0,
+  })
+  return c.json(dto)
 })
 
 async function parseOrderIntent(payload: Promise<unknown>): Promise<OrderIntent> {
