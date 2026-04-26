@@ -1,4 +1,5 @@
 import { and, desc, eq, gte, isNull, or, sql } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/sqlite-core'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
@@ -146,12 +147,14 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     eq(tradeJournal.brokerStatus, 'FILLED'),
     isNull(tradeJournal.stateAppliedAt),
   )
+  const preSubmit = alias(tradeJournal, 'pre_submit')
   const candidates = await db
     .select({
       id: tradeJournal.id,
       clientOrderId: tradeJournal.clientOrderId,
       symbol: tradeJournal.symbol,
       side: tradeJournal.side,
+      preSubmitSide: preSubmit.side,
       brokerStatus: tradeJournal.brokerStatus,
       filledQty: tradeJournal.filledQty,
       filledPrice: tradeJournal.filledPrice,
@@ -160,6 +163,13 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       stateApplyAttempts: tradeJournal.stateApplyAttempts,
     })
     .from(tradeJournal)
+    .leftJoin(
+      preSubmit,
+      and(
+        eq(preSubmit.clientOrderId, tradeJournal.clientOrderId),
+        eq(preSubmit.tradeEventType, 'pre_submit'),
+      ),
+    )
     .where(
       and(
         eq(tradeJournal.tradeEventType, 'post_submit'),
@@ -175,15 +185,17 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         ),
       ),
     )
+    .groupBy(tradeJournal.id)
     .orderBy(desc(tradeJournal.id))
     .limit(limit)
 
-  if (candidates.length === 0) return summary
+  const uniqueCandidates = dedupeCandidatesByRowId(candidates)
+  if (uniqueCandidates.length === 0) return summary
 
-  summary.inspected = candidates.length
+  summary.inspected = uniqueCandidates.length
   const client = createWebullHttpClient(options.env)
 
-  for (const row of candidates) {
+  for (const row of uniqueCandidates) {
     const coid = row.clientOrderId
     if (!coid) {
       // In practice a post_submit row with submitted=1 always has a coid
@@ -212,7 +224,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       // re-poll Webull — orders/history can rotate the row off the first
       // page after a few days, and re-polling would also waste a quota.
       const symbol = row.symbol
-      const side = row.side as 'BUY' | 'SELL' | null
+      const side = resolveJournalSide(row.side, row.preSubmitSide)
       const filledQty = row.filledQty ?? null
       const filledPrice = row.filledPrice ?? null
       if (
@@ -288,12 +300,13 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     // the symbol's current avg cost from SymbolStateDO, which is only
     // meaningful after we've been recording BUY fills. Early trades with no
     // prior position yield realized=null (can't compute).
-    const side = (detail.side ?? row.side ?? null) as 'BUY' | 'SELL' | null
+    const journalSide = resolveJournalSide(row.side, row.preSubmitSide)
+    const resolvedSide = resolveJournalSide(detail.side, journalSide)
     const symbol = row.symbol ?? detail.symbol ?? null
     let realizedPnl: number | null = null
     if (
       status === 'FILLED' &&
-      side === 'SELL' &&
+      resolvedSide === 'SELL' &&
       symbol !== null &&
       filledQty !== null && filledQty > 0 &&
       filledPrice !== null && filledPrice > 0 &&
@@ -336,7 +349,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       // `state_applied_at = NULL` so the next reconcile tick will retry.
       if (
         status === 'FILLED' &&
-        side !== null &&
+        resolvedSide !== null &&
         symbol !== null &&
         filledQty !== null && filledQty > 0 &&
         filledPrice !== null && filledPrice > 0
@@ -348,7 +361,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           rowId: row.id,
           clientOrderId: coid,
           symbol,
-          side,
+          side: resolvedSide,
           filledQty,
           filledPrice,
           realizedPnl,
@@ -533,6 +546,36 @@ async function tryApplyAndStamp(args: {
     return false
   }
   return true
+}
+
+function resolveJournalSide(
+  primary: string | null | undefined,
+  fallback: string | null | undefined,
+): 'BUY' | 'SELL' | null {
+  if (primary === 'BUY' || primary === 'SELL') return primary
+  if (fallback === 'BUY' || fallback === 'SELL') return fallback
+  return null
+}
+
+function dedupeCandidatesByRowId<T extends { id: number; side: string | null; preSubmitSide?: string | null }>(
+  rows: T[],
+): T[] {
+  const byId = new Map<number, T>()
+  for (const row of rows) {
+    const existing = byId.get(row.id)
+    if (!existing) {
+      byId.set(row.id, row)
+      continue
+    }
+    // Defensive fallback for malformed append-only journals. If a duplicate
+    // join row has the only usable pre_submit side, keep that one while still
+    // processing the post_submit row at most once.
+    if (resolveJournalSide(existing.side, existing.preSubmitSide) === null &&
+      resolveJournalSide(row.side, row.preSubmitSide) !== null) {
+      byId.set(row.id, row)
+    }
+  }
+  return [...byId.values()]
 }
 
 async function recordApplyFailure(
