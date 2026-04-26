@@ -128,6 +128,30 @@ describe('GET /admin/backtest', () => {
     expect(res.status).toBe(400)
   })
 
+  it('400s when no Yahoo bars fall within the requested range', async () => {
+    // Regression for the silent fallback bug: previously, when
+    // `bars.findIndex(b => b.date >= from)` returned -1 (i.e. Yahoo had
+    // nothing inside [from, to] — e.g. `from` is in the future / symbol
+    // delisted) the route ran the backtest against the *entire* prior
+    // history and returned 200. The endpoint must now reject with 400.
+    const pastBars = buildBars(100, Array(80).fill(1.005), '2024-01-01')
+
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(pastBars)), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest?symbol=AAPL&from=2099-01-01&to=2099-12-31',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
   it('200s and returns BacktestResult shape on success', async () => {
     // Build an uptrend-then-pullback synthetic series long enough for SMA50.
     const warmup = buildBars(100, Array(80).fill(1.005), '2024-01-01')

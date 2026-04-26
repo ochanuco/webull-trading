@@ -151,13 +151,20 @@ export const admin = new Hono<AppBindings>()
     const barClient = new YahooBarClient()
     const allBars = await barClient.getDailyBars(symbol, lookbackDays)
     const bars = allBars.filter((b) => b.date <= to)
-    // Keep at least the first 50 bars before `from` as warmup; if available
+    // Keep at least the first 60 bars before `from` as warmup; if available
     // we slice to (from - warmup_buffer)..to. Yahoo already returned them
     // oldest-first.
     const liveStartIdx = bars.findIndex((b) => b.date >= from)
+    if (liveStartIdx === -1) {
+      // No bars within [from, to]: Yahoo had no daily data for the requested
+      // window (e.g. `from` is in the future, or symbol delisted before
+      // `from`). Reject with 400 instead of silently running on the entire
+      // pre-`from` history (which would compute against an unrelated window
+      // and return a misleading 200).
+      throw new ValidationError('no bars found in requested range', { field: 'from' })
+    }
     const warmupKeep = 60
-    const sliced =
-      liveStartIdx >= 0 ? bars.slice(Math.max(0, liveStartIdx - warmupKeep)) : bars
+    const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
 
     const params: BacktestParams = {
       symbol,

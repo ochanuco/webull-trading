@@ -115,8 +115,11 @@ export async function runBacktest(
   let peakEquity = params.initialCash
 
   // computePullbackIndicators requires >=50 bars. Walk forward starting at
-  // index 50 so the first decision has a full warmup window.
-  const warmup = 50
+  // index 60 so the first decision has the same recent 60-bar window the
+  // strategy assumes — and so admin.ts (which pre-slices with
+  // `warmupKeep = 60` before calling us) doesn't lose its first 10 live bars
+  // to under-warmed iterations.
+  const warmup = 60
 
   for (let i = warmup; i < bars.length; i += 1) {
     // Use bars up to and including the current day for the indicator window.
@@ -165,6 +168,15 @@ export async function runBacktest(
       }
     } else if (signal.action === 'SELL' && position !== null) {
       const price = today.close
+      if (!Number.isFinite(price) || price <= 0) {
+        // Defensive: a bad close (NaN / 0 / negative) on the SELL bar would
+        // poison realizedPnl, equity, Sharpe and MaxDD all at once. Refuse
+        // rather than silently corrupt the result. BUY side already rejects
+        // implicitly via `price > 0`.
+        throw new Error(
+          `runBacktest: invalid close price for ${params.symbol} on ${today.date}`,
+        )
+      }
       const realizedPnl = (price - position.avgPrice) * position.qty
       cash += position.qty * price
       trades.push({
@@ -196,6 +208,13 @@ export async function runBacktest(
   if (position !== null && bars.length > 0) {
     const last = bars[bars.length - 1]!
     const price = last.close
+    if (!Number.isFinite(price) || price <= 0) {
+      // Same rationale as the SELL branch — a bad final close would silently
+      // wreck totalPnl / equityCurve / Sharpe / MaxDD.
+      throw new Error(
+        `runBacktest: invalid close price for ${params.symbol} on ${last.date}`,
+      )
+    }
     const realizedPnl = (price - position.avgPrice) * position.qty
     cash += position.qty * price
     trades.push({
