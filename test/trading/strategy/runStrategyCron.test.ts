@@ -202,6 +202,52 @@ describe('runStrategyCron', () => {
     }
   })
 
+  // issue #196 2/3: macro_event_calendar (0014) も同パターンで table 未存在
+  // 環境では gate 無効化される。probe SELECT が走り、warn ログ
+  // `macro_event_gate_disabled_table_missing` が出ることを確認する。
+  it('disables macro event gate when macro_event_calendar table is missing (#196 2/3)', async () => {
+    const firstSpy = vi.fn(async () => null)
+    const fakeDb = {
+      prepare: vi.fn(() => ({
+        first: firstSpy,
+      })),
+    } as unknown as D1Database
+    const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const envWithMissingTable = {
+        DB: fakeDb,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 10_000,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+
+      await runStrategyCron(envWithMissingTable, { requestId: 'req-no-macro-table' }).catch(
+        () => undefined,
+      )
+
+      const calls = (fakeDb.prepare as ReturnType<typeof vi.fn>).mock.calls as Array<[string]>
+      const probedSqliteMaster = calls.some(
+        (c) => c[0].includes('sqlite_master') && c[0].includes('macro_event_calendar'),
+      )
+      expect(probedSqliteMaster).toBe(true)
+      const warnLines = warnSpy2.mock.calls.map((c) => String(c[0]))
+      expect(
+        warnLines.some((l) => l.includes('macro_event_gate_disabled_table_missing')),
+      ).toBe(true)
+    } finally {
+      warnSpy2.mockRestore()
+    }
+  })
+
   // #141: critical な skip reason は Notifier 経由で push 通知される。
   // env.SLACK_WEBHOOK_URL を設定して fetch を spy し、webhook 行きの POST が
   // 1 回入ることだけ確認する (formatter は WebhookNotifier.test に分離済み)。

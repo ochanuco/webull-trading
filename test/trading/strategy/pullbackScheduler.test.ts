@@ -625,3 +625,162 @@ describe('runPullbackScheduler earnings calendar gate (#196)', () => {
     expect(msftDecision?.decision).toBe('BUY')
   })
 })
+
+describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
+  it('rejects BUY when a macro event is within the freeze window of eval timestamp', async () => {
+    // FOMC 14:00 ET (= 18:30 UTC EDT) を `now` (= 14:30 UTC EDT に近い) と
+    // 同瞬間に置く simple repo。`now` 経由で 14:30 UTC が渡るので CPI 08:30 ET
+    // (= 12:30 UTC) を window 内に置く。
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      macroEventGate: {
+        repo: {
+          async fetchByDateRange() {
+            // 2026-04-20 12:30 UTC = 08:30 EDT — `now` 14:30 UTC = 10:30 EDT。
+            // 2h 差で window 外。代わりに 14:30 UTC = 10:30 EDT を CPI 時刻に
+            // することで window 内に入れる。
+            return [
+              {
+                id: 1,
+                eventType: 'CPI',
+                eventDate: '2026-04-20',
+                eventTime: '10:30',
+                notes: null,
+                createdAt: now.toISOString(),
+              },
+            ]
+          },
+          async fetchAll() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('risk: macro_event_gate: CPI')
+  })
+
+  it('approves BUY when macro repo returns no rows', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      macroEventGate: {
+        repo: {
+          async fetchByDateRange() {
+            return []
+          },
+          async fetchAll() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('skips the macro gate when option is omitted (back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+  })
+
+  it('earnings reason wins when both gates would reject (priority order)', async () => {
+    // 両 gate 入れたら earnings の reject が先 (task 指定の優先順位 earnings → macro)。
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      earningsGate: {
+        repo: {
+          async fetchByRange() {
+            return [
+              {
+                id: 1,
+                symbol: 'AAPL',
+                earningsDate: now.toISOString().slice(0, 10),
+                notes: null,
+                createdAt: now.toISOString(),
+              },
+            ]
+          },
+          async fetchBySymbol() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+        freezeBusinessDays: 1,
+      },
+      macroEventGate: {
+        repo: {
+          async fetchByDateRange() {
+            return [
+              {
+                id: 1,
+                eventType: 'CPI',
+                eventDate: now.toISOString().slice(0, 10),
+                eventTime: '10:30',
+                notes: null,
+                createdAt: now.toISOString(),
+              },
+            ]
+          },
+          async fetchAll() {
+            return []
+          },
+          async bulkUpsert() {
+            return { inserted: 0, skipped: 0 }
+          },
+          async deleteById() {
+            return false
+          },
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('earnings_within_1bd')
+    expect(reject?.reason).not.toContain('macro_event_gate')
+  })
+})

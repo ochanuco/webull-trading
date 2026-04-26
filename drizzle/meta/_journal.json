@@ -99,6 +99,13 @@
       "when": 1777210015055,
       "tag": "0013_earnings_calendar",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1777901600000,
+      "tag": "0014_macro_event_calendar",
+      "breakpoints": true
     }
   ]
 }
