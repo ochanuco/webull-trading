@@ -4,13 +4,10 @@ import type { RiskDecision } from '../domain/RiskDecision'
 import type { Signal } from '../domain/Signal'
 import type { Execution } from '../execution/Execution'
 import type { RiskPolicy } from '../risk/RiskPolicy'
-import { isWithinJpPriceBand } from '../risk/jpPriceBand'
-import { computeSpreadPct } from '../risk/spreadGuard'
+import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
 import type { PortfolioStore } from '../state/PortfolioStore'
 import type { PositionStore } from '../state/PositionStore'
-import type { QuoteSnapshot, SymbolState } from '../state/types'
 import type { Strategy, StrategyInput } from '../strategy/Strategy'
-import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import {
   logPostSubmit,
   logPreSubmit,
@@ -238,16 +235,10 @@ export class TradingService {
     const now = this.now()
     const state = await this.positionStore.getState(symbol)
 
-    if (state.cooldownUntil && new Date(state.cooldownUntil).getTime() > now.getTime()) {
-      return {
-        allowed: false,
-        riskDecision: appendReason(decision.riskDecision, `cooldown active until ${state.cooldownUntil}`),
-      }
-    }
-
-    // Portfolio-level drawdown kill switch. Fires before pending-lock acquisition
-    // so the lock is never taken when trading is disabled. Unseeded equity
-    // (0) is treated as fail-open so existing flows keep working.
+    // Portfolio-level drawdown kill switch & tradingDisabled は per-symbol gate
+    // ではなく account-wide なので applyStateGate に残す (issue #138 unify
+    // scope は per-symbol 側のみ)。pending-lock 取得前に評価して、kill
+    // 状態でロックが取られないようにする。
     if (this.portfolioStore) {
       const portfolio = await this.portfolioStore.getPortfolio()
       if (
@@ -278,89 +269,37 @@ export class TradingService {
       }
     }
 
-    if (
-      decision.orderIntent.side === 'BUY' &&
-      state.settledCash > 0 &&
-      decision.orderIntent.notional > state.settledCash
-    ) {
+    // Per-symbol gate を pure function に集約 (issue #138 — cron 側と unify)。
+    // inverse pair の SymbolState は同期 pure 関数で必要なので事前に fetch。
+    const inverseSymbol = decision.orderIntent.side === 'BUY'
+      ? this.inversePairs[symbol.toUpperCase()]
+      : undefined
+    const inverseState = inverseSymbol
+      ? await this.positionStore.getState(inverseSymbol)
+      : null
+
+    const perSymbol = evaluatePerSymbolRisk(
+      {
+        symbol,
+        side: decision.orderIntent.side,
+        intentPrice: decision.orderIntent.price,
+        intentNotional: decision.orderIntent.notional,
+        state,
+        inverseState,
+        now,
+      },
+      {
+        inversePairs: this.inversePairs,
+        spreadLimits: this.spreadLimits,
+        staleQuoteMs: this.staleQuoteMs,
+        gapRejectPct: this.gapRejectPct,
+        evaluateCooldown: true,
+      },
+    )
+    if (!perSymbol.approved) {
       return {
         allowed: false,
-        riskDecision: appendReason(
-          decision.riskDecision,
-          `insufficient settled cash: notional ${decision.orderIntent.notional} exceeds settledCash ${state.settledCash}`,
-        ),
-      }
-    }
-
-    if (decision.orderIntent.side === 'BUY') {
-      const inverse = this.inversePairs[symbol.toUpperCase()]
-      if (inverse) {
-        const inverseState = await this.positionStore.getState(inverse)
-        if (inverseState.position !== null && inverseState.position.qty > 0) {
-          return {
-            allowed: false,
-            riskDecision: appendReason(
-              decision.riskDecision,
-              `inverse-pair exposure: ${inverse} position (qty ${inverseState.position.qty}) blocks BUY ${symbol}`,
-            ),
-          }
-        }
-      }
-    }
-
-    // Halt detection (#38-C, freshness fallback): broker-side halt flag が UAT
-    // で確認できていないので quote freshness で代替。lastQuote が null のケース
-    // (quote feed まだ未シード) は POC 後方互換のためスキップ。先に halt を見る
-    // のは、stale な quote では下流の spread/gap/band が成立しないため。
-    // 注: `isQuoteStale` は future-quote ガードで diffMs<=0 も stale 扱いするが、
-    //   halt gate では「取得時刻と now がほぼ同時」(diffMs=0) を fresh として扱う。
-    if (state.lastQuote) {
-      const ageMs = now.getTime() - new Date(state.lastQuote.fetchedAt).getTime()
-      if (!Number.isFinite(ageMs) || ageMs > this.staleQuoteMs) {
-        return {
-          allowed: false,
-          riskDecision: appendReason(
-            decision.riskDecision,
-            `halt or stale quote: lastQuote ${state.lastQuote.fetchedAt} exceeds staleQuoteMs ${this.staleQuoteMs}`,
-          ),
-        }
-      }
-    }
-
-    // Spread guard (#38-D): wide spread at submit turns into slippage on market
-    // orders and stale fills on marketable limits. Fail-closed when bid/ask are
-    // missing once a quote has been seeded.
-    const spreadGate = this.evaluateSpreadGate(symbol, state.lastQuote)
-    if (spreadGate !== null) {
-      return {
-        allowed: false,
-        riskDecision: appendReason(decision.riskDecision, spreadGate),
-      }
-    }
-
-    // Gap re-eval (#38-C, simplified POC): avgPrice と現在 quote の gap が
-    // |gapRejectPct| を超えていれば 1 tick HOLD。open position が無いとき
-    // は比較対象が無いので gap check 自体をスキップする。
-    const gapReject = evaluateGap(state, this.gapRejectPct)
-    if (gapReject) {
-      return {
-        allowed: false,
-        riskDecision: appendReason(decision.riskDecision, gapReject),
-      }
-    }
-
-    // JP 値幅制限 (#38-C): 東証銘柄の指値が approximation band 外なら reject。
-    if (
-      inferWebullMarket(symbol) === 'JP' &&
-      state.lastQuote &&
-      !isWithinJpPriceBand(state.lastQuote.price, decision.orderIntent.price)
-    ) {
-      return {
-        allowed: false,
-        riskDecision: appendReason(
-          decision.riskDecision,
-          `JP price band: order price ${decision.orderIntent.price} outside band for reference ${state.lastQuote.price}`,
-        ),
+        riskDecision: appendReason(decision.riskDecision, perSymbol.reasons[0] ?? 'per-symbol risk reject'),
       }
     }
 
@@ -381,35 +320,6 @@ export class TradingService {
     return { allowed: true }
   }
 
-  /**
-   * Returns a rejection reason string when the spread gate blocks submit, or
-   * null when the gate passes. Fail-closed: missing bid or ask is a reject
-   * once a quote has been seeded.
-   */
-  private evaluateSpreadGate(
-    symbol: string,
-    lastQuote: QuoteSnapshot | null,
-  ): string | null {
-    if (lastQuote === null) return null
-
-    const bid = lastQuote.bid
-    const ask = lastQuote.ask
-    if (bid === undefined || ask === undefined) {
-      return 'spread unknown, bid/ask missing'
-    }
-
-    const market = inferWebullMarket(symbol)
-    const limit = market === 'JP' ? this.spreadLimits.JP : this.spreadLimits.US
-    const spreadPct = computeSpreadPct(bid, ask)
-    if (spreadPct === null) {
-      return 'spread invalid: crossed book, non-finite, or non-positive bid/ask'
-    }
-    if (spreadPct > limit) {
-      return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%`
-    }
-    return null
-  }
-
   private createOrderIntent(signal: Signal): OrderIntent | undefined {
     if (signal.action === 'HOLD') {
       return undefined
@@ -424,18 +334,6 @@ export class TradingService {
       clientOrderId: crypto.randomUUID().replaceAll('-', ''),
     }
   }
-}
-
-function evaluateGap(state: SymbolState, thresholdPct: number): string | null {
-  const position = state.position
-  const quote = state.lastQuote
-  if (!position || !quote) return null
-  if (!Number.isFinite(position.avgPrice) || position.avgPrice <= 0) return null
-  const gap = (quote.price - position.avgPrice) / position.avgPrice
-  if (Math.abs(gap) > thresholdPct) {
-    return `gap re-eval: |${gap.toFixed(4)}| > ${thresholdPct} (avgPrice ${position.avgPrice} vs quote ${quote.price})`
-  }
-  return null
 }
 
 function endOfUtcDay(now: Date): Date {
