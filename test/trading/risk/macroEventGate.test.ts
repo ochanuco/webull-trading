@@ -405,9 +405,9 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
 })
 
 describe('evaluateMacroEventGate — config sanitisation', () => {
-  it('clamps negative freezeHoursBefore/After to default (1h each)', async () => {
-    // negative → default 1h。FOMC 14:00 ET ±1h で 13:30 ET (= 17:30 UTC) は
-    // window 内で reject されるはず。
+  it('clamps negative freezeHoursBefore/After to defaults (1h/6h)', async () => {
+    // negative → defaults (before=1h, after=6h)。FOMC 14:00 ET、before=1h で
+    // 13:30 ET (= 17:30 UTC) は window 内 (-1h ≤ delta ≤ +6h) なので reject されるはず。
     const repo = fakeRepo([row('FOMC', '2026-06-17', '14:00')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-06-17T17:30:00.000Z', side: 'BUY' },

@@ -232,7 +232,7 @@ function shiftYmd(ymd: string, days: number): string {
  *   3. `naive UTC ms - offset` が真の UTC ms
  *
  * DST 境界の 1 時間ジャンプは無視 (POC では 1 時間程度の誤差を許容する旨
- * task に明記)。fail soft 設計で、戻り値が NaN なら caller が無視する。
+ * task に明記)。不正値は `null` を返し、caller 側で fail-closed reject する。
  */
 function etWallClockToUtcMs(eventDate: string, eventTime: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) return null
