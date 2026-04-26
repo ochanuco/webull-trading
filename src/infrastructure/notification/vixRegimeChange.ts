@@ -61,9 +61,12 @@ export function classifyVixRegimeSeverity(
 /**
  * 前回 snapshot を読む。table 未 migration / 接続失敗等は null フォールバック
  * (= 「初回扱い」、通知は出さない)。
+ *
+ * `requestId` は失敗 warn ログにのみ使用する (cron run と相関させるため)。
  */
 export async function loadVixRegimeSnapshot(
   db: D1Database,
+  requestId?: string,
 ): Promise<VixRegime | null> {
   try {
     const drizzle = createDb(db)
@@ -83,6 +86,7 @@ export async function loadVixRegimeSnapshot(
     console.warn(
       JSON.stringify({
         event: 'vix_regime_snapshot_load_failed',
+        requestId: requestId ?? null,
         message: error instanceof Error ? error.message : String(error),
       }),
     )
@@ -116,6 +120,7 @@ export async function persistVixRegimeSnapshot(
     console.warn(
       JSON.stringify({
         event: 'vix_regime_snapshot_persist_failed',
+        requestId: requestId ?? null,
         message: error instanceof Error ? error.message : String(error),
       }),
     )
@@ -141,13 +146,17 @@ export async function detectAndNotifyVixRegimeChange(args: {
   if (!args.db) {
     return { from: null, to: args.current.regime, emitted: false }
   }
-  const previous = await loadVixRegimeSnapshot(args.db)
+  const previous = await loadVixRegimeSnapshot(args.db, args.requestId)
   let emitted = false
   if (previous !== null && previous !== args.current.regime) {
     const severity = classifyVixRegimeSeverity(previous, args.current.regime)
     const note = args.requestId ? `requestId=${args.requestId}` : undefined
-    args.notifier
-      .notify({
+    // notify は fire-and-forget。`.catch(...)` は async rejection しか拾えない
+    // ため、type error 等の同期 throw が起きると下の snapshot 永続化に到達せず
+    // 「次 tick も同じ regime → 再通知 + snapshot 不整合」のリスクがあった。
+    // try/catch で sync throw も握りつぶし、両系統を同じ event 名で warn する。
+    try {
+      const result = args.notifier.notify({
         type: 'STATE_CHANGE',
         field: VIX_REGIME_SNAPSHOT_KEY,
         from: previous,
@@ -155,14 +164,26 @@ export async function detectAndNotifyVixRegimeChange(args: {
         severity,
         ...(note !== undefined ? { note: `${note} ${args.current.reason}`.trim() } : { note: args.current.reason }),
       })
-      .catch((err) => {
-        console.warn(
-          JSON.stringify({
-            event: 'vix_regime_change_notify_failed',
-            message: err instanceof Error ? err.message : String(err),
-          }),
-        )
-      })
+      if (result && typeof (result as Promise<unknown>).catch === 'function') {
+        ;(result as Promise<unknown>).catch((err) => {
+          console.warn(
+            JSON.stringify({
+              event: 'vix_regime_change_notify_failed',
+              requestId: args.requestId ?? null,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          )
+        })
+      }
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          event: 'vix_regime_change_notify_failed',
+          requestId: args.requestId ?? null,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    }
     emitted = true
   }
   const now = (args.now ?? (() => new Date()))()

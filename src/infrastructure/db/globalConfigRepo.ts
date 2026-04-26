@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
-import { globalConfig } from './schema'
+import { globalConfig, type GlobalConfigRow } from './schema'
 
 export interface GlobalConfigSnapshot {
   dryRun: boolean
@@ -91,7 +91,28 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
 export async function loadGlobalConfig(
   db: DrizzleD1Database,
 ): Promise<GlobalConfigSnapshot> {
-  const rows = await db.select().from(globalConfig).where(eq(globalConfig.id, 'default')).limit(1)
+  // VIX 列 (vix_warning_threshold / vix_critical_threshold / vix_warning_size_scale)
+  // は migration 0015 で追加。pre-0015 deploy / ALTER 適用前の D1 では `select` 自体が
+  // SQL レベルで失敗するため、`row.vixXxx ?? defaults` の null fallback では救えない。
+  // ここでは query 境界を try/catch で囲み、「missing column」を文字列マッチで検知して
+  // defaults を返す段階デプロイ救済を行う (POC 用フォールバック)。それ以外のエラーは
+  // 上に再 throw して fail-closed を維持する。
+  let rows: GlobalConfigRow[]
+  try {
+    rows = await db.select().from(globalConfig).where(eq(globalConfig.id, 'default')).limit(1)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/no such column|vix_/i.test(message)) {
+      console.warn(
+        JSON.stringify({
+          event: 'global_config_pre_0015_fallback',
+          message,
+        }),
+      )
+      return { ...GLOBAL_CONFIG_DEFAULTS }
+    }
+    throw error
+  }
   const row = rows[0]
   if (!row) return { ...GLOBAL_CONFIG_DEFAULTS }
   return {
@@ -123,6 +144,7 @@ export async function loadGlobalConfig(
     bucketExposurePct: row.bucketExposurePct,
     // VIX 列は 0015 で追加。古い D1 (snapshot 取得失敗 / ALTER 直前 race) では
     // undefined になり得るため、defaults へ畳む (snapshot 経由 read だが safety)。
+    // schema 自体の欠落は上の try/catch で defaults fallback する。
     vixWarningThreshold:
       row.vixWarningThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
     vixCriticalThreshold:

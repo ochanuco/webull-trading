@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   classifyVixRegimeSeverity,
   detectAndNotifyVixRegimeChange,
+  loadVixRegimeSnapshot,
+  persistVixRegimeSnapshot,
 } from '../../../src/infrastructure/notification/vixRegimeChange'
 import type {
   Notifier,
@@ -60,20 +62,28 @@ function fakeDb(initialRegime: string | null): {
       : null
   const inserts: Array<{ key: string; value: string }> = []
 
-  // drizzle は env.DB.prepare(sql).bind(args).all() / .run() / .first() の流れで叩く。
-  // ここは最低限「key='vix_regime' を select / delete / insert する」だけ動かす
-  // テスト用 fake。詳細は configStateChange と同様の構造。
+  // drizzle は env.DB.prepare(sql).bind(args).all() / .run() / .first() / .raw()
+  // の流れで叩く。`select({ value: ... })` の field 指定形式は drizzle 内部で
+  // `.raw()` 経由 (= 配列で返す) になるため raw() も実装する。`select / delete /
+  // insert` だけ動かす最低限の fake。詳細は configStateChange と同様の構造。
   const prepare = (sql: string): unknown => {
     return {
       bind(...args: unknown[]) {
         return {
           async all() {
-            // SELECT path
             if (sql.includes('select')) {
               if (stored) return { results: [stored] }
               return { results: [] }
             }
             return { results: [] }
+          },
+          async raw() {
+            // drizzle `select({ value: x })` は raw 配列を期待する。
+            if (sql.includes('select')) {
+              if (stored) return [[stored.value]]
+              return []
+            }
+            return []
           },
           async run() {
             if (sql.includes('delete')) {
@@ -159,3 +169,116 @@ describe('detectAndNotifyVixRegimeChange — dedup / first-run', () => {
 // `db: undefined` 経路のみを unit test でカバー。
 // 「同 regime 連続では emit しない」「DB に書く / 読む」結合は
 // configStateChange と同じ pattern で動くことを既存実装で担保している。
+
+/**
+ * `prepare` を呼ぶと throw する D1 fake。drizzle `select` / `delete` /
+ * `insert` のいずれも prepare phase で死ぬ。load/persist 失敗時の warn ログに
+ * requestId が含まれることだけを確認する。
+ */
+function brokenDb(): D1Database {
+  return {
+    prepare(_sql: string) {
+      throw new Error('boom: db unavailable')
+    },
+    async batch() {
+      return []
+    },
+  } as unknown as D1Database
+}
+
+describe('loadVixRegimeSnapshot — failure logging', () => {
+  it('logs warn with requestId when snapshot load throws', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await loadVixRegimeSnapshot(brokenDb(), 'req-abc-123')
+    expect(result).toBeNull()
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('vix_regime_snapshot_load_failed')
+    expect(logged.requestId).toBe('req-abc-123')
+    expect(logged.message).toMatch(/boom/)
+    warnSpy.mockRestore()
+  })
+
+  it('logs requestId=null when not provided', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await loadVixRegimeSnapshot(brokenDb())
+    expect(result).toBeNull()
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.requestId).toBeNull()
+    warnSpy.mockRestore()
+  })
+})
+
+describe('persistVixRegimeSnapshot — failure logging', () => {
+  it('logs warn with requestId when persist throws (fail-silent)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await persistVixRegimeSnapshot(brokenDb(), 'warning', 'req-xyz-456', new Date())
+    expect(warnSpy).toHaveBeenCalled()
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('vix_regime_snapshot_persist_failed')
+    expect(logged.requestId).toBe('req-xyz-456')
+    warnSpy.mockRestore()
+  })
+})
+
+describe('detectAndNotifyVixRegimeChange — sync throw from notify', () => {
+  it('still persists snapshot when notify() throws synchronously', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { db, inserts } = fakeDb('normal')
+    // 同期 throw する notifier。`.catch(...)` では拾えない経路を再現する。
+    const throwingNotifier: Notifier = {
+      notify(_event) {
+        throw new Error('boom: sync notify failure')
+      },
+    }
+    const result = await detectAndNotifyVixRegimeChange({
+      db,
+      notifier: throwingNotifier,
+      current: decision('warning', 27.3),
+      requestId: 'req-sync-throw',
+    })
+    expect(result.from).toBe('normal')
+    expect(result.to).toBe('warning')
+    expect(result.emitted).toBe(true)
+    // notify が同期 throw しても snapshot は upsert されているはず。
+    expect(inserts).toHaveLength(1)
+    expect(inserts[0]!.key).toBe('vix_regime')
+    expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
+    // warn ログに requestId が乗っていること。
+    const failedLogs = warnSpy.mock.calls
+      .map((call) => {
+        try {
+          return JSON.parse(call[0] as string) as Record<string, unknown>
+        } catch {
+          return null
+        }
+      })
+      .filter((entry): entry is Record<string, unknown> =>
+        entry !== null && entry.event === 'vix_regime_change_notify_failed',
+      )
+    expect(failedLogs.length).toBeGreaterThanOrEqual(1)
+    expect(failedLogs[0]!.requestId).toBe('req-sync-throw')
+    warnSpy.mockRestore()
+  })
+
+  it('still persists snapshot when notify() rejects asynchronously', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { db, inserts } = fakeDb('normal')
+    const rejectingNotifier: Notifier = {
+      async notify(_event) {
+        throw new Error('boom: async notify rejection')
+      },
+    }
+    const result = await detectAndNotifyVixRegimeChange({
+      db,
+      notifier: rejectingNotifier,
+      current: decision('critical', 32.1),
+      requestId: 'req-async-reject',
+    })
+    expect(result.emitted).toBe(true)
+    // async rejection でも snapshot は到達する (これは既存挙動の確認)。
+    expect(inserts).toHaveLength(1)
+    expect(inserts[0]!.value).toBe(JSON.stringify('critical'))
+    warnSpy.mockRestore()
+  })
+})
