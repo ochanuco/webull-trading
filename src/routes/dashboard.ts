@@ -76,7 +76,7 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('設定', unavailable('DB not bound')))
     }
     const [global, universe] = await Promise.all([
-      loadGlobalConfigFrom(c.env),
+      loadGlobalConfigFrom(c.env, c.get('requestId')),
       loadSymbolUniverse(c.env),
     ])
     return c.html(layout('設定', configBody(global, universe)))
@@ -120,7 +120,7 @@ export const dashboard = new Hono<AppBindings>()
       if (tab === 'grid') {
         const [universe, global] = await Promise.all([
           loadSymbolUniverse(c.env),
-          loadGlobalConfigFrom(c.env),
+          loadGlobalConfigFrom(c.env, c.get('requestId')),
         ])
         const rules: SymbolChartRules = {
           pullbackMax: global.pullbackDefaultPullbackMax,
@@ -150,7 +150,7 @@ export const dashboard = new Hono<AppBindings>()
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(c.env),
-        loadGlobalConfigFrom(c.env),
+        loadGlobalConfigFrom(c.env, c.get('requestId')),
       ])
       const allowed = new Set(universe.allowedSymbols)
       const defaultSymbol = await pickDefaultSymbol(c.env.DB)

@@ -21,7 +21,7 @@ export const webull = new Hono<AppBindings>().post('/order/place', async (c) => 
 
   logPreSubmit({ requestId, clientOrderId: intent.clientOrderId, intent })
 
-  const global = await loadGlobalConfigFrom(c.env)
+  const global = await loadGlobalConfigFrom(c.env, requestId)
   if (!global.dryRun) {
     logPostSubmit({
       requestId,

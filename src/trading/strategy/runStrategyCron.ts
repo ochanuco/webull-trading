@@ -149,7 +149,7 @@ export async function runStrategyCron(
   })
 
   const [global, universe] = await Promise.all([
-    loadGlobalConfigFrom(env),
+    loadGlobalConfigFrom(env, options.requestId),
     loadSymbolUniverse(env),
   ])
 

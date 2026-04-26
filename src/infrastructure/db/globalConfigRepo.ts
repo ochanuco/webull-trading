@@ -90,6 +90,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
 
 export async function loadGlobalConfig(
   db: DrizzleD1Database,
+  requestId?: string,
 ): Promise<GlobalConfigSnapshot> {
   // VIX 列 (vix_warning_threshold / vix_critical_threshold / vix_warning_size_scale)
   // は migration 0015 で追加。pre-0015 deploy / ALTER 適用前の D1 では `select` 自体が
@@ -97,15 +98,24 @@ export async function loadGlobalConfig(
   // ここでは query 境界を try/catch で囲み、「missing column」を文字列マッチで検知して
   // defaults を返す段階デプロイ救済を行う (POC 用フォールバック)。それ以外のエラーは
   // 上に再 throw して fail-closed を維持する。
+  //
+  // Regex は **schema-missing 限定**で組む: `vix_` 単独マッチを許すと非スキーマ
+  // 障害メッセージに `vix_` が偶然含まれただけで fail-open 化するリスクがあるため、
+  // SQLite 系の `no such column: vix_*` か、`vix_<col> not found / does not exist /
+  // unknown column` 形式に絞る (CodeRabbit 2nd round 指摘)。
   let rows: GlobalConfigRow[]
   try {
     rows = await db.select().from(globalConfig).where(eq(globalConfig.id, 'default')).limit(1)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (/no such column|vix_/i.test(message)) {
+    const isMissingVixColumn =
+      /no such column:\s*vix_/i.test(message) ||
+      /vix_[a-z_]*\s+(not found|does not exist|unknown column)/i.test(message)
+    if (isMissingVixColumn) {
       console.warn(
         JSON.stringify({
           event: 'global_config_pre_0015_fallback',
+          requestId: requestId ?? null,
           message,
         }),
       )
