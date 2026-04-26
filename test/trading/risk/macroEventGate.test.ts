@@ -319,6 +319,89 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
     expect(decision.approved).toBe(false)
     expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
   })
+
+  it('rejects nonexistent calendar date 2026-02-30 (round-trip validation)', async () => {
+    // JS Date は 2026-02-30 を 2026-03-02 に silent normalize するため、
+    // 形式チェック + Date.parse だけでは fail-open する。round-trip 比較で
+    // 実在しない暦日を弾くことを保証する。
+    const repo = fakeRepo([row('CPI', '2026-02-30', '08:30')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-02-28T13:30:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('CPI 2026-02-30 08:30')
+  })
+
+  it('rejects nonexistent month 2026-13-01 (round-trip validation)', async () => {
+    // 月 > 12 を弾く (13 月は normalize で翌年 1 月になる)。
+    // fakeRepo の date filter を回避するため、malformed row を必ず返す repo を使う。
+    const malformedRow = row('FOMC', '2026-13-01', '14:00')
+    const repo: MacroEventCalendarRepo = {
+      async fetchByDateRange() {
+        return [malformedRow]
+      },
+      async fetchAll() {
+        return [malformedRow]
+      },
+      async bulkUpsert() {
+        return { inserted: 0, skipped: 0 }
+      },
+      async deleteById() {
+        return false
+      },
+    }
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-12-15T19:00:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('FOMC 2026-13-01 14:00')
+  })
+
+  it('rejects nonexistent day 2026-04-31 (round-trip validation)', async () => {
+    // 4 月 31 日は存在しない (normalize で 5/1)。round-trip で reject されること。
+    const repo = fakeRepo([row('NFP', '2026-04-31', '08:30')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-04-30T13:00:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('NFP 2026-04-31 08:30')
+  })
+
+  it('rejects out-of-range hour "25:00" (range validation)', async () => {
+    // 24h 超の hour は range check で reject (Date.parse は 25:00 を翌日 01:00
+    // に normalize して通してしまう)。
+    const repo = fakeRepo([row('CPI', '2026-06-12', '25:00')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-06-12T12:30:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('CPI 2026-06-12 25:00')
+  })
+
+  it('rejects out-of-range minute "00:60" (range validation)', async () => {
+    // 60min 超は range check で reject (00:60 は normalize で 01:00 になる)。
+    const repo = fakeRepo([row('GDP', '2026-06-12', '00:60')])
+    const decision = await evaluateMacroEventGate(
+      { evalTimestamp: '2026-06-12T04:00:00.000Z', side: 'BUY' },
+      repo,
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reason).toContain('macro_event_gate_invalid_calendar_row')
+    expect(decision.reason).toContain('GDP 2026-06-12 00:60')
+  })
 })
 
 describe('evaluateMacroEventGate — config sanitisation', () => {

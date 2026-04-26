@@ -236,9 +236,20 @@ function shiftYmd(ymd: string, days: number): string {
  */
 function etWallClockToUtcMs(eventDate: string, eventTime: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) return null
-  if (!/^\d{2}:\d{2}$/.test(eventTime)) return null
+  const tm = /^(\d{2}):(\d{2})$/.exec(eventTime)
+  if (!tm) return null
+  const hh = Number(tm[1])
+  const mm = Number(tm[2])
+  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null
   const naiveUtcMs = Date.parse(`${eventDate}T${eventTime}:00.000Z`)
   if (!Number.isFinite(naiveUtcMs)) return null
+  // round-trip で実在しない暦日 (e.g. 2026-02-30, 2026-04-31) を reject。
+  // JS Date は不正な日付を silent normalize する (2026-02-30 → 2026-03-02) ため、
+  // ISOString に戻して入力と一致するか厳密比較しないと fail-open する。
+  const roundTrip = new Date(naiveUtcMs).toISOString()
+  if (roundTrip.slice(0, 10) !== eventDate) return null
+  if (roundTrip.slice(11, 16) !== eventTime) return null
   const offsetMin = etOffsetMinutesAt(naiveUtcMs)
   // ET は UTC の西側 (negative offset)。例: EST = -300, EDT = -240。
   // wall-clock が UTC `XX` のときの真 UTC = naive - offset (offset is negative)
