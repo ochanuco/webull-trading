@@ -1,4 +1,8 @@
-import type { Notifier, NotificationEvent } from './Notifier'
+import type {
+  Notifier,
+  NotificationEvent,
+  NotificationSeverity,
+} from './Notifier'
 
 export interface WebhookNotifierOptions {
   /** Slack incoming webhook URL。空 / undefined なら Slack には送らない。 */
@@ -95,7 +99,12 @@ export class WebhookNotifier implements Notifier {
     }
   }
 
-  private formatMessage(event: NotificationEvent): string {
+  /**
+   * Slack/Discord に送るのと同じ message 文字列を組み立てる。`LoggingNotifier`
+   * が D1 `notification_emit_log.message` 列に同じ表現を残すために public に
+   * 露出している (#141)。テスト用にも便利。
+   */
+  formatMessage(event: NotificationEvent): string {
     if (event.type === 'TRADE') {
       const head =
         event.side === 'BUY'
@@ -106,10 +115,18 @@ export class WebhookNotifier implements Notifier {
       const link = this.dashboardLinkFor(event.symbol)
       return link ? `${head}\n${link}` : head
     }
+    if (event.type === 'STATE_CHANGE') {
+      // `from → to` を表示し、severity icon で実発注に近づく遷移を強調する。
+      const head = `${severityIcon(event.severity)} state change: ${event.field} ${formatValue(event.from)} → ${formatValue(event.to)}`
+      const note = event.note ? `\n${event.note}` : ''
+      return `${head}${note}`
+    }
     // ERROR
     const sym = event.symbol ?? 'global'
     const causePart = event.cause ? ` (${event.cause})` : ''
-    const head = `⚠️ cron error: ${sym} — ${event.message}${causePart}`
+    const icon = severityIcon(event.severity ?? 'warning')
+    const label = event.severity === 'critical' ? 'CRITICAL' : 'cron error'
+    const head = `${icon} ${label}: ${sym} — ${event.message}${causePart}`
     const link = event.symbol ? this.dashboardLinkFor(event.symbol) : undefined
     return link ? `${head}\n${link}` : head
   }
@@ -136,4 +153,38 @@ function formatPnl(pnl: number): string {
   // pnl は正負ありうる。読みやすさで小数 2 桁固定 + 符号明示。
   const sign = pnl > 0 ? '+' : ''
   return `${sign}${pnl.toFixed(2)}`
+}
+
+/**
+ * Severity を icon に対応付ける (#141)。Slack/Discord 共通で render される
+ * unicode emoji。critical = 赤、warning = 黄、info = 青を採用。BUY/SELL の
+ * 緑/赤と差別化するため critical は警告マーク (🚨) を使う。
+ */
+function severityIcon(severity: NotificationSeverity): string {
+  switch (severity) {
+    case 'critical':
+      return '🚨'
+    case 'info':
+      return 'ℹ️'
+    case 'warning':
+    default:
+      return '⚠️'
+  }
+}
+
+/**
+ * STATE_CHANGE event の `from` / `to` を 1 行表記に。primitive はそのまま、
+ * object は JSON 化する。null/undefined は明示文字列で出して「値が消えた」と
+ * 区別できるようにする。
+ */
+function formatValue(value: unknown): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
 }

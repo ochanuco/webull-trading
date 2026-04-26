@@ -3,7 +3,12 @@ import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
+import {
+  detectAndNotifyConfigStateChanges,
+  type WatchedConfig,
+} from '../../infrastructure/notification/configStateChange'
 import { createNotifier } from '../../infrastructure/notification/createNotifier'
+import type { Notifier } from '../../infrastructure/notification/Notifier'
 import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
 import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
@@ -130,6 +135,36 @@ export async function runStrategyCron(
     loadSymbolUniverse(env),
   ])
 
+  // Notifier は cron tick の最序盤で組み立てる: 後続の skipReason 通知や
+  // state change 検知が同じ instance を使う (#141)。requestId を伝搬させる
+  // ことで `notification_emit_log.request_id` に紐付く。
+  const notifier = createNotifier(env, { requestId: options.requestId })
+
+  // global_config の watched field 遷移を検知 (#141)。await して snapshot を
+  // 確実に書き終えてから次の処理に進む — 1 cron tick 中に複数の通知 path が
+  // STATE_CHANGE を出すと重複するので、ここで 1 回だけ走らせる。失敗しても
+  // 内部で握りつぶされる (caller は気にしなくて良い)。
+  const watchedNow: WatchedConfig = {
+    dryRun: global.dryRun,
+    tradingEnabled: global.tradingEnabled,
+    marketHoursCheck: global.marketHoursCheck,
+    drawdownKillThreshold: global.drawdownKillThreshold,
+  }
+  await detectAndNotifyConfigStateChanges({
+    db: env.DB,
+    notifier,
+    current: watchedNow,
+    requestId: options.requestId,
+  }).catch((err) => {
+    console.warn(
+      JSON.stringify({
+        event: 'config_state_change_detect_failed',
+        requestId: options.requestId,
+        message: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  })
+
   const defaultRule = {
     stopPct: global.pullbackDefaultStopPct,
     takeProfitPct: global.pullbackDefaultTakeProfitPct,
@@ -171,6 +206,9 @@ export async function runStrategyCron(
     decisions: [],
   })
 
+  // Critical な cron skip は #141 で push 通知化する。`trading_disabled` /
+  // `no_tradable_symbols` は「設定通り」なので noisy にしないよう **通知しない**
+  // (operator は意図的に切ってる場合が多い)。
   if (!global.tradingEnabled) {
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'trading_disabled' }
   }
@@ -180,6 +218,7 @@ export async function runStrategyCron(
   }
 
   if (!env.SYMBOL_STATE) {
+    emitSkipReasonNotify(notifier, 'no_bridge_state', options.requestId, 'critical')
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
@@ -195,6 +234,7 @@ export async function runStrategyCron(
   // - tradingDisabledUntil が有効 & 未来 → halt
   // - drawdown 閾値超過 → halt
   if (!env.PORTFOLIO_STATE) {
+    emitSkipReasonNotify(notifier, 'portfolio_halted', options.requestId, 'critical', 'PORTFOLIO_STATE binding missing')
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
@@ -229,6 +269,13 @@ export async function runStrategyCron(
     if (portfolioSnapshot.tradingDisabledUntil) {
       const disabledUntilMs = new Date(portfolioSnapshot.tradingDisabledUntil).getTime()
       if (!Number.isFinite(disabledUntilMs) || disabledUntilMs > now) {
+        emitSkipReasonNotify(
+          notifier,
+          'portfolio_halted',
+          options.requestId,
+          'critical',
+          `tradingDisabledUntil=${portfolioSnapshot.tradingDisabledUntil}`,
+        )
         return {
           summary: emptySummary(),
           symbols: universe.allowedSymbols,
@@ -240,6 +287,13 @@ export async function runStrategyCron(
     if (portfolioSnapshot.dailyStartEquity > 0) {
       const ratio = portfolioSnapshot.dailyRealizedPnl / portfolioSnapshot.dailyStartEquity
       if (ratio <= global.drawdownKillThreshold) {
+        emitSkipReasonNotify(
+          notifier,
+          'drawdown_kill',
+          options.requestId,
+          'critical',
+          `ratio=${ratio.toFixed(4)} <= threshold=${global.drawdownKillThreshold}`,
+        )
         return {
           summary: emptySummary(),
           symbols: universe.allowedSymbols,
@@ -248,7 +302,14 @@ export async function runStrategyCron(
         }
       }
     }
-  } catch {
+  } catch (error) {
+    emitSkipReasonNotify(
+      notifier,
+      'portfolio_halted',
+      options.requestId,
+      'critical',
+      `getPortfolio threw: ${error instanceof Error ? error.message : String(error)}`,
+    )
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
@@ -311,8 +372,9 @@ export async function runStrategyCron(
   const execution = global.dryRun
     ? new MockExecution()
     : new WebullExecution(createWebullHttpClient(env))
-  // Slack/Discord webhook 通知 (#199)。env 未設定なら NoopNotifier。
-  const notifier = createNotifier(env)
+  // notifier は関数冒頭で組み立て済み (#141)。BUY/SELL emit / per-symbol
+  // bar fetch error / broker submit error は scheduler 内で注入された
+  // notifier を使う (#199 経路のまま)。
   // Yahoo Finance /v8/finance/chart is free, no auth, covers US + JP (7267.T
   // style) in one endpoint — chosen over Webull's JP-subscription-gated
   // market-data API (see #84). Webull is still the order-execution path.
@@ -509,4 +571,39 @@ export function emitStaleRollWarningIfNeeded(args: {
       }),
     )
   }
+}
+
+/**
+ * cron tick の skip reason を Notifier に push する (#141)。fire-and-forget
+ * + silent fallback。`portfolio_halted` / `drawdown_kill` / `no_bridge_state`
+ * の 3 種を critical として通知する。
+ *
+ * 既存の `strategy_cron_run.skipReason` ログ列はそのまま (後方互換)。
+ */
+function emitSkipReasonNotify(
+  notifier: Notifier,
+  reason: 'portfolio_halted' | 'drawdown_kill' | 'no_bridge_state',
+  requestId: string | undefined,
+  severity: 'critical' | 'warning' = 'critical',
+  detail?: string,
+): void {
+  const note = requestId ? ` requestId=${requestId}` : ''
+  const message = detail ? `cron skipped: ${reason} — ${detail}${note}` : `cron skipped: ${reason}${note}`
+  notifier
+    .notify({
+      type: 'ERROR',
+      message,
+      cause: reason,
+      severity,
+    })
+    .catch((err) => {
+      console.warn(
+        JSON.stringify({
+          event: 'cron_skip_notify_failed',
+          requestId,
+          reason,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    })
 }

@@ -354,3 +354,78 @@ export const strategyDecisionLog = sqliteTable(
 
 export type StrategyDecisionLogRow = typeof strategyDecisionLog.$inferSelect
 export type StrategyDecisionLogInsert = typeof strategyDecisionLog.$inferInsert
+
+/**
+ * `Notifier.notify()` で push 通知を送った全イベントを書き出す append-only
+ * ログ (#141)。dashboard `/dashboard/alerts` の active alerts view が
+ * `severity = 'critical' | 'warning'` を timestamp DESC で読む。
+ *
+ * 役割:
+ *   - operator が dashboard を見れば「直近 100 件の critical / warning」を
+ *     一覧できる
+ *   - Webhook が落ちていた / 未設定でも D1 だけは残る (audit trail)
+ *   - Workers Logs retention を超える長期保全までは expectation しない (POC)。
+ *     長期保全は Logpush to R2 (follow-up) でカバー想定。
+ *
+ * `severity` は free-form text にしておく (DB CHECK 制約は drizzle-kit で
+ * 後から追加可能)。production の値域は `NotificationSeverity` 型で縛る。
+ */
+export const notificationEmitLog = sqliteTable(
+  'notification_emit_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    timestamp: text('timestamp').notNull(),
+    requestId: text('request_id'),
+    /** 'TRADE' / 'ERROR' / 'STATE_CHANGE' (NotificationEvent.type と一致) */
+    eventType: text('event_type').notNull(),
+    /** 'critical' / 'warning' / 'info' (NotificationSeverity と一致)。TRADE は 'info'。 */
+    severity: text('severity').notNull(),
+    symbol: text('symbol'),
+    /** ERROR の cause (例: `bar fetch`, `broker submit`)。STATE_CHANGE は field 名。 */
+    cause: text('cause'),
+    /** WebhookNotifier formatter が組み立てた text (Slack/Discord に送ったのと同じ)。 */
+    message: text('message').notNull(),
+  },
+  (t) => ({
+    // dashboard `/dashboard/alerts` は ORDER BY timestamp DESC, id DESC で読む。
+    // `waitUntil` 配下の INSERT が前後して id 順と発生順がずれるケースを
+    // tiebreak で吸収するため、timestamp を first key にする (CodeRabbit #210)。
+    timestampIdIdx: index('notification_emit_log_timestamp_id_idx').on(t.timestamp, t.id),
+    // severity フィルタ + timestamp DESC ソートを 1 本でカバー。
+    severityTimestampIdIdx: index('notification_emit_log_severity_timestamp_id_idx').on(
+      t.severity,
+      t.timestamp,
+      t.id,
+    ),
+    // event type 別フィルタ ('strategy_cron_error' のような cause も同 index で覆える)。
+    eventTypeTimestampIdIdx: index('notification_emit_log_event_type_timestamp_id_idx').on(
+      t.eventType,
+      t.timestamp,
+      t.id,
+    ),
+  }),
+)
+
+export type NotificationEmitLogRow = typeof notificationEmitLog.$inferSelect
+export type NotificationEmitLogInsert = typeof notificationEmitLog.$inferInsert
+
+/**
+ * `global_config` の重要 field の前回値スナップショット (#141)。
+ * cron tick で global_config を読む際にこの table と比較し、
+ * `dry_run` true→false や `trading_enabled` false→true 等の遷移を検知して
+ * STATE_CHANGE 通知を出す。
+ *
+ * `key` PRIMARY KEY 1 行 / field なので `INSERT OR REPLACE` で更新する。
+ * 値は JSON.stringify で保存 (boolean / number / string / null を一律扱う)。
+ */
+export const configStateSnapshot = sqliteTable('config_state_snapshot', {
+  /** field 名 (例: `dry_run`, `trading_enabled`). */
+  key: text('key').primaryKey(),
+  /** `JSON.stringify(value)` 形式。比較は文字列等価で行う。 */
+  value: text('value').notNull(),
+  snapshotAt: text('snapshot_at').notNull(),
+  requestId: text('request_id'),
+})
+
+export type ConfigStateSnapshotRow = typeof configStateSnapshot.$inferSelect
+export type ConfigStateSnapshotInsert = typeof configStateSnapshot.$inferInsert

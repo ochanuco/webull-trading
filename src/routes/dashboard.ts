@@ -5,6 +5,12 @@ import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
+import {
+  loadRecentAlerts,
+  type AlertRow,
+  type LoadAlertOptions,
+} from '../infrastructure/notification/notificationEmitLog'
+import type { NotificationSeverity, NotificationEvent } from '../infrastructure/notification/Notifier'
 import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -322,6 +328,35 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('Cron 判定', unavailable(messageOf(err))))
     }
   })
+  .get('/alerts', async (c) => {
+    if (!c.env.DB) {
+      return c.html(layout('アラート', unavailable('DB not bound')))
+    }
+    const limit = clampAlertLimit(c.req.query('limit'))
+    const severityFilter = parseSeverityFilter(c.req.query('severity'))
+    const eventTypeFilter = parseEventTypeFilter(c.req.query('eventType'))
+    const currentQuery = parseAlertsQuery(c.req.url)
+    const options: LoadAlertOptions = { limit }
+    if (eventTypeFilter) {
+      options.eventType = eventTypeFilter
+    }
+    if (severityFilter.length > 0) {
+      options.severities = severityFilter
+    }
+    try {
+      const rows = await loadRecentAlerts(c.env.DB, options)
+      return c.html(
+        layout(
+          'アラート',
+          alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery }),
+        ),
+      )
+    } catch (err) {
+      // 0012 migration 未適用 (= notification_emit_log テーブル無し) を
+      // 500 にせず unavailable に落とす。段階的デプロイ時の自己保護。
+      return c.html(layout('アラート', unavailable(messageOf(err))))
+    }
+  })
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -424,6 +459,7 @@ function layout(title: string, body: string): string {
   <a href="/dashboard/config">設定</a>
   <a href="/dashboard/cron">Cron</a>
   <a href="/dashboard/charts">チャート</a>
+  <a href="/dashboard/alerts">アラート</a>
 </nav>
 ${body}
 <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
@@ -460,6 +496,7 @@ function indexBody(): string {
   <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
   <li><a href="/dashboard/cron">Cron 判定</a> — <code>strategy_decision_log</code> 直近 (<code>?symbol=SOXL</code> で絞り込み可)</li>
   <li><a href="/dashboard/charts">チャート</a> — 概要 (エクイティカーブ + ドローダウン) / 取引品質 (PnL 分布 + 統計 + Decision breakdown) / 個別銘柄 (price + SMA50 + entry/exit) を tab 切替</li>
+  <li><a href="/dashboard/alerts">アラート</a> — Slack/Discord に push 通知した critical / warning / info の直近 (#141)。webhook 未設定でも D1 に記録される。</li>
 </ul>`
 }
 
@@ -1066,6 +1103,172 @@ export function localizeReason(en: string | null | undefined): string {
     'データ不足: 同グループ発注金額が無効 ($1 の金額 $2)',
   )
   return s
+}
+
+/**
+ * `?limit=N` を 1〜500 の範囲に丸める。`/dashboard/alerts` 専用 (cron 系の
+ * `clampLimit` は既定 50 / max 200 で別ロール)。
+ */
+function clampAlertLimit(raw: string | undefined): number {
+  const n = raw === undefined ? 100 : Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n <= 0) return 100
+  return Math.min(n, 500)
+}
+
+/**
+ * `c.req.url` から `URLSearchParams` を取り出す。filter pill が他の query
+ * (例: `limit=500`) を保持するために使う (CodeRabbit #210)。
+ *
+ * URL 構築失敗時は空 URLSearchParams にフォールバック。
+ */
+function parseAlertsQuery(rawUrl: string): URLSearchParams {
+  try {
+    return new URL(rawUrl).searchParams
+  } catch {
+    return new URLSearchParams()
+  }
+}
+
+const SEVERITY_VALUES: ReadonlyArray<NotificationSeverity> = ['critical', 'warning', 'info']
+
+function parseSeverityFilter(raw: string | undefined): NotificationSeverity[] {
+  if (!raw) return []
+  return raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s): s is NotificationSeverity =>
+      (SEVERITY_VALUES as readonly string[]).includes(s),
+    )
+}
+
+const EVENT_TYPE_VALUES: ReadonlyArray<NotificationEvent['type']> = [
+  'TRADE',
+  'ERROR',
+  'STATE_CHANGE',
+]
+
+function parseEventTypeFilter(raw: string | undefined): NotificationEvent['type'] | undefined {
+  if (!raw) return undefined
+  const upper = raw.trim().toUpperCase() as NotificationEvent['type']
+  return (EVENT_TYPE_VALUES as readonly string[]).includes(upper) ? upper : undefined
+}
+
+interface AlertsBodyArgs {
+  rows: AlertRow[]
+  limit: number
+  severityFilter: NotificationSeverity[]
+  eventTypeFilter: NotificationEvent['type'] | undefined
+  /** 現在の query string。filter pill が他の param (limit 等) を保持するために使う。 */
+  currentQuery: URLSearchParams
+}
+
+/**
+ * `/dashboard/alerts` の HTML 本文 (#141)。
+ *
+ *   - severity ピル (critical / warning / info / 全件) で絞り込み
+ *   - event type ピル (TRADE / ERROR / STATE_CHANGE / 全件) で絞り込み
+ *   - 表示は最新 100 件 (`?limit=N` で 1〜500)
+ *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
+ */
+function alertsBody(args: AlertsBodyArgs): string {
+  const { rows, limit, severityFilter, eventTypeFilter, currentQuery } = args
+  const filterDescription =
+    severityFilter.length === 0 && eventTypeFilter === undefined
+      ? '全件'
+      : [
+          severityFilter.length > 0 ? `severity=${severityFilter.join(',')}` : null,
+          eventTypeFilter ? `eventType=${eventTypeFilter}` : null,
+        ]
+          .filter((s): s is string => s !== null)
+          .join(' / ')
+  const header = `<p class="muted">直近 ${rows.length} 件のアラート (${esc(filterDescription)}, limit=${limit}, max 500)。Webhook が未設定でも D1 には記録されています。</p>`
+  const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
+  if (rows.length === 0) {
+    return `${header}${filterPills}<p class="muted">該当するアラートは見つかりませんでした。</p>`
+  }
+  const tbody = rows
+    .map((r) => {
+      const cls =
+        r.severity === 'critical'
+          ? 'err'
+          : r.severity === 'warning'
+            ? 'warn'
+            : 'muted'
+      const symbolCell = r.symbol
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}">${esc(r.symbol)}</a>`
+        : '<span class="muted">-</span>'
+      return `<tr>
+        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
+        <td class="${cls}"><strong>${esc(r.severity)}</strong></td>
+        <td>${esc(r.eventType)}</td>
+        <td>${symbolCell}</td>
+        <td>${esc(r.cause ?? '-')}</td>
+        <td><code style="white-space:pre-wrap">${esc(r.message)}</code></td>
+        <td class="muted"><code>${esc(r.requestId ?? '-')}</code></td>
+      </tr>`
+    })
+    .join('')
+  return `${header}${filterPills}
+  <table>
+    <thead><tr>
+      <th>timestamp (JST)</th><th>severity</th><th>event</th><th>symbol</th><th>cause / field</th><th>message</th><th>requestId</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>`
+}
+
+/**
+ * `/dashboard/alerts` の severity / eventType filter ピルを描画する。
+ *
+ * `currentQuery` の他 param (例: `limit=500`) は preserve したまま、対象 key
+ * のみを差し替える / 削除する (CodeRabbit #210)。
+ *
+ * Exported for unit test (URL preservation).
+ */
+export function renderAlertFilterPills(
+  active: NotificationSeverity[],
+  activeEventType: NotificationEvent['type'] | undefined,
+  currentQuery: URLSearchParams,
+): string {
+  const buildHref = (updatedKey: string, updatedValue: string | null): string => {
+    const next = new URLSearchParams(currentQuery)
+    if (updatedValue === null) next.delete(updatedKey)
+    else next.set(updatedKey, updatedValue)
+    const qs = next.toString()
+    return qs.length === 0 ? '/dashboard/alerts' : `/dashboard/alerts?${qs}`
+  }
+  const pill = (label: string, href: string, isActive: boolean): string =>
+    `<a href="${esc(href)}" style="margin-right:6px;${isActive ? 'background:#1d1d1f;color:#fff;' : ''}">${esc(label)}</a>`
+  const sev = [
+    pill('全 severity', buildHref('severity', null), active.length === 0),
+    pill(
+      'critical',
+      buildHref('severity', 'critical'),
+      active.length === 1 && active[0] === 'critical',
+    ),
+    pill(
+      'warning',
+      buildHref('severity', 'warning'),
+      active.length === 1 && active[0] === 'warning',
+    ),
+    pill(
+      'critical+warning',
+      buildHref('severity', 'critical,warning'),
+      active.length === 2 && active.includes('critical') && active.includes('warning'),
+    ),
+    pill('info', buildHref('severity', 'info'), active.length === 1 && active[0] === 'info'),
+  ].join('')
+  const ev = [
+    pill('全 type', buildHref('eventType', null), activeEventType === undefined),
+    pill('ERROR', buildHref('eventType', 'ERROR'), activeEventType === 'ERROR'),
+    pill('TRADE', buildHref('eventType', 'TRADE'), activeEventType === 'TRADE'),
+    pill(
+      'STATE_CHANGE',
+      buildHref('eventType', 'STATE_CHANGE'),
+      activeEventType === 'STATE_CHANGE',
+    ),
+  ].join('')
+  return `<nav style="margin-bottom:12px">${sev}<span class="muted" style="margin:0 8px">|</span>${ev}</nav>`
 }
 
 function cronBody(

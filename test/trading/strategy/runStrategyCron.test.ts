@@ -21,12 +21,18 @@ const env = {
 } as unknown as Parameters<typeof runStrategyCron>[0]
 
 describe('runStrategyCron', () => {
+  // 0012 migration の new tables (config_state_snapshot / notification_emit_log)
+  // を mock D1 が知らないので、`this.client.prepare is not a function` 系の
+  // warn が大量に出る。挙動には影響しない (silent fallback) ので suppress。
+  let warnSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
     vi.mocked(loadSymbolUniverse).mockResolvedValue(makeSymbolUniverse())
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
   })
 
   afterEach(() => {
+    warnSpy.mockRestore()
     vi.resetAllMocks()
   })
 
@@ -140,6 +146,42 @@ describe('runStrategyCron', () => {
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithBrokenPortfolio)
     expect(result.skipReason).toBe('portfolio_halted')
+  })
+
+  // #141: critical な skip reason は Notifier 経由で push 通知される。
+  // env.SLACK_WEBHOOK_URL を設定して fetch を spy し、webhook 行きの POST が
+  // 1 回入ることだけ確認する (formatter は WebhookNotifier.test に分離済み)。
+  it('pushes notify() when skipReason=portfolio_halted (#141)', async () => {
+    const fetchSpy = vi
+      .fn(async () => new Response('ok', { status: 200 }))
+      .mockName('fetchSpy')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+    try {
+      const envWithBrokenPortfolio = {
+        DB: {} as D1Database,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        // Webhook URL を設定 → notifier が fetch を叩く
+        SLACK_WEBHOOK_URL: 'https://hooks.slack.test/x',
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockRejectedValue(new Error('DO unreachable')),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+      const result = await runStrategyCron(envWithBrokenPortfolio, { requestId: 'req-x' })
+      expect(result.skipReason).toBe('portfolio_halted')
+      // notify は fire-and-forget なので microtask flush 待ち
+      await new Promise((r) => setTimeout(r, 0))
+      expect(fetchSpy).toHaveBeenCalled()
+      const calls = fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>
+      const body = JSON.parse(String(calls[0]?.[1]?.body))
+      expect(body.text).toContain('CRITICAL')
+      expect(body.text).toContain('portfolio_halted')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
 })

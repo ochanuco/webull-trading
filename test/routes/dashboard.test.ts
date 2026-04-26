@@ -3,6 +3,7 @@ import { createApp } from '../../src/app'
 import { loadGlobalConfigFrom } from '../../src/infrastructure/db/globalConfigLoader'
 import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
 import { loadSymbolUniverse } from '../../src/infrastructure/db/symbolUniverse'
+import { loadRecentAlerts } from '../../src/infrastructure/notification/notificationEmitLog'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
@@ -13,6 +14,9 @@ vi.mock('../../src/infrastructure/db/symbolUniverse', () => ({
 }))
 vi.mock('../../src/infrastructure/db/tradeJournalRepo', () => ({
   createDb: vi.fn(),
+}))
+vi.mock('../../src/infrastructure/notification/notificationEmitLog', () => ({
+  loadRecentAlerts: vi.fn(),
 }))
 
 const baseEnv = {
@@ -299,6 +303,69 @@ describe('dashboard', () => {
   it('cron page requires basic auth', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/cron', {}, baseEnv)
+    expect(res.status).toBe(401)
+  })
+
+  // #141: dashboard alerts view
+  it('renders /dashboard/alerts unavailable when DB is not bound', async () => {
+    const app = createApp()
+    const res = await app.request('/dashboard/alerts', { headers: authHeader }, baseEnv)
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('利用不可')
+  })
+
+  it('renders rows from notification_emit_log on /dashboard/alerts (#141)', async () => {
+    vi.mocked(loadRecentAlerts).mockResolvedValue([
+      {
+        id: 1,
+        timestamp: '2026-04-23T00:00:00.000Z',
+        requestId: 'req-1',
+        eventType: 'ERROR',
+        severity: 'critical',
+        symbol: 'SOXL',
+        cause: 'portfolio_halted',
+        message: '🚨 CRITICAL: SOXL — cron skipped: portfolio_halted',
+      },
+      {
+        id: 2,
+        timestamp: '2026-04-23T00:01:00.000Z',
+        requestId: 'req-2',
+        eventType: 'STATE_CHANGE',
+        severity: 'critical',
+        symbol: null,
+        cause: 'dryRun',
+        message: '🚨 state change: dryRun true → false',
+      },
+    ])
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/alerts',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('CRITICAL: SOXL')
+    expect(body).toContain('dryRun true → false')
+    expect(body).toContain('portfolio_halted')
+    expect(body).toContain('req-1')
+  })
+
+  it('falls back to unavailable when loadRecentAlerts throws (e.g. migration not applied)', async () => {
+    vi.mocked(loadRecentAlerts).mockRejectedValue(new Error('no such table: notification_emit_log'))
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/alerts',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('利用不可')
+  })
+
+  it('alerts page requires basic auth', async () => {
+    const app = createApp()
+    const res = await app.request('/dashboard/alerts', {}, baseEnv)
     expect(res.status).toBe(401)
   })
 })
@@ -1617,5 +1684,35 @@ describe('renderLastRolledCell (issue #140)', () => {
     const html = renderLastRolledCell('not-an-iso', now)
     expect(html).toContain('class="err"')
     expect(html).toContain('parse 不能')
+  })
+})
+
+import { renderAlertFilterPills } from '../../src/routes/dashboard'
+
+describe('renderAlertFilterPills', () => {
+  it('preserves unrelated query params (e.g. limit) when switching severity', () => {
+    const current = new URLSearchParams('limit=500&severity=warning')
+    const html = renderAlertFilterPills(['warning'], undefined, current)
+    // critical pill should switch severity but keep limit=500.
+    expect(html).toContain('href="/dashboard/alerts?limit=500&amp;severity=critical"')
+    // warning pill should be the active one (currently selected).
+    expect(html).toContain('href="/dashboard/alerts?limit=500&amp;severity=warning"')
+    // 全 severity pill drops the severity key but keeps limit.
+    expect(html).toContain('href="/dashboard/alerts?limit=500"')
+  })
+
+  it('drops severity entirely when 全 severity is selected (no stale severity param)', () => {
+    const current = new URLSearchParams('severity=info')
+    const html = renderAlertFilterPills(['info'], undefined, current)
+    expect(html).toContain('href="/dashboard/alerts"')
+  })
+
+  it('includes both severity and eventType keys when current url already has both', () => {
+    const current = new URLSearchParams('limit=200&severity=critical&eventType=ERROR')
+    const html = renderAlertFilterPills(['critical'], 'ERROR', current)
+    // Switching to TRADE event type should keep limit and severity.
+    expect(html).toContain(
+      'href="/dashboard/alerts?limit=200&amp;severity=critical&amp;eventType=TRADE"',
+    )
   })
 })
