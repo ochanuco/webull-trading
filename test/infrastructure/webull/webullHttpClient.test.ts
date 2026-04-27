@@ -281,6 +281,63 @@ describe('WebullHttpClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('includes the JSON response body in the 4xx error message (Webull reject reason)', async () => {
+    // 417 with a typical Webull error envelope. Without this the operator only
+    // sees "status 417" in cron logs and cannot tell whether the rejection is
+    // ORDER_INVALID_QTY, MARKET_CLOSED, etc.
+    const body = JSON.stringify({
+      code: 'ORDER_INVALID_QTY',
+      message: 'requested quantity exceeds available holding',
+    })
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(body, { status: 417 }))
+    const client = createClient(fetchMock)
+
+    const err = await client.placeOrder(intent).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BrokerClientError)
+    expect((err as Error).message).toContain('status 417')
+    expect((err as Error).message).toContain('ORDER_INVALID_QTY')
+    expect((err as Error).message).toContain('requested quantity exceeds available holding')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('includes the plain-text response body in the 5xx retried-out error message', async () => {
+    // A fresh Response per call — `Response.text()` consumes the body, so
+    // returning the same instance across retries would make later attempts
+    // see `<failed to read body>` instead of the real upstream message.
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => new Response('Internal Server Error', { status: 500 }))
+    const client = createClient(fetchMock)
+
+    const err = await client.placeOrder(intent).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BrokerServerError)
+    expect((err as Error).message).toContain('Internal Server Error')
+    expect((err as Error).message).toContain('after 3 attempts with last status 500')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('truncates oversized error bodies to keep log lines bounded', async () => {
+    // 10KB HTML page from a CDN — we keep at most 1000 chars + the truncation
+    // marker so the log line cannot blow up.
+    const huge = 'A'.repeat(10_000)
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => new Response(huge, { status: 502 }))
+    const client = createClient(fetchMock)
+
+    const err = await client.placeOrder(intent).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BrokerServerError)
+    const msg = (err as Error).message
+    expect(msg).toContain('...[truncated]')
+    // The truncated body itself ends at 1000 'A's; the full message has
+    // additional surrounding text but should not contain anywhere near the
+    // original 10K characters.
+    expect(msg).not.toContain('A'.repeat(1100))
+    expect(msg).toContain('A'.repeat(1000))
+  })
+
   it('retries AbortError failures', async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

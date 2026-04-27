@@ -124,6 +124,7 @@ export class WebullHttpClient {
     const resolvedUrl = buildRequestUrl(this.baseUrl, path, query)
     let lastFailure: Error | undefined
     let lastStatus: number | undefined
+    let lastBody: string | undefined
 
     let authHeaders: Record<string, string>
     try {
@@ -199,16 +200,28 @@ export class WebullHttpClient {
         return (await response.json()) as T
       }
 
+      // Capture response body for error diagnostics. Webull typically returns
+      // `{ code: "...", message: "..." }` JSON on errors, but some failures
+      // come from upstream CDN / proxies as HTML or plain text (502 etc.), so
+      // use `text()` rather than `json()` to keep the raw body either way.
+      // Truncate to avoid memory blowup on huge HTML error pages.
+      const bodyText = await readErrorBody(response)
+
       lastStatus = response.status
-      lastFailure = new Error(`Webull request failed with status ${response.status}`)
+      lastBody = bodyText
+      lastFailure = new Error(
+        `Webull request failed with status ${response.status}: ${bodyText}`,
+      )
 
       if (response.status >= 400 && response.status < 500) {
         // 4xx is the caller's fault or an auth/rate-limit problem — do not
         // retry. Map to the narrowest error subclass so downstream handlers
-        // can treat 401/429 differently from 400.
+        // can treat 401/429 differently from 400. Include the response body
+        // in the surfaced message so logs show why Webull rejected the
+        // request (e.g. 417 with `ORDER_INVALID_QTY`).
         throw brokerErrorForStatus(
           response.status,
-          `Webull request failed permanently with status ${response.status}`,
+          `Webull request failed permanently with status ${response.status}: ${bodyText}`,
           `${method} ${path}`,
           { cause: lastFailure },
         )
@@ -229,10 +242,11 @@ export class WebullHttpClient {
 
     if (lastStatus !== undefined) {
       // Retries exhausted on a 5xx. Surface as a server-class error so alerts
-      // can distinguish "Webull is down" from "we sent a bad request".
+      // can distinguish "Webull is down" from "we sent a bad request". Include
+      // the last response body so the log explains *why* the upstream gave up.
       throw brokerErrorForStatus(
         lastStatus,
-        `Webull request failed after ${this.retry.maxAttempts} attempts with last status ${lastStatus}`,
+        `Webull request failed after ${this.retry.maxAttempts} attempts with last status ${lastStatus}: ${lastBody ?? '<no body>'}`,
         `${method} ${path}`,
         { cause: lastFailure },
       )
@@ -306,6 +320,32 @@ function getRetryDelayMs({
 
 function wait(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+/**
+ * Read an upstream error response body for diagnostics. Use `text()` rather
+ * than `json()` because non-JSON bodies are common (CDN HTML 502 pages, plain
+ * text proxy errors). The body is truncated to keep log lines bounded — the
+ * Webull error envelope `{code, message}` is well within this limit, and any
+ * larger blob is most likely an HTML error page that is not worth keeping in
+ * full.
+ */
+const ERROR_BODY_MAX_CHARS = 1000
+
+async function readErrorBody(response: Response): Promise<string> {
+  let text: string
+  try {
+    text = await response.text()
+  } catch {
+    return '<failed to read body>'
+  }
+  if (text.length === 0) {
+    return '<empty body>'
+  }
+  if (text.length > ERROR_BODY_MAX_CHARS) {
+    return `${text.slice(0, ERROR_BODY_MAX_CHARS)}...[truncated]`
+  }
+  return text
 }
 
 function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, string>): URL {
