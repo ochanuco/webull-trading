@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { BarClient, IntradayBar } from '../../../src/infrastructure/quotes/BarClient'
 import type { Notifier, NotificationEvent } from '../../../src/infrastructure/notification/Notifier'
+import {
+  BrokerClientError,
+  BrokerServerError,
+  WEBULL_SELL_QTY_EXCEED_CODE,
+} from '../../../src/shared/errors'
 import type { Execution } from '../../../src/trading/execution/Execution'
 import type { PositionStore } from '../../../src/trading/state/PositionStore'
 import { emptySymbolState, type SymbolState } from '../../../src/trading/state/types'
@@ -52,6 +57,9 @@ function makeStore(states: Record<string, SymbolState>) {
       return emptySymbolState(symbol, () => now)
     },
     async seedSettledCash(symbol: string) {
+      return emptySymbolState(symbol, () => now)
+    },
+    async overridePosition(symbol: string) {
       return emptySymbolState(symbol, () => now)
     },
   } satisfies PositionStore
@@ -981,5 +989,324 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
       (d) => d.decision === 'REJECT' && (d.reason ?? '').includes('vix_critical'),
     )
     expect(vixReject).toBeUndefined()
+  })
+})
+
+describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () => {
+  /**
+   * Down-trend bars that fire a SELL on a held position. PullbackUptrend
+   * triggers SELL when price breaks below the trailing stop / takeProfit.
+   * Cheap shortcut: take uptrendBars() and crash the last close so the
+   * stop fires.
+   */
+  function downtrendBars(): DailyBar[] {
+    const bars = uptrendBars()
+    const last = bars[bars.length - 1]!
+    bars[bars.length - 1] = synth(59, last.close * 0.7) // -30% gap = stop
+    return bars
+  }
+
+  function heldState(qty = 8, avgPrice = 124.95): SymbolState {
+    return {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty, avgPrice, openedAt: '2026-04-19T15:00:00.000Z' },
+      // Add settledCash so the per-symbol gate (when used) wouldn't trip;
+      // here we don't pass perSymbolRisk so it's a no-op anyway.
+      settledCash: 100_000,
+    }
+  }
+
+  /**
+   * Build a Webull-style 417 SELL_QTY_EXCEED error mirroring what
+   * `WebullHttpClient` actually throws — the body snippet is embedded in
+   * the message so `isSellQtyExceedError` can read it.
+   */
+  function makeSellQtyExceedError(): BrokerClientError {
+    return new BrokerClientError(
+      `Webull request failed permanently with status 417 body=${JSON.stringify({
+        code: WEBULL_SELL_QTY_EXCEED_CODE,
+        msg: 'requested_qty exceeds available',
+      })}`,
+      'POST /openapi/account/orders/place',
+      { brokerStatus: 417 },
+    )
+  }
+
+  function mockSellExecution(behaviour: {
+    firstThrow?: Error
+    secondThrow?: Error
+  }): Execution & { calls: unknown[] } {
+    const calls: unknown[] = []
+    let attempt = 0
+    return {
+      calls,
+      async execute(intent) {
+        attempt += 1
+        calls.push(intent)
+        if (attempt === 1 && behaviour.firstThrow) throw behaviour.firstThrow
+        if (attempt === 2 && behaviour.secondThrow) throw behaviour.secondThrow
+        return { mode: 'DRY_RUN', submitted: true, brokerOrderId: `dry-run-${attempt}` }
+      },
+    }
+  }
+
+  it('retries SELL with broker available qty when 417 SELL_QTY_EXCEED fires', async () => {
+    // Setup: DO state qty=8, broker available=4. PullbackUptrend triggers
+    // SELL via the downtrend close. First execute() throws 417 SELL_QTY_EXCEED
+    // → fallback resolver returns 4 → second execute() succeeds with qty=4.
+    const overrideCalls: Array<{ symbol: string; args: { qty: number; reason: string } }> = []
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition(symbol, args) {
+        overrideCalls.push({ symbol, args })
+        return baseStore.getState(symbol)
+      },
+    }
+    const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      sellFallback: { getAvailableQty: async () => 4 },
+      now: () => now,
+    })
+
+    // Two execute() calls: original SELL 8 + fallback SELL 4.
+    expect(execution.calls).toHaveLength(2)
+    const firstIntent = execution.calls[0] as { side: string; quantity: number }
+    const secondIntent = execution.calls[1] as { side: string; quantity: number }
+    expect(firstIntent.side).toBe('SELL')
+    expect(firstIntent.quantity).toBe(8)
+    expect(secondIntent.side).toBe('SELL')
+    expect(secondIntent.quantity).toBe(4)
+
+    expect(summary.sells).toBe(1)
+    expect(summary.errors).toHaveLength(0)
+
+    // DO position must be force-reset to null after the fallback succeeds.
+    expect(overrideCalls).toHaveLength(1)
+    expect(overrideCalls[0]).toMatchObject({
+      symbol: 'AAPL',
+      args: { qty: 0 },
+    })
+    expect(overrideCalls[0]?.args.reason).toContain('sell_qty_fallback')
+
+    // Decision trace should include the new fallback step.
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SELL')
+    expect(decision?.order?.quantity).toBe(4)
+    const labels = decision?.trace?.map((s) => s.label) ?? []
+    expect(labels).toContain('broker.sell_qty_fallback')
+    expect(decision?.reason).toContain('sell_qty_fallback')
+  })
+
+  it('does NOT retry on a different 4xx (not SELL_QTY_EXCEED) — original error wins', async () => {
+    const overrideCalls: Array<{ symbol: string }> = []
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition(symbol) {
+        overrideCalls.push({ symbol })
+        return baseStore.getState(symbol)
+      },
+    }
+    // 400 with a *different* Webull error code → fallback must not engage.
+    const otherErr = new BrokerClientError(
+      `Webull request failed permanently with status 400 body=${JSON.stringify({
+        code: 'OAUTH_OPENAPI_OTHER_ERROR',
+      })}`,
+      'POST /openapi/account/orders/place',
+      { brokerStatus: 400 },
+    )
+    const execution = mockSellExecution({ firstThrow: otherErr })
+    const fallbackSpy = vi.fn(async () => 4)
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      sellFallback: { getAvailableQty: fallbackSpy },
+      now: () => now,
+    })
+    expect(execution.calls).toHaveLength(1)
+    expect(fallbackSpy).not.toHaveBeenCalled()
+    expect(overrideCalls).toHaveLength(0)
+    expect(summary.sells).toBe(0)
+    expect(summary.errors).toHaveLength(1)
+    const errDecision = summary.decisions.find((d) => d.decision === 'ERROR')
+    expect(errDecision?.reason).toContain('OAUTH_OPENAPI_OTHER_ERROR')
+  })
+
+  it('falls back to original error when broker available=0', async () => {
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const overrideCalls: Array<{ symbol: string }> = []
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition(symbol) {
+        overrideCalls.push({ symbol })
+        return baseStore.getState(symbol)
+      },
+    }
+    const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      sellFallback: { getAvailableQty: async () => 0 },
+      now: () => now,
+    })
+    // No retry submit, no DO reset, original 417 error reported.
+    expect(execution.calls).toHaveLength(1)
+    expect(overrideCalls).toHaveLength(0)
+    expect(summary.sells).toBe(0)
+    expect(summary.errors).toHaveLength(1)
+    expect(summary.errors[0]?.message).toContain('OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY')
+  })
+
+  it('does not retry when available >= original qty (broker contradicts the 417)', async () => {
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition() {
+        return baseStore.getState('AAPL')
+      },
+    }
+    const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      sellFallback: { getAvailableQty: async () => 8 },
+      now: () => now,
+    })
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.sells).toBe(0)
+    expect(summary.errors).toHaveLength(1)
+  })
+
+  it('falls through to original error when fallback resolver throws', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition() {
+        return baseStore.getState('AAPL')
+      },
+    }
+    const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      sellFallback: {
+        getAvailableQty: async () => {
+          throw new Error('positions endpoint timeout')
+        },
+      },
+      now: () => now,
+    })
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.sells).toBe(0)
+    expect(summary.errors).toHaveLength(1)
+    expect(summary.errors[0]?.message).toContain('OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY')
+    warnSpy.mockRestore()
+  })
+
+  it('falls back to original error when retry submit also fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const overrideCalls: Array<{ symbol: string }> = []
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition(symbol) {
+        overrideCalls.push({ symbol })
+        return baseStore.getState(symbol)
+      },
+    }
+    // Both attempts throw — retry's failure must not mask the original 417.
+    const execution = mockSellExecution({
+      firstThrow: makeSellQtyExceedError(),
+      secondThrow: new BrokerServerError('upstream 503', 'POST /openapi/account/orders/place', {
+        brokerStatus: 503,
+      }),
+    })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      sellFallback: { getAvailableQty: async () => 4 },
+      now: () => now,
+    })
+    // Retry was attempted but failed → DO state stays untouched, summary
+    // reports the *original* 417 error (not the retry 503).
+    expect(execution.calls).toHaveLength(2)
+    expect(overrideCalls).toHaveLength(0)
+    expect(summary.sells).toBe(0)
+    expect(summary.errors).toHaveLength(1)
+    expect(summary.errors[0]?.message).toContain('OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY')
+    warnSpy.mockRestore()
+  })
+
+  it('skips fallback entirely when sellFallback is omitted (back-compat)', async () => {
+    const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition() {
+        return baseStore.getState('AAPL')
+      },
+    }
+    const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(downtrendBars()),
+      positionStore,
+      execution,
+      now: () => now,
+    })
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.sells).toBe(0)
+    expect(summary.errors).toHaveLength(1)
+  })
+
+  it('does NOT trigger fallback for BUY 417s (SELL-only path)', async () => {
+    const overrideCalls: Array<{ symbol: string }> = []
+    const baseStore = makeStore({})
+    const positionStore: PositionStore = {
+      ...baseStore,
+      async overridePosition(symbol) {
+        overrideCalls.push({ symbol })
+        return baseStore.getState(symbol)
+      },
+    }
+    const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
+    const fallbackSpy = vi.fn(async () => 4)
+    // uptrendBars + no held position → BUY signal. The "417 SELL_QTY_EXCEED"
+    // is artificial here but lets us prove the fallback is gated on side='SELL'.
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore,
+      execution,
+      sellFallback: { getAvailableQty: fallbackSpy },
+      now: () => now,
+    })
+    expect(execution.calls).toHaveLength(1)
+    expect(fallbackSpy).not.toHaveBeenCalled()
+    expect(overrideCalls).toHaveLength(0)
+    expect(summary.errors).toHaveLength(1)
   })
 })

@@ -3,6 +3,7 @@ import {
   addPendingSettlement,
   clearPendingOrder,
   lockPendingOrder,
+  overridePosition,
   recordFill,
   recordFillOnce,
   recordSignal,
@@ -347,5 +348,148 @@ describe('misc transitions', () => {
         { now: fixedNow('2026-04-18T10:00:00.000Z') },
       )
     }).toThrow('Invalid settlement.settleDate')
+  })
+})
+
+describe('overridePosition', () => {
+  it('writes a new position when qty>0', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-24T15:30:00.000Z'))
+    const next = overridePosition(
+      state,
+      { qty: 4, avgPrice: 124.95, openedAt: '2026-04-24T15:30:38.000Z' },
+      { now: fixedNow('2026-04-25T00:00:00.000Z') },
+    )
+    expect(next.position).toEqual({
+      qty: 4,
+      avgPrice: 124.95,
+      openedAt: '2026-04-24T15:30:38.000Z',
+    })
+    expect(next.updatedAt).toBe('2026-04-25T00:00:00.000Z')
+  })
+
+  it('overwrites an existing position (drift fix path)', () => {
+    let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    state = recordFill(
+      state,
+      { side: 'BUY', qty: 8, price: 124.95 },
+      { now: fixedNow('2026-04-19T10:00:00.000Z') },
+    )
+    expect(state.position?.qty).toBe(8)
+    const next = overridePosition(
+      state,
+      { qty: 4, avgPrice: 124.95, openedAt: state.position?.openedAt ?? null },
+      { now: fixedNow('2026-04-25T00:00:00.000Z') },
+    )
+    expect(next.position?.qty).toBe(4)
+    expect(next.position?.avgPrice).toBe(124.95)
+  })
+
+  it('falls back to now() when openedAt is null', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-24T00:00:00.000Z'))
+    const next = overridePosition(
+      state,
+      { qty: 4, avgPrice: 100, openedAt: null },
+      { now: fixedNow('2026-04-25T00:00:00.000Z') },
+    )
+    expect(next.position?.openedAt).toBe('2026-04-25T00:00:00.000Z')
+  })
+
+  it('clears the position when qty=0 (operator-explicit close)', () => {
+    let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    state = recordFill(
+      state,
+      { side: 'BUY', qty: 8, price: 124.95 },
+      { now: fixedNow('2026-04-19T10:00:00.000Z') },
+    )
+    const next = overridePosition(
+      state,
+      { qty: 0, avgPrice: 0, openedAt: null },
+      { now: fixedNow('2026-04-25T00:00:00.000Z') },
+    )
+    expect(next.position).toBeNull()
+    expect(next.updatedAt).toBe('2026-04-25T00:00:00.000Z')
+  })
+
+  it('rejects qty=NaN (fail-closed)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() =>
+      overridePosition(
+        state,
+        { qty: Number.NaN, avgPrice: 100, openedAt: null },
+        { now: fixedNow('2026-04-25T00:00:00.000Z') },
+      ),
+    ).toThrow(/invalid qty/)
+  })
+
+  it('rejects negative qty', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() =>
+      overridePosition(
+        state,
+        { qty: -1, avgPrice: 100, openedAt: null },
+        { now: fixedNow('2026-04-25T00:00:00.000Z') },
+      ),
+    ).toThrow(/invalid qty/)
+  })
+
+  it('rejects avgPrice<=0 when qty>0', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() =>
+      overridePosition(
+        state,
+        { qty: 4, avgPrice: 0, openedAt: null },
+        { now: fixedNow('2026-04-25T00:00:00.000Z') },
+      ),
+    ).toThrow(/invalid avgPrice/)
+  })
+
+  it('ignores avgPrice / openedAt when qty=0 (close path)', () => {
+    let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    state = recordFill(
+      state,
+      { side: 'BUY', qty: 8, price: 124.95 },
+      { now: fixedNow('2026-04-19T10:00:00.000Z') },
+    )
+    // avgPrice 0 / negative is normally invalid for qty>0, but on close we
+    // accept it because the operator's intent is "drop the position".
+    const next = overridePosition(
+      state,
+      { qty: 0, avgPrice: -999, openedAt: null },
+      { now: fixedNow('2026-04-25T00:00:00.000Z') },
+    )
+    expect(next.position).toBeNull()
+  })
+
+  it('rejects unparseable openedAt', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    expect(() =>
+      overridePosition(
+        state,
+        { qty: 4, avgPrice: 100, openedAt: 'not-a-date' },
+        { now: fixedNow('2026-04-25T00:00:00.000Z') },
+      ),
+    ).toThrow(/invalid openedAt/)
+  })
+
+  it('does not touch unrelated fields (pendingOrder / cooldownUntil / settledCash)', () => {
+    const state = {
+      ...emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z')),
+      pendingOrder: {
+        clientOrderId: 'coid-x',
+        side: 'BUY' as const,
+        submittedAt: '2026-04-25T09:00:00.000Z',
+        expiresAt: '2026-04-25T09:05:00.000Z',
+      },
+      cooldownUntil: '2026-04-30T00:00:00.000Z',
+      settledCash: 5_000,
+    }
+    const next = overridePosition(
+      state,
+      { qty: 4, avgPrice: 124.95, openedAt: null },
+      { now: fixedNow('2026-04-25T00:00:00.000Z') },
+    )
+    expect(next.pendingOrder).toEqual(state.pendingOrder)
+    expect(next.cooldownUntil).toBe('2026-04-30T00:00:00.000Z')
+    expect(next.settledCash).toBe(5_000)
   })
 })

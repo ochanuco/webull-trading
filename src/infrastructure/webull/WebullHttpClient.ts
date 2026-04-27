@@ -4,6 +4,7 @@ import type {
   WebullAccountDto,
   WebullOrderDetailDto,
   WebullPlaceOrderResponseDto,
+  WebullPositionDto,
   WebullSubscriptionDto,
 } from './dto'
 import { toWebullPlaceOrderRequest } from './mapper'
@@ -97,6 +98,23 @@ export class WebullHttpClient {
       },
     )
     return page.find((entry) => entry.client_order_id === clientOrderId)
+  }
+
+  /**
+   * Fetch the account's open positions. Used by the SELL_QTY_EXCEED fallback
+   * in the cron path: when Webull rejects a SELL because the requested qty
+   * is greater than `quantity_available` (e.g. DO state drifted above broker
+   * truth), the scheduler re-fetches available qty here and retries the
+   * SELL with the broker-side ground truth.
+   *
+   * TODO(#21): the live UAT endpoint name is not yet confirmed — using
+   * `/openapi/account/positions/get` based on Webull OpenAPI naming
+   * conventions. Update once the live response shape is verified.
+   */
+  async getPositions(): Promise<WebullPositionDto[]> {
+    return this.request<WebullPositionDto[]>('GET', '/openapi/account/positions/get', {
+      query: { account_id: this.requireAccountId() },
+    })
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {
@@ -218,7 +236,10 @@ export class WebullHttpClient {
         // retry. Map to the narrowest error subclass so downstream handlers
         // can treat 401/429 differently from 400. Include the response body
         // in the surfaced message so logs show why Webull rejected the
-        // request (e.g. 417 with `ORDER_INVALID_QTY`).
+        // request (e.g. 417 with `ORDER_INVALID_QTY`) and so callers can
+        // detect Webull-specific error codes like
+        // `OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY` (used by the SELL
+        // fallback in pullbackScheduler) by string-matching on the message.
         throw brokerErrorForStatus(
           response.status,
           `Webull request failed permanently with status ${response.status}: ${bodyText}`,

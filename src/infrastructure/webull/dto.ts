@@ -42,6 +42,33 @@ export interface WebullPlaceOrderResponseDto {
 }
 
 /**
+ * One row of the Webull `account/positions/get` response. Field names are
+ * the Webull canonical snake_case + numeric-as-string convention used
+ * throughout the OpenAPI surface (mapper layer parses the strings to
+ * numbers before they leave infrastructure).
+ *
+ * TODO(#21): the live JP UAT tenant has not yet been probed for this
+ * endpoint — the field set is inferred from `WebullSubscriptionDto` /
+ * `WebullOrderDetailDto` conventions. Treat shape as "best effort" until
+ * confirmed against a real response. See follow-up issue #21.
+ */
+export interface WebullPositionDto {
+  /** Ticker. Webull returns it as the canonical form (e.g. `SOXL`, `1570`). */
+  symbol?: string
+  /** Total holding (informational). */
+  quantity_total?: string
+  /** Available-to-sell holding. May be < `quantity_total` when shares are
+   *  reserved by an in-flight SELL. SELL fallback uses **this** value. */
+  quantity_available?: string
+  /** Average cost basis (informational; not used by SELL fallback). */
+  avg_cost?: string
+  /** Currency on the position. POC: USD/JPY only. */
+  currency?: string
+  /** Optional account id (some Webull endpoints echo it back per row). */
+  account_id?: string
+}
+
+/**
  * Shape returned by GET /openapi/account/orders/detail (v1).
  * Fields mirror openapi-java-sdk's `v2.OrderHistory`.
  */

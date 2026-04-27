@@ -364,6 +364,80 @@ describe('WebullHttpClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('embeds the response body snippet in the error message on 4xx (so SELL_QTY_EXCEED can be detected)', async () => {
+    const errBody = JSON.stringify({
+      code: 'OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY',
+      msg: 'available_qty=4 < requested_qty=8',
+    })
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(errBody, { status: 417 }))
+    const client = createClient(fetchMock)
+    const err = await client
+      .placeOrder({ ...intent, side: 'SELL' })
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BrokerClientError)
+    expect((err as BrokerClientError).brokerStatus).toBe(417)
+    expect((err as Error).message).toContain('OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY')
+    expect((err as Error).message).toContain('status 417')
+  })
+
+  it('truncates an oversized error body in the message (no log explosion)', async () => {
+    const huge = 'X'.repeat(2000)
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(huge, { status: 400 }))
+    const client = createClient(fetchMock)
+    const err = await client.placeOrder(intent).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BrokerClientError)
+    // The body is embedded after `status 400: ` and `readErrorBody` caps it
+    // at ERROR_BODY_MAX_CHARS (=1000) plus a `...[truncated]` marker so the
+    // upstream Webull error code stays visible without log explosion.
+    const message = (err as Error).message
+    const bodyIdx = message.indexOf('status 400: ')
+    expect(bodyIdx).toBeGreaterThan(-1)
+    const bodyPart = message.slice(bodyIdx + 'status 400: '.length)
+    expect(bodyPart).toContain('...[truncated]')
+    // 1000-char cap + the literal "...[truncated]" suffix (14 chars).
+    expect(bodyPart.length).toBeLessThanOrEqual(1000 + '...[truncated]'.length)
+  })
+
+  it('getPositions hits /openapi/account/positions/get and returns the array', async () => {
+    const positions = [
+      {
+        symbol: 'SOXL',
+        quantity_total: '8',
+        quantity_available: '4',
+        avg_cost: '124.95',
+        currency: 'USD',
+      },
+    ]
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(positions), { status: 200 }))
+    const client = createClient(fetchMock)
+    const result = await client.getPositions()
+    expect(result).toEqual(positions)
+    const [url, init] = fetchMock.mock.calls[0]!
+    const u = new URL(String(url))
+    expect(u.pathname).toBe('/openapi/account/positions/get')
+    expect(u.searchParams.get('account_id')).toBe('acct-1')
+    expect(init?.method).toBe('GET')
+    expect(init?.body).toBeUndefined()
+  })
+
+  it('getPositions throws BrokerRequestError when accountId is not configured', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    const client = new WebullHttpClient({
+      auth: new WebullAuth({ appKey: 'app-key', appSecret: 'app-secret' }),
+      baseUrl: 'https://broker.example.test',
+      retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 },
+      fetchFn: fetchMock,
+    })
+    await expect(client.getPositions()).rejects.toThrow(/Missing Webull account ID/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('listSubscriptions hits /app/subscriptions/list and returns the array', async () => {
     const subscriptions = [
       { subscription_id: 'sub-1', user_id: 'u-1', account_id: 'acct-abc', account_number: '123' },

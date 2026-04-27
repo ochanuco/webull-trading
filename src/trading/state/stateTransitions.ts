@@ -150,6 +150,62 @@ export function addPendingSettlement(
 }
 
 /**
+ * Operator-driven position override. Used to manually reconcile a corrupted
+ * `position` against the real broker holding (e.g. after a reconcile-race
+ * double-apply that drifted DO qty above broker truth). Not part of the
+ * regular BUY/SELL fill flow — `recordFill` should be the only writer for
+ * organic state changes.
+ *
+ *   - `qty <= 0` (or null caller intent) → close the position entirely.
+ *     Internally accepted only when the operator explicitly opts in via
+ *     `qty=0` so we never silently swallow a typo as "close".
+ *   - `qty > 0` → write `{ qty, avgPrice, openedAt: openedAt ?? now() }`.
+ *
+ * Fail-closed on bad inputs (NaN / negative / zero avgPrice when qty>0)
+ * because operators paste these values from a CLI; rejecting upfront avoids
+ * a malformed position propagating into the strategy loop.
+ */
+export function overridePosition(
+  state: SymbolState,
+  args: { qty: number; avgPrice: number; openedAt: string | null },
+  ctx: TransitionContext = defaultCtx,
+): SymbolState {
+  if (!Number.isFinite(args.qty) || args.qty < 0) {
+    throw new Error(
+      `overridePosition: invalid qty=${args.qty} (must be a finite number >= 0)`,
+    )
+  }
+  const iso = ctx.now().toISOString()
+  if (args.qty === 0) {
+    // Operator-explicit close. avgPrice / openedAt are ignored on close so a
+    // mistyped price field doesn't accidentally seed a fresh position.
+    return { ...state, position: null, updatedAt: iso }
+  }
+  if (!Number.isFinite(args.avgPrice) || args.avgPrice <= 0) {
+    throw new Error(
+      `overridePosition: invalid avgPrice=${args.avgPrice} (must be a finite number > 0 when qty>0)`,
+    )
+  }
+  if (args.openedAt !== null) {
+    const t = new Date(args.openedAt).getTime()
+    if (!Number.isFinite(t)) {
+      throw new Error(
+        `overridePosition: invalid openedAt=${args.openedAt} (must be ISO 8601 timestamp or null)`,
+      )
+    }
+  }
+  return {
+    ...state,
+    position: {
+      qty: args.qty,
+      avgPrice: args.avgPrice,
+      openedAt: args.openedAt ?? iso,
+    },
+    updatedAt: iso,
+  }
+}
+
+/**
  * Overwrites `settledCash` with an operator-provided value. POC seed path —
  * used once during initial setup or after a manual reconciliation with the
  * broker. Not part of the regular fill/roll flow.

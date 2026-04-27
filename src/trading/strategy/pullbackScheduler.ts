@@ -2,6 +2,7 @@ import type { BarClient } from '../../infrastructure/quotes/BarClient'
 import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
 import { classifyBrokerErrorCause } from '../../infrastructure/notification/brokerErrorSurge'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
+import { isSellQtyExceedError } from '../../shared/errors'
 import type { DecisionTraceStep } from '../domain/Signal'
 import { inferTradingMarket } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
@@ -104,6 +105,22 @@ export interface PullbackSchedulerOptions {
    */
   perSymbolRisk?: PerSymbolRiskScheduleConfig
   /**
+   * Webull SELL_QTY_EXCEED fallback resolver。SELL submit が
+   * `OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY` (HTTP 417) で reject
+   * された時に呼ばれる: broker portfolio から実 available qty を返し、
+   * `available > 0 && available < intent.quantity` なら scheduler が
+   * 全部売りで再 submit する (= 辻褄合わせ)。失敗時は throw でも null
+   * 返却でも OK で、いずれの場合も元 SELL_QTY_EXCEED エラーが re-throw
+   * される (fail-closed)。production (`runStrategyCron`) は
+   * `WebullHttpClient.getPositions()` でラップして注入する。未注入なら
+   * fallback は skip (= 既存挙動の元 error 再 throw、POC 後方互換)。
+   *
+   * Race window: getAvailableQty と SELL submit の間で broker side が
+   * 動く可能性は POC 段階では許容。連続 reject は次の cron tick で
+   * 再評価される。
+   */
+  sellFallback?: SellFallbackConfig
+  /**
    * Earnings calendar gate (issue #196 1/3)。±N 営業日で BUY を凍結。
    * `repo` 未注入なら gate skip (POC 後方互換)。production
    * (`runStrategyCron`) が D1 から repo を作って渡す。
@@ -126,6 +143,17 @@ export interface PullbackSchedulerOptions {
    */
   vixDecision?: VixRegimeFilterDecision
   now?: () => Date
+}
+
+/**
+ * Resolver for the SELL_QTY_EXCEED fallback. Returns the broker-side
+ * `quantity_available` for the symbol (case-insensitive match), or `null`
+ * if not held / not findable. Throwing here is treated the same as `null`
+ * — the fallback is best-effort and never converts a SELL reject into a
+ * different reject (the original SELL_QTY_EXCEED error is re-thrown).
+ */
+export interface SellFallbackConfig {
+  getAvailableQty: (symbol: string) => Promise<number | null>
 }
 
 export interface EarningsScheduleConfig {
@@ -753,55 +781,83 @@ export async function runPullbackScheduler(
     }
 
     let result: ExecutionResult | undefined
+    let executedIntent: OrderIntent = intent
+    let fallbackApplied = false
     const startedAt = Date.now()
     try {
       result = await options.execution.execute(intent)
     } catch (error) {
-      await options.positionStore.clearPendingOrder(upper).catch(() => undefined)
-      summary.errors.push({
-        symbol: upper,
-        message: messageOf(error),
-      })
-      await emitDecision({
-        symbol: upper,
-        decision: 'ERROR',
-        // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
-        reason: `broker submit error: ${messageOf(error)}`,
-        price: indicators.price,
-        trace: appendTrace(signal.trace, traceStep('broker.submit', false, messageOf(error), '==', 'submitted')),
-      })
-      emitNotify({
-        type: 'ERROR',
-        symbol: upper,
-        message: messageOf(error),
-        // surge detector が cause で count するため (#209)、broker submit
-        // failure を 4xx / 429 / 5xx / other に分類する。`null` (= broker
-        // error ではない) なら legacy の `'broker submit'` に戻す。
-        cause: classifyBrokerErrorCause(error) ?? 'broker submit',
-      })
-      try {
-        logPostSubmit({
-          clientOrderId: intent.clientOrderId,
+      // SELL_QTY_EXCEED fallback: Webull rejected the SELL because qty >
+      // broker-side `quantity_available`. This usually means DO state has
+      // drifted above broker truth (#215 reconcile race). Fetch the actual
+      // available qty and retry the SELL with that — i.e. close out
+      // whatever the broker actually still holds, so the next cron tick
+      // sees a clean slate. If anything in the fallback fails, re-throw
+      // the original error path (no silent recovery).
+      const fallbackResult =
+        intent.side === 'SELL' && options.sellFallback && isSellQtyExceedError(error)
+          ? await tryFallbackSell({
+              originalIntent: intent,
+              error,
+              upper,
+              symbol,
+              execution: options.execution,
+              positionStore: options.positionStore,
+              sellFallback: options.sellFallback,
+              requestId: options.requestId,
+            })
+          : null
+      if (fallbackResult) {
+        result = fallbackResult.result
+        executedIntent = fallbackResult.intent
+        fallbackApplied = true
+      } else {
+        await options.positionStore.clearPendingOrder(upper).catch(() => undefined)
+        summary.errors.push({
           symbol: upper,
-          latencyMs: Date.now() - startedAt,
-          error: error instanceof Error ? error : new Error(String(error)),
+          message: messageOf(error),
         })
-      } catch (logError) {
-        console.error(
-          JSON.stringify({
-            event: 'cron_log_post_submit_failed',
-            symbol: upper,
+        await emitDecision({
+          symbol: upper,
+          decision: 'ERROR',
+          // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
+          reason: `broker submit error: ${messageOf(error)}`,
+          price: indicators.price,
+          trace: appendTrace(signal.trace, traceStep('broker.submit', false, messageOf(error), '==', 'submitted')),
+        })
+        emitNotify({
+          type: 'ERROR',
+          symbol: upper,
+          message: messageOf(error),
+          // surge detector が cause で count するため (#209)、broker submit
+          // failure を 4xx / 429 / 5xx / other に分類する。`null` (= broker
+          // error ではない) なら legacy の `'broker submit'` に戻す。
+          cause: classifyBrokerErrorCause(error) ?? 'broker submit',
+        })
+        try {
+          logPostSubmit({
             clientOrderId: intent.clientOrderId,
-            message: logError instanceof Error ? logError.message : String(logError),
-          }),
-        )
+            symbol: upper,
+            latencyMs: Date.now() - startedAt,
+            error: error instanceof Error ? error : new Error(String(error)),
+          })
+        } catch (logError) {
+          console.error(
+            JSON.stringify({
+              event: 'cron_log_post_submit_failed',
+              symbol: upper,
+              clientOrderId: intent.clientOrderId,
+              message: logError instanceof Error ? logError.message : String(logError),
+            }),
+          )
+        }
+        continue
       }
-      continue
     }
 
     try {
       logPostSubmit({
-        clientOrderId: intent.clientOrderId,
+        clientOrderId: executedIntent.clientOrderId,
         symbol: upper,
         result,
         latencyMs: Date.now() - startedAt,
@@ -811,46 +867,91 @@ export async function runPullbackScheduler(
         JSON.stringify({
           event: 'cron_log_post_submit_failed',
           symbol: upper,
-          clientOrderId: intent.clientOrderId,
+          clientOrderId: executedIntent.clientOrderId,
           message: logError instanceof Error ? logError.message : String(logError),
         }),
       )
     }
 
+    // SELL_QTY_EXCEED fallback succeeded → DO state currently lies above
+    // broker truth (the very reason we hit the fallback). Force-reset
+    // `position=null` so the next cron tick doesn't try to SELL phantom
+    // shares again. We deliberately bypass `recordFill` here because the
+    // executed qty < DO qty would leave a non-zero remainder.
+    if (fallbackApplied) {
+      try {
+        await options.positionStore.overridePosition(upper, {
+          qty: 0,
+          avgPrice: 0,
+          openedAt: null,
+          reason: `sell_qty_fallback: closed at broker available qty (originalIntentQty=${intent.quantity}, executedQty=${executedIntent.quantity})`,
+          requestId: options.requestId ?? null,
+        })
+      } catch (resetError) {
+        console.error(
+          JSON.stringify({
+            event: 'sell_qty_fallback_reset_failed',
+            requestId: options.requestId ?? null,
+            symbol: upper,
+            message: resetError instanceof Error ? resetError.message : String(resetError),
+          }),
+        )
+      }
+    }
+
     // Increment counters only after successful execution.
-    if (intent.side === 'BUY') {
+    if (executedIntent.side === 'BUY') {
       summary.buys += 1
     } else {
       summary.sells += 1
     }
     await emitDecision({
       symbol: upper,
-      decision: intent.side,
-      reason: signal.reason,
-      price: intent.price,
+      decision: executedIntent.side,
+      reason: fallbackApplied
+        ? `sell_qty_fallback: ${signal.reason} (originalQty=${intent.quantity}, executedQty=${executedIntent.quantity})`
+        : signal.reason,
+      price: executedIntent.price,
       indicatorsJson: JSON.stringify(indicators),
-      clientOrderId: intent.clientOrderId,
-      trace: appendTrace(signal.trace, traceStep('broker.submit', true, result.mode, '==', 'submitted')),
+      clientOrderId: executedIntent.clientOrderId,
+      trace: appendTrace(
+        signal.trace,
+        traceStep('broker.submit', true, result.mode, '==', 'submitted'),
+        ...(fallbackApplied
+          ? [
+              traceStep(
+                'broker.sell_qty_fallback',
+                true,
+                executedIntent.quantity,
+                '==',
+                intent.quantity,
+                'broker available qty で再 submit',
+              ),
+            ]
+          : []),
+      ),
       order: {
-        side: intent.side,
-        quantity: intent.quantity,
-        notional: intent.notional,
+        side: executedIntent.side,
+        quantity: executedIntent.quantity,
+        notional: executedIntent.notional,
       },
     })
 
     // SELL の realizedPnl は state.position.avgPrice (existing) と
-    // intent.price (exit) の差から推定。BUY 時は undefined。avgPrice が無い
-    // SELL は不正経路 (上で reject 済) なので発生しないはずだが defensive。
+    // executedIntent.price (exit) の差から推定。BUY 時は undefined。avgPrice
+    // が無い SELL は不正経路 (上で reject 済) なので発生しないはずだが defensive。
+    // fallback で qty が変わった場合も executedIntent.quantity を使うので
+    // realized PnL は実 SELL 数量分のみ。
     const realizedPnl =
-      intent.side === 'SELL' && state.position && Number.isFinite(state.position.avgPrice)
-        ? (intent.price - state.position.avgPrice) * intent.quantity
+      executedIntent.side === 'SELL' && state.position && Number.isFinite(state.position.avgPrice)
+        ? (executedIntent.price - state.position.avgPrice) * executedIntent.quantity
         : undefined
     emitNotify({
       type: 'TRADE',
-      side: intent.side,
+      side: executedIntent.side,
       symbol: upper,
-      qty: intent.quantity,
-      price: intent.price,
+      qty: executedIntent.quantity,
+      price: executedIntent.price,
       ...(realizedPnl !== undefined ? { realizedPnl } : {}),
       mode: result.mode,
     })
@@ -862,6 +963,93 @@ export async function runPullbackScheduler(
   }
 
   return summary
+}
+
+/**
+ * SELL_QTY_EXCEED fallback inner. Returns the successful execution result
+ * + the (possibly resized) intent that was actually submitted. Returns
+ * `null` when the fallback can't or shouldn't run — the caller treats
+ * `null` as "go re-throw the original error path".
+ *
+ * Conservative invariants:
+ *   - `available <= 0` → null (nothing to sell, original 417 stands)
+ *   - `available >= intent.quantity` → null (broker truth >= our intent;
+ *     the 417 was unexpected and we shouldn't paper over it)
+ *   - retry submit throws → null (don't substitute a different error)
+ *   - resolver throws / returns NaN → null
+ *
+ * The successful path emits one structured `sell_qty_fallback_submitted`
+ * audit log so the run is reconstructable from log tail. clientOrderId is
+ * regenerated for the retry so it doesn't collide with the original
+ * (rejected) submission's idempotency key.
+ */
+async function tryFallbackSell(args: {
+  originalIntent: OrderIntent
+  error: unknown
+  upper: string
+  symbol: string
+  execution: Execution
+  positionStore: PositionStore
+  sellFallback: SellFallbackConfig
+  requestId?: string
+}): Promise<{ result: ExecutionResult; intent: OrderIntent } | null> {
+  let available: number | null
+  try {
+    available = await args.sellFallback.getAvailableQty(args.upper)
+  } catch (resolverErr) {
+    console.warn(
+      JSON.stringify({
+        event: 'sell_qty_fallback_resolver_failed',
+        requestId: args.requestId ?? null,
+        symbol: args.upper,
+        message: resolverErr instanceof Error ? resolverErr.message : String(resolverErr),
+      }),
+    )
+    return null
+  }
+  if (available === null || !Number.isFinite(available) || available <= 0) {
+    return null
+  }
+  if (available >= args.originalIntent.quantity) {
+    // Broker says we have at least as much as we tried to SELL — the 417
+    // contradicts that, so the situation is something else (transient,
+    // race, broker bug). Don't fabricate a reduced SELL.
+    return null
+  }
+  const fallbackIntent: OrderIntent = {
+    ...args.originalIntent,
+    quantity: available,
+    notional: available * args.originalIntent.price,
+    clientOrderId: crypto.randomUUID().replaceAll('-', ''),
+  }
+  try {
+    const result = await args.execution.execute(fallbackIntent)
+    console.log(
+      JSON.stringify({
+        event: 'sell_qty_fallback_submitted',
+        requestId: args.requestId ?? null,
+        symbol: args.upper,
+        originalClientOrderId: args.originalIntent.clientOrderId,
+        fallbackClientOrderId: fallbackIntent.clientOrderId,
+        originalQty: args.originalIntent.quantity,
+        fallbackQty: fallbackIntent.quantity,
+        price: fallbackIntent.price,
+      }),
+    )
+    return { result, intent: fallbackIntent }
+  } catch (retryErr) {
+    console.warn(
+      JSON.stringify({
+        event: 'sell_qty_fallback_retry_failed',
+        requestId: args.requestId ?? null,
+        symbol: args.upper,
+        originalClientOrderId: args.originalIntent.clientOrderId,
+        fallbackClientOrderId: fallbackIntent.clientOrderId,
+        message: retryErr instanceof Error ? retryErr.message : String(retryErr),
+      }),
+    )
+    return null
+  }
 }
 
 function buildIntent(symbol: string, side: 'BUY' | 'SELL', qty: number, price: number): OrderIntent {
@@ -933,6 +1121,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
   'broker.submit': '証券会社への発注送信',
+  'broker.sell_qty_fallback': 'SELL 数量超過時の broker available qty 再 submit',
 }
 
 /**
