@@ -1041,3 +1041,300 @@ describe('Macro event calendar admin endpoints (#196 2/3)', () => {
     })
   })
 })
+
+/**
+ * `POST /admin/orders/sync-holdings` (broker holding reconcile, #221 follow-up).
+ *
+ * Verifies route-level wiring only — the broker / DO / drift logic is covered
+ * end-to-end by `test/trading/reconciliation/syncHoldings.test.ts`. Here we
+ * just confirm the route extracts query params, mounts the WebullHttpClient
+ * + SymbolStateClient, gates on bindings, and forwards results.
+ */
+describe('POST /admin/orders/sync-holdings', () => {
+  type SyncOverrideCall = {
+    symbol: string
+    args: {
+      qty: number
+      avgPrice: number
+      openedAt: string | null
+      reason: string
+      requestId?: string | null
+    }
+  }
+  function fakeSyncNamespace(
+    captured: { calls: SyncOverrideCall[] },
+    initial: Record<string, { qty: number; avgPrice: number; openedAt: string } | null>,
+  ) {
+    const stub = {
+      async getState(symbol: string) {
+        const pos = initial[symbol] ?? null
+        return {
+          symbol,
+          position: pos,
+          appliedClientOrderIds: [],
+          pendingOrder: null,
+          lastSignalAt: null,
+          cooldownUntil: null,
+          settledCash: 0,
+          pendingSettlement: [],
+          lastExecutedPrice: null,
+          lastQuote: null,
+          updatedAt: '2026-04-25T00:00:00.000Z',
+        }
+      },
+      async overridePosition(symbol: string, args: SyncOverrideCall['args']) {
+        captured.calls.push({ symbol, args })
+        return {
+          symbol,
+          position:
+            args.qty > 0
+              ? { qty: args.qty, avgPrice: args.avgPrice, openedAt: args.openedAt ?? '2026-04-25T00:00:00.000Z' }
+              : null,
+          appliedClientOrderIds: [],
+          pendingOrder: null,
+          lastSignalAt: null,
+          cooldownUntil: null,
+          settledCash: 0,
+          pendingSettlement: [],
+          lastExecutedPrice: null,
+          lastQuote: null,
+          updatedAt: '2026-04-25T00:00:00.000Z',
+        }
+      },
+    }
+    return {
+      idFromName: () => 'id',
+      get: () => stub,
+    } as unknown
+  }
+
+  async function withMocks<T>(
+    mocks: {
+      universe?: { allowedSymbols: string[] }
+      positions?: Array<{ symbol: string; available_quantity: string; avg_cost?: string }>
+      positionsThrows?: string
+    },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const universeMod = await import('../../src/infrastructure/db/symbolUniverse')
+    const webullMod = await import('../../src/infrastructure/webull/WebullHttpClient')
+    const universeSpy = vi.spyOn(universeMod, 'loadSymbolUniverse').mockResolvedValue({
+      allowedSymbols: mocks.universe?.allowedSymbols ?? [],
+      symbolMaxNotional: {},
+      symbolCurrency: {},
+      symbolBucket: {},
+      inversePairs: {},
+      source: 'd1',
+    })
+    const fakeWebull = {
+      async getPositions() {
+        if (mocks.positionsThrows) throw new Error(mocks.positionsThrows)
+        return mocks.positions ?? []
+      },
+    } as never
+    const webullSpy = vi
+      .spyOn(webullMod, 'createWebullHttpClient')
+      .mockReturnValue(fakeWebull)
+    try {
+      return await fn()
+    } finally {
+      universeSpy.mockRestore()
+      webullSpy.mockRestore()
+    }
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('401s without Basic Auth', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/sync-holdings',
+      { method: 'POST' },
+      baseEnv,
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('400s when SYMBOL_STATE binding is missing', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/sync-holdings',
+      { method: 'POST', headers: { ...authHeader } },
+      { ...baseEnv, DB: {} as unknown as D1Database },
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('400s when DB binding is missing in all-symbols mode (universe loader needs it)', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/orders/sync-holdings',
+      { method: 'POST', headers: { ...authHeader } },
+      { ...baseEnv, SYMBOL_STATE: fakeSyncNamespace(captured, {}) },
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('200s in single-symbol mode without DB binding (universe load skipped)', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      { positions: [{ symbol: 'SOXL', available_quantity: '4', avg_cost: '125.50' }] },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings?symbol=SOXL',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            // Deliberately no DB binding — single-symbol mode must not need it.
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    expect(captured.calls.map((c) => c.symbol)).toEqual(['SOXL'])
+  })
+
+  it('200s and applies broker truth across the universe', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['SOXL', 'AAPL'] },
+        positions: [{ symbol: 'SOXL', available_quantity: '4', avg_cost: '125.50' }],
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+              AAPL: null,
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: Array<{ symbol: string; broker_qty: number | null; skipped?: string }>
+      errors: unknown[]
+      summary: { total: number; synced: number; no_drift: number; errors: number }
+      dryRun: boolean
+    }
+    expect(body.dryRun).toBe(false)
+    expect(body.summary).toEqual({ total: 2, synced: 1, no_drift: 1, errors: 0 })
+    expect(captured.calls.map((c) => c.symbol)).toEqual(['SOXL'])
+    expect(captured.calls[0]!.args.qty).toBe(4)
+    expect(captured.calls[0]!.args.avgPrice).toBe(125.5)
+    expect(captured.calls[0]!.args.requestId).toBeTypeOf('string')
+  })
+
+  it('200s with ?symbol=SOXL — single-symbol mode skips universe override', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['NEVER_USED'] },
+        positions: [{ symbol: 'SOXL', available_quantity: '4', avg_cost: '125.50' }],
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings?symbol=soxl',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: Array<{ symbol: string }>
+      summary: { total: number }
+    }
+    expect(body.synced.map((r) => r.symbol)).toEqual(['SOXL'])
+    expect(body.summary.total).toBe(1)
+    expect(captured.calls.map((c) => c.symbol)).toEqual(['SOXL'])
+  })
+
+  it('200s with ?dryRun=1 and emits diff without writing', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['SOXL'] },
+        positions: [{ symbol: 'SOXL', available_quantity: '4', avg_cost: '125.50' }],
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings?dryRun=1',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: Array<{ symbol: string; skipped?: string; before: { qty: number }; after: { qty: number } }>
+      dryRun: boolean
+    }
+    expect(body.dryRun).toBe(true)
+    expect(body.synced[0]!.skipped).toBe('dry_run')
+    expect(body.synced[0]!.before.qty).toBe(8)
+    expect(body.synced[0]!.after.qty).toBe(4)
+    expect(captured.calls).toEqual([])
+  })
+
+  it('200s and reports broker fetch failures per-symbol (no overrides)', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['SOXL', 'AAPL'] },
+        positionsThrows: 'broker auth failed',
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 4, avgPrice: 125, openedAt: '2026-04-20T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: unknown[]
+      errors: Array<{ symbol: string; error: string }>
+      summary: { errors: number }
+    }
+    expect(body.summary.errors).toBe(2)
+    expect(body.errors.map((e) => e.symbol).sort()).toEqual(['AAPL', 'SOXL'])
+    expect(captured.calls).toEqual([])
+  })
+})

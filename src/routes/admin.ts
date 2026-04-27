@@ -6,7 +6,9 @@ import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClien
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import { reconcileFills } from '../trading/reconciliation/reconcileFills'
+import { syncHoldings } from '../trading/reconciliation/syncHoldings'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
+import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
@@ -285,6 +287,68 @@ export const admin = new Hono<AppBindings>()
       )
     const pendingApply = Number(rows[0]?.count ?? 0)
     return c.json({ pendingApply })
+  })
+  /**
+   * Reconcile broker-side holdings into the per-symbol DO `position`.
+   *
+   * Pulls Webull `/openapi/account/positions` once and walks the symbol
+   * universe (or `?symbol=SOXL` for a single ticker), comparing the DO
+   * `position.qty` against broker `available_quantity`. When they disagree
+   * the DO row is overwritten via the same `overridePosition` path used by
+   * `/admin/symbol-state/:symbol/override-position` — one structured
+   * `symbol_state_position_override` log per write plus an outer
+   * `holdings_sync_applied` log keyed by `requestId`.
+   *
+   * Use this as the manual recovery tool for DO state that drifted before
+   * PR #215 (idempotency) / PR #221 (SELL fallback) landed. Both fixes
+   * prevent **future** corruption but neither rewrites existing rows.
+   *
+   * Query:
+   *   - `symbol`  (optional)  restrict to one ticker (case-insensitive)
+   *   - `dryRun`  (optional)  `1`/`true`/`yes` → diff-only, no DO writes
+   *
+   * Body: ignored (POST kept for "this mutates state" intent — `dryRun`
+   *   path obviously doesn't, but the verb stays consistent).
+   */
+  .post('/orders/sync-holdings', async (c) => {
+    if (!c.env.SYMBOL_STATE) {
+      throw new ValidationError('SYMBOL_STATE binding is not configured', { field: 'env' })
+    }
+    const symbolRaw = c.req.query('symbol')?.trim()
+    const dryRun = parseTruthyQuery(c.req.query('dryRun'))
+    const symbol = symbolRaw && symbolRaw.length > 0 ? symbolRaw.toUpperCase() : undefined
+
+    // Single-symbol mode skips the universe load: lets the operator sync a
+    // ticker even if it's been removed from `symbol_config` (e.g. retired
+    // strategy that still has a stale DO row). All-symbols mode needs D1;
+    // reject early so the operator gets 400-with-field instead of a 500
+    // from deeper in `loadSymbolUniverse`.
+    let allowedSymbols: string[]
+    if (symbol !== undefined) {
+      allowedSymbols = [symbol]
+    } else {
+      if (!c.env.DB) {
+        throw new ValidationError('DB binding is not configured', { field: 'env' })
+      }
+      const universe = await loadSymbolUniverse(c.env)
+      allowedSymbols = universe.allowedSymbols
+    }
+
+    const webull = createWebullHttpClient(c.env)
+    const positionStore = new SymbolStateClient(c.env.SYMBOL_STATE)
+    const result = await syncHoldings(
+      {
+        ...(symbol !== undefined ? { symbol } : {}),
+        dryRun,
+        requestId: c.get('requestId') ?? null,
+      },
+      {
+        allowedSymbols,
+        fetchPositions: () => webull.getPositions(),
+        positionStore,
+      },
+    )
+    return c.json(result)
   })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
