@@ -52,13 +52,21 @@ describe('classifyVixRegimeSeverity', () => {
 /**
  * Fake D1 — drizzle が呼ぶ select / delete / insert を素朴に動かす最小限の
  * spy。`config_state_snapshot` 1 行のみ扱う。
+ *
+ * `corruptInitial: true` を渡すと「行は存在するが value が parse 不能」状態を
+ * 注入する (snapshot 破損 self-heal の test 用 — CodeRabbit #216 5th)。
  */
-function fakeDb(initialRegime: string | null): {
+function fakeDb(
+  initialRegime: string | null,
+  options: { corruptInitial?: boolean } = {},
+): {
   db: D1Database
   inserts: Array<{ key: string; value: string }>
+  getStored: () => { key: string; value: string } | null
 } {
-  let stored: { key: string; value: string } | null =
-    initialRegime !== null
+  let stored: { key: string; value: string } | null = options.corruptInitial
+    ? { key: 'vix_regime', value: '@@not-json@@' }
+    : initialRegime !== null
       ? { key: 'vix_regime', value: JSON.stringify(initialRegime) }
       : null
   const inserts: Array<{ key: string; value: string }> = []
@@ -100,16 +108,28 @@ function fakeDb(initialRegime: string | null): {
               return { meta: { changes: 1 } }
             }
             if (sql.includes('update')) {
-              // CAS update: WHERE key=? AND value=? に一致したら書き換え。
-              // raw helper のバインド順は (newValue, snapshotAt, requestId, key, oldValue)。
+              // 2 種類の UPDATE を処理する:
+              //   (a) CAS update: WHERE key=? AND value=? — bind 5 個 (CodeRabbit #216 4th)
+              //   (b) self-heal update: WHERE key=? のみ — bind 4 個 (CodeRabbit #216 5th)
+              // bind 数で分岐する (どちらも先頭は (newValue, snapshotAt, requestId, key, ...))。
               const newValue = String(args[0])
               const expectedKey = String(args[3])
-              const expectedOldValue = String(args[4])
-              if (
-                stored &&
-                stored.key === expectedKey &&
-                stored.value === expectedOldValue
-              ) {
+              if (args.length >= 5) {
+                // CAS path
+                const expectedOldValue = String(args[4])
+                if (
+                  stored &&
+                  stored.key === expectedKey &&
+                  stored.value === expectedOldValue
+                ) {
+                  stored = { key: expectedKey, value: newValue }
+                  inserts.push({ key: expectedKey, value: newValue })
+                  return { meta: { changes: 1 } }
+                }
+                return { meta: { changes: 0 } }
+              }
+              // self-heal path: 行が存在するなら問答無用で書き換える。
+              if (stored && stored.key === expectedKey) {
                 stored = { key: expectedKey, value: newValue }
                 inserts.push({ key: expectedKey, value: newValue })
                 return { meta: { changes: 1 } }
@@ -147,7 +167,7 @@ function fakeDb(initialRegime: string | null): {
       return []
     },
   } as unknown as D1Database
-  return { db, inserts }
+  return { db, inserts, getStored: () => stored }
 }
 
 function makeNotifier(): { notifier: Notifier; calls: NotificationEvent[] } {
@@ -376,6 +396,55 @@ describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
     // CAS 成功は 1 回だけ insert/update される (insert log にも 1 件)。
     expect(inserts).toHaveLength(1)
     expect(inserts[0]!.value).toBe(JSON.stringify('critical'))
+  })
+
+  it('self-heals a corrupted snapshot row by overwriting with next (no notify) (CodeRabbit #216 5th)', async () => {
+    // 行は存在するが value が parse 不能 (= readCurrentRegime → null)。
+    // INSERT OR IGNORE は既存行に当たって changes=0、その後の self-heal UPDATE で
+    // next が書き込まれる。previous=null を返すので caller 側で notify は skip される。
+    const { db, inserts, getStored } = fakeDb(null, { corruptInitial: true })
+    const result = await atomicallyUpdateVixRegimeSnapshot(
+      db,
+      'warning',
+      new Date('2026-04-25T00:00:00.000Z'),
+      'req-self-heal',
+    )
+    expect(result.previous).toBeNull()
+    expect(result.updated).toBe(true)
+    // self-heal UPDATE で書き込まれている。
+    expect(inserts).toHaveLength(1)
+    expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
+    expect(getStored()?.value).toBe(JSON.stringify('warning'))
+  })
+
+  it('after self-heal, the next tick performs a normal compare-and-update (CodeRabbit #216 5th)', async () => {
+    // 1 回目: 壊れた snapshot を warning で self-heal (previous=null, updated=true)。
+    // 2 回目: 正常な warning → critical の compare-and-update が動く
+    //         (previous=warning, updated=true)。
+    const { db, inserts, getStored } = fakeDb(null, { corruptInitial: true })
+    const first = await atomicallyUpdateVixRegimeSnapshot(
+      db,
+      'warning',
+      new Date('2026-04-25T00:00:00.000Z'),
+      'req-heal',
+    )
+    expect(first.previous).toBeNull()
+    expect(first.updated).toBe(true)
+    expect(getStored()?.value).toBe(JSON.stringify('warning'))
+
+    const second = await atomicallyUpdateVixRegimeSnapshot(
+      db,
+      'critical',
+      new Date('2026-04-25T00:01:00.000Z'),
+      'req-next',
+    )
+    expect(second.previous).toBe('warning')
+    expect(second.updated).toBe(true)
+    expect(getStored()?.value).toBe(JSON.stringify('critical'))
+    // self-heal + 通常 CAS で 2 件分の書き込みが log されている。
+    expect(inserts).toHaveLength(2)
+    expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
+    expect(inserts[1]!.value).toBe(JSON.stringify('critical'))
   })
 
   it('detectAndNotifyVixRegimeChange dedups parallel callers via CAS', async () => {

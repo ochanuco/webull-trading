@@ -178,8 +178,18 @@ export async function atomicallyUpdateVixRegimeSnapshot(
     // 2) 既存 row があるので current を読む。
     const current = await readCurrentRegime(db)
     if (current === null) {
-      // 行は存在するが値が壊れている等。CAS の起点が無いので fail-silent で抜ける。
-      return { previous: null, updated: false }
+      // 行は存在するが値が壊れている (parse 失敗等)。CAS の起点が無いままだと
+      // 毎 tick 同じ分岐で stuck し snapshot が永久に self-heal せず通知も再開
+      // しないので、初回観測と同じ扱いで next を書き込み snapshot を直す
+      // (CodeRabbit #216 5th)。previous=null のため caller 側で notify は
+      // skip される (false alert 防止)。
+      await db
+        .prepare(
+          'UPDATE config_state_snapshot SET value = ?, snapshot_at = ?, request_id = ? WHERE key = ?',
+        )
+        .bind(nextJson, snapshotAt, requestId ?? null, VIX_REGIME_SNAPSHOT_KEY)
+        .run()
+      return { previous: null, updated: true }
     }
     if (current === next) {
       // 値が同じ → no-op (snapshot_at だけ更新する意味は薄い、emit もしない)。
