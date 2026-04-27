@@ -27,6 +27,7 @@ import {
   evaluateMacroEventGate,
   type MacroEventGateConfig,
 } from '../risk/macroEventGate'
+import type { VixRegimeFilterDecision } from '../risk/vixRegimeFilter'
 import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
@@ -114,6 +115,16 @@ export interface PullbackSchedulerOptions {
    * より後ろで評価される (両方 reject なら earnings reason が先に確定する)。
    */
   macroEventGate?: MacroEventScheduleConfig
+  /**
+   * VIX regime filter decision (issue #196 3/3)。caller (`runStrategyCron`) が
+   * cron tick 起動時に `^VIX` を fetch し `evaluateVixRegime` を呼んで作る。
+   * scheduler は decision を受け取って:
+   *   - sizeScale === 0 (critical): BUY 全 reject (reason: `risk: vix_critical: ...`)
+   *   - 0 < sizeScale < 1 (warning): `intent.quantity = floor(qty * sizeScale)`
+   *   - sizeScale === 1 (normal / unavailable): no-op
+   * 未注入なら skip (POC 後方互換)。SELL は VIX 関係なく通す。
+   */
+  vixDecision?: VixRegimeFilterDecision
   now?: () => Date
 }
 
@@ -157,6 +168,13 @@ export interface PullbackRunSummary {
    * reconstructing context from scattered log lines.
    */
   decisions: PullbackDecisionTrace[]
+  /**
+   * VIX regime filter decision applied to this run (issue #196 3/3)。
+   * `vixDecision` option を渡された時のみ set される (POC 後方互換)。
+   * cron summary log / dashboard で「この run でどの regime で動いていたか」
+   * を可視化するために残す。
+   */
+  vix?: VixRegimeFilterDecision
 }
 
 export interface PullbackDecisionTrace {
@@ -202,6 +220,7 @@ export async function runPullbackScheduler(
     rejected: [],
     errors: [],
     decisions: [],
+    ...(options.vixDecision !== undefined ? { vix: options.vixDecision } : {}),
   }
 
   // Notifier helper: fire-and-forget。Notifier 実装側で silent fallback する
@@ -391,6 +410,68 @@ export async function runPullbackScheduler(
         })
         continue
       }
+      // VIX regime filter (issue #196 3/3) — sizing 直後 / bucket gate 直前で適用。
+      //   - critical (sizeScale === 0): BUY 全 reject
+      //   - warning (0 < sizeScale < 1): qty = floor(qty * sizeScale / lot) * lot
+      //   - normal (sizeScale === 1): no-op
+      // SELL は VIX 関係なく通すため、ここで scaling しても OK (BUY 経路だけ)。
+      // sizing 後 / bucket 前に置く理由:
+      //   - 縮小後の notional で bucket cap を判定したい (= over-block を避ける)
+      //   - 同時に VIX critical の reject は bucket 計算前に確定させたい (前段判定)
+      let scaledQuantity = sizing.quantity
+      if (options.vixDecision) {
+        if (options.vixDecision.sizeScale === 0) {
+          // critical: BUY 全 reject。decision.reason をそのまま乗せて操作者に
+          // 「VIX で止めた」を明示する (localizeReason が日本語化)。
+          const reason = `risk: ${options.vixDecision.reason}`
+          summary.rejected.push({ symbol: upper, reason })
+          await emitDecision({
+            symbol: upper,
+            decision: 'REJECT',
+            reason,
+            price: indicators.price,
+            indicatorsJson: JSON.stringify(indicators),
+            trace: appendTrace(
+              signal.trace,
+              traceStep('risk.vix_regime', false, options.vixDecision.vix ?? null, '<=', null, options.vixDecision.reason),
+            ),
+          })
+          continue
+        }
+        if (options.vixDecision.sizeScale < 1) {
+          // warning: qty を `floor(qty * scale / lot) * lot` で lot に揃える。
+          // lot=1 の US 株は単純な floor、lot=100 の JP 株は単元未満で 0 になり得る。
+          // 結果が 0 になった場合は次の `scaledQuantity <= 0` reject で拾う。
+          const lot = options.lotSize ?? 1
+          const rawScaled = sizing.quantity * options.vixDecision.sizeScale
+          scaledQuantity = lot > 1
+            ? Math.floor(rawScaled / lot) * lot
+            : Math.floor(rawScaled)
+          if (scaledQuantity <= 0) {
+            const reason = `risk: ${options.vixDecision.reason} (qty rounded to 0, lot=${lot})`
+            summary.rejected.push({ symbol: upper, reason })
+            await emitDecision({
+              symbol: upper,
+              decision: 'REJECT',
+              reason,
+              price: indicators.price,
+              indicatorsJson: JSON.stringify(indicators),
+              trace: appendTrace(
+                signal.trace,
+                traceStep(
+                  'risk.vix_regime',
+                  false,
+                  scaledQuantity,
+                  '>',
+                  0,
+                  `${options.vixDecision.reason}; qty 0 after lot round`,
+                ),
+              ),
+            })
+            continue
+          }
+        }
+      }
       if (!Number.isFinite(indicators.price) || indicators.price <= 0) {
         const reason = `invalid price: ${indicators.price}`
         summary.rejected.push({ symbol: upper, reason })
@@ -403,9 +484,9 @@ export async function runPullbackScheduler(
         })
         continue
       }
-      const notional = sizing.quantity * indicators.price
+      const notional = scaledQuantity * indicators.price
       if (!Number.isFinite(notional) || notional <= 0) {
-        const reason = `invalid notional: ${notional} (qty=${sizing.quantity}, price=${indicators.price})`
+        const reason = `invalid notional: ${notional} (qty=${scaledQuantity}, price=${indicators.price})`
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
@@ -442,7 +523,7 @@ export async function runPullbackScheduler(
       if (bucket && bucketDecision.newExposure !== undefined) {
         pendingBucketUpdate = { bucket, newExposure: bucketDecision.newExposure }
       }
-      intent = buildIntent(upper, 'BUY', sizing.quantity, indicators.price)
+      intent = buildIntent(upper, 'BUY', scaledQuantity, indicators.price)
     } else {
       // SELL: close the full open position.
       if (state.position === null) {
@@ -850,6 +931,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.earnings_calendar': '決算日カレンダーゲート',
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
+  'risk.vix_regime': 'VIX レジーム判定',
   'broker.submit': '証券会社への発注送信',
 }
 

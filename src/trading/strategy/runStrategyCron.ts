@@ -28,6 +28,11 @@ import {
   createMacroEventCalendarDb,
   createMacroEventCalendarRepo,
 } from '../../infrastructure/calendar/macroEventCalendarRepo'
+import {
+  evaluateVixRegime,
+  type VixRegimeFilterDecision,
+} from '../risk/vixRegimeFilter'
+import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -94,6 +99,11 @@ export interface StrategyCronAnalysis {
     scale: number
     drawdown: number
   }
+  /**
+   * VIX regime decision (issue #196 3/3)。`^VIX` の最新値から導出。
+   * cron tick で一度だけ算出し、両 currency run に同じ decision を渡す。
+   */
+  vix?: VixRegimeFilterDecision
   runs: Array<{
     currency: SymbolCurrency
     equity: number
@@ -140,7 +150,7 @@ export async function runStrategyCron(
   })
 
   const [global, universe] = await Promise.all([
-    loadGlobalConfigFrom(env),
+    loadGlobalConfigFrom(env, options.requestId),
     loadSymbolUniverse(env),
   ])
 
@@ -435,9 +445,35 @@ export async function runStrategyCron(
     )
   }
 
+  // VIX regime filter (issue #196 3/3)。`^VIX` daily の最新 close を 1 本だけ
+  // 取得し、`evaluateVixRegime` で regime / sizeScale を決める。fetch 失敗は
+  // fail-open (= normal fallback)。POC 段階で fail-closed BUY 全停止は厳しい。
+  // `^VIX` は free / no-auth で Yahoo `chart` endpoint がそのまま使える。
+  const vixDecision = await loadVixDecision(barClient, global, options.requestId)
+  analysis = { ...analysis, vix: vixDecision }
+  // Regime 遷移 (normal → warning, warning → critical 等) を STATE_CHANGE 通知。
+  // 同 regime の連続 tick では emit しない (snapshot table で dedup)。
+  await detectAndNotifyVixRegimeChange({
+    db: env.DB,
+    notifier,
+    current: vixDecision,
+    requestId: options.requestId,
+  }).catch((err) => {
+    console.warn(
+      JSON.stringify({
+        event: 'vix_regime_change_detect_failed',
+        requestId: options.requestId,
+        message: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  })
+
   // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
   // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
-  const summary = emptySummary()
+  // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
+  // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
+  // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
+  const summary: PullbackRunSummary = { ...emptySummary(), vix: vixDecision }
   const runs: Array<{ currency: SymbolCurrency; equity: number; lotSize: number; symbols: string[] }> = []
   if (byCurrency.USD.length > 0) {
     runs.push({
@@ -524,6 +560,10 @@ export async function runStrategyCron(
             },
           }
         : {}),
+      // VIX regime filter (issue #196 3/3)。critical で BUY 全停止、warning で
+      // size を縮小、normal は no-op。両 currency run に同じ decision を渡す
+      // (`^VIX` は global indicator なので per-currency に変える意味はない)。
+      vixDecision,
       onDecision: (record) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
@@ -673,6 +713,54 @@ async function isEarningsCalendarReady(db: D1Database): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * `^VIX` の最新 close を取って `evaluateVixRegime` に流し、size scaling 用
+ * decision を返す (issue #196 3/3)。
+ *
+ * fail-open: VIX fetch / parse 失敗時は `null` を渡して `regime: 'normal'` /
+ * `sizeScale: 1.0` (= 通常運用) に倒す。POC 段階では VIX は part-of-the-system
+ * で必須ではなく、fetch 失敗 = BUY 全停止は副作用が大きすぎる。warning ログ
+ * だけ吐いて続行。
+ */
+async function loadVixDecision(
+  barClient: YahooBarClient,
+  global: { vixWarningThreshold: number; vixCriticalThreshold: number; vixWarningSizeScale: number },
+  requestId: string | undefined,
+): Promise<VixRegimeFilterDecision> {
+  let vix: number | null = null
+  try {
+    // `^VIX` (CBOE Volatility Index)。Yahoo は記号付き symbol を URL encode で
+    // 受けてくれる。lookback=1 で最新 close 1 本だけ。
+    const bars = await barClient.getDailyBars('^VIX', 1)
+    const last = bars[bars.length - 1]
+    if (last && Number.isFinite(last.close) && last.close > 0) {
+      vix = last.close
+    } else {
+      console.warn(
+        JSON.stringify({
+          event: 'vix_fetch_no_bars',
+          requestId,
+          barsLength: bars.length,
+        }),
+      )
+    }
+  } catch (err) {
+    // fail-open: warning ログだけ。decision は null = normal fallback。
+    console.warn(
+      JSON.stringify({
+        event: 'vix_fetch_failed',
+        requestId,
+        message: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  }
+  return evaluateVixRegime(vix, {
+    warningThreshold: global.vixWarningThreshold,
+    criticalThreshold: global.vixCriticalThreshold,
+    warningSizeScale: global.vixWarningSizeScale,
+  })
 }
 
 /**

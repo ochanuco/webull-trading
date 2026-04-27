@@ -11,6 +11,8 @@ import {
   type LoadAlertOptions,
 } from '../infrastructure/notification/notificationEmitLog'
 import type { NotificationSeverity, NotificationEvent } from '../infrastructure/notification/Notifier'
+import { loadVixRegimeSnapshot } from '../infrastructure/notification/vixRegimeChange'
+import type { VixRegime } from '../trading/risk/vixRegimeFilter'
 import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -52,7 +54,12 @@ export const dashboard = new Hono<AppBindings>()
     }
     try {
       const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
-      return c.html(layout('ポートフォリオ', portfolioBody(portfolio)))
+      // VIX regime (issue #196 3/3) を D1 snapshot から読む。table 未 migration /
+      // bind 不在は null fallback (= 未知扱い、ページ自体は表示)。
+      const vixRegime = c.env.DB
+        ? await loadVixRegimeSnapshot(c.env.DB, c.get('requestId'))
+        : null
+      return c.html(layout('ポートフォリオ', portfolioBody(portfolio, vixRegime)))
     } catch (err) {
       return c.html(layout('ポートフォリオ', unavailable(messageOf(err))))
     }
@@ -71,7 +78,7 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('設定', unavailable('DB not bound')))
     }
     const [global, universe] = await Promise.all([
-      loadGlobalConfigFrom(c.env),
+      loadGlobalConfigFrom(c.env, c.get('requestId')),
       loadSymbolUniverse(c.env),
     ])
     return c.html(layout('設定', configBody(global, universe)))
@@ -115,7 +122,7 @@ export const dashboard = new Hono<AppBindings>()
       if (tab === 'grid') {
         const [universe, global] = await Promise.all([
           loadSymbolUniverse(c.env),
-          loadGlobalConfigFrom(c.env),
+          loadGlobalConfigFrom(c.env, c.get('requestId')),
         ])
         const rules: SymbolChartRules = {
           pullbackMax: global.pullbackDefaultPullbackMax,
@@ -145,7 +152,7 @@ export const dashboard = new Hono<AppBindings>()
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(c.env),
-        loadGlobalConfigFrom(c.env),
+        loadGlobalConfigFrom(c.env, c.get('requestId')),
       ])
       const allowed = new Set(universe.allowedSymbols)
       const defaultSymbol = await pickDefaultSymbol(c.env.DB)
@@ -637,22 +644,48 @@ function portfolioBody(p: {
   tradingDisabledUntil: string | null
   lastRolledAt?: string | null
   updatedAt: string
-}): string {
+}, vixRegime: VixRegime | null): string {
   const drawdownPct =
     p.dailyStartEquity > 0 ? (p.dailyRealizedPnl / p.dailyStartEquity) * 100 : null
   const ddClass = drawdownPct === null ? 'muted' : drawdownPct >= 0 ? 'ok' : 'err'
   const kill = p.tradingDisabledUntil
   const lastRolledCell = renderLastRolledCell(p.lastRolledAt ?? null)
+  const vixCell = renderVixRegimeCell(vixRegime)
   return `<table>
     <tbody>
       <tr><th>当日始値資産 (dailyStartEquity)</th><td>${fmtNumber(p.dailyStartEquity, 2)}</td></tr>
       <tr><th>当日実現損益 (dailyRealizedPnl)</th><td class="${ddClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</td></tr>
       <tr><th>ドローダウン (drawdown)</th><td class="${ddClass}">${drawdownPct === null ? '—' : fmtNumber(drawdownPct, 2) + '%'}</td></tr>
       <tr><th>取引停止解除時刻 (tradingDisabledUntil)</th><td>${kill ? `<span class="warn">${esc(fmtJst(kill))}</span>` : '<span class="ok">稼働中</span>'}</td></tr>
+      <tr><th>VIX レジーム (vixRegime)</th><td>${vixCell}</td></tr>
       <tr><th>EOD ロールオーバー実行時刻 (lastRolledAt)</th><td>${lastRolledCell}</td></tr>
       <tr><th>更新時刻 (updatedAt)</th><td class="muted">${esc(fmtJst(p.updatedAt))}</td></tr>
     </tbody>
   </table>`
+}
+
+/**
+ * VIX regime snapshot を bage 風に表示 (issue #196 3/3)。
+ *
+ *   - normal:   緑 (size 1.0、通常運用)
+ *   - warning:  黄 (size 0.5、新規 BUY 縮小)
+ *   - critical: 赤 (新規 BUY 全停止 / SELL は通常)
+ *   - null:     灰 (snapshot 未生成、初回 cron tick 前 or DB 未配線)
+ *
+ * VIX 値そのものは snapshot table に持たないので regime ラベルのみ表示。
+ * 値が必要なら strategy_decision_log の VIX reject reason を見る運用 (POC)。
+ */
+export function renderVixRegimeCell(regime: VixRegime | null): string {
+  if (regime === null) {
+    return `<span class="muted">— (cron 未到達 or DB 未配線、fail-open で通常運用)</span>`
+  }
+  if (regime === 'critical') {
+    return `<span class="err">critical — 新規買い停止 (売却は通常)</span>`
+  }
+  if (regime === 'warning') {
+    return `<span class="warn">warning — 新規買いを縮小 (size scale 適用)</span>`
+  }
+  return `<span class="ok">normal — 通常運用</span>`
 }
 
 /**
@@ -920,6 +953,18 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   bucket_exposure_pct: {
     label: '同グループ建玉上限率 (比率)',
     detail: '同じグループ (例: 半導体 ETF) の合計をこの率まで保有可。0.30 = 総資本の 30%。大きくすると集中投資↑、小さいと分散↑。',
+  },
+  vix_warning_threshold: {
+    label: 'VIX 警戒閾値',
+    detail: '恐怖指数 (VIX) がこの値を超えたら新規買いの数量を縮小。25 が標準。下げると早めに用心、上げると VIX 高でも普段通り。',
+  },
+  vix_critical_threshold: {
+    label: 'VIX 緊急閾値',
+    detail: '恐怖指数 (VIX) がこの値を超えたら新規買いを全停止 (売却は通常通り)。30 が標準。下げると守り重視、上げると荒れ相場でも買いに行く。',
+  },
+  vix_warning_size_scale: {
+    label: 'VIX 警戒時の建玉縮小率 (比率)',
+    detail: 'VIX 警戒時 (warning ≤ VIX < critical) の発注数量倍率。0.5 = 半分に縮小。1.0 で縮小なし、0 で停止と同義。',
   },
 }
 

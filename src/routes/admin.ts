@@ -113,7 +113,7 @@ export const admin = new Hono<AppBindings>()
       mustBePositive: true,
     })
 
-    const global = await loadGlobalConfigFrom(c.env)
+    const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
     const rule: SymbolRule = {
       stopPct: readOptionalNumber(
         c.req.query('stopPct'),

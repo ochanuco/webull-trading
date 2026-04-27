@@ -25,27 +25,29 @@ interface TradeRequest {
 export const trade = new Hono<AppBindings>()
   .post('/decide', async (c) => {
     const request = await parseTradeRequest(c.req.json())
+    const requestId = c.get('requestId')
     const [universe, global] = await Promise.all([
       loadSymbolUniverse(c.env),
-      loadGlobalConfigFrom(c.env),
+      loadGlobalConfigFrom(c.env, requestId),
     ])
     const service = createTradingService(request, c.env, universe, global)
     return c.json(
       service.decide(request, toTradingConfig(request, universe, global), {
-        requestId: c.get('requestId'),
+        requestId,
       }),
     )
   })
   .post('/execute', async (c) => {
     const request = await parseTradeRequest(c.req.json())
+    const requestId = c.get('requestId')
     const [universe, global] = await Promise.all([
       loadSymbolUniverse(c.env),
-      loadGlobalConfigFrom(c.env),
+      loadGlobalConfigFrom(c.env, requestId),
     ])
     const service = createTradingService(request, c.env, universe, global)
     return c.json(
       await service.executeTrade(request, toTradingConfig(request, universe, global), {
-        requestId: c.get('requestId'),
+        requestId,
       }),
     )
   })

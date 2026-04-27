@@ -36,6 +36,9 @@ export function makeGlobalConfigSnapshot(
     riskDdHalfThreshold: -0.05,
     riskDdHaltThreshold: -0.10,
     bucketExposurePct: 0.30,
+    vixWarningThreshold: 25.0,
+    vixCriticalThreshold: 30.0,
+    vixWarningSizeScale: 0.5,
     source: 'd1',
     ...overrides,
   }

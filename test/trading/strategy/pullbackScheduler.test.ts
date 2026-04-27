@@ -784,3 +784,202 @@ describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
     expect(reject?.reason).not.toContain('macro_event_gate')
   })
 })
+
+describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
+  // Probe で「VIX 無し時の qty / notional」を確定させ、warning 時の half qty
+  // を厳密に比較できるようにする。uptrendBars + equity 100k は決定的。
+  async function probeBaseQty(): Promise<number> {
+    const probe = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      now: () => now,
+    })
+    return probe.decisions[0]?.order?.quantity ?? 0
+  }
+
+  it('blocks all BUY when VIX is critical (sizeScale = 0)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'critical',
+        sizeScale: 0,
+        reason: 'vix_critical: 35.10 (block)',
+        vix: 35.1,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('risk: vix_critical')
+    expect(summary.vix?.regime).toBe('critical')
+  })
+
+  it('halves BUY quantity in warning regime (sizeScale = 0.5)', async () => {
+    const baseQty = await probeBaseQty()
+    expect(baseQty).toBeGreaterThan(1) // half になっても 1 以上残る前提
+
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'warning',
+        sizeScale: 0.5,
+        reason: 'vix_warning: 27.30 (size x0.5)',
+        vix: 27.3,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const intent = execution.calls[0] as { side: string; quantity: number }
+    expect(intent.side).toBe('BUY')
+    // floor(baseQty * 0.5)
+    expect(intent.quantity).toBe(Math.floor(baseQty * 0.5))
+    expect(summary.vix?.regime).toBe('warning')
+  })
+
+  it('rejects BUY with VIX reason when warning sizeScale rounds qty below 1 share', async () => {
+    // sizeScale が極端に小さい (0.001) 場合、qty * 0.001 → floor で 0 になる。
+    // 「sizing は通ったが VIX 縮小で 0 になった」経路を確実に取りたいので、
+    // 通常 sizing が通る入力で sizeScale だけ極端にする (実運用では現れない値だが
+    // 境界条件として実装の正しさを担保する)。
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'warning',
+        sizeScale: 0.001,
+        reason: 'vix_warning: 27.30 (size x0.001)',
+        vix: 27.3,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('vix_warning')
+    expect(reject?.reason).toContain('qty rounded to 0')
+  })
+
+  it('does not modify BUY in normal regime (sizeScale = 1)', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'normal',
+        sizeScale: 1.0,
+        reason: 'vix_normal: 18.50',
+        vix: 18.5,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(baseQty)
+    expect(summary.vix?.regime).toBe('normal')
+  })
+
+  it('treats unavailable VIX (fail-open) as normal', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'normal',
+        sizeScale: 1.0,
+        reason: 'vix_unavailable_fallback_normal',
+        vix: null,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(baseQty)
+    expect(summary.vix?.vix).toBeNull()
+  })
+
+  it('skips the VIX filter entirely when vixDecision is omitted (back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(summary.vix).toBeUndefined()
+  })
+
+  it('does not block SELL even when VIX is critical', async () => {
+    // existing position から SELL 経路を作る。SELL は VIX 関係なく通る前提。
+    // (uptrendBars の最後 4% pullback は BUY ではなく実際には HOLD/BUY 判定なので、
+    // SELL を出すには time stop / take profit / stop loss のいずれかが要る。
+    // 簡略のため take-profit を踏ませる: avgPrice を低く置いて pnl を +10% にする)
+    const sellingState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 100, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: sellingState }),
+      execution,
+      vixDecision: {
+        regime: 'critical',
+        sizeScale: 0,
+        reason: 'vix_critical: 35.10 (block)',
+        vix: 35.1,
+      },
+      now: () => now,
+    })
+    // BUY は確実に来ない。
+    expect(summary.buys).toBe(0)
+    // SELL が確かに通っていることを証明 (CodeRabbit #216 4th):
+    //   - summary.sells === 1
+    //   - execution に SELL intent が渡っている
+    //   - decision log にも SELL が残っている
+    // これで「critical でも SELL は本当に通る」passthrough を実証する
+    // (HOLD で素通りしても通る test だと、回帰検知ができない)。
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(execution.calls[0]).toMatchObject({ side: 'SELL' })
+    const sellDecision = summary.decisions.find((d) => d.decision === 'SELL')
+    expect(sellDecision).toBeDefined()
+    expect(sellDecision?.order?.side).toBe('SELL')
+    // vix_critical 起因の REJECT が混ざっていないこと。
+    const vixReject = summary.decisions.find(
+      (d) => d.decision === 'REJECT' && (d.reason ?? '').includes('vix_critical'),
+    )
+    expect(vixReject).toBeUndefined()
+  })
+})
