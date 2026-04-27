@@ -130,7 +130,7 @@ export function brokerErrorForStatus(
 
 /**
  * Webull error code surfaced when a SELL request's quantity exceeds the
- * account's `quantity_available`. Returned with HTTP 417 alongside the
+ * account's `available_quantity`. Returned with HTTP 417 alongside the
  * code in the response body. Hard-coded as a string (not enum) because
  * the broker treats it as a versionless protocol constant.
  */

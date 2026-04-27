@@ -103,18 +103,42 @@ export class WebullHttpClient {
   /**
    * Fetch the account's open positions. Used by the SELL_QTY_EXCEED fallback
    * in the cron path: when Webull rejects a SELL because the requested qty
-   * is greater than `quantity_available` (e.g. DO state drifted above broker
+   * is greater than `available_quantity` (e.g. DO state drifted above broker
    * truth), the scheduler re-fetches available qty here and retries the
    * SELL with the broker-side ground truth.
    *
-   * TODO(#21): the live UAT endpoint name is not yet confirmed — using
-   * `/openapi/account/positions/get` based on Webull OpenAPI naming
-   * conventions. Update once the live response shape is verified.
+   * Endpoint and field names follow the official Webull OpenAPI reference:
+   * https://developer.webull.com/apis/docs/reference/account-position/
    */
   async getPositions(): Promise<WebullPositionDto[]> {
-    return this.request<WebullPositionDto[]>('GET', '/openapi/account/positions/get', {
+    return this.request<WebullPositionDto[]>('GET', '/openapi/account/positions', {
       query: { account_id: this.requireAccountId() },
     })
+  }
+
+  /**
+   * Resolve the broker-side `available_quantity` for a single symbol. Wraps
+   * `getPositions()` and keeps the Webull DTO interpretation (case-insensitive
+   * symbol match, `available_quantity` parsing) inside the infrastructure
+   * layer so the application-side scheduler only sees a `number | null`.
+   *
+   * - Position match found AND `available_quantity` parses to a finite number
+   *   (including 0) → that number is returned.
+   * - Position match found but `available_quantity` is missing / non-numeric
+   *   → `null`.
+   * - No matching symbol on the account → `null`.
+   * - `getPositions()` throws → the error is rethrown (caller decides how to
+   *   handle the SELL fallback failure).
+   */
+  async getAvailableQtyForSymbol(symbol: string): Promise<number | null> {
+    const target = symbol.toUpperCase()
+    const positions = await this.getPositions()
+    const match = positions.find((p) => (p.symbol ?? '').toUpperCase() === target)
+    if (!match) return null
+    const raw = match.available_quantity
+    if (raw === undefined || raw === null || raw === '') return null
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : null
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {

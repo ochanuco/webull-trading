@@ -42,15 +42,12 @@ export interface WebullPlaceOrderResponseDto {
 }
 
 /**
- * One row of the Webull `account/positions/get` response. Field names are
- * the Webull canonical snake_case + numeric-as-string convention used
- * throughout the OpenAPI surface (mapper layer parses the strings to
- * numbers before they leave infrastructure).
- *
- * TODO(#21): the live JP UAT tenant has not yet been probed for this
- * endpoint — the field set is inferred from `WebullSubscriptionDto` /
- * `WebullOrderDetailDto` conventions. Treat shape as "best effort" until
- * confirmed against a real response. See follow-up issue #21.
+ * One row of the Webull `/openapi/account/positions` response. Field names
+ * follow the official Webull OpenAPI reference
+ * (https://developer.webull.com/apis/docs/reference/account-position/) —
+ * canonical snake_case + numeric-as-string convention used throughout the
+ * OpenAPI surface (mapper layer parses the strings to numbers before they
+ * leave infrastructure).
  */
 export interface WebullPositionDto {
   /** Ticker. Webull returns it as the canonical form (e.g. `SOXL`, `1570`). */
@@ -58,8 +55,9 @@ export interface WebullPositionDto {
   /** Total holding (informational). */
   quantity_total?: string
   /** Available-to-sell holding. May be < `quantity_total` when shares are
-   *  reserved by an in-flight SELL. SELL fallback uses **this** value. */
-  quantity_available?: string
+   *  reserved by an in-flight SELL. SELL fallback uses **this** value.
+   *  Webull canonical field name (per official reference docs). */
+  available_quantity?: string
   /** Average cost basis (informational; not used by SELL fallback). */
   avg_cost?: string
   /** Currency on the position. POC: USD/JPY only. */

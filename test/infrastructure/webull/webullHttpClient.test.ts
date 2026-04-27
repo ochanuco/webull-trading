@@ -402,12 +402,12 @@ describe('WebullHttpClient', () => {
     expect(bodyPart.length).toBeLessThanOrEqual(1000 + '...[truncated]'.length)
   })
 
-  it('getPositions hits /openapi/account/positions/get and returns the array', async () => {
+  it('getPositions hits /openapi/account/positions and returns the array', async () => {
     const positions = [
       {
         symbol: 'SOXL',
         quantity_total: '8',
-        quantity_available: '4',
+        available_quantity: '4',
         avg_cost: '124.95',
         currency: 'USD',
       },
@@ -420,7 +420,7 @@ describe('WebullHttpClient', () => {
     expect(result).toEqual(positions)
     const [url, init] = fetchMock.mock.calls[0]!
     const u = new URL(String(url))
-    expect(u.pathname).toBe('/openapi/account/positions/get')
+    expect(u.pathname).toBe('/openapi/account/positions')
     expect(u.searchParams.get('account_id')).toBe('acct-1')
     expect(init?.method).toBe('GET')
     expect(init?.body).toBeUndefined()
@@ -436,6 +436,55 @@ describe('WebullHttpClient', () => {
     })
     await expect(client.getPositions()).rejects.toThrow(/Missing Webull account ID/)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('getAvailableQtyForSymbol returns the parsed quantity when the symbol is held', async () => {
+    const positions = [
+      { symbol: 'SOXL', available_quantity: '4', quantity_total: '8' },
+      { symbol: 'AAPL', available_quantity: '10', quantity_total: '10' },
+    ]
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(positions), { status: 200 }))
+    const client = createClient(fetchMock)
+    // case-insensitive match (broker returns canonical SOXL, caller may pass soxl)
+    await expect(client.getAvailableQtyForSymbol('soxl')).resolves.toBe(4)
+  })
+
+  it('getAvailableQtyForSymbol returns null when available_quantity is non-numeric', async () => {
+    const positions = [{ symbol: 'SOXL', available_quantity: 'NaN' }]
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(positions), { status: 200 }))
+    const client = createClient(fetchMock)
+    await expect(client.getAvailableQtyForSymbol('SOXL')).resolves.toBeNull()
+  })
+
+  it('getAvailableQtyForSymbol returns 0 (not null) when available_quantity is "0"', async () => {
+    const positions = [{ symbol: 'SOXL', available_quantity: '0' }]
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(positions), { status: 200 }))
+    const client = createClient(fetchMock)
+    await expect(client.getAvailableQtyForSymbol('SOXL')).resolves.toBe(0)
+  })
+
+  it('getAvailableQtyForSymbol returns null when the symbol is not on the account', async () => {
+    const positions = [{ symbol: 'AAPL', available_quantity: '10' }]
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(positions), { status: 200 }))
+    const client = createClient(fetchMock)
+    await expect(client.getAvailableQtyForSymbol('SOXL')).resolves.toBeNull()
+  })
+
+  it('getAvailableQtyForSymbol rethrows when getPositions fails', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('boom', { status: 500 }))
+    const client = createClient(fetchMock)
+    // 500 retries 3x then surfaces as BrokerServerError — must propagate to caller.
+    await expect(client.getAvailableQtyForSymbol('SOXL')).rejects.toThrow(BrokerServerError)
   })
 
   it('listSubscriptions hits /app/subscriptions/list and returns the array', async () => {

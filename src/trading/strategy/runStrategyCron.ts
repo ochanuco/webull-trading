@@ -544,23 +544,16 @@ export async function runStrategyCron(
       },
       // SELL_QTY_EXCEED fallback (#215 follow-up)。live Webull 経路
       // (DRY_RUN=false) の時だけ注入する。MockExecution 経路は 417 を
-      // 起こさないので fallback は dead code。getPositions() の例外は
-      // resolver 側で握り潰さず、scheduler 側 (`tryFallbackSell`) が
+      // 起こさないので fallback は dead code。Webull DTO の解釈
+      // (symbol 比較 / available_quantity の数値化) は infrastructure 層
+      // (`WebullHttpClient.getAvailableQtyForSymbol`) に閉じている。
+      // resolver 側で例外を握り潰さず、scheduler 側 (`tryFallbackSell`) が
       // null fallback して元の SELL_QTY_EXCEED エラーを再 throw する。
       ...(liveWebullClient
         ? {
             sellFallback: {
-              async getAvailableQty(symbol: string): Promise<number | null> {
-                const positions = await liveWebullClient.getPositions()
-                const target = positions.find(
-                  (p) => (p.symbol ?? '').toUpperCase() === symbol.toUpperCase(),
-                )
-                if (!target) return null
-                const raw = target.quantity_available
-                if (raw === undefined || raw === null || raw === '') return null
-                const parsed = Number(raw)
-                return Number.isFinite(parsed) ? parsed : null
-              },
+              getAvailableQty: (symbol: string) =>
+                liveWebullClient.getAvailableQtyForSymbol(symbol),
             },
           }
         : {}),
