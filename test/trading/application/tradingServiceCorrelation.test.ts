@@ -42,6 +42,9 @@ function makeStore(statesBySymbol: Record<string, SymbolState>): PositionStore {
     async seedSettledCash(symbol) {
       return emptySymbolState(symbol, () => now)
     },
+    async overridePosition(symbol) {
+      return emptySymbolState(symbol, () => now)
+    },
   }
 }
 

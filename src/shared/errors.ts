@@ -128,6 +128,30 @@ export function brokerErrorForStatus(
   return new BrokerRequestError(message, operation, opts)
 }
 
+/**
+ * Webull error code surfaced when a SELL request's quantity exceeds the
+ * account's `available_quantity`. Returned with HTTP 417 alongside the
+ * code in the response body. Hard-coded as a string (not enum) because
+ * the broker treats it as a versionless protocol constant.
+ */
+export const WEBULL_SELL_QTY_EXCEED_CODE = 'OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY'
+
+/**
+ * True when the error is the Webull-specific "SELL qty > available qty"
+ * 417, used by the SELL fallback path in `pullbackScheduler` to decide
+ * whether to refetch the broker's available qty and retry.
+ *
+ * Detection is conservative: status must be 417 AND the error message
+ * (which includes the response body snippet, see `WebullHttpClient`) must
+ * contain `OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY`. Other 417s
+ * (unlikely but possible) fall through to the regular error path.
+ */
+export function isSellQtyExceedError(error: unknown): error is BrokerClientError {
+  if (!(error instanceof BrokerClientError)) return false
+  if (error.brokerStatus !== 417) return false
+  return error.message.includes(WEBULL_SELL_QTY_EXCEED_CODE)
+}
+
 // Planned but deferred per issue #1 §13:
 // RiskRejectedError, BrokerResponseError, ConfigurationError,
 // TradeEventIngestError, BridgeConnectionError.

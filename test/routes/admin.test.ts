@@ -220,6 +220,228 @@ describe('GET /admin/orders/repair-status', () => {
   })
 })
 
+describe('POST /admin/symbol-state/:symbol/override-position', () => {
+  type OverrideCall = {
+    symbol: string
+    args: {
+      qty: number
+      avgPrice: number
+      openedAt: string | null
+      reason: string
+      requestId?: string | null
+    }
+  }
+  function fakeOverrideNamespace(captured: { calls: OverrideCall[] }) {
+    const stub = {
+      async overridePosition(symbol: string, args: OverrideCall['args']) {
+        captured.calls.push({ symbol, args })
+        return {
+          symbol,
+          position:
+            args.qty > 0
+              ? {
+                  qty: args.qty,
+                  avgPrice: args.avgPrice,
+                  openedAt: args.openedAt ?? '2026-04-25T00:00:00.000Z',
+                }
+              : null,
+          pendingOrder: null,
+          lastSignalAt: null,
+          cooldownUntil: null,
+          settledCash: 0,
+          pendingSettlement: [],
+          lastExecutedPrice: null,
+          lastQuote: null,
+          updatedAt: '2026-04-25T00:00:00.000Z',
+        }
+      },
+    }
+    return {
+      idFromName: () => 'id',
+      get: () => stub,
+    } as unknown
+  }
+
+  it('401s without Basic Auth', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        body: JSON.stringify({ qty: 4, avgPrice: 124.95, reason: 'manual' }),
+      },
+      baseEnv,
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('400s when SYMBOL_STATE binding is missing', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ qty: 4, avgPrice: 124.95, reason: 'manual' }),
+      },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('400s when reason is missing', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ qty: 4, avgPrice: 124.95 }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(400)
+    expect(captured.calls).toEqual([])
+  })
+
+  it('400s when qty>0 but avgPrice<=0', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ qty: 4, avgPrice: 0, reason: 'manual' }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(400)
+    expect(captured.calls).toEqual([])
+  })
+
+  it('400s on negative qty', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ qty: -1, avgPrice: 124.95, reason: 'manual' }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(400)
+    expect(captured.calls).toEqual([])
+  })
+
+  it('400s on unparseable openedAt', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          qty: 4,
+          avgPrice: 124.95,
+          openedAt: 'not-a-date',
+          reason: 'manual',
+        }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(400)
+    expect(captured.calls).toEqual([])
+  })
+
+  it('200s and forwards qty=0 close (avgPrice / openedAt ignored)', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/soxl/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          qty: 0,
+          avgPrice: 124.95, // tolerated, ignored on close
+          reason: 'force close',
+        }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { symbol: string; position: unknown }
+    expect(body.symbol).toBe('SOXL')
+    expect(body.position).toBeNull()
+    expect(captured.calls).toHaveLength(1)
+    expect(captured.calls[0]?.symbol).toBe('SOXL')
+    expect(captured.calls[0]?.args.qty).toBe(0)
+    expect(captured.calls[0]?.args.reason).toBe('force close')
+    expect(captured.calls[0]?.args.requestId).toBeTypeOf('string')
+  })
+
+  it('200s and forwards a full override', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/soxl/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          qty: 4,
+          avgPrice: 124.95,
+          openedAt: '2026-04-24T15:30:38.000Z',
+          reason: 'manual reconcile after PR #215 corrupted state',
+        }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      symbol: string
+      position: { qty: number; avgPrice: number; openedAt: string }
+    }
+    expect(body.symbol).toBe('SOXL')
+    expect(body.position).toEqual({
+      qty: 4,
+      avgPrice: 124.95,
+      openedAt: '2026-04-24T15:30:38.000Z',
+    })
+    expect(captured.calls).toHaveLength(1)
+    const call = captured.calls[0]!
+    expect(call.symbol).toBe('SOXL')
+    expect(call.args).toMatchObject({
+      qty: 4,
+      avgPrice: 124.95,
+      openedAt: '2026-04-24T15:30:38.000Z',
+      reason: 'manual reconcile after PR #215 corrupted state',
+    })
+    expect(call.args.requestId).toBeTypeOf('string')
+  })
+
+  it('400s when reason is empty string', async () => {
+    const captured = { calls: [] as OverrideCall[] }
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-state/SOXL/override-position',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ qty: 4, avgPrice: 124.95, reason: '   ' }),
+      },
+      { ...baseEnv, SYMBOL_STATE: fakeOverrideNamespace(captured) },
+    )
+    expect(res.status).toBe(400)
+    expect(captured.calls).toEqual([])
+  })
+})
+
 describe('POST /admin/symbols/:symbol/clear-cooldown', () => {
   function fakeCooldownNamespace(captured: { calls: Array<{ symbol: string; untilIso: string }> }) {
     const stub = {

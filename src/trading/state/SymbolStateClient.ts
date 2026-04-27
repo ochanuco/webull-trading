@@ -55,4 +55,17 @@ export class SymbolStateClient implements PositionStore {
   seedSettledCash(symbol: string, amount: number): Promise<SymbolState> {
     return this.stub(symbol).seedSettledCash(symbol, amount)
   }
+
+  overridePosition(
+    symbol: string,
+    args: {
+      qty: number
+      avgPrice: number
+      openedAt: string | null
+      reason: string
+      requestId?: string | null
+    },
+  ): Promise<SymbolState> {
+    return this.stub(symbol).overridePosition(symbol, args)
+  }
 }

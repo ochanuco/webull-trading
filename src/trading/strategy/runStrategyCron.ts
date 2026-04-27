@@ -407,9 +407,12 @@ export async function runStrategyCron(
   const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
-  const execution = global.dryRun
-    ? new MockExecution()
-    : new WebullExecution(createWebullHttpClient(env))
+  // Single Webull client instance shared between WebullExecution (order
+  // submit) and the SELL_QTY_EXCEED fallback (positions read). DRY_RUN
+  // path constructs nothing live — fallback resolver is also undefined so
+  // MockExecution can never trip the fallback retry path.
+  const liveWebullClient = global.dryRun ? null : createWebullHttpClient(env)
+  const execution = liveWebullClient ? new WebullExecution(liveWebullClient) : new MockExecution()
   // notifier は関数冒頭で組み立て済み (#141)。BUY/SELL emit / per-symbol
   // bar fetch error / broker submit error は scheduler 内で注入された
   // notifier を使う (#199 経路のまま)。
@@ -539,6 +542,21 @@ export async function runStrategyCron(
         staleQuoteMs: global.staleQuoteMs,
         gapRejectPct: global.gapRejectPct,
       },
+      // SELL_QTY_EXCEED fallback (#215 follow-up)。live Webull 経路
+      // (DRY_RUN=false) の時だけ注入する。MockExecution 経路は 417 を
+      // 起こさないので fallback は dead code。Webull DTO の解釈
+      // (symbol 比較 / available_quantity の数値化) は infrastructure 層
+      // (`WebullHttpClient.getAvailableQtyForSymbol`) に閉じている。
+      // resolver 側で例外を握り潰さず、scheduler 側 (`tryFallbackSell`) が
+      // null fallback して元の SELL_QTY_EXCEED エラーを再 throw する。
+      ...(liveWebullClient
+        ? {
+            sellFallback: {
+              getAvailableQty: (symbol: string) =>
+                liveWebullClient.getAvailableQtyForSymbol(symbol),
+            },
+          }
+        : {}),
       // Earnings calendar gate (issue #196 1/3)。env.DB が無い OR table 未
       // migrate なら skip (POC 後方互換 / CodeRabbit #196 review)。
       // freezeBusinessDays は POC 段階では default 1 固定。将来 global_config に

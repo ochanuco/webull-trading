@@ -30,6 +30,47 @@ import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendS
  * and should only be called for initial seeding or reconciliation.
  */
 export const admin = new Hono<AppBindings>()
+  /**
+   * Operator override for a corrupted `position`. Used when a past reconcile
+   * race left DO state with a qty above broker truth (#215) — the regular
+   * recordFill path can't undo it because there is no fill to apply, so the
+   * operator must reset directly. POC blast radius: requires Basic Auth and
+   * an explicit `reason` string for the audit log.
+   *
+   * Body: `{ qty: number, avgPrice: number, openedAt?: string | null, reason: string }`
+   *   - `qty=0` → close the position (avgPrice / openedAt ignored)
+   *   - `qty>0` → write `{ qty, avgPrice, openedAt: openedAt ?? now() }`
+   *
+   * Side effects: emits one structured `symbol_state_position_override`
+   * audit log with before/after/reason/requestId. Does NOT touch
+   * `pendingOrder` / `cooldownUntil` / `settledCash`.
+   */
+  .post('/symbol-state/:symbol/override-position', async (c) => {
+    const symbol = c.req.param('symbol').trim().toUpperCase()
+    if (symbol.length === 0) {
+      throw new ValidationError('symbol must be a non-empty path param', { field: 'symbol' })
+    }
+    if (!c.env.SYMBOL_STATE) {
+      throw new ValidationError('SYMBOL_STATE binding is not configured', { field: 'env' })
+    }
+
+    const body = (await c.req.json().catch(() => null)) as unknown
+    const args = readOverridePositionBody(body)
+
+    const client = new SymbolStateClient(c.env.SYMBOL_STATE)
+    const state = await client.overridePosition(symbol, {
+      qty: args.qty,
+      avgPrice: args.avgPrice,
+      openedAt: args.openedAt,
+      reason: args.reason,
+      requestId: c.get('requestId'),
+    })
+    return c.json({
+      symbol,
+      position: state.position,
+      updatedAt: state.updatedAt,
+    })
+  })
   .post('/symbols/:symbol/seed-cash', async (c) => {
     const symbol = c.req.param('symbol').trim().toUpperCase()
     if (symbol.length === 0) {
@@ -598,6 +639,79 @@ function parseEarningsSeedRow(raw: unknown, idx: number): EarningsCalendarSeedIn
     notes = obj.notes
   }
   return { symbol: symbol.toUpperCase(), earningsDate, notes }
+}
+
+/**
+ * Parse the `/admin/symbol-state/:symbol/override-position` body. Strict so
+ * an operator typo in qty / avgPrice / reason gets a 400 instead of silently
+ * writing a malformed position into the DO.
+ *
+ *   - `qty`: finite >= 0 (0 = close)
+ *   - `avgPrice`: finite > 0 when `qty > 0`; ignored when `qty=0` but we
+ *     still type-check to surface stray fields
+ *   - `openedAt`: ISO 8601 timestamp string OR null OR omitted (→ null)
+ *   - `reason`: required, 1..256 chars (mandatory audit context)
+ */
+function readOverridePositionBody(body: unknown): {
+  qty: number
+  avgPrice: number
+  openedAt: string | null
+  reason: string
+} {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ValidationError('body must be a JSON object', { field: 'body' })
+  }
+  const raw = body as {
+    qty?: unknown
+    avgPrice?: unknown
+    openedAt?: unknown
+    reason?: unknown
+  }
+  const qty = raw.qty
+  if (typeof qty !== 'number' || !Number.isFinite(qty) || qty < 0) {
+    throw new ValidationError('qty must be a finite number >= 0', { field: 'qty' })
+  }
+  const avgPriceRaw = raw.avgPrice
+  let avgPrice = 0
+  if (qty > 0) {
+    if (typeof avgPriceRaw !== 'number' || !Number.isFinite(avgPriceRaw) || avgPriceRaw <= 0) {
+      throw new ValidationError('avgPrice must be a finite number > 0 when qty>0', {
+        field: 'avgPrice',
+      })
+    }
+    avgPrice = avgPriceRaw
+  } else if (avgPriceRaw !== undefined && avgPriceRaw !== null) {
+    // qty=0 close: avgPrice irrelevant. Tolerate but still validate type so
+    // a stray string doesn't get silently accepted.
+    if (typeof avgPriceRaw !== 'number' || !Number.isFinite(avgPriceRaw) || avgPriceRaw < 0) {
+      throw new ValidationError('avgPrice must be a finite number >= 0 when present', {
+        field: 'avgPrice',
+      })
+    }
+  }
+  let openedAt: string | null = null
+  if (raw.openedAt !== undefined && raw.openedAt !== null) {
+    if (typeof raw.openedAt !== 'string') {
+      throw new ValidationError('openedAt must be an ISO 8601 string or null', {
+        field: 'openedAt',
+      })
+    }
+    const t = new Date(raw.openedAt).getTime()
+    if (!Number.isFinite(t)) {
+      throw new ValidationError('openedAt must be a valid ISO 8601 timestamp', {
+        field: 'openedAt',
+      })
+    }
+    openedAt = raw.openedAt
+  }
+  const reason = raw.reason
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw new ValidationError('reason must be a non-empty string', { field: 'reason' })
+  }
+  if (reason.length > 256) {
+    throw new ValidationError('reason must be <= 256 chars', { field: 'reason' })
+  }
+  return { qty, avgPrice, openedAt, reason }
 }
 
 function readAmount(body: unknown): number {

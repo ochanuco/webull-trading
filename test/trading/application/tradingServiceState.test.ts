@@ -66,6 +66,10 @@ function makeStore(initial?: SymbolState): PositionStore & { state: SymbolState;
       calls.push('seedSettledCash')
       return state
     },
+    async overridePosition() {
+      calls.push('overridePosition')
+      return state
+    },
   }
 }
 

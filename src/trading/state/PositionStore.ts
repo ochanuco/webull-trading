@@ -19,4 +19,20 @@ export interface PositionStore {
   addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState>
   setCooldown(symbol: string, untilIso: string): Promise<SymbolState>
   seedSettledCash(symbol: string, amount: number): Promise<SymbolState>
+  /**
+   * Operator-driven position override. Used to manually reconcile DO state
+   * against broker truth (e.g. corrupted `position.qty` from a past
+   * reconcile race) and from the SELL_QTY_EXCEED fallback path to force
+   * `position=null` after the fallback closes the broker-side holding.
+   */
+  overridePosition(
+    symbol: string,
+    args: {
+      qty: number
+      avgPrice: number
+      openedAt: string | null
+      reason: string
+      requestId?: string | null
+    },
+  ): Promise<SymbolState>
 }

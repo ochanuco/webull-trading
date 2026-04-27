@@ -3,6 +3,7 @@ import {
   addPendingSettlement,
   clearPendingOrder,
   lockPendingOrder,
+  overridePosition,
   recordFill,
   recordFillOnce,
   recordSignal,
@@ -114,6 +115,44 @@ export class SymbolStateDO extends DurableObject<object> {
     const state = await this.load(symbol)
     const next = seedSettledCash(state, amount, this.transitionCtx)
     await this.save(next)
+    return next
+  }
+
+  /**
+   * Operator override for a corrupted `position`. Logs a structured audit
+   * record (`event: 'symbol_state_position_override'`) with the previous
+   * and new position so the trail is recoverable from log tail. Caller is
+   * expected to be the Basic-auth-protected admin route — DO surface alone
+   * is not a security boundary.
+   */
+  async overridePosition(
+    symbol: string,
+    args: {
+      qty: number
+      avgPrice: number
+      openedAt: string | null
+      reason: string
+      requestId?: string | null
+    },
+  ): Promise<SymbolState> {
+    const state = await this.load(symbol)
+    const next = overridePosition(
+      state,
+      { qty: args.qty, avgPrice: args.avgPrice, openedAt: args.openedAt },
+      this.transitionCtx,
+    )
+    await this.save(next)
+    console.log(
+      JSON.stringify({
+        event: 'symbol_state_position_override',
+        symbol,
+        requestId: args.requestId ?? null,
+        reason: args.reason,
+        before: state.position,
+        after: next.position,
+        appliedAt: next.updatedAt,
+      }),
+    )
     return next
   }
 
