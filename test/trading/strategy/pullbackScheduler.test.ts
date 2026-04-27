@@ -962,9 +962,21 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
       },
       now: () => now,
     })
-    // SELL 経路を取れたか buys/sells/holds で判定。BUY は確実に来ない。
+    // BUY は確実に来ない。
     expect(summary.buys).toBe(0)
-    // SELL は通る (or HOLD) — どちらにせよ vix_critical reject にはならない。
+    // SELL が確かに通っていることを証明 (CodeRabbit #216 4th):
+    //   - summary.sells === 1
+    //   - execution に SELL intent が渡っている
+    //   - decision log にも SELL が残っている
+    // これで「critical でも SELL は本当に通る」passthrough を実証する
+    // (HOLD で素通りしても通る test だと、回帰検知ができない)。
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(execution.calls[0]).toMatchObject({ side: 'SELL' })
+    const sellDecision = summary.decisions.find((d) => d.decision === 'SELL')
+    expect(sellDecision).toBeDefined()
+    expect(sellDecision?.order?.side).toBe('SELL')
+    // vix_critical 起因の REJECT が混ざっていないこと。
     const vixReject = summary.decisions.find(
       (d) => d.decision === 'REJECT' && (d.reason ?? '').includes('vix_critical'),
     )

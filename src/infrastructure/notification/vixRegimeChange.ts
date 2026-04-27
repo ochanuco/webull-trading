@@ -128,6 +128,106 @@ export async function persistVixRegimeSnapshot(
 }
 
 /**
+ * Atomic compare-and-update for the VIX regime snapshot (CodeRabbit #216 4th).
+ *
+ * 同 cron tick が並行して走った場合 (e.g. cron 重複 / 手動 trigger 並行) に
+ * `loadVixRegimeSnapshot → notify → persistVixRegimeSnapshot` の 3 step が
+ * race して、両 caller が同じ previous を読み → 両方が notify → 後勝ち update、
+ * という重複通知が起きうる。これを D1 の `UPDATE ... WHERE value = old` (CAS)
+ * で原子化する。
+ *
+ * 戻り値:
+ *   - `previous`: 直前の snapshot 値 (初回は null)
+ *   - `updated`: この caller が実際に snapshot を書き換えたか
+ *
+ * caller は `updated === true && previous !== null && previous !== next` の
+ * ときだけ notify することで、race 下でも重複通知を防げる。初回 (previous=null)
+ * は updated=true でも emit しない (false alert 防止 — 既存挙動と同じ)。
+ *
+ * fail-silent: D1 が落ちたら `{ previous: null, updated: false }` を返す。
+ * 既存 `loadVixRegimeSnapshot` / `persistVixRegimeSnapshot` の signature は
+ * 温存し、新 caller (`detectAndNotifyVixRegimeChange`) のみがこの helper を
+ * 使う。
+ */
+export async function atomicallyUpdateVixRegimeSnapshot(
+  db: D1Database,
+  next: VixRegime,
+  now: Date,
+  requestId?: string,
+): Promise<{ previous: VixRegime | null; updated: boolean }> {
+  const snapshotAt = now.toISOString()
+  const nextJson = JSON.stringify(next)
+  try {
+    // 1) 初回 race を防ぐため INSERT OR IGNORE で行を確保する。
+    //    ただ、この時点では「INSERT した = この caller が初回」と確定はしない
+    //    (drizzle 既存 path で別 helper が delete+insert してる可能性)。
+    //    meta.changes >= 1 なら自分が初回 row を作った。
+    const insertRes = await db
+      .prepare(
+        'INSERT OR IGNORE INTO config_state_snapshot (key, value, snapshot_at, request_id) VALUES (?, ?, ?, ?)',
+      )
+      .bind(VIX_REGIME_SNAPSHOT_KEY, nextJson, snapshotAt, requestId ?? null)
+      .run()
+    const insertedRows = insertRes?.meta?.changes ?? 0
+    if (insertedRows >= 1) {
+      // この caller が初めて snapshot を作った。previous は null。
+      // updated=true だが、caller 側で previous=null は emit しない約束。
+      return { previous: null, updated: true }
+    }
+
+    // 2) 既存 row があるので current を読む。
+    const current = await readCurrentRegime(db)
+    if (current === null) {
+      // 行は存在するが値が壊れている等。CAS の起点が無いので fail-silent で抜ける。
+      return { previous: null, updated: false }
+    }
+    if (current === next) {
+      // 値が同じ → no-op (snapshot_at だけ更新する意味は薄い、emit もしない)。
+      return { previous: current, updated: false }
+    }
+
+    // 3) UPDATE WHERE value = current で CAS。他 caller が先に書き換えていたら
+    //    meta.changes === 0 になる。
+    const updateRes = await db
+      .prepare(
+        'UPDATE config_state_snapshot SET value = ?, snapshot_at = ?, request_id = ? WHERE key = ? AND value = ?',
+      )
+      .bind(nextJson, snapshotAt, requestId ?? null, VIX_REGIME_SNAPSHOT_KEY, JSON.stringify(current))
+      .run()
+    const changed = updateRes?.meta?.changes ?? 0
+    if (changed >= 1) {
+      // CAS 成功。この caller の責任で notify してよい。
+      return { previous: current, updated: true }
+    }
+    // 4) 他 caller が先に書き換えた。最新値を再取得して updated=false で返す。
+    const latest = await readCurrentRegime(db)
+    return { previous: latest, updated: false }
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: 'vix_regime_snapshot_cas_failed',
+        requestId: requestId ?? null,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
+    return { previous: null, updated: false }
+  }
+}
+
+async function readCurrentRegime(db: D1Database): Promise<VixRegime | null> {
+  const row = await db
+    .prepare('SELECT value FROM config_state_snapshot WHERE key = ? LIMIT 1')
+    .bind(VIX_REGIME_SNAPSHOT_KEY)
+    .first<{ value: string }>()
+  if (!row || typeof row.value !== 'string') return null
+  const parsed = parseSafe(row.value)
+  if (parsed === 'normal' || parsed === 'warning' || parsed === 'critical') {
+    return parsed
+  }
+  return null
+}
+
+/**
  * cron tick から呼ばれる top-level helper (configStateChange の pattern を踏襲)。
  *
  *   1. snapshot を読む (失敗 → null)
@@ -146,9 +246,17 @@ export async function detectAndNotifyVixRegimeChange(args: {
   if (!args.db) {
     return { from: null, to: args.current.regime, emitted: false }
   }
-  const previous = await loadVixRegimeSnapshot(args.db, args.requestId)
+  const now = (args.now ?? (() => new Date()))()
+  // CAS で snapshot を更新。並行 cron で重複通知が出ないように、ここで「自分が
+  // 更新した」と判定された caller だけが notify する (CodeRabbit #216 4th)。
+  const { previous, updated } = await atomicallyUpdateVixRegimeSnapshot(
+    args.db,
+    args.current.regime,
+    now,
+    args.requestId,
+  )
   let emitted = false
-  if (previous !== null && previous !== args.current.regime) {
+  if (updated && previous !== null && previous !== args.current.regime) {
     const severity = classifyVixRegimeSeverity(previous, args.current.regime)
     const note = args.requestId ? `requestId=${args.requestId}` : undefined
     // notify は fire-and-forget。`.catch(...)` は async rejection しか拾えない
@@ -186,8 +294,6 @@ export async function detectAndNotifyVixRegimeChange(args: {
     }
     emitted = true
   }
-  const now = (args.now ?? (() => new Date()))()
-  await persistVixRegimeSnapshot(args.db, args.current.regime, args.requestId, now)
   return { from: previous, to: args.current.regime, emitted }
 }
 

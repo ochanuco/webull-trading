@@ -56,7 +56,9 @@ export const dashboard = new Hono<AppBindings>()
       const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
       // VIX regime (issue #196 3/3) を D1 snapshot から読む。table 未 migration /
       // bind 不在は null fallback (= 未知扱い、ページ自体は表示)。
-      const vixRegime = c.env.DB ? await loadVixRegimeSnapshot(c.env.DB) : null
+      const vixRegime = c.env.DB
+        ? await loadVixRegimeSnapshot(c.env.DB, c.get('requestId'))
+        : null
       return c.html(layout('ポートフォリオ', portfolioBody(portfolio, vixRegime)))
     } catch (err) {
       return c.html(layout('ポートフォリオ', unavailable(messageOf(err))))

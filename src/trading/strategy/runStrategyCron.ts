@@ -450,7 +450,10 @@ export async function runStrategyCron(
 
   // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
   // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
-  const summary = emptySummary()
+  // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
+  // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
+  // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
+  const summary: PullbackRunSummary = { ...emptySummary(), vix: vixDecision }
   const runs: Array<{ currency: SymbolCurrency; equity: number; lotSize: number; symbols: string[] }> = []
   if (byCurrency.USD.length > 0) {
     runs.push({
