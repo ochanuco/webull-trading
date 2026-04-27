@@ -8,11 +8,15 @@
  * 含まれる gate:
  *   1. settled cash (BUY only): notional > settledCash で reject
  *   2. inverse pair (BUY only): inverse 銘柄の建玉が残っていれば reject
- *   3. quote freshness (halt fallback): lastQuote.fetchedAt が staleQuoteMs を超えれば reject
- *   4. spread guard: bid/ask 欠損 / 異常 / spread% が limit 超で reject
- *   5. gap re-eval: avgPrice と lastQuote.price の |gap| > gapRejectPct で reject
- *   6. JP 値幅制限: JP 銘柄かつ band 外 limit price で reject
+ *   3. quote freshness (BUY only / halt fallback): lastQuote.fetchedAt が staleQuoteMs を超えれば reject
+ *   4. spread guard (BUY only): bid/ask 欠損 / 異常 / spread% が limit 超で reject
+ *   5. gap re-eval (BUY only): avgPrice と lastQuote.price の |gap| > gapRejectPct で reject
+ *   6. JP 値幅制限 (BUY only): JP 銘柄かつ band 外 limit price で reject
  *   7. (option) cooldown: state.cooldownUntil が未来なら reject
+ *
+ * Gate 3-6 は **エントリ抑止** が目的なので BUY only。SELL/exit (stop hit / 損切り)
+ * は stale quote / wide spread / 大 gap / JP band 外でも実行を優先する
+ * (= 損切りが永久 block されて position 塩漬けにならないように)。
  *
  * 含まれない gate (orchestrator 層が直接持つ):
  *   - portfolio-wide drawdown kill
@@ -114,8 +118,10 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 4. halt / stale quote。lastQuote=null は未 seed 扱いで skip (POC 後方互換)。
-  if (state.lastQuote) {
+  // 4. halt / stale quote (BUY only)。SELL は stale でも exit 実行を優先する
+  //    (stop hit / 損切りが stale quote で永久に block されないように)。
+  //    lastQuote=null は未 seed 扱いで skip (POC 後方互換)。
+  if (side === 'BUY' && state.lastQuote) {
     const ageMs = now.getTime() - new Date(state.lastQuote.fetchedAt).getTime()
     if (!Number.isFinite(ageMs) || ageMs > config.staleQuoteMs) {
       return reject(
@@ -124,20 +130,28 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 5. spread guard: bid/ask 欠損は fail-closed (lastQuote 有り前提)。
-  const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits)
-  if (spreadReason !== null) {
-    return reject(spreadReason)
+  // 5. spread guard (BUY only)。SELL/exit は wide spread でも実行優先。
+  //    bid/ask 欠損は fail-closed (lastQuote 有り前提)。
+  if (side === 'BUY') {
+    const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits)
+    if (spreadReason !== null) {
+      return reject(spreadReason)
+    }
   }
 
-  // 6. gap re-eval。open position が無い / avgPrice が不正なら skip。
-  const gapReason = evaluateGap(state, config.gapRejectPct)
-  if (gapReason !== null) {
-    return reject(gapReason)
+  // 6. gap re-eval (BUY only)。SELL は大 gap (= stop hit) こそ fire させたい。
+  //    open position が無い / avgPrice が不正なら skip。
+  if (side === 'BUY') {
+    const gapReason = evaluateGap(state, config.gapRejectPct)
+    if (gapReason !== null) {
+      return reject(gapReason)
+    }
   }
 
-  // 7. JP price band。JP 銘柄かつ lastQuote 有りで limit が band 外なら reject。
+  // 7. JP price band (BUY only)。SELL/exit は band 外でも通す。
+  //    JP 銘柄かつ lastQuote 有りで limit が band 外なら reject。
   if (
+    side === 'BUY' &&
     inferWebullMarket(symbol) === 'JP' &&
     state.lastQuote &&
     !isWithinJpPriceBand(state.lastQuote.price, intentPrice)

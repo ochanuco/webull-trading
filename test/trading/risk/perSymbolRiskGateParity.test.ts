@@ -218,6 +218,41 @@ describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) �
     expect(reject?.reason).toContain('inverse-pair exposure')
   })
 
+  it('SELL passes the stale-quote gate (exit priority — TradingService)', async () => {
+    // Anchors the SOXL stop-hit bug: SELL must NOT be blocked by stale lastQuote.
+    // (cron path drives BUY-only via runPullbackScheduler, so this assertion is
+    // limited to TradingService — the manual / liquidate / exit code path.)
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 1, avgPrice: 124.95, openedAt: now.toISOString() },
+      lastQuote: {
+        price: 119.38,
+        asOf: new Date(now.getTime() - 4 * 24 * 60 * 60 * 1_000).toISOString(),
+        fetchedAt: new Date(now.getTime() - 4 * 24 * 60 * 60 * 1_000).toISOString(),
+        source: 'test',
+        bid: 119.3,
+        ask: 119.46,
+      },
+    }
+
+    // Pure helper: SELL bypasses the stale gate entirely.
+    const pure = evaluatePerSymbolRisk(
+      { symbol: 'AAPL', side: 'SELL', intentPrice: 119.38, intentNotional: 119.38, state, now },
+      riskConfig,
+    )
+    expect(pure.approved).toBe(true)
+
+    // TradingService route: price >= sellAbove (20_000) triggers SELL via FixedRuleStrategy.
+    const result = await tradingService(makeStore({ AAPL: state })).executeTrade(
+      { symbol: 'AAPL', price: 25_000, quantity: 1 },
+      tradingConfig,
+    )
+    expect(result.riskDecision.allowed).toBe(true)
+    expect(
+      result.riskDecision.reasons.some((r) => r.includes('halt or stale quote')),
+    ).toBe(false)
+  })
+
   it('clean state approves in all 3 evaluators', async () => {
     const cleanState = emptySymbolState('AAPL', () => now)
 

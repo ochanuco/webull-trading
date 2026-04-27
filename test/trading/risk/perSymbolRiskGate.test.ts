@@ -157,6 +157,21 @@ describe('evaluatePerSymbolRisk — stale quote / halt fallback', () => {
     )
     expect(decision.approved).toBe(true)
   })
+
+  it('approves SELL even when lastQuote is days-stale (stop hit / exit priority)', () => {
+    // SOXL stop hit scenario from prod: lastQuote 4 days old must NOT block SELL.
+    const state: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      position: { qty: 10, avgPrice: 124.95, openedAt: now.toISOString() },
+      lastQuote: quote(119.38, 4 * 24 * 60 * 60 * 1_000),
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: 'SOXL', side: 'SELL', intentPrice: 119.38, intentNotional: 1_193.8, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(true)
+    expect(decision.reasons).toEqual([])
+  })
 })
 
 describe('evaluatePerSymbolRisk — spread guard', () => {
@@ -184,6 +199,33 @@ describe('evaluatePerSymbolRisk — spread guard', () => {
     )
     expect(decision.approved).toBe(false)
     expect(decision.reasons[0]).toContain('bid/ask missing')
+  })
+
+  it('approves SELL when spread is wide (exit priority)', () => {
+    const state: SymbolState = {
+      ...emptySymbolState('SPY', () => now),
+      position: { qty: 1, avgPrice: 100, openedAt: now.toISOString() },
+      lastQuote: quote(100, 1_000, { bid: 99.85, ask: 100.15 }),
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: 'SPY', side: 'SELL', intentPrice: 100, intentNotional: 100, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(true)
+    expect(decision.reasons).toEqual([])
+  })
+
+  it('approves SELL even when bid/ask is missing (exit priority)', () => {
+    const state: SymbolState = {
+      ...emptySymbolState('SPY', () => now),
+      position: { qty: 1, avgPrice: 100, openedAt: now.toISOString() },
+      lastQuote: quote(100, 1_000, { bid: undefined, ask: 100.1 }),
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: 'SPY', side: 'SELL', intentPrice: 100, intentNotional: 100, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(true)
   })
 })
 
@@ -213,6 +255,21 @@ describe('evaluatePerSymbolRisk — gap re-eval', () => {
     )
     expect(decision.approved).toBe(true)
   })
+
+  it('approves SELL even when |gap| exceeds threshold (stop hit fires)', () => {
+    // SOXL stop hit shape: avgPrice 124.95 vs current 119.38 (~-4.5%) > 3% threshold.
+    const state: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      position: { qty: 10, avgPrice: 124.95, openedAt: now.toISOString() },
+      lastQuote: quote(119.38),
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: 'SOXL', side: 'SELL', intentPrice: 119.38, intentNotional: 1_193.8, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(true)
+    expect(decision.reasons).toEqual([])
+  })
 })
 
 describe('evaluatePerSymbolRisk — JP price band', () => {
@@ -239,6 +296,20 @@ describe('evaluatePerSymbolRisk — JP price band', () => {
       baseConfig,
     )
     expect(decision.approved).toBe(true)
+  })
+
+  it('approves SELL outside JP price band (exit priority)', () => {
+    const state: SymbolState = {
+      ...emptySymbolState('7203', () => now),
+      position: { qty: 100, avgPrice: 5_000, openedAt: now.toISOString() },
+      lastQuote: quote(5_000),
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: '7203', side: 'SELL', intentPrice: 5_800, intentNotional: 580_000, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(true)
+    expect(decision.reasons).toEqual([])
   })
 })
 
