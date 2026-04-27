@@ -88,6 +88,74 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   vixWarningSizeScale: 0.5,
 })
 
+/**
+ * VIX 値の application-level validation。
+ *
+ * 0015 migration は ALTER TABLE ADD COLUMN しか実行しておらず CHECK 制約は
+ * 将来の table-rebuild migration で一括投入予定 (schema.ts 参照)。それまでの
+ * 補完として、`loadGlobalConfig` が返す前にここで範囲・順序を検証する。
+ *
+ * 違反時は **fail-closed = defaults fallback**:
+ * - cron 全停止より既知 default で動かす方が POC では安全
+ * - warn ログに違反 field / 値 / 期待範囲を出して運用で検知できるようにする
+ *
+ * CodeRabbit #216 6th round 対応。
+ */
+function validateVixConfig(
+  config: GlobalConfigSnapshot,
+  requestId: string | undefined,
+): GlobalConfigSnapshot {
+  const violations: Array<{ field: string; value: unknown; expected: string }> = []
+  const { vixWarningThreshold, vixCriticalThreshold, vixWarningSizeScale } = config
+
+  if (!(vixWarningThreshold > 0 && vixWarningThreshold <= 200)) {
+    violations.push({
+      field: 'vixWarningThreshold',
+      value: vixWarningThreshold,
+      expected: '>0 and <=200',
+    })
+  }
+  if (!(vixCriticalThreshold > 0 && vixCriticalThreshold <= 200)) {
+    violations.push({
+      field: 'vixCriticalThreshold',
+      value: vixCriticalThreshold,
+      expected: '>0 and <=200',
+    })
+  }
+  if (vixWarningThreshold > vixCriticalThreshold) {
+    violations.push({
+      field: 'vixWarningThreshold/vixCriticalThreshold',
+      value: { warning: vixWarningThreshold, critical: vixCriticalThreshold },
+      expected: 'warning <= critical',
+    })
+  }
+  if (!(vixWarningSizeScale >= 0 && vixWarningSizeScale <= 1)) {
+    violations.push({
+      field: 'vixWarningSizeScale',
+      value: vixWarningSizeScale,
+      expected: '>=0 and <=1',
+    })
+  }
+
+  if (violations.length > 0) {
+    console.warn(
+      JSON.stringify({
+        event: 'global_config_vix_validation_failed',
+        requestId: requestId ?? null,
+        violations,
+      }),
+    )
+    return {
+      ...config,
+      vixWarningThreshold: GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
+      vixCriticalThreshold: GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
+      vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
+    }
+  }
+
+  return config
+}
+
 export async function loadGlobalConfig(
   db: DrizzleD1Database,
   requestId?: string,
@@ -160,7 +228,7 @@ export async function loadGlobalConfig(
           .limit(1)
         const legacyRow = legacyRows[0]
         if (legacyRow) {
-          return {
+          return validateVixConfig({
             dryRun: legacyRow.dryRun,
             tradingEnabled: legacyRow.tradingEnabled,
             marketHoursCheck: legacyRow.marketHoursCheck,
@@ -191,7 +259,7 @@ export async function loadGlobalConfig(
             vixWarningThreshold: GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
             vixCriticalThreshold: GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
             vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
-          }
+          }, requestId)
         }
       } catch (legacyError) {
         // legacy fetch も失敗 → 想定外の double failure。ここまで来たら全 defaults
@@ -205,13 +273,13 @@ export async function loadGlobalConfig(
         )
       }
       // legacy row なし or legacy fetch 失敗 → 全 defaults
-      return { ...GLOBAL_CONFIG_DEFAULTS }
+      return validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId)
     }
     throw error
   }
   const row = rows[0]
-  if (!row) return { ...GLOBAL_CONFIG_DEFAULTS }
-  return {
+  if (!row) return validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId)
+  return validateVixConfig({
     dryRun: row.dryRun,
     tradingEnabled: row.tradingEnabled,
     marketHoursCheck: row.marketHoursCheck,
@@ -247,5 +315,5 @@ export async function loadGlobalConfig(
       row.vixCriticalThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
     vixWarningSizeScale:
       row.vixWarningSizeScale ?? GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
-  }
+  }, requestId)
 }

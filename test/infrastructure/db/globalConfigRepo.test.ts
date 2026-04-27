@@ -226,3 +226,173 @@ describe('loadGlobalConfig — pre-0015 fallback', () => {
     warnSpy.mockRestore()
   })
 })
+
+/**
+ * 0015 migration は ALTER TABLE ADD COLUMN しか流していないため CHECK 制約は
+ * 未投入。table-rebuild migration で一括投入するまでの compensating control
+ * として `loadGlobalConfig` 内で application-level validation を行う:
+ *   - vixWarningThreshold / vixCriticalThreshold ∈ (0, 200]
+ *   - vixWarningThreshold <= vixCriticalThreshold
+ *   - vixWarningSizeScale ∈ [0, 1]
+ * 違反時は **fail-closed = defaults fallback** + warn ログ。
+ * CodeRabbit #216 6th round 対応。
+ */
+describe('loadGlobalConfig — VIX validation (CHECK 制約 補完)', () => {
+  /**
+   * full select (1st call) が `[row]` を返す (= post-0015 path)。VIX 列を含む
+   * 完全な row。validation の対象は最終 return 直前なので、ここから不正値を
+   * 挿入することで validateVixConfig の挙動を検証できる。
+   */
+  function fakeDbWithRow(row: Record<string, unknown>) {
+    return {
+      select(_columns?: unknown) {
+        return {
+          from() {
+            return {
+              where() {
+                return {
+                  async limit() {
+                    return [row]
+                  },
+                }
+              },
+            }
+          },
+        }
+      },
+    } as unknown as Parameters<typeof loadGlobalConfig>[0]
+  }
+
+  // post-0015 row 用の baseline。検証ケースごとに VIX 3 列を上書きする。
+  const baseRow = {
+    id: 'default',
+    dryRun: true,
+    tradingEnabled: false,
+    marketHoursCheck: false,
+    maxOrderNotional: 100,
+    maxOrderNotionalUsd: 2000,
+    maxOrderNotionalJpy: 100000,
+    totalCapitalUsd: null,
+    totalCapitalJpy: null,
+    maxPortfolioExposurePct: 0.6,
+    drawdownKillThreshold: -0.02,
+    staleQuoteMs: 900000,
+    gapRejectPct: 0.03,
+    spreadLimitPctUs: 0.0025,
+    spreadLimitPctJp: 0.006,
+    pullbackDefaultStopPct: -0.04,
+    pullbackDefaultTakeProfitPct: 0.07,
+    pullbackDefaultTimeStopDays: 10,
+    pullbackDefaultPullbackMax: -0.03,
+    pullbackDefaultPullbackMin: -0.06,
+    pullbackDefaultMinReturn50d: 0.08,
+    pullbackDefaultRequireAboveSma50: true,
+    pullbackDefaultKAtr: 2.0,
+    riskBasePerTradePct: 0.004,
+    riskDdHalfThreshold: -0.05,
+    riskDdHaltThreshold: -0.1,
+    bucketExposurePct: 0.3,
+  }
+
+  it('passes through valid VIX values without warning', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      vixWarningThreshold: 22.5,
+      vixCriticalThreshold: 28.0,
+      vixWarningSizeScale: 0.4,
+    })
+    const result = await loadGlobalConfig(db, 'req-vix-ok')
+    expect(result.vixWarningThreshold).toBe(22.5)
+    expect(result.vixCriticalThreshold).toBe(28.0)
+    expect(result.vixWarningSizeScale).toBe(0.4)
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('falls back to defaults when vixWarningThreshold = 0 (range violation)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      vixWarningThreshold: 0,
+      vixCriticalThreshold: 30,
+      vixWarningSizeScale: 0.5,
+    })
+    const result = await loadGlobalConfig(db, 'req-vix-zero')
+    expect(result.vixWarningThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold)
+    expect(result.vixCriticalThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold)
+    expect(result.vixWarningSizeScale).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale)
+    // 他の non-VIX 列は row 値が保持されること
+    expect(result.tradingEnabled).toBe(false)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('global_config_vix_validation_failed')
+    expect(logged.requestId).toBe('req-vix-zero')
+    expect(Array.isArray(logged.violations)).toBe(true)
+    expect(logged.violations.some((v: { field: string }) => v.field === 'vixWarningThreshold')).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back when warning > critical (order violation)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      vixWarningThreshold: 30,
+      vixCriticalThreshold: 25,
+      vixWarningSizeScale: 0.5,
+    })
+    const result = await loadGlobalConfig(db, 'req-vix-order')
+    expect(result.vixWarningThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold)
+    expect(result.vixCriticalThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold)
+    expect(result.vixWarningSizeScale).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('global_config_vix_validation_failed')
+    expect(
+      logged.violations.some((v: { field: string }) =>
+        v.field === 'vixWarningThreshold/vixCriticalThreshold',
+      ),
+    ).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back when vixWarningSizeScale = 1.5 (range violation)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      vixWarningThreshold: 25,
+      vixCriticalThreshold: 30,
+      vixWarningSizeScale: 1.5,
+    })
+    const result = await loadGlobalConfig(db, 'req-vix-scale')
+    expect(result.vixWarningSizeScale).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale)
+    // 単独違反でも他 2 項目も defaults に倒される (compensating control の安全側)
+    expect(result.vixWarningThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold)
+    expect(result.vixCriticalThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('global_config_vix_validation_failed')
+    expect(
+      logged.violations.some((v: { field: string }) => v.field === 'vixWarningSizeScale'),
+    ).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back when vixCriticalThreshold > 200 (range violation, upper bound)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      vixWarningThreshold: 25,
+      vixCriticalThreshold: 250,
+      vixWarningSizeScale: 0.5,
+    })
+    const result = await loadGlobalConfig(db, 'req-vix-upper')
+    expect(result.vixCriticalThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(
+      logged.violations.some((v: { field: string }) => v.field === 'vixCriticalThreshold'),
+    ).toBe(true)
+    warnSpy.mockRestore()
+  })
+})
