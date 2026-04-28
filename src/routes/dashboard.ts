@@ -368,10 +368,17 @@ export const dashboard = new Hono<AppBindings>()
    * proxy せず、純粋にフォーム + 表示器を返すだけ (= 認証ヘッダの転送ロジック
    * 不要、責務分離)。
    */
-  .get('/broker-probe', (c) => {
-    const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase() || 'SOXL'
-    const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase() || 'US_ETF'
-    return c.html(layout('Broker 診断', brokerProbeBody({ symbol, category })))
+  .get('/broker-probe', async (c) => {
+    const symbol = (c.req.query('symbol') ?? 'AAPL').trim().toUpperCase() || 'AAPL'
+    const category = (c.req.query('category') ?? 'US_STOCK').trim().toUpperCase() || 'US_STOCK'
+    // symbol_config 全銘柄 (active + inactive) をリンク候補として渡す。DB が未
+    // 設定 / load 失敗時は null fallback で UI は保有銘柄 + AAPL control のみ。
+    const universe = c.env.DB
+      ? await loadSymbolUniverse(c.env).catch(() => null)
+      : null
+    return c.html(
+      layout('Broker 診断', brokerProbeBody({ symbol, category, universe })),
+    )
   })
   .get('/alerts', async (c) => {
     if (!c.env.DB) {
@@ -577,27 +584,107 @@ function unavailable(reason: string): string {
  *   - probe payload に Cache-Control: no-store が付いてるので browser cache
  *     にも残らない
  */
-function brokerProbeBody(args: { symbol: string; category: string }): string {
-  // 旧版 (PR #245-#247) は form + datalist + chip 並べてたが、結局 user の
-  // 関心は「自分の保有銘柄を broker がどう答えるか」がメイン。なので form を
-  // 撤去し、auto-probe で取れる positions リストをクリッカブルに表示する形に
-  // 再設計 (PR #248)。AAPL は JP UAT で唯一 200 が返る US 銘柄なので control
-  // として 1 ボタン残す。
+/**
+ * symbol → probe category 推定 (server-side)。client 側の inferCategory と同じ
+ * ロジックを TS でも持つことで、universe を server-side render するときの
+ * data-category 属性を正しく埋められる。
+ *
+ * - 4 桁数字 = JP_STOCK (`1570` だけ既知 ETF)
+ * - US は `SOXL/SOXS/SPY/QQQ` を ETF 扱い、それ以外 STOCK
+ */
+function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_STOCK' | 'US_ETF' {
+  const upper = symbol.toUpperCase()
+  if (/^\d{4}$/.test(upper)) {
+    if (upper === '1570') return 'JP_ETF'
+    return 'JP_STOCK'
+  }
+  if (upper === 'SOXL' || upper === 'SOXS' || upper === 'SPY' || upper === 'QQQ') {
+    return 'US_ETF'
+  }
+  return 'US_STOCK'
+}
+
+/**
+ * universe.allowedSymbols + inactiveSymbols を category 別にグルーピングして
+ * クリック可能ボタン群を返す。inactive は薄色 + INACTIVE バッジで識別。
+ * universe=null (DB 未設定 / load 失敗) は空文字 (UI から登録銘柄セクションは
+ * 隠れず空のまま表示)。
+ */
+function renderUniverseLinks(universe: SymbolUniverse | null): string {
+  if (!universe) {
+    return '<span class="muted" style="font-size:12px">universe ロード失敗 (DB 未設定 / 接続失敗)</span>'
+  }
+  const inactiveSet = new Set(universe.inactiveSymbols.map((s) => s.toUpperCase()))
+  const allSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
+  if (allSymbols.length === 0) {
+    return '<span class="muted" style="font-size:12px">登録銘柄なし</span>'
+  }
+  // category 別に分類して描画 (US_STOCK / US_ETF / JP_STOCK / JP_ETF の順)
+  const groups: Record<string, string[]> = {
+    US_STOCK: [],
+    US_ETF: [],
+    JP_STOCK: [],
+    JP_ETF: [],
+  }
+  for (const sym of allSymbols) {
+    const cat = inferProbeCategory(sym)
+    groups[cat]!.push(sym)
+  }
+  const renderBtn = (sym: string, cat: string): string => {
+    const inactive = inactiveSet.has(sym.toUpperCase())
+    const display = displaySymbol(sym, universe)
+    const baseStyle =
+      'padding:3px 10px;font-size:12px;border:1px solid #ddd;border-radius:14px;cursor:pointer;background:#fff'
+    const style = inactive
+      ? `${baseStyle};color:#999;background:#f3f3f3`
+      : baseStyle
+    const inactiveBadge = inactive
+      ? ' <span style="font-size:10px;color:#999">(INACTIVE)</span>'
+      : ''
+    return `<button type="button" class="probe-pickbtn" data-symbol="${esc(sym)}" data-category="${cat}" style="${style}" title="${esc(cat)}">${esc(display)}${inactiveBadge}</button>`
+  }
+  const sections: string[] = []
+  for (const cat of ['US_STOCK', 'US_ETF', 'JP_STOCK', 'JP_ETF']) {
+    const syms = groups[cat]!
+    if (syms.length === 0) continue
+    const buttons = syms.map((s) => renderBtn(s, cat)).join(' ')
+    sections.push(
+      `<div style="margin-bottom:8px"><span class="muted" style="font-size:11px;margin-right:8px">${cat}</span>${buttons}</div>`,
+    )
+  }
+  return sections.join('')
+}
+
+function brokerProbeBody(args: {
+  symbol: string
+  category: string
+  universe: SymbolUniverse | null
+}): string {
+  // 旧版 (PR #245-#247) は form + datalist + chip、PR #248 で保有銘柄駆動に
+  // 切替えた。本 UI (PR #249) では symbol_config 登録銘柄全部 (active +
+  // inactive) を「登録銘柄」セクションでも click 可能にする (ユーザ要望:
+  // 「登録している銘柄は全部リンクにしてほしかった」)。これで保有してない
+  // 銘柄も Webull に直で確認できる。
   //
   // フロー:
   //   1. ページ表示 → auto-probe (default: AAPL/US_STOCK)
-  //   2. positions JSON parse → 各 holding をボタンとして列挙
-  //   3. ホールディング (or AAPL) クリック → 該当 symbol / inferred category
-  //      で再 probe (positions パートは毎回更新されるが内容は同じ)
+  //   2. positions JSON parse → 各 holding をボタンとして列挙 (= 保有 click)
+  //   3. universe.allowedSymbols + inactiveSymbols を server-side で render
+  //      (= 登録銘柄 click)
+  //   4. AAPL は JP UAT で唯一 200 が返る US 銘柄なので control として残す
   //
-  // 任意 symbol の検証は curl で /admin/broker/probe を直接叩く前提。UI から
-  // 外して責務を「保有確認 + 1 control」に絞る。
+  // 任意 symbol で叩きたい場合は curl /admin/broker/probe を直接でも OK。
+
+  // server-side で universe をリンク chip に展開。category は client 側の
+  // inferCategory と同じロジックでサーバ側でも判定 (4 桁 = JP_STOCK or
+  // 1570=JP_ETF、US は SOXL/SOXS/SPY/QQQ=US_ETF それ以外=US_STOCK)。
+  const universeLinks = renderUniverseLinks(args.universe)
   return `<p class="muted" style="font-size:12px">
   Webull broker (現状: JP UAT <code>jp-openapi-alb.uat.webullbroker.com</code>) に
   <code>/openapi/market-data/stock/snapshot</code> + <code>/openapi/account/positions</code>
-  を直接 fetch して raw レスポンスを表示します。保有銘柄を click すると、その銘柄
-  の quote を broker に問合せて生応答 (status / error_code / request_id) が見えます。
-  任意の symbol / category で叩きたい場合は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>
+  を直接 fetch して raw レスポンスを表示します。click した銘柄について broker に
+  quote を問合せて生応答 (status / error_code / request_id) が見えます。任意の
+  symbol / category で叩きたい場合は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>
   を直接実行してください。
 </p>
 <div style="display:flex;gap:14px;align-items:center;margin-bottom:12px">
@@ -607,6 +694,9 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
 
 <h2 style="font-size:14px;margin:16px 0 4px 0">保有銘柄 (click で quote probe)</h2>
 <div id="probe-positions-list" style="margin-bottom:16px"></div>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">登録銘柄 (symbol_config の active + inactive)</h2>
+<div style="margin-bottom:16px">${universeLinks}</div>
 
 <h2 style="font-size:14px;margin:16px 0 4px 0">control (US は AAPL のみ allowlist 通過)</h2>
 <div style="margin-bottom:16px">
