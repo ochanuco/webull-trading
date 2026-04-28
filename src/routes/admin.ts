@@ -455,11 +455,20 @@ export const admin = new Hono<AppBindings>()
         },
         version: 'v2',
       }),
-      probeOnce({
-        method: 'GET',
-        path: '/openapi/account/positions',
-        query: { account_id: accountId },
-      }),
+      // accountId 未設定なら fetch せず auth-phase エラーで返す (WebullHttpClient
+      // の requireAccountId が throw する挙動を mirror)。version='v1' は
+      // WebullHttpClient.request が account ルートでも送る固定値 (line 180)。
+      accountId.length === 0
+        ? Promise.resolve<ProbeResult>({
+            phase: 'auth',
+            error: 'Missing Webull account ID: WEBULL_ACCOUNT_ID_JP_CASH is unset',
+          })
+        : probeOnce({
+            method: 'GET',
+            path: '/openapi/account/positions',
+            query: { account_id: accountId },
+            version: 'v1',
+          }),
     ])
 
     return c.json({
