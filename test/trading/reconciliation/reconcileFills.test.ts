@@ -718,4 +718,201 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
   it('throws when env.DB binding is missing', async () => {
     await expect(reconcileFills({ env: {} as never })).rejects.toThrow(/env\.DB/)
   })
+
+  // ---------------------------------------------------------------------------
+  // sanity failure → repair cohort retention (PR #223 CodeRabbit Major)
+  //
+  // When `resolveFilledPrice()` rejects a fill price as a stub (ratio guard),
+  // the row must be left WITHOUT `state_applied_at` so the next reconcile
+  // tick re-selects it from the repair cohort and tries again with whatever
+  // the broker now reports.
+  // ---------------------------------------------------------------------------
+
+  it('sanity failure: keeps state_applied_at NULL so next tick retries', async () => {
+    // JP UAT 6971-style stub: filled_quantity > 0 but filled_price=10 vs
+    // limit_price=2683 — sanity ratio guard rejects.
+    const row: CandidateRow = {
+      id: 31,
+      clientOrderId: 'coid-jp-stub-1',
+      symbol: '6971',
+      side: 'BUY',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-jp-stub-1': {
+          status: 'FILLED',
+          filled_quantity: '1',
+          limit_price: '2683',
+          items: [{ filled_price: '10' }],
+          side: 'BUY',
+          symbol: '6971',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    // Quiet sanity warn log.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    // DO state apply must NOT happen — the stub price would poison avgPrice.
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+
+    // Two UPDATEs:
+    //   (1) journal fill columns (broker_status=FILLED, filled_qty=1,
+    //       filled_price=null because sanity rejected)
+    //   (2) failure marker (state_apply_error set, attempts++) — but
+    //       crucially state_applied_at must NOT be stamped.
+    expect(updates).toHaveLength(2)
+    expect(updates[0]!.set.brokerStatus).toBe('FILLED')
+    expect(updates[0]!.set.filledQty).toBe(1)
+    expect(updates[0]!.set.filledPrice).toBeNull()
+    expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
+    // Failure marker UPDATE: error recorded, marker NOT stamped → row
+    // remains in repair cohort for next tick.
+    expect(updates[1]!.set.stateAppliedAt).toBeUndefined()
+    expect(updates[1]!.set.stateApplyError).toMatch(/sanity_failed/)
+    expect(updates[1]!.set.stateApplyAttempts).toBeDefined()
+
+    expect(summary.stateApplied).toBe(0)
+    expect(summary.stateApplyFailed).toBe(1)
+    expect(summary.repaired).toBe(0)
+    expect(summary.errors).toEqual([
+      { clientOrderId: 'coid-jp-stub-1', message: expect.stringContaining('sanity_failed') },
+    ])
+  })
+
+  it('next reconcile tick: realistic broker price → DO apply succeeds, marker stamped', async () => {
+    // Same row from the sanity failure — broker_status='FILLED' already
+    // recorded but state_applied_at still NULL. retryStateApply=true sweeps
+    // it back. This time the broker returns a realistic 2680 vs 2683 (within
+    // the 0.5–2x band) — but note the repair branch uses the canonical
+    // filled_price already on the row, NOT the broker's response. So we
+    // simulate the row having been updated (e.g. by a prior cron tick that
+    // saw a realistic broker price between #1 and #2 — equivalent to the row
+    // gaining a usable price by some path).
+    //
+    // Practical model: imagine the prior cron tick observed the new healthy
+    // price and the journal UPDATE wrote `filled_price=2680`, but the DO
+    // apply still failed transiently. retryStateApply now picks it up.
+    const row: CandidateRow = {
+      id: 31,
+      clientOrderId: 'coid-jp-stub-1',
+      symbol: '6971',
+      side: 'BUY',
+      brokerStatus: 'FILLED',
+      filledQty: 1,
+      filledPrice: 2680,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 1,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    const webullStub = makeWebullStub({})
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:05:00.000Z'),
+      retryStateApply: true,
+    })
+
+    // Repair path doesn't re-poll Webull.
+    expect(webullStub.findOrderByClientId).not.toHaveBeenCalled()
+    // DO apply now runs with the healthy price.
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('6971', 'coid-jp-stub-1', {
+      side: 'BUY',
+      qty: 1,
+      price: 2680,
+    })
+    expect(summary.stateApplied).toBe(1)
+    expect(summary.repaired).toBe(1)
+    expect(updates).toHaveLength(1)
+    expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:05:00.000Z')
+    expect(updates[0]!.set.stateApplyError).toBeNull()
+  })
+
+  it('FILLED with filledQty=0 (genuine no-op): stamps marker — no retry forever', async () => {
+    // Distinguishes (b) sanity failure from (a) genuine "FILLED but nothing
+    // to apply". CANCELLED-then-FILLED shaped rows (filledQty=0) have no
+    // recoverable state — stamp the marker so the row exits the repair
+    // cohort.
+    const row: CandidateRow = {
+      id: 33,
+      clientOrderId: 'coid-zero-qty',
+      symbol: 'SOXL',
+      side: 'BUY',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-zero-qty': {
+          status: 'FILLED',
+          filled_quantity: '0',
+          limit_price: '50',
+          side: 'BUY',
+          symbol: 'SOXL',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+    // Two UPDATEs: journal fill columns + state_applied_at marker (no-op
+    // path — nothing to apply, stamp so we don't retry forever).
+    expect(updates).toHaveLength(2)
+    expect(updates[1]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+    expect(summary.stateApplied).toBe(0)
+    expect(summary.stateApplyFailed).toBe(0)
+  })
+
+  it('shouldRetryStateApply: true only for FILLED + qty>0 + price=null', () => {
+    const fn = _internal.shouldRetryStateApply as (
+      qty: number | null,
+      price: number | null,
+      status: string | null,
+    ) => boolean
+    expect(fn(1, null, 'FILLED')).toBe(true) // sanity failure: retry
+    expect(fn(0, null, 'FILLED')).toBe(false) // genuine no-op
+    expect(fn(null, null, 'FILLED')).toBe(false) // missing qty
+    expect(fn(1, 50, 'FILLED')).toBe(false) // healthy fill
+    expect(fn(1, null, 'CANCELLED')).toBe(false) // not FILLED
+    expect(fn(1, null, null)).toBe(false) // no status
+  })
 })

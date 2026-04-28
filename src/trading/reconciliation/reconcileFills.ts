@@ -420,17 +420,41 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           })
         }
       } else if (status === 'FILLED') {
-        // FILLED but missing one of the apply prerequisites. Mark
-        // `state_applied_at` anyway so we don't retry forever — there's
-        // nothing to apply.
-        await db
-          .update(tradeJournal)
-          .set({
-            stateAppliedAt: runNow.toISOString(),
-            stateApplyError: null,
-            stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+        // FILLED but missing one of the apply prerequisites. Two sub-cases:
+        //
+        //   (a) Genuine no-op — e.g. filledQty=0 (CANCELLED-then-FILLED edge,
+        //       or REJECTED-then-FILLED) or symbol/side missing on the row.
+        //       Nothing to apply now and nothing the next tick will recover,
+        //       so stamp `state_applied_at` to prevent forever-retry.
+        //
+        //   (b) Transient sanity failure — `filledQty > 0` but
+        //       `filledPrice === null` because `resolveFilledPrice()`
+        //       rejected the candidate (e.g. JP `items[].filled_price=10`
+        //       stub vs limit ~2683 → ratio 0.0037 → null). The next
+        //       reconcile tick may get a realistic price from the broker;
+        //       leave `state_applied_at` NULL so the row stays in the
+        //       repair cohort.
+        //
+        // `shouldRetryStateApply` distinguishes (b). For it we still record
+        // the reason via `state_apply_error` for operator visibility, but
+        // do NOT stamp the marker.
+        if (shouldRetryStateApply(filledQty, filledPrice, status)) {
+          await recordApplyFailure(db, row.id, 'sanity_failed: filled_price rejected by ratio guard')
+          summary.stateApplyFailed += 1
+          summary.errors.push({
+            clientOrderId: coid,
+            message: 'state_apply_failed (sanity_failed: filled_price rejected by ratio guard)',
           })
-          .where(eq(tradeJournal.id, row.id))
+        } else {
+          await db
+            .update(tradeJournal)
+            .set({
+              stateAppliedAt: runNow.toISOString(),
+              stateApplyError: null,
+              stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+            })
+            .where(eq(tradeJournal.id, row.id))
+        }
       }
 
       // Release the pending-order lock on every terminal status — FILLED,
@@ -597,6 +621,31 @@ function resolveJournalSide(
   if (primary === 'BUY' || primary === 'SELL') return primary
   if (fallback === 'BUY' || fallback === 'SELL') return fallback
   return null
+}
+
+/**
+ * True when a FILLED row has a positive filledQty but `filledPrice` came back
+ * null from `resolveFilledPrice` — i.e. the broker reported a fill but the
+ * sanity guardrail rejected the price as a stub. We deliberately keep
+ * `state_applied_at = NULL` for these rows so the repair cohort
+ * (broker_status='FILLED' AND state_applied_at IS NULL) re-selects them on
+ * the next reconcile tick. If the broker eventually returns a realistic
+ * price, the apply runs normally; if it never does, we never poison DO state.
+ *
+ * Genuine no-ops (filledQty=0, missing symbol/side, etc.) fall through to the
+ * marker stamp so they don't retry forever.
+ */
+function shouldRetryStateApply(
+  filledQty: number | null,
+  filledPrice: number | null,
+  brokerStatus: string | null,
+): boolean {
+  return (
+    brokerStatus === 'FILLED' &&
+    filledQty !== null &&
+    filledQty > 0 &&
+    filledPrice === null
+  )
 }
 
 function dedupeCandidatesByRowId<T extends { id: number; side: string | null; preSubmitSide?: string | null }>(
@@ -870,4 +919,9 @@ function resolveFilledPrice(
 }
 
 // Exposed for tests.
-export const _internal = { TERMINAL_STATUSES, pickFilledPrice, resolveFilledPrice }
+export const _internal = {
+  TERMINAL_STATUSES,
+  pickFilledPrice,
+  resolveFilledPrice,
+  shouldRetryStateApply,
+}
