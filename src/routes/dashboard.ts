@@ -3014,18 +3014,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // - 下端 = high20d × (1 + pullbackMin)  = 押し目買いの下限 (-15% 以下は深すぎ)
       var pullbackMaxMul = 1 + sc.rules.pullbackMax;
       var pullbackMinMul = 1 + sc.rules.pullbackMin;
-      var bandUpperXY = sc.points.map(function (p) {
-        var x = xForTimestamp(p.timestamp);
-        return [x, p.high20d == null ? null : p.high20d * pullbackMaxMul];
-      });
-      var bandLowerXY = sc.points.map(function (p) {
-        var x = xForTimestamp(p.timestamp);
-        return [x, p.high20d == null ? null : p.high20d * pullbackMinMul];
-      });
       // 押し目ゾーン fill 用の代表 y 値: 直近の有効な high20d を採用。
-      // 押し目ゾーン上下端は per-timestamp で変動するが、3% 幅の dashed line
-      // 2 本だけでは視認性が低いので、最新値で固定した横帯を markArea で重ねる
-      // (= 「現在の押し目ゾーンはこの価格帯」が一目で分かる)。
+      // 帯の表現は markArea 一本に統一 (#232 follow-up): 以前は per-timestamp
+      // の dashed line 2 本も併用していたが、20 日 high はあまり動かないため
+      // markArea の上下境界とほぼ重なって冗長だった。markArea fill だけのほう
+      // が「現在の押し目ゾーンはこの価格帯」が一目で分かる。
       // high20d は 20 日移動高値で日次更新、chart 表示期間内では緩やかに動くため
       // 視覚的近似として十分。
       var latestHigh20d = null;
@@ -3413,27 +3406,18 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           splitLine: { show: true, lineStyle: { opacity: 0.15 } },
         },
         series: [
-          // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は淡く表示
-          // (戦略 rule の参考、トレンドラインが主役なので opacity 控えめ)。
+          // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は表示。
           //
-          // 視認性向上 (#231 follow-up): dashed line 2 本だけだと 3% 幅の帯は
-          // 細くて見落としやすかったため、最新 high20d を基準とした半透明の
-          // markArea fill を上端 line series に付与し「押し目ゾーンはここ」と
-          // 一目で分かる横帯にする。per-timestamp の動的な上端/下端 line は
-          // 日次の high20d 推移を表す参照線として残す (style もやや強化)。
-          ...(sc.position ? [] : [
+          // 帯は markArea fill のみで表現 (#232 follow-up): 以前は per-timestamp
+          // の dashed line 2 本も併用していたが、20 日 high はあまり動かず
+          // markArea の上下境界とほぼ重なって冗長だった。markArea のみに統一して
+          // 凡例もコンパクトにし、chart の視認性を上げる。
+          ...((sc.position || !pullbackBandMarkArea) ? [] : [
             {
-              name: '押し目ゾーン上端 (high20d × ' + (pullbackMaxMul).toFixed(2) + ')',
-              type: 'line', data: bandUpperXY,
-              lineStyle: { width: 1, color: '#057a55', type: 'dashed', opacity: 0.7 },
-              symbol: 'none', connectNulls: false, z: 1,
-              markArea: pullbackBandMarkArea || undefined,
-            },
-            {
-              name: '押し目ゾーン下端 (high20d × ' + (pullbackMinMul).toFixed(2) + ')',
-              type: 'line', data: bandLowerXY,
-              lineStyle: { width: 1, color: '#b25000', type: 'dashed', opacity: 0.7 },
-              symbol: 'none', connectNulls: false, z: 1,
+              name: '押し目ゾーン',
+              type: 'line', data: [],
+              symbol: 'none', z: 1,
+              markArea: pullbackBandMarkArea,
             },
           ]),
           // 価格トレンド (linear regression, 直近 30 日 daily close fit)。
