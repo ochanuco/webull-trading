@@ -20,6 +20,7 @@ import {
   logStrategyDecision,
   strategyDecisionDbOrUndefined,
 } from '../../infrastructure/logger/strategyDecisionLog'
+import { hasRecentSanityFailure } from '../../infrastructure/db/tradeJournalRepo'
 import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
@@ -38,6 +39,16 @@ import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSumma
 const DEFAULT_EQUITY_USD = 10_000
 const DEFAULT_EQUITY_JPY = 1_500_000
 const JP_LOT_SIZE = 100
+
+/**
+ * sanity_failed cooldown window (ms)。直近この期間内に同 symbol で broker
+ * stub fill が観測されていた場合、新規 BUY を block する。
+ *
+ * 30 分は経験則: 9697 04/28 incident で 5 min cron × 6 tick = 30 min かけて
+ * 600 株疑い分まで累積した実例から、同様の連鎖を 1 cycle 以内で止める長さ。
+ * tunable は別 PR で global_config 化想定 (POC 段階では hard-code)。
+ */
+const SANITY_FAILED_COOLDOWN_MS = 30 * 60 * 1000
 
 export interface StrategyCronResult {
   summary: PullbackRunSummary
@@ -582,6 +593,19 @@ export async function runStrategyCron(
       // size を縮小、normal は no-op。両 currency run に同じ decision を渡す
       // (`^VIX` は global indicator なので per-currency に変える意味はない)。
       vixDecision,
+      // sanity_failed cooldown (9697 04/28 incident: broker stub fill 30 min /
+      // 6 BUY 累積)。env.DB がある時だけ有効化 — D1 が無いと journal 検査
+      // できないので skip (= 過去挙動)。fail-closed: check throw 時は scheduler
+      // 側で BUY reject。
+      ...(env.DB
+        ? {
+            sanityFailedCooldown: {
+              check: (symbol: string) =>
+                hasRecentSanityFailure(env.DB!, symbol, SANITY_FAILED_COOLDOWN_MS),
+              withinMs: SANITY_FAILED_COOLDOWN_MS,
+            },
+          }
+        : {}),
       onDecision: (record) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
