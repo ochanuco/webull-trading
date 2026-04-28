@@ -400,9 +400,23 @@ export const admin = new Hono<AppBindings>()
     if (appKey.length === 0) missingEnv.push('WEBULL_APP_KEY')
     if (appSecret.length === 0) missingEnv.push('WEBULL_APP_SECRET')
     if (accountId.length === 0) missingEnv.push('WEBULL_ACCOUNT_ID_JP_CASH')
+    // baseUrl は length > 0 でも http(s):// で parse できないと probeOnce 内の
+    // `new URL(args.path, ${baseUrl}/)` が同期的に TypeError を吐いて 500 で
+    // 落ちる。明示的に validate して 400 で返す方が運用視点で扱いやすい。
+    if (baseUrl.length > 0) {
+      let parsed: URL | null = null
+      try {
+        parsed = new URL(baseUrl)
+      } catch {
+        parsed = null
+      }
+      if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+        missingEnv.push('WEBULL_API_BASE (invalid: must be absolute http/https URL)')
+      }
+    }
     if (missingEnv.length > 0) {
       throw new ValidationError(
-        `Webull env var(s) missing or whitespace-only: ${missingEnv.join(', ')}`,
+        `Webull env var(s) missing or invalid: ${missingEnv.join(', ')}`,
         { field: 'env' },
       )
     }
@@ -488,6 +502,9 @@ export const admin = new Hono<AppBindings>()
       }),
     ])
 
+    // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
+    // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
+    c.header('Cache-Control', 'no-store')
     return c.json({
       timestamp: new Date().toISOString(),
       sandbox: baseUrl,
