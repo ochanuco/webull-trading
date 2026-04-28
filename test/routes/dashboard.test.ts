@@ -118,6 +118,31 @@ describe('dashboard', () => {
     expect(body).toContain('5.00%')
   })
 
+  it('formats JP positions as `${symbol}-${name}` while leaving US untouched', async () => {
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({
+        allowedSymbols: ['7974', 'SOXL'],
+        symbolCurrency: { '7974': 'JPY', SOXL: 'USD' },
+        symbolMarket: { '7974': 'JP', SOXL: 'US' },
+        symbolName: { '7974': '任天堂', SOXL: 'Direxion Semiconductor Bull 3X' },
+      }),
+    )
+    const env = {
+      ...baseEnv,
+      DB: {} as D1Database,
+      SYMBOL_STATE: fakeSymbolStateNamespace(),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // JP は 番号-会社名 形式に整形される
+    expect(body).toContain('7974-任天堂')
+    // US 銘柄は ticker のみ (US 名は使わない、URL routing も含め symbol そのまま)
+    expect(body).toContain('>SOXL<')
+    expect(body).not.toContain('SOXL-Direxion')
+  })
+
   it('renders positions with "unavailable" when SYMBOL_STATE is missing', async () => {
     const env = { ...baseEnv, DB: {} as D1Database }
     const app = createApp()

@@ -3,6 +3,7 @@ import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import { inversePairs, symbolConfig } from './schema'
 
 export type SymbolCurrency = 'USD' | 'JPY'
+export type SymbolMarket = 'US' | 'JP'
 
 export interface SymbolConfigSnapshot {
   /** Uppercased symbols where `active = 1`. */
@@ -20,6 +21,17 @@ export interface SymbolConfigSnapshot {
    * = 個別銘柄判定)。相関集約 cap (#23 Lane 3) で使う。
    */
   symbolBucket: Record<string, string>
+  /**
+   * symbol → market ('US' | 'JP')。dashboard が JP 銘柄表示を「番号-会社名」
+   * に切り替える判定に使う。CHECK 制約は schema 側に無いので 'US' / 'JP'
+   * 以外が混ざる場合は 'US' fallback (defensive)。
+   */
+  symbolMarket: Record<string, SymbolMarket>
+  /**
+   * symbol → 人間可読な銘柄名 (symbol_config.name)。NULL / 空文字は map に
+   * 含めない。dashboard が JP の `${symbol}-${name}` 表示で使う。
+   */
+  symbolName: Record<string, string>
 }
 
 /**
@@ -35,6 +47,8 @@ export async function loadSymbolConfig(
   const symbolMaxNotional: Record<string, number> = {}
   const symbolCurrency: Record<string, SymbolCurrency> = {}
   const symbolBucket: Record<string, string> = {}
+  const symbolMarket: Record<string, SymbolMarket> = {}
+  const symbolName: Record<string, string> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     allowedSymbols.push(symbol)
@@ -48,8 +62,23 @@ export async function loadSymbolConfig(
     if (normalizedBucket) {
       symbolBucket[symbol] = normalizedBucket
     }
+    // schema 上 market は 'US' | 'JP' 想定だが CHECK 制約は無いので
+    // 不正値は 'US' fallback (defensive)。dashboard 表示の「JP のみ
+    // 番号-会社名」判定に使う。
+    symbolMarket[symbol] = row.market === 'JP' ? 'JP' : 'US'
+    const trimmedName = row.name?.trim()
+    if (trimmedName && trimmedName.length > 0) {
+      symbolName[symbol] = trimmedName
+    }
   }
-  return { allowedSymbols, symbolMaxNotional, symbolCurrency, symbolBucket }
+  return {
+    allowedSymbols,
+    symbolMaxNotional,
+    symbolCurrency,
+    symbolBucket,
+    symbolMarket,
+    symbolName,
+  }
 }
 
 /**

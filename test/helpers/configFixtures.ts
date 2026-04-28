@@ -50,6 +50,8 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolMaxNotional: {},
     symbolCurrency: { SOXL: 'USD', SOXS: 'USD' },
     symbolBucket: {},
+    symbolMarket: { SOXL: 'US', SOXS: 'US' },
+    symbolName: {},
     inversePairs: {},
     source: 'd1',
     ...overrides,
