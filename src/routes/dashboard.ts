@@ -3930,9 +3930,14 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   // 「市場全体ビュー」で trader が銘柄を一目で識別できるようにする。
   // inactive 銘柄は data 取得は通常通り行うが、panel header に INACTIVE バッジと
   // grayed-out style (`symbol-inactive`) を付けて視覚識別する。
+  // panel に data-has-position / data-inactive を付け、上部 toolbar の checkbox
+  // で client-side filter (display:none) する。state は localStorage に保存
+  // (`dashboard.gridFilter.v1`)。chart=null (取得失敗) の panel は position 不明
+  // のため has-position=false 扱い (= 「未保有」フィルタに含める)。
   const panelsHtml = args.charts
     .map((entry, idx) => {
       const inactive = isSymbolInactive(entry.symbol, args.universe)
+      const hasPosition = entry.chart?.position != null
       // inactive は background / text-decoration の inline 上書きを避け、
       // CSS class 側 (.grid-panel.symbol-inactive と .symbol-disabled) に任せる。
       // inline style は CSS class より優先されてしまうため (CodeRabbit #230)。
@@ -3940,6 +3945,7 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         ? 'border:1px solid #d0d0d5;border-radius:6px;padding:8px'
         : 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff'
       const panelClass = inactive ? 'grid-panel symbol-inactive' : 'grid-panel'
+      const dataAttrs = ` data-has-position="${hasPosition ? '1' : '0'}" data-inactive="${inactive ? '1' : '0'}"`
       const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
       const headerText = displaySymbol(entry.symbol, args.universe)
       const tooltipText = inactiveTooltip(entry.symbol, args.universe)
@@ -3952,11 +3958,14 @@ export function renderGridTab(args: ChartsBodyGrid): string {
       const inactiveBadge = inactive
         ? `<span class="muted" style="font-size:11px"${titleAttr}>INACTIVE</span>`
         : ''
+      const positionBadge = hasPosition
+        ? `<span style="font-size:11px;color:#0a8a0a;font-weight:600" title="現保有あり">●保有</span>`
+        : ''
       if (entry.chart === null) {
         const errMsg = entry.error ?? 'チャートデータ取得失敗'
         const errBadge = `<span class="warn" style="font-size:11px">取得失敗</span>`
-        const rightSide = inactive ? inactiveBadge + errBadge : errBadge
-        return `<div class="${panelClass}" style="${baseStyle}">
+        const rightSide = (inactive ? inactiveBadge : '') + errBadge
+        return `<div class="${panelClass}"${dataAttrs} style="${baseStyle}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
             ${headerLink}
             <div style="display:flex;gap:6px;align-items:center">${rightSide}</div>
@@ -3965,8 +3974,8 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         </div>`
       }
       const badge = renderGridPanelBadge(entry.chart)
-      const rightSide = inactive ? inactiveBadge + badge : badge
-      return `<div class="${panelClass}" style="${baseStyle}">
+      const rightSide = (inactive ? inactiveBadge : '') + positionBadge + badge
+      return `<div class="${panelClass}"${dataAttrs} style="${baseStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
           ${headerLink}
           <div style="display:flex;gap:6px;align-items:center">${rightSide}</div>
@@ -4431,6 +4440,13 @@ export function renderGridTab(args: ChartsBodyGrid): string {
     panel 左上の銘柄名をクリックすると個別銘柄タブの詳細表示に遷移。
   </p>
   ${presetButtonsHtml}
+  <div class="grid-filter-bar" style="display:flex;gap:14px;align-items:center;margin-top:8px;font-size:12px;flex-wrap:wrap">
+    <span class="muted">表示:</span>
+    <label style="cursor:pointer"><input type="checkbox" id="grid-filter-position" checked> 保有あり</label>
+    <label style="cursor:pointer"><input type="checkbox" id="grid-filter-flat" checked> 未保有</label>
+    <label style="cursor:pointer"><input type="checkbox" id="grid-filter-inactive"> INACTIVE</label>
+    <span class="muted" id="grid-filter-count" style="margin-left:auto"></span>
+  </div>
   <div class="symbols-grid" style="display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:8px;margin-top:12px">
     ${panelsHtml}
   </div>
@@ -4444,8 +4460,100 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   </style>
   ${safeJsonScript('__chartData', payload)}
   <script src="${ECHARTS_CDN}" defer></script>
-  <script>${initScript}</script>`
+  <script>${initScript}</script>
+  <script>${filterScript}</script>`
 }
+
+/**
+ * grid panel filter (保有あり / 未保有 / INACTIVE)。echarts init 後に
+ * DOMContentLoaded で発火するよう <script> を initScript より後ろに置く。
+ * state は localStorage の `dashboard.gridFilter.v1` に保存。
+ *
+ * panel の表示/非表示は display:none の toggle のみ。echarts instance は
+ * init 済 (= サイズ確定済) なので再表示時に resize 不要。
+ */
+const filterScript = `
+  document.addEventListener('DOMContentLoaded', function () {
+    var KEY = 'dashboard.gridFilter.v1';
+    var DEFAULT = { position: true, flat: true, inactive: false };
+    var state = DEFAULT;
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          state = {
+            position: parsed.position !== false,
+            flat: parsed.flat !== false,
+            inactive: parsed.inactive === true,
+          };
+        }
+      }
+    } catch (_e) {}
+
+    var cbPosition = document.getElementById('grid-filter-position');
+    var cbFlat = document.getElementById('grid-filter-flat');
+    var cbInactive = document.getElementById('grid-filter-inactive');
+    var counter = document.getElementById('grid-filter-count');
+    if (!cbPosition || !cbFlat || !cbInactive) return;
+    cbPosition.checked = state.position;
+    cbFlat.checked = state.flat;
+    cbInactive.checked = state.inactive;
+
+    function apply() {
+      var panels = document.querySelectorAll('.symbols-grid .grid-panel');
+      var shown = 0;
+      // 「今回 visible に切り替わった panel」を resize 対象として記録。echarts は
+      // display:none の DOM に init すると 0×0 で残り、後から display:'' にしても
+      // 自動 resize しないため、手動で resize() を叩く必要がある (CodeRabbit #237)。
+      // 対象を「visible に *なった* panel」だけに絞ってウィンドウ resize 全件再
+      // レイアウトのコストを避ける。
+      var newlyShown = [];
+      for (var i = 0; i < panels.length; i++) {
+        var p = panels[i];
+        var hasPos = p.getAttribute('data-has-position') === '1';
+        var inact = p.getAttribute('data-inactive') === '1';
+        // INACTIVE は最優先 (inactive チェックが OFF なら問答無用で隠す)
+        var visible;
+        if (inact) {
+          visible = state.inactive;
+        } else if (hasPos) {
+          visible = state.position;
+        } else {
+          visible = state.flat;
+        }
+        var wasHidden = p.style.display === 'none';
+        p.style.display = visible ? '' : 'none';
+        if (visible) {
+          shown++;
+          if (wasHidden) newlyShown.push(p);
+        }
+      }
+      if (counter) counter.textContent = shown + ' / ' + panels.length + ' 銘柄表示';
+      // panel が再表示されたら、内部の echarts instance を resize して
+      // 0×0 サイズや stale viewport size のままにならないようにする。
+      // window resize されてた間に hidden だった panel も含めて safe。
+      if (newlyShown.length > 0 && typeof echarts !== 'undefined') {
+        for (var j = 0; j < newlyShown.length; j++) {
+          var chartDiv = newlyShown[j].querySelector('[id^="grid-chart-"]');
+          if (!chartDiv) continue;
+          var inst = echarts.getInstanceByDom(chartDiv);
+          if (inst) inst.resize();
+        }
+      }
+    }
+
+    function onChange() {
+      state = { position: cbPosition.checked, flat: cbFlat.checked, inactive: cbInactive.checked };
+      try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (_e) {}
+      apply();
+    }
+    cbPosition.addEventListener('change', onChange);
+    cbFlat.addEventListener('change', onChange);
+    cbInactive.addEventListener('change', onChange);
+    apply();
+  });
+`
 
 /**
  * grid panel header の右肩に出す軽量 indicators badge (price / SMA50)。
