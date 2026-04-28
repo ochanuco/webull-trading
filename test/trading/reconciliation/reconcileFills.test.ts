@@ -1421,7 +1421,10 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       // First row failed: surfaced as an error, NOT counted as abandoned.
       // Second row succeeded: counted as abandoned.
       expect(summary.abandoned).toBe(1)
-      expect(summary.stateApplyFailed).toBe(1)
+      // CodeRabbit #228 minor: stateApplyFailed counts DO state apply
+      // failures, not auto-abandon DB UPDATE failures. The latter is
+      // tracked via summary.errors.
+      expect(summary.stateApplyFailed).toBe(0)
       expect(summary.errors).toEqual([
         {
           clientOrderId: 'coid-stuck-1',

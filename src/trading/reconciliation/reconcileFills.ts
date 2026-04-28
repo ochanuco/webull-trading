@@ -323,7 +323,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
             }),
           )
           summary.errors.push({ clientOrderId: coid, message: `auto_abandon_failed: ${message}` })
-          summary.stateApplyFailed += 1
           continue
         }
         console.warn(
