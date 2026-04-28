@@ -126,6 +126,98 @@ describe('reconcileFills internals', () => {
       expect(_internal.resolveFilledPrice(1, detail)).toBeNull()
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // referenceLimitPrice (issue: 9697 ping-pong loop where broker echoes the
+  // same stub for both filled_price and limit_price → ratio=1 silently
+  // passes the PR #223 sanity guard and a $10 stub fills DO state.
+  //
+  // Fix: prefer the pre_submit row's limit_price (= our signed intent) over
+  // detail.limit_price as the ratio reference.
+  // ---------------------------------------------------------------------------
+  describe('resolveFilledPrice with referenceLimitPrice (pre_submit intent)', () => {
+    beforeEach(() => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+    })
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('rejects 9697-style stub (filled=10, broker.limit=10, pre_submit=3516)', () => {
+      // The exact bug: broker echoes a stub limit_price that matches its
+      // stub filled_price, so ratio = 10/10 = 1 and the prior implementation
+      // accepted the bogus fill. With the pre_submit reference, ratio
+      // = 10/3516 = 0.00284 → reject.
+      const detail = {
+        items: [{ filled_price: '10' }],
+        limit_price: '10',
+      }
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: 3516 }),
+      ).toBeNull()
+    })
+
+    it('accepts a healthy fill against the pre_submit reference (215 vs 215.42)', () => {
+      const detail = {
+        items: [{ filled_price: '215' }],
+        limit_price: '215.42',
+      }
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: 215.42 }),
+      ).toBe(215)
+    })
+
+    it('falls back to broker limit when referenceLimitPrice is null', () => {
+      // No pre_submit reference (= legacy caller). Existing behaviour:
+      // ratio uses broker limit. Stub-vs-stub still passes (ratio=1) — this
+      // is the bug we are fixing for the new caller, but the fallback is
+      // preserved to avoid regression for any non-reconcile call site.
+      const detail = {
+        items: [{ filled_price: '10' }],
+        limit_price: '10',
+      }
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: null }),
+      ).toBe(10)
+    })
+
+    it('skips ratio check when both references are absent (defensive)', () => {
+      const detail = {
+        items: [{ filled_price: '10' }],
+      }
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: null }),
+      ).toBe(10)
+    })
+
+    it('treats non-positive referenceLimitPrice as missing (falls back to broker limit)', () => {
+      // Defensive against malformed pre_submit rows. 0 / negative → ignore
+      // and fall back to broker echo.
+      const detail = {
+        items: [{ filled_price: '10' }],
+        limit_price: '2683',
+      }
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: 0 }),
+      ).toBeNull()
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: -1 }),
+      ).toBeNull()
+    })
+
+    it('preferred: pre_submit accepts even if broker limit would reject', () => {
+      // Pre-submit limit aligns with reality (3516); broker echoes a stub
+      // 215.42 that would reject 3500. Trusting pre_submit lets the
+      // healthy fill through.
+      const detail = {
+        items: [{ filled_price: '3500' }],
+        limit_price: '215.42',
+      }
+      expect(
+        _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: 3516 }),
+      ).toBe(3500)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -138,6 +230,13 @@ interface CandidateRow {
   symbol: string | null
   side: string | null
   preSubmitSide?: string | null
+  /**
+   * pre_submit 行の limit_price (= 我々が intent で signed した値)。
+   * sanity check の ratio reference として broker.limit_price より優先
+   * 利用される。null の場合 (= MARKET order without limit) は broker
+   * echo にフォールバック、それも無ければ ratio check skip。
+   */
+  preSubmitLimitPrice?: number | null
   brokerStatus: string | null
   filledQty: number | null
   filledPrice: number | null
@@ -900,6 +999,81 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(updates[1]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     expect(summary.stateApplied).toBe(0)
     expect(summary.stateApplyFailed).toBe(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 9697 ping-pong scenario (this PR): broker echoes detail.limit_price=10 to
+  // match its stub filled_price=10 → ratio=1 silently passes the PR #223
+  // sanity check. Pre_submit limit_price (3516, our signed intent) is the
+  // fix: ratio collapses to 10/3516 = 0.00284, sanity rejects, DO is spared.
+  // ---------------------------------------------------------------------------
+  it('JP 9697 stub: broker echoes limit=10 matching filled=10 — pre_submit limit catches it', async () => {
+    const row: CandidateRow = {
+      id: 92, // matches the post_submit row id from the bug report
+      clientOrderId: 'coid-9697-stub',
+      symbol: '9697',
+      side: 'BUY',
+      preSubmitSide: 'BUY',
+      // Pre_submit row id 91 with limit_price=3516. JOIN attaches it here.
+      preSubmitLimitPrice: 3516,
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-9697-stub': {
+          status: 'FILLED',
+          filled_quantity: '1',
+          // BUG: broker echoes the same stub for both fields. Without the
+          // pre_submit reference, ratio = 10/10 = 1 and PR #223 sanity
+          // wrongly accepts the fill.
+          limit_price: '10',
+          items: [{ filled_price: '10' }],
+          side: 'BUY',
+          symbol: '9697',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    // DO state must NOT be touched — that's the whole point. avgPrice=10
+    // would have triggered a TP→SELL→re-fill ping-pong against a real
+    // entry near 3516.
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+
+    // Two UPDATEs:
+    //   (1) journal fill columns: broker_status=FILLED, filled_qty=1,
+    //       filled_price=null (sanity rejected via pre_submit reference)
+    //   (2) failure marker — state_applied_at must NOT be stamped so the
+    //       row stays in the repair cohort for next tick.
+    expect(updates).toHaveLength(2)
+    expect(updates[0]!.set.brokerStatus).toBe('FILLED')
+    expect(updates[0]!.set.filledQty).toBe(1)
+    expect(updates[0]!.set.filledPrice).toBeNull()
+    expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
+    expect(updates[1]!.set.stateAppliedAt).toBeUndefined()
+    expect(updates[1]!.set.stateApplyError).toMatch(/sanity_failed/)
+
+    expect(summary.stateApplied).toBe(0)
+    expect(summary.stateApplyFailed).toBe(1)
+    expect(summary.errors).toEqual([
+      { clientOrderId: 'coid-9697-stub', message: expect.stringContaining('sanity_failed') },
+    ])
   })
 
   it('shouldRetryStateApply: true only for FILLED + qty>0 + price=null', () => {
