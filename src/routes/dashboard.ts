@@ -578,87 +578,73 @@ function unavailable(reason: string): string {
  *     にも残らない
  */
 function brokerProbeBody(args: { symbol: string; category: string }): string {
-  // 主要 symbol 候補は datalist (typing 補完) と画面下のクリッカブル chip
-  // (一発入力) の二重で出す。datalist だけだと Chrome は input 値で filter
-  // するため、初期値 "SOXL" のままだと dropdown に SOXL しか出てこない。
-  // chip ボタンなら category とセットで一発切替えでき、JP/US 両方を発見可能。
-  // US: ticker、JP: 4 桁 TSE code。JP_STOCK / JP_ETF は WebullQuoteCategory 上
-  // unsupported (= cron は送らない) だが、probe は broker に直接投げて raw を
-  // 見るのが役目なので allowlist 拡張と JP endpoint 動作確認のため選べる。
-  const usStockSymbols = ['AAPL', 'NVDA', 'MSFT', 'GOOG']
-  const usEtfSymbols = ['SOXL', 'SOXS', 'SPY', 'QQQ']
-  const jpStockSymbols = ['7203', '7011', '6752', '6971', '9697']
-  const jpEtfSymbols = ['1570']
-  const popularSymbols = [
-    ...usStockSymbols, ...usEtfSymbols, ...jpStockSymbols, ...jpEtfSymbols,
-  ]
-  const datalistOptions = popularSymbols
-    .map((s) => `<option value="${esc(s)}"></option>`)
-    .join('')
-  const renderChips = (symbols: string[], chipCategory: string): string =>
-    symbols
-      .map(
-        (s) =>
-          `<button type="button" class="probe-chip" data-symbol="${esc(s)}" data-category="${chipCategory}" style="padding:2px 8px;font-size:11px;border:1px solid #ccc;border-radius:12px;background:#f6f6f6;cursor:pointer">${esc(s)}</button>`,
-      )
-      .join(' ')
-  const chipsHtml = `<div style="display:flex;gap:14px;flex-wrap:wrap;margin:0 0 16px 0;font-size:11px;align-items:center">
-    <span class="muted">候補:</span>
-    <span><span class="muted">US_STOCK</span> ${renderChips(usStockSymbols, 'US_STOCK')}</span>
-    <span><span class="muted">US_ETF</span> ${renderChips(usEtfSymbols, 'US_ETF')}</span>
-    <span><span class="muted">JP_STOCK</span> ${renderChips(jpStockSymbols, 'JP_STOCK')}</span>
-    <span><span class="muted">JP_ETF</span> ${renderChips(jpEtfSymbols, 'JP_ETF')}</span>
-  </div>`
-  const categoryOptions = (['US_STOCK', 'US_ETF', 'JP_STOCK', 'JP_ETF'] as const)
-    .map((c) => `<option value="${c}"${c === args.category ? ' selected' : ''}>${c}</option>`)
-    .join('')
+  // 旧版 (PR #245-#247) は form + datalist + chip 並べてたが、結局 user の
+  // 関心は「自分の保有銘柄を broker がどう答えるか」がメイン。なので form を
+  // 撤去し、auto-probe で取れる positions リストをクリッカブルに表示する形に
+  // 再設計 (PR #248)。AAPL は JP UAT で唯一 200 が返る US 銘柄なので control
+  // として 1 ボタン残す。
+  //
+  // フロー:
+  //   1. ページ表示 → auto-probe (default: AAPL/US_STOCK)
+  //   2. positions JSON parse → 各 holding をボタンとして列挙
+  //   3. ホールディング (or AAPL) クリック → 該当 symbol / inferred category
+  //      で再 probe (positions パートは毎回更新されるが内容は同じ)
+  //
+  // 任意 symbol の検証は curl で /admin/broker/probe を直接叩く前提。UI から
+  // 外して責務を「保有確認 + 1 control」に絞る。
   return `<p class="muted" style="font-size:12px">
   Webull broker (現状: JP UAT <code>jp-openapi-alb.uat.webullbroker.com</code>) に
-  実 cron と同じ <code>/openapi/market-data/stock/snapshot</code> + <code>/openapi/account/positions</code>
-  を直接 fetch して raw レスポンスを表示します。403 が返る場合は body にある
-  Webull の error_code / message / request_id をサポートに転送可能。
-  US 銘柄は <code>US_STOCK</code> / <code>US_ETF</code>、JP 銘柄 (4 桁 TSE
-  コード) は <code>JP_STOCK</code> / <code>JP_ETF</code> を試せます (cron は
-  US カテゴリしか叩かない設計だが、probe で JP endpoint の挙動を確認できる)。
+  <code>/openapi/market-data/stock/snapshot</code> + <code>/openapi/account/positions</code>
+  を直接 fetch して raw レスポンスを表示します。保有銘柄を click すると、その銘柄
+  の quote を broker に問合せて生応答 (status / error_code / request_id) が見えます。
+  任意の symbol / category で叩きたい場合は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>
+  を直接実行してください。
 </p>
-<form id="probe-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
-  <label style="display:flex;flex-direction:column;font-size:12px">
-    symbol
-    <input type="text" name="symbol" id="probe-symbol" value="${esc(args.symbol)}" list="probe-symbols" style="padding:6px;font-size:14px;width:140px" required>
-    <datalist id="probe-symbols">${datalistOptions}</datalist>
-  </label>
-  <label style="display:flex;flex-direction:column;font-size:12px">
-    category
-    <select name="category" id="probe-category" style="padding:6px;font-size:14px">
-      ${categoryOptions}
-    </select>
-  </label>
-  <button type="submit" id="probe-submit" style="padding:6px 16px;font-size:14px;background:#06c;color:#fff;border:1px solid #06c;border-radius:4px;cursor:pointer">probe 実行</button>
-  <span class="muted" id="probe-status" style="font-size:12px"></span>
-</form>
-${chipsHtml}
-<div id="probe-result" style="display:none;margin-top:8px">
-  <h2 style="font-size:14px;margin:0 0 4px 0">quote (snapshot endpoint)</h2>
-  <pre id="probe-quote" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all"></pre>
-  <h2 style="font-size:14px;margin:12px 0 4px 0">positions (account endpoint)</h2>
-  <pre id="probe-positions" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all"></pre>
-  <h2 style="font-size:14px;margin:12px 0 4px 0">meta</h2>
-  <pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px"></pre>
+<div style="display:flex;gap:14px;align-items:center;margin-bottom:12px">
+  <span class="muted" id="probe-status" style="font-size:12px">読み込み中...</span>
+  <button type="button" id="probe-refresh" style="padding:4px 12px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">再 probe</button>
 </div>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">保有銘柄 (click で quote probe)</h2>
+<div id="probe-positions-list" style="margin-bottom:16px"></div>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">control (US は AAPL のみ allowlist 通過)</h2>
+<div style="margin-bottom:16px">
+  <button type="button" class="probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK" style="padding:4px 12px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">AAPL (US_STOCK)</button>
+</div>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 <span class="muted" id="probe-current" style="font-size:12px;font-weight:normal"></span></h2>
+<pre id="probe-quote" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">(まだ probe 未実行)</pre>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">meta</h2>
+<pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px">(まだ probe 未実行)</pre>
+
+<details style="margin-top:16px">
+  <summary class="muted" style="font-size:12px;cursor:pointer">positions raw response</summary>
+  <pre id="probe-positions-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px"></pre>
+</details>
+
 <script>
 (function () {
-  var form = document.getElementById('probe-form');
-  var symbolEl = document.getElementById('probe-symbol');
-  var categoryEl = document.getElementById('probe-category');
-  var submitBtn = document.getElementById('probe-submit');
   var statusEl = document.getElementById('probe-status');
-  var resultEl = document.getElementById('probe-result');
+  var refreshBtn = document.getElementById('probe-refresh');
+  var positionsListEl = document.getElementById('probe-positions-list');
   var quoteEl = document.getElementById('probe-quote');
-  var positionsEl = document.getElementById('probe-positions');
   var metaEl = document.getElementById('probe-meta');
+  var rawEl = document.getElementById('probe-positions-raw');
+  var currentEl = document.getElementById('probe-current');
 
-  // probe.bodyTruncated は元 broker レスポンスが JSON なら parse し直して
-  // 整形表示する。parse 失敗 (HTML / plain text の error page) は素のまま表示。
+  // JP は 4 桁数字 (TSE code)。1570 だけ既知 ETF、それ以外は STOCK 扱い。
+  // US は SOXL / SOXS / SPY / QQQ を ETF 扱い、それ以外は STOCK。
+  var US_ETF_KNOWN = { SOXL: 1, SOXS: 1, SPY: 1, QQQ: 1 };
+  var JP_ETF_KNOWN = { '1570': 1 };
+  function inferCategory(symbol) {
+    if (/^\\d{4}$/.test(symbol)) {
+      return JP_ETF_KNOWN[symbol] ? 'JP_ETF' : 'JP_STOCK';
+    }
+    return US_ETF_KNOWN[symbol.toUpperCase()] ? 'US_ETF' : 'US_STOCK';
+  }
+
   function prettify(section) {
     if (!section) return '(no data)';
     var raw = section.bodyTruncated;
@@ -673,77 +659,112 @@ ${chipsHtml}
     return header + '\\n\\n' + bodyText;
   }
 
-  form.addEventListener('submit', function (ev) {
-    ev.preventDefault();
-    var symbol = symbolEl.value.trim().toUpperCase();
-    var category = categoryEl.value;
-    if (!symbol) return;
-    submitBtn.disabled = true;
-    statusEl.textContent = '実行中...';
-    // 前回の probe 結果をクリア
-    quoteEl.textContent = '';
-    positionsEl.textContent = '';
-    metaEl.textContent = '';
-    resultEl.style.display = 'none';
+  function formatNumber(s) {
+    var n = Number(s);
+    if (!Number.isFinite(n)) return String(s);
+    return n.toLocaleString('ja-JP', { maximumFractionDigits: 2 });
+  }
+
+  // positions の bodyTruncated を parse して clickable button list を作る。
+  // parse 失敗 / 空配列なら "(なし)" 表示。各 button は data-symbol / data-category
+  // を持ち、共通 click handler で probe 起動。
+  function renderPositionsList(section) {
+    if (!section || section.phase !== 'response' || !section.ok) {
+      positionsListEl.innerHTML = '<span class="muted" style="font-size:12px">positions: ' +
+        ((section && section.error) || (section && 'status=' + section.status) || 'no data') + '</span>';
+      rawEl.textContent = section ? prettify(section) : '(no data)';
+      return;
+    }
+    var raw = section.bodyTruncated;
+    rawEl.textContent = prettify(section);
+    var items = null;
+    try { items = JSON.parse(raw); } catch (_) { items = null; }
+    if (!Array.isArray(items) || items.length === 0) {
+      positionsListEl.innerHTML = '<span class="muted" style="font-size:12px">保有銘柄なし</span>';
+      return;
+    }
+    var html = items.map(function (item) {
+      var sym = item.symbol || '';
+      var name = item.symbol_name || '';
+      var qty = formatNumber(item.quantity);
+      var cur = item.currency || '';
+      var mv = formatNumber(item.market_value);
+      var cost = formatNumber(item.cost_price);
+      var cat = inferCategory(sym);
+      return '<button type="button" class="probe-pickbtn" data-symbol="' + sym + '" data-category="' + cat +
+        '" style="display:block;width:100%;text-align:left;padding:6px 10px;font-size:12px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;margin-bottom:4px">' +
+        '<strong>' + sym + '</strong> ' + (name ? '— ' + name + ' ' : '') +
+        '<span class="muted">qty=' + qty + ' cost=' + cost + ' mv=' + cur + ' ' + mv + ' (' + cat + ')</span>' +
+        '</button>';
+    }).join('');
+    positionsListEl.innerHTML = html;
+    // 動的に作られたボタンに click handler を接続
+    positionsListEl.querySelectorAll('.probe-pickbtn').forEach(function (btn) {
+      btn.addEventListener('click', onPickClick);
+    });
+  }
+
+  function probe(symbol, category) {
+    refreshBtn.disabled = true;
+    statusEl.textContent = '実行中: ' + symbol + ' (' + category + ')';
+    currentEl.textContent = '— ' + symbol + ' / ' + category;
+    quoteEl.textContent = '...';
     var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
       '&category=' + encodeURIComponent(category);
-    // URL 更新 (リロード時に同じ条件を保つ + bookmarks 用)
+    // URL 更新 (bookmark / リロード対応)
     try {
       var u = new URL(window.location.href);
       u.searchParams.set('symbol', symbol);
       u.searchParams.set('category', category);
       window.history.replaceState({}, '', u.toString());
     } catch (_) {}
-    fetch(url, { credentials: 'same-origin' })
+    return fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
       .then(function (res) {
-        statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
         var body = res.body;
+        statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
         if (body.quote) quoteEl.textContent = prettify(body.quote);
-        if (body.positions) positionsEl.textContent = prettify(body.positions);
-        var meta = {
+        if (body.positions) renderPositionsList(body.positions);
+        metaEl.textContent = JSON.stringify({
           timestamp: body.timestamp,
           sandbox: body.sandbox,
           input: body.input,
           adminStatus: res.status,
-        };
-        metaEl.textContent = JSON.stringify(meta, null, 2);
-        resultEl.style.display = 'block';
+        }, null, 2);
       })
       .catch(function (e) {
         statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
-        // fetch エラー時も古いデータを残さない
-        quoteEl.textContent = '';
-        positionsEl.textContent = '';
-        metaEl.textContent = '';
-        resultEl.style.display = 'none';
       })
       .finally(function () {
-        submitBtn.disabled = false;
+        refreshBtn.disabled = false;
       });
-  });
-
-  // クリッカブル候補 chip。クリックで symbol input + category select を一発
-  // 上書きして submit 発火 (= 即 probe 実行)。datalist は Chrome の filter
-  // 挙動でデフォルト値と一致する候補しか出ない UX 問題への補助。
-  document.querySelectorAll('.probe-chip').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var sym = btn.getAttribute('data-symbol');
-      var cat = btn.getAttribute('data-category');
-      if (sym) symbolEl.value = sym;
-      if (cat) categoryEl.value = cat;
-      form.dispatchEvent(new Event('submit', { cancelable: true }));
-    });
-  });
-
-  // 初回読み込み時、URL に **両方** ?symbol & ?category がついてれば自動 probe
-  // (form 状態は server-side で既に埋まってる)。ブックマークから戻った時に
-  // 何も表示されない違和感を防ぐ。?utm_source=... のような無関係 query で
-  // 暴発しないよう、両 key の存在を URLSearchParams で明示的に確認する。
-  var qs = new URLSearchParams(window.location.search);
-  if (qs.has('symbol') && qs.has('category')) {
-    form.dispatchEvent(new Event('submit', { cancelable: true }));
   }
+
+  function onPickClick(ev) {
+    var btn = ev.currentTarget;
+    var sym = btn.getAttribute('data-symbol');
+    var cat = btn.getAttribute('data-category');
+    if (sym && cat) probe(sym, cat);
+  }
+
+  // 起動時の click 連携 (control buttons)
+  document.querySelectorAll('.probe-pickbtn').forEach(function (btn) {
+    btn.addEventListener('click', onPickClick);
+  });
+
+  // 再 probe ボタン: 直近の symbol / category を再使用。URL から拾う。
+  refreshBtn.addEventListener('click', function () {
+    var qs = new URLSearchParams(window.location.search);
+    var sym = qs.get('symbol') || 'AAPL';
+    var cat = qs.get('category') || 'US_STOCK';
+    probe(sym, cat);
+  });
+
+  // 起動時 auto-probe。URL に symbol+category があればそれ、なければ AAPL/US_STOCK。
+  var qs = new URLSearchParams(window.location.search);
+  var initialSymbol = qs.get('symbol') || 'AAPL';
+  var initialCategory = qs.get('category') || 'US_STOCK';
+  probe(initialSymbol, initialCategory);
 })();
 </script>`
 }
