@@ -3038,7 +3038,13 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
       var bandUpperY = latestHigh20d == null ? null : latestHigh20d * pullbackMaxMul;
       var bandLowerY = latestHigh20d == null ? null : latestHigh20d * pullbackMinMul;
-      var pullbackBandMarkArea = (bandUpperY != null && bandLowerY != null) ? {
+      var bandTopY = null;
+      var bandBottomY = null;
+      if (bandUpperY != null && bandLowerY != null) {
+        bandTopY = Math.max(bandUpperY, bandLowerY);
+        bandBottomY = Math.min(bandUpperY, bandLowerY);
+      }
+      var pullbackBandMarkArea = (bandTopY != null && bandBottomY != null) ? {
         silent: true,
         itemStyle: {
           color: 'rgba(255, 180, 50, 0.12)',
@@ -3047,8 +3053,8 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           borderType: 'dashed',
         },
         data: [[
-          { yAxis: bandLowerY, name: '押し目ゾーン' },
-          { yAxis: bandUpperY },
+          { yAxis: bandBottomY, name: '押し目ゾーン' },
+          { yAxis: bandTopY },
         ]],
       } : null;
 
