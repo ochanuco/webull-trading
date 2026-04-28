@@ -3064,13 +3064,16 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       // - 下端 = high20d × (1 + pullbackMin)  = 押し目買いの下限 (-15% 以下は深すぎ)
       var pullbackMaxMul = 1 + sc.rules.pullbackMax;
       var pullbackMinMul = 1 + sc.rules.pullbackMin;
-      // 押し目ゾーン fill 用の代表 y 値: 直近の有効な high20d を採用。
-      // 帯の表現は markArea 一本に統一 (#232 follow-up): 以前は per-timestamp
-      // の dashed line 2 本も併用していたが、20 日 high はあまり動かないため
-      // markArea の上下境界とほぼ重なって冗長だった。markArea fill だけのほう
-      // が「現在の押し目ゾーンはこの価格帯」が一目で分かる。
-      // high20d は 20 日移動高値で日次更新、chart 表示期間内では緩やかに動くため
-      // 視覚的近似として十分。
+      // 帯の描画は 3 層で構成 (#237 follow-up):
+      //   1. markArea fill (薄オレンジ): 「現在の押し目ゾーン (latest high20d 基準)」
+      //      を flat に塗って即座にレンジを把握させる。
+      //   2. per-timestamp dashed line × 2 (上端 / 下端): 各日の high20d × mul を
+      //      たどる斜めライン。SOXL のように high20d が右肩上がりで動く銘柄では
+      //      flat な markArea とのズレが大きく、傾きで「押し目ゾーンが日々どう動
+      //      いてるか」を可視化する。
+      // 元々 (#232 follow-up) は 1 だけにしていたが、価格 momentum が大きい銘柄で
+      // 「平行な帯が実態とズレて見える」issue → 1+2 のハイブリッドに戻す。
+      // markArea の opacity は重ね描きで濃くなりすぎないよう 0.12 → 0.08 に下げる。
       var latestHigh20d = null;
       for (var lhi = sc.points.length - 1; lhi >= 0; lhi -= 1) {
         var lhp = sc.points[lhi];
@@ -3090,8 +3093,8 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var pullbackBandMarkArea = (bandTopY != null && bandBottomY != null) ? {
         silent: true,
         itemStyle: {
-          color: 'rgba(255, 180, 50, 0.12)',
-          borderColor: 'rgba(255, 140, 0, 0.4)',
+          color: 'rgba(255, 180, 50, 0.08)',
+          borderColor: 'rgba(255, 140, 0, 0.35)',
           borderWidth: 1,
           borderType: 'dashed',
         },
@@ -3100,6 +3103,24 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           { yAxis: bandTopY },
         ]],
       } : null;
+
+      // per-timestamp の押し目ゾーン上下端 (sloped 2 lines)。各 point.high20d ×
+      // pullbackMaxMul / pullbackMinMul を辿る。high20d が null の point は
+      // null を入れて echarts に segment break させる (connectNulls=false)。
+      var pullbackUpperXY = sc.points.map(function (p) {
+        var x = xForTimestamp(p.timestamp);
+        if (typeof p.high20d !== 'number' || !isFinite(p.high20d)) return [x, null];
+        return [x, p.high20d * pullbackMaxMul];
+      });
+      var pullbackLowerXY = sc.points.map(function (p) {
+        var x = xForTimestamp(p.timestamp);
+        if (typeof p.high20d !== 'number' || !isFinite(p.high20d)) return [x, null];
+        return [x, p.high20d * pullbackMinMul];
+      });
+      // 全点 null の場合は line series を出さない (legend を汚さない)。
+      var pullbackBandHasData =
+        pullbackUpperXY.some(function (xy) { return xy[1] != null; }) &&
+        pullbackLowerXY.some(function (xy) { return xy[1] != null; });
 
       // 価格トレンド線 (server-side で daily close の linear regression fit)。
       // 旧仕様の「上値抵抗線 / 下値支持線」上下 2 本は、ローソク足の上下を
@@ -3506,6 +3527,29 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               type: 'line', data: [],
               symbol: 'none', z: 1,
               markArea: pullbackBandMarkArea,
+            },
+          ]),
+          // per-timestamp 上下端 (sloped lines)。markArea の上に重ねて、
+          // high20d が動く銘柄での「帯の傾き」を可視化する。保有時 + 押し目
+          // markArea 描画なしのケースは line も出さない (chart 過密回避)。
+          // 凡例は markArea host series '押し目ゾーン' に集約させたいので、
+          // この 2 本は legendHoverLink で同期する独立 series (name のみ別)。
+          ...((sc.position || !pullbackBandMarkArea || !pullbackBandHasData) ? [] : [
+            {
+              name: '押し目上端',
+              type: 'line', data: pullbackUpperXY,
+              connectNulls: false,
+              lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
+              itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
+              symbol: 'none', z: 2,
+            },
+            {
+              name: '押し目下端',
+              type: 'line', data: pullbackLowerXY,
+              connectNulls: false,
+              lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
+              itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
+              symbol: 'none', z: 2,
             },
           ]),
           // 価格トレンド (linear regression, 直近 30 日 daily close fit)。
