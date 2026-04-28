@@ -3325,8 +3325,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         if (Number.isFinite(pFromMs) && Number.isFinite(pToMs)) {
           previewStopLineXY = toCategoryXY(densifyHorizontalLine(pStopPrice, pFromMs, pToMs, ohlcTimestamps));
           previewTpLineXY = toCategoryXY(densifyHorizontalLine(pTpPrice, pFromMs, pToMs, ohlcTimestamps));
-          previewStopLabel = 'preview stop ' + pStopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
-          previewTpLabel = 'preview TP ' + pTpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
+          // label は actual stop/TP と長さを揃える (右端で見切れないよう
+          // "preview" prefix ではなく "(preview)" suffix にして、actual の
+          // "stop X (-Y%)" と同等の幅に収める)。
+          previewStopLabel = 'stop ' + pStopPrice.toFixed(2) + ' (preview)';
+          previewTpLabel = 'TP ' + pTpPrice.toFixed(2) + ' (preview)';
         }
       }
 
@@ -3458,7 +3461,9 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         legend: { top: 22, type: 'scroll' },
         // plot 面積最大化: grid 余白を絞り、splitLine 淡く、axisLine 非表示で
         // candle が映える背景に (trader-strategist 助言)。bottom は slider 用 64px キープ。
-        grid: { left: 50, right: 20, top: 56, bottom: 64 },
+        // right は stop/TP の endLabel ("stop X (preview)" 等) が見切れないよう
+        // 80px 確保 (短い "stop X (-Y%)" でも余白として違和感ない範囲)。
+        grid: { left: 50, right: 80, top: 56, bottom: 64 },
         dataZoom: dataZoomCfg,
         // category mode: categories = intradayBars 各 bar の ISO timestamp。
         // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
