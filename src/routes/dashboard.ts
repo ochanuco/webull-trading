@@ -4459,6 +4459,12 @@ const filterScript = `
     function apply() {
       var panels = document.querySelectorAll('.symbols-grid .grid-panel');
       var shown = 0;
+      // 「今回 visible に切り替わった panel」を resize 対象として記録。echarts は
+      // display:none の DOM に init すると 0×0 で残り、後から display:'' にしても
+      // 自動 resize しないため、手動で resize() を叩く必要がある (CodeRabbit #237)。
+      // 対象を「visible に *なった* panel」だけに絞ってウィンドウ resize 全件再
+      // レイアウトのコストを避ける。
+      var newlyShown = [];
       for (var i = 0; i < panels.length; i++) {
         var p = panels[i];
         var hasPos = p.getAttribute('data-has-position') === '1';
@@ -4472,10 +4478,25 @@ const filterScript = `
         } else {
           visible = state.flat;
         }
+        var wasHidden = p.style.display === 'none';
         p.style.display = visible ? '' : 'none';
-        if (visible) shown++;
+        if (visible) {
+          shown++;
+          if (wasHidden) newlyShown.push(p);
+        }
       }
       if (counter) counter.textContent = shown + ' / ' + panels.length + ' 銘柄表示';
+      // panel が再表示されたら、内部の echarts instance を resize して
+      // 0×0 サイズや stale viewport size のままにならないようにする。
+      // window resize されてた間に hidden だった panel も含めて safe。
+      if (newlyShown.length > 0 && typeof echarts !== 'undefined') {
+        for (var j = 0; j < newlyShown.length; j++) {
+          var chartDiv = newlyShown[j].querySelector('[id^="grid-chart-"]');
+          if (!chartDiv) continue;
+          var inst = echarts.getInstanceByDom(chartDiv);
+          if (inst) inst.resize();
+        }
+      }
     }
 
     function onChange() {
