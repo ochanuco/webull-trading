@@ -174,6 +174,112 @@ describe('WebullHttpClient', () => {
     expect(await client.findOrderByClientId('missing')).toBeUndefined()
   })
 
+  // #251 / #253: 新 OpenAPI docs では order-history が wrapper 形式
+  // ({client_order_id, combo_type, orders[]}) で返るので、normalizer が
+  // wrapper を flat 形式に projection することを確認。
+  it('findOrderByClientId handles new wrapper response shape ({client_order_id, orders: [...]})', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            client_order_id: 'wrapped-1',
+            combo_type: 'NORMAL',
+            orders: [
+              {
+                symbol: 'SOXL',
+                side: 'BUY',
+                status: 'FILLED',
+                total_quantity: '4',
+                filled_quantity: '4',
+                filled_price: '125.00',
+              },
+            ],
+          },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('wrapped-1')
+    expect(detail).toBeDefined()
+    expect(detail?.client_order_id).toBe('wrapped-1')
+    expect(detail?.symbol).toBe('SOXL')
+    expect(detail?.status).toBe('FILLED')
+    expect(detail?.filled_quantity).toBe('4')
+    expect(detail?.filled_price).toBe('125.00')
+    // total_quantity → quantity に正規化されてること
+    expect(detail?.quantity).toBe('4')
+    expect(detail?.total_quantity).toBe('4')
+  })
+
+  it('findOrderByClientId handles legacy flat response shape (no orders[] wrapper)', async () => {
+    // 旧 shape は normalizer が pass-through すること (= 既存 callers が引き
+    // 続き動く backward compat)
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { client_order_id: 'flat-1', symbol: 'AAPL', status: 'FILLED', quantity: '8', filled_quantity: '8' },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('flat-1')
+    expect(detail?.symbol).toBe('AAPL')
+    expect(detail?.quantity).toBe('8')
+    expect(detail?.status).toBe('FILLED')
+  })
+
+  // CodeRabbit #261 finding 1: wrapper の `orders[]` が空のケース。
+  // partial detail (client_order_id だけ持つ) を返すと incomplete data が
+  // caller に渡るので、normalizer は空オブジェクト → find で skip される。
+  it('findOrderByClientId returns undefined when wrapper has empty orders[]', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { client_order_id: 'empty-wrapper', combo_type: 'NORMAL', orders: [] },
+          { client_order_id: 'unrelated', symbol: 'NVDA', status: 'PENDING' },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    expect(await client.findOrderByClientId('empty-wrapper')).toBeUndefined()
+  })
+
+  // CodeRabbit #261 finding 2: top-level に client_order_id が無く inner 側
+  // にあるパターン。normalizer は inner.client_order_id を fallback として使う。
+  it('findOrderByClientId falls back to inner client_order_id when top-level is missing', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            // top-level に client_order_id が無いケース (新 docs で稀にあり得る)
+            combo_type: 'NORMAL',
+            orders: [
+              {
+                client_order_id: 'inner-only-1',
+                symbol: 'SOXL',
+                side: 'SELL',
+                status: 'FILLED',
+                total_quantity: '8',
+                filled_quantity: '8',
+              },
+            ],
+          },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('inner-only-1')
+    expect(detail).toBeDefined()
+    expect(detail?.client_order_id).toBe('inner-only-1')
+    expect(detail?.symbol).toBe('SOXL')
+    expect(detail?.quantity).toBe('8') // total_quantity → quantity 正規化
+    expect(detail?.status).toBe('FILLED')
+  })
+
   it('requests account details from the documented profile endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

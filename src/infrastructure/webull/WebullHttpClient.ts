@@ -3,6 +3,7 @@ import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import type {
   WebullAccountDto,
   WebullOrderDetailDto,
+  WebullOrderHistoryWrapperDto,
   WebullPlaceOrderResponseDto,
   WebullPositionDto,
   WebullSubscriptionDto,
@@ -85,19 +86,31 @@ export class WebullHttpClient {
    * fetch the first page of `/openapi/account/orders/history` and filter
    * client-side. If the order is older than that window the caller gets
    * `undefined`; a wider pagination sweep is out of scope for the MVP.
+   *
+   * 新 OpenAPI docs (#251) では response が wrapper 形式 (`{client_order_id,
+   * combo_type, orders[]}`) に変わってる。\`normalizeOrderHistoryRow\` で
+   * wrapper / flat 双方を flat な \`WebullOrderDetailDto\` に正規化するので
+   * callers (reconcileFills 等) は signature を変えずに済む (#253)。
    */
   async findOrderByClientId(
     clientOrderId: string,
     pageSize = 50,
   ): Promise<WebullOrderDetailDto | undefined> {
-    const page = await this.request<WebullOrderDetailDto[]>(
+    const page = await this.request<unknown[]>(
       'GET',
       '/openapi/account/orders/history',
       {
         query: { account_id: this.requireAccountId(), page_size: String(pageSize) },
       },
     )
-    return page.find((entry) => entry.client_order_id === clientOrderId)
+    if (!Array.isArray(page)) return undefined
+    for (const raw of page) {
+      const normalized = normalizeOrderHistoryRow(
+        raw as WebullOrderHistoryWrapperDto | WebullOrderDetailDto,
+      )
+      if (normalized.client_order_id === clientOrderId) return normalized
+    }
+    return undefined
   }
 
   /**
@@ -403,4 +416,49 @@ function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, s
   }
 
   return url
+}
+
+/**
+ * 新 OpenAPI docs (#251 / #253) の order-history / order-detail wrapper shape:
+ *   { client_order_id, combo_type, orders: [...inner...] }
+ * 旧 (現行 callers が想定する) flat shape:
+ *   { client_order_id, side, status, filled_quantity, ... }
+ *
+ * row が `orders[]` を持っていれば wrapper と判定:
+ *   - `orders[0]` が存在 → flat shape に projection (`total_quantity` →
+ *     `quantity` も合わせてコピー)。多 leg / combo は POC scope 外なので
+ *     `orders[0]` のみ採用 (combo_type !== 'NORMAL' なら呼び出し側 reconciler
+ *     が detect)。
+ *   - `orders[]` が空 → 「対象 order が存在しない」状態として **空オブジェクト**
+ *     を返す (CodeRabbit #261)。partial detail (client_order_id だけ持つ) を
+ *     返すと findOrderByClientId が誤 match して、status/side 等を持たない
+ *     incomplete row を caller に渡してしまうため。
+ *
+ * 旧 flat shape の row はそのまま返す (互換)。
+ */
+export function normalizeOrderHistoryRow(
+  raw: WebullOrderHistoryWrapperDto | WebullOrderDetailDto,
+): WebullOrderDetailDto {
+  if (raw === null || typeof raw !== 'object') return {} as WebullOrderDetailDto
+  const wrapper = raw as WebullOrderHistoryWrapperDto
+  if (!Array.isArray(wrapper.orders)) {
+    return raw as WebullOrderDetailDto
+  }
+  const inner = wrapper.orders[0]
+  if (inner === undefined || inner === null) {
+    // wrapper.orders が空 / 不在 → 「対象なし」 sentinel として空オブジェクトを返す
+    // (caller の find は clientOrderId !== undefined で match しないので skip)。
+    return {} as WebullOrderDetailDto
+  }
+  // top-level の client_order_id を最優先 (wrapper 側が canonical)、inner の同
+  // フィールドは fallback。
+  const clientOrderId = wrapper.client_order_id ?? inner.client_order_id
+  // 新 `total_quantity` を `quantity` にコピー (consumer は `quantity` を読む)。
+  const quantity = inner.quantity ?? inner.total_quantity
+  return {
+    ...inner,
+    client_order_id: clientOrderId,
+    quantity,
+    total_quantity: inner.total_quantity,
+  }
 }
