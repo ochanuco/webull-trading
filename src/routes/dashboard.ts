@@ -709,9 +709,31 @@ function brokerProbeBody(args: {
 <h2 style="font-size:14px;margin:16px 0 4px 0">meta</h2>
 <pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px">(まだ probe 未実行)</pre>
 
+<h2 style="font-size:14px;margin:16px 0 4px 0">drift 比較 (旧 path vs 新 path)</h2>
+<p class="muted" style="font-size:11px;margin:0 0 8px 0">
+  #251 で発覚した OpenAPI ドキュメント drift の検証。旧 (\`/openapi/account/*\` + v1) と新 (\`/openapi/assets/*\` or \`/openapi/trade/order/*\` + v2) を並列で叩いた結果。両方 200 なら alias、片方 404 なら drift 確定、shape 違いなら schema migration が必要。
+</p>
+<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px">
+  <thead><tr style="border-bottom:1px solid #ddd">
+    <th style="text-align:left;padding:4px 8px">endpoint</th>
+    <th style="text-align:left;padding:4px 8px">old</th>
+    <th style="text-align:left;padding:4px 8px">new</th>
+  </tr></thead>
+  <tbody id="probe-drift-table">
+    <tr><td colspan="3" class="muted" style="padding:8px;text-align:center">(probe 未実行)</td></tr>
+  </tbody>
+</table>
+
 <details style="margin-top:16px">
-  <summary class="muted" style="font-size:12px;cursor:pointer">positions raw response</summary>
-  <pre id="probe-positions-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px"></pre>
+  <summary class="muted" style="font-size:12px;cursor:pointer">positions / orderHistory raw responses (旧/新)</summary>
+  <h3 style="font-size:12px;margin:8px 0 4px 0">positions (旧 /openapi/account/positions, v1)</h3>
+  <pre id="probe-positions-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
+  <h3 style="font-size:12px;margin:8px 0 4px 0">positionsNew (新 /openapi/assets/positions, v2)</h3>
+  <pre id="probe-positions-new-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
+  <h3 style="font-size:12px;margin:8px 0 4px 0">orderHistoryOld (旧 /openapi/account/orders/history, v1)</h3>
+  <pre id="probe-order-old-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
+  <h3 style="font-size:12px;margin:8px 0 4px 0">orderHistoryNew (新 /openapi/trade/order/history, v2)</h3>
+  <pre id="probe-order-new-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
 </details>
 
 <script>
@@ -813,8 +835,19 @@ function brokerProbeBody(args: {
       .then(function (res) {
         var body = res.body;
         statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
-        if (body.quote) quoteEl.textContent = prettify(body.quote);
-        if (body.positions) renderPositionsList(body.positions);
+        // CodeRabbit #262: body fields が欠けてても UI を必ず更新して stale を
+        // 残さない。quote / positions / 各 raw を **常に** 上書き。
+        quoteEl.textContent = body.quote ? prettify(body.quote) : '(no data)';
+        renderPositionsList(body.positions || null);
+        // drift 比較: 新 path 結果も raw + table へ。値が無くても "(no data)"
+        // を入れて stale 表示にしない。
+        var positionsNewRaw = document.getElementById('probe-positions-new-raw');
+        var orderOldRaw = document.getElementById('probe-order-old-raw');
+        var orderNewRaw = document.getElementById('probe-order-new-raw');
+        if (positionsNewRaw) positionsNewRaw.textContent = prettify(body.positionsNew);
+        if (orderOldRaw) orderOldRaw.textContent = prettify(body.orderHistoryOld);
+        if (orderNewRaw) orderNewRaw.textContent = prettify(body.orderHistoryNew);
+        renderDriftTable(body);
         metaEl.textContent = JSON.stringify({
           timestamp: body.timestamp,
           sandbox: body.sandbox,
@@ -828,6 +861,27 @@ function brokerProbeBody(args: {
       .finally(function () {
         refreshBtn.disabled = false;
       });
+  }
+
+  // drift 比較テーブルを描画。各行は status / msTaken を旧/新 並列表示。
+  function renderDriftTable(body) {
+    var tableBody = document.getElementById('probe-drift-table');
+    if (!tableBody) return;
+    function cell(section) {
+      if (!section) return '<td class="muted" style="padding:4px 8px">(no data)</td>';
+      var status = section.status == null ? section.phase : 'status=' + section.status;
+      var ok = section.ok ? '✅' : (section.ok === false ? '❌' : '');
+      var ms = section.msTaken == null ? '' : ' (' + section.msTaken + 'ms)';
+      var color = section.ok ? '#0a8a0a' : (section.ok === false ? '#c22' : '#666');
+      return '<td style="padding:4px 8px;color:' + color + '">' + ok + ' ' + status + ms + '</td>';
+    }
+    function row(label, oldSection, newSection) {
+      return '<tr><td style="padding:4px 8px"><code>' + label + '</code></td>' +
+        cell(oldSection) + cell(newSection) + '</tr>';
+    }
+    tableBody.innerHTML =
+      row('positions', body.positions, body.positionsNew) +
+      row('order history', body.orderHistoryOld, body.orderHistoryNew);
   }
 
   function onPickClick(ev) {
