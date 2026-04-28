@@ -3096,7 +3096,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           borderType: 'dashed',
         },
         data: [[
-          { yAxis: bandBottomY, name: '押し目ゾーン' },
+          { yAxis: bandBottomY },
           { yAxis: bandTopY },
         ]],
       } : null;
@@ -3463,7 +3463,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         // candle が映える背景に (trader-strategist 助言)。bottom は slider 用 64px キープ。
         // right は stop/TP の endLabel ("stop X (preview)" 等) が見切れないよう
         // 80px 確保 (短い "stop X (-Y%)" でも余白として違和感ない範囲)。
-        grid: { left: 50, right: 80, top: 56, bottom: 64 },
+        grid: { left: 50, right: 120, top: 56, bottom: 64 },
         dataZoom: dataZoomCfg,
         // category mode: categories = intradayBars 各 bar の ISO timestamp。
         // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
