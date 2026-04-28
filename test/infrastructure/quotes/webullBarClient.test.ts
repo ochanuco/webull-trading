@@ -77,6 +77,8 @@ describe('WebullBarClient.getDailyBars', () => {
     expect(capturedUrl?.searchParams.get('count')).toBe('30')
     expect(capturedUrl?.searchParams.get('period')).toBeNull()
     expect(capturedUrl?.searchParams.get('limit')).toBeNull()
+    // 新 OpenAPI docs (#251 / #255) で required 扱い、default 'true' を明示送信
+    expect(capturedUrl?.searchParams.get('real_time_required')).toBe('true')
     expect(capturedHeaders?.get('x-version')).toBe('v2')
   })
 
