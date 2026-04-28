@@ -360,6 +360,19 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('Cron 判定', unavailable(messageOf(err))))
     }
   })
+  /**
+   * Broker probe UI: 同一 origin の `/admin/broker/probe` を browser の fetch で
+   * 呼び、生 JSON を整形表示する小さい form ページ。/dashboard/* と /admin/* は
+   * 同じ basicAuthMiddleware で保護されてるので、ブラウザに残ってる認証
+   * credentials がそのまま流用される (再 prompt なし)。サーバー側は probe を
+   * proxy せず、純粋にフォーム + 表示器を返すだけ (= 認証ヘッダの転送ロジック
+   * 不要、責務分離)。
+   */
+  .get('/broker-probe', (c) => {
+    const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase() || 'SOXL'
+    const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase() || 'US_ETF'
+    return c.html(layout('Broker 診断', brokerProbeBody({ symbol, category })))
+  })
   .get('/alerts', async (c) => {
     if (!c.env.DB) {
       return c.html(layout('アラート', unavailable('DB not bound')))
@@ -540,6 +553,7 @@ function layout(title: string, body: string): string {
   <a href="/dashboard/cron">Cron</a>
   <a href="/dashboard/charts">チャート</a>
   <a href="/dashboard/alerts">アラート</a>
+  <a href="/dashboard/broker-probe" title="Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ">broker 診断</a>
 </nav>
 ${body}
 <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
@@ -549,6 +563,146 @@ ${body}
 
 function unavailable(reason: string): string {
   return `<p class="warn">利用不可: ${esc(reason)}</p>`
+}
+
+/**
+ * Broker probe UI body: form + 結果表示器。submit で `/admin/broker/probe` を
+ * 同一 origin の fetch (credentials: 'same-origin') で呼び、JSON を pre 整形
+ * 表示。auth は browser の既存 basic-auth credentials が流用される。
+ *
+ * Server-side proxy を介さず client-side fetch にしてる理由:
+ *   - dashboard handler が admin endpoint を sub-fetch するには Authorization
+ *     ヘッダを request から request へ転送する必要があり、責務が混ざる
+ *   - client-side fetch なら browser cred が自然に流れる、ロジック単純
+ *   - probe payload に Cache-Control: no-store が付いてるので browser cache
+ *     にも残らない
+ */
+function brokerProbeBody(args: { symbol: string; category: string }): string {
+  // 主要 symbol 候補は datalist で suggest (typing も自由)。category は固定 2 値。
+  const popularSymbols = ['AAPL', 'SOXL', 'SOXS', 'NVDA', 'MSFT', 'GOOG', 'SPY', 'QQQ']
+  const datalistOptions = popularSymbols
+    .map((s) => `<option value="${esc(s)}"></option>`)
+    .join('')
+  const categoryOptions = (['US_STOCK', 'US_ETF'] as const)
+    .map((c) => `<option value="${c}"${c === args.category ? ' selected' : ''}>${c}</option>`)
+    .join('')
+  return `<p class="muted" style="font-size:12px">
+  Webull broker (現状: JP UAT <code>jp-openapi-alb.uat.webullbroker.com</code>) に
+  実 cron と同じ <code>/openapi/market-data/stock/snapshot</code> + <code>/openapi/account/positions</code>
+  を直接 fetch して raw レスポンスを表示します。403 が返る場合は body にある
+  Webull の error_code / message / request_id をサポートに転送可能。
+</p>
+<form id="probe-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
+  <label style="display:flex;flex-direction:column;font-size:12px">
+    symbol
+    <input type="text" name="symbol" id="probe-symbol" value="${esc(args.symbol)}" list="probe-symbols" style="padding:6px;font-size:14px;width:140px" required>
+    <datalist id="probe-symbols">${datalistOptions}</datalist>
+  </label>
+  <label style="display:flex;flex-direction:column;font-size:12px">
+    category
+    <select name="category" id="probe-category" style="padding:6px;font-size:14px">
+      ${categoryOptions}
+    </select>
+  </label>
+  <button type="submit" id="probe-submit" style="padding:6px 16px;font-size:14px;background:#06c;color:#fff;border:1px solid #06c;border-radius:4px;cursor:pointer">probe 実行</button>
+  <span class="muted" id="probe-status" style="font-size:12px"></span>
+</form>
+<div id="probe-result" style="display:none;margin-top:8px">
+  <h2 style="font-size:14px;margin:0 0 4px 0">quote (snapshot endpoint)</h2>
+  <pre id="probe-quote" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all"></pre>
+  <h2 style="font-size:14px;margin:12px 0 4px 0">positions (account endpoint)</h2>
+  <pre id="probe-positions" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all"></pre>
+  <h2 style="font-size:14px;margin:12px 0 4px 0">meta</h2>
+  <pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px"></pre>
+</div>
+<script>
+(function () {
+  var form = document.getElementById('probe-form');
+  var symbolEl = document.getElementById('probe-symbol');
+  var categoryEl = document.getElementById('probe-category');
+  var submitBtn = document.getElementById('probe-submit');
+  var statusEl = document.getElementById('probe-status');
+  var resultEl = document.getElementById('probe-result');
+  var quoteEl = document.getElementById('probe-quote');
+  var positionsEl = document.getElementById('probe-positions');
+  var metaEl = document.getElementById('probe-meta');
+
+  // probe.bodyTruncated は元 broker レスポンスが JSON なら parse し直して
+  // 整形表示する。parse 失敗 (HTML / plain text の error page) は素のまま表示。
+  function prettify(section) {
+    if (!section) return '(no data)';
+    var raw = section.bodyTruncated;
+    var parsed = null;
+    if (typeof raw === 'string' && raw.length > 0) {
+      try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+    }
+    var header = '[' + section.phase + '] status=' + section.status + ' ok=' + section.ok +
+      ' msTaken=' + section.msTaken + 'ms bodyLength=' + section.bodyLength;
+    if (section.error) header += ' error=' + section.error;
+    var bodyText = parsed != null ? JSON.stringify(parsed, null, 2) : (raw || '(empty)');
+    return header + '\\n\\n' + bodyText;
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var symbol = symbolEl.value.trim().toUpperCase();
+    var category = categoryEl.value;
+    if (!symbol) return;
+    submitBtn.disabled = true;
+    statusEl.textContent = '実行中...';
+    // 前回の probe 結果をクリア
+    quoteEl.textContent = '';
+    positionsEl.textContent = '';
+    metaEl.textContent = '';
+    resultEl.style.display = 'none';
+    var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
+      '&category=' + encodeURIComponent(category);
+    // URL 更新 (リロード時に同じ条件を保つ + bookmarks 用)
+    try {
+      var u = new URL(window.location.href);
+      u.searchParams.set('symbol', symbol);
+      u.searchParams.set('category', category);
+      window.history.replaceState({}, '', u.toString());
+    } catch (_) {}
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (res) {
+        statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
+        var body = res.body;
+        if (body.quote) quoteEl.textContent = prettify(body.quote);
+        if (body.positions) positionsEl.textContent = prettify(body.positions);
+        var meta = {
+          timestamp: body.timestamp,
+          sandbox: body.sandbox,
+          input: body.input,
+          adminStatus: res.status,
+        };
+        metaEl.textContent = JSON.stringify(meta, null, 2);
+        resultEl.style.display = 'block';
+      })
+      .catch(function (e) {
+        statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
+        // fetch エラー時も古いデータを残さない
+        quoteEl.textContent = '';
+        positionsEl.textContent = '';
+        metaEl.textContent = '';
+        resultEl.style.display = 'none';
+      })
+      .finally(function () {
+        submitBtn.disabled = false;
+      });
+  });
+
+  // 初回読み込み時、URL に **両方** ?symbol & ?category がついてれば自動 probe
+  // (form 状態は server-side で既に埋まってる)。ブックマークから戻った時に
+  // 何も表示されない違和感を防ぐ。?utm_source=... のような無関係 query で
+  // 暴発しないよう、両 key の存在を URLSearchParams で明示的に確認する。
+  var qs = new URLSearchParams(window.location.search);
+  if (qs.has('symbol') && qs.has('category')) {
+    form.dispatchEvent(new Event('submit', { cancelable: true }));
+  }
+})();
+</script>`
 }
 
 function jsonPretty(payload: unknown, status = 200): Response {
