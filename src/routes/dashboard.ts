@@ -850,11 +850,17 @@ function brokerProbeBody(args: {
     probe(sym, cat);
   });
 
-  // 起動時 auto-probe。URL に symbol+category があればそれ、なければ AAPL/US_STOCK。
+  // 起動時 auto-probe は **URL に symbol+category 両方** ある時だけ
+  // (= ボタンクリックで URL push された後の再読み込み / bookmark / 共有 link)。
+  // nav からのプレーン訪問 (?なし) で勝手に probe を投げない方針 (PR #250、
+  // ユーザ要望: 「Broker診断ボタンを押した直後は何も診断しないようにしてほし
+  // い」)。URL クエリ無し時は status を「click 待ち」で表示。
   var qs = new URLSearchParams(window.location.search);
-  var initialSymbol = qs.get('symbol') || 'AAPL';
-  var initialCategory = qs.get('category') || 'US_STOCK';
-  probe(initialSymbol, initialCategory);
+  if (qs.has('symbol') && qs.has('category')) {
+    probe(qs.get('symbol'), qs.get('category'));
+  } else {
+    statusEl.textContent = '銘柄ボタンをクリックして probe 開始';
+  }
 })();
 </script>`
 }
