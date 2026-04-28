@@ -421,25 +421,33 @@ export const admin = new Hono<AppBindings>()
         return { phase: 'auth', error: e instanceof Error ? e.message : String(e) }
       }
 
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10_000)
+
       const t0 = Date.now()
-      let response: Response
       try {
-        response = await fetch(url.href, { method: args.method, headers: { Accept: 'application/json', ...headers } })
+        const response = await fetch(url.href, {
+          method: args.method,
+          headers: { Accept: 'application/json', ...headers },
+          signal: controller.signal,
+        })
+        const body = await response.text()
+        clearTimeout(timeoutId)
+        return {
+          phase: 'response',
+          status: response.status,
+          ok: response.ok,
+          bodyTruncated: body.slice(0, 4000),
+          bodyLength: body.length,
+          msTaken: Date.now() - t0,
+        }
       } catch (e) {
+        clearTimeout(timeoutId)
         return {
           phase: 'fetch',
           error: e instanceof Error ? e.message : String(e),
           msTaken: Date.now() - t0,
         }
-      }
-      const body = await response.text()
-      return {
-        phase: 'response',
-        status: response.status,
-        ok: response.ok,
-        bodyTruncated: body.slice(0, 4000),
-        bodyLength: body.length,
-        msTaken: Date.now() - t0,
       }
     }
 
