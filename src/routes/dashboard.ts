@@ -2771,12 +2771,10 @@ interface ChartsBodySymbol {
 
 /**
  * 銘柄グリッドビュー: ALLOWED_SYMBOLS を 4 列 (responsive) grid で並列表示。
- * 各 panel は個別 mini chart で、dataZoom (zoom/pan) のみ全 panel 間で同期。
- * tooltip / axisPointer は **panel ローカル** — hover 中の panel だけに表示
- * (16 panel で全 popup する問題を避けるため `echarts.connect` は使わず、
- * 起点 panel の dataZoom を `dispatchAction` で他 panel に broadcast する手動
- * 同期に切替えた、PR #241)。preset zoom (1D/5D/1M/All) も同様に dispatchAction
- * で全 chart に配信。
+ * `echarts.connect` で **dataZoom + axisPointer (縦線)** を全 panel 同期、
+ * **tooltip popup は hover 中の panel だけ** に表示する (formatter 内で
+ * window.__gridHoveredPanelId !== elId の panel は空文字を返し popup を抑制、
+ * PR #242)。preset zoom (1D/5D/1M/All) も dispatchAction で全 chart に配信。
  */
 interface ChartsBodyGrid {
   tab: 'grid'
@@ -3906,10 +3904,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
 
 /**
  * 銘柄グリッドビュー (Datadog dashboard 風)。ALLOWED_SYMBOLS を 4 列 grid で
- * 並列表示。dataZoom (zoom/pan) のみ全 panel 間で同期、tooltip は panel ローカル
- * (PR #241 で `echarts.connect` を撤去、起点 panel → 他 panel へ手動
- * `dispatchAction({type:'dataZoom'})` で broadcast)。preset zoom (1D/5D/1M/All)
- * も grid 共通 toolbar から dispatchAction で全 chart に配信。
+ * 並列表示。`echarts.connect` で dataZoom + axisPointer (縦線) を全 panel 同期、
+ * tooltip popup は hover 中の panel だけに表示 (PR #242、formatter 内で
+ * window.__gridHoveredPanelId !== elId のとき空文字を返して描画を抑制)。
+ * preset zoom (1D/5D/1M/All) も grid 共通 toolbar から dispatchAction で全 chart
+ * に配信。
  *
  * mini chart の構成 (PR #239 で個別銘柄タブと表示要素パリティ):
  * - candle (1h OHLC)
@@ -4278,10 +4277,10 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           }
         }
 
-        // dataZoom 初期範囲。panel 構築ループ末尾の onDz / preset button が
-        // dispatchAction で他 panel に broadcast する手動同期 (PR #241、connect
-        // は使わない)。filterMode は trend / position line の dropping 防止
-        // 目的で 'weakFilter' (個別銘柄タブと同方針)。
+        // dataZoom 初期範囲。panel 構築ループ末尾で echarts.connect により全
+        // panel 同期される (PR #242、tooltip popup だけは formatter 側で
+        // 抑制)。filterMode は trend / position line の dropping 防止目的で
+        // 'weakFilter' (個別銘柄タブと同方針)。
         var dzInitial = (function () {
           if (data.zoomFromMs == null || data.zoomToMs == null) return {};
           if (useCategoryAxis) {
@@ -4312,7 +4311,15 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             // 個別銘柄タブと同形式: candle は OHLC 4 値を 1 行、line は seriesName +
             // value を行ごとに表示。densified path で重複する seriesName+value 行は
             // dedup する (#231 と同方針)。
+            //
+            // axisPointer は echarts.connect 経由で全 panel 同期するが、tooltip
+            // popup は **hover 中の panel だけ** に出したい (PR #241 報告: 16
+            // panel 全 popup でダッシュボードが埋め尽くされる問題)。なので
+            // hoveredPanelId と elId が一致しない panel は formatter で空文字を
+            // 返して popup 描画をスキップする。axisPointer 縦線は formatter と
+            // 独立に描画されるので、空文字でも縦線は全 panel に出る。
             formatter: function (params) {
+              if (window.__gridHoveredPanelId && window.__gridHoveredPanelId !== elId) return '';
               if (!Array.isArray(params) || params.length === 0) return '';
               var ts = params[0].axisValue;
               var lines = ['<div style="font-weight:600;font-size:11px">' + (sc.displayName || sc.symbol) + ' ' + jstLabelForX(ts) + '</div>'];
@@ -4468,7 +4475,7 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             }] : []),
           ],
         });
-        return { chart: chart, useCategoryAxis: useCategoryAxis, nearestIndex: nearestIndex, categories: categories, ohlcMs: ohlcMs };
+        return { elId: elId, chart: chart, useCategoryAxis: useCategoryAxis, nearestIndex: nearestIndex, categories: categories, ohlcMs: ohlcMs };
       }
 
       // 各 panel を build。null (load 失敗) は skip。
@@ -4478,30 +4485,46 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         var built = buildPanel('grid-chart-' + i, entry.chart);
         if (built) panels.push(built);
       }
-      // echarts.connect は dataZoom / tooltip / legend / axisPointer を一括で
-      // sync するため、16 panel で 1 つの panel を hover すると全 panel に同時
-      // tooltip が popup する (#240 後発見、ユーザ #43 報告)。よって
-      // **echarts.connect は使わず**、dataZoom だけを手動で broadcast する形に
-      // 切り替える。tooltip は各 panel ローカル — 自分の panel の hover 時だけ
-      // 自分の panel に表示。
+      // echarts.connect で dataZoom + axisPointer (縦線) + legend を全 panel
+      // 同期する (PR #237/#241 の経緯参照):
+      //   - PR #237 で connect 採用 → tooltip popup まで全 panel 同期されてしまい、
+      //     16 panel hover で popup の山に (ユーザ #43 報告)。
+      //   - PR #241 で connect 撤去、dataZoom のみ手動 broadcast に変更。だが
+      //     「縦線 (axisPointer) の同期は欲しかった」というフィードバックを受け、
+      //     本 PR (#242) で connect を復活。
+      //   - tooltip popup だけ panel ローカルにするため、tooltip.formatter 側で
+      //     window.__gridHoveredPanelId !== elId なら空文字を返して描画スキップ
+      //     (formatter 内のコメント参照)。axisPointer 縦線は formatter 結果と
+      //     独立に描画されるので、空文字でも縦線は出る。
       //
-      // panel 間の dataZoom 同期方針:
-      //   1. 起点 panel の dataZoom event を listen
-      //   2. その startValue/endValue を ms 範囲に変換 (category mode は
-      //      categories[idx] の timestamp を採用)
-      //   3. 他 panel に dispatchAction({type:'dataZoom', startValue, endValue})
-      //      を **debounce 後 1 回だけ** 配信。各 panel は自分の category index
-      //      / time ms にあわせ変換 (panelMsToNative)。
-      //   4. dispatchAction の echarts 側 hook が再度 dataZoom event を発火
-      //      するので、suppressBroadcast フラグで無限ループ防止。
+      // panel DOM の mouseenter/leave で window.__gridHoveredPanelId を更新する
+      // (DOMContentLoaded 開始時に null で初期化)。
       var instances = panels.map(function (p) { return p.chart; });
+      if (instances.length > 0) echarts.connect(instances);
+
+      window.__gridHoveredPanelId = null;
+      panels.forEach(function (panel) {
+        var dom = panel.chart.getDom();
+        if (!dom) return;
+        // mouseenter は子要素遷移で再発火しないので panel 単位の追跡に最適。
+        dom.addEventListener('mouseenter', function () {
+          window.__gridHoveredPanelId = panel.elId;
+        });
+        dom.addEventListener('mouseleave', function () {
+          if (window.__gridHoveredPanelId === panel.elId) {
+            window.__gridHoveredPanelId = null;
+          }
+        });
+      });
 
       // resize 時は全 panel を resize (responsive)
       window.addEventListener('resize', function () {
         for (var i = 0; i < instances.length; i += 1) instances[i].resize();
       });
 
-      // panel の現在 dataZoom 範囲を ms 範囲に変換 (category / time 両対応)。
+      // dataZoom event 1 つを listen して URL ?from / ?to を更新。connect 経由
+      // で全 panel が同期発火するので panel[0] からだけ読み出せば十分 (debounce
+      // 200ms で zoom drag 中の連続発火をまとめる)。
       function panelDataZoomToMs(panel) {
         var opt = panel.chart.getOption();
         var dz = opt.dataZoom && opt.dataZoom[0];
@@ -4518,47 +4541,13 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         }
         return { fromMs: sv, toMs: ev };
       }
-      // 受信 panel の native 軸単位 (category index or ms) に変換。
-      function panelMsToNative(panel, fromMs, toMs) {
-        if (panel.useCategoryAxis) {
-          if (panel.ohlcMs.length === 0) return null;
-          var sIdx = panel.nearestIndex(fromMs);
-          var eIdx = panel.nearestIndex(toMs);
-          if (sIdx < 0 || eIdx < 0) return null;
-          if (sIdx > eIdx) { var tmp = sIdx; sIdx = eIdx; eIdx = tmp; }
-          return { startValue: sIdx, endValue: eIdx };
-        }
-        return { startValue: fromMs, endValue: toMs };
-      }
       var dzTimer = null;
-      var suppressBroadcast = false;
-      function onDz(srcPanel) {
-        if (suppressBroadcast) return;
+      function onDz() {
         if (dzTimer) clearTimeout(dzTimer);
         dzTimer = setTimeout(function () {
-          var range = panelDataZoomToMs(srcPanel);
+          if (panels.length === 0) return;
+          var range = panelDataZoomToMs(panels[0]);
           if (!range) return;
-          // 1. 他 panel に broadcast (suppressBroadcast 中は再 emit を捨てる)
-          suppressBroadcast = true;
-          try {
-            for (var i = 0; i < panels.length; i += 1) {
-              var p = panels[i];
-              if (p === srcPanel) continue;
-              var native = panelMsToNative(p, range.fromMs, range.toMs);
-              if (!native) continue;
-              p.chart.dispatchAction({
-                type: 'dataZoom',
-                startValue: native.startValue,
-                endValue: native.endValue,
-              });
-            }
-          } finally {
-            // dispatchAction が同期発火する dataZoom event を捌き終えたら解除。
-            // setTimeout 0 で micro-task 単位の遅延を入れる (echarts の listener
-            // は同期的に呼ばれるが念のため遅延)。
-            setTimeout(function () { suppressBroadcast = false; }, 0);
-          }
-          // 2. URL ?from / ?to を更新
           try {
             var fromIso = new Date(range.fromMs).toISOString();
             var toIso = new Date(range.toMs).toISOString();
@@ -4569,9 +4558,9 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           } catch (e) { /* noop */ }
         }, 200);
       }
-      panels.forEach(function (panel) {
-        panel.chart.on('dataZoom', function () { onDz(panel); });
-      });
+      for (var pi2 = 0; pi2 < panels.length; pi2 += 1) {
+        panels[pi2].chart.on('dataZoom', onDz);
+      }
 
       // preset zoom buttons (1D/5D/1M/All): 全 panel に dispatchAction で
       // 共通 ms 範囲を broadcast。category mode panel では nearestIndex で
@@ -4604,8 +4593,9 @@ export function renderGridTab(args: ChartsBodyGrid): string {
 
   return `<p class="muted" style="font-size:12px">
     ALLOWED_SYMBOLS の全銘柄を 4 列 grid で並列表示 (Datadog dashboard 風)。
-    ズーム / パン (slider drag, wheel) は全 panel 間で同期、tooltip は hover した
-    panel ローカル。panel 左上の銘柄名をクリックすると個別銘柄タブの詳細表示に遷移。
+    ズーム / パン (slider drag, wheel) と axisPointer 縦線は全 panel 間で同期、
+    tooltip popup は hover した panel ローカル。panel 左上の銘柄名をクリックする
+    と個別銘柄タブの詳細表示に遷移。
   </p>
   ${presetButtonsHtml}
   <div class="grid-filter-bar" style="display:flex;gap:14px;align-items:center;margin-top:8px;font-size:12px;flex-wrap:wrap">
