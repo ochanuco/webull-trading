@@ -5,6 +5,7 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
 import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
+import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
@@ -287,6 +288,43 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       continue
     }
 
+    // P0 raw response capture for JP tenant. We've observed the JP UAT
+    // returning `items[].filled_price=10` as a stub on orders that should
+    // have filled near 2683 (issue: 6971 ping-pong loop). The official doc
+    // does not pin down the unit, so emit the raw response (response body
+    // only — never the request body / signature / auth headers) so the
+    // parser can be confirmed against real data. Limited to JP and one log
+    // per row per reconcile cycle (cron is 5min, so this is not noisy).
+    // Once the unit is confirmed, this log can be removed or guarded by a
+    // debug flag.
+    {
+      const logSymbol = row.symbol ?? detail.symbol
+      if (logSymbol && inferWebullMarket(logSymbol) === 'JP') {
+        console.log(
+          JSON.stringify({
+            event: 'webull_order_detail_raw',
+            requestId: options.requestId,
+            symbol: logSymbol,
+            clientOrderId: coid,
+            detail_status: detail.status,
+            detail_side: detail.side,
+            detail_limit_price: detail.limit_price,
+            detail_quantity: detail.quantity,
+            detail_filled_quantity: detail.filled_quantity,
+            items_count: detail.items?.length ?? 0,
+            items_summary: detail.items?.map((item) => ({
+              filled_price: item.filled_price,
+              filled_quantity: item.filled_quantity,
+              side: item.side,
+              status: item.status,
+              raw_keys: Object.keys(item ?? {}),
+            })),
+            detail_keys: Object.keys(detail ?? {}),
+          }),
+        )
+      }
+    }
+
     const status = detail.status
     if (!status || !TERMINAL_STATUSES.has(status)) {
       summary.stillPending.push({ clientOrderId: coid, status })
@@ -294,7 +332,11 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     }
 
     const filledQty = toNumberOrNull(detail.filled_quantity)
-    const filledPrice = resolveFilledPrice(filledQty, detail)
+    const filledPrice = resolveFilledPrice(filledQty, detail, {
+      requestId: options.requestId,
+      clientOrderId: coid,
+      symbol: row.symbol ?? detail.symbol ?? null,
+    })
 
     // Compute realized P&L for SELL fills BEFORE we touch any state. Needs
     // the symbol's current avg cost from SymbolStateDO, which is only
@@ -378,17 +420,41 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           })
         }
       } else if (status === 'FILLED') {
-        // FILLED but missing one of the apply prerequisites. Mark
-        // `state_applied_at` anyway so we don't retry forever — there's
-        // nothing to apply.
-        await db
-          .update(tradeJournal)
-          .set({
-            stateAppliedAt: runNow.toISOString(),
-            stateApplyError: null,
-            stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+        // FILLED but missing one of the apply prerequisites. Two sub-cases:
+        //
+        //   (a) Genuine no-op — e.g. filledQty=0 (CANCELLED-then-FILLED edge,
+        //       or REJECTED-then-FILLED) or symbol/side missing on the row.
+        //       Nothing to apply now and nothing the next tick will recover,
+        //       so stamp `state_applied_at` to prevent forever-retry.
+        //
+        //   (b) Transient sanity failure — `filledQty > 0` but
+        //       `filledPrice === null` because `resolveFilledPrice()`
+        //       rejected the candidate (e.g. JP `items[].filled_price=10`
+        //       stub vs limit ~2683 → ratio 0.0037 → null). The next
+        //       reconcile tick may get a realistic price from the broker;
+        //       leave `state_applied_at` NULL so the row stays in the
+        //       repair cohort.
+        //
+        // `shouldRetryStateApply` distinguishes (b). For it we still record
+        // the reason via `state_apply_error` for operator visibility, but
+        // do NOT stamp the marker.
+        if (shouldRetryStateApply(filledQty, filledPrice, status)) {
+          await recordApplyFailure(db, row.id, 'sanity_failed: filled_price rejected by ratio guard')
+          summary.stateApplyFailed += 1
+          summary.errors.push({
+            clientOrderId: coid,
+            message: 'state_apply_failed (sanity_failed: filled_price rejected by ratio guard)',
           })
-          .where(eq(tradeJournal.id, row.id))
+        } else {
+          await db
+            .update(tradeJournal)
+            .set({
+              stateAppliedAt: runNow.toISOString(),
+              stateApplyError: null,
+              stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+            })
+            .where(eq(tradeJournal.id, row.id))
+        }
       }
 
       // Release the pending-order lock on every terminal status — FILLED,
@@ -555,6 +621,31 @@ function resolveJournalSide(
   if (primary === 'BUY' || primary === 'SELL') return primary
   if (fallback === 'BUY' || fallback === 'SELL') return fallback
   return null
+}
+
+/**
+ * True when a FILLED row has a positive filledQty but `filledPrice` came back
+ * null from `resolveFilledPrice` — i.e. the broker reported a fill but the
+ * sanity guardrail rejected the price as a stub. We deliberately keep
+ * `state_applied_at = NULL` for these rows so the repair cohort
+ * (broker_status='FILLED' AND state_applied_at IS NULL) re-selects them on
+ * the next reconcile tick. If the broker eventually returns a realistic
+ * price, the apply runs normally; if it never does, we never poison DO state.
+ *
+ * Genuine no-ops (filledQty=0, missing symbol/side, etc.) fall through to the
+ * marker stamp so they don't retry forever.
+ */
+function shouldRetryStateApply(
+  filledQty: number | null,
+  filledPrice: number | null,
+  brokerStatus: string | null,
+): boolean {
+  return (
+    brokerStatus === 'FILLED' &&
+    filledQty !== null &&
+    filledQty > 0 &&
+    filledPrice === null
+  )
 }
 
 function dedupeCandidatesByRowId<T extends { id: number; side: string | null; preSubmitSide?: string | null }>(
@@ -746,7 +837,7 @@ function pickFilledPrice(detail: WebullOrderDetailDto): number | null {
   // to walk items[] directly instead.
   if (detail.items && detail.items.length > 0) {
     const prices = detail.items
-      .map((item) => toNumberOrNull((item as { filled_price?: string }).filled_price))
+      .map((item) => toNumberOrNull(item.filled_price))
       .filter((n): n is number => n !== null && n > 0)
     if (prices.length > 0) {
       const sum = prices.reduce((acc, n) => acc + n, 0)
@@ -761,20 +852,76 @@ function pickFilledPrice(detail: WebullOrderDetailDto): number | null {
 }
 
 /**
+ * Sanity guardrail: a fill price more than 2x or less than 0.5x the
+ * signed limit price is treated as a stub / parse error and rejected. The
+ * trigger was JP UAT returning `items[].filled_price=10` on a 6971 order
+ * with limit ~2683 (~268x deviation), which then propagated as
+ * `avgPrice=10` into SymbolStateDO and produced a +26730% pnl in
+ * pullbackScheduler — kicking off a TP→SELL→re-fill ping-pong loop.
+ *
+ * Returning `null` here causes the reconcile loop to leave
+ * `state_applied_at` NULL and skip the DO apply path, so the bogus price
+ * never lands in DO state. The next reconcile tick retries; if the
+ * broker eventually returns a realistic price we apply normally, and if
+ * not we never poison the DO.
+ *
+ * The threshold is intentionally loose (2x band) because:
+ *   - MARKET orders can fill outside the limit on a fast-moving symbol,
+ *   - intraday gap-ups / haltreopens also produce >1x moves.
+ *   2x catches order-of-magnitude stubs without flagging realistic vol.
+ */
+const FILLED_PRICE_RATIO_MIN = 0.5
+const FILLED_PRICE_RATIO_MAX = 2
+
+/**
  * Only record a fill price when there's actually a fill, and only if it
  * passes the "finite and > 0" guideline. For CANCELLED / REJECTED rows
  * (filledQty=0) this returns null so we don't misrepresent the row as if
  * it had transacted at the signed limit price.
+ *
+ * Also rejects fills whose price is wildly inconsistent with the signed
+ * limit (`<0.5x` or `>2x`) — see `FILLED_PRICE_RATIO_*` for the rationale.
  */
 function resolveFilledPrice(
   filledQty: number | null,
   detail: WebullOrderDetailDto,
+  context?: {
+    requestId?: string
+    clientOrderId?: string
+    symbol?: string | null
+  },
 ): number | null {
   if (filledQty === null || filledQty <= 0) return null
   const candidate = pickFilledPrice(detail)
   if (candidate === null || !Number.isFinite(candidate) || candidate <= 0) return null
+
+  const limit = toNumberOrNull(detail.limit_price)
+  if (limit !== null && limit > 0) {
+    const ratio = candidate / limit
+    if (ratio < FILLED_PRICE_RATIO_MIN || ratio > FILLED_PRICE_RATIO_MAX) {
+      console.warn(
+        JSON.stringify({
+          event: 'webull_filled_price_sanity_failed',
+          requestId: context?.requestId,
+          clientOrderId: context?.clientOrderId,
+          symbol: context?.symbol,
+          candidate,
+          limit_price: limit,
+          ratio,
+          detail_status: detail.status,
+          detail_side: detail.side,
+        }),
+      )
+      return null
+    }
+  }
   return candidate
 }
 
 // Exposed for tests.
-export const _internal = { TERMINAL_STATUSES, pickFilledPrice, resolveFilledPrice }
+export const _internal = {
+  TERMINAL_STATUSES,
+  pickFilledPrice,
+  resolveFilledPrice,
+  shouldRetryStateApply,
+}
