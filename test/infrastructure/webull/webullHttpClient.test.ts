@@ -230,6 +230,56 @@ describe('WebullHttpClient', () => {
     expect(detail?.status).toBe('FILLED')
   })
 
+  // CodeRabbit #261 finding 1: wrapper の `orders[]` が空のケース。
+  // partial detail (client_order_id だけ持つ) を返すと incomplete data が
+  // caller に渡るので、normalizer は空オブジェクト → find で skip される。
+  it('findOrderByClientId returns undefined when wrapper has empty orders[]', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { client_order_id: 'empty-wrapper', combo_type: 'NORMAL', orders: [] },
+          { client_order_id: 'unrelated', symbol: 'NVDA', status: 'PENDING' },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    expect(await client.findOrderByClientId('empty-wrapper')).toBeUndefined()
+  })
+
+  // CodeRabbit #261 finding 2: top-level に client_order_id が無く inner 側
+  // にあるパターン。normalizer は inner.client_order_id を fallback として使う。
+  it('findOrderByClientId falls back to inner client_order_id when top-level is missing', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            // top-level に client_order_id が無いケース (新 docs で稀にあり得る)
+            combo_type: 'NORMAL',
+            orders: [
+              {
+                client_order_id: 'inner-only-1',
+                symbol: 'SOXL',
+                side: 'SELL',
+                status: 'FILLED',
+                total_quantity: '8',
+                filled_quantity: '8',
+              },
+            ],
+          },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('inner-only-1')
+    expect(detail).toBeDefined()
+    expect(detail?.client_order_id).toBe('inner-only-1')
+    expect(detail?.symbol).toBe('SOXL')
+    expect(detail?.quantity).toBe('8') // total_quantity → quantity 正規化
+    expect(detail?.status).toBe('FILLED')
+  })
+
   it('requests account details from the documented profile endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

@@ -424,12 +424,15 @@ function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, s
  * 旧 (現行 callers が想定する) flat shape:
  *   { client_order_id, side, status, filled_quantity, ... }
  *
- * row が `orders[]` を持っていれば wrapper と判定し、`orders[0]` の中身を flat
- * shape に projection する。多 leg / combo は POC scope 外なので `orders[0]`
- * のみ採用 (combo_type !== 'NORMAL' なら呼び出し側 reconciler が detect)。
- *
- * 新 docs では per-order に `total_quantity` (rename from `quantity`) も来る
- * ので、normalize 時に `quantity` にコピーして従来 reader を維持する。
+ * row が `orders[]` を持っていれば wrapper と判定:
+ *   - `orders[0]` が存在 → flat shape に projection (`total_quantity` →
+ *     `quantity` も合わせてコピー)。多 leg / combo は POC scope 外なので
+ *     `orders[0]` のみ採用 (combo_type !== 'NORMAL' なら呼び出し側 reconciler
+ *     が detect)。
+ *   - `orders[]` が空 → 「対象 order が存在しない」状態として **空オブジェクト**
+ *     を返す (CodeRabbit #261)。partial detail (client_order_id だけ持つ) を
+ *     返すと findOrderByClientId が誤 match して、status/side 等を持たない
+ *     incomplete row を caller に渡してしまうため。
  *
  * 旧 flat shape の row はそのまま返す (互換)。
  */
@@ -441,8 +444,13 @@ export function normalizeOrderHistoryRow(
   if (!Array.isArray(wrapper.orders)) {
     return raw as WebullOrderDetailDto
   }
-  const inner: WebullOrderDetailDto = wrapper.orders[0] ?? {}
-  // top-level の client_order_id を最優先 (wrapper 側が canonical)。inner の同
+  const inner = wrapper.orders[0]
+  if (inner === undefined || inner === null) {
+    // wrapper.orders が空 / 不在 → 「対象なし」 sentinel として空オブジェクトを返す
+    // (caller の find は clientOrderId !== undefined で match しないので skip)。
+    return {} as WebullOrderDetailDto
+  }
+  // top-level の client_order_id を最優先 (wrapper 側が canonical)、inner の同
   // フィールドは fallback。
   const clientOrderId = wrapper.client_order_id ?? inner.client_order_id
   // 新 `total_quantity` を `quantity` にコピー (consumer は `quantity` を読む)。
