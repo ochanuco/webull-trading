@@ -156,6 +156,13 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       symbol: tradeJournal.symbol,
       side: tradeJournal.side,
       preSubmitSide: preSubmit.side,
+      // pre_submit の limit_price は intent 時に我々が signed した値で、
+      // D1 内に確定している。broker が JP sandbox stub で
+      // detail.limit_price=10 を返しても、こちらの値は影響を受けない。
+      // PR #223 sanity check が broker の stub limit_price と stub
+      // filled_price の両方が同値で ratio=1 になり pass してしまう穴を
+      // 塞ぐため、reference 候補として優先利用する。
+      preSubmitLimitPrice: preSubmit.limitPrice,
       brokerStatus: tradeJournal.brokerStatus,
       filledQty: tradeJournal.filledQty,
       filledPrice: tradeJournal.filledPrice,
@@ -336,6 +343,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       requestId: options.requestId,
       clientOrderId: coid,
       symbol: row.symbol ?? detail.symbol ?? null,
+      // 我々が intent で signed した limit。broker stub に依存しない。
+      referenceLimitPrice: row.preSubmitLimitPrice ?? null,
     })
 
     // Compute realized P&L for SELL fills BEFORE we touch any state. Needs
@@ -881,6 +890,18 @@ const FILLED_PRICE_RATIO_MAX = 2
  *
  * Also rejects fills whose price is wildly inconsistent with the signed
  * limit (`<0.5x` or `>2x`) — see `FILLED_PRICE_RATIO_*` for the rationale.
+ *
+ * Reference limit price selection (issue: 9697 ping-pong loop):
+ *   1. `context.referenceLimitPrice` (= our intent, persisted on the
+ *      `pre_submit` trade_journal row at signing time). Preferred because
+ *      it does not depend on broker behaviour — JP sandbox has been
+ *      observed to echo a stub `detail.limit_price` that matches its stub
+ *      `filled_price` (e.g. both 10) so the ratio collapses to 1 and the
+ *      sanity guard passes a wildly wrong fill.
+ *   2. `detail.limit_price` (broker response) as fallback for paths that
+ *      can't surface the pre_submit reference (e.g. older callers).
+ *   3. Neither available → ratio check is skipped (defensive: better to
+ *      keep the fill than to drop a healthy MARKET-style order).
  */
 function resolveFilledPrice(
   filledQty: number | null,
@@ -889,13 +910,26 @@ function resolveFilledPrice(
     requestId?: string
     clientOrderId?: string
     symbol?: string | null
+    /**
+     * Limit price we recorded at intent time (pre_submit row). Takes
+     * precedence over `detail.limit_price` because it is broker-stub-proof.
+     */
+    referenceLimitPrice?: number | null
   },
 ): number | null {
   if (filledQty === null || filledQty <= 0) return null
   const candidate = pickFilledPrice(detail)
   if (candidate === null || !Number.isFinite(candidate) || candidate <= 0) return null
 
-  const limit = toNumberOrNull(detail.limit_price)
+  const brokerLimit = toNumberOrNull(detail.limit_price)
+  const preSubmitLimit =
+    context?.referenceLimitPrice !== undefined && context.referenceLimitPrice !== null &&
+    Number.isFinite(context.referenceLimitPrice) && context.referenceLimitPrice > 0
+      ? context.referenceLimitPrice
+      : null
+  // Prefer pre_submit (our signed intent) over broker echo. Falls back to
+  // broker for legacy callers that don't pass referenceLimitPrice.
+  const limit = preSubmitLimit !== null ? preSubmitLimit : brokerLimit
   if (limit !== null && limit > 0) {
     const ratio = candidate / limit
     if (ratio < FILLED_PRICE_RATIO_MIN || ratio > FILLED_PRICE_RATIO_MAX) {
@@ -906,6 +940,11 @@ function resolveFilledPrice(
           clientOrderId: context?.clientOrderId,
           symbol: context?.symbol,
           candidate,
+          // Both reference candidates included so the diff between our
+          // intent and the broker echo is easy to inspect during ops.
+          pre_submit_limit: preSubmitLimit,
+          broker_limit: brokerLimit,
+          // Effective reference used for the ratio check.
           limit_price: limit,
           ratio,
           detail_status: detail.status,
