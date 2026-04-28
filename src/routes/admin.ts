@@ -371,11 +371,12 @@ export const admin = new Hono<AppBindings>()
    *      (default SOXL) + `?category=` (default US_ETF).
    *   2. `GET /openapi/account/positions` for the configured JP cash account.
    *
-   * Each probe returns `{ phase: 'response', status, ok, bodyTruncated,
-   * bodyLength, msTaken }`. Auth-phase error (signing failure inside
-   * `buildSignedHeaders`) returns `{ phase: 'auth', error }`. Network /
-   * timeout returns `{ phase: 'fetch', error, msTaken }`. Body is truncated to
-   * 4 kB to avoid log blowup on HTML error pages.
+   * Each probe returns the same uniform shape regardless of phase:
+   * `{ phase: 'response' | 'auth' | 'fetch', status, ok, bodyTruncated,
+   *   bodyLength, msTaken, error }` with `null` for unavailable values
+   * (auth phase: status / ok / body fields / msTaken all null; fetch phase:
+   * status / ok / body fields null but msTaken set; response phase: error
+   * null). Body is truncated to 4 kB to avoid log blowup on HTML error pages.
    *
    * Pre-condition: `WEBULL_API_BASE` / `WEBULL_APP_KEY` / `WEBULL_APP_SECRET`
    * / `WEBULL_ACCOUNT_ID_JP_CASH` must all be set (non-whitespace). Missing
@@ -421,9 +422,18 @@ export const admin = new Hono<AppBindings>()
       )
     }
 
-    type ProbeResult =
-      | { phase: 'auth' | 'fetch'; error: string; msTaken?: number }
-      | { phase: 'response'; status: number; ok: boolean; bodyTruncated: string; bodyLength: number; msTaken: number }
+    // 全 phase で同じキーを返す uniform shape (CodeRabbit #243)。jq / curl から
+    // 結果を比較・集計するときに「auth phase だけキーが少ない」状況を避ける。
+    // 値が無い場合は null を入れ、`error` は response phase では null にする。
+    interface ProbeResult {
+      phase: 'response' | 'auth' | 'fetch'
+      status: number | null
+      ok: boolean | null
+      bodyTruncated: string | null
+      bodyLength: number | null
+      msTaken: number | null
+      error: string | null
+    }
 
     async function probeOnce(args: {
       method: 'GET' | 'POST'
@@ -446,7 +456,15 @@ export const admin = new Hono<AppBindings>()
           version: args.version,
         })
       } catch (e) {
-        return { phase: 'auth', error: e instanceof Error ? e.message : String(e) }
+        return {
+          phase: 'auth',
+          status: null,
+          ok: null,
+          bodyTruncated: null,
+          bodyLength: null,
+          msTaken: null,
+          error: e instanceof Error ? e.message : String(e),
+        }
       }
 
       const controller = new AbortController()
@@ -468,13 +486,18 @@ export const admin = new Hono<AppBindings>()
           bodyTruncated: body.slice(0, 4000),
           bodyLength: body.length,
           msTaken: Date.now() - t0,
+          error: null,
         }
       } catch (e) {
         clearTimeout(timeoutId)
         return {
           phase: 'fetch',
-          error: e instanceof Error ? e.message : String(e),
+          status: null,
+          ok: null,
+          bodyTruncated: null,
+          bodyLength: null,
           msTaken: Date.now() - t0,
+          error: e instanceof Error ? e.message : String(e),
         }
       }
     }
