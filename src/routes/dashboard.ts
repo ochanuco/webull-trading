@@ -384,18 +384,17 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * `SymbolUniverse` から JP 銘柄向け 番号-会社名 表示文字列を返す薄い helper。
+ * `SymbolUniverse` から 番号/ticker - 会社名 表示文字列を返す薄い helper。
  * universe が無い (load 失敗等) ケースは symbol そのまま (= 既存挙動)。
  *
  * `URL ?symbol=7974` の routing は変更しない。表示テキストだけが
- * `7974-任天堂` 形式に切り替わる。
+ * `7974-任天堂` / `AAPL-Apple Inc.` 形式に切り替わる。
  */
 function displaySymbol(symbol: string, universe?: SymbolUniverse | null): string {
   if (!universe) return symbol
   const upper = symbol.toUpperCase()
   return formatSymbolDisplay({
     symbol,
-    market: universe.symbolMarket[upper] ?? null,
     name: universe.symbolName[upper] ?? null,
   })
 }
