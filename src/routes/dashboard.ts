@@ -4472,22 +4472,30 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         var built = buildPanel('grid-chart-' + i, entry.chart);
         if (built) panels.push(built);
       }
-      // echarts.connect で全 panel の dataZoom / tooltip / legend を同期。
-      // Datadog dashboard と同様、1 panel で zoom/pan するだけで他 panel が
-      // 連動して同じ時間帯にスクロール。
+      // echarts.connect は dataZoom / tooltip / legend / axisPointer を一括で
+      // sync するため、16 panel で 1 つの panel を hover すると全 panel に同時
+      // tooltip が popup する (#240 後発見、ユーザ #43 報告)。よって
+      // **echarts.connect は使わず**、dataZoom だけを手動で broadcast する形に
+      // 切り替える。tooltip は各 panel ローカル — 自分の panel の hover 時だけ
+      // 自分の panel に表示。
+      //
+      // panel 間の dataZoom 同期方針:
+      //   1. 起点 panel の dataZoom event を listen
+      //   2. その startValue/endValue を ms 範囲に変換 (category mode は
+      //      categories[idx] の timestamp を採用)
+      //   3. 他 panel に dispatchAction({type:'dataZoom', startValue, endValue})
+      //      を **debounce 後 1 回だけ** 配信。各 panel は自分の category index
+      //      / time ms にあわせ変換 (panelMsToNative)。
+      //   4. dispatchAction の echarts 側 hook が再度 dataZoom event を発火
+      //      するので、suppressBroadcast フラグで無限ループ防止。
       var instances = panels.map(function (p) { return p.chart; });
-      if (instances.length > 0) echarts.connect(instances);
 
       // resize 時は全 panel を resize (responsive)
       window.addEventListener('resize', function () {
         for (var i = 0; i < instances.length; i += 1) instances[i].resize();
       });
 
-      // 1 panel の dataZoom event を listen して URL ?from / ?to を更新
-      // (個別銘柄タブと同方針)。connect 越しに他 panel の dataZoom も同期し
-      // 全 panel が同じイベントを発火しうるが、debounce 200ms でまとめる。
-      // 起点 panel は category mode / time mode のどちらでも構わない (同一
-      // ms 範囲を URL に書き戻す)。
+      // panel の現在 dataZoom 範囲を ms 範囲に変換 (category / time 両対応)。
       function panelDataZoomToMs(panel) {
         var opt = panel.chart.getOption();
         var dz = opt.dataZoom && opt.dataZoom[0];
@@ -4504,13 +4512,47 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         }
         return { fromMs: sv, toMs: ev };
       }
+      // 受信 panel の native 軸単位 (category index or ms) に変換。
+      function panelMsToNative(panel, fromMs, toMs) {
+        if (panel.useCategoryAxis) {
+          if (panel.ohlcMs.length === 0) return null;
+          var sIdx = panel.nearestIndex(fromMs);
+          var eIdx = panel.nearestIndex(toMs);
+          if (sIdx < 0 || eIdx < 0) return null;
+          if (sIdx > eIdx) { var tmp = sIdx; sIdx = eIdx; eIdx = tmp; }
+          return { startValue: sIdx, endValue: eIdx };
+        }
+        return { startValue: fromMs, endValue: toMs };
+      }
       var dzTimer = null;
-      function onDz() {
+      var suppressBroadcast = false;
+      function onDz(srcPanel) {
+        if (suppressBroadcast) return;
         if (dzTimer) clearTimeout(dzTimer);
         dzTimer = setTimeout(function () {
-          if (panels.length === 0) return;
-          var range = panelDataZoomToMs(panels[0]);
+          var range = panelDataZoomToMs(srcPanel);
           if (!range) return;
+          // 1. 他 panel に broadcast (suppressBroadcast 中は再 emit を捨てる)
+          suppressBroadcast = true;
+          try {
+            for (var i = 0; i < panels.length; i += 1) {
+              var p = panels[i];
+              if (p === srcPanel) continue;
+              var native = panelMsToNative(p, range.fromMs, range.toMs);
+              if (!native) continue;
+              p.chart.dispatchAction({
+                type: 'dataZoom',
+                startValue: native.startValue,
+                endValue: native.endValue,
+              });
+            }
+          } finally {
+            // dispatchAction が同期発火する dataZoom event を捌き終えたら解除。
+            // setTimeout 0 で micro-task 単位の遅延を入れる (echarts の listener
+            // は同期的に呼ばれるが念のため遅延)。
+            setTimeout(function () { suppressBroadcast = false; }, 0);
+          }
+          // 2. URL ?from / ?to を更新
           try {
             var fromIso = new Date(range.fromMs).toISOString();
             var toIso = new Date(range.toMs).toISOString();
@@ -4521,9 +4563,9 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           } catch (e) { /* noop */ }
         }, 200);
       }
-      for (var pi2 = 0; pi2 < panels.length; pi2 += 1) {
-        panels[pi2].chart.on('dataZoom', onDz);
-      }
+      panels.forEach(function (panel) {
+        panel.chart.on('dataZoom', function () { onDz(panel); });
+      });
 
       // preset zoom buttons (1D/5D/1M/All): 全 panel に dispatchAction で
       // 共通 ms 範囲を broadcast。category mode panel では nearestIndex で
