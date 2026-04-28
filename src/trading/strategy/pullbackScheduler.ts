@@ -142,7 +142,32 @@ export interface PullbackSchedulerOptions {
    * 未注入なら skip (POC 後方互換)。SELL は VIX 関係なく通す。
    */
   vixDecision?: VixRegimeFilterDecision
+  /**
+   * sanity_failed cooldown gate。直近 N 分以内に同 symbol で broker stub
+   * fill (`resolveFilledPrice` が ratio guard で reject した) が観測されて
+   * いた場合、新規 BUY を block する。9697 04/28 incident (30 min/6 fills 累積、
+   * DO null のまま broker 側 600 株疑い) の再発防止 fail-closed gate。
+   *
+   * 未注入なら skip (POC 後方互換)。SELL は対象外 (= broker stub では起きない、
+   * exit 経路を妨げないため)。
+   */
+  sanityFailedCooldown?: SanityFailedCooldownConfig
   now?: () => Date
+}
+
+export interface SanityFailedCooldownConfig {
+  /**
+   * `symbol` (大文字) について、直近 `withinMs` 内に sanity_failed 系の
+   * trade_journal row があるかを返す predicate。production は
+   * `hasRecentSanityFailure(env.DB, ...)` で wrap、test は fake で注入する。
+   * throw した場合は fail-closed (= cooldown 有効扱い) で BUY を reject。
+   */
+  check: (symbol: string) => Promise<boolean>
+  /**
+   * Operator 視認用の窓幅 (ms)。reject reason 文字列に埋め込むだけで、
+   * 実際の cutoff は `check` 実装側が持つ (= 1 source of truth)。
+   */
+  withinMs: number
 }
 
 /**
@@ -400,6 +425,47 @@ export async function runPullbackScheduler(
         trace: signal.trace,
       })
       continue
+    }
+
+    // sanity_failed cooldown gate (incident: 9697 04/28 で 30 min / 6 BUY 累積、
+    // DO null / broker 側 600 株疑い)。直近 N 分以内に同 symbol で broker stub
+    // fill が観測されていれば新規 BUY を block する。SELL は対象外 (broker stub
+    // では起きない、exit を妨げない)。signal.action === 'BUY' のみ評価し、
+    // intent build / sizing 計算より前で短絡させる (= 不要な計算を避ける)。
+    // check が throw した場合は fail-closed (= cooldown 有効扱い) — DB read
+    // 失敗で BUY を通すと incident 再発リスクが残るため。
+    if (signal.action === 'BUY' && options.sanityFailedCooldown) {
+      let cooledDown = false
+      try {
+        cooledDown = await options.sanityFailedCooldown.check(upper)
+      } catch (err) {
+        cooledDown = true
+        console.warn(
+          JSON.stringify({
+            event: 'sanity_failed_cooldown_check_failed',
+            requestId: options.requestId ?? null,
+            symbol: upper,
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        )
+      }
+      if (cooledDown) {
+        const minutes = Math.round(options.sanityFailedCooldown.withinMs / 60_000)
+        const reason = `risk: sanity_failed cooldown active (recent broker stub fill within ${minutes}min)`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('risk.sanity_failed_cooldown', false, undefined, undefined, undefined, reason),
+          ),
+        })
+        continue
+      }
     }
 
     let intent: OrderIntent
@@ -1120,6 +1186,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
+  'risk.sanity_failed_cooldown': 'sanity_failed cooldown (broker stub 疑い)',
   'broker.submit': '証券会社への発注送信',
   'broker.sell_qty_fallback': 'SELL 数量超過時の broker available qty 再 submit',
 }

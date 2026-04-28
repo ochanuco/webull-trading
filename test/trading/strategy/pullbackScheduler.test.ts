@@ -1310,3 +1310,144 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
     expect(summary.errors).toHaveLength(1)
   })
 })
+
+describe('runPullbackScheduler sanity_failed cooldown gate', () => {
+  // 9697 04/28 incident: broker stub fill (filled_price=10 vs limit ~2683) が
+  // ratio guard で reject されると DO state は更新されず、cron は毎 tick
+  // 「未保有 → BUY」を送って broker 側 600 株疑い。cooldown gate は直近 N 分で
+  // sanity_failed が観測されていれば BUY を block する。
+
+  it('rejects BUY when sanity_failed cooldown reports a recent failure', async () => {
+    const execution = mockExecution()
+    const checkSpy = vi.fn(async (symbol: string) => symbol === '9697')
+    const summary = await runPullbackScheduler({
+      symbols: ['9697'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      sanityFailedCooldown: { check: checkSpy, withinMs: 30 * 60_000 },
+      now: () => now,
+    })
+
+    expect(checkSpy).toHaveBeenCalledWith('9697')
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('sanity_failed cooldown active')
+    expect(reject?.reason).toContain('30min')
+    expect(reject?.trace?.map((s) => s.label)).toContain('risk.sanity_failed_cooldown')
+  })
+
+  it('approves BUY when cooldown reports no recent failure (lapsed window)', async () => {
+    const execution = mockExecution()
+    const checkSpy = vi.fn(async () => false)
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      sanityFailedCooldown: { check: checkSpy, withinMs: 30 * 60_000 },
+      now: () => now,
+    })
+
+    expect(checkSpy).toHaveBeenCalledWith('AAPL')
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('skips the cooldown gate when option is omitted (back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+  })
+
+  it('treats a thrown check as cooldown active (fail-closed)', async () => {
+    // DB read failure should not silently let BUY through — the incident we
+    // are guarding against is exactly the case where the broker side may have
+    // accumulated phantom shares.
+    const execution = mockExecution()
+    const checkSpy = vi.fn(async () => {
+      throw new Error('D1 unavailable')
+    })
+    const summary = await runPullbackScheduler({
+      symbols: ['9697'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      sanityFailedCooldown: { check: checkSpy, withinMs: 30 * 60_000 },
+      now: () => now,
+    })
+
+    expect(checkSpy).toHaveBeenCalledWith('9697')
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('sanity_failed cooldown active')
+  })
+
+  it('does not invoke check on the SELL path (existing position exit not gated)', async () => {
+    // SELL は対象外: broker stub fill では起きない (= sanity_failed の根本原因
+    // ではない) し、entry を凍結したいだけで exit を妨げる必要はない。Strategy
+    // が SELL を出す setup に切り替えるため、time-stop / take-profit を引き寄せた
+    // position を fixture で持たせる。
+    const execution = mockExecution()
+    const checkSpy = vi.fn(async () => true)
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: {
+        qty: 5,
+        avgPrice: 80,
+        // 50 BD 前 → time stop で SELL 経路に乗る (default rule timeStopDays=10)
+        openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      sanityFailedCooldown: { check: checkSpy, withinMs: 30 * 60_000 },
+      now: () => now,
+    })
+
+    // SELL であれば cooldown は呼ばれず、execute も走る。HOLD で抜けた場合は
+    // execute は走らないが check も呼ばれない (= BUY 経路でしか引かない実装)。
+    expect(checkSpy).not.toHaveBeenCalled()
+    if (summary.sells > 0) {
+      expect((execution.calls[0] as { side: string }).side).toBe('SELL')
+    }
+  })
+
+  it('does not affect other symbols when one symbol is in cooldown', async () => {
+    // Cooldown は symbol 単位 — 1 銘柄が止まっても他銘柄の評価は通常通り。
+    const execution = mockExecution()
+    const checkSpy = vi.fn(async (symbol: string) => symbol === '9697')
+    const summary = await runPullbackScheduler({
+      symbols: ['9697', 'AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      sanityFailedCooldown: { check: checkSpy, withinMs: 30 * 60_000 },
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect((execution.calls[0] as { symbol: string }).symbol).toBe('AAPL')
+    const reject = summary.decisions.find((d) => d.symbol === '9697')
+    expect(reject?.decision).toBe('REJECT')
+    expect(reject?.reason).toContain('sanity_failed cooldown active')
+  })
+})
