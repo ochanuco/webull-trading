@@ -2771,9 +2771,12 @@ interface ChartsBodySymbol {
 
 /**
  * 銘柄グリッドビュー: ALLOWED_SYMBOLS を 4 列 (responsive) grid で並列表示。
- * 各 panel は個別 mini chart で、Datadog dashboard 風に dataZoom と tooltip が
- * `echarts.connect` 経由で全 panel 間で同期する。preset zoom (1D/5D/1M/All)
- * は grid 全体共通の toolbar から発火し、全 chart へ dispatchAction される。
+ * 各 panel は個別 mini chart で、dataZoom (zoom/pan) のみ全 panel 間で同期。
+ * tooltip / axisPointer は **panel ローカル** — hover 中の panel だけに表示
+ * (16 panel で全 popup する問題を避けるため `echarts.connect` は使わず、
+ * 起点 panel の dataZoom を `dispatchAction` で他 panel に broadcast する手動
+ * 同期に切替えた、PR #241)。preset zoom (1D/5D/1M/All) も同様に dispatchAction
+ * で全 chart に配信。
  */
 interface ChartsBodyGrid {
   tab: 'grid'
@@ -3903,17 +3906,20 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
 
 /**
  * 銘柄グリッドビュー (Datadog dashboard 風)。ALLOWED_SYMBOLS を 4 列 grid で
- * 並列表示し、`echarts.connect('symbols-grid')` で全 panel の dataZoom と
- * tooltip を同期させる。preset zoom (1D/5D/1M/All) は grid 共通 toolbar から
- * 全 chart へ dispatchAction で broadcast。
+ * 並列表示。dataZoom (zoom/pan) のみ全 panel 間で同期、tooltip は panel ローカル
+ * (PR #241 で `echarts.connect` を撤去、起点 panel → 他 panel へ手動
+ * `dispatchAction({type:'dataZoom'})` で broadcast)。preset zoom (1D/5D/1M/All)
+ * も grid 共通 toolbar から dispatchAction で全 chart に配信。
  *
- * mini chart の構成 (個別銘柄タブの簡素版):
+ * mini chart の構成 (PR #239 で個別銘柄タブと表示要素パリティ):
  * - candle (1h OHLC)
  * - 価格トレンド (linear regression)
- * - 保有時の avg / stop / TP 水平線
- * - BUY/SELL pin (markPoint)
+ * - SMA50
+ * - 押し目ゾーン markArea + sloped 上下端線 (未保有時のみ)
+ * - 保有時の avg / stop / TP 水平線 + endLabel
+ * - 未保有時の preview stop / TP 点線 + endLabel
+ * - BUY/SELL pin (markPoint, hover で qty / PnL / fill 時刻 tooltip)
  * - session divider (vertical lines)
- * - SMA50 / band / 詳細パネルは省略 (panel size に合わせて視認性を優先)
  */
 export function renderGridTab(args: ChartsBodyGrid): string {
   if (args.charts.length === 0) {
@@ -4272,9 +4278,9 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           }
         }
 
-        // dataZoom 初期範囲。connect 経由で他 panel と同期するため、最初の
-        // setOption 直後に echarts.connect('symbols-grid') を呼ぶ (panel 構築
-        // ループの末尾)。filterMode は trend / position line の dropping 防止
+        // dataZoom 初期範囲。panel 構築ループ末尾の onDz / preset button が
+        // dispatchAction で他 panel に broadcast する手動同期 (PR #241、connect
+        // は使わない)。filterMode は trend / position line の dropping 防止
         // 目的で 'weakFilter' (個別銘柄タブと同方針)。
         var dzInitial = (function () {
           if (data.zoomFromMs == null || data.zoomToMs == null) return {};
@@ -4598,8 +4604,8 @@ export function renderGridTab(args: ChartsBodyGrid): string {
 
   return `<p class="muted" style="font-size:12px">
     ALLOWED_SYMBOLS の全銘柄を 4 列 grid で並列表示 (Datadog dashboard 風)。
-    ズーム / パン (slider drag, wheel) と tooltip は全 panel 間で同期します。
-    panel 左上の銘柄名をクリックすると個別銘柄タブの詳細表示に遷移。
+    ズーム / パン (slider drag, wheel) は全 panel 間で同期、tooltip は hover した
+    panel ローカル。panel 左上の銘柄名をクリックすると個別銘柄タブの詳細表示に遷移。
   </p>
   ${presetButtonsHtml}
   <div class="grid-filter-bar" style="display:flex;gap:14px;align-items:center;margin-top:8px;font-size:12px;flex-wrap:wrap">
