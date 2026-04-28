@@ -1735,6 +1735,63 @@ describe('renderGridTab', () => {
     expect(html).toContain('class="symbol-disabled"')
   })
 
+  // CodeRabbit #230: inline style は CSS class より優先されるため、inactive panel
+  // では `background:#fff` / `text-decoration:none` の inline 上書きを抑制する。
+  // これで `.grid-panel.symbol-inactive { background:#fafafa; opacity:0.65 }` と
+  // `.symbol-disabled { text-decoration:line-through }` が effective になる。
+  it('inactive panel は inline background:#fff を出力せず、CSS class (symbol-inactive) に任せる', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['9697'],
+      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+    })
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [
+        { symbol: '9697', chart: makeChart('9697', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 4500, sma50: 4400, high20d: 4600, low20d: 4300 },
+        ]), error: null },
+      ],
+      zoom: null,
+      universe,
+    })
+    // inactive panel の wrapper には background:#fff が inline で入らない
+    // (= class 側の background:#fafafa が effective)
+    const panelOpenIdx = html.indexOf('class="grid-panel symbol-inactive"')
+    expect(panelOpenIdx).toBeGreaterThanOrEqual(0)
+    const panelOpenEnd = html.indexOf('>', panelOpenIdx)
+    const panelOpenTag = html.slice(panelOpenIdx, panelOpenEnd)
+    expect(panelOpenTag).not.toContain('background:#fff')
+    // inactive header link には text-decoration:none が inline で入らない
+    // (= symbol-disabled の line-through が effective)
+    const linkIdx = html.indexOf('class="symbol-disabled"')
+    expect(linkIdx).toBeGreaterThanOrEqual(0)
+    const linkEnd = html.indexOf('>', linkIdx)
+    const linkOpenTag = html.slice(linkIdx, linkEnd)
+    expect(linkOpenTag).not.toContain('text-decoration:none')
+  })
+
+  // active panel の inline style は従来どおり残す (regression guard)。
+  it('active panel は従来どおり inline background:#fff と link の text-decoration:none を持つ', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: [],
+      symbolCurrency: { SOXL: 'USD' },
+    })
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [
+        { symbol: 'SOXL', chart: makeChart('SOXL', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
+        ]), error: null },
+      ],
+      zoom: null,
+      universe,
+    })
+    expect(html).toContain('background:#fff')
+    expect(html).toContain('text-decoration:none')
+  })
+
   it('inactive 銘柄で chart load に失敗した場合は active と同じ error 表示 + INACTIVE バッジを併記', () => {
     const universe = makeSymbolUniverse({
       allowedSymbols: ['SOXL'],

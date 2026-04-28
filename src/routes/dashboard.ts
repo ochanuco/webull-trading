@@ -3722,14 +3722,22 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   const panelsHtml = args.charts
     .map((entry, idx) => {
       const inactive = isSymbolInactive(entry.symbol, args.universe)
-      const baseStyle = 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff'
+      // inactive は background / text-decoration の inline 上書きを避け、
+      // CSS class 側 (.grid-panel.symbol-inactive と .symbol-disabled) に任せる。
+      // inline style は CSS class より優先されてしまうため (CodeRabbit #230)。
+      const baseStyle = inactive
+        ? 'border:1px solid #d0d0d5;border-radius:6px;padding:8px'
+        : 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff'
       const panelClass = inactive ? 'grid-panel symbol-inactive' : 'grid-panel'
       const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
       const headerText = displaySymbol(entry.symbol, args.universe)
       const tooltipText = inactiveTooltip(entry.symbol, args.universe)
       const linkClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(tooltipText)}"` : ''
-      const headerLink = `<a href="${symbolLink}"${linkClass}${titleAttr} style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
+      const linkStyle = inactive
+        ? 'font-weight:600;font-size:14px;color:#06c'
+        : 'font-weight:600;font-size:14px;color:#06c;text-decoration:none'
+      const headerLink = `<a href="${symbolLink}"${linkClass}${titleAttr} style="${linkStyle}">${esc(headerText)}</a>`
       const inactiveBadge = inactive
         ? `<span class="muted" style="font-size:11px"${titleAttr}>INACTIVE</span>`
         : ''
