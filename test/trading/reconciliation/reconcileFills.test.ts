@@ -68,6 +68,64 @@ describe('reconcileFills internals', () => {
     expect(_internal.resolveFilledPrice(1, { limit_price: 'NaN' })).toBeNull()
     expect(_internal.resolveFilledPrice(1, {})).toBeNull()
   })
+
+  // ratio sanity guardrail (issue: 6971 ping-pong from filled_price=10 stub)
+  describe('resolveFilledPrice ratio sanity', () => {
+    beforeEach(() => {
+      // Quiet the JSON warn log so test output stays readable.
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+    })
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('rejects a JP-style stub fill (filled=10 vs limit=2683)', () => {
+      const detail = {
+        items: [{ filled_price: '10' }],
+        limit_price: '2683',
+      }
+      expect(_internal.resolveFilledPrice(1, detail)).toBeNull()
+    })
+
+    it('accepts a US fill with realistic limit/fill spread (215 vs 215.42)', () => {
+      const detail = {
+        items: [{ filled_price: '215' }],
+        limit_price: '215.42',
+      }
+      expect(_internal.resolveFilledPrice(1, detail)).toBe(215)
+    })
+
+    it('accepts a 1.07x slippage fill (120.43 vs 112.77) inside the 0.5–2x band', () => {
+      const detail = {
+        items: [{ filled_price: '120.43' }],
+        limit_price: '112.77',
+      }
+      expect(_internal.resolveFilledPrice(1, detail)).toBeCloseTo(120.43)
+    })
+
+    it('accepts a JP fill close to the signed limit (2680 vs 2683)', () => {
+      const detail = {
+        items: [{ filled_price: '2680' }],
+        limit_price: '2683',
+      }
+      expect(_internal.resolveFilledPrice(1, detail)).toBe(2680)
+    })
+
+    it('skips the ratio check when limit_price is missing (candidate kept as-is)', () => {
+      const detail = {
+        items: [{ filled_price: '10' }],
+      }
+      expect(_internal.resolveFilledPrice(1, detail)).toBe(10)
+    })
+
+    it('rejects a 3x overshoot (candidate above the 2x ceiling)', () => {
+      const detail = {
+        items: [{ filled_price: '300' }],
+        limit_price: '100',
+      }
+      expect(_internal.resolveFilledPrice(1, detail)).toBeNull()
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

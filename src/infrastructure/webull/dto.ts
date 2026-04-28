@@ -67,6 +67,29 @@ export interface WebullPositionDto {
 }
 
 /**
+ * Per-fill leg inside a Webull order detail. Field names follow the
+ * openapi-java-sdk `v2.OrderHistory.Item` mirror — keep them as free strings
+ * (the OpenAPI surface returns numeric-as-string consistently). Only the
+ * fields we actually consume are typed; unknown ones are tolerated.
+ *
+ * Note: the official doc does not formally declare `filled_price` /
+ * `filled_quantity` here, but the production US tenant returns them and
+ * `pickFilledPrice` averages across them. The JP UAT tenant has been
+ * observed returning `filled_price=10` as a stub on otherwise-realistic
+ * orders (see `webull_order_detail_raw` log in reconcileFills) — that is
+ * the trigger for the sanity-ratio guard in `resolveFilledPrice`.
+ */
+export interface WebullOrderItemDto {
+  order_id?: string
+  symbol?: string
+  side?: 'BUY' | 'SELL'
+  quantity?: string
+  filled_quantity?: string
+  filled_price?: string
+  status?: string
+}
+
+/**
  * Shape returned by GET /openapi/account/orders/detail (v1).
  * Fields mirror openapi-java-sdk's `v2.OrderHistory`.
  */
@@ -85,11 +108,5 @@ export interface WebullOrderDetailDto {
   // CANCELLED, REJECTED, EXPIRED, etc. Keep as free string for forward-compat.
   status?: string
   support_trading_session?: string
-  items?: Array<{
-    order_id?: string
-    symbol?: string
-    quantity?: string
-    filled_quantity?: string
-    status?: string
-  }>
+  items?: WebullOrderItemDto[]
 }
