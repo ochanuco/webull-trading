@@ -371,27 +371,41 @@ export const admin = new Hono<AppBindings>()
    *      (default SOXL) + `?category=` (default US_ETF).
    *   2. `GET /openapi/account/positions` for the configured JP cash account.
    *
-   * Each probe returns `{ phase, status, ok, bodyTruncated, bodyLength,
-   * msTaken }`. Error or timeout returns `{ phase: 'auth' | 'fetch', error }`.
-   * Body is truncated to 4 kB to avoid log blowup on HTML error pages.
+   * Each probe returns `{ phase: 'response', status, ok, bodyTruncated,
+   * bodyLength, msTaken }`. Auth-phase error (signing failure inside
+   * `buildSignedHeaders`) returns `{ phase: 'auth', error }`. Network /
+   * timeout returns `{ phase: 'fetch', error, msTaken }`. Body is truncated to
+   * 4 kB to avoid log blowup on HTML error pages.
+   *
+   * Pre-condition: `WEBULL_API_BASE` / `WEBULL_APP_KEY` / `WEBULL_APP_SECRET`
+   * / `WEBULL_ACCOUNT_ID_JP_CASH` must all be set (non-whitespace). Missing
+   * env returns `400 ValidationError` with the missing var names listed —
+   * "I forgot to set X" should never silently look like "broker rejected".
    *
    * Read-only: no DO writes, no D1 writes. Safe to call from operator browser.
    */
   .get('/broker/probe', async (c) => {
     const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase()
     const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase()
-    const rawBaseUrl = c.env.WEBULL_API_BASE
-    const rawAppKey = c.env.WEBULL_APP_KEY
-    const rawAppSecret = c.env.WEBULL_APP_SECRET
-    const accountId = c.env.WEBULL_ACCOUNT_ID_JP_CASH ?? ''
-
-    if (!rawBaseUrl || !rawAppKey || !rawAppSecret) {
-      throw new ValidationError('Webull env vars missing (BASE / APP_KEY / APP_SECRET)', { field: 'env' })
+    // 全 env var を trim、whitespace-only も "未設定" 扱い。silent な phase:'auth'
+    // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
+    // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
+    // 400 を返す ("正規の設定" のときだけ probe を走らせる)。
+    const baseUrl = (c.env.WEBULL_API_BASE ?? '').trim()
+    const appKey = (c.env.WEBULL_APP_KEY ?? '').trim()
+    const appSecret = (c.env.WEBULL_APP_SECRET ?? '').trim()
+    const accountId = (c.env.WEBULL_ACCOUNT_ID_JP_CASH ?? '').trim()
+    const missingEnv: string[] = []
+    if (baseUrl.length === 0) missingEnv.push('WEBULL_API_BASE')
+    if (appKey.length === 0) missingEnv.push('WEBULL_APP_KEY')
+    if (appSecret.length === 0) missingEnv.push('WEBULL_APP_SECRET')
+    if (accountId.length === 0) missingEnv.push('WEBULL_ACCOUNT_ID_JP_CASH')
+    if (missingEnv.length > 0) {
+      throw new ValidationError(
+        `Webull env var(s) missing or whitespace-only: ${missingEnv.join(', ')}`,
+        { field: 'env' },
+      )
     }
-    // TS は guard narrowing を closure 内に伝播しないので const に再 bind する。
-    const baseUrl: string = rawBaseUrl
-    const appKey: string = rawAppKey
-    const appSecret: string = rawAppSecret
 
     type ProbeResult =
       | { phase: 'auth' | 'fetch'; error: string; msTaken?: number }
@@ -463,20 +477,15 @@ export const admin = new Hono<AppBindings>()
         },
         version: 'v2',
       }),
-      // accountId 未設定なら fetch せず auth-phase エラーで返す (WebullHttpClient
-      // の requireAccountId が throw する挙動を mirror)。version='v1' は
-      // WebullHttpClient.request が account ルートでも送る固定値 (line 180)。
-      accountId.length === 0
-        ? Promise.resolve<ProbeResult>({
-            phase: 'auth',
-            error: 'Missing Webull account ID: WEBULL_ACCOUNT_ID_JP_CASH is unset',
-          })
-        : probeOnce({
-            method: 'GET',
-            path: '/openapi/account/positions',
-            query: { account_id: accountId },
-            version: 'v1',
-          }),
+      // version='v1' は WebullHttpClient.request が account ルートで送ってる
+      // 固定値 (line 180)。accountId は probe 入口の missingEnv チェックで
+      // 既に空文字 reject 済 → ここに到達した時点で必ず非空。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/account/positions',
+        query: { account_id: accountId },
+        version: 'v1',
+      }),
     ])
 
     return c.json({
