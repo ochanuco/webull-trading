@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import { ValidationError } from '../shared/errors'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
+import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import { reconcileFills } from '../trading/reconciliation/reconcileFills'
@@ -356,6 +357,118 @@ export const admin = new Hono<AppBindings>()
       },
     )
     return c.json(result)
+  })
+  /**
+   * Read-only diagnostic: directly hit Webull broker endpoints with bare fetch
+   * and return the raw HTTP status / body / timing. Bypasses
+   * `WebullHttpClient` / `WebullQuoteClient` so the response is **not normalized
+   * by our parsers** — used to verify whether sandbox failures (#240 alert:
+   * status 403 across US_STOCK / US_ETF) come from the broker side or our
+   * client-side handling.
+   *
+   * Probes (in parallel):
+   *   1. `GET /openapi/quotes/v2/market-data/stock/snapshot` for `?symbol=`
+   *      (default SOXL) + `?category=` (default US_ETF).
+   *   2. `GET /openapi/account/positions` for the configured JP cash account.
+   *
+   * Each probe returns `{ phase, status, ok, bodyTruncated, bodyLength,
+   * msTaken }`. Error or timeout returns `{ phase: 'auth' | 'fetch', error }`.
+   * Body is truncated to 4 kB to avoid log blowup on HTML error pages.
+   *
+   * Read-only: no DO writes, no D1 writes. Safe to call from operator browser.
+   */
+  .get('/broker/probe', async (c) => {
+    const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase()
+    const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase()
+    const rawBaseUrl = c.env.WEBULL_API_BASE
+    const rawAppKey = c.env.WEBULL_APP_KEY
+    const rawAppSecret = c.env.WEBULL_APP_SECRET
+    const accountId = c.env.WEBULL_ACCOUNT_ID_JP_CASH ?? ''
+
+    if (!rawBaseUrl || !rawAppKey || !rawAppSecret) {
+      throw new ValidationError('Webull env vars missing (BASE / APP_KEY / APP_SECRET)', { field: 'env' })
+    }
+    // TS は guard narrowing を closure 内に伝播しないので const に再 bind する。
+    const baseUrl: string = rawBaseUrl
+    const appKey: string = rawAppKey
+    const appSecret: string = rawAppSecret
+
+    type ProbeResult =
+      | { phase: 'auth' | 'fetch'; error: string; msTaken?: number }
+      | { phase: 'response'; status: number; ok: boolean; bodyTruncated: string; bodyLength: number; msTaken: number }
+
+    async function probeOnce(args: {
+      method: 'GET' | 'POST'
+      path: string
+      query: Record<string, string>
+      version?: string
+    }): Promise<ProbeResult> {
+      const url = new URL(args.path, `${baseUrl}/`)
+      for (const [k, v] of Object.entries(args.query)) url.searchParams.set(k, v)
+
+      let headers: Record<string, string>
+      try {
+        headers = await buildSignedHeaders({
+          method: args.method,
+          path: url.pathname,
+          query: args.query,
+          host: url.host,
+          appKey,
+          appSecret,
+          version: args.version,
+        })
+      } catch (e) {
+        return { phase: 'auth', error: e instanceof Error ? e.message : String(e) }
+      }
+
+      const t0 = Date.now()
+      let response: Response
+      try {
+        response = await fetch(url.href, { method: args.method, headers: { Accept: 'application/json', ...headers } })
+      } catch (e) {
+        return {
+          phase: 'fetch',
+          error: e instanceof Error ? e.message : String(e),
+          msTaken: Date.now() - t0,
+        }
+      }
+      const body = await response.text()
+      return {
+        phase: 'response',
+        status: response.status,
+        ok: response.ok,
+        bodyTruncated: body.slice(0, 4000),
+        bodyLength: body.length,
+        msTaken: Date.now() - t0,
+      }
+    }
+
+    const [quoteResult, positionsResult] = await Promise.all([
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/quotes/v2/market-data/stock/snapshot',
+        query: {
+          symbols: symbol,
+          category,
+          extend_hour_required: 'false',
+          overnight_required: 'false',
+        },
+        version: 'v2',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/account/positions',
+        query: { account_id: accountId },
+      }),
+    ])
+
+    return c.json({
+      timestamp: new Date().toISOString(),
+      sandbox: baseUrl,
+      input: { symbol, category, accountIdConfigured: accountId.length > 0 },
+      quote: quoteResult,
+      positions: positionsResult,
+    })
   })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
