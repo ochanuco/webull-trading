@@ -1956,6 +1956,18 @@ export interface SymbolChartData {
   trendLine: TrendLineSegment | null
   /** Yahoo 日次 OHLC、candlestick 描画用 (空配列 = Yahoo fetch 失敗) */
   intradayBars: OhlcBar[]
+  /**
+   * 最新の cron-eval point (= strategy_decision_log 由来) の price。
+   * Yahoo daily filler を含めず、merge 前 cron-eval の末尾を採用する。
+   *
+   * preview stop/TP の virtualAvg はこの値を使う。`points` 末尾は
+   * Yahoo filler だと「古い日次 close」になる可能性があり、preview に使うと
+   * 「実 strategy 評価で参照していない過去価格」で線が引かれて誤解を招く。
+   * cron eval 履歴が無い (= strategy_decision_log が空) 場合は null。
+   */
+  latestCronPrice: number | null
+  /** `latestCronPrice` の timestamp (ISO Z)。preview line の to-end 用。null 時 preview 描画スキップ。 */
+  latestCronTimestamp: string | null
 }
 
 /**
@@ -2052,6 +2064,13 @@ export async function loadSymbolChart(
   const yahooBars =
     cronLastTs == null ? yahooBarsRaw : yahooBarsRaw.filter((b) => b.timestamp <= cronLastTs)
 
+  // 最新 cron-eval point (= 実 strategy 評価で使った値) を merge 前に snapshot。
+  // mergedPoints[末尾] は Yahoo daily filler の可能性があり (cron 停止中 / 古い銘柄)、
+  // preview stop/TP に使うと「strategy 上は触ってない過去 Yahoo 値」で線が引かれて
+  // 誤解を招く。preview は cron eval 履歴がある時だけ描く方針 → null フィールドで
+  // 「描画スキップ」シグナルにする。
+  const { latestCronPrice, latestCronTimestamp } = selectLatestCronSnapshot(points)
+
   // Yahoo bar を points にマージして全期間 price line を実現。同 timestamp で
   // 既に cron-eval point があればそちらを優先 (indicators が乗っているため)。
   // Yahoo bar 由来の point は indicators フィールド全 null。
@@ -2118,6 +2137,8 @@ export async function loadSymbolChart(
     rules,
     trendLine,
     intradayBars: intradayBars,
+    latestCronPrice,
+    latestCronTimestamp,
   }
 }
 
@@ -2159,6 +2180,35 @@ export async function loadAllSymbolCharts(
       }
     }),
   )
+}
+
+/**
+ * cron-eval points の末尾 (= 実 strategy 評価で参照した最新価格) を取り出して
+ * `{ latestCronPrice, latestCronTimestamp }` を返す。preview stop/TP は
+ * Yahoo filler を含む `mergedPoints[末尾]` ではなくこちらを使う方針。
+ *
+ * - cron 履歴空 / 末尾 price 非有限 / 末尾 timestamp 不正 → 全 null
+ *   (= preview 描画スキップのシグナル)。
+ * - 末尾の price は >= 0 で finite なものだけ採用 (株価の sanity check)。
+ *
+ * 入力は merge 前 (= strategy_decision_log 由来) の SymbolChartPoint[] を想定。
+ * 呼出側が誤って merged points を渡しても動くが、その場合は filler 末尾を
+ * 拾うので preview の意図と乖離する。設計上、`loadSymbolChart` 内で merge
+ * 前に呼ぶこと。
+ */
+export function selectLatestCronSnapshot(
+  cronPoints: SymbolChartPoint[],
+): { latestCronPrice: number | null; latestCronTimestamp: string | null } {
+  if (cronPoints.length === 0) {
+    return { latestCronPrice: null, latestCronTimestamp: null }
+  }
+  const last = cronPoints[cronPoints.length - 1]!
+  const tsValid = Number.isFinite(new Date(last.timestamp).getTime())
+  const priceValid = Number.isFinite(last.price)
+  if (!tsValid || !priceValid) {
+    return { latestCronPrice: null, latestCronTimestamp: null }
+  }
+  return { latestCronPrice: last.price, latestCronTimestamp: last.timestamp }
 }
 
 /**
@@ -3223,6 +3273,18 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var avgLabel = '';
       var stopLabel = '';
       var tpLabel = '';
+      // 保有ナシ時に「もし今 BUY したら」の損切り / 利食い水準を仮置きで描く
+      // preview lines。virtualAvg = sc.latestCronPrice (= 直近 cron eval で
+      // strategy 評価に使った価格) を仮の avg と見立てる。
+      // sc.points[末尾] を使うと Yahoo daily filler が末尾に来ているケース
+      // (cron 停止中 / 銘柄古い) で「過去 Yahoo close」を avg にしてしまい、
+      // user に「最新評価値」と誤解させる。latestCronPrice が null = 評価履歴
+      // 自体が無い → preview line そのものを描画スキップする。
+      // dotted + opacity 0.5 で「actual position ではない」と区別する。
+      var previewStopLineXY = null;
+      var previewTpLineXY = null;
+      var previewStopLabel = '';
+      var previewTpLabel = '';
       var extraYValues = [];
       if (sc.position) {
         var avg = sc.position.avgPrice;
@@ -3245,6 +3307,27 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
         avgLabel = 'avg ' + avg.toFixed(2);
         stopLabel = 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
         tpLabel = 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
+      } else if (
+        sc.points.length > 0 &&
+        sc.latestCronPrice != null &&
+        sc.latestCronPrice > 0 &&
+        sc.latestCronTimestamp != null
+      ) {
+        var virtualAvg = sc.latestCronPrice;
+        var pStopPrice = virtualAvg * (1 + sc.rules.stopPct);
+        var pTpPrice = virtualAvg * (1 + sc.rules.takeProfitPct);
+        extraYValues.push(pStopPrice, pTpPrice);
+        // preview line の x 範囲: chart 開始 → 最新 cron eval timestamp。
+        // 末尾を Yahoo filler 末尾まで伸ばすと「最新 cron 以降の Yahoo 区間」
+        // にも線が出てしまい virtualAvg と整合しないので latestCron まで。
+        var pFromMs = new Date(sc.points[0].timestamp).getTime();
+        var pToMs = new Date(sc.latestCronTimestamp).getTime();
+        if (Number.isFinite(pFromMs) && Number.isFinite(pToMs)) {
+          previewStopLineXY = toCategoryXY(densifyHorizontalLine(pStopPrice, pFromMs, pToMs, ohlcTimestamps));
+          previewTpLineXY = toCategoryXY(densifyHorizontalLine(pTpPrice, pFromMs, pToMs, ohlcTimestamps));
+          previewStopLabel = 'preview stop ' + pStopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
+          previewTpLabel = 'preview TP ' + pTpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
+        }
       }
 
       // ECharts の scale:true は markLine を yAxis range に含めないため、
@@ -3525,6 +3608,28 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             endLabel: { show: true, formatter: tpLabel, color: '#057a55', fontSize: 11 },
             silent: true, emphasis: { disabled: true }, z: 8,
           }] : []),
+          // 保有ナシ時の preview stop / TP (current price ベース)。dotted +
+          // opacity 0.5 で「actual position の線ではない、仮置き」と視覚区別。
+          // z:7 にして actual の z:8 より下に置く (混在することは無いが、
+          // 凡例での視覚上の優先度として明示)。
+          ...(previewStopLineXY ? [{
+            name: previewStopLabel, type: 'line', data: previewStopLineXY,
+            lineStyle: { width: 1, color: '#c22', type: 'dotted', opacity: 0.5 }, symbol: 'none',
+            itemStyle: { color: '#c22', opacity: 0.5 },
+            endLabel: {
+              show: true, formatter: previewStopLabel, color: '#c22', fontSize: 10, opacity: 0.7,
+            },
+            silent: true, emphasis: { disabled: true }, z: 7,
+          }] : []),
+          ...(previewTpLineXY ? [{
+            name: previewTpLabel, type: 'line', data: previewTpLineXY,
+            lineStyle: { width: 1, color: '#057a55', type: 'dotted', opacity: 0.5 }, symbol: 'none',
+            itemStyle: { color: '#057a55', opacity: 0.5 },
+            endLabel: {
+              show: true, formatter: previewTpLabel, color: '#057a55', fontSize: 10, opacity: 0.7,
+            },
+            silent: true, emphasis: { disabled: true }, z: 7,
+          }] : []),
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
@@ -3631,6 +3736,15 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             pushIfFinite(avg * (1 + sc.rules.stopPct));
             pushIfFinite(avg * (1 + sc.rules.takeProfitPct));
           }
+        } else if (sc.latestCronPrice != null && sc.latestCronPrice > 0) {
+          // preview lines は描画範囲が chart 開始 → 最新 cron eval まで。
+          // visible 範囲とは常に交差する想定。virtualAvg = latestCronPrice
+          // (Yahoo filler ではなく実 strategy 評価値) から stop/TP を算出。
+          // latestCronPrice == null のときは preview 線そのものを描いていない
+          // ので y range にも含めない (= 軸が無駄に広がるのを防ぐ)。
+          var pVirtualAvg = sc.latestCronPrice;
+          pushIfFinite(pVirtualAvg * (1 + sc.rules.stopPct));
+          pushIfFinite(pVirtualAvg * (1 + sc.rules.takeProfitPct));
         }
         if (visibleY.length === 0) return;
         var rawMin = Math.min.apply(null, visibleY);
@@ -3994,6 +4108,10 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           return out;
         }
         var avgLineXY = null, stopLineXY = null, tpLineXY = null;
+        // 保有ナシ時の preview stop/TP (latestCronPrice ベースの仮置き)。
+        // 個別銘柄タブと同方針 (詳細コメントは上方参照)。Yahoo filler を
+        // 含めないために sc.latestCronPrice / sc.latestCronTimestamp を採用。
+        var previewStopLineXY = null, previewTpLineXY = null;
         var extraYValues = [];
         if (sc.position) {
           var avg = sc.position.avgPrice;
@@ -4008,6 +4126,22 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           avgLineXY = toCategoryXY(densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps));
           stopLineXY = toCategoryXY(densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps));
           tpLineXY = toCategoryXY(densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps));
+        } else if (
+          sc.points.length > 0 &&
+          sc.latestCronPrice != null &&
+          sc.latestCronPrice > 0 &&
+          sc.latestCronTimestamp != null
+        ) {
+          var virtualAvg = sc.latestCronPrice;
+          var pStopPrice = virtualAvg * (1 + sc.rules.stopPct);
+          var pTpPrice = virtualAvg * (1 + sc.rules.takeProfitPct);
+          extraYValues.push(pStopPrice, pTpPrice);
+          var pFromMs = new Date(sc.points[0].timestamp).getTime();
+          var pToMs = new Date(sc.latestCronTimestamp).getTime();
+          if (Number.isFinite(pFromMs) && Number.isFinite(pToMs)) {
+            previewStopLineXY = toCategoryXY(densifyHorizontalLine(pStopPrice, pFromMs, pToMs, ohlcTimestamps));
+            previewTpLineXY = toCategoryXY(densifyHorizontalLine(pTpPrice, pFromMs, pToMs, ohlcTimestamps));
+          }
         }
 
         // y 軸 range (candle + markers + position lines のみ。SMA50/band は除外)
@@ -4135,6 +4269,18 @@ export function renderGridTab(args: ChartsBodyGrid): string {
               name: 'tp', type: 'line', data: tpLineXY,
               lineStyle: { width: 1, color: '#057a55', type: 'dashed' }, symbol: 'none',
               silent: true, emphasis: { disabled: true }, z: 8,
+            }] : []),
+            // preview stop / TP (保有ナシで current price ベースの仮置き)。
+            // dotted + opacity 0.5 で actual position lines と区別。
+            ...(previewStopLineXY ? [{
+              name: 'preview stop', type: 'line', data: previewStopLineXY,
+              lineStyle: { width: 1, color: '#c22', type: 'dotted', opacity: 0.5 }, symbol: 'none',
+              silent: true, emphasis: { disabled: true }, z: 7,
+            }] : []),
+            ...(previewTpLineXY ? [{
+              name: 'preview tp', type: 'line', data: previewTpLineXY,
+              lineStyle: { width: 1, color: '#057a55', type: 'dotted', opacity: 0.5 }, symbol: 'none',
+              silent: true, emphasis: { disabled: true }, z: 7,
             }] : []),
           ],
         });
