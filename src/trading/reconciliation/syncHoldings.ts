@@ -61,6 +61,14 @@ export interface SyncHoldingsSummary {
     errors: number
   }
   dryRun: boolean
+  /**
+   * Soft signals surfaced to the operator without abort semantics. Currently
+   * one literal: `'broker_returned_empty_diff_suspicious'` — emitted only on
+   * `dryRun=true` to flag that the live (non-dryRun) call would safe-fail.
+   * Absent on the happy path; never present alongside a safe-fail abort
+   * (those go through `errors`).
+   */
+  warnings?: string[]
 }
 
 export interface SyncHoldingsOptions {
@@ -68,6 +76,14 @@ export interface SyncHoldingsOptions {
   symbol?: string
   /** When true, compute diffs but do not write to the DO. */
   dryRun: boolean
+  /**
+   * Operator escape hatch for the safe-fail guard. When the broker returns
+   * no usable holdings AND the DO has positions for the targeted symbols,
+   * we refuse to zero-out the DO unless `force=true` — that pattern most
+   * often indicates a broker auth / sandbox glitch, not actual liquidation.
+   * Default `false` keeps existing callers on the safe path.
+   */
+  force?: boolean
   /** Audit-correlation id from the route layer (`c.get('requestId')`). */
   requestId: string | null
 }
@@ -116,17 +132,83 @@ export async function syncHoldings(
   const synced: SyncHoldingResult[] = []
   const errors: SyncHoldingError[] = []
 
-  for (const sym of symbols) {
-    if (brokerFetchError !== null) {
+  // Short-circuit when the broker fetch itself failed — every symbol gets
+  // the same error and the safe-fail guard is moot.
+  if (brokerFetchError !== null) {
+    for (const sym of symbols) {
       errors.push({ symbol: sym, error: brokerFetchError })
+    }
+    return summarize(synced, errors, options.dryRun)
+  }
+
+  // Read-only pass: gather broker + DO state for each target symbol so we
+  // can run the safe-fail guard *before* any destructive write. The guard
+  // catches the "broker getPositions returned all-null but DO holds shares"
+  // pattern (most often a sandbox / auth glitch — see PR motivating bug:
+  // SOXL qty=8 + AAPL qty=1 zeroed out by a single bad fetch).
+  interface SymbolPlan {
+    sym: string
+    before: PositionState | null
+    brokerQty: number | null
+    brokerAvg: number | null
+    /** Captured at scan time so we don't refetch in the apply pass. */
+    fetchError: string | null
+  }
+  const plans: SymbolPlan[] = []
+  for (const sym of symbols) {
+    const brokerPos = brokerByUpper!.get(sym)
+    const brokerQty = parseBrokerQty(brokerPos)
+    const brokerAvg = parseBrokerAvg(brokerPos)
+    try {
+      const state = await deps.positionStore.getState(sym)
+      plans.push({
+        sym,
+        before: state.position,
+        brokerQty,
+        brokerAvg,
+        fetchError: null,
+      })
+    } catch (err) {
+      plans.push({
+        sym,
+        before: null,
+        brokerQty,
+        brokerAvg,
+        fetchError: messageOf(err),
+      })
+    }
+  }
+
+  // Safe-fail predicate: zero broker holdings AND DO has at least one row
+  // for a targeted symbol. We deliberately check `qty>0` rather than
+  // `position!==null` so a stale `{qty:0}` row doesn't block the guard.
+  const hasAnyBrokerQty = plans.some(
+    (p) => p.brokerQty !== null && p.brokerQty > 0,
+  )
+  const doHasAnyPosition = plans.some(
+    (p) => p.before !== null && p.before.qty > 0,
+  )
+  const safeFailTriggered = !hasAnyBrokerQty && doHasAnyPosition
+
+  if (safeFailTriggered && !options.dryRun && !options.force) {
+    // Refuse the destructive zero-out. Surface a single error rather than
+    // per-symbol noise — the operator's recovery action is "investigate or
+    // re-run with ?force=true", not "retry per symbol".
+    errors.push({
+      symbol: '*',
+      error:
+        'broker_returned_empty_but_do_has_positions: broker getPositions returned no holdings, but DO has positions. Refusing to zero-out DO. Use ?force=true to override.',
+    })
+    return summarize(synced, errors, options.dryRun)
+  }
+
+  for (const plan of plans) {
+    const { sym, before, brokerQty, brokerAvg, fetchError } = plan
+    if (fetchError !== null) {
+      errors.push({ symbol: sym, error: fetchError })
       continue
     }
     try {
-      const brokerPos = brokerByUpper!.get(sym)
-      const brokerQty = parseBrokerQty(brokerPos)
-      const brokerAvg = parseBrokerAvg(brokerPos)
-      const state = await deps.positionStore.getState(sym)
-      const before = state.position
       const doQty = before?.qty ?? 0
 
       // No-drift fast path. We treat "broker has no row" as `brokerQty=0`
@@ -181,6 +263,7 @@ export async function syncHoldings(
           broker_avg: brokerAvg,
           requestId: options.requestId,
           dryRun: false,
+          forced: options.force === true && safeFailTriggered,
         }),
       )
       synced.push({
@@ -195,9 +278,25 @@ export async function syncHoldings(
     }
   }
 
+  // dryRun + safe-fail-would-trigger: surface as a soft warning so the
+  // operator sees the diff but also knows the live call would refuse.
+  const warnings: string[] = []
+  if (safeFailTriggered && options.dryRun) {
+    warnings.push('broker_returned_empty_diff_suspicious')
+  }
+
+  return summarize(synced, errors, options.dryRun, warnings)
+}
+
+function summarize(
+  synced: SyncHoldingResult[],
+  errors: SyncHoldingError[],
+  dryRun: boolean,
+  warnings: string[] = [],
+): SyncHoldingsSummary {
   const noDriftCount = synced.filter((r) => r.skipped === 'no_drift').length
   const syncedCount = synced.length - noDriftCount
-  return {
+  const base: SyncHoldingsSummary = {
     synced,
     errors,
     summary: {
@@ -206,8 +305,9 @@ export async function syncHoldings(
       no_drift: noDriftCount,
       errors: errors.length,
     },
-    dryRun: options.dryRun,
+    dryRun,
   }
+  return warnings.length > 0 ? { ...base, warnings } : base
 }
 
 interface ApplyOverrideArgs {

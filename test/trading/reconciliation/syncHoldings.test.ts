@@ -236,12 +236,14 @@ describe('syncHoldings', () => {
     expect(result.dryRun).toBe(true)
   })
 
-  it('broker not held (qty=0) → DO position is closed (null)', async () => {
+  it('broker not held (qty=0) → DO position is closed (null) [force=true required]', async () => {
     const { store, overrides } = createFakeStore({
       SOXL: { qty: 4, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
     })
+    // PR #222 follow-up: this destructive zero-out now requires force=true.
+    // The bare-call equivalent is covered by the safe-fail guard tests above.
     const result = await syncHoldings(
-      { dryRun: false, requestId: 'req-4' },
+      { dryRun: false, force: true, requestId: 'req-4' },
       {
         allowedSymbols: ['SOXL'],
         // Webull omits zero-qty rows entirely.
@@ -274,12 +276,15 @@ describe('syncHoldings', () => {
     expect(result.synced[0]!.after).toMatchObject({ qty: 3, avgPrice: 120 })
   })
 
-  it('DO has shares but broker reports none → DO position is closed', async () => {
+  it('DO has shares but broker reports none → DO position is closed [force=true required]', async () => {
     const { store, overrides } = createFakeStore({
       SOXL: { qty: 4, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
     })
+    // Broker explicitly reports qty=0 (vs. omitting the row). Either way the
+    // safe-fail guard sees "no usable broker qty + DO has positions" and
+    // requires force=true to proceed with the destructive zero-out.
     const result = await syncHoldings(
-      { dryRun: false, requestId: 'req-6' },
+      { dryRun: false, force: true, requestId: 'req-6' },
       {
         allowedSymbols: ['SOXL'],
         fetchPositions: async () => [brokerPosition('SOXL', '0', '0')],
@@ -346,6 +351,209 @@ describe('syncHoldings', () => {
     expect(result.errors).toHaveLength(1)
     expect(result.errors[0]!.symbol).toBe('SOXL')
     expect(result.errors[0]!.error).toMatch(/cannot determine avgPrice/)
+  })
+
+  /**
+   * Safe-fail guard: PR #222 follow-up. The bug being defended against was
+   * a broker getPositions response that returned all 14 universe symbols
+   * with `available_quantity: null` (UAT auth glitch), which sync-holdings
+   * happily interpreted as "broker has nothing → zero out the DO". That
+   * destroyed real DO rows (SOXL qty=8, AAPL qty=1). The guard refuses the
+   * write when broker has zero usable rows AND DO has any qty>0 row;
+   * `force=true` is the operator escape hatch for genuine liquidations.
+   */
+  describe('safe-fail guard (broker empty + DO non-empty)', () => {
+    it('aborts with safe-fail error when broker returns no qty and DO has positions (force=false, dryRun=false)', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+        AAPL: { qty: 1, avgPrice: 200, openedAt: '2026-04-21T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: false, requestId: 'req-safe-1' },
+        {
+          allowedSymbols: ['SOXL', 'AAPL'],
+          // Broker returns nothing — the bug pattern.
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      expect(overrides).toEqual([])
+      expect(result.synced).toEqual([])
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]!.symbol).toBe('*')
+      expect(result.errors[0]!.error).toMatch(/broker_returned_empty_but_do_has_positions/)
+      expect(result.errors[0]!.error).toMatch(/force=true/)
+      expect(result.summary).toEqual({ total: 1, synced: 0, no_drift: 0, errors: 1 })
+      expect(result.dryRun).toBe(false)
+      expect(result.warnings).toBeUndefined()
+    })
+
+    it('also triggers when broker returns rows but every available_quantity is null', async () => {
+      // Mirrors the actual incident: 14 symbols returned but `available_quantity: null`
+      // on every row. The guard treats that the same as "no rows".
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: false, requestId: 'req-safe-1b' },
+        {
+          allowedSymbols: ['SOXL'],
+          fetchPositions: async () => [
+            // null/empty available_quantity → parseBrokerQty returns null
+            { symbol: 'SOXL', available_quantity: null as unknown as string },
+          ],
+          positionStore: store,
+        },
+      )
+      expect(overrides).toEqual([])
+      expect(result.errors[0]!.error).toMatch(/broker_returned_empty_but_do_has_positions/)
+    })
+
+    it('force=true bypasses the guard and applies the destructive zero-out', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+        AAPL: { qty: 1, avgPrice: 200, openedAt: '2026-04-21T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: false, force: true, requestId: 'req-safe-2' },
+        {
+          allowedSymbols: ['SOXL', 'AAPL'],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      // Both DO rows zeroed out (intentional liquidation cleanup).
+      expect(overrides).toHaveLength(2)
+      expect(overrides.map((o) => o.symbol).sort()).toEqual(['AAPL', 'SOXL'])
+      for (const o of overrides) {
+        expect(o.args.qty).toBe(0)
+      }
+      expect(result.synced).toHaveLength(2)
+      for (const r of result.synced) {
+        expect(r.after).toBeNull()
+      }
+      expect(result.errors).toEqual([])
+    })
+
+    it('broker empty + DO empty → no-op (no positions anywhere, nothing destructive)', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: null,
+        AAPL: null,
+      })
+      const result = await syncHoldings(
+        { dryRun: false, requestId: 'req-safe-3' },
+        {
+          allowedSymbols: ['SOXL', 'AAPL'],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      // Guard does NOT trigger — no DO position to protect.
+      expect(overrides).toEqual([])
+      expect(result.errors).toEqual([])
+      expect(result.synced.every((r) => r.skipped === 'no_drift')).toBe(true)
+      expect(result.summary).toEqual({ total: 2, synced: 0, no_drift: 2, errors: 0 })
+    })
+
+    it('mixed broker (some null, some qty>0) does NOT trigger guard — partial API works', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+        AAPL: { qty: 1, avgPrice: 200, openedAt: '2026-04-21T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: false, requestId: 'req-safe-4' },
+        {
+          allowedSymbols: ['SOXL', 'AAPL'],
+          // SOXL has qty (broker partly works), AAPL omitted (zero-out is real).
+          fetchPositions: async () => [brokerPosition('SOXL', '4', '125.50')],
+          positionStore: store,
+        },
+      )
+      // Guard does NOT trigger because broker reported at least one qty>0.
+      // SOXL drifts 8 → 4 (write), AAPL DO 1 → 0 (write).
+      expect(overrides).toHaveLength(2)
+      const byName = new Map(overrides.map((o) => [o.symbol, o]))
+      expect(byName.get('SOXL')!.args.qty).toBe(4)
+      expect(byName.get('AAPL')!.args.qty).toBe(0)
+      expect(result.errors).toEqual([])
+    })
+
+    it('dryRun=true + safe-fail-would-trigger: shows diff and surfaces warning', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: true, requestId: 'req-safe-5' },
+        {
+          allowedSymbols: ['SOXL'],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      // dryRun is non-destructive, so we still emit the diff for inspection.
+      expect(overrides).toEqual([])
+      expect(result.synced).toHaveLength(1)
+      expect(result.synced[0]!.skipped).toBe('dry_run')
+      expect(result.synced[0]!.before?.qty).toBe(8)
+      expect(result.synced[0]!.after).toBeNull()
+      // Warning communicates "the live call would refuse this".
+      expect(result.warnings).toEqual(['broker_returned_empty_diff_suspicious'])
+      expect(result.errors).toEqual([])
+      expect(result.dryRun).toBe(true)
+    })
+
+    it('single-symbol mode: same guard applies (broker null + DO has qty)', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { symbol: 'SOXL', dryRun: false, requestId: 'req-safe-6' },
+        {
+          allowedSymbols: [],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      expect(overrides).toEqual([])
+      expect(result.errors[0]!.error).toMatch(/broker_returned_empty_but_do_has_positions/)
+    })
+
+    it('single-symbol mode + force=true: bypasses guard for one ticker', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { symbol: 'SOXL', dryRun: false, force: true, requestId: 'req-safe-7' },
+        {
+          allowedSymbols: [],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      expect(overrides).toHaveLength(1)
+      expect(overrides[0]!.args.qty).toBe(0)
+      expect(result.synced[0]!.after).toBeNull()
+    })
+
+    it('stale {qty:0} DO row does NOT count as "DO has positions" (guard not triggered)', async () => {
+      const { store, overrides } = createFakeStore({
+        // Edge case: DO has a position record but qty=0 (already closed).
+        // Zeroing it again is a no-op, not destructive — guard should let it through.
+        SOXL: { qty: 0, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: false, requestId: 'req-safe-8' },
+        {
+          allowedSymbols: ['SOXL'],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      // No safe-fail error; symbol is just no-drift (DO=0, broker=0).
+      expect(overrides).toEqual([])
+      expect(result.errors).toEqual([])
+      expect(result.synced[0]!.skipped).toBe('no_drift')
+    })
   })
 
   it('matches symbols case-insensitively against broker payload', async () => {

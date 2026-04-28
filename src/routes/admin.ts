@@ -306,6 +306,11 @@ export const admin = new Hono<AppBindings>()
    * Query:
    *   - `symbol`  (optional)  restrict to one ticker (case-insensitive)
    *   - `dryRun`  (optional)  `1`/`true`/`yes` → diff-only, no DO writes
+   *   - `force`   (optional)  `1`/`true`/`yes` → bypass the "broker empty +
+   *                            DO has positions" safe-fail guard. Use only
+   *                            when the operator has *confirmed* the broker
+   *                            is genuinely empty (e.g. liquidation) and
+   *                            the DO rows are stale ghosts to be cleared.
    *
    * Body: ignored (POST kept for "this mutates state" intent — `dryRun`
    *   path obviously doesn't, but the verb stays consistent).
@@ -316,6 +321,7 @@ export const admin = new Hono<AppBindings>()
     }
     const symbolRaw = c.req.query('symbol')?.trim()
     const dryRun = parseTruthyQuery(c.req.query('dryRun'))
+    const force = parseTruthyQuery(c.req.query('force'))
     const symbol = symbolRaw && symbolRaw.length > 0 ? symbolRaw.toUpperCase() : undefined
 
     // Single-symbol mode skips the universe load: lets the operator sync a
@@ -340,6 +346,7 @@ export const admin = new Hono<AppBindings>()
       {
         ...(symbol !== undefined ? { symbol } : {}),
         dryRun,
+        force,
         requestId: c.get('requestId') ?? null,
       },
       {
