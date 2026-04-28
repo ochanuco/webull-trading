@@ -650,6 +650,11 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
     if (!symbol) return;
     submitBtn.disabled = true;
     statusEl.textContent = '実行中...';
+    // 前回の probe 結果をクリア
+    quoteEl.textContent = '';
+    positionsEl.textContent = '';
+    metaEl.textContent = '';
+    resultEl.style.display = 'none';
     var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
       '&category=' + encodeURIComponent(category);
     // URL 更新 (リロード時に同じ条件を保つ + bookmarks 用)
@@ -677,6 +682,11 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
       })
       .catch(function (e) {
         statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
+        // fetch エラー時も古いデータを残さない
+        quoteEl.textContent = '';
+        positionsEl.textContent = '';
+        metaEl.textContent = '';
+        resultEl.style.display = 'none';
       })
       .finally(function () {
         submitBtn.disabled = false;
