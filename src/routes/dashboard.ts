@@ -4066,6 +4066,57 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           ? ohlcBars.map(function (b) { return [b.open, b.close, b.low, b.high]; })
           : ohlcBars.map(function (b) { return [b.timestamp, b.open, b.close, b.low, b.high]; });
 
+        // SMA50: 個別銘柄タブと同形 (sc.points 各点の sma50 値)。null は break 用に
+        // そのまま入れる (connectNulls=true でも null は points 間を非描画にする)。
+        var smasXY = sc.points.map(function (p) {
+          if (p.sma50 == null) return [xForTimestamp(p.timestamp), null];
+          return [xForTimestamp(p.timestamp), p.sma50];
+        });
+
+        // 押し目ゾーン (#238 個別銘柄タブと同実装)。markArea (latest high20d 基準
+        // の flat 帯) + per-timestamp の上下端 sloped line で構成。保有時は非表示。
+        var pullbackMaxMul = 1 + sc.rules.pullbackMax;
+        var pullbackMinMul = 1 + sc.rules.pullbackMin;
+        var latestHigh20d = null;
+        for (var lhi = sc.points.length - 1; lhi >= 0; lhi -= 1) {
+          var lhp = sc.points[lhi];
+          if (lhp && typeof lhp.high20d === 'number' && isFinite(lhp.high20d)) {
+            latestHigh20d = lhp.high20d;
+            break;
+          }
+        }
+        var bandUpperY = latestHigh20d == null ? null : latestHigh20d * pullbackMaxMul;
+        var bandLowerY = latestHigh20d == null ? null : latestHigh20d * pullbackMinMul;
+        var bandTopY = null;
+        var bandBottomY = null;
+        if (Number.isFinite(bandUpperY) && Number.isFinite(bandLowerY)) {
+          bandTopY = Math.max(bandUpperY, bandLowerY);
+          bandBottomY = Math.min(bandUpperY, bandLowerY);
+        }
+        var pullbackBandMarkArea = (bandTopY != null && bandBottomY != null) ? {
+          silent: true,
+          itemStyle: {
+            color: 'rgba(255, 180, 50, 0.08)',
+            borderColor: 'rgba(255, 140, 0, 0.35)',
+            borderWidth: 1,
+            borderType: 'dashed',
+          },
+          data: [[{ yAxis: bandBottomY }, { yAxis: bandTopY }]],
+        } : null;
+        var pullbackUpperXY = sc.points.map(function (p) {
+          var x = xForTimestamp(p.timestamp);
+          if (typeof p.high20d !== 'number' || !isFinite(p.high20d)) return [x, null];
+          return [x, p.high20d * pullbackMaxMul];
+        });
+        var pullbackLowerXY = sc.points.map(function (p) {
+          var x = xForTimestamp(p.timestamp);
+          if (typeof p.high20d !== 'number' || !isFinite(p.high20d)) return [x, null];
+          return [x, p.high20d * pullbackMinMul];
+        });
+        var pullbackBandHasData =
+          pullbackUpperXY.some(function (xy) { return xy[1] != null; }) &&
+          pullbackLowerXY.some(function (xy) { return xy[1] != null; });
+
         // dense trend line (個別銘柄タブと同アルゴリズム)
         var ohlcTimestamps = ohlcMs.slice();
         function densifyTrendLine(line, sampleTimestamps) {
@@ -4252,10 +4303,14 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           tooltip: {
             trigger: 'axis',
             axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
+            // 個別銘柄タブと同形式: candle は OHLC 4 値を 1 行、line は seriesName +
+            // value を行ごとに表示。densified path で重複する seriesName+value 行は
+            // dedup する (#231 と同方針)。
             formatter: function (params) {
               if (!Array.isArray(params) || params.length === 0) return '';
               var ts = params[0].axisValue;
               var lines = ['<div style="font-weight:600;font-size:11px">' + (sc.displayName || sc.symbol) + ' ' + jstLabelForX(ts) + '</div>'];
+              var seenLine = Object.create(null);
               for (var i = 0; i < params.length; i += 1) {
                 var p = params[i];
                 if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
@@ -4265,13 +4320,23 @@ export function renderGridTab(args: ChartsBodyGrid): string {
                     Number(p.value[off + 3]).toFixed(2) + ' / ' +
                     Number(p.value[off + 2]).toFixed(2) + ' / ' +
                     Number(p.value[off + 1]).toFixed(2) + '</div>');
+                } else {
+                  var v = Array.isArray(p.value) ? p.value[1] : p.value;
+                  if (v == null) continue;
+                  var vText = Number(v).toFixed(2);
+                  var key = String(p.seriesName) + '|' + vText;
+                  if (seenLine[key]) continue;
+                  seenLine[key] = true;
+                  lines.push('<div style="font-size:11px">' + p.marker + ' ' + p.seriesName + ': ' + vText + '</div>');
                 }
               }
               return lines.join('');
             },
           },
           legend: { show: false },
-          grid: { left: 40, right: 8, top: 8, bottom: 28 },
+          // right を 60 に拡大して avg/stop/TP の endLabel (右端 'avg X' 等) を
+          // 描画範囲に収める。bottom は slider 18px + padding 10 = 28 のまま。
+          grid: { left: 40, right: 60, top: 8, bottom: 28 },
           dataZoom: dataZoomCfg,
           xAxis: useCategoryAxis ? {
             type: 'category', data: categories,
@@ -4291,6 +4356,29 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             splitLine: { show: true, lineStyle: { opacity: 0.1 } },
           },
           series: [
+            // 押し目ゾーン markArea (host series)。保有時は非表示。個別銘柄タブと同実装。
+            ...((sc.position || !pullbackBandMarkArea) ? [] : [{
+              name: '押し目ゾーン',
+              type: 'line', data: [], symbol: 'none', z: 1,
+              markArea: pullbackBandMarkArea,
+            }]),
+            // 押し目 sloped 上下端 (#238)。markArea の上に重ねて傾きを可視化。
+            ...((sc.position || !pullbackBandMarkArea || !pullbackBandHasData) ? [] : [
+              {
+                name: '押し目上端', type: 'line', data: pullbackUpperXY,
+                connectNulls: false,
+                lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
+                itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
+                symbol: 'none', z: 2,
+              },
+              {
+                name: '押し目下端', type: 'line', data: pullbackLowerXY,
+                connectNulls: false,
+                lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
+                itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
+                symbol: 'none', z: 2,
+              },
+            ]),
             ...(trendLineXY ? [{
               name: 'trend', type: 'line', data: trendLineXY,
               lineStyle: { width: 1.2, color: '#9333ea' }, symbol: 'none',
@@ -4309,23 +4397,51 @@ export function renderGridTab(args: ChartsBodyGrid): string {
                 lineStyle: { color: '#bbb', width: 1, type: 'dashed' }, z: 1,
                 data: sessionOpenIndices.map(function (idx) { return { xAxis: idx }; }),
               } : undefined,
+              // BUY/SELL pin の hover tooltip (qty / realized PnL / fill 時刻)。
+              // 個別銘柄タブと同形 (symbolSize は panel に合わせて 18 のまま)。
               markPoint: entries.length + exits.length > 0 ? {
                 symbol: 'pin', symbolSize: 18, data: entries.concat(exits),
+                tooltip: {
+                  trigger: 'item',
+                  formatter: function (p) {
+                    var d = p.data;
+                    var pnl = d.realizedPnl == null
+                      ? ''
+                      : '<br/>realized PnL: ' + (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
+                    var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
+                    var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabel(d.fillTimestamp);
+                    return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts;
+                  },
+                },
               } : undefined,
             }] : []),
+            // SMA50: candle (z:5) より上、trend (z:7) と同じ層に置く。連続値で
+            // null は break (gap) させる。色は TradingView 系の orange (#f59e0b)。
+            {
+              name: 'SMA50', type: 'line', data: smasXY,
+              lineStyle: { width: 1.2, color: '#f59e0b' },
+              symbol: 'none', connectNulls: true, z: 6,
+              itemStyle: { color: '#f59e0b' },
+            },
             ...(avgLineXY ? [{
               name: 'avg', type: 'line', data: avgLineXY,
               lineStyle: { width: 1, color: '#444' }, symbol: 'none',
+              itemStyle: { color: '#444' },
+              endLabel: { show: true, formatter: 'avg', color: '#444', fontSize: 10 },
               silent: true, emphasis: { disabled: true }, z: 8,
             }] : []),
             ...(stopLineXY ? [{
               name: 'stop', type: 'line', data: stopLineXY,
               lineStyle: { width: 1, color: '#c22', type: 'dashed' }, symbol: 'none',
+              itemStyle: { color: '#c22' },
+              endLabel: { show: true, formatter: 'stop', color: '#c22', fontSize: 10 },
               silent: true, emphasis: { disabled: true }, z: 8,
             }] : []),
             ...(tpLineXY ? [{
               name: 'tp', type: 'line', data: tpLineXY,
               lineStyle: { width: 1, color: '#057a55', type: 'dashed' }, symbol: 'none',
+              itemStyle: { color: '#057a55' },
+              endLabel: { show: true, formatter: 'tp', color: '#057a55', fontSize: 10 },
               silent: true, emphasis: { disabled: true }, z: 8,
             }] : []),
             // preview stop / TP (保有ナシで current price ベースの仮置き)。
@@ -4333,11 +4449,15 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             ...(previewStopLineXY ? [{
               name: 'preview stop', type: 'line', data: previewStopLineXY,
               lineStyle: { width: 1, color: '#c22', type: 'dotted', opacity: 0.5 }, symbol: 'none',
+              itemStyle: { color: '#c22' },
+              endLabel: { show: true, formatter: 'p.stop', color: '#c22', opacity: 0.7, fontSize: 10 },
               silent: true, emphasis: { disabled: true }, z: 7,
             }] : []),
             ...(previewTpLineXY ? [{
               name: 'preview tp', type: 'line', data: previewTpLineXY,
               lineStyle: { width: 1, color: '#057a55', type: 'dotted', opacity: 0.5 }, symbol: 'none',
+              itemStyle: { color: '#057a55' },
+              endLabel: { show: true, formatter: 'p.tp', color: '#057a55', opacity: 0.7, fontSize: 10 },
               silent: true, emphasis: { disabled: true }, z: 7,
             }] : []),
           ],
