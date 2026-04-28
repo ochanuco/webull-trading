@@ -91,11 +91,17 @@ export class WebullBarClient implements BarClient {
     // v2 stock/bars timespan enum (from probe 417 body):
     //   M1, M5, M15, M30, M60, M120, M240, D, W, M, Y
     // Daily = "D" (upper-case). Earlier `d1` yielded UNSUPPORTED_TIMESPAN.
+    //
+    // `real_time_required` は新 OpenAPI docs (#251) で required 扱い、default
+    // `true`。サーバ側既定と同じ値を明示送信して、将来 default 変更があっても
+    // 我々の挙動が動かないようにする (= 戦略 cron は real-time bar を期待する
+    // ので false に倒す動機はない)。issue #255。
     const query = {
       symbol,
       category,
       timespan: 'D',
       count: String(lookback),
+      real_time_required: 'true',
     }
 
     const url = new URL(this.barsPath, `${this.baseUrl}/`)
