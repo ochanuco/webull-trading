@@ -116,6 +116,29 @@ export default {
               errors: summary.errors,
             }),
           )
+          // Partial failure: getSnapshots() がカテゴリ単位で throw しても全体の
+          // promise は resolve するため、summary.errors にだけ積まれて silent に
+          // なってた (SOXL が 5 日 stale だったケース)。errors 件数 > 0 のときは
+          // /dashboard/alerts に warning として昇格させ、operator が cron 沈黙を
+          // 検知できるようにする。global throw の cause='quote_feed' とは区別する
+          // ため cause='quote_feed_partial'。
+          if (summary.errors.length > 0) {
+            const summaryMsg = summary.errors
+              .slice(0, 3)
+              .map((e) => `[${e.category}] ${e.message}`)
+              .join(' | ')
+            const tail = summary.errors.length > 3 ? ` (+${summary.errors.length - 3} more)` : ''
+            ctx.waitUntil(
+              createNotifier(env, { requestId })
+                .notify({
+                  type: 'ERROR',
+                  message: `quote_feed partial failure (${summary.errors.length} error(s)): ${summaryMsg}${tail}`,
+                  cause: 'quote_feed_partial',
+                  severity: 'warning',
+                })
+                .catch(() => undefined),
+            )
+          }
         },
         (error) => {
           const message = error instanceof Error ? error.message : String(error)
