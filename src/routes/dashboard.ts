@@ -578,12 +578,18 @@ function unavailable(reason: string): string {
  *     にも残らない
  */
 function brokerProbeBody(args: { symbol: string; category: string }): string {
-  // 主要 symbol 候補は datalist で suggest (typing も自由)。category は固定 2 値。
-  const popularSymbols = ['AAPL', 'SOXL', 'SOXS', 'NVDA', 'MSFT', 'GOOG', 'SPY', 'QQQ']
+  // 主要 symbol 候補は datalist で suggest (typing も自由)。US: ticker、JP は
+  // 4 桁 TSE code。JP_STOCK / JP_ETF は WebullQuoteCategory 上 unsupported
+  // (= cron は送らない) だが、probe は broker に直接投げて raw 応答を見るのが
+  // 役目なので allowlist 拡張と JP endpoint 動作確認のため選べるようにする。
+  const popularSymbols = [
+    'AAPL', 'SOXL', 'SOXS', 'NVDA', 'MSFT', 'GOOG', 'SPY', 'QQQ',
+    '7203', '7011', '6752', '6971', '9697', '1570',
+  ]
   const datalistOptions = popularSymbols
     .map((s) => `<option value="${esc(s)}"></option>`)
     .join('')
-  const categoryOptions = (['US_STOCK', 'US_ETF'] as const)
+  const categoryOptions = (['US_STOCK', 'US_ETF', 'JP_STOCK', 'JP_ETF'] as const)
     .map((c) => `<option value="${c}"${c === args.category ? ' selected' : ''}>${c}</option>`)
     .join('')
   return `<p class="muted" style="font-size:12px">
@@ -591,6 +597,9 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
   実 cron と同じ <code>/openapi/market-data/stock/snapshot</code> + <code>/openapi/account/positions</code>
   を直接 fetch して raw レスポンスを表示します。403 が返る場合は body にある
   Webull の error_code / message / request_id をサポートに転送可能。
+  US 銘柄は <code>US_STOCK</code> / <code>US_ETF</code>、JP 銘柄 (4 桁 TSE
+  コード) は <code>JP_STOCK</code> / <code>JP_ETF</code> を試せます (cron は
+  US カテゴリしか叩かない設計だが、probe で JP endpoint の挙動を確認できる)。
 </p>
 <form id="probe-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
   <label style="display:flex;flex-direction:column;font-size:12px">
