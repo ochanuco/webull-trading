@@ -3040,7 +3040,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       var bandLowerY = latestHigh20d == null ? null : latestHigh20d * pullbackMinMul;
       var bandTopY = null;
       var bandBottomY = null;
-      if (bandUpperY != null && bandLowerY != null) {
+      if (Number.isFinite(bandUpperY) && Number.isFinite(bandLowerY)) {
         bandTopY = Math.max(bandUpperY, bandLowerY);
         bandBottomY = Math.min(bandUpperY, bandLowerY);
       }
