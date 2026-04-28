@@ -84,6 +84,21 @@ describe('syncHoldings internals', () => {
     expect(_internal.parseBrokerQty({ available_quantity: 'banana' })).toBeNull()
   })
 
+  // #251 / #252: 新 docs (account-position) は `cost_price`、旧 SDK は `avg_cost`。
+  // defensive parser は新→旧の順、両方無ければ null。
+  it('parseBrokerAvg prefers new cost_price over legacy avg_cost', () => {
+    expect(_internal.parseBrokerAvg(undefined)).toBeNull()
+    expect(_internal.parseBrokerAvg({ cost_price: '124.95' })).toBe(124.95)
+    expect(_internal.parseBrokerAvg({ avg_cost: '100.00' })).toBe(100)
+    // 両方ある場合は new (cost_price) 優先
+    expect(_internal.parseBrokerAvg({ cost_price: '124.95', avg_cost: '100.00' })).toBe(124.95)
+    // 新名前が空文字 / null の場合は旧名前にフォールバック
+    expect(_internal.parseBrokerAvg({ cost_price: '', avg_cost: '100.00' })).toBe(100)
+    // 数値化できない値は null
+    expect(_internal.parseBrokerAvg({ cost_price: 'banana' })).toBeNull()
+    expect(_internal.parseBrokerAvg({})).toBeNull()
+  })
+
   it('computePlannedAfter returns null when broker qty is zero', () => {
     expect(
       _internal.computePlannedAfter({ brokerQty: 0, brokerAvg: 100, before: null }),

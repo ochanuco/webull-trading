@@ -395,6 +395,7 @@ function pickAvgPrice(brokerAvg: number | null, doAvg: number | null): number | 
 
 function parseBrokerQty(pos: WebullPositionDto | undefined): number | null {
   if (pos === undefined) return null
+  // available_quantity は新旧 docs 共通の名前 (#251 / #252)。
   const raw = pos.available_quantity
   if (raw === undefined || raw === null || raw === '') return null
   const parsed = Number(raw)
@@ -403,8 +404,16 @@ function parseBrokerQty(pos: WebullPositionDto | undefined): number | null {
 
 function parseBrokerAvg(pos: WebullPositionDto | undefined): number | null {
   if (pos === undefined) return null
-  const raw = pos.avg_cost
-  if (raw === undefined || raw === null || raw === '') return null
+  // 新 docs (#251) では `cost_price`、旧 SDK は `avg_cost`。新→旧の順で defensive
+  // parse (#252)。新 endpoint への切替前でも JP UAT は既に新名前で返してくる
+  // ケースがあり、旧名前だけ読んでると silently null = avg-price fallback を
+  // 強制発動してしまう。
+  // 新名前が undefined / null / 空文字 (== "未送信") なら旧名前にフォールバック。
+  // `??` だけでは空文字を「設定済」と扱ってしまうので、明示的に空かどうか判定。
+  const isEmpty = (v: unknown): boolean =>
+    v === undefined || v === null || v === ''
+  const raw = !isEmpty(pos.cost_price) ? pos.cost_price : pos.avg_cost
+  if (isEmpty(raw)) return null
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? parsed : null
 }
