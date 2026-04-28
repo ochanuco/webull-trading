@@ -243,6 +243,13 @@ interface CandidateRow {
   realizedPnl: number | null
   stateAppliedAt: string | null
   stateApplyAttempts: number
+  /**
+   * Last `state_apply_error` recorded on the journal row. Read by the
+   * auto-abandon path (`isPermanentSanityFailure`) to decide whether
+   * MAX_REPAIR_ATTEMPTS-exceeded rows should be force-stamped or left
+   * to keep retrying (transient errors).
+   */
+  stateApplyError?: string | null
 }
 
 interface UpdateCall {
@@ -1088,5 +1095,264 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(fn(1, 50, 'FILLED')).toBe(false) // healthy fill
     expect(fn(1, null, 'CANCELLED')).toBe(false) // not FILLED
     expect(fn(1, null, null)).toBe(false) // no status
+  })
+
+  // ---------------------------------------------------------------------------
+  // auto-abandon (this PR): rows that have tripped a permanent sanity-class
+  // error MAX_REPAIR_ATTEMPTS times should be force-stamped state_applied_at
+  // so they fall out of the repair cohort and stop driving the
+  // reconcile_fills_partial alarm forever. Transient errors (broker_5xx,
+  // network) must keep retrying past 5 attempts.
+  //
+  // Real-world trigger: 9697 — 6 rows accumulated to attempts 12-24 with
+  // `state_apply_error='sanity_failed: filled_price rejected by ratio guard'`,
+  // and the operator received the same alert every 5-minute cron tick.
+  // ---------------------------------------------------------------------------
+  describe('auto-abandon for sanity-stuck repair rows', () => {
+    it('attempts >= 5 + sanity_failed → force-stamps state_applied_at and bumps abandoned count', async () => {
+      const row: CandidateRow = {
+        id: 9697,
+        clientOrderId: 'coid-stuck-sanity',
+        symbol: '9697',
+        side: 'BUY',
+        brokerStatus: 'FILLED',
+        // filled_price=null is the actual on-disk shape for sanity-rejected
+        // rows (resolveFilledPrice returned null and the journal UPDATE
+        // wrote NULL). Repair branch's invalid-row guard would normally
+        // catch this, but we want the auto-abandon path to fire FIRST so
+        // the row drops out of the cohort before consuming another
+        // `repair_skipped_invalid_row` slot.
+        filledQty: 1,
+        filledPrice: null,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 5,
+        stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      // Quiet the audit-log warn so the test output stays readable.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // No DO call — abandoned rows are not re-applied.
+      expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+      // Single UPDATE: the auto-abandon stamp.
+      expect(updates).toHaveLength(1)
+      expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+      expect(updates[0]!.set.stateApplyError).toMatch(/^auto_abandoned_after_5_attempts:/)
+      expect(updates[0]!.set.stateApplyError).toMatch(/sanity_failed/)
+      expect(updates[0]!.set.stateApplyAttempts).toBeDefined()
+      // Counts: abandoned bumps, errors stays empty (so notifier stays quiet).
+      expect(summary.abandoned).toBe(1)
+      expect(summary.stateApplied).toBe(0)
+      expect(summary.stateApplyFailed).toBe(0)
+      expect(summary.errors).toEqual([])
+      // Audit log emitted so operator can see the abandon event.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"reconcile_auto_abandon"'),
+      )
+      const auditLog = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+      expect(auditLog).toMatchObject({
+        event: 'reconcile_auto_abandon',
+        rowId: 9697,
+        clientOrderId: 'coid-stuck-sanity',
+        symbol: '9697',
+        attempts: 5,
+        priorError: 'sanity_failed: filled_price rejected by ratio guard',
+      })
+    })
+
+    it('attempts >= 5 + repair_skipped_invalid_row → also abandons', async () => {
+      // Second permanent sanity class: repair branch detected a structurally
+      // invalid FILLED row (qty<=0). Same outcome — keeps tripping the same
+      // error, no recovery possible.
+      const row: CandidateRow = {
+        id: 100,
+        clientOrderId: 'coid-stuck-invalid',
+        symbol: 'SOXL',
+        side: 'BUY',
+        brokerStatus: 'FILLED',
+        filledQty: 0,
+        filledPrice: 40,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 8,
+        stateApplyError: 'repair_skipped_invalid_row: symbol=SOXL side=BUY qty=0 price=40',
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      expect(updates).toHaveLength(1)
+      expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+      expect(updates[0]!.set.stateApplyError).toMatch(/^auto_abandoned_after_8_attempts:/)
+      expect(updates[0]!.set.stateApplyError).toMatch(/repair_skipped_invalid_row/)
+      expect(summary.abandoned).toBe(1)
+      expect(summary.errors).toEqual([])
+    })
+
+    it('attempts < 5 + sanity_failed → keeps retrying (existing behaviour)', async () => {
+      // Below threshold: standard repair retry path. Because filledPrice is
+      // null on this row the repair branch's invalid-row guard fires (this
+      // is the existing `repair_skipped_invalid_row` path) — what we are
+      // asserting is that auto-abandon does NOT fire prematurely.
+      const row: CandidateRow = {
+        id: 200,
+        clientOrderId: 'coid-stuck-early',
+        symbol: '9697',
+        side: 'BUY',
+        brokerStatus: 'FILLED',
+        filledQty: 1,
+        filledPrice: null,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 4,
+        stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // Existing path: repair_skipped_invalid_row fires (filledPrice=null).
+      // state_applied_at MUST NOT be stamped (= row stays in repair cohort).
+      expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+      expect(updates).toHaveLength(1)
+      expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
+      expect(updates[0]!.set.stateApplyError).toMatch(/repair_skipped_invalid_row/)
+      // Crucially: NOT abandoned, error counted (so the operator alert can
+      // still surface a fresh issue while it is recoverable).
+      expect(summary.abandoned).toBe(0)
+      expect(summary.stateApplyFailed).toBe(1)
+      expect(summary.errors).toHaveLength(1)
+    })
+
+    it('attempts >= 5 + transient error (DO unavailable) → keeps retrying (NOT abandoned)', async () => {
+      // Transient errors should never auto-abandon — the next tick may
+      // succeed even after dozens of failures. Here `state_apply_error`
+      // does NOT contain `sanity_failed` / `repair_skipped_invalid_row`,
+      // so `isPermanentSanityFailure` returns false.
+      //
+      // We give the row a usable filled_price so the standard repair
+      // path runs; the DO stub then throws to simulate a still-broken
+      // underlying.
+      const row: CandidateRow = {
+        id: 300,
+        clientOrderId: 'coid-stuck-transient',
+        symbol: 'SOXL',
+        side: 'BUY',
+        brokerStatus: 'FILLED',
+        filledQty: 3,
+        filledPrice: 40,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 10, // way past the threshold
+        stateApplyError: 'DO unavailable',
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      const symbolStub = emptySymbolStateStub()
+      symbolStub.recordFillOnce.mockRejectedValueOnce(new Error('DO still unavailable'))
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // Repair path actually ran (= we did not auto-abandon).
+      expect(symbolStub.recordFillOnce).toHaveBeenCalled()
+      // Single UPDATE — the recordApplyFailure error stamp. state_applied_at
+      // MUST NOT be set (= row remains in cohort for next tick).
+      expect(updates).toHaveLength(1)
+      expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
+      expect(updates[0]!.set.stateApplyError).toBe('DO still unavailable')
+      expect(summary.abandoned).toBe(0)
+      expect(summary.stateApplyFailed).toBe(1)
+    })
+
+    it('attempts >= 5 + null state_apply_error → keeps retrying (NOT abandoned)', async () => {
+      // Defensive: a row could conceivably have high attempts with a null
+      // error column (e.g. attempts bump after marker UPDATE failure
+      // clears the prior error). isPermanentSanityFailure(null) is false →
+      // do not abandon, let the standard path run.
+      const row: CandidateRow = {
+        id: 400,
+        clientOrderId: 'coid-null-error',
+        symbol: 'SOXL',
+        side: 'BUY',
+        brokerStatus: 'FILLED',
+        filledQty: 2,
+        filledPrice: 35,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 7,
+        stateApplyError: null,
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // Standard repair path runs (DO apply succeeded).
+      expect(symbolStub.recordFillOnce).toHaveBeenCalled()
+      expect(summary.abandoned).toBe(0)
+      expect(summary.stateApplied).toBe(1)
+      expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+    })
   })
 })

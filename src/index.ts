@@ -159,16 +159,22 @@ export default {
               stillPending: summary.stillPending.length,
               notFound: summary.notFound.length,
               errorCount: summary.errors.length,
+              abandoned: summary.abandoned,
             }),
           )
           // reconcile の per-row error が出ていれば 1 件まとめて通知 (#141)。
           // 1 row 1 通知だと polling tick で連発するので summary 単位で 1 件。
+          //
+          // Auto-abandoned rows (sanity-stuck for >=5 attempts) は
+          // summary.errors に積まれずこの message 経路から抜ける。
+          // operator 側は `reconcile_auto_abandon` audit log を別経路で
+          // 拾えば良い。
           if (summary.errors.length > 0) {
             ctx.waitUntil(
               createNotifier(env, { requestId })
                 .notify({
                   type: 'ERROR',
-                  message: `reconcile fills had ${summary.errors.length} error(s) across ${summary.inspected} row(s)`,
+                  message: `reconcile fills had ${summary.errors.length} error(s), ${summary.abandoned} abandoned, across ${summary.inspected} row(s)`,
                   cause: 'reconcile_fills_partial',
                   severity: 'warning',
                 })

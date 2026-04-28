@@ -50,6 +50,48 @@ export interface ReconcileSummary {
    * recovery activity in cron logs.
    */
   repaired: number
+  /**
+   * Number of rows that were force-stamped `state_applied_at` on this run
+   * because they exceeded `MAX_REPAIR_ATTEMPTS` with a permanent sanity
+   * failure. Bumps `state_apply_error` with an `auto_abandoned_after_*`
+   * prefix so an operator can audit them later. Excluded from `errors`
+   * (and from the per-row error count surfaced to the alert notifier) so a
+   * stuck row stops re-firing the same alarm forever.
+   */
+  abandoned: number
+}
+
+/**
+ * Hard cap on how many times the repair cohort retries a row whose
+ * `state_apply_error` indicates a permanent sanity-style failure. Beyond
+ * this we force-stamp `state_applied_at` to drop the row out of the cohort
+ * (see `markAsAbandoned`). Picked at 5 to give a few cron ticks of grace
+ * for transient DO blips without letting a structurally-broken row
+ * (e.g. broker forever returns `filled_price=10` for a 3516 limit) keep
+ * the alert siren going indefinitely.
+ *
+ * Tunable in code only — moving this to env / runtime config is out of
+ * scope (separate PR if needed).
+ */
+const MAX_REPAIR_ATTEMPTS = 5
+
+/**
+ * `state_apply_error` substrings that we treat as "no further retry will
+ * help" — repeated reconcile cycles will keep producing the same failure.
+ * Distinct from transient errors (`broker_5xx`, `network`, `DO unavailable`,
+ * etc.) which should keep retrying.
+ *
+ * Recognized substrings:
+ *   - `sanity_failed` — `resolveFilledPrice()` rejected the broker's price
+ *     via the ratio guard. Will keep failing as long as the broker echoes
+ *     the same stub.
+ *   - `repair_skipped_invalid_row` — repair branch detected a structurally
+ *     invalid FILLED row (qty<=0, missing symbol/side, etc.). Cannot be
+ *     fixed by retry — the journal row itself is malformed.
+ */
+function isPermanentSanityFailure(error: string | null | undefined): boolean {
+  if (!error) return false
+  return error.includes('sanity_failed') || error.includes('repair_skipped_invalid_row')
 }
 
 interface ReconcileOptions {
@@ -121,6 +163,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     stateApplied: 0,
     stateApplyFailed: 0,
     repaired: 0,
+    abandoned: 0,
   }
 
   const now = options.now ?? (() => new Date())
@@ -169,6 +212,10 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       realizedPnl: tradeJournal.realizedPnl,
       stateAppliedAt: tradeJournal.stateAppliedAt,
       stateApplyAttempts: tradeJournal.stateApplyAttempts,
+      // Required by the auto-abandon path so we can decide whether the
+      // prior failure was a permanent sanity-class error (retry will not
+      // help) vs a transient one. See `isPermanentSanityFailure`.
+      stateApplyError: tradeJournal.stateApplyError,
     })
     .from(tradeJournal)
     .leftJoin(
@@ -228,6 +275,51 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     const isRepair = row.brokerStatus === 'FILLED' && row.stateAppliedAt === null
 
     if (isRepair) {
+      // Auto-abandon: a row that has tripped a permanent sanity-class
+      // error MAX_REPAIR_ATTEMPTS times in a row is not going to recover
+      // on the next tick. Force-stamp `state_applied_at` so:
+      //   - it falls out of the repair cohort SELECT,
+      //   - subsequent reconcile cycles do not include it in
+      //     `summary.errors` and so the `reconcile_fills_partial`
+      //     alarm stops re-firing for the same stuck row.
+      //
+      // The prior error is preserved (prefixed with
+      // `auto_abandoned_after_<n>_attempts:`) for operator audit. We
+      // emit a `reconcile_auto_abandon` audit log so dashboards / alert
+      // pipelines can pick up the event separately from the noisy
+      // partial-error alarm.
+      //
+      // Transient errors (broker_5xx, DO unavailable, network) are
+      // intentionally NOT auto-abandoned — those can clear on their own
+      // and should keep retrying past 5 attempts. See
+      // `isPermanentSanityFailure` for the included substrings.
+      if (
+        row.stateApplyAttempts >= MAX_REPAIR_ATTEMPTS &&
+        isPermanentSanityFailure(row.stateApplyError)
+      ) {
+        await markAsAbandoned(
+          db,
+          row.id,
+          row.stateApplyAttempts,
+          row.stateApplyError ?? '',
+          runNow.toISOString(),
+        )
+        console.warn(
+          JSON.stringify({
+            event: 'reconcile_auto_abandon',
+            requestId: options.requestId,
+            rowId: row.id,
+            clientOrderId: coid,
+            symbol: row.symbol,
+            side: row.side,
+            attempts: row.stateApplyAttempts,
+            priorError: row.stateApplyError,
+          }),
+        )
+        summary.abandoned += 1
+        continue
+      }
+
       // Use the canonical fill data already on the row. We must not
       // re-poll Webull — orders/history can rotate the row off the first
       // page after a few days, and re-polling would also waste a quota.
@@ -676,6 +768,40 @@ function dedupeCandidatesByRowId<T extends { id: number; side: string | null; pr
     }
   }
   return [...byId.values()]
+}
+
+/**
+ * Force-stamp `state_applied_at` on a permanently-stuck repair row. Used
+ * by the auto-abandon path: after MAX_REPAIR_ATTEMPTS retries on a
+ * sanity-class failure we accept that the next tick will not help and
+ * drop the row out of the repair cohort.
+ *
+ * The prior error is preserved verbatim, prefixed with
+ * `auto_abandoned_after_<attempts>_attempts:` so an operator running a
+ * journal query can tell at a glance which rows were force-closed vs
+ * applied normally.
+ *
+ * NOT a best-effort path: if this UPDATE fails the row stays in the
+ * cohort and the same alert keeps firing — surface the failure to the
+ * caller so the run summary reflects reality. Caller wraps it in a
+ * try/catch so a single row's failure does not kill the whole batch.
+ */
+async function markAsAbandoned(
+  db: ReturnType<typeof createDb>,
+  rowId: number,
+  attempts: number,
+  priorError: string,
+  nowIso: string,
+): Promise<void> {
+  const message = `auto_abandoned_after_${attempts}_attempts: ${priorError}`
+  await db
+    .update(tradeJournal)
+    .set({
+      stateAppliedAt: nowIso,
+      stateApplyError: message,
+      stateApplyAttempts: sql`${tradeJournal.stateApplyAttempts} + 1`,
+    })
+    .where(eq(tradeJournal.id, rowId))
 }
 
 async function recordApplyFailure(
