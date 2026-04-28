@@ -297,13 +297,35 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         row.stateApplyAttempts >= MAX_REPAIR_ATTEMPTS &&
         isPermanentSanityFailure(row.stateApplyError)
       ) {
-        await markAsAbandoned(
-          db,
-          row.id,
-          row.stateApplyAttempts,
-          row.stateApplyError ?? '',
-          runNow.toISOString(),
-        )
+        try {
+          await markAsAbandoned(
+            db,
+            row.id,
+            row.stateApplyAttempts,
+            row.stateApplyError ?? '',
+            runNow.toISOString(),
+          )
+        } catch (error) {
+          // The auto-abandon UPDATE itself failed (e.g. D1 throttled, transient
+          // bind error). Do not let a single row kill the whole batch — log,
+          // record the failure on the run summary, and move on to the next
+          // row. The cohort SELECT will pick this row up again next tick and
+          // retry the abandon.
+          const message = error instanceof Error ? error.message : String(error)
+          console.error(
+            JSON.stringify({
+              event: 'reconcile_auto_abandon_error',
+              requestId: options.requestId,
+              rowId: row.id,
+              clientOrderId: coid,
+              symbol: row.symbol,
+              message,
+            }),
+          )
+          summary.errors.push({ clientOrderId: coid, message: `auto_abandon_failed: ${message}` })
+          summary.stateApplyFailed += 1
+          continue
+        }
         console.warn(
           JSON.stringify({
             event: 'reconcile_auto_abandon',

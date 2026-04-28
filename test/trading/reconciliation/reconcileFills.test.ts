@@ -1354,5 +1354,88 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       expect(summary.stateApplied).toBe(1)
       expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     })
+
+    it('markAsAbandoned UPDATE throws → loop continues, row goes to errors, abandoned not bumped', async () => {
+      // CodeRabbit #228: the auto-abandon UPDATE must be wrapped in
+      // try/catch so a single transient D1 failure does not abort the
+      // whole reconcile batch. Two rows both qualify for auto-abandon;
+      // the first row's UPDATE throws (simulated via
+      // `failStateAppliedAtOnce`) — the loop must continue to process
+      // the second row, which abandons normally.
+      const stuckRows: CandidateRow[] = [
+        {
+          id: 9697,
+          clientOrderId: 'coid-stuck-1',
+          symbol: '9697',
+          side: 'BUY',
+          brokerStatus: 'FILLED',
+          filledQty: 1,
+          filledPrice: null,
+          realizedPnl: null,
+          stateAppliedAt: null,
+          stateApplyAttempts: 5,
+          stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
+        },
+        {
+          id: 9698,
+          clientOrderId: 'coid-stuck-2',
+          symbol: '9697',
+          side: 'BUY',
+          brokerStatus: 'FILLED',
+          filledQty: 1,
+          filledPrice: null,
+          realizedPnl: null,
+          stateAppliedAt: null,
+          stateApplyAttempts: 6,
+          stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
+        },
+      ]
+      // Fail the first stateAppliedAt-bearing UPDATE (= first row's
+      // markAsAbandoned). Second row's UPDATE then succeeds.
+      const { db, updates } = makeFakeDb(stuckRows, { failStateAppliedAtOnce: true })
+      vi.mocked(createDb).mockReturnValue(db)
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // Both rows attempted the auto-abandon UPDATE (= loop continued
+      // past the first row's failure). Both UPDATEs carry the abandon
+      // marker shape (`stateAppliedAt` + `auto_abandoned_after_*`).
+      expect(updates).toHaveLength(2)
+      expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+      expect(updates[0]!.set.stateApplyError).toMatch(/^auto_abandoned_after_5_attempts:/)
+      expect(updates[1]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+      expect(updates[1]!.set.stateApplyError).toMatch(/^auto_abandoned_after_6_attempts:/)
+      // First row failed: surfaced as an error, NOT counted as abandoned.
+      // Second row succeeded: counted as abandoned.
+      expect(summary.abandoned).toBe(1)
+      expect(summary.stateApplyFailed).toBe(1)
+      expect(summary.errors).toEqual([
+        {
+          clientOrderId: 'coid-stuck-1',
+          message: expect.stringContaining('auto_abandon_failed:'),
+        },
+      ])
+      // Error log emitted for the failed row.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"reconcile_auto_abandon_error"'),
+      )
+      // Second row's success audit log emitted.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"reconcile_auto_abandon"'),
+      )
+    })
   })
 })
