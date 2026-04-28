@@ -3310,6 +3310,14 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             if (!Array.isArray(params) || params.length === 0) return '';
             var ts = params[0].axisValue;
             var lines = ['<div style="font-weight:600;font-size:11px">' + jstLabelForX(ts) + '</div>'];
+            // densified path (intradayBars timestamp ごとに line series を埋める
+            // PR #190 / #192) により、同じ seriesName + 同じ y 値の data point が
+            // 同一 axis index 周辺に多数並ぶ。ECharts の trigger axis は該当
+            // params を全件渡してくるため、tooltip 上で SMA50 65.82 が 16 行
+            // 続くような重複表示が発生する。seriesName + 整形後 value を key に
+            // した Set で連続行を 1 行に dedup する (系列ごと 1 行)。candle は
+            // OHLC 4 値の array なので special-case のまま既存挙動を維持。
+            var seenLine = Object.create(null);
             for (var i = 0; i < params.length; i += 1) {
               var p = params[i];
               if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
@@ -3325,8 +3333,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
               } else {
                 var v = Array.isArray(p.value) ? p.value[1] : p.value;
                 if (v == null) continue;
+                var vText = Number(v).toFixed(2);
+                var key = String(p.seriesName) + '|' + vText;
+                if (seenLine[key]) continue;
+                seenLine[key] = true;
                 lines.push('<div style="font-size:11px">' + p.marker + ' ' + p.seriesName +
-                  ': ' + Number(v).toFixed(2) + '</div>');
+                  ': ' + vText + '</div>');
               }
             }
             return lines.join('');
