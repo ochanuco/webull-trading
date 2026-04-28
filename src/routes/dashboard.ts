@@ -2,7 +2,8 @@ import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import type { Env } from '../config/env'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
-import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
+import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
+import { formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
 import {
@@ -46,7 +47,7 @@ export const dashboard = new Hono<AppBindings>()
       ),
       loadLatestStrategyPrices(c.env.DB, universe.allowedSymbols),
     ])
-    return c.html(layout('保有状況', positionsBody(rows, strategyPriceMap)))
+    return c.html(layout('保有状況', positionsBody(rows, strategyPriceMap, universe)))
   })
   .get('/portfolio', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
@@ -70,8 +71,13 @@ export const dashboard = new Hono<AppBindings>()
     }
     const limit = clampLimit(c.req.query('limit'))
     const db = createDb(c.env.DB)
-    const rows = await db.select().from(tradeJournal).orderBy(desc(tradeJournal.id)).limit(limit)
-    return c.html(layout('約定履歴', tradesBody(rows, limit)))
+    // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
+    // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
+    const [rows, universe] = await Promise.all([
+      db.select().from(tradeJournal).orderBy(desc(tradeJournal.id)).limit(limit),
+      loadSymbolUniverse(c.env).catch(() => null),
+    ])
+    return c.html(layout('約定履歴', tradesBody(rows, limit, universe)))
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
@@ -144,6 +150,7 @@ export const dashboard = new Hono<AppBindings>()
               tab,
               charts,
               zoom,
+              universe,
             }),
           ),
         )
@@ -203,6 +210,7 @@ export const dashboard = new Hono<AppBindings>()
             availableSymbols: universe.allowedSymbols,
             strategyParams,
             zoom,
+            universe,
           }),
         ),
       )
@@ -320,15 +328,18 @@ export const dashboard = new Hono<AppBindings>()
             eq(tradeJournal.tradeEventType, 'post_submit'),
           ),
         )
-      const rows = symbolFilter
-        ? await baseQuery
-            .where(eq(strategyDecisionLog.symbol, symbolFilter))
-            .orderBy(desc(strategyDecisionLog.id))
-            .limit(limit)
-        : await baseQuery
-            .orderBy(desc(strategyDecisionLog.id))
-            .limit(limit)
-      return c.html(layout('Cron 判定', cronBody(rows, limit, symbolFilter)))
+      const [rows, universe] = await Promise.all([
+        symbolFilter
+          ? baseQuery
+              .where(eq(strategyDecisionLog.symbol, symbolFilter))
+              .orderBy(desc(strategyDecisionLog.id))
+              .limit(limit)
+          : baseQuery
+              .orderBy(desc(strategyDecisionLog.id))
+              .limit(limit),
+        loadSymbolUniverse(c.env).catch(() => null),
+      ])
+      return c.html(layout('Cron 判定', cronBody(rows, limit, symbolFilter, universe)))
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
@@ -351,11 +362,14 @@ export const dashboard = new Hono<AppBindings>()
       options.severities = severityFilter
     }
     try {
-      const rows = await loadRecentAlerts(c.env.DB, options)
+      const [rows, universe] = await Promise.all([
+        loadRecentAlerts(c.env.DB, options),
+        loadSymbolUniverse(c.env).catch(() => null),
+      ])
       return c.html(
         layout(
           'アラート',
-          alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery }),
+          alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery, universe }),
         ),
       )
     } catch (err) {
@@ -367,6 +381,22 @@ export const dashboard = new Hono<AppBindings>()
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * `SymbolUniverse` から 番号/ticker - 会社名 表示文字列を返す薄い helper。
+ * universe が無い (load 失敗等) ケースは symbol そのまま (= 既存挙動)。
+ *
+ * `URL ?symbol=7974` の routing は変更しない。表示テキストだけが
+ * `7974-任天堂` / `AAPL-Apple Inc.` 形式に切り替わる。
+ */
+function displaySymbol(symbol: string, universe?: SymbolUniverse | null): string {
+  if (!universe) return symbol
+  const upper = symbol.toUpperCase()
+  return formatSymbolDisplay({
+    symbol,
+    name: universe.symbolName[upper] ?? null,
+  })
 }
 
 function clampLimit(raw: string | undefined): number {
@@ -590,12 +620,13 @@ export function pickFreshQuote(
 function positionsBody(
   rows: Array<{ sym: string; state: SymbolState | null; error: string | null }>,
   strategyPriceMap: Map<string, { price: number; asOf: string }>,
+  universe?: SymbolUniverse | null,
 ): string {
   if (rows.length === 0) return `<p class="muted">有効な銘柄がありません。</p>`
   const tbody = rows
     .map((r) => {
       if (r.error !== null || r.state === null) {
-        return `<tr><td>${esc(r.sym)}</td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
+        return `<tr><td>${esc(displaySymbol(r.sym, universe))}</td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
       }
       const s = r.state
       const pos = s.position
@@ -614,7 +645,7 @@ function positionsBody(
         ? `${fmtNumber(quote.price, 2)} <span class="muted" style="font-size:11px">(${esc(quote.source)}, ${esc(formatQuoteAsOf(quote.asOf))})</span>`
         : '<span class="muted">—</span>'
       return `<tr>
-        <td><strong>${esc(s.symbol)}</strong></td>
+        <td><strong>${esc(displaySymbol(s.symbol, universe))}</strong></td>
         <td>${pos ? esc(pos.qty) : '<span class="muted">—</span>'}</td>
         <td>${pos ? fmtNumber(pos.avgPrice, 2) : '<span class="muted">—</span>'}</td>
         <td>${quoteCell}</td>
@@ -738,6 +769,7 @@ function tradesBody(
     errorMessage: string | null
   }>,
   limit: number,
+  universe?: SymbolUniverse | null,
 ): string {
   if (rows.length === 0) {
     return `<p class="muted">trade_journal にレコードがありません (limit=${limit})。</p>`
@@ -757,11 +789,12 @@ function tradesBody(
       // しやすい粒度を保つ。
       const statusText =
         r.errorMessage ? `エラー: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
+      const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : '—'
       return `<tr>
         <td>${r.id}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td>${esc(r.tradeEventType)}</td>
-        <td><strong>${esc(r.symbol ?? '—')}</strong></td>
+        <td><strong>${esc(symbolText)}</strong></td>
         <td>${esc(r.side ?? '—')}</td>
         <td>${r.quantity === null ? '—' : esc(r.quantity)}</td>
         <td>${r.limitPrice === null ? '—' : fmtNumber(r.limitPrice, 2)}</td>
@@ -810,7 +843,7 @@ function configBody(
     .map(
       (sym) =>
         `<tr>
-          <td><strong>${esc(sym)}</strong></td>
+          <td><strong>${esc(displaySymbol(sym, universe))}</strong></td>
           <td>${esc(universe.symbolCurrency[sym] ?? '—')}</td>
           <td>${universe.symbolMaxNotional[sym] != null ? esc(universe.symbolMaxNotional[sym]) : '<span class="muted">—</span>'}</td>
           <td>${universe.inversePairs[sym] ? esc(universe.inversePairs[sym]) : '<span class="muted">—</span>'}</td>
@@ -1205,6 +1238,8 @@ interface AlertsBodyArgs {
   eventTypeFilter: NotificationEvent['type'] | undefined
   /** 現在の query string。filter pill が他の param (limit 等) を保持するために使う。 */
   currentQuery: URLSearchParams
+  /** symbol 列の表示を JP 銘柄向け 番号-会社名 形式にするための universe (load 失敗は null)。 */
+  universe?: SymbolUniverse | null
 }
 
 /**
@@ -1216,7 +1251,7 @@ interface AlertsBodyArgs {
  *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
  */
 function alertsBody(args: AlertsBodyArgs): string {
-  const { rows, limit, severityFilter, eventTypeFilter, currentQuery } = args
+  const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe } = args
   const filterDescription =
     severityFilter.length === 0 && eventTypeFilter === undefined
       ? '全件'
@@ -1240,7 +1275,7 @@ function alertsBody(args: AlertsBodyArgs): string {
             ? 'warn'
             : 'muted'
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}">${esc(r.symbol)}</a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}">${esc(displaySymbol(r.symbol, universe))}</a>`
         : '<span class="muted">-</span>'
       return `<tr>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
@@ -1334,9 +1369,10 @@ function cronBody(
   }>,
   limit: number,
   symbolFilter: string | undefined,
+  universe?: SymbolUniverse | null,
 ): string {
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(symbolFilter)}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
     : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
   if (rows.length === 0) {
     return `${header}<p class="muted">判定ログがまだありません。</p>`
@@ -1365,7 +1401,7 @@ function cronBody(
           : `${fmtNumber(r.filledPrice, 2)} × ${r.filledQty ?? '?'}`
       return `<tr>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"><strong>${esc(r.symbol)}</strong></a></td>
+        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"><strong>${esc(displaySymbol(r.symbol, universe))}</strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
@@ -2606,6 +2642,8 @@ interface ChartsBodySymbol {
   strategyParams: StrategyParamsSnapshot
   /** dataZoom 初期範囲。null なら全期間 (full data) */
   zoom: { from: Date; to: Date } | null
+  /** symbol picker / chart title を JP 銘柄向け 番号-会社名 形式に整形するための universe。 */
+  universe?: SymbolUniverse | null
 }
 
 /**
@@ -2620,6 +2658,8 @@ interface ChartsBodyGrid {
   charts: Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>
   /** dataZoom 初期範囲。null なら全期間 */
   zoom: { from: Date; to: Date } | null
+  /** panel header の銘柄表示を JP 銘柄向け 番号-会社名 形式にするための universe。 */
+  universe?: SymbolUniverse | null
 }
 
 type ChartsBodyArgs =
@@ -3172,8 +3212,12 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       ];
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
+      // displayName は server 側で symbol_config.market='JP' なら "番号-会社名" を
+      // 入れている。US / fallback は symbol そのまま。chart 内 string concat 時の
+      // 安全フォールバックとして '|| sc.symbol' を残す。
+      var titleSymbol = sc.displayName || sc.symbol;
       symChart.setOption({
-        title: { text: sc.symbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: titleSymbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
@@ -3546,13 +3590,18 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
       }
     });
   `
+  // chart payload に displayName を注入。client 側の chart title / tooltip header
+  // は `sc.displayName || sc.symbol` で読む (US 銘柄は displayName === symbol)。
+  const symbolChartPayload = args.symbolChart
+    ? { ...args.symbolChart, displayName: displaySymbol(args.symbolChart.symbol, args.universe) }
+    : null
   return `${renderSymbolPickerForTab(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   ${renderZoomPresetButtons(args.symbolChart)}
   ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', {
-    symbolChart: args.symbolChart,
+    symbolChart: symbolChartPayload,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   })}
@@ -3591,7 +3640,8 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   const panelsHtml = args.charts
     .map((entry, idx) => {
       const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
-      const headerLink = `<a href="${symbolLink}" style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(entry.symbol)}</a>`
+      const headerText = displaySymbol(entry.symbol, args.universe)
+      const headerLink = `<a href="${symbolLink}" style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
       if (entry.chart === null) {
         const errMsg = entry.error ?? 'チャートデータ取得失敗'
         return `<div class="grid-panel" style="border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff">
@@ -3614,10 +3664,19 @@ export function renderGridTab(args: ChartsBodyGrid): string {
     .join('')
 
   // client 側に渡す全銘柄分の chart payload。各 panel が個別 echarts.init で
-  // 消費する。__chartData.charts は array of { symbol, chart } (chart は load
-  // 失敗で null)。zoomFromMs / zoomToMs は preset toolbar・初期 dataZoom で共有。
+  // 消費する。__chartData.charts は array of { symbol, chart, displayName }
+  // (chart は load 失敗で null)。displayName は server 側で JP 銘柄なら
+  // "番号-会社名" を入れている (US は symbol そのまま) — tooltip header
+  // (`sc.displayName || sc.symbol`) で読まれる。
   const payload = {
-    charts: args.charts.map((c) => ({ symbol: c.symbol, chart: c.chart, error: c.error })),
+    charts: args.charts.map((c) => ({
+      symbol: c.symbol,
+      chart: c.chart
+        ? { ...c.chart, displayName: displaySymbol(c.chart.symbol, args.universe) }
+        : null,
+      error: c.error,
+      displayName: displaySymbol(c.symbol, args.universe),
+    })),
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   }
@@ -3854,7 +3913,7 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             formatter: function (params) {
               if (!Array.isArray(params) || params.length === 0) return '';
               var ts = params[0].axisValue;
-              var lines = ['<div style="font-weight:600;font-size:11px">' + sc.symbol + ' ' + jstLabelForX(ts) + '</div>'];
+              var lines = ['<div style="font-weight:600;font-size:11px">' + (sc.displayName || sc.symbol) + ' ' + jstLabelForX(ts) + '</div>'];
               for (var i = 0; i < params.length; i += 1) {
                 var p = params[i];
                 if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
@@ -4242,10 +4301,12 @@ function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
       (s) =>
         `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}" style="margin-right:6px;${
           s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
-        }">${esc(s)}</a>`,
+        }">${esc(displaySymbol(s, args.universe))}</a>`,
     )
     .join('')
-  const focusLabel = args.focusSymbol ?? '—'
+  const focusLabel = args.focusSymbol
+    ? displaySymbol(args.focusSymbol, args.universe)
+    : '—'
   return `<p class="muted" style="font-size:12px">
     銘柄: <strong>${esc(focusLabel)}</strong> | 切替: ${opts}
   </p>`

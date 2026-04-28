@@ -1,11 +1,20 @@
 import { createDb } from './tradeJournalRepo'
-import { loadInversePairs, loadSymbolConfig, type SymbolCurrency } from './symbolConfigRepo'
+import {
+  loadInversePairs,
+  loadSymbolConfig,
+  type SymbolCurrency,
+  type SymbolMarket,
+} from './symbolConfigRepo'
 
 export interface SymbolUniverse {
   allowedSymbols: string[]
   symbolMaxNotional: Record<string, number>
   symbolCurrency: Record<string, SymbolCurrency>
   symbolBucket: Record<string, string>
+  /** symbol → 'US' | 'JP'。dashboard が JP 銘柄表示を切り替えるのに使う。 */
+  symbolMarket: Record<string, SymbolMarket>
+  /** symbol → 人間可読 name (symbol_config.name、null は map に不在)。 */
+  symbolName: Record<string, string>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -31,6 +40,8 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolMaxNotional: config.symbolMaxNotional,
     symbolCurrency: config.symbolCurrency,
     symbolBucket: config.symbolBucket,
+    symbolMarket: config.symbolMarket,
+    symbolName: config.symbolName,
     inversePairs: pairs,
     source: 'd1',
   }

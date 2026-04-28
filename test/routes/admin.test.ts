@@ -1123,6 +1123,8 @@ describe('POST /admin/orders/sync-holdings', () => {
       symbolMaxNotional: {},
       symbolCurrency: {},
       symbolBucket: {},
+      symbolMarket: {},
+      symbolName: {},
       inversePairs: {},
       source: 'd1',
     })
