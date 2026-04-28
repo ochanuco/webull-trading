@@ -693,10 +693,12 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
       });
   });
 
-  // 初回読み込み時、URL に ?symbol & ?category がついてれば自動 probe (form
-  // 状態は server-side で既に埋まってる)。ブックマークから戻った時に何も
-  // 表示されない違和感を防ぐ。
-  if (window.location.search && window.location.search.length > 1) {
+  // 初回読み込み時、URL に **両方** ?symbol & ?category がついてれば自動 probe
+  // (form 状態は server-side で既に埋まってる)。ブックマークから戻った時に
+  // 何も表示されない違和感を防ぐ。?utm_source=... のような無関係 query で
+  // 暴発しないよう、両 key の存在を URLSearchParams で明示的に確認する。
+  var qs = new URLSearchParams(window.location.search);
+  if (qs.has('symbol') && qs.has('category')) {
     form.dispatchEvent(new Event('submit', { cancelable: true }));
   }
 })();
