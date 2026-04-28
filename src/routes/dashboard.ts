@@ -835,10 +835,12 @@ function brokerProbeBody(args: {
       .then(function (res) {
         var body = res.body;
         statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
-        if (body.quote) quoteEl.textContent = prettify(body.quote);
-        if (body.positions) renderPositionsList(body.positions);
-        // #254: drift 比較用に新 path 結果も raw + table へ。raw 側は positions
-        // (旧) を従来通り、新フィールドは新規 pre 要素に。
+        // CodeRabbit #262: body fields が欠けてても UI を必ず更新して stale を
+        // 残さない。quote / positions / 各 raw を **常に** 上書き。
+        quoteEl.textContent = body.quote ? prettify(body.quote) : '(no data)';
+        renderPositionsList(body.positions || null);
+        // drift 比較: 新 path 結果も raw + table へ。値が無くても "(no data)"
+        // を入れて stale 表示にしない。
         var positionsNewRaw = document.getElementById('probe-positions-new-raw');
         var orderOldRaw = document.getElementById('probe-order-old-raw');
         var orderNewRaw = document.getElementById('probe-order-new-raw');
