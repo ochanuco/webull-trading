@@ -121,6 +121,7 @@ describe('POST /admin/orders/reconcile', () => {
       stateApplied: 0,
       stateApplyFailed: 0,
       repaired: 0,
+      abandoned: 0,
     }
   }
 
