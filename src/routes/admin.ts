@@ -367,7 +367,8 @@ export const admin = new Hono<AppBindings>()
    * client-side handling.
    *
    * Probes (in parallel):
-   *   1. `GET /openapi/quotes/v2/market-data/stock/snapshot` for `?symbol=`
+   *   1. `GET /openapi/market-data/stock/snapshot` (with `x-version: v2`
+   *      header — same combo as `WebullQuoteClient`) for `?symbol=`
    *      (default SOXL) + `?category=` (default US_ETF).
    *   2. `GET /openapi/account/positions` for the configured JP cash account.
    *
@@ -503,9 +504,13 @@ export const admin = new Hono<AppBindings>()
     }
 
     const [quoteResult, positionsResult] = await Promise.all([
+      // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致させる:
+      // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
+      // v2 は path ではなく x-version ヘッダ。最初に書いたとき paste ミスで
+      // /quotes/v2/ を path に入れてしまい、実 cron と違うパスを叩いてた。
       probeOnce({
         method: 'GET',
-        path: '/openapi/quotes/v2/market-data/stock/snapshot',
+        path: '/openapi/market-data/stock/snapshot',
         query: {
           symbols: symbol,
           category,
