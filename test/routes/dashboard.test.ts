@@ -1213,6 +1213,56 @@ describe('densifyHorizontalLine', () => {
   })
 })
 
+import { selectLatestCronSnapshot } from '../../src/routes/dashboard'
+
+describe('selectLatestCronSnapshot', () => {
+  it('cron 履歴ありなら末尾 price/timestamp を返す (Yahoo filler を含めない)', () => {
+    const cron: SymbolChartPoint[] = [
+      { timestamp: '2026-04-23T05:00:00.000Z', price: 100, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 110, sma50: null, high20d: null, low20d: null },
+    ]
+    expect(selectLatestCronSnapshot(cron)).toEqual({
+      latestCronPrice: 110,
+      latestCronTimestamp: '2026-04-25T05:00:00.000Z',
+    })
+  })
+
+  it('空配列なら全 null (= preview 描画スキップ)', () => {
+    expect(selectLatestCronSnapshot([])).toEqual({
+      latestCronPrice: null,
+      latestCronTimestamp: null,
+    })
+  })
+
+  it('末尾 price が NaN なら全 null', () => {
+    const cron: SymbolChartPoint[] = [
+      { timestamp: '2026-04-25T05:00:00.000Z', price: Number.NaN, sma50: null, high20d: null, low20d: null },
+    ]
+    expect(selectLatestCronSnapshot(cron)).toEqual({
+      latestCronPrice: null,
+      latestCronTimestamp: null,
+    })
+  })
+
+  it('末尾 timestamp が不正 ISO なら全 null', () => {
+    const cron: SymbolChartPoint[] = [
+      { timestamp: 'not-an-iso', price: 110, sma50: null, high20d: null, low20d: null },
+    ]
+    expect(selectLatestCronSnapshot(cron)).toEqual({
+      latestCronPrice: null,
+      latestCronTimestamp: null,
+    })
+  })
+
+  it('複数 point の中間に 0 価格があっても末尾だけ判定する', () => {
+    const cron: SymbolChartPoint[] = [
+      { timestamp: '2026-04-23T05:00:00.000Z', price: 0, sma50: null, high20d: null, low20d: null },
+      { timestamp: '2026-04-25T05:00:00.000Z', price: 110, sma50: null, high20d: null, low20d: null },
+    ]
+    expect(selectLatestCronSnapshot(cron).latestCronPrice).toBe(110)
+  })
+})
+
 import { mergeYahooAndCronPoints } from '../../src/routes/dashboard'
 
 describe('mergeYahooAndCronPoints', () => {
@@ -1403,6 +1453,8 @@ describe('computeZoomRange', () => {
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
       trendLine: null,
       intradayBars: [],
+      latestCronPrice: null,
+      latestCronTimestamp: null,
     }
   }
 
@@ -1447,6 +1499,7 @@ describe('computeZoomRange', () => {
       symbol: 'X', points: [], markers: [], position: null,
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
       trendLine: null, intradayBars: [],
+      latestCronPrice: null, latestCronTimestamp: null,
     }
     expect(computeZoomRange(null, null, chart)).toBeNull()
   })
@@ -1491,6 +1544,7 @@ describe('renderCurrentIndicatorsBadge', () => {
       symbol: 'X', points, markers: [], position: null,
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
       trendLine: null, intradayBars: [],
+      latestCronPrice: null, latestCronTimestamp: null,
     }
   }
 
@@ -1546,6 +1600,7 @@ describe('renderZoomPresetButtons', () => {
       symbol: 'X', points, markers: [], position: null,
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
       trendLine: null, intradayBars: [],
+      latestCronPrice: null, latestCronTimestamp: null,
     }
   }
 
@@ -1643,6 +1698,7 @@ describe('renderGridTab', () => {
       symbol, points, markers: [], position: null,
       rules: { pullbackMax: -0.03, pullbackMin: -0.06, stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10 },
       trendLine: null, intradayBars: [],
+      latestCronPrice: null, latestCronTimestamp: null,
     }
   }
 
