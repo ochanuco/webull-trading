@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import { ValidationError } from '../shared/errors'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
+import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import { reconcileFills } from '../trading/reconciliation/reconcileFills'
@@ -356,6 +357,184 @@ export const admin = new Hono<AppBindings>()
       },
     )
     return c.json(result)
+  })
+  /**
+   * Read-only diagnostic: directly hit Webull broker endpoints with bare fetch
+   * and return the raw HTTP status / body / timing. Bypasses
+   * `WebullHttpClient` / `WebullQuoteClient` so the response is **not normalized
+   * by our parsers** — used to verify whether sandbox failures (#240 alert:
+   * status 403 across US_STOCK / US_ETF) come from the broker side or our
+   * client-side handling.
+   *
+   * Probes (in parallel):
+   *   1. `GET /openapi/quotes/v2/market-data/stock/snapshot` for `?symbol=`
+   *      (default SOXL) + `?category=` (default US_ETF).
+   *   2. `GET /openapi/account/positions` for the configured JP cash account.
+   *
+   * Each probe returns the same uniform shape regardless of phase:
+   * `{ phase: 'response' | 'auth' | 'fetch', status, ok, bodyTruncated,
+   *   bodyLength, msTaken, error }` with `null` for unavailable values
+   * (auth phase: status / ok / body fields / msTaken all null; fetch phase:
+   * status / ok / body fields null but msTaken set; response phase: error
+   * null). Body is truncated to 4 kB to avoid log blowup on HTML error pages.
+   *
+   * Pre-condition: `WEBULL_API_BASE` / `WEBULL_APP_KEY` / `WEBULL_APP_SECRET`
+   * / `WEBULL_ACCOUNT_ID_JP_CASH` must all be set (non-whitespace). Missing
+   * env returns `400 ValidationError` with the missing var names listed —
+   * "I forgot to set X" should never silently look like "broker rejected".
+   *
+   * Read-only: no DO writes, no D1 writes. Safe to call from operator browser.
+   */
+  .get('/broker/probe', async (c) => {
+    const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase()
+    const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase()
+    // 全 env var を trim、whitespace-only も "未設定" 扱い。silent な phase:'auth'
+    // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
+    // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
+    // 400 を返す ("正規の設定" のときだけ probe を走らせる)。
+    const baseUrl = (c.env.WEBULL_API_BASE ?? '').trim()
+    const appKey = (c.env.WEBULL_APP_KEY ?? '').trim()
+    const appSecret = (c.env.WEBULL_APP_SECRET ?? '').trim()
+    const accountId = (c.env.WEBULL_ACCOUNT_ID_JP_CASH ?? '').trim()
+    const missingEnv: string[] = []
+    if (baseUrl.length === 0) missingEnv.push('WEBULL_API_BASE')
+    if (appKey.length === 0) missingEnv.push('WEBULL_APP_KEY')
+    if (appSecret.length === 0) missingEnv.push('WEBULL_APP_SECRET')
+    if (accountId.length === 0) missingEnv.push('WEBULL_ACCOUNT_ID_JP_CASH')
+    // baseUrl は length > 0 でも http(s):// で parse できないと probeOnce 内の
+    // `new URL(args.path, ${baseUrl}/)` が同期的に TypeError を吐いて 500 で
+    // 落ちる。明示的に validate して 400 で返す方が運用視点で扱いやすい。
+    if (baseUrl.length > 0) {
+      let parsed: URL | null = null
+      try {
+        parsed = new URL(baseUrl)
+      } catch {
+        parsed = null
+      }
+      if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+        missingEnv.push('WEBULL_API_BASE (invalid: must be absolute http/https URL)')
+      }
+    }
+    if (missingEnv.length > 0) {
+      throw new ValidationError(
+        `Webull env var(s) missing or invalid: ${missingEnv.join(', ')}`,
+        { field: 'env' },
+      )
+    }
+
+    // 全 phase で同じキーを返す uniform shape (CodeRabbit #243)。jq / curl から
+    // 結果を比較・集計するときに「auth phase だけキーが少ない」状況を避ける。
+    // 値が無い場合は null を入れ、`error` は response phase では null にする。
+    interface ProbeResult {
+      phase: 'response' | 'auth' | 'fetch'
+      status: number | null
+      ok: boolean | null
+      bodyTruncated: string | null
+      bodyLength: number | null
+      msTaken: number | null
+      error: string | null
+    }
+
+    async function probeOnce(args: {
+      method: 'GET' | 'POST'
+      path: string
+      query: Record<string, string>
+      version?: string
+    }): Promise<ProbeResult> {
+      const url = new URL(args.path, `${baseUrl}/`)
+      for (const [k, v] of Object.entries(args.query)) url.searchParams.set(k, v)
+
+      let headers: Record<string, string>
+      try {
+        headers = await buildSignedHeaders({
+          method: args.method,
+          path: url.pathname,
+          query: args.query,
+          host: url.host,
+          appKey,
+          appSecret,
+          version: args.version,
+        })
+      } catch (e) {
+        return {
+          phase: 'auth',
+          status: null,
+          ok: null,
+          bodyTruncated: null,
+          bodyLength: null,
+          msTaken: null,
+          error: e instanceof Error ? e.message : String(e),
+        }
+      }
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10_000)
+
+      const t0 = Date.now()
+      try {
+        const response = await fetch(url.href, {
+          method: args.method,
+          headers: { Accept: 'application/json', ...headers },
+          signal: controller.signal,
+        })
+        const body = await response.text()
+        clearTimeout(timeoutId)
+        return {
+          phase: 'response',
+          status: response.status,
+          ok: response.ok,
+          bodyTruncated: body.slice(0, 4000),
+          bodyLength: body.length,
+          msTaken: Date.now() - t0,
+          error: null,
+        }
+      } catch (e) {
+        clearTimeout(timeoutId)
+        return {
+          phase: 'fetch',
+          status: null,
+          ok: null,
+          bodyTruncated: null,
+          bodyLength: null,
+          msTaken: Date.now() - t0,
+          error: e instanceof Error ? e.message : String(e),
+        }
+      }
+    }
+
+    const [quoteResult, positionsResult] = await Promise.all([
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/quotes/v2/market-data/stock/snapshot',
+        query: {
+          symbols: symbol,
+          category,
+          extend_hour_required: 'false',
+          overnight_required: 'false',
+        },
+        version: 'v2',
+      }),
+      // version='v1' は WebullHttpClient.request が account ルートで送ってる
+      // 固定値 (line 180)。accountId は probe 入口の missingEnv チェックで
+      // 既に空文字 reject 済 → ここに到達した時点で必ず非空。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/account/positions',
+        query: { account_id: accountId },
+        version: 'v1',
+      }),
+    ])
+
+    // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
+    // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
+    c.header('Cache-Control', 'no-store')
+    return c.json({
+      timestamp: new Date().toISOString(),
+      sandbox: baseUrl,
+      input: { symbol, category, accountIdConfigured: accountId.length > 0 },
+      quote: quoteResult,
+      positions: positionsResult,
+    })
   })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
