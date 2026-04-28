@@ -140,16 +140,14 @@ export const dashboard = new Hono<AppBindings>()
           takeProfitPct: global.pullbackDefaultTakeProfitPct,
           timeStopDays: global.pullbackDefaultTimeStopDays,
         }
-        // 重い chart データ取得 (Yahoo daily + intraday + D1 + DO で銘柄あたり
-        // ~5 subrequest) は active 銘柄に限定する。inactive 銘柄が増えると
-        // Workers subrequest budget を逼迫させるため、grid では fetch なしの
-        // 静的 placeholder panel として表示する (operator は個別タブへ遷移して
-        // 必要に応じて深掘る)。
-        const charts = await loadAllSymbolCharts(c.env, universe.allowedSymbols, rules)
-        const inactivePlaceholders = universe.inactiveSymbols.map((symbol) => ({
-          symbol,
-          note: universe.symbolNotes[symbol] ?? null,
-        }))
+        // active + inactive 双方の chart を load する。inactive 銘柄もチャートで
+        // 動向確認したい (PR #229 で grid から外したが operator から復帰要望)。
+        // `loadAllSymbolCharts` は per-symbol catch (PR #197) で 1 銘柄が失敗
+        // しても他は OK。Workers subrequest budget を超えた場合も該当 panel が
+        // 個別 error 表示になるだけで grid 全体は描画される。視覚識別 (INACTIVE
+        // バッジ + grayed style) は `renderGridTab` 側で symbol 単位に付与する。
+        const allGridSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
+        const charts = await loadAllSymbolCharts(c.env, allGridSymbols, rules)
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
         // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
         // 採用する。URL ?from / ?to があればそれを優先 (既存と同挙動)。
@@ -161,7 +159,6 @@ export const dashboard = new Hono<AppBindings>()
             chartsBody({
               tab,
               charts,
-              inactivePlaceholders,
               zoom,
               universe,
             }),
@@ -520,6 +517,7 @@ const STYLE = `
   .symbol-disabled{opacity:0.5;font-style:italic;text-decoration:line-through}
   tr.symbol-disabled-row{background:#fafafa}
   tr.symbol-disabled-row td{color:#86868b}
+  .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
 `
 
 function layout(title: string, body: string): string {
@@ -2730,19 +2728,15 @@ interface ChartsBodySymbol {
 interface ChartsBodyGrid {
   tab: 'grid'
   /**
-   * Active (cron 評価対象) 銘柄の SymbolChartData (load 失敗銘柄は値 null。
-   * 1 銘柄失敗で全 grid を 500 にしない)。
+   * Grid に表示する全銘柄 (active + inactive) の SymbolChartData。load 失敗時は
+   * `chart === null`。inactive 銘柄も同じ Map から render し、panel header に
+   * INACTIVE バッジ + grayed style を付与して識別する (`isSymbolInactive` で判定)。
+   *
+   * PR #229 で inactive を grid から外したが、operator から「inactive 銘柄も
+   * 動向確認したい」要望があったため復活。subrequest budget は per-symbol catch
+   * で graceful degrade (個別 panel が空になるだけ、grid 全体は描画される)。
    */
   charts: Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>
-  /**
-   * Inactive (active=0) 銘柄の static placeholder。chart データは fetch せず、
-   * grid 上では灰色の panel + INACTIVE バッジ + notes tooltip だけを描画する。
-   * 個別タブ (?tab=symbol&symbol=...) へ link して operator が深掘りできる。
-   *
-   * 旧実装は inactive も `loadAllSymbolCharts` に投げていたが、銘柄あたり
-   * ~5 subrequest かかるため Workers の budget を圧迫する (CodeRabbit #229)。
-   */
-  inactivePlaceholders?: Array<{ symbol: string; note: string | null }>
   /** dataZoom 初期範囲。null なら全期間 */
   zoom: { from: Date; to: Date } | null
   /** panel header の銘柄表示を JP 銘柄向け 番号-会社名 形式にするための universe。 */
@@ -3711,8 +3705,7 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
  * - SMA50 / band / 詳細パネルは省略 (panel size に合わせて視認性を優先)
  */
 export function renderGridTab(args: ChartsBodyGrid): string {
-  const inactivePlaceholders = args.inactivePlaceholders ?? []
-  if (args.charts.length === 0 && inactivePlaceholders.length === 0) {
+  if (args.charts.length === 0) {
     return `<p class="muted">ALLOWED_SYMBOLS が空です。<code>symbol_config</code> に少なくとも 1 銘柄登録してください。</p>`
   }
   // grid 共通 toolbar の preset zoom buttons。reference chart (最初に load 成功)
@@ -3721,66 +3714,48 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   const referenceChart = args.charts.find((c) => c.chart !== null)?.chart ?? null
   const presetButtonsHtml = renderZoomPresetButtons(referenceChart)
 
-  // Active panel: chart 本体は client side で echarts.init される。
-  // panel header に symbol 名 (詳細タブへの link) と最新 indicators (price /
-  // SMA50 / high20d / low20d) を出して「市場全体ビュー」で trader が銘柄を
-  // 一目で識別できるようにする。
-  // Note: args.charts は active 銘柄だけで構成される (inactive は別経路)。
-  const activePanelsHtml = args.charts
+  // 各 panel: chart 本体は client side で echarts.init される。panel header に
+  // symbol 名 (詳細タブへの link) と最新 indicators (price / SMA50) を出して
+  // 「市場全体ビュー」で trader が銘柄を一目で識別できるようにする。
+  // inactive 銘柄は data 取得は通常通り行うが、panel header に INACTIVE バッジと
+  // grayed-out style (`symbol-inactive`) を付けて視覚識別する。
+  const panelsHtml = args.charts
     .map((entry, idx) => {
-      const panelStyle = 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff'
+      const inactive = isSymbolInactive(entry.symbol, args.universe)
+      const baseStyle = 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff'
+      const panelClass = inactive ? 'grid-panel symbol-inactive' : 'grid-panel'
       const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
       const headerText = displaySymbol(entry.symbol, args.universe)
-      const headerLink = `<a href="${symbolLink}" style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
+      const tooltipText = inactiveTooltip(entry.symbol, args.universe)
+      const linkClass = inactive ? ' class="symbol-disabled"' : ''
+      const titleAttr = inactive ? ` title="${esc(tooltipText)}"` : ''
+      const headerLink = `<a href="${symbolLink}"${linkClass}${titleAttr} style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
+      const inactiveBadge = inactive
+        ? `<span class="muted" style="font-size:11px"${titleAttr}>INACTIVE</span>`
+        : ''
       if (entry.chart === null) {
         const errMsg = entry.error ?? 'チャートデータ取得失敗'
-        return `<div class="grid-panel" style="${panelStyle}">
+        const errBadge = `<span class="warn" style="font-size:11px">取得失敗</span>`
+        const rightSide = inactive ? inactiveBadge + errBadge : errBadge
+        return `<div class="${panelClass}" style="${baseStyle}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
             ${headerLink}
-            <span class="warn" style="font-size:11px">取得失敗</span>
+            <div style="display:flex;gap:6px;align-items:center">${rightSide}</div>
           </div>
           <div class="muted" style="font-size:12px;padding:24px 8px;text-align:center">${esc(errMsg)}</div>
         </div>`
       }
       const badge = renderGridPanelBadge(entry.chart)
-      return `<div class="grid-panel" style="${panelStyle}">
+      const rightSide = inactive ? inactiveBadge + badge : badge
+      return `<div class="${panelClass}" style="${baseStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
           ${headerLink}
-          ${badge}
+          <div style="display:flex;gap:6px;align-items:center">${rightSide}</div>
         </div>
         <div id="grid-chart-${idx}" style="width:100%;height:280px"></div>
       </div>`
     })
     .join('')
-
-  // Inactive placeholder panel: chart データを fetch せず、symbol header と
-  // INACTIVE バッジ + notes tooltip だけ描画する。個別タブへ link することで
-  // operator が必要な時だけ chart を fetch できる (subrequest 軽量化)。
-  const inactivePanelsHtml = inactivePlaceholders
-    .map((entry) => {
-      const panelStyle = 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fafafa;opacity:0.65'
-      const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
-      const headerText = displaySymbol(entry.symbol, args.universe)
-      const tooltipText = entry.note ? `INACTIVE: ${entry.note}` : 'INACTIVE'
-      const titleAttr = ` title="${esc(tooltipText)}"`
-      const headerLink = `<a href="${symbolLink}" class="symbol-disabled"${titleAttr} style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
-      const noteHtml = entry.note
-        ? `<div class="muted" style="font-size:11px;padding:4px 0 0">${esc(entry.note)}</div>`
-        : ''
-      return `<div class="grid-panel" style="${panelStyle}">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
-          ${headerLink}
-          <span class="muted" style="font-size:11px">INACTIVE</span>
-        </div>
-        <div class="muted" style="font-size:12px;padding:24px 8px;text-align:center">
-          チャート未取得 (cron 評価対象外) — <a href="${symbolLink}">個別タブで表示</a>
-        </div>
-        ${noteHtml}
-      </div>`
-    })
-    .join('')
-
-  const panelsHtml = activePanelsHtml + inactivePanelsHtml
 
   // client 側に渡す全銘柄分の chart payload。各 panel が個別 echarts.init で
   // 消費する。__chartData.charts は array of { symbol, chart, displayName }
