@@ -366,11 +366,13 @@ export const admin = new Hono<AppBindings>()
    * status 403 across US_STOCK / US_ETF) come from the broker side or our
    * client-side handling.
    *
-   * Probes (in parallel):
-   *   1. `GET /openapi/market-data/stock/snapshot` (with `x-version: v2`
-   *      header — same combo as `WebullQuoteClient`) for `?symbol=`
-   *      (default SOXL) + `?category=` (default US_ETF).
-   *   2. `GET /openapi/account/positions` for the configured JP cash account.
+   * Probes (in parallel, #251 / #254 で旧/新 path 比較):
+   *   1. `GET /openapi/market-data/stock/snapshot` (`x-version: v2`)
+   *      for `?symbol=` (default SOXL) + `?category=` (default US_ETF).
+   *   2. positions (旧): `GET /openapi/account/positions` (`x-version: v1`)
+   *   3. positions (新): `GET /openapi/assets/positions` (`x-version: v2`)
+   *   4. order history (旧): `GET /openapi/account/orders/history` (`v1`)
+   *   5. order history (新): `GET /openapi/trade/order/history` (`v2`)
    *
    * Each probe returns the same uniform shape regardless of phase:
    * `{ phase: 'response' | 'auth' | 'fetch', status, ok, bodyTruncated,
@@ -503,11 +505,23 @@ export const admin = new Hono<AppBindings>()
       }
     }
 
-    const [quoteResult, positionsResult] = await Promise.all([
-      // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致させる:
+    // #251 / #254: drift 検証のため旧 path (v1) と 新 path (v2) を **並列** で
+    // 叩いて比較する。各セクションを result 配列の object として返却:
+    //   - quote (path 共通、v2 ヘッダ): 既存
+    //   - positions: old=/openapi/account/positions+v1 vs new=/openapi/assets/positions+v2
+    //   - orderHistory: old=/openapi/account/orders/history+v1 vs new=/openapi/trade/order/history+v2
+    // dashboard UI は 旧 (= positions) を保有銘柄リスト描画に使うので shape は
+    // 後方互換維持 (`positions` field 名据え置き)、新 path 結果は追加 field。
+    const [
+      quoteResult,
+      positionsOld,
+      positionsNew,
+      orderHistoryOld,
+      orderHistoryNew,
+    ] = await Promise.all([
+      // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
-      // v2 は path ではなく x-version ヘッダ。最初に書いたとき paste ミスで
-      // /quotes/v2/ を path に入れてしまい、実 cron と違うパスを叩いてた。
+      // v2 は path ではなく x-version ヘッダ。
       probeOnce({
         method: 'GET',
         path: '/openapi/market-data/stock/snapshot',
@@ -519,14 +533,34 @@ export const admin = new Hono<AppBindings>()
         },
         version: 'v2',
       }),
-      // version='v1' は WebullHttpClient.request が account ルートで送ってる
-      // 固定値 (line 180)。accountId は probe 入口の missingEnv チェックで
-      // 既に空文字 reject 済 → ここに到達した時点で必ず非空。
+      // OLD: WebullHttpClient.getPositions (現行 cron が叩く path + v1)
       probeOnce({
         method: 'GET',
         path: '/openapi/account/positions',
         query: { account_id: accountId },
         version: 'v1',
+      }),
+      // NEW: 新 OpenAPI docs の path + v2 (x-access-token 必須化の可能性は
+      // 別 issue #258 で評価、本 probe は signing 周りは現行と同じ buildSignedHeaders)
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/assets/positions',
+        query: { account_id: accountId },
+        version: 'v2',
+      }),
+      // OLD: 現行 findOrderByClientId が叩く path + v1
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/account/orders/history',
+        query: { account_id: accountId, page_size: '5' },
+        version: 'v1',
+      }),
+      // NEW: 新 OpenAPI docs の trade/order/history + v2
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/trade/order/history',
+        query: { account_id: accountId, page_size: '5' },
+        version: 'v2',
       }),
     ])
 
@@ -538,7 +572,13 @@ export const admin = new Hono<AppBindings>()
       sandbox: baseUrl,
       input: { symbol, category, accountIdConfigured: accountId.length > 0 },
       quote: quoteResult,
-      positions: positionsResult,
+      // 後方互換: dashboard UI が `positions` を保有銘柄リスト描画に使うので
+      // 旧 path 結果を従来通り返す。
+      positions: positionsOld,
+      // 新 OpenAPI docs ベースの結果。drift 比較に使う。
+      positionsNew,
+      orderHistoryOld,
+      orderHistoryNew,
     })
   })
   .get('/orders/:clientOrderId', async (c) => {
