@@ -223,6 +223,37 @@ describe('dashboard', () => {
     expect(body).toContain('&lt;script&gt;')
   })
 
+  // inactive (active=0) 銘柄も config / picker / table に表示する (operator visibility)。
+  // cron / risk gate の評価対象は変えない (= allowedSymbols のみ)。
+  // "INACTIVE" naming: `inactiveSymbols` は disable / pause 双方を含むため
+  // 中立的な "INACTIVE" を採用 (CodeRabbit #229)。
+  it('renders inactive symbols on config page with grayed-out style and notes tooltip', async () => {
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({
+        allowedSymbols: ['SOXL'],
+        inactiveSymbols: ['9697'],
+        symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+        symbolMarket: { SOXL: 'US', '9697': 'JP' },
+        symbolName: { '9697': 'カプコン' },
+        symbolNotes: { '9697': 'liquidity dropped' },
+      }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard/config', { headers: authHeader }, env)
+    const body = await res.text()
+    // active 銘柄は通常表示、inactive 銘柄は symbol-disabled クラスで grayed-out
+    expect(body).toContain('SOXL')
+    expect(body).toContain('9697-カプコン')
+    expect(body).toContain('class="symbol-disabled"')
+    // tooltip に notes 表示 ("INACTIVE: <notes>" — pause も含むため中立 label)
+    expect(body).toContain('INACTIVE: liquidity dropped')
+    // 状態列に "inactive" が出る
+    expect(body).toContain('>inactive<')
+    // count 行に active / inactive 件数が出る
+    expect(body).toContain('active 1 / inactive 1')
+  })
+
   it('renders cron page with "unavailable" when DB is not bound', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
@@ -1663,6 +1694,52 @@ describe('renderGridTab', () => {
   it('charts 空 → ALLOWED_SYMBOLS が空である旨を案内', () => {
     const html = renderGridTab({ tab: 'grid', charts: [], zoom: null })
     expect(html).toContain('ALLOWED_SYMBOLS が空')
+  })
+
+  // inactive 銘柄は heavy chart load せずに placeholder panel のみ描画する
+  // (CodeRabbit #229: subrequest 浪費を避ける)。
+  it('inactivePlaceholders は INACTIVE バッジと個別タブ link 付きで grid に追加描画される', () => {
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [
+        { symbol: 'SOXL', chart: makeChart('SOXL', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
+        ]), error: null },
+      ],
+      inactivePlaceholders: [
+        { symbol: '9697', note: 'liquidity dropped' },
+      ],
+      zoom: null,
+    })
+    // active panel の chart container は引き続き出る
+    expect(html).toContain('id="grid-chart-0"')
+    // inactive panel: chart container は無い (= 軽量、subrequest 不要)
+    expect(html).not.toContain('id="grid-chart-1"')
+    // INACTIVE バッジ + tooltip
+    expect(html).toContain('>INACTIVE<')
+    expect(html).toContain('INACTIVE: liquidity dropped')
+    // 個別タブへの link (operator が深掘れる)
+    expect(html).toContain('?tab=symbol&symbol=9697')
+    // 説明文
+    expect(html).toContain('チャート未取得')
+  })
+
+  it('inactivePlaceholders だけ (active charts 空) でも案内ではなく placeholder grid を描画', () => {
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [],
+      inactivePlaceholders: [
+        { symbol: '9697', note: null },
+      ],
+      zoom: null,
+    })
+    // active 銘柄 0 でも、inactive がいれば「ALLOWED_SYMBOLS 空」案内では
+    // なく grid そのものを描画する (operator は inactive 銘柄を見える)
+    expect(html).not.toContain('ALLOWED_SYMBOLS が空')
+    expect(html).toContain('class="symbols-grid"')
+    expect(html).toContain('>INACTIVE<')
+    // notes が無い場合 tooltip は単に "INACTIVE"
+    expect(html).toContain('title="INACTIVE"')
   })
 })
 

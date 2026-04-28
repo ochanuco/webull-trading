@@ -47,11 +47,13 @@ export function makeGlobalConfigSnapshot(
 export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): SymbolUniverse {
   return {
     allowedSymbols: ['SOXL', 'SOXS'],
+    inactiveSymbols: [],
     symbolMaxNotional: {},
     symbolCurrency: { SOXL: 'USD', SOXS: 'USD' },
     symbolBucket: {},
     symbolMarket: { SOXL: 'US', SOXS: 'US' },
     symbolName: {},
+    symbolNotes: {},
     inversePairs: {},
     source: 'd1',
     ...overrides,

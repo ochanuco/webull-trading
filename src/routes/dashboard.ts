@@ -35,9 +35,12 @@ export const dashboard = new Hono<AppBindings>()
     }
     const universe = await loadSymbolUniverse(c.env)
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
+    // inactive 銘柄も表示する (operator visibility) — chart に飛んで状態を確認したり
+    // 再有効化判断したりするのに必要。cron / risk gate は引き続き allowedSymbols のみ評価。
+    const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
     const [rows, strategyPriceMap] = await Promise.all([
       Promise.all(
-        universe.allowedSymbols.map(async (sym) => {
+        allDisplaySymbols.map(async (sym) => {
           try {
             return { sym, state: await client.getState(sym), error: null as string | null }
           } catch (err) {
@@ -45,7 +48,7 @@ export const dashboard = new Hono<AppBindings>()
           }
         }),
       ),
-      loadLatestStrategyPrices(c.env.DB, universe.allowedSymbols),
+      loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
     ])
     return c.html(layout('保有状況', positionsBody(rows, strategyPriceMap, universe)))
   })
@@ -137,7 +140,16 @@ export const dashboard = new Hono<AppBindings>()
           takeProfitPct: global.pullbackDefaultTakeProfitPct,
           timeStopDays: global.pullbackDefaultTimeStopDays,
         }
+        // 重い chart データ取得 (Yahoo daily + intraday + D1 + DO で銘柄あたり
+        // ~5 subrequest) は active 銘柄に限定する。inactive 銘柄が増えると
+        // Workers subrequest budget を逼迫させるため、grid では fetch なしの
+        // 静的 placeholder panel として表示する (operator は個別タブへ遷移して
+        // 必要に応じて深掘る)。
         const charts = await loadAllSymbolCharts(c.env, universe.allowedSymbols, rules)
+        const inactivePlaceholders = universe.inactiveSymbols.map((symbol) => ({
+          symbol,
+          note: universe.symbolNotes[symbol] ?? null,
+        }))
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
         // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
         // 採用する。URL ?from / ?to があればそれを優先 (既存と同挙動)。
@@ -149,6 +161,7 @@ export const dashboard = new Hono<AppBindings>()
             chartsBody({
               tab,
               charts,
+              inactivePlaceholders,
               zoom,
               universe,
             }),
@@ -161,14 +174,18 @@ export const dashboard = new Hono<AppBindings>()
         loadSymbolUniverse(c.env),
         loadGlobalConfigFrom(c.env, c.get('requestId')),
       ])
+      // 表示候補: active + inactive 銘柄。focusSymbol は inactive でも valid と扱う
+      // (operator が chart で inactivate 後の動向を確認できるよう)。default は active を優先。
+      const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
+      const allDisplaySet = new Set(allDisplaySymbols)
       const allowed = new Set(universe.allowedSymbols)
       const defaultSymbol = await pickDefaultSymbol(c.env.DB)
       const focusSymbol =
-        symbolParam && allowed.has(symbolParam)
+        symbolParam && allDisplaySet.has(symbolParam)
           ? symbolParam
           : defaultSymbol && allowed.has(defaultSymbol)
             ? defaultSymbol
-            : universe.allowedSymbols[0] ?? null
+            : universe.allowedSymbols[0] ?? universe.inactiveSymbols[0] ?? null
       // ルール閾値は global_config から。per-symbol override は POC で未対応
       // (symbol_rules table が無い、env-var 経由なので動的反映困難)。
       const strategyParams: StrategyParamsSnapshot = {
@@ -207,7 +224,7 @@ export const dashboard = new Hono<AppBindings>()
             tab,
             focusSymbol,
             symbolChart,
-            availableSymbols: universe.allowedSymbols,
+            availableSymbols: allDisplaySymbols,
             strategyParams,
             zoom,
             universe,
@@ -399,6 +416,31 @@ function displaySymbol(symbol: string, universe?: SymbolUniverse | null): string
   })
 }
 
+/**
+ * symbol が universe.inactiveSymbols (= active=0) に含まれていれば true。
+ * `inactiveSymbols` は active=0 全般 (disable / pause 含む) なので "inactive"
+ * と中立的に呼ぶ。universe が null / 未配線の時は false (= 既存挙動を変えない)。
+ */
+function isSymbolInactive(symbol: string, universe?: SymbolUniverse | null): boolean {
+  if (!universe) return false
+  const upper = symbol.toUpperCase()
+  return universe.inactiveSymbols.includes(upper)
+}
+
+/**
+ * inactive 銘柄の tooltip 用テキスト ("INACTIVE: <notes>" 形式)。notes が
+ * 無ければ単に "INACTIVE"。HTML escape は呼び出し側の責任。
+ *
+ * `inactiveSymbols` は disable (恒久) と pause (一時停止) を区別しないため、
+ * 中立的な "INACTIVE" を採用 (元の "DISABLED" は pause 銘柄を誤認させる)。
+ */
+function inactiveTooltip(symbol: string, universe?: SymbolUniverse | null): string {
+  if (!universe) return ''
+  const upper = symbol.toUpperCase()
+  const note = universe.symbolNotes[upper]
+  return note ? `INACTIVE: ${note}` : 'INACTIVE'
+}
+
 function clampLimit(raw: string | undefined): number {
   const n = raw === undefined ? 50 : Number.parseInt(raw, 10)
   if (!Number.isFinite(n) || n <= 0) return 50
@@ -475,6 +517,9 @@ const STYLE = `
   .reason-panel ul{margin:4px 0 10px;padding-left:20px}
   .reason-panel code{white-space:pre-wrap;word-break:break-word}
   .reason-panel pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px}
+  .symbol-disabled{opacity:0.5;font-style:italic;text-decoration:line-through}
+  tr.symbol-disabled-row{background:#fafafa}
+  tr.symbol-disabled-row td{color:#86868b}
 `
 
 function layout(title: string, body: string): string {
@@ -625,8 +670,12 @@ function positionsBody(
   if (rows.length === 0) return `<p class="muted">有効な銘柄がありません。</p>`
   const tbody = rows
     .map((r) => {
+      const inactive = isSymbolInactive(r.sym, universe)
+      const rowClass = inactive ? ' class="symbol-disabled-row"' : ''
+      const symbolClass = inactive ? ' class="symbol-disabled"' : ''
+      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.sym, universe))}"` : ''
       if (r.error !== null || r.state === null) {
-        return `<tr><td>${esc(displaySymbol(r.sym, universe))}</td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
+        return `<tr${rowClass}><td><span${symbolClass}${titleAttr}>${esc(displaySymbol(r.sym, universe))}</span></td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
       }
       const s = r.state
       const pos = s.position
@@ -644,8 +693,8 @@ function positionsBody(
       const quoteCell = quote
         ? `${fmtNumber(quote.price, 2)} <span class="muted" style="font-size:11px">(${esc(quote.source)}, ${esc(formatQuoteAsOf(quote.asOf))})</span>`
         : '<span class="muted">—</span>'
-      return `<tr>
-        <td><strong>${esc(displaySymbol(s.symbol, universe))}</strong></td>
+      return `<tr${rowClass}>
+        <td><strong><span${symbolClass}${titleAttr}>${esc(displaySymbol(s.symbol, universe))}</span></strong></td>
         <td>${pos ? esc(pos.qty) : '<span class="muted">—</span>'}</td>
         <td>${pos ? fmtNumber(pos.avgPrice, 2) : '<span class="muted">—</span>'}</td>
         <td>${quoteCell}</td>
@@ -790,11 +839,15 @@ function tradesBody(
       const statusText =
         r.errorMessage ? `エラー: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
       const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : '—'
+      const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
+      const symbolCellInner = r.symbol && inactive
+        ? `<span class="symbol-disabled" title="${esc(inactiveTooltip(r.symbol, universe))}">${esc(symbolText)}</span>`
+        : esc(symbolText)
       return `<tr>
         <td>${r.id}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td>${esc(r.tradeEventType)}</td>
-        <td><strong>${esc(symbolText)}</strong></td>
+        <td><strong>${symbolCellInner}</strong></td>
         <td>${esc(r.side ?? '—')}</td>
         <td>${r.quantity === null ? '—' : esc(r.quantity)}</td>
         <td>${r.limitPrice === null ? '—' : fmtNumber(r.limitPrice, 2)}</td>
@@ -839,16 +892,30 @@ function configBody(
       return `<tr><th>${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td></tr>`
     })
     .join('')
-  const symRows = universe.allowedSymbols
-    .map(
-      (sym) =>
-        `<tr>
-          <td><strong>${esc(displaySymbol(sym, universe))}</strong></td>
+  // active + inactive 両方を 1 つの table で表示。inactive 行は grayed-out 化し、
+  // 「状態」「メモ (notes)」列で disable 経緯が読める。cron 評価対象は active=1 のみ
+  // (allowedSymbols)、表示のみ全件出すのが今 PR の趣旨。
+  const allConfigSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
+  const symRows = allConfigSymbols
+    .map((sym) => {
+      const inactive = isSymbolInactive(sym, universe)
+      const rowClass = inactive ? ' class="symbol-disabled-row"' : ''
+      const symbolClass = inactive ? ' class="symbol-disabled"' : ''
+      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(sym, universe))}"` : ''
+      const stateCell = inactive
+        ? '<span class="muted">inactive</span>'
+        : '<span class="ok">active</span>'
+      const noteText = universe.symbolNotes[sym] ?? null
+      const noteCell = noteText ? esc(noteText) : '<span class="muted">—</span>'
+      return `<tr${rowClass}>
+          <td><strong><span${symbolClass}${titleAttr}>${esc(displaySymbol(sym, universe))}</span></strong></td>
+          <td>${stateCell}</td>
           <td>${esc(universe.symbolCurrency[sym] ?? '—')}</td>
           <td>${universe.symbolMaxNotional[sym] != null ? esc(universe.symbolMaxNotional[sym]) : '<span class="muted">—</span>'}</td>
           <td>${universe.inversePairs[sym] ? esc(universe.inversePairs[sym]) : '<span class="muted">—</span>'}</td>
-        </tr>`,
-    )
+          <td>${noteCell}</td>
+        </tr>`
+    })
     .join('')
   return `<details open>
     <summary>グローバル設定 (global_config)</summary>
@@ -858,9 +925,13 @@ function configBody(
     </table>
   </details>
   <details open>
-    <summary>銘柄別設定 (symbol_config、active=1) — ${universe.allowedSymbols.length} 銘柄</summary>
+    <summary>銘柄別設定 (symbol_config) — active ${universe.allowedSymbols.length} / inactive ${universe.inactiveSymbols.length} 銘柄</summary>
+    <p class="muted" style="font-size:12px">
+      inactive (active=0) 銘柄も表示しています。cron / risk gate の評価対象は active=1 のみで、
+      inactive 銘柄は灰色斜体・取消線で区別しています。再有効化は <code>UPDATE symbol_config SET active = 1 WHERE symbol = '...'</code>。
+    </p>
     <table>
-      <thead><tr><th>銘柄</th><th>通貨</th><th>1注文あたり上限 (max_notional)</th><th>インバース対 (inverse)</th></tr></thead>
+      <thead><tr><th>銘柄</th><th>状態</th><th>通貨</th><th>1注文あたり上限 (max_notional)</th><th>インバース対 (inverse)</th><th>メモ (notes)</th></tr></thead>
       <tbody>${symRows}</tbody>
     </table>
   </details>`
@@ -1274,8 +1345,9 @@ function alertsBody(args: AlertsBodyArgs): string {
           : r.severity === 'warning'
             ? 'warn'
             : 'muted'
+      const symbolInactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}">${esc(displaySymbol(r.symbol, universe))}</a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''}><span${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</span></a>`
         : '<span class="muted">-</span>'
       return `<tr>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
@@ -1399,9 +1471,12 @@ function cronBody(
         r.filledPrice === null || r.filledPrice === undefined
           ? '-'
           : `${fmtNumber(r.filledPrice, 2)} × ${r.filledQty ?? '?'}`
+      const inactive = isSymbolInactive(r.symbol, universe)
+      const symbolClass = inactive ? ' class="symbol-disabled"' : ''
+      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
       return `<tr>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"><strong>${esc(displaySymbol(r.symbol, universe))}</strong></a></td>
+        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
@@ -2654,8 +2729,20 @@ interface ChartsBodySymbol {
  */
 interface ChartsBodyGrid {
   tab: 'grid'
-  /** 全銘柄の SymbolChartData (load 失敗銘柄は値 null。1 銘柄失敗で全 grid を 500 にしない) */
+  /**
+   * Active (cron 評価対象) 銘柄の SymbolChartData (load 失敗銘柄は値 null。
+   * 1 銘柄失敗で全 grid を 500 にしない)。
+   */
   charts: Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>
+  /**
+   * Inactive (active=0) 銘柄の static placeholder。chart データは fetch せず、
+   * grid 上では灰色の panel + INACTIVE バッジ + notes tooltip だけを描画する。
+   * 個別タブ (?tab=symbol&symbol=...) へ link して operator が深掘りできる。
+   *
+   * 旧実装は inactive も `loadAllSymbolCharts` に投げていたが、銘柄あたり
+   * ~5 subrequest かかるため Workers の budget を圧迫する (CodeRabbit #229)。
+   */
+  inactivePlaceholders?: Array<{ symbol: string; note: string | null }>
   /** dataZoom 初期範囲。null なら全期間 */
   zoom: { from: Date; to: Date } | null
   /** panel header の銘柄表示を JP 銘柄向け 番号-会社名 形式にするための universe。 */
@@ -3624,7 +3711,8 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
  * - SMA50 / band / 詳細パネルは省略 (panel size に合わせて視認性を優先)
  */
 export function renderGridTab(args: ChartsBodyGrid): string {
-  if (args.charts.length === 0) {
+  const inactivePlaceholders = args.inactivePlaceholders ?? []
+  if (args.charts.length === 0 && inactivePlaceholders.length === 0) {
     return `<p class="muted">ALLOWED_SYMBOLS が空です。<code>symbol_config</code> に少なくとも 1 銘柄登録してください。</p>`
   }
   // grid 共通 toolbar の preset zoom buttons。reference chart (最初に load 成功)
@@ -3633,19 +3721,21 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   const referenceChart = args.charts.find((c) => c.chart !== null)?.chart ?? null
   const presetButtonsHtml = renderZoomPresetButtons(referenceChart)
 
-  // 各 panel の HTML container。chart 本体は client side で echarts.init される。
+  // Active panel: chart 本体は client side で echarts.init される。
   // panel header に symbol 名 (詳細タブへの link) と最新 indicators (price /
   // SMA50 / high20d / low20d) を出して「市場全体ビュー」で trader が銘柄を
   // 一目で識別できるようにする。
-  const panelsHtml = args.charts
+  // Note: args.charts は active 銘柄だけで構成される (inactive は別経路)。
+  const activePanelsHtml = args.charts
     .map((entry, idx) => {
+      const panelStyle = 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff'
       const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
       const headerText = displaySymbol(entry.symbol, args.universe)
       const headerLink = `<a href="${symbolLink}" style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
       if (entry.chart === null) {
         const errMsg = entry.error ?? 'チャートデータ取得失敗'
-        return `<div class="grid-panel" style="border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        return `<div class="grid-panel" style="${panelStyle}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
             ${headerLink}
             <span class="warn" style="font-size:11px">取得失敗</span>
           </div>
@@ -3653,7 +3743,7 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         </div>`
       }
       const badge = renderGridPanelBadge(entry.chart)
-      return `<div class="grid-panel" style="border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fff">
+      return `<div class="grid-panel" style="${panelStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
           ${headerLink}
           ${badge}
@@ -3662,6 +3752,35 @@ export function renderGridTab(args: ChartsBodyGrid): string {
       </div>`
     })
     .join('')
+
+  // Inactive placeholder panel: chart データを fetch せず、symbol header と
+  // INACTIVE バッジ + notes tooltip だけ描画する。個別タブへ link することで
+  // operator が必要な時だけ chart を fetch できる (subrequest 軽量化)。
+  const inactivePanelsHtml = inactivePlaceholders
+    .map((entry) => {
+      const panelStyle = 'border:1px solid #d0d0d5;border-radius:6px;padding:8px;background:#fafafa;opacity:0.65'
+      const symbolLink = `/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(entry.symbol)}`
+      const headerText = displaySymbol(entry.symbol, args.universe)
+      const tooltipText = entry.note ? `INACTIVE: ${entry.note}` : 'INACTIVE'
+      const titleAttr = ` title="${esc(tooltipText)}"`
+      const headerLink = `<a href="${symbolLink}" class="symbol-disabled"${titleAttr} style="font-weight:600;font-size:14px;color:#06c;text-decoration:none">${esc(headerText)}</a>`
+      const noteHtml = entry.note
+        ? `<div class="muted" style="font-size:11px;padding:4px 0 0">${esc(entry.note)}</div>`
+        : ''
+      return `<div class="grid-panel" style="${panelStyle}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
+          ${headerLink}
+          <span class="muted" style="font-size:11px">INACTIVE</span>
+        </div>
+        <div class="muted" style="font-size:12px;padding:24px 8px;text-align:center">
+          チャート未取得 (cron 評価対象外) — <a href="${symbolLink}">個別タブで表示</a>
+        </div>
+        ${noteHtml}
+      </div>`
+    })
+    .join('')
+
+  const panelsHtml = activePanelsHtml + inactivePanelsHtml
 
   // client 側に渡す全銘柄分の chart payload。各 panel が個別 echarts.init で
   // 消費する。__chartData.charts は array of { symbol, chart, displayName }
@@ -4297,17 +4416,26 @@ function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
     ? `&from=${encodeURIComponent(args.zoom.from.toISOString())}&to=${encodeURIComponent(args.zoom.to.toISOString())}`
     : ''
   const opts = args.availableSymbols
-    .map(
-      (s) =>
-        `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}" style="margin-right:6px;${
-          s === args.focusSymbol ? 'font-weight:600;text-decoration:underline' : ''
-        }">${esc(displaySymbol(s, args.universe))}</a>`,
-    )
+    .map((s) => {
+      const inactive = isSymbolInactive(s, args.universe)
+      const isFocus = s === args.focusSymbol
+      const linkClass = inactive ? ' class="symbol-disabled"' : ''
+      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(s, args.universe))}"` : ''
+      return `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}"${linkClass}${titleAttr} style="margin-right:6px;${
+        isFocus ? 'font-weight:600;text-decoration:underline' : ''
+      }">${esc(displaySymbol(s, args.universe))}</a>`
+    })
     .join('')
   const focusLabel = args.focusSymbol
     ? displaySymbol(args.focusSymbol, args.universe)
     : '—'
+  const focusInactive = args.focusSymbol
+    ? isSymbolInactive(args.focusSymbol, args.universe)
+    : false
+  const focusBadge = focusInactive
+    ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(args.universe?.symbolNotes[args.focusSymbol!.toUpperCase()] ?? 'cron 評価対象外')})</span>`
+    : ''
   return `<p class="muted" style="font-size:12px">
-    銘柄: <strong>${esc(focusLabel)}</strong> | 切替: ${opts}
+    銘柄: <strong>${esc(focusLabel)}</strong>${focusBadge} | 切替: ${opts}
   </p>`
 }
