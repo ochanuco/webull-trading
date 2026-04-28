@@ -1696,9 +1696,88 @@ describe('renderGridTab', () => {
     expect(html).toContain('ALLOWED_SYMBOLS が空')
   })
 
-  // inactive 銘柄は heavy chart load せずに placeholder panel のみ描画する
-  // (CodeRabbit #229: subrequest 浪費を避ける)。
-  it('inactivePlaceholders は INACTIVE バッジと個別タブ link 付きで grid に追加描画される', () => {
+  // inactive 銘柄も active と同じく chart データを load して描画する。
+  // ただし `symbol-inactive` クラス + INACTIVE バッジ + symbol-disabled tooltip
+  // で視覚識別する (PR #229 で外したが operator から復活要望)。
+  it('inactive 銘柄も grid-chart container を持ち、INACTIVE バッジと grayed style で識別される', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['9697'],
+      symbolNotes: { '9697': 'liquidity dropped' },
+      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+    })
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [
+        { symbol: 'SOXL', chart: makeChart('SOXL', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
+        ]), error: null },
+        { symbol: '9697', chart: makeChart('9697', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 4500, sma50: 4400, high20d: 4600, low20d: 4300 },
+        ]), error: null },
+      ],
+      zoom: null,
+      universe,
+    })
+    // active / inactive 双方の chart container が出る (= operator が動向確認できる)
+    expect(html).toContain('id="grid-chart-0"')
+    expect(html).toContain('id="grid-chart-1"')
+    // inactive panel に grayed style class が付与される
+    expect(html).toContain('class="grid-panel symbol-inactive"')
+    // active panel は通常 class
+    expect(html).toContain('class="grid-panel"')
+    // INACTIVE バッジ + tooltip (notes 入り)
+    expect(html).toContain('>INACTIVE<')
+    expect(html).toContain('INACTIVE: liquidity dropped')
+    // 個別タブへの link
+    expect(html).toContain('?tab=symbol&symbol=9697')
+    // header link が symbol-disabled (= 取消線で識別)
+    expect(html).toContain('class="symbol-disabled"')
+  })
+
+  // CodeRabbit #230: inline style は CSS class より優先されるため、inactive panel
+  // では `background:#fff` / `text-decoration:none` の inline 上書きを抑制する。
+  // これで `.grid-panel.symbol-inactive { background:#fafafa; opacity:0.65 }` と
+  // `.symbol-disabled { text-decoration:line-through }` が effective になる。
+  it('inactive panel は inline background:#fff を出力せず、CSS class (symbol-inactive) に任せる', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['9697'],
+      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+    })
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [
+        { symbol: '9697', chart: makeChart('9697', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 4500, sma50: 4400, high20d: 4600, low20d: 4300 },
+        ]), error: null },
+      ],
+      zoom: null,
+      universe,
+    })
+    // inactive panel の wrapper には background:#fff が inline で入らない
+    // (= class 側の background:#fafafa が effective)
+    const panelOpenIdx = html.indexOf('class="grid-panel symbol-inactive"')
+    expect(panelOpenIdx).toBeGreaterThanOrEqual(0)
+    const panelOpenEnd = html.indexOf('>', panelOpenIdx)
+    const panelOpenTag = html.slice(panelOpenIdx, panelOpenEnd)
+    expect(panelOpenTag).not.toContain('background:#fff')
+    // inactive header link には text-decoration:none が inline で入らない
+    // (= symbol-disabled の line-through が effective)
+    const linkIdx = html.indexOf('class="symbol-disabled"')
+    expect(linkIdx).toBeGreaterThanOrEqual(0)
+    const linkEnd = html.indexOf('>', linkIdx)
+    const linkOpenTag = html.slice(linkIdx, linkEnd)
+    expect(linkOpenTag).not.toContain('text-decoration:none')
+  })
+
+  // active panel の inline style は従来どおり残す (regression guard)。
+  it('active panel は従来どおり inline background:#fff と link の text-decoration:none を持つ', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: [],
+      symbolCurrency: { SOXL: 'USD' },
+    })
     const html = renderGridTab({
       tab: 'grid',
       charts: [
@@ -1706,40 +1785,51 @@ describe('renderGridTab', () => {
           { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
         ]), error: null },
       ],
-      inactivePlaceholders: [
-        { symbol: '9697', note: 'liquidity dropped' },
-      ],
       zoom: null,
+      universe,
     })
-    // active panel の chart container は引き続き出る
-    expect(html).toContain('id="grid-chart-0"')
-    // inactive panel: chart container は無い (= 軽量、subrequest 不要)
-    expect(html).not.toContain('id="grid-chart-1"')
-    // INACTIVE バッジ + tooltip
-    expect(html).toContain('>INACTIVE<')
-    expect(html).toContain('INACTIVE: liquidity dropped')
-    // 個別タブへの link (operator が深掘れる)
-    expect(html).toContain('?tab=symbol&symbol=9697')
-    // 説明文
-    expect(html).toContain('チャート未取得')
+    expect(html).toContain('background:#fff')
+    expect(html).toContain('text-decoration:none')
   })
 
-  it('inactivePlaceholders だけ (active charts 空) でも案内ではなく placeholder grid を描画', () => {
+  it('inactive 銘柄で chart load に失敗した場合は active と同じ error 表示 + INACTIVE バッジを併記', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['9697'],
+      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+    })
     const html = renderGridTab({
       tab: 'grid',
-      charts: [],
-      inactivePlaceholders: [
-        { symbol: '9697', note: null },
+      charts: [
+        { symbol: 'SOXL', chart: makeChart('SOXL', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
+        ]), error: null },
+        { symbol: '9697', chart: null, error: 'subrequest budget exhausted' },
+      ],
+      zoom: null,
+      universe,
+    })
+    // 失敗 panel でも INACTIVE バッジと取得失敗バッジが両方出る
+    expect(html).toContain('symbol-inactive')
+    expect(html).toContain('>INACTIVE<')
+    expect(html).toContain('取得失敗')
+    expect(html).toContain('subrequest budget exhausted')
+    // 失敗 panel に chart container は出ない (active と同挙動)
+    expect(html).not.toContain('id="grid-chart-1"')
+  })
+
+  it('universe が無ければ inactive 識別なし (= 全 panel が active 扱い)', () => {
+    const html = renderGridTab({
+      tab: 'grid',
+      charts: [
+        { symbol: 'SOXL', chart: makeChart('SOXL', [
+          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
+        ]), error: null },
       ],
       zoom: null,
     })
-    // active 銘柄 0 でも、inactive がいれば「ALLOWED_SYMBOLS 空」案内では
-    // なく grid そのものを描画する (operator は inactive 銘柄を見える)
-    expect(html).not.toContain('ALLOWED_SYMBOLS が空')
-    expect(html).toContain('class="symbols-grid"')
-    expect(html).toContain('>INACTIVE<')
-    // notes が無い場合 tooltip は単に "INACTIVE"
-    expect(html).toContain('title="INACTIVE"')
+    expect(html).not.toContain('symbol-inactive')
+    expect(html).not.toContain('>INACTIVE<')
   })
 })
 
