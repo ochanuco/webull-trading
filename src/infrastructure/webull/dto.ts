@@ -42,23 +42,32 @@ export interface WebullPlaceOrderResponseDto {
 }
 
 /**
- * One row of the Webull `/openapi/account/positions` response. Field names
- * follow the official Webull OpenAPI reference
- * (https://developer.webull.com/apis/docs/reference/account-position/) —
- * canonical snake_case + numeric-as-string convention used throughout the
- * OpenAPI surface (mapper layer parses the strings to numbers before they
- * leave infrastructure).
+ * One row of the Webull positions response. Spec ambiguity #251: the older
+ * `/openapi/account/positions` SDK returned `quantity_total` / `avg_cost`,
+ * but the new docs (`/openapi/assets/positions` →
+ * https://developer.webull.co.jp/apis/docs/reference/account-position.md)
+ * use `quantity` / `cost_price`. JP UAT は実際の probe で **新名前** で返す。
+ *
+ * 旧 SDK 互換のため両方 optional として持ち、reader 側 (`parseBrokerAvg`,
+ * `parseBrokerQty` 等) は新→旧の順で読む defensive parsing にする。新規 reader
+ * を書くときも同じヘルパを通すこと。
+ *
+ * 全 field は string-encoded number / string (= OpenAPI 共通の数値文字列方針)。
+ * mapper 層で数値化してから infrastructure 層を出る。
  */
 export interface WebullPositionDto {
   /** Ticker. Webull returns it as the canonical form (e.g. `SOXL`, `1570`). */
   symbol?: string
-  /** Total holding (informational). */
+  /** 新 docs: total holding (informational). */
+  quantity?: string
+  /** 旧 SDK 互換: 新 docs では `quantity` に rename。 */
   quantity_total?: string
-  /** Available-to-sell holding. May be < `quantity_total` when shares are
-   *  reserved by an in-flight SELL. SELL fallback uses **this** value.
-   *  Webull canonical field name (per official reference docs). */
+  /** Available-to-sell holding. May be < total when shares are reserved by
+   *  an in-flight SELL. SELL fallback uses **this** value. 新旧 docs 共通。 */
   available_quantity?: string
-  /** Average cost basis (informational; not used by SELL fallback). */
+  /** 新 docs: average cost basis (informational; not used by SELL fallback). */
+  cost_price?: string
+  /** 旧 SDK 互換: 新 docs では `cost_price` に rename。 */
   avg_cost?: string
   /** Currency on the position. POC: USD/JPY only. */
   currency?: string
