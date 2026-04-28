@@ -1,4 +1,3 @@
-import { eq } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import { inversePairs, symbolConfig } from './schema'
 
@@ -6,52 +5,75 @@ export type SymbolCurrency = 'USD' | 'JPY'
 export type SymbolMarket = 'US' | 'JP'
 
 export interface SymbolConfigSnapshot {
-  /** Uppercased symbols where `active = 1`. */
+  /** Uppercased symbols where `active = 1`. cron / risk gate はこの list だけを評価対象とする。 */
   allowedSymbols: string[]
+  /**
+   * Uppercased symbols where `active = 0`. Operator visibility 用 — dashboard
+   * の picker / table は disabled でも表示し続ける必要がある (operator が
+   * disable 経緯を判断して再有効化判断するため)。cron / risk gate からは見えない。
+   */
+  inactiveSymbols: string[]
   /**
    * symbol → max_notional (positive number). Symbols with `max_notional` NULL
    * are absent from the map — caller falls through to the global
-   * `MAX_ORDER_NOTIONAL`.
+   * `MAX_ORDER_NOTIONAL`. active=0 の銘柄も含む (display 用)。
    */
   symbolMaxNotional: Record<string, number>
-  /** symbol → currency ('USD' / 'JPY')。Risk gate が global 通貨別 cap を引くのに使う。 */
+  /** symbol → currency ('USD' / 'JPY')。Risk gate が global 通貨別 cap を引くのに使う。active=0 含む。 */
   symbolCurrency: Record<string, SymbolCurrency>
   /**
    * symbol → bucket tag。NULL bucket は map に含めない (gate 側で未分類扱い
-   * = 個別銘柄判定)。相関集約 cap (#23 Lane 3) で使う。
+   * = 個別銘柄判定)。相関集約 cap (#23 Lane 3) で使う。active=0 含む。
    */
   symbolBucket: Record<string, string>
   /**
    * symbol → market ('US' | 'JP')。dashboard が JP 銘柄表示を「番号-会社名」
    * に切り替える判定に使う。CHECK 制約は schema 側に無いので 'US' / 'JP'
-   * 以外が混ざる場合は 'US' fallback (defensive)。
+   * 以外が混ざる場合は 'US' fallback (defensive)。active=0 含む。
    */
   symbolMarket: Record<string, SymbolMarket>
   /**
    * symbol → 人間可読な銘柄名 (symbol_config.name)。NULL / 空文字は map に
-   * 含めない。dashboard が JP の `${symbol}-${name}` 表示で使う。
+   * 含めない。dashboard が JP の `${symbol}-${name}` 表示で使う。active=0 含む。
    */
   symbolName: Record<string, string>
+  /**
+   * symbol → notes (symbol_config.notes)。disable 理由などを operator が memo
+   * しておく自由 text。NULL / 空文字は map に含めない。dashboard が disabled
+   * 銘柄の tooltip 表示に使う。active=0 / active=1 両方含む。
+   */
+  symbolNotes: Record<string, string>
 }
 
 /**
  * Loads the per-symbol config from D1. A single query is cheap; no cache at
  * this layer — call sites hold the snapshot for the duration of one handler.
+ *
+ * active=1 / active=0 の両方を取得し、`allowedSymbols` (active=1) と
+ * `inactiveSymbols` (active=0) に振り分ける。cron / risk gate は
+ * `allowedSymbols` のみを参照するため挙動は変えない。dashboard が
+ * disabled 銘柄を grayed-out で表示するために両方を返す (operator visibility)。
  */
 export async function loadSymbolConfig(
   db: DrizzleD1Database,
 ): Promise<SymbolConfigSnapshot> {
-  const rows = await db.select().from(symbolConfig).where(eq(symbolConfig.active, true))
+  const rows = await db.select().from(symbolConfig)
 
   const allowedSymbols: string[] = []
+  const inactiveSymbols: string[] = []
   const symbolMaxNotional: Record<string, number> = {}
   const symbolCurrency: Record<string, SymbolCurrency> = {}
   const symbolBucket: Record<string, string> = {}
   const symbolMarket: Record<string, SymbolMarket> = {}
   const symbolName: Record<string, string> = {}
+  const symbolNotes: Record<string, string> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
-    allowedSymbols.push(symbol)
+    if (row.active) {
+      allowedSymbols.push(symbol)
+    } else {
+      inactiveSymbols.push(symbol)
+    }
     if (row.maxNotional !== null && Number.isFinite(row.maxNotional) && row.maxNotional > 0) {
       symbolMaxNotional[symbol] = row.maxNotional
     }
@@ -70,14 +92,20 @@ export async function loadSymbolConfig(
     if (trimmedName && trimmedName.length > 0) {
       symbolName[symbol] = trimmedName
     }
+    const trimmedNotes = row.notes?.trim()
+    if (trimmedNotes && trimmedNotes.length > 0) {
+      symbolNotes[symbol] = trimmedNotes
+    }
   }
   return {
     allowedSymbols,
+    inactiveSymbols,
     symbolMaxNotional,
     symbolCurrency,
     symbolBucket,
     symbolMarket,
     symbolName,
+    symbolNotes,
   }
 }
 

@@ -115,6 +115,30 @@ describe('runStrategyCron', () => {
     expect(result.analysis.universe.symbols).toEqual(['SOXL', 'SOXS'])
   })
 
+  // dashboard が disabled (active=0) を表示するために `inactiveSymbols` を
+  // SymbolUniverse に追加したが、cron / risk gate の評価対象は引き続き
+  // `allowedSymbols` のみであることを保証する regression test (= disabled 銘柄が
+  // 評価ループに混入しない)。
+  it('cron only evaluates allowedSymbols and ignores inactiveSymbols', async () => {
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({
+        allowedSymbols: ['SOXL'],
+        inactiveSymbols: ['9697'],
+        symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+        symbolMarket: { SOXL: 'US', '9697': 'JP' },
+        symbolNotes: { '9697': 'paused for review' },
+      }),
+    )
+    const envWithoutBridge = {
+      DB: {} as D1Database,
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envWithoutBridge)
+    // analysis.universe.symbols は cron が評価しようとした symbol 集合。
+    // inactiveSymbols (9697) は混入しない。
+    expect(result.analysis.universe.symbols).toEqual(['SOXL'])
+    expect(result.analysis.universe.symbols).not.toContain('9697')
+  })
+
   it('fail-closes to portfolio_halted on invalid tradingDisabledUntil timestamp', async () => {
     const envBadTimestamp = {
       ...env,

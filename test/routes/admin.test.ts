@@ -1120,11 +1120,13 @@ describe('POST /admin/orders/sync-holdings', () => {
     const webullMod = await import('../../src/infrastructure/webull/WebullHttpClient')
     const universeSpy = vi.spyOn(universeMod, 'loadSymbolUniverse').mockResolvedValue({
       allowedSymbols: mocks.universe?.allowedSymbols ?? [],
+      inactiveSymbols: [],
       symbolMaxNotional: {},
       symbolCurrency: {},
       symbolBucket: {},
       symbolMarket: {},
       symbolName: {},
+      symbolNotes: {},
       inversePairs: {},
       source: 'd1',
     })

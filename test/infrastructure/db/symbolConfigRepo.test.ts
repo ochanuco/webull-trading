@@ -5,14 +5,12 @@ import {
 } from '../../../src/infrastructure/db/symbolConfigRepo'
 
 function fakeDb(rows: unknown[]) {
+  // loadSymbolConfig は WHERE active=... を外したので、`from` 直後で resolve する
+  // (active=0 / 1 両方を読んで repo 側で振り分ける)。
   return {
     select() {
       return {
-        from() {
-          return {
-            where: vi.fn().mockResolvedValue(rows),
-          }
-        },
+        from: vi.fn().mockResolvedValue(rows),
       }
     },
   } as unknown as Parameters<typeof loadSymbolConfig>[0]
@@ -81,6 +79,39 @@ describe('loadSymbolConfig', () => {
     ]
     const result = await loadSymbolConfig(fakeDb(rows))
     expect(result.symbolMarket).toEqual({ X: 'US', Y: 'US' })
+  })
+
+  // dashboard が disabled (active=0) を grayed-out で表示するために、active=0 の
+  // symbol も読み込んで `inactiveSymbols` / `symbolNotes` に振り分ける。
+  // cron / risk gate は引き続き `allowedSymbols` のみを参照する (= 評価対象は変えない)。
+  it('partitions rows into allowedSymbols / inactiveSymbols by active flag', async () => {
+    const rows = [
+      { symbol: 'soxl', name: 'SOXL', market: 'US', active: true, maxNotional: 50000, notes: null },
+      { symbol: 'soxs', name: 'SOXS', market: 'US', active: false, maxNotional: null, notes: 'pair removed 2026-04-20' },
+      { symbol: '7203', name: 'トヨタ', market: 'JP', active: true, maxNotional: null, notes: null },
+      { symbol: '9697', name: 'カプコン', market: 'JP', active: false, maxNotional: null, notes: 'liquidity dropped' },
+    ]
+    const result = await loadSymbolConfig(fakeDb(rows))
+    expect(result.allowedSymbols).toEqual(['SOXL', '7203'])
+    expect(result.inactiveSymbols).toEqual(['SOXS', '9697'])
+    // notes は active=0 / 1 両方の銘柄分が含まれる (active=1 で notes 設定済の運用も想定)
+    expect(result.symbolNotes).toEqual({
+      SOXS: 'pair removed 2026-04-20',
+      '9697': 'liquidity dropped',
+    })
+    // currency / market map は active=0 含めて全銘柄分
+    expect(result.symbolMarket).toEqual({ SOXL: 'US', SOXS: 'US', '7203': 'JP', '9697': 'JP' })
+  })
+
+  it('skips empty / whitespace-only notes (defensive)', async () => {
+    const rows = [
+      { symbol: 'A', name: null, market: 'US', active: false, maxNotional: null, notes: '' },
+      { symbol: 'B', name: null, market: 'US', active: false, maxNotional: null, notes: '   ' },
+      { symbol: 'C', name: null, market: 'US', active: false, maxNotional: null, notes: '  reason  ' },
+    ]
+    const result = await loadSymbolConfig(fakeDb(rows))
+    expect(result.symbolNotes).toEqual({ C: 'reason' })
+    expect(result.inactiveSymbols).toEqual(['A', 'B', 'C'])
   })
 })
 

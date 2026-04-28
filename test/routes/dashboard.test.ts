@@ -223,6 +223,35 @@ describe('dashboard', () => {
     expect(body).toContain('&lt;script&gt;')
   })
 
+  // disabled (active=0) 銘柄も config / picker / table に表示する (operator visibility)。
+  // cron / risk gate の評価対象は変えない (= allowedSymbols のみ)。
+  it('renders disabled symbols on config page with grayed-out style and notes tooltip', async () => {
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({
+        allowedSymbols: ['SOXL'],
+        inactiveSymbols: ['9697'],
+        symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+        symbolMarket: { SOXL: 'US', '9697': 'JP' },
+        symbolName: { '9697': 'カプコン' },
+        symbolNotes: { '9697': 'liquidity dropped' },
+      }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard/config', { headers: authHeader }, env)
+    const body = await res.text()
+    // active 銘柄は通常表示、disabled 銘柄は symbol-disabled クラスで grayed-out
+    expect(body).toContain('SOXL')
+    expect(body).toContain('9697-カプコン')
+    expect(body).toContain('class="symbol-disabled"')
+    // tooltip に notes 表示
+    expect(body).toContain('DISABLED: liquidity dropped')
+    // 状態列に "disabled" が出る
+    expect(body).toContain('>disabled<')
+    // count 行に active / disabled 件数が出る
+    expect(body).toContain('active 1 / disabled 1')
+  })
+
   it('renders cron page with "unavailable" when DB is not bound', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
