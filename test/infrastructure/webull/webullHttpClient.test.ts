@@ -174,6 +174,62 @@ describe('WebullHttpClient', () => {
     expect(await client.findOrderByClientId('missing')).toBeUndefined()
   })
 
+  // #251 / #253: 新 OpenAPI docs では order-history が wrapper 形式
+  // ({client_order_id, combo_type, orders[]}) で返るので、normalizer が
+  // wrapper を flat 形式に projection することを確認。
+  it('findOrderByClientId handles new wrapper response shape ({client_order_id, orders: [...]})', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            client_order_id: 'wrapped-1',
+            combo_type: 'NORMAL',
+            orders: [
+              {
+                symbol: 'SOXL',
+                side: 'BUY',
+                status: 'FILLED',
+                total_quantity: '4',
+                filled_quantity: '4',
+                filled_price: '125.00',
+              },
+            ],
+          },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('wrapped-1')
+    expect(detail).toBeDefined()
+    expect(detail?.client_order_id).toBe('wrapped-1')
+    expect(detail?.symbol).toBe('SOXL')
+    expect(detail?.status).toBe('FILLED')
+    expect(detail?.filled_quantity).toBe('4')
+    expect(detail?.filled_price).toBe('125.00')
+    // total_quantity → quantity に正規化されてること
+    expect(detail?.quantity).toBe('4')
+    expect(detail?.total_quantity).toBe('4')
+  })
+
+  it('findOrderByClientId handles legacy flat response shape (no orders[] wrapper)', async () => {
+    // 旧 shape は normalizer が pass-through すること (= 既存 callers が引き
+    // 続き動く backward compat)
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { client_order_id: 'flat-1', symbol: 'AAPL', status: 'FILLED', quantity: '8', filled_quantity: '8' },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('flat-1')
+    expect(detail?.symbol).toBe('AAPL')
+    expect(detail?.quantity).toBe('8')
+    expect(detail?.status).toBe('FILLED')
+  })
+
   it('requests account details from the documented profile endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

@@ -90,8 +90,15 @@ export interface WebullOrderItemDto {
 }
 
 /**
- * Shape returned by GET /openapi/account/orders/detail (v1).
+ * Shape returned by GET /openapi/account/orders/detail (v1) — flat 形式。
  * Fields mirror openapi-java-sdk's `v2.OrderHistory`.
+ *
+ * 新 docs (#251 / #253) では order-history / order-detail が wrapper 形式に
+ * なる:
+ *   { client_order_id, combo_type, orders: [...inner...] }
+ * ここでは `findOrderByClientId` 内で wrapper を正規化して同じ flat 形式に
+ * 落とし込むため、callers (reconcileFills 等) の signature は変えない。
+ * 新名前 `total_quantity` は `quantity` に正規化される。
  */
 export interface WebullOrderDetailDto {
   client_order_id?: string
@@ -103,10 +110,30 @@ export interface WebullOrderDetailDto {
   limit_price?: string
   stop_price?: string
   quantity?: string
+  /** 新 docs での名前。normalizer が `quantity` にコピーするので consumer は
+   *  従来通り `quantity` を読めば良い (両方持ってても矛盾しない)。 */
+  total_quantity?: string
   filled_quantity?: string
+  /** 新 docs では top-level に持つ。flat 表現でも optional として持っておき、
+   *  items[] が空のケースで `resolveFilledPrice` が参照できるよう保持。 */
+  filled_price?: string
   // Webull order lifecycle statuses: NEW, PARTIALLY_FILLED, FILLED,
   // CANCELLED, REJECTED, EXPIRED, etc. Keep as free string for forward-compat.
   status?: string
   support_trading_session?: string
   items?: WebullOrderItemDto[]
+}
+
+/**
+ * 新 docs (#251) の order-history / order-detail wrapper shape:
+ *   { client_order_id, combo_type, orders: [WebullOrderDetailDto] }
+ *
+ * 通常 1 つの client_order_id に対し orders[] は単一エントリ (combo / leg は
+ * POC スコープ外)。\`findOrderByClientId\` 内の \`normalizeOrderHistoryRow\` で
+ * 平坦化して \`WebullOrderDetailDto\` として扱う。
+ */
+export interface WebullOrderHistoryWrapperDto {
+  client_order_id?: string
+  combo_type?: string
+  orders?: WebullOrderDetailDto[]
 }
