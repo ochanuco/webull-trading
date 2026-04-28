@@ -502,6 +502,29 @@ describe('syncHoldings', () => {
       expect(result.dryRun).toBe(true)
     })
 
+    it('dryRun=true + force=true: no warning (operator already acknowledged the destructive intent)', async () => {
+      const { store, overrides } = createFakeStore({
+        SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+      })
+      const result = await syncHoldings(
+        { dryRun: true, force: true, requestId: 'req-safe-5b' },
+        {
+          allowedSymbols: ['SOXL'],
+          fetchPositions: async () => [],
+          positionStore: store,
+        },
+      )
+      expect(overrides).toEqual([])
+      expect(result.synced).toHaveLength(1)
+      expect(result.synced[0]!.skipped).toBe('dry_run')
+      expect(result.synced[0]!.after).toBeNull()
+      // force=true means the operator already opted into the destructive
+      // zero-out, so the "suspicious" warning is silenced.
+      expect(result.warnings).toBeUndefined()
+      expect(result.errors).toEqual([])
+      expect(result.dryRun).toBe(true)
+    })
+
     it('single-symbol mode: same guard applies (broker null + DO has qty)', async () => {
       const { store, overrides } = createFakeStore({
         SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },

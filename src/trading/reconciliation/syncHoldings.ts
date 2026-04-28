@@ -281,7 +281,7 @@ export async function syncHoldings(
   // dryRun + safe-fail-would-trigger: surface as a soft warning so the
   // operator sees the diff but also knows the live call would refuse.
   const warnings: string[] = []
-  if (safeFailTriggered && options.dryRun) {
+  if (safeFailTriggered && options.dryRun && !options.force) {
     warnings.push('broker_returned_empty_diff_suspicious')
   }
 
