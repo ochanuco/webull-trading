@@ -1307,6 +1307,116 @@ describe('POST /admin/orders/sync-holdings', () => {
     expect(captured.calls).toEqual([])
   })
 
+  /**
+   * Safe-fail guard smoke: when broker returns nothing but DO holds shares,
+   * the route must NOT zero out the DO unless ?force=true is explicit. The
+   * full guard semantics live in `test/trading/reconciliation/syncHoldings.test.ts`;
+   * here we just confirm the route parses `force` correctly and forwards it.
+   */
+  it('safe-fails (no overrides) when broker returns empty + DO has positions + force=false', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['SOXL', 'AAPL'] },
+        positions: [], // broker returns nothing — bug-reproducer pattern
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+              AAPL: { qty: 1, avgPrice: 200, openedAt: '2026-04-21T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: unknown[]
+      errors: Array<{ symbol: string; error: string }>
+      summary: { synced: number; errors: number }
+    }
+    expect(body.synced).toEqual([])
+    expect(body.summary.errors).toBe(1)
+    expect(body.errors[0]!.error).toMatch(/broker_returned_empty_but_do_has_positions/)
+    expect(captured.calls).toEqual([])
+  })
+
+  it('?force=true bypasses safe-fail and applies destructive zero-out', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['SOXL'] },
+        positions: [], // broker empty
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings?force=true',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: Array<{ symbol: string; after: unknown }>
+      errors: unknown[]
+    }
+    expect(body.errors).toEqual([])
+    expect(captured.calls).toHaveLength(1)
+    expect(captured.calls[0]!.symbol).toBe('SOXL')
+    expect(captured.calls[0]!.args.qty).toBe(0)
+    expect(body.synced[0]!.after).toBeNull()
+  })
+
+  it('?dryRun=1 + broker empty + DO has positions: surfaces warning, no overrides', async () => {
+    const captured = { calls: [] as SyncOverrideCall[] }
+    const res = await withMocks(
+      {
+        universe: { allowedSymbols: ['SOXL'] },
+        positions: [],
+      },
+      async () => {
+        const app = createApp()
+        return app.request(
+          '/admin/orders/sync-holdings?dryRun=1',
+          { method: 'POST', headers: { ...authHeader } },
+          {
+            ...baseEnv,
+            DB: {} as unknown as D1Database,
+            SYMBOL_STATE: fakeSyncNamespace(captured, {
+              SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
+            }),
+          },
+        )
+      },
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      synced: Array<{ skipped?: string; before: { qty: number }; after: unknown }>
+      warnings?: string[]
+      dryRun: boolean
+    }
+    expect(body.dryRun).toBe(true)
+    expect(body.warnings).toEqual(['broker_returned_empty_diff_suspicious'])
+    expect(body.synced[0]!.skipped).toBe('dry_run')
+    expect(body.synced[0]!.before.qty).toBe(8)
+    expect(captured.calls).toEqual([])
+  })
+
   it('200s and reports broker fetch failures per-symbol (no overrides)', async () => {
     const captured = { calls: [] as SyncOverrideCall[] }
     const res = await withMocks(
