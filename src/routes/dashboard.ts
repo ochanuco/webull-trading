@@ -578,17 +578,37 @@ function unavailable(reason: string): string {
  *     にも残らない
  */
 function brokerProbeBody(args: { symbol: string; category: string }): string {
-  // 主要 symbol 候補は datalist で suggest (typing も自由)。US: ticker、JP は
-  // 4 桁 TSE code。JP_STOCK / JP_ETF は WebullQuoteCategory 上 unsupported
-  // (= cron は送らない) だが、probe は broker に直接投げて raw 応答を見るのが
-  // 役目なので allowlist 拡張と JP endpoint 動作確認のため選べるようにする。
+  // 主要 symbol 候補は datalist (typing 補完) と画面下のクリッカブル chip
+  // (一発入力) の二重で出す。datalist だけだと Chrome は input 値で filter
+  // するため、初期値 "SOXL" のままだと dropdown に SOXL しか出てこない。
+  // chip ボタンなら category とセットで一発切替えでき、JP/US 両方を発見可能。
+  // US: ticker、JP: 4 桁 TSE code。JP_STOCK / JP_ETF は WebullQuoteCategory 上
+  // unsupported (= cron は送らない) だが、probe は broker に直接投げて raw を
+  // 見るのが役目なので allowlist 拡張と JP endpoint 動作確認のため選べる。
+  const usStockSymbols = ['AAPL', 'NVDA', 'MSFT', 'GOOG']
+  const usEtfSymbols = ['SOXL', 'SOXS', 'SPY', 'QQQ']
+  const jpStockSymbols = ['7203', '7011', '6752', '6971', '9697']
+  const jpEtfSymbols = ['1570']
   const popularSymbols = [
-    'AAPL', 'SOXL', 'SOXS', 'NVDA', 'MSFT', 'GOOG', 'SPY', 'QQQ',
-    '7203', '7011', '6752', '6971', '9697', '1570',
+    ...usStockSymbols, ...usEtfSymbols, ...jpStockSymbols, ...jpEtfSymbols,
   ]
   const datalistOptions = popularSymbols
     .map((s) => `<option value="${esc(s)}"></option>`)
     .join('')
+  const renderChips = (symbols: string[], chipCategory: string): string =>
+    symbols
+      .map(
+        (s) =>
+          `<button type="button" class="probe-chip" data-symbol="${esc(s)}" data-category="${chipCategory}" style="padding:2px 8px;font-size:11px;border:1px solid #ccc;border-radius:12px;background:#f6f6f6;cursor:pointer">${esc(s)}</button>`,
+      )
+      .join(' ')
+  const chipsHtml = `<div style="display:flex;gap:14px;flex-wrap:wrap;margin:0 0 16px 0;font-size:11px;align-items:center">
+    <span class="muted">候補:</span>
+    <span><span class="muted">US_STOCK</span> ${renderChips(usStockSymbols, 'US_STOCK')}</span>
+    <span><span class="muted">US_ETF</span> ${renderChips(usEtfSymbols, 'US_ETF')}</span>
+    <span><span class="muted">JP_STOCK</span> ${renderChips(jpStockSymbols, 'JP_STOCK')}</span>
+    <span><span class="muted">JP_ETF</span> ${renderChips(jpEtfSymbols, 'JP_ETF')}</span>
+  </div>`
   const categoryOptions = (['US_STOCK', 'US_ETF', 'JP_STOCK', 'JP_ETF'] as const)
     .map((c) => `<option value="${c}"${c === args.category ? ' selected' : ''}>${c}</option>`)
     .join('')
@@ -616,6 +636,7 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
   <button type="submit" id="probe-submit" style="padding:6px 16px;font-size:14px;background:#06c;color:#fff;border:1px solid #06c;border-radius:4px;cursor:pointer">probe 実行</button>
   <span class="muted" id="probe-status" style="font-size:12px"></span>
 </form>
+${chipsHtml}
 <div id="probe-result" style="display:none;margin-top:8px">
   <h2 style="font-size:14px;margin:0 0 4px 0">quote (snapshot endpoint)</h2>
   <pre id="probe-quote" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all"></pre>
@@ -700,6 +721,19 @@ function brokerProbeBody(args: { symbol: string; category: string }): string {
       .finally(function () {
         submitBtn.disabled = false;
       });
+  });
+
+  // クリッカブル候補 chip。クリックで symbol input + category select を一発
+  // 上書きして submit 発火 (= 即 probe 実行)。datalist は Chrome の filter
+  // 挙動でデフォルト値と一致する候補しか出ない UX 問題への補助。
+  document.querySelectorAll('.probe-chip').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var sym = btn.getAttribute('data-symbol');
+      var cat = btn.getAttribute('data-category');
+      if (sym) symbolEl.value = sym;
+      if (cat) categoryEl.value = cat;
+      form.dispatchEvent(new Event('submit', { cancelable: true }));
+    });
   });
 
   // 初回読み込み時、URL に **両方** ?symbol & ?category がついてれば自動 probe
