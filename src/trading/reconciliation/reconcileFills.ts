@@ -229,14 +229,23 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       and(
         eq(tradeJournal.tradeEventType, 'post_submit'),
         eq(tradeJournal.submitted, true),
-        // Always require the lookback window for the "fresh poll" cohort.
-        // Repair-mode (retryStateApply=true) drops it for cohort (b) only,
-        // applied via the OR below.
+        // Lookback の適用は cohort 別に分かれる (#268):
+        //   - fresh poll cohort (broker_status NULL): broker への問合せが必要
+        //     なので、古い行を毎 tick 引っ張ると broker pressure になる
+        //     (default 48h cap)。
+        //   - repair cohort (broker_status='FILLED' AND state_applied_at NULL):
+        //     broker poll 不要 (broker_status 確認済)、DO RPC のみで軽量。
+        //     **lookback 無視で常に sweep** する。これにより長期保有 fill が
+        //     48h 経過後 aged-out で permanent split-brain になる事故を防ぐ。
+        //     行数爆発は SELECT LIMIT 50 で bounded、永続 fail 行は #228 の
+        //     auto-abandon (MAX_REPAIR_ATTEMPTS=5) で cohort から自動的に外れる。
+        //
+        // `retryStateApply` フラグは残してあるが #268 以降は no-op
+        // (互換性のため signature 維持、将来 admin 側で別 sweep モードに
+        // 再定義する余地)。
         or(
           and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since)),
-          options.retryStateApply
-            ? repairFilter
-            : and(repairFilter, gte(tradeJournal.timestamp, since)),
+          repairFilter,
         ),
       ),
     )
