@@ -548,18 +548,20 @@ export const admin = new Hono<AppBindings>()
         query: { account_id: accountId },
         version: 'v2',
       }),
-      // OLD: 現行 findOrderByClientId が叩く path + v1
+      // OLD: 現行 findOrderByClientId が叩く path + v1。
+      // page_size は broker 側の制約で 10-100 のみ受理 (`5` だと 417
+      // OAUTH_OPENAPI_PARAM_ERR、see #251 follow-up)。
       probeOnce({
         method: 'GET',
         path: '/openapi/account/orders/history',
-        query: { account_id: accountId, page_size: '5' },
+        query: { account_id: accountId, page_size: '10' },
         version: 'v1',
       }),
       // NEW: 新 OpenAPI docs の trade/order/history + v2
       probeOnce({
         method: 'GET',
         path: '/openapi/trade/order/history',
-        query: { account_id: accountId, page_size: '5' },
+        query: { account_id: accountId, page_size: '10' },
         version: 'v2',
       }),
     ])
