@@ -25,6 +25,22 @@ export interface WebullClientEnv {
    * have no intent to run margin-leveraged trades from this POC.
    */
   WEBULL_ACCOUNT_ID_JP_CASH?: string
+  /**
+   * #257: trade/account endpoint path の env override。新 OpenAPI docs
+   * (#251) で `/openapi/account/*` → `/openapi/assets/*` /
+   * `/openapi/trade/order/*` への drift があり、staging で env を切替えて
+   * 段階移行できるようにする。default は現行 path、未設定なら従来挙動。
+   *
+   * 旧 → 新の対応:
+   *   /openapi/account/positions       → /openapi/assets/positions
+   *   /openapi/account/orders/history  → /openapi/trade/order/history
+   *   /openapi/account/orders/place    → /openapi/trade/order/place
+   *
+   * 旧/新ともに alias で 200 が返ることは probe で確認済 (PR #262)。
+   */
+  WEBULL_PATH_POSITIONS?: string
+  WEBULL_PATH_ORDERS_HISTORY?: string
+  WEBULL_PATH_ORDERS_PLACE?: string
 }
 
 interface WebullRetryOptions {
@@ -42,7 +58,15 @@ interface WebullHttpClientOptions {
   timeoutMs?: number
   retry?: WebullRetryOptions
   fetchFn?: typeof fetch
+  /** #257: trade/account endpoint path overrides。default は旧 path。 */
+  positionsPath?: string
+  ordersHistoryPath?: string
+  ordersPlacePath?: string
 }
+
+const DEFAULT_POSITIONS_PATH = '/openapi/account/positions'
+const DEFAULT_ORDERS_HISTORY_PATH = '/openapi/account/orders/history'
+const DEFAULT_ORDERS_PLACE_PATH = '/openapi/account/orders/place'
 
 export class WebullHttpClient {
   private readonly baseUrl: string
@@ -51,6 +75,9 @@ export class WebullHttpClient {
   private readonly fetchFn: typeof fetch
   private readonly retry: Required<WebullRetryOptions>
   private readonly accountId: string | undefined
+  private readonly positionsPath: string
+  private readonly ordersHistoryPath: string
+  private readonly ordersPlacePath: string
 
   constructor(private readonly options: WebullHttpClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
@@ -66,6 +93,9 @@ export class WebullHttpClient {
       jitter: options.retry?.jitter ?? 0.25,
     }
     this.accountId = options.accountId
+    this.positionsPath = options.positionsPath ?? DEFAULT_POSITIONS_PATH
+    this.ordersHistoryPath = options.ordersHistoryPath ?? DEFAULT_ORDERS_HISTORY_PATH
+    this.ordersPlacePath = options.ordersPlacePath ?? DEFAULT_ORDERS_PLACE_PATH
   }
 
   async listSubscriptions(): Promise<WebullSubscriptionDto[]> {
@@ -98,7 +128,7 @@ export class WebullHttpClient {
   ): Promise<WebullOrderDetailDto | undefined> {
     const page = await this.request<unknown[]>(
       'GET',
-      '/openapi/account/orders/history',
+      this.ordersHistoryPath,
       {
         query: { account_id: this.requireAccountId(), page_size: String(pageSize) },
       },
@@ -124,7 +154,7 @@ export class WebullHttpClient {
    * https://developer.webull.com/apis/docs/reference/account-position/
    */
   async getPositions(): Promise<WebullPositionDto[]> {
-    return this.request<WebullPositionDto[]>('GET', '/openapi/account/positions', {
+    return this.request<WebullPositionDto[]>('GET', this.positionsPath, {
       query: { account_id: this.requireAccountId() },
     })
   }
@@ -158,7 +188,7 @@ export class WebullHttpClient {
     // Single CASH account handles both US and JP (multi-currency cash
     // account). v2 endpoint — JP UAT rejects the v1 `/trade/order/place`
     // body shape with ILLEGAL_PARAMETER.
-    return this.request<WebullPlaceOrderResponseDto>('POST', '/openapi/account/orders/place', {
+    return this.request<WebullPlaceOrderResponseDto>('POST', this.ordersPlacePath, {
       query: { account_id: this.requireAccountId() },
       body: toWebullPlaceOrderRequest(intent),
     })
@@ -339,6 +369,14 @@ export function createWebullHttpClient(
   env: WebullClientEnv,
   options?: { fetchFn?: typeof fetch; timeoutMs?: number; retry?: WebullRetryOptions },
 ): WebullHttpClient {
+  // #257: env で trade/account path を上書き可能。trim 済みかつ非空なら採用、
+  // 未設定 / 空文字 / whitespace-only は default にフォールバック (空文字を
+  // "設定済" とみなして broken request を投げないため)。
+  const trim = (v: string | undefined): string | undefined => {
+    if (typeof v !== 'string') return undefined
+    const t = v.trim()
+    return t.length === 0 ? undefined : t
+  }
   return new WebullHttpClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
@@ -349,6 +387,9 @@ export function createWebullHttpClient(
     timeoutMs: options?.timeoutMs,
     retry: options?.retry,
     fetchFn: options?.fetchFn,
+    positionsPath: trim(env.WEBULL_PATH_POSITIONS),
+    ordersHistoryPath: trim(env.WEBULL_PATH_ORDERS_HISTORY),
+    ordersPlacePath: trim(env.WEBULL_PATH_ORDERS_PLACE),
   })
 }
 

@@ -51,6 +51,22 @@ export interface Env {
   WEBULL_API_BASE?: string
   /** Override the snapshot endpoint path (POC: UAT 未確定なので env で差し替え). */
   WEBULL_QUOTE_PATH?: string
+  /**
+   * #257: trade/account endpoint path overrides。新 OpenAPI docs (#251) で
+   * `/openapi/account/*` → `/openapi/assets/*` / `/openapi/trade/order/*`
+   * への drift があり、staging で env を切替えて段階移行できる。default は
+   * 旧 path (= 現行挙動)、未設定 / 空 / whitespace のみ なら fallback。
+   *
+   *   旧                                  →  新
+   *   /openapi/account/positions          →  /openapi/assets/positions
+   *   /openapi/account/orders/history     →  /openapi/trade/order/history
+   *   /openapi/account/orders/place       →  /openapi/trade/order/place
+   *
+   * 旧/新 alias で両 200 確認済 (PR #262 probe / 2026-04-29 検証)。
+   */
+  WEBULL_PATH_POSITIONS?: string
+  WEBULL_PATH_ORDERS_HISTORY?: string
+  WEBULL_PATH_ORDERS_PLACE?: string
 }
 
 

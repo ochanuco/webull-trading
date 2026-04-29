@@ -18,6 +18,13 @@ WEBULL_APP_SECRET=
 WEBULL_ACCOUNT_ID=
 # Sandbox default. Use https://openapi.webull.com for production.
 WEBULL_API_BASE=https://api.sandbox.webull.hk
+
+# #257: trade/account endpoint path 上書き (optional)。default は旧 path
+# (/openapi/account/*)。staging で新 path に切替えるとき設定。空 / whitespace
+# のみは未設定扱い (= default fallback)。
+# WEBULL_PATH_POSITIONS=/openapi/assets/positions
+# WEBULL_PATH_ORDERS_HISTORY=/openapi/trade/order/history
+# WEBULL_PATH_ORDERS_PLACE=/openapi/trade/order/place
 ALLOWED_SYMBOLS=SOXL,SOXS
 MAX_ORDER_NOTIONAL=100
 SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
