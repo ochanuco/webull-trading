@@ -316,3 +316,21 @@ export interface Env {
    */
   DASHBOARD_BASE_URL?: string
 }
+
+
+// #257: trade/account endpoint path overrides (append at end / 共有ファイル
+// は末尾 append 規約)。新 OpenAPI docs (#251) で `/openapi/account/*` →
+// `/openapi/assets/positions` / `/openapi/trade/order/*` への drift。env を
+// 切替えるだけで段階移行できる。default は旧 path、未設定 / 空 / whitespace
+// のみ / `/` で始まらない値は fallback (絶対 URL 注入で WEBULL_API_BASE を
+// bypass する事故防止、CodeRabbit #264)。
+//
+//   旧                                  →  新
+//   /openapi/account/positions          →  /openapi/assets/positions
+//   /openapi/account/orders/history     →  /openapi/trade/order/history
+//   /openapi/account/orders/place       →  /openapi/trade/order/place
+export interface Env {
+  WEBULL_PATH_POSITIONS?: string
+  WEBULL_PATH_ORDERS_HISTORY?: string
+  WEBULL_PATH_ORDERS_PLACE?: string
+}

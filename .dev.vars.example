@@ -37,3 +37,11 @@ SLACK_WEBHOOK_URL=
 DISCORD_WEBHOOK_URL=
 # dashboard 通知 link の base URL (例: https://webull-trading.example.workers.dev)。
 DASHBOARD_BASE_URL=
+
+# #257: trade/account endpoint path 上書き (optional、append at end 規約)。
+# default は旧 path (/openapi/account/*)。staging で新 path に切替えるとき
+# 設定する。値は `/` で始まる絶対パスのみ受理、空 / whitespace / 相対 URL
+# は default fallback (broken request 投げない / WEBULL_API_BASE bypass 防止)。
+# WEBULL_PATH_POSITIONS=/openapi/assets/positions
+# WEBULL_PATH_ORDERS_HISTORY=/openapi/trade/order/history
+# WEBULL_PATH_ORDERS_PLACE=/openapi/trade/order/place
