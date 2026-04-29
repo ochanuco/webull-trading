@@ -15,23 +15,45 @@ export interface WebullSubscriptionDto {
 
 export type WebullMarket = 'US' | 'JP'
 
+/**
+ * Place Order body schema。#251 / #256 で v1 (旧 SDK) と v2 (新 OpenAPI docs)
+ * の差分対応のため、両方を許容する shape を持つ。version の選択は env
+ * (\`WEBULL_PLACE_ORDER_VERSION\`) で行い、mapper が schema 別の body を構築する。
+ *
+ * v1 (default / 現挙動):
+ *   - limit_price 必須 (MARKET orders にも safety cap として送る)
+ *   - support_trading_session: 'N'
+ *   - combo_type は無し
+ *   - account_id は query param 側
+ *
+ * v2 (新 docs / opt-in):
+ *   - limit_price は LIMIT/STOP_LOSS_LIMIT のときのみ required
+ *   - support_trading_session enum は \`NIGHT/ALL/CORE/ALL_DAY\` (旧 'N' は廃止)
+ *   - combo_type 必須 (\`'NORMAL'\` for non-combo single-leg)
+ *   - account_id は body へ
+ */
 export interface WebullV2OrderEntry {
   client_order_id: string
   symbol: string
   instrument_type: 'EQUITY'
   market: WebullMarket
   order_type: 'LIMIT' | 'MARKET'
-  /** MARKET orders still carry limit_price as a safety cap (Webull schema). */
-  limit_price: string
+  /** v1 必須 (MARKET でも safety cap)、v2 で MARKET は省略可。 */
+  limit_price?: string
   quantity: string
-  support_trading_session: 'N'
+  /** v1: 'N'、v2: 'CORE' (新 enum)。 */
+  support_trading_session: string
   side: 'BUY' | 'SELL'
   time_in_force: 'DAY'
   entrust_type: 'QTY'
   account_tax_type: 'GENERAL'
+  /** v2 のみ。combo / multi-leg 未対応 POC では常に 'NORMAL'。 */
+  combo_type?: 'NORMAL'
 }
 
 export interface WebullPlaceOrderRequestDto {
+  /** v2 で account_id を body 側に持つ場合に使用。v1 では未送信。 */
+  account_id?: string
   new_orders: [WebullV2OrderEntry]
 }
 
