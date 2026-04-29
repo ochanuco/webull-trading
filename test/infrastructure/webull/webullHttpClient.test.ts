@@ -702,4 +702,68 @@ describe('WebullHttpClient', () => {
       expect(new URL(fetchMock.mock.calls[0]![0] as string).pathname).toBe('/openapi/account/positions')
     })
   })
+
+  // #258: trade/account routes の x-version env override
+  describe('trade x-version env override (#258)', () => {
+    it('defaults to x-version: v1 when WEBULL_TRADE_VERSION is unset', async () => {
+      let captured: Headers | undefined
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+        captured = new Headers(init?.headers)
+        return new Response(JSON.stringify([]), { status: 200 })
+      })
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
+          WEBULL_API_BASE: 'https://broker.example.test',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.getPositions()
+      expect(captured?.get('x-version')).toBe('v1')
+    })
+
+    it('honours WEBULL_TRADE_VERSION=v2 override', async () => {
+      let captured: Headers | undefined
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+        captured = new Headers(init?.headers)
+        return new Response(JSON.stringify([]), { status: 200 })
+      })
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
+          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_VERSION: 'v2',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.getPositions()
+      expect(captured?.get('x-version')).toBe('v2')
+    })
+
+    it('rejects invalid version values (anything not v1/v2) and falls back to v1', async () => {
+      let captured: Headers | undefined
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+        captured = new Headers(init?.headers)
+        return new Response(JSON.stringify([]), { status: 200 })
+      })
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
+          WEBULL_API_BASE: 'https://broker.example.test',
+          // 任意文字列 / 空 / whitespace は v1 fallback (auth signing が壊れる
+          // のを防ぐ strict allow-list)
+          WEBULL_TRADE_VERSION: 'v3',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.getPositions()
+      expect(captured?.get('x-version')).toBe('v1')
+    })
+  })
 })

@@ -45,3 +45,10 @@ DASHBOARD_BASE_URL=
 # WEBULL_PATH_POSITIONS=/openapi/assets/positions
 # WEBULL_PATH_ORDERS_HISTORY=/openapi/trade/order/history
 # WEBULL_PATH_ORDERS_PLACE=/openapi/trade/order/place
+
+# #258: trade/account routes の x-version ヘッダ override (optional、append
+# 規約)。default 'v1' (= 現行)。新 docs では v2 推奨だが旧 path でも v1 alias
+# で受理されるので staging で 'v2' 切替え検証してから default 化する。
+# 受理値は 'v1' / 'v2' のみ、それ以外 (空 / whitespace / 任意文字列) は 'v1'
+# fallback (auth signing が壊れるのを防ぐ strict 受理)。
+# WEBULL_TRADE_VERSION=v2

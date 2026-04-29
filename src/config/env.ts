@@ -334,3 +334,14 @@ export interface Env {
   WEBULL_PATH_ORDERS_HISTORY?: string
   WEBULL_PATH_ORDERS_PLACE?: string
 }
+
+
+// #258: trade/account routes に送る x-version ヘッダ値の env override
+// (append at end)。default 'v1' (= 現行挙動)。新 OpenAPI docs では v2 必須化
+// の方向だが、旧 path も v1 alias で受理されてるので staging で env 切替えて
+// 検証してから default 化する。
+// 受理値は 'v1' / 'v2' のみ allow-list。それ以外 (空 / whitespace / 不正値)
+// は 'v1' fallback (任意文字列を渡すと auth signing が壊れるため strict)。
+export interface Env {
+  WEBULL_TRADE_VERSION?: string
+}

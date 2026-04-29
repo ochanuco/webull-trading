@@ -41,6 +41,13 @@ export interface WebullClientEnv {
   WEBULL_PATH_POSITIONS?: string
   WEBULL_PATH_ORDERS_HISTORY?: string
   WEBULL_PATH_ORDERS_PLACE?: string
+  /**
+   * #258: trade/account routes に送る x-version ヘッダ値。default 'v1'
+   * (= 現行挙動)、'v2' に opt-in 可能。新 docs では v2 推奨だが旧/新 path
+   * とも v1 alias が動いてるので staging で切替え試験できる。
+   * 未設定 / 空 / whitespace のみ / 'v1'/'v2' 以外 → 'v1' fallback。
+   */
+  WEBULL_TRADE_VERSION?: string
 }
 
 interface WebullRetryOptions {
@@ -62,11 +69,18 @@ interface WebullHttpClientOptions {
   positionsPath?: string
   ordersHistoryPath?: string
   ordersPlacePath?: string
+  /**
+   * #258: trade/account routes に送る x-version ヘッダ値。default 'v1' (= 現行
+   * 挙動)、env で 'v2' に opt-in 可能。新 OpenAPI docs では v2 必須化の方向だが
+   * v1 でも alias 受理されてるので staging で env 切替えて検証する。
+   */
+  tradeVersion?: string
 }
 
 const DEFAULT_POSITIONS_PATH = '/openapi/account/positions'
 const DEFAULT_ORDERS_HISTORY_PATH = '/openapi/account/orders/history'
 const DEFAULT_ORDERS_PLACE_PATH = '/openapi/account/orders/place'
+const DEFAULT_TRADE_VERSION = 'v1'
 
 export class WebullHttpClient {
   private readonly baseUrl: string
@@ -78,6 +92,7 @@ export class WebullHttpClient {
   private readonly positionsPath: string
   private readonly ordersHistoryPath: string
   private readonly ordersPlacePath: string
+  private readonly tradeVersion: string
 
   constructor(private readonly options: WebullHttpClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
@@ -96,6 +111,7 @@ export class WebullHttpClient {
     this.positionsPath = options.positionsPath ?? DEFAULT_POSITIONS_PATH
     this.ordersHistoryPath = options.ordersHistoryPath ?? DEFAULT_ORDERS_HISTORY_PATH
     this.ordersPlacePath = options.ordersPlacePath ?? DEFAULT_ORDERS_PLACE_PATH
+    this.tradeVersion = options.tradeVersion ?? DEFAULT_TRADE_VERSION
   }
 
   async listSubscriptions(): Promise<WebullSubscriptionDto[]> {
@@ -220,7 +236,9 @@ export class WebullHttpClient {
         body: payload,
         host: resolvedUrl.host,
         // Webull SDK sets x-version=v1 for the documented trade/account routes.
-        version: 'v1',
+        // 新 OpenAPI docs (#251 / #258) では v2 必須化の方向。env override
+        // (`WEBULL_TRADE_VERSION`) で staging 切替え可能、default は v1。
+        version: this.tradeVersion,
       })
     } catch (error) {
       throw new BrokerRequestError(
@@ -382,6 +400,15 @@ export function createWebullHttpClient(
     if (!t.startsWith('/')) return undefined
     return t
   }
+  // #258: x-version は 'v1' / 'v2' のみ allow-list 受理。それ以外 (空 /
+  // whitespace / 不正値) は undefined を返して default ('v1') に fallback。
+  // 任意文字列を通すと broker auth signing が壊れるため strict validation。
+  const validateVersion = (v: string | undefined): string | undefined => {
+    if (typeof v !== 'string') return undefined
+    const t = v.trim()
+    if (t === 'v1' || t === 'v2') return t
+    return undefined
+  }
   return new WebullHttpClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
@@ -395,6 +422,7 @@ export function createWebullHttpClient(
     positionsPath: trim(env.WEBULL_PATH_POSITIONS),
     ordersHistoryPath: trim(env.WEBULL_PATH_ORDERS_HISTORY),
     ordersPlacePath: trim(env.WEBULL_PATH_ORDERS_PLACE),
+    tradeVersion: validateVersion(env.WEBULL_TRADE_VERSION),
   })
 }
 
