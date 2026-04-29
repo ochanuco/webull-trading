@@ -369,13 +369,18 @@ export function createWebullHttpClient(
   env: WebullClientEnv,
   options?: { fetchFn?: typeof fetch; timeoutMs?: number; retry?: WebullRetryOptions },
 ): WebullHttpClient {
-  // #257: env で trade/account path を上書き可能。trim 済みかつ非空なら採用、
-  // 未設定 / 空文字 / whitespace-only は default にフォールバック (空文字を
-  // "設定済" とみなして broken request を投げないため)。
+  // #257: env で trade/account path を上書き可能。受理条件:
+  //   - 文字列であること
+  //   - trim 後が非空
+  //   - `/` で始まる絶対パス (= WEBULL_API_BASE を bypass する絶対 URL を弾く、
+  //     CodeRabbit #264 finding)
+  // 上記を満たさない場合は undefined を返して default path にフォールバック。
   const trim = (v: string | undefined): string | undefined => {
     if (typeof v !== 'string') return undefined
     const t = v.trim()
-    return t.length === 0 ? undefined : t
+    if (t.length === 0) return undefined
+    if (!t.startsWith('/')) return undefined
+    return t
   }
   return new WebullHttpClient({
     auth: new WebullAuth({

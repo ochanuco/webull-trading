@@ -51,22 +51,6 @@ export interface Env {
   WEBULL_API_BASE?: string
   /** Override the snapshot endpoint path (POC: UAT 未確定なので env で差し替え). */
   WEBULL_QUOTE_PATH?: string
-  /**
-   * #257: trade/account endpoint path overrides。新 OpenAPI docs (#251) で
-   * `/openapi/account/*` → `/openapi/assets/*` / `/openapi/trade/order/*`
-   * への drift があり、staging で env を切替えて段階移行できる。default は
-   * 旧 path (= 現行挙動)、未設定 / 空 / whitespace のみ なら fallback。
-   *
-   *   旧                                  →  新
-   *   /openapi/account/positions          →  /openapi/assets/positions
-   *   /openapi/account/orders/history     →  /openapi/trade/order/history
-   *   /openapi/account/orders/place       →  /openapi/trade/order/place
-   *
-   * 旧/新 alias で両 200 確認済 (PR #262 probe / 2026-04-29 検証)。
-   */
-  WEBULL_PATH_POSITIONS?: string
-  WEBULL_PATH_ORDERS_HISTORY?: string
-  WEBULL_PATH_ORDERS_PLACE?: string
 }
 
 
@@ -331,4 +315,22 @@ export interface Env {
    * (例: `https://webull-trading.example.workers.dev`)。未設定なら link 省略。
    */
   DASHBOARD_BASE_URL?: string
+}
+
+
+// #257: trade/account endpoint path overrides (append at end / 共有ファイル
+// は末尾 append 規約)。新 OpenAPI docs (#251) で `/openapi/account/*` →
+// `/openapi/assets/positions` / `/openapi/trade/order/*` への drift。env を
+// 切替えるだけで段階移行できる。default は旧 path、未設定 / 空 / whitespace
+// のみ / `/` で始まらない値は fallback (絶対 URL 注入で WEBULL_API_BASE を
+// bypass する事故防止、CodeRabbit #264)。
+//
+//   旧                                  →  新
+//   /openapi/account/positions          →  /openapi/assets/positions
+//   /openapi/account/orders/history     →  /openapi/trade/order/history
+//   /openapi/account/orders/place       →  /openapi/trade/order/place
+export interface Env {
+  WEBULL_PATH_POSITIONS?: string
+  WEBULL_PATH_ORDERS_HISTORY?: string
+  WEBULL_PATH_ORDERS_PLACE?: string
 }

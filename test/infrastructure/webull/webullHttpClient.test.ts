@@ -633,10 +633,10 @@ describe('WebullHttpClient', () => {
       expect(u.pathname).toBe('/openapi/account/positions')
     })
 
-    it('honours WEBULL_PATH_POSITIONS / WEBULL_PATH_ORDERS_HISTORY env overrides', async () => {
+    it('honours WEBULL_PATH_POSITIONS / WEBULL_PATH_ORDERS_HISTORY / WEBULL_PATH_ORDERS_PLACE env overrides', async () => {
       // mockImplementation で毎回新しい Response を返す (body を二度読みしないため)
       const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
-        new Response(JSON.stringify([]), { status: 200 }),
+        new Response(JSON.stringify({ client_order_id: 'test-coid', order_id: 'oid-1' }), { status: 200 }),
       )
       const client = createWebullHttpClient(
         {
@@ -646,6 +646,7 @@ describe('WebullHttpClient', () => {
           WEBULL_API_BASE: 'https://broker.example.test',
           WEBULL_PATH_POSITIONS: '/openapi/assets/positions',
           WEBULL_PATH_ORDERS_HISTORY: '/openapi/trade/order/history',
+          WEBULL_PATH_ORDERS_PLACE: '/openapi/trade/order/place',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
       )
@@ -653,6 +654,32 @@ describe('WebullHttpClient', () => {
       expect(new URL(fetchMock.mock.calls[0]![0] as string).pathname).toBe('/openapi/assets/positions')
       await client.findOrderByClientId('coid')
       expect(new URL(fetchMock.mock.calls[1]![0] as string).pathname).toBe('/openapi/trade/order/history')
+      await client.placeOrder(intent)
+      expect(new URL(fetchMock.mock.calls[2]![0] as string).pathname).toBe('/openapi/trade/order/place')
+    })
+
+    it('rejects override values that are not absolute paths (security: prevent base URL bypass)', async () => {
+      // 絶対 URL や相対値だと WEBULL_API_BASE を bypass されるリスクがあるので、
+      // `/` で始まらない値は default fallback (CodeRabbit #264)。
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
+        new Response(JSON.stringify([]), { status: 200 }),
+      )
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
+          WEBULL_API_BASE: 'https://broker.example.test',
+          // 絶対 URL や 相対 path は reject されて default fallback
+          WEBULL_PATH_POSITIONS: 'https://attacker.example.com/positions',
+          WEBULL_PATH_ORDERS_HISTORY: 'orders/history',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.getPositions()
+      const url = new URL(fetchMock.mock.calls[0]![0] as string)
+      expect(url.host).toBe('broker.example.test')
+      expect(url.pathname).toBe('/openapi/account/positions')
     })
 
     it('treats whitespace-only env override as unset (falls back to default)', async () => {
