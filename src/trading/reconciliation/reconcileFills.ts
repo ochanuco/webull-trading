@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, eq, gte, isNull, or, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/sqlite-core'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
@@ -250,7 +250,14 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       ),
     )
     .groupBy(tradeJournal.id)
-    .orderBy(desc(tradeJournal.id))
+    // ASC = 古い順 = chain 依存 (BUY → SELL) が natural 順で 1 tick 内解決
+    // (#270)。DESC だと SELL を先に処理して DO 上ポジ無し→ "Cannot SELL
+    // without an open position" の false-positive alert が出る。
+    // 古い行を全部捌いてから新しい行に進むので、long-term 蓄積した repair
+    // cohort も時系列どおり apply される。LIMIT 50 + 5min cron で「古い行
+    // 優先で詰まって新しい行が遅延」状況は long-term 蓄積でしか起きない
+    // (= 別問題、#228 auto-abandon と組み合わせれば自然に収束)。
+    .orderBy(asc(tradeJournal.id))
     .limit(limit)
 
   const uniqueCandidates = dedupeCandidatesByRowId(candidates)
