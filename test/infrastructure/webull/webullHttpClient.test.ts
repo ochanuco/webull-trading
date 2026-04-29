@@ -766,4 +766,86 @@ describe('WebullHttpClient', () => {
       expect(captured?.get('x-version')).toBe('v1')
     })
   })
+
+  // #256: Place Order body schema version の env override
+  describe('place order schema env override (#256)', () => {
+    it('defaults to v1 schema (account_id in query, support_trading_session=N, limit_price sent)', async () => {
+      let capturedUrl: URL | undefined
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let capturedBody: any
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+        capturedUrl = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined
+        return new Response(JSON.stringify({ client_order_id: 'coid', order_id: 'oid' }), { status: 200 })
+      })
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
+          WEBULL_API_BASE: 'https://broker.example.test',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.placeOrder(intent)
+      expect(capturedUrl?.searchParams.get('account_id')).toBe('acct-1')
+      expect(capturedBody.account_id).toBeUndefined()
+      const order = capturedBody.new_orders[0]
+      expect(order.support_trading_session).toBe('N')
+      expect(order.limit_price).toBeDefined()
+      expect(order.combo_type).toBeUndefined()
+    })
+
+    it('honours WEBULL_PLACE_ORDER_SCHEMA=v2 (account_id in body, combo_type=NORMAL, session=CORE, no limit_price)', async () => {
+      let capturedUrl: URL | undefined
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let capturedBody: any
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+        capturedUrl = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined
+        return new Response(JSON.stringify({ client_order_id: 'coid', order_id: 'oid' }), { status: 200 })
+      })
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
+          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_PLACE_ORDER_SCHEMA: 'v2',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.placeOrder(intent)
+      expect(capturedUrl?.searchParams.get('account_id')).toBeNull() // v2 は query に無い
+      expect(capturedBody.account_id).toBe('acct-1') // v2 は body 側
+      const order = capturedBody.new_orders[0]
+      expect(order.combo_type).toBe('NORMAL')
+      expect(order.support_trading_session).toBe('CORE')
+      expect(order.limit_price).toBeUndefined() // MARKET では送らない
+    })
+
+    it('rejects invalid schema values and falls back to v1', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let capturedBody: any
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+        capturedBody = init?.body ? JSON.parse(init.body as string) : undefined
+        return new Response(JSON.stringify({ client_order_id: 'coid', order_id: 'oid' }), { status: 200 })
+      })
+      const client = createWebullHttpClient(
+        {
+          WEBULL_APP_KEY: 'k',
+          WEBULL_APP_SECRET: 's',
+          WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
+          WEBULL_API_BASE: 'https://broker.example.test',
+          // 任意文字列 / 空 は v1 fallback (broken body 防止)
+          WEBULL_PLACE_ORDER_SCHEMA: 'v3',
+        },
+        { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
+      )
+      await client.placeOrder(intent)
+      // v1 fallback の挙動を確認
+      expect(capturedBody.new_orders[0].support_trading_session).toBe('N')
+      expect(capturedBody.account_id).toBeUndefined()
+    })
+  })
 })

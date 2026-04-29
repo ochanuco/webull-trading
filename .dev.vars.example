@@ -52,3 +52,9 @@ DASHBOARD_BASE_URL=
 # 受理値は 'v1' / 'v2' のみ、それ以外 (空 / whitespace / 任意文字列) は 'v1'
 # fallback (auth signing が壊れるのを防ぐ strict 受理)。
 # WEBULL_TRADE_VERSION=v2
+
+# #256: Place Order body schema version (optional、append 規約)。default 'v1'
+# (現挙動)、'v2' で新 docs 形式 (combo_type=NORMAL / session=CORE / MARKET
+# は limit_price 不要 / account_id を body)。受理値は 'v1' / 'v2' のみ、
+# それ以外 (空 / whitespace / 任意文字列) は 'v1' fallback。
+# WEBULL_PLACE_ORDER_SCHEMA=v2

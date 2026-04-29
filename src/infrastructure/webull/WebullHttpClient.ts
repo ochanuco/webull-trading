@@ -8,7 +8,7 @@ import type {
   WebullPositionDto,
   WebullSubscriptionDto,
 } from './dto'
-import { toWebullPlaceOrderRequest } from './mapper'
+import { toWebullPlaceOrderRequest, type PlaceOrderSchemaVersion } from './mapper'
 import { WebullAuth } from './WebullAuth'
 
 export interface WebullClientEnv {
@@ -48,6 +48,12 @@ export interface WebullClientEnv {
    * 未設定 / 空 / whitespace のみ / 'v1'/'v2' 以外 → 'v1' fallback。
    */
   WEBULL_TRADE_VERSION?: string
+  /**
+   * #256: Place Order body schema version。'v1' (default / 現挙動) か 'v2'
+   * (新 OpenAPI docs)。受理値は 'v1' / 'v2' のみ allow-list、それ以外は
+   * 'v1' fallback。
+   */
+  WEBULL_PLACE_ORDER_SCHEMA?: string
 }
 
 interface WebullRetryOptions {
@@ -75,12 +81,19 @@ interface WebullHttpClientOptions {
    * v1 でも alias 受理されてるので staging で env 切替えて検証する。
    */
   tradeVersion?: string
+  /**
+   * #256: Place Order body schema version。'v1' (default / 現挙動) か 'v2'
+   * (新 OpenAPI docs)。v2 だと combo_type=NORMAL、session=CORE、
+   * limit_price (MARKET) 省略、account_id を body 側へ移動する。
+   */
+  placeOrderSchema?: PlaceOrderSchemaVersion
 }
 
 const DEFAULT_POSITIONS_PATH = '/openapi/account/positions'
 const DEFAULT_ORDERS_HISTORY_PATH = '/openapi/account/orders/history'
 const DEFAULT_ORDERS_PLACE_PATH = '/openapi/account/orders/place'
 const DEFAULT_TRADE_VERSION = 'v1'
+const DEFAULT_PLACE_ORDER_SCHEMA: PlaceOrderSchemaVersion = 'v1'
 
 export class WebullHttpClient {
   private readonly baseUrl: string
@@ -93,6 +106,7 @@ export class WebullHttpClient {
   private readonly ordersHistoryPath: string
   private readonly ordersPlacePath: string
   private readonly tradeVersion: string
+  private readonly placeOrderSchema: PlaceOrderSchemaVersion
 
   constructor(private readonly options: WebullHttpClientOptions) {
     this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
@@ -112,6 +126,7 @@ export class WebullHttpClient {
     this.ordersHistoryPath = options.ordersHistoryPath ?? DEFAULT_ORDERS_HISTORY_PATH
     this.ordersPlacePath = options.ordersPlacePath ?? DEFAULT_ORDERS_PLACE_PATH
     this.tradeVersion = options.tradeVersion ?? DEFAULT_TRADE_VERSION
+    this.placeOrderSchema = options.placeOrderSchema ?? DEFAULT_PLACE_ORDER_SCHEMA
   }
 
   async listSubscriptions(): Promise<WebullSubscriptionDto[]> {
@@ -204,9 +219,16 @@ export class WebullHttpClient {
     // Single CASH account handles both US and JP (multi-currency cash
     // account). v2 endpoint — JP UAT rejects the v1 `/trade/order/place`
     // body shape with ILLEGAL_PARAMETER.
+    //
+    // #256: schema が v2 のときは account_id を body 側に移動 (新 docs)、
+    //   query には付けない。v1 (default) は従来どおり query。
+    const accountId = this.requireAccountId()
+    const body = toWebullPlaceOrderRequest(intent, this.placeOrderSchema, accountId)
+    const query: Record<string, string> =
+      this.placeOrderSchema === 'v2' ? {} : { account_id: accountId }
     return this.request<WebullPlaceOrderResponseDto>('POST', this.ordersPlacePath, {
-      query: { account_id: this.requireAccountId() },
-      body: toWebullPlaceOrderRequest(intent),
+      query,
+      body,
     })
   }
 
@@ -409,6 +431,15 @@ export function createWebullHttpClient(
     if (t === 'v1' || t === 'v2') return t
     return undefined
   }
+  // #256: Place Order body schema version の strict allow-list 受理。
+  // 'v1' / 'v2' 以外 (空 / whitespace / 任意文字列) は undefined → default 'v1'。
+  // 任意文字列を通すと broken body schema を broker に送って order が壊れる。
+  const validateOrderSchema = (v: string | undefined): PlaceOrderSchemaVersion | undefined => {
+    if (typeof v !== 'string') return undefined
+    const t = v.trim()
+    if (t === 'v1' || t === 'v2') return t
+    return undefined
+  }
   return new WebullHttpClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
@@ -423,6 +454,7 @@ export function createWebullHttpClient(
     ordersHistoryPath: trim(env.WEBULL_PATH_ORDERS_HISTORY),
     ordersPlacePath: trim(env.WEBULL_PATH_ORDERS_PLACE),
     tradeVersion: validateVersion(env.WEBULL_TRADE_VERSION),
+    placeOrderSchema: validateOrderSchema(env.WEBULL_PLACE_ORDER_SCHEMA),
   })
 }
 

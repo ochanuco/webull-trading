@@ -345,3 +345,18 @@ export interface Env {
 export interface Env {
   WEBULL_TRADE_VERSION?: string
 }
+
+
+// #256: Place Order body schema version の env override (append at end)。
+// 'v1' (default / 現挙動) と 'v2' (新 OpenAPI docs) を切替え可能。受理値は
+// 'v1' / 'v2' のみ allow-list、それ以外 (空 / whitespace / 任意文字列) は
+// 'v1' fallback (任意文字列で broken body を broker に送らないため strict)。
+//
+// v2 にすると mapper は以下に変更:
+//   - combo_type: 'NORMAL' を必ず付ける
+//   - support_trading_session: 'N' → 'CORE' (新 enum、'N' は廃止)
+//   - MARKET 注文では limit_price を送らない (LIMIT のときのみ required)
+//   - account_id を query → body に移動
+export interface Env {
+  WEBULL_PLACE_ORDER_SCHEMA?: string
+}
