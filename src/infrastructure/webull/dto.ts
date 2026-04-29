@@ -18,7 +18,7 @@ export type WebullMarket = 'US' | 'JP'
 /**
  * Place Order body schema。#251 / #256 で v1 (旧 SDK) と v2 (新 OpenAPI docs)
  * の差分対応のため、両方を許容する shape を持つ。version の選択は env
- * (\`WEBULL_PLACE_ORDER_VERSION\`) で行い、mapper が schema 別の body を構築する。
+ * (\`WEBULL_PLACE_ORDER_SCHEMA\`) で行い、mapper が schema 別の body を構築する。
  *
  * v1 (default / 現挙動):
  *   - limit_price 必須 (MARKET orders にも safety cap として送る)
