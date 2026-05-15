@@ -232,8 +232,8 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     // hard delete button only on inactive row (active 行は無効化先行を要求)
     expect(body).toContain('/admin/symbol-config/7203/delete')
     expect(body).not.toContain('/admin/symbol-config/SOXL/delete')
-    // counts
-    expect(body).toContain('active 1 / inactive 1')
+    // counts (post-cleanup format)
+    expect(body).toContain('有効 1 / 無効 1')
   })
 
   // --- POST add ---
