@@ -366,14 +366,36 @@ describe('dashboard events UI (#293)', () => {
   })
 
   it('clamp upper bound is inclusive at +365d but rejects +366d', async () => {
-    // withinClampRange は date-only inclusive。`now + 366d` は範囲外として 400 を返すこと。
-    const earningsRepo = fakeEarningsRepo()
+    // withinClampRange は date-only inclusive。`now + 365d` は通り、`now + 366d` は 400。
     const macroRepo = fakeMacroRepo()
     vi.mocked(createDb).mockReturnValue(
       fakeListDb([]) as unknown as ReturnType<typeof createDb>,
     )
+    // +365d (inclusive boundary): 受理されて 303 redirect になること
+    const earningsRepo365 = fakeEarningsRepo()
+    const day365 = new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10)
+    const okRes = await withFakeRepos(earningsRepo365, macroRepo, async () => {
+      const app = createApp()
+      const form = new URLSearchParams()
+      form.set('symbol', 'AAPL')
+      form.set('earnings_date', day365)
+      return app.request(
+        '/dashboard/events/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+          body: form.toString(),
+        },
+        { ...baseEnv, DB: {} as D1Database },
+      )
+    })
+    expect(okRes.status).toBe(303)
+    expect(earningsRepo365.bulkUpsert).toHaveBeenCalled()
+
+    // +366d (out of range): 400 + 入力 form 再描画
+    const earningsRepo366 = fakeEarningsRepo()
     const day366 = new Date(Date.now() + 366 * 86_400_000).toISOString().slice(0, 10)
-    const res = await withFakeRepos(earningsRepo, macroRepo, async () => {
+    const badRes = await withFakeRepos(earningsRepo366, macroRepo, async () => {
       const app = createApp()
       const form = new URLSearchParams()
       form.set('symbol', 'AAPL')
@@ -388,10 +410,10 @@ describe('dashboard events UI (#293)', () => {
         { ...baseEnv, DB: {} as D1Database },
       )
     })
-    expect(res.status).toBe(400)
-    const body = await res.text()
+    expect(badRes.status).toBe(400)
+    const body = await badRes.text()
     expect(body).toContain('過去 90 日 〜 未来 365 日')
-    expect(earningsRepo.bulkUpsert).not.toHaveBeenCalled()
+    expect(earningsRepo366.bulkUpsert).not.toHaveBeenCalled()
   })
 
   it('seed earnings with symbol outside universe → save succeeds + warning rendered', async () => {
