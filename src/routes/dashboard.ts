@@ -15,7 +15,7 @@ type DashboardBindings = AppBindings & {
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
-import { formatSymbolDisplay } from '../shared/format'
+import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
 import {
@@ -548,19 +548,14 @@ function clampLimit(raw: string | undefined): number {
 }
 
 /**
- * HTML entity escaper. Used on every string derived from D1 / DO payloads
- * (symbol names, error messages, etc.) before interpolating into HTML to
- * defend against injection via crafted config rows.
+ * HTML entity escaper. Thin alias over shared `escapeHtml` (#284) — every
+ * D1 / DO-derived string (symbol names, error messages, audit JSON, alerts
+ * cause / message, …) passes through this before interpolation. Without it
+ * an attacker who can write `notes` / `reason` / `before_json` could inject
+ * a <script> that submits the kill-switch / seed-cash form on the
+ * operator's session.
  */
-function esc(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
+const esc = escapeHtml
 
 function fmtNumber(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '-'

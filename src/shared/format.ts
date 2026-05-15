@@ -27,3 +27,21 @@ export function formatSymbolDisplay(input: SymbolDisplayInput): string {
   }
   return input.symbol
 }
+
+/**
+ * HTML entity escaper for DB-derived / user-controllable strings interpolated
+ * into server-rendered HTML. Defends against XSS that would otherwise pivot
+ * into kill-switch / seed-cash CSRF (#284).
+ *
+ * - null / undefined → "" (so `${escapeHtml(x ?? null)}` is safe)
+ * - escapes `& < > " '` (`'` for single-quoted attribute safety)
+ */
+export function escapeHtml(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
