@@ -6103,18 +6103,25 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px;width:280px">
       ${
         knownBuckets.length > 0
-          ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
-               <span class="muted" style="font-size:11px;margin-right:4px">既存 (click で挿入):</span>
-               ${knownBuckets
-                 .map(
-                   (b) =>
-                     `<button type="button" onclick="window.pickSymbolFormBucket('${esc(b).replace(/'/g, '&#39;')}')" style="padding:2px 8px;font-size:11px;background:#fff;border:1px solid #d0d0d5;border-radius:12px;cursor:pointer;color:#06c">${esc(b)}</button>`,
-                 )
-                 .join('')}
+          ? `<div style="margin-top:8px">
+               ${
+                 knownBuckets.length > 6
+                   ? `<input type="search" id="symbol-form-bucket-filter" placeholder="🔍 chip を絞り込み" oninput="window.filterSymbolFormBucketChips(this.value)" style="padding:4px 8px;font-size:12px;width:240px;margin-bottom:4px"><br>`
+                   : ''
+               }
+               <div id="symbol-form-bucket-chips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+                 <span class="muted" style="font-size:11px;margin-right:4px">既存 (click で挿入):</span>
+                 ${knownBuckets
+                   .map(
+                     (b) =>
+                       `<button type="button" data-bucket="${esc(b)}" onclick="window.pickSymbolFormBucket('${esc(b).replace(/'/g, '&#39;')}')" style="padding:2px 8px;font-size:11px;background:#eef;border:1px solid #b0c4f5;border-radius:12px;cursor:pointer;color:#06c">${esc(b)}</button>`,
+                   )
+                   .join('')}
+               </div>
              </div>`
           : ''
       }
-      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。空欄なら bucket 未分類。</p>
+      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。空欄なら bucket 未分類。新規 bucket は上の入力欄に直接入力。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
@@ -6142,6 +6149,17 @@ function symbolFormBody(args: SymbolFormArgs): string {
       if (input) {
         input.value = val;
         input.focus();
+      }
+    };
+    window.filterSymbolFormBucketChips = function (q) {
+      var container = document.getElementById('symbol-form-bucket-chips');
+      if (!container) return;
+      var needle = (q || '').toLowerCase();
+      var chips = container.querySelectorAll('button[data-bucket]');
+      for (var i = 0; i < chips.length; i++) {
+        var c = chips[i];
+        var name = (c.getAttribute('data-bucket') || '').toLowerCase();
+        c.hidden = needle.length > 0 && name.indexOf(needle) === -1;
       }
     };
     window.lookupSymbolAutoFill = async function () {
