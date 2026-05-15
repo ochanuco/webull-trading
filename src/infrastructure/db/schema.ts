@@ -553,3 +553,49 @@ export const macroEventCalendar = sqliteTable(
 
 export type MacroEventCalendarRow = typeof macroEventCalendar.$inferSelect
 export type MacroEventCalendarInsert = typeof macroEventCalendar.$inferInsert
+
+/**
+ * Append-only audit trail of state-changing admin POST calls (#274). One row per
+ * mutation: `before_json` / `after_json` are `JSON.stringify`'d snapshots of the
+ * affected resource so dashboard can render diffs without re-fetching state.
+ *
+ * Rows are written by `recordChange()` only when before != after — pure no-op
+ * calls (e.g. seed-cash with the same amount) are skipped to keep the table
+ * focused on actual changes.
+ *
+ * `actor` is the basic-auth username, falling back to `'ai-agent'` when the
+ * header is missing or unparseable. `target_key` is a free-form short string
+ * (e.g. `symbol=SOXL` / `portfolio=daily`) so a single endpoint with multiple
+ * resources (`/earnings/seed`) can still group rows.
+ */
+export const configAuditLog = sqliteTable(
+  'config_audit_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    timestamp: text('timestamp').notNull(),
+    actor: text('actor').notNull(),
+    endpoint: text('endpoint').notNull(),
+    targetKey: text('target_key'),
+    beforeJson: text('before_json').notNull(),
+    afterJson: text('after_json').notNull(),
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    // dashboard `/dashboard/audit` は timestamp DESC で読む。id を tiebreak に
+    // 含めて同 timestamp の順序を安定化 (notification_emit_log 相当の対応)。
+    timestampIdIdx: index('config_audit_log_timestamp_id_idx').on(t.timestamp, t.id),
+    actorTimestampIdIdx: index('config_audit_log_actor_timestamp_id_idx').on(
+      t.actor,
+      t.timestamp,
+      t.id,
+    ),
+    endpointTimestampIdIdx: index('config_audit_log_endpoint_timestamp_id_idx').on(
+      t.endpoint,
+      t.timestamp,
+      t.id,
+    ),
+  }),
+)
+
+export type ConfigAuditLogRow = typeof configAuditLog.$inferSelect
+export type ConfigAuditLogInsert = typeof configAuditLog.$inferInsert

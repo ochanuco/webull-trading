@@ -7,6 +7,11 @@ import { formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
 import {
+  loadRecentAudit,
+  type ConfigAuditRow,
+  type LoadAuditOptions,
+} from '../infrastructure/db/configAuditLog'
+import {
   loadRecentAlerts,
   type AlertRow,
   type LoadAlertOptions,
@@ -412,6 +417,41 @@ export const dashboard = new Hono<AppBindings>()
       return c.html(layout('アラート', unavailable(messageOf(err))))
     }
   })
+  .get('/audit', async (c) => {
+    if (!c.env.DB) {
+      return c.html(layout('監査ログ', unavailable('DB not bound')))
+    }
+    const limit = clampAuditLimit(c.req.query('limit'))
+    const actorFilter = trimQuery(c.req.query('actor'))
+    const endpointFilter = trimQuery(c.req.query('endpoint'))
+    const fromFilter = parseAuditDateFilter(c.req.query('from'), false)
+    const toFilter = parseAuditDateFilter(c.req.query('to'), true)
+    const options: LoadAuditOptions = { limit }
+    if (actorFilter) options.actor = actorFilter
+    if (endpointFilter) options.endpoint = endpointFilter
+    if (fromFilter) options.fromIso = fromFilter
+    if (toFilter) options.toIso = toFilter
+    try {
+      const rows = await loadRecentAudit(c.env.DB, options)
+      return c.html(
+        layout(
+          '監査ログ',
+          auditBody({
+            rows,
+            limit,
+            actorFilter,
+            endpointFilter,
+            fromFilter: c.req.query('from') ?? '',
+            toFilter: c.req.query('to') ?? '',
+          }),
+        ),
+      )
+    } catch (err) {
+      // 0016 migration 未適用 (= config_audit_log テーブル無し) を 500 にせず
+      // unavailable に落とす。段階的デプロイ時の自己保護 (alerts と同パターン)。
+      return c.html(layout('監査ログ', unavailable(messageOf(err))))
+    }
+  })
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -560,6 +600,7 @@ function layout(title: string, body: string): string {
   <a href="/dashboard/cron">Cron</a>
   <a href="/dashboard/charts">チャート</a>
   <a href="/dashboard/alerts">アラート</a>
+  <a href="/dashboard/audit">監査ログ</a>
   <a href="/dashboard/broker-probe" title="Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ">broker 診断</a>
 </nav>
 ${body}
@@ -945,6 +986,7 @@ function indexBody(): string {
   <li><a href="/dashboard/cron">Cron 判定</a> — <code>strategy_decision_log</code> 直近 (<code>?symbol=SOXL</code> で絞り込み可)</li>
   <li><a href="/dashboard/charts">チャート</a> — 概要 (エクイティカーブ + ドローダウン) / 取引品質 (PnL 分布 + 統計 + Decision breakdown) / 個別銘柄 (price + SMA50 + entry/exit) を tab 切替</li>
   <li><a href="/dashboard/alerts">アラート</a> — Slack/Discord に push 通知した critical / warning / info の直近 (#141)。webhook 未設定でも D1 に記録される。</li>
+  <li><a href="/dashboard/audit">監査ログ</a> — 状態変更系 admin POST の before/after 差分 (#274)。actor / endpoint / 日付で絞り込み可。</li>
 </ul>`
 }
 
@@ -1787,6 +1829,100 @@ export function renderAlertFilterPills(
     ),
   ].join('')
   return `<nav style="margin-bottom:12px">${sev}<span class="muted" style="margin:0 8px">|</span>${ev}</nav>`
+}
+
+interface AuditBodyArgs {
+  rows: ConfigAuditRow[]
+  limit: number
+  actorFilter: string | undefined
+  endpointFilter: string | undefined
+  /** Raw query string values for the form inputs (passthrough so a typo round-trips). */
+  fromFilter: string
+  toFilter: string
+}
+
+/**
+ * `/dashboard/audit` の HTML 本文 (#274)。
+ *
+ *   - 直近 100 件 (`?limit=N` で 1〜500)
+ *   - actor / endpoint / from / to で絞り込み (GET form)
+ *   - before_json / after_json は `<details>` で展開表示
+ */
+function auditBody(args: AuditBodyArgs): string {
+  const { rows, limit, actorFilter, endpointFilter, fromFilter, toFilter } = args
+  const form = `<form method="get" action="/dashboard/audit" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+  <label>actor<br><input name="actor" value="${esc(actorFilter ?? '')}" placeholder="ai-agent" style="padding:4px 8px"></label>
+  <label>endpoint<br><input name="endpoint" value="${esc(endpointFilter ?? '')}" placeholder="/admin/symbols/:symbol/seed-cash" style="padding:4px 8px;min-width:280px"></label>
+  <label>from<br><input name="from" type="date" value="${esc(fromFilter)}" style="padding:4px 8px"></label>
+  <label>to<br><input name="to" type="date" value="${esc(toFilter)}" style="padding:4px 8px"></label>
+  <label>limit<br><input name="limit" type="number" min="1" max="500" value="${limit}" style="padding:4px 8px;width:90px"></label>
+  <button type="submit" style="padding:6px 14px">絞り込み</button>
+  <a href="/dashboard/audit" style="padding:6px 14px;text-decoration:none">リセット</a>
+</form>`
+  const header = `<p class="muted">直近 ${rows.length} 件 (limit=${limit}, max 500)。状態変更系 admin POST の before/after diff。before == after の no-op 呼び出しは記録されません。</p>`
+  if (rows.length === 0) {
+    return `${header}${form}<p class="muted">該当する監査ログは見つかりませんでした。</p>`
+  }
+  const tbody = rows
+    .map((r) => {
+      return `<tr>
+        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
+        <td><strong>${esc(r.actor)}</strong></td>
+        <td><code>${esc(r.endpoint)}</code></td>
+        <td>${esc(r.targetKey ?? '-')}</td>
+        <td><details><summary class="muted">before</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;background:#fafafa;padding:6px;border-radius:4px">${esc(formatAuditJson(r.beforeJson))}</pre></details></td>
+        <td><details><summary class="muted">after</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;background:#fafafa;padding:6px;border-radius:4px">${esc(formatAuditJson(r.afterJson))}</pre></details></td>
+        <td class="muted"><code>${esc(r.requestId ?? '-')}</code></td>
+      </tr>`
+    })
+    .join('')
+  return `${header}${form}
+  <table>
+    <thead><tr>
+      <th>timestamp (JST)</th><th>actor</th><th>endpoint</th><th>target</th><th>before</th><th>after</th><th>requestId</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>`
+}
+
+/**
+ * `?limit=N` を 1〜500 に丸める。`/dashboard/audit` 既定 100。
+ */
+function clampAuditLimit(raw: string | undefined): number {
+  const n = raw === undefined ? 100 : Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n <= 0) return 100
+  return Math.min(n, 500)
+}
+
+function trimQuery(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * `YYYY-MM-DD` 日付フィルタを ISO timestamp に展開。`isEnd=true` は `T23:59:59.999Z`、
+ * false は `T00:00:00.000Z` を付ける (UTC base — 監査ログの timestamp は
+ * ISO UTC で書かれる)。文法が合わない値は undefined を返す (フィルタ skip)。
+ */
+function parseAuditDateFilter(raw: string | undefined, isEnd: boolean): string | undefined {
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return undefined
+  return isEnd ? `${trimmed}T23:59:59.999Z` : `${trimmed}T00:00:00.000Z`
+}
+
+/**
+ * `before_json` / `after_json` を整形して表示。JSON parse が成功すれば 2-space
+ * indent、失敗 (= マイグレ前の raw 文字列など) は原文をそのまま返す。
+ */
+function formatAuditJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
 }
 
 function cronBody(

@@ -1,5 +1,6 @@
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import type { AppBindings } from '../app'
 import { ValidationError } from '../shared/errors'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
@@ -13,7 +14,8 @@ import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
-import { tradeJournal } from '../infrastructure/db/schema'
+import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastructure/db/schema'
+import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
@@ -61,6 +63,7 @@ export const admin = new Hono<AppBindings>()
     const args = readOverridePositionBody(body)
 
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
+    const before = await safeGetSymbolState(client, symbol)
     const state = await client.overridePosition(symbol, {
       qty: args.qty,
       avgPrice: args.avgPrice,
@@ -68,6 +71,13 @@ export const admin = new Hono<AppBindings>()
       reason: args.reason,
       requestId: c.get('requestId'),
     })
+    await writeAuditLog(
+      c,
+      '/admin/symbol-state/:symbol/override-position',
+      `symbol=${symbol}`,
+      { position: before?.position ?? null },
+      { position: state.position, reason: args.reason },
+    )
     return c.json({
       symbol,
       position: state.position,
@@ -87,7 +97,15 @@ export const admin = new Hono<AppBindings>()
     const amount = readAmount(body)
 
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
+    const before = await safeGetSymbolState(client, symbol)
     const state = await client.seedSettledCash(symbol, amount)
+    await writeAuditLog(
+      c,
+      '/admin/symbols/:symbol/seed-cash',
+      `symbol=${symbol}`,
+      { settledCash: before?.settledCash ?? null },
+      { settledCash: state.settledCash },
+    )
     return c.json({ symbol, settledCash: state.settledCash, updatedAt: state.updatedAt })
   })
   /**
@@ -106,7 +124,15 @@ export const admin = new Hono<AppBindings>()
     }
     const pastIso = new Date(0).toISOString()
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
+    const before = await safeGetSymbolState(client, symbol)
     const state = await client.setCooldown(symbol, pastIso)
+    await writeAuditLog(
+      c,
+      '/admin/symbols/:symbol/clear-cooldown',
+      `symbol=${symbol}`,
+      { cooldownUntil: before?.cooldownUntil ?? null },
+      { cooldownUntil: state.cooldownUntil },
+    )
     return c.json({
       symbol,
       cooldownUntil: state.cooldownUntil,
@@ -610,6 +636,19 @@ export const admin = new Hono<AppBindings>()
     }
     const client = new PortfolioStateClient(c.env.PORTFOLIO_STATE)
     const { before, after } = await client.rollDaily()
+    await writeAuditLog(
+      c,
+      '/admin/portfolio/roll-daily',
+      'portfolio=daily',
+      {
+        dailyStartEquity: before.dailyStartEquity,
+        dailyRealizedPnl: before.dailyRealizedPnl,
+      },
+      {
+        dailyStartEquity: after.dailyStartEquity,
+        dailyRealizedPnl: after.dailyRealizedPnl,
+      },
+    )
     return c.json({
       rolledAt: after.updatedAt,
       rolledDelta: before.dailyRealizedPnl,
@@ -633,7 +672,15 @@ export const admin = new Hono<AppBindings>()
     const amount = readAmount(body)
 
     const client = new PortfolioStateClient(c.env.PORTFOLIO_STATE)
+    const before = await safeGetPortfolioState(client)
     const state = await client.seedDailyStartEquity(amount)
+    await writeAuditLog(
+      c,
+      '/admin/portfolio/seed-equity',
+      'portfolio=daily',
+      { dailyStartEquity: before?.dailyStartEquity ?? null },
+      { dailyStartEquity: state.dailyStartEquity },
+    )
     return c.json({
       dailyStartEquity: state.dailyStartEquity,
       dailyRealizedPnl: state.dailyRealizedPnl,
@@ -671,6 +718,15 @@ export const admin = new Hono<AppBindings>()
     })
     const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
     const result = await repo.bulkUpsert(records)
+    if (result.inserted > 0) {
+      await writeAuditLog(
+        c,
+        '/admin/earnings/seed',
+        `inserted=${result.inserted}`,
+        null,
+        { inserted: result.inserted, skipped: result.skipped, records },
+      )
+    }
     return c.json({ inserted: result.inserted, skipped: result.skipped, total: records.length })
   })
   /**
@@ -699,10 +755,17 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError("'id' must be a positive integer path param", { field: 'id' })
     }
     const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+    const beforeRow = await createDb(c.env.DB)
+      .select()
+      .from(earningsCalendar)
+      .where(eq(earningsCalendar.id, id))
+      .then((rows) => rows[0] ?? null)
+      .catch(() => null)
     const ok = await repo.deleteById(id)
     if (!ok) {
       return c.json({ error: 'earnings_row_not_found', id }, 404)
     }
+    await writeAuditLog(c, '/admin/earnings/:id', `earnings_id=${id}`, beforeRow, null)
     return c.json({ deleted: true, id })
   })
   /**
@@ -738,6 +801,15 @@ export const admin = new Hono<AppBindings>()
     })
     const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
     const result = await repo.bulkUpsert(records)
+    if (result.inserted > 0) {
+      await writeAuditLog(
+        c,
+        '/admin/macro-events/seed',
+        `inserted=${result.inserted}`,
+        null,
+        { inserted: result.inserted, skipped: result.skipped, records },
+      )
+    }
     return c.json({ inserted: result.inserted, skipped: result.skipped, total: records.length })
   })
   /**
@@ -799,10 +871,17 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError("'id' must be a positive integer path param", { field: 'id' })
     }
     const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+    const beforeRow = await createDb(c.env.DB)
+      .select()
+      .from(macroEventCalendar)
+      .where(eq(macroEventCalendar.id, id))
+      .then((rows) => rows[0] ?? null)
+      .catch(() => null)
     const ok = await repo.deleteById(id)
     if (!ok) {
       return c.json({ error: 'macro_event_row_not_found', id }, 404)
     }
+    await writeAuditLog(c, '/admin/macro-events/:id', `macro_event_id=${id}`, beforeRow, null)
     return c.json({ deleted: true, id })
   })
 
@@ -1055,6 +1134,69 @@ function parseTruthyQuery(value: string | undefined): boolean {
   if (value === undefined) return false
   const normalized = value.trim().toLowerCase()
   return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+
+/**
+ * 状態変更系 admin POST 用の audit log writer (#274)。基本認証 user を header
+ * から抽出し `recordChange` で diff 1 行を書く。`env.DB` が無い / D1 が落ちて
+ * いるケースは log を skip (handler 本体の状態変更は既に成立しているため、
+ * audit の欠落で 500 を返したくない)。before == after は recordChange 側で
+ * no-op skip される。
+ */
+async function writeAuditLog(
+  c: Context<AppBindings>,
+  endpoint: string,
+  targetKey: string | null,
+  before: unknown,
+  after: unknown,
+): Promise<void> {
+  if (!c.env.DB) return
+  const actor = extractActor(c.req.header('Authorization'))
+  try {
+    await recordChange(c.env.DB, {
+      actor,
+      endpoint,
+      targetKey,
+      before,
+      after,
+      requestId: c.get('requestId') ?? null,
+    })
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        event: 'config_audit_log_write_failed',
+        endpoint,
+        targetKey,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  }
+}
+
+/**
+ * `client.getState(symbol)` を safe wrap。stub に getState が無い (legacy fake)
+ * / DO 呼び出しが throw した場合は `null` を返す — audit ログの before snapshot
+ * が取れないだけで、handler 本体の状態変更は止めない。
+ */
+async function safeGetSymbolState(
+  client: SymbolStateClient,
+  symbol: string,
+): Promise<Awaited<ReturnType<SymbolStateClient['getState']>> | null> {
+  try {
+    return await client.getState(symbol)
+  } catch {
+    return null
+  }
+}
+
+async function safeGetPortfolioState(
+  client: PortfolioStateClient,
+): Promise<Awaited<ReturnType<PortfolioStateClient['getPortfolio']>> | null> {
+  try {
+    return await client.getPortfolio()
+  } catch {
+    return null
+  }
 }
 
 /**
