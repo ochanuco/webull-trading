@@ -874,7 +874,10 @@ const esc = escapeHtml
 
 function fmtNumber(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '-'
-  return n.toFixed(digits)
+  return n.toLocaleString('ja-JP', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })
 }
 
 const JST_FORMATTER = new Intl.DateTimeFormat('en-CA', {
@@ -2533,7 +2536,7 @@ function describeCronReason(reason: string | null | undefined): string {
 function formatRealizedPnl(value: number): string {
   const sign = value > 0 ? '+' : ''
   const cls = value > 0 ? 'ok' : value < 0 ? 'err' : 'muted'
-  return `<span class="${cls}">${sign}${value.toFixed(2)}</span>`
+  return `<span class="${cls}">${sign}${value.toLocaleString('ja-JP', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>`
 }
 
 /**
@@ -5932,20 +5935,20 @@ function symbolsListBody(args: {
       const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
       const toggleAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/toggle-active`
       const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
-      // soft delete は active=false にするだけ (FK 影響回避)。既に inactive なら
-      // ボタン自体を出さない (no-op 防止) — toggle で対応可能。
+      // hard delete は inactive 行のみ。active 行に削除を出すと「無効化」と機能重複に
+      // なるため、運用フローを「先に無効化 → 確認 → 削除」と段階化。
       const deleteForm = r.active
-        ? `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を無効化 (soft delete) します。本当によろしいですか？');">
+        ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
+        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去)。元に戻せません。よろしいですか？');">
             <button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button>
           </form>`
-        : '<span class="muted" style="font-size:11px">—</span>'
       return `<tr${rowClass}>
         <td><strong><span${symbolClass}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
         <td>${esc(r.market)}</td>
         <td>${esc(r.currency)}</td>
         <td>${stateLabel}</td>
-        <td>${r.maxNotional === null ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>' : `${esc(r.maxNotional)} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`}</td>
+        <td>${r.maxNotional === null ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>' : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`}</td>
         <td>${esc(r.bucket ?? '')}</td>
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted">${esc(fmtJst(r.updatedAt))}</td>
@@ -5996,6 +5999,10 @@ function symbolErrorMessage(code: string, symbol: string | null): string {
         : 'symbol は既に登録済みです。'
     case 'not_found':
       return sym ? `symbol "${sym}" が見つかりません。` : 'symbol が見つかりません。'
+    case 'still_active':
+      return sym
+        ? `symbol "${sym}" は有効化中のため削除できません。先に無効化してから削除してください。`
+        : 'symbol が有効化中のため削除できません。先に無効化してください。'
     case 'validation':
       return '入力値に誤りがあります。'
     default:
