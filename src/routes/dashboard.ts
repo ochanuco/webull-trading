@@ -6099,29 +6099,10 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
     </div>
     <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
-    <div>
-      <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px;width:280px">
-      ${
-        knownBuckets.length > 0
-          ? `<div style="margin-top:8px">
-               ${
-                 knownBuckets.length > 6
-                   ? `<input type="search" id="symbol-form-bucket-filter" placeholder="🔍 chip を絞り込み" oninput="window.filterSymbolFormBucketChips(this.value)" style="padding:4px 8px;font-size:12px;width:240px;margin-bottom:4px"><br>`
-                   : ''
-               }
-               <div id="symbol-form-bucket-chips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
-                 <span class="muted" style="font-size:11px;margin-right:4px">既存 (click で挿入):</span>
-                 ${knownBuckets
-                   .map(
-                     (b) =>
-                       `<button type="button" data-bucket="${esc(b)}" onclick="window.pickSymbolFormBucket('${esc(b).replace(/'/g, '&#39;')}')" style="padding:2px 8px;font-size:11px;background:#eef;border:1px solid #b0c4f5;border-radius:12px;cursor:pointer;color:#06c">${esc(b)}</button>`,
-                   )
-                   .join('')}
-               </div>
-             </div>`
-          : ''
-      }
-      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。空欄なら bucket 未分類。新規 bucket は上の入力欄に直接入力。</p>
+    <div style="position:relative">
+      <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" autocomplete="off" placeholder="例: semi / us_large_cap / jp_auto (任意)" oninput="window.suggestSymbolFormBucket(this.value)" onfocus="window.suggestSymbolFormBucket(this.value)" onblur="setTimeout(window.hideSymbolFormBucketSuggest, 150)" style="padding:6px;width:280px">
+      <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownBuckets))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:280px;max-height:200px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存値の候補が出る (新規でもそのまま入力で OK)。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
@@ -6144,23 +6125,37 @@ function symbolFormBody(args: SymbolFormArgs): string {
       if (sel) sel.value = cur;
       window.syncSymbolFormCurrencyUnits(cur);
     };
+    window.hideSymbolFormBucketSuggest = function () {
+      var list = document.getElementById('symbol-form-bucket-suggest');
+      if (list) list.style.display = 'none';
+    };
+    window.suggestSymbolFormBucket = function (q) {
+      var list = document.getElementById('symbol-form-bucket-suggest');
+      var input = document.getElementById('symbol-form-bucket-input');
+      if (!list || !input) return;
+      var query = (q || '').toLowerCase().trim();
+      if (query.length < 2) {
+        list.style.display = 'none';
+        return;
+      }
+      var known = [];
+      try { known = JSON.parse(list.getAttribute('data-known') || '[]'); } catch (e) {}
+      var matches = known.filter(function (b) { return b.toLowerCase().indexOf(query) !== -1 && b.toLowerCase() !== query; });
+      if (matches.length === 0) {
+        list.style.display = 'none';
+        return;
+      }
+      list.innerHTML = matches.map(function (b) {
+        var safe = String(b).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        return '<li data-bucket="' + safe + '" style="padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee" onmousedown="window.pickSymbolFormBucket(this.getAttribute(\'data-bucket\'))" onmouseover="this.style.background=\'#eef\'" onmouseout="this.style.background=\'#fff\'">' + safe + '</li>';
+      }).join('');
+      list.style.display = 'block';
+    };
     window.pickSymbolFormBucket = function (val) {
       var input = document.getElementById('symbol-form-bucket-input');
-      if (input) {
-        input.value = val;
-        input.focus();
-      }
-    };
-    window.filterSymbolFormBucketChips = function (q) {
-      var container = document.getElementById('symbol-form-bucket-chips');
-      if (!container) return;
-      var needle = (q || '').toLowerCase();
-      var chips = container.querySelectorAll('button[data-bucket]');
-      for (var i = 0; i < chips.length; i++) {
-        var c = chips[i];
-        var name = (c.getAttribute('data-bucket') || '').toLowerCase();
-        c.hidden = needle.length > 0 && name.indexOf(needle) === -1;
-      }
+      if (input) input.value = val;
+      window.hideSymbolFormBucketSuggest();
+      if (input) input.focus();
     };
     window.lookupSymbolAutoFill = async function () {
       var symInput = document.getElementById('symbol-form-symbol');
