@@ -1,5 +1,6 @@
+import { eq } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
-import { inversePairs, symbolConfig } from './schema'
+import { inversePairs, symbolConfig, type SymbolConfigRow } from './schema'
 
 export type SymbolCurrency = 'USD' | 'JPY'
 export type SymbolMarket = 'US' | 'JP'
@@ -107,6 +108,129 @@ export async function loadSymbolConfig(
     symbolName,
     symbolNotes,
   }
+}
+
+/**
+ * symbol_config 1 行を返す。CRUD UI (#292) の before/after snapshot に使う。
+ * 未存在は `null`。
+ */
+export async function findSymbolConfig(
+  db: DrizzleD1Database,
+  symbol: string,
+): Promise<SymbolConfigRow | null> {
+  const rows = await db.select().from(symbolConfig).where(eq(symbolConfig.symbol, symbol)).limit(1)
+  return rows[0] ?? null
+}
+
+export interface SymbolConfigWriteInput {
+  symbol: string
+  name: string | null
+  market: SymbolMarket
+  currency: SymbolCurrency
+  active: boolean
+  maxNotional: number | null
+  bucket: string | null
+  notes: string | null
+}
+
+/**
+ * CRUD UI (#292) で symbol_config に新規 INSERT する。symbol 既存なら null を
+ * 返し caller が 409 を返す。INSERT 後の最新行を返す。
+ */
+export async function insertSymbolConfig(
+  db: DrizzleD1Database,
+  input: SymbolConfigWriteInput,
+  nowIso: string,
+): Promise<SymbolConfigRow | null> {
+  const existing = await findSymbolConfig(db, input.symbol)
+  if (existing !== null) return null
+  await db.insert(symbolConfig).values({
+    symbol: input.symbol,
+    name: input.name,
+    market: input.market,
+    currency: input.currency,
+    active: input.active,
+    maxNotional: input.maxNotional,
+    bucket: input.bucket,
+    notes: input.notes,
+    updatedAt: nowIso,
+  })
+  return await findSymbolConfig(db, input.symbol)
+}
+
+/**
+ * CRUD UI (#292) で symbol_config を全列 update する。存在しなければ null を
+ * 返し caller が 404 を返す。symbol 自体は path から固定で来るので変更不可。
+ */
+export async function updateSymbolConfig(
+  db: DrizzleD1Database,
+  input: SymbolConfigWriteInput,
+  nowIso: string,
+): Promise<SymbolConfigRow | null> {
+  const existing = await findSymbolConfig(db, input.symbol)
+  if (existing === null) return null
+  await db
+    .update(symbolConfig)
+    .set({
+      name: input.name,
+      market: input.market,
+      currency: input.currency,
+      active: input.active,
+      maxNotional: input.maxNotional,
+      bucket: input.bucket,
+      notes: input.notes,
+      updatedAt: nowIso,
+    })
+    .where(eq(symbolConfig.symbol, input.symbol))
+  return await findSymbolConfig(db, input.symbol)
+}
+
+/**
+ * Flip `active` 1↔0 atomically (read-modify-write). Not found → null。
+ */
+export async function toggleSymbolActive(
+  db: DrizzleD1Database,
+  symbol: string,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  // Snapshot before.active BEFORE running update — some fake DBs share the
+  // row reference so re-fetching could surface the post-update value (and
+  // recordChange would then skip the audit row as a "no-op").
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  const nextActive = !before.active
+  await db
+    .update(symbolConfig)
+    .set({ active: nextActive, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
+}
+
+/**
+ * Soft delete (active=false)。hard delete は FK 影響回避のため避ける。
+ * 既に active=false なら no-op (before==after で audit log も skip される)。
+ */
+export async function softDeleteSymbol(
+  db: DrizzleD1Database,
+  symbol: string,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  if (!before.active) {
+    return { before: beforeSnapshot, after: beforeSnapshot }
+  }
+  await db
+    .update(symbolConfig)
+    .set({ active: false, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
 }
 
 /**

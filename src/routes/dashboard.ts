@@ -18,7 +18,13 @@ import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
-import { MAX_TIME_STOP_DAYS, strategyDecisionLog, tradeJournal } from '../infrastructure/db/schema'
+import {
+  MAX_TIME_STOP_DAYS,
+  strategyDecisionLog,
+  symbolConfig,
+  tradeJournal,
+  type SymbolConfigRow,
+} from '../infrastructure/db/schema'
 import {
   loadRecentAudit,
   type ConfigAuditRow,
@@ -497,6 +503,48 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err))))
     }
   })
+  /**
+   * 銘柄管理 (#292) — symbol_config CRUD UI。
+   *
+   * list / new / edit の 3 ページのみ render する read 系。POST は
+   * `/admin/symbol-config[/...]` に form submit → 303 redirect で戻る (PRG)。
+   */
+  .get('/symbols', async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '銘柄管理', unavailable('DB not bound')))
+    }
+    try {
+      const rows = await loadAllSymbolConfigRows(c.env.DB)
+      return c.html(renderLayout(c, '銘柄管理', symbolsListBody({ rows })))
+    } catch (err) {
+      return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
+    }
+  })
+  .get('/symbols/new', (c) => {
+    return c.html(
+      renderLayout(c, '銘柄管理 - 新規追加', symbolFormBody({ mode: 'new', row: null, error: null })),
+    )
+  })
+  .get('/symbols/:symbol/edit', async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable('DB not bound')))
+    }
+    const symbol = (c.req.param('symbol') ?? '').trim().toUpperCase()
+    if (symbol.length === 0) {
+      return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable('symbol path param required')))
+    }
+    try {
+      const row = await findSymbolConfigForView(c.env.DB, symbol)
+      if (row === null) {
+        return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(`symbol "${symbol}" not found`)))
+      }
+      return c.html(
+        renderLayout(c, '銘柄管理 - 編集', symbolFormBody({ mode: 'edit', row, error: null })),
+      )
+    } catch (err) {
+      return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(messageOf(err))))
+    }
+  })
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -719,6 +767,7 @@ function layout(title: string, body: string, env?: unknown): string {
   <a href="/dashboard/alerts">アラート</a>
   <span class="nav-group">運用</span>
   <a href="/dashboard/config">設定</a>
+  <a href="/dashboard/symbols">銘柄管理</a>
   <a href="/dashboard/audit">監査ログ</a>
   <a href="/dashboard/broker-probe" title="Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ">broker 診断</a>
 </nav>
@@ -1116,6 +1165,7 @@ function indexBody(): string {
 <h2 style="font-size:14px;margin:16px 0 4px 0">運用</h2>
 <ul>
   <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
+  <li><a href="/dashboard/symbols">銘柄管理</a> — <code>symbol_config</code> CRUD (#292)。追加 / 編集 / 有効化切替 / soft delete。</li>
   <li><a href="/dashboard/audit">監査ログ</a> — 状態変更系 admin POST の before/after 差分 (#274)。actor / endpoint / 日付で絞り込み可。</li>
   <li><a href="/dashboard/broker-probe">broker 診断</a> — Webull broker へ直接 quote / positions を投げて raw レスポンスを観察 (接続診断用)。</li>
 </ul>`
@@ -5565,4 +5615,144 @@ function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
   return `<p class="muted" style="font-size:12px">
     銘柄: <strong>${esc(focusLabel)}</strong>${focusBadge} | 切替: ${opts}
   </p>`
+}
+
+/**
+ * 銘柄管理 (#292) ページの SELECT。`symbol_config` 全行 (active + inactive)
+ * を symbol ASC で返す。dashboard 表示専用。
+ */
+async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[]> {
+  const drizzle = createDb(db)
+  return await drizzle.select().from(symbolConfig).orderBy(asc(symbolConfig.symbol))
+}
+
+async function findSymbolConfigForView(
+  db: D1Database,
+  symbol: string,
+): Promise<SymbolConfigRow | null> {
+  const drizzle = createDb(db)
+  const rows = await drizzle
+    .select()
+    .from(symbolConfig)
+    .where(eq(symbolConfig.symbol, symbol))
+    .limit(1)
+  return rows[0] ?? null
+}
+
+function symbolsListBody(args: { rows: SymbolConfigRow[] }): string {
+  const { rows } = args
+  const headerBar = `<p style="margin:0 0 12px">
+    <a href="/dashboard/symbols/new" style="padding:6px 12px;background:#06c;color:#fff;border-radius:4px;text-decoration:none">+ 新規追加</a>
+    <span class="muted" style="margin-left:12px;font-size:12px">${rows.length} 件 (active ${rows.filter((r) => r.active).length} / inactive ${rows.filter((r) => !r.active).length})</span>
+  </p>`
+  if (rows.length === 0) {
+    return `${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
+  }
+  const tbody = rows
+    .map((r) => {
+      const inactive = !r.active
+      const rowClass = inactive ? ' class="symbol-disabled-row"' : ''
+      const symbolClass = inactive ? ' class="symbol-disabled"' : ''
+      const stateLabel = r.active
+        ? '<span class="ok">active</span>'
+        : '<span class="muted">inactive</span>'
+      const toggleLabel = r.active ? '無効化' : '有効化'
+      const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
+      const toggleAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/toggle-active`
+      const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
+      // soft delete は active=false にするだけ (FK 影響回避)。既に inactive なら
+      // ボタン自体を出さない (no-op 防止) — toggle で対応可能。
+      const deleteForm = r.active
+        ? `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を無効化 (soft delete) します。本当によろしいですか？');">
+            <button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button>
+          </form>`
+        : '<span class="muted" style="font-size:11px">—</span>'
+      return `<tr${rowClass}>
+        <td><strong><span${symbolClass}>${esc(r.symbol)}</span></strong></td>
+        <td>${esc(r.name ?? '')}</td>
+        <td>${esc(r.market)}</td>
+        <td>${esc(r.currency)}</td>
+        <td>${stateLabel}</td>
+        <td>${r.maxNotional === null ? '<span class="muted">—</span>' : esc(r.maxNotional)}</td>
+        <td>${esc(r.bucket ?? '')}</td>
+        <td>${esc(r.notes ?? '')}</td>
+        <td class="muted">${esc(fmtJst(r.updatedAt))}</td>
+        <td>
+          <a href="${esc(editHref)}" style="padding:3px 8px;font-size:12px;text-decoration:none">編集</a>
+          <form method="post" action="${esc(toggleAction)}" style="display:inline">
+            <button type="submit" style="padding:3px 8px;font-size:12px;cursor:pointer">${esc(toggleLabel)}</button>
+          </form>
+          ${deleteForm}
+        </td>
+      </tr>`
+    })
+    .join('')
+  return `${headerBar}
+  <table>
+    <thead><tr>
+      <th>symbol</th><th>name</th><th>market</th><th>currency</th><th>状態</th>
+      <th>max_notional</th><th>bucket</th><th>notes</th><th>updated_at</th><th>操作</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>`
+}
+
+interface SymbolFormArgs {
+  mode: 'new' | 'edit'
+  row: SymbolConfigRow | null
+  /** validation error message — POST handler が re-render する時に渡す。 */
+  error: string | null
+}
+
+function symbolFormBody(args: SymbolFormArgs): string {
+  const { mode, row, error } = args
+  const action =
+    mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
+  const symbolValue = row?.symbol ?? ''
+  const nameValue = row?.name ?? ''
+  const marketValue = row?.market ?? 'US'
+  const currencyValue = row?.currency ?? 'USD'
+  const activeChecked = (row?.active ?? true) ? ' checked' : ''
+  const maxNotionalValue = row?.maxNotional === null || row?.maxNotional === undefined ? '' : String(row.maxNotional)
+  const bucketValue = row?.bucket ?? ''
+  const notesValue = row?.notes ?? ''
+  const symbolField =
+    mode === 'edit'
+      ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">`
+      : `<input type="text" name="symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" style="padding:6px">`
+  const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
+  const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
+  return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
+  ${errBlock}
+  <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:120px 1fr;gap:8px;max-width:560px;align-items:center">
+    <label>symbol</label>${symbolField}
+    <label>name</label>
+    <input type="text" name="name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
+    <label>market</label>
+    <select name="market" required style="padding:6px">
+      <option value="US"${marketValue === 'US' ? ' selected' : ''}>US</option>
+      <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP</option>
+    </select>
+    <label>currency</label>
+    <select name="currency" required style="padding:6px">
+      <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD</option>
+      <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY</option>
+    </select>
+    <label>active</label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="active" value="false">
+      <input type="checkbox" name="active" value="true"${activeChecked}> 有効
+    </label>
+    <label>max_notional</label>
+    <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0" placeholder="空欄で global default を使用" style="padding:6px">
+    <label>bucket</label>
+    <input type="text" name="bucket" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap" style="padding:6px">
+    <label>notes</label>
+    <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
+    <span></span>
+    <div style="display:flex;gap:8px">
+      <button type="submit" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
+      <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
+    </div>
+  </form>`
 }

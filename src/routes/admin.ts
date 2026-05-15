@@ -18,6 +18,15 @@ import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastructure/db/schema'
 import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 import {
+  findSymbolConfig,
+  insertSymbolConfig,
+  softDeleteSymbol,
+  toggleSymbolActive,
+  updateSymbolConfig,
+  type SymbolConfigWriteInput,
+} from '../infrastructure/db/symbolConfigRepo'
+import type { SymbolConfigRow } from '../infrastructure/db/schema'
+import {
   applyTradingToggle,
   createTradingToggleDb,
 } from '../infrastructure/db/tradingToggleRepo'
@@ -947,6 +956,119 @@ export const admin = new Hono<AppBindings>()
     await writeAuditLog(c, '/admin/macro-events/:id', `macro_event_id=${id}`, beforeRow, null)
     return c.json({ deleted: true, id })
   })
+  /**
+   * symbol_config CRUD (#292) — UI からの form POST 用 endpoint 群。
+   *
+   * `/admin/symbol-config`               INSERT (重複 symbol は 409)
+   * `/admin/symbol-config/:symbol/update` 全列 UPDATE
+   * `/admin/symbol-config/:symbol/toggle-active` active 1↔0
+   * `/admin/symbol-config/:symbol/delete` soft delete (active=false; hard delete はしない)
+   *
+   * いずれも `rateLimit('ADMIN_WRITE')` + `writeAuditLog` を経由する。
+   * dashboard form (application/x-www-form-urlencoded) からの POST を想定し、
+   * 成功時は 303 redirect で `/dashboard/symbols` に戻す (PRG)。JSON body も
+   * 同じ shape で受理し、JSON Accept (= ヘッダ無し) の場合は 200 JSON を返す。
+   */
+  .post('/symbol-config', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const isForm = isFormContentType(c.req.header('content-type'))
+    const body = await readFormOrJsonBody(c)
+    const input = parseSymbolConfigBody(body)
+    const db = createDb(c.env.DB)
+    const inserted = await insertSymbolConfig(db, input, new Date().toISOString())
+    if (inserted === null) {
+      // 409 with JSON. Form path would normally re-render but caller pattern
+      // here mirrors macro/earnings: dashboard handler does pre-flight check
+      // and shows the form-level validation message before POST. 409 keeps
+      // semantics correct for CLI users.
+      return c.json({ error: 'symbol_already_exists', symbol: input.symbol }, 409)
+    }
+    await writeAuditLog(
+      c,
+      '/admin/symbol-config',
+      `symbol=${input.symbol}`,
+      null,
+      symbolConfigSnapshot(inserted),
+    )
+    if (isForm) return c.redirect('/dashboard/symbols', 303)
+    return c.json({ symbol: inserted.symbol, row: symbolConfigSnapshot(inserted) })
+  })
+  .post('/symbol-config/:symbol/update', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const symbolPath = normalizeSymbolPathParam(c.req.param('symbol'))
+    const isForm = isFormContentType(c.req.header('content-type'))
+    const body = await readFormOrJsonBody(c)
+    // path の :symbol を強制し、body symbol は無視 (path が source of truth)。
+    const bodyObj = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
+    const input: SymbolConfigWriteInput = {
+      ...parseSymbolConfigBody({ ...bodyObj, symbol: symbolPath }),
+      symbol: symbolPath,
+    }
+    const db = createDb(c.env.DB)
+    const before = await findSymbolConfig(db, symbolPath)
+    if (before === null) {
+      return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
+    }
+    const after = await updateSymbolConfig(db, input, new Date().toISOString())
+    if (after === null) {
+      return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
+    }
+    await writeAuditLog(
+      c,
+      '/admin/symbol-config/:symbol/update',
+      `symbol=${symbolPath}`,
+      symbolConfigSnapshot(before),
+      symbolConfigSnapshot(after),
+    )
+    if (isForm) return c.redirect('/dashboard/symbols', 303)
+    return c.json({ symbol: after.symbol, row: symbolConfigSnapshot(after) })
+  })
+  .post('/symbol-config/:symbol/toggle-active', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const symbolPath = normalizeSymbolPathParam(c.req.param('symbol'))
+    const isForm = isFormContentType(c.req.header('content-type'))
+    const db = createDb(c.env.DB)
+    const result = await toggleSymbolActive(db, symbolPath, new Date().toISOString())
+    if (result === null) {
+      return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
+    }
+    await writeAuditLog(
+      c,
+      '/admin/symbol-config/:symbol/toggle-active',
+      `symbol=${symbolPath}`,
+      { active: result.before.active },
+      { active: result.after.active },
+    )
+    if (isForm) return c.redirect('/dashboard/symbols', 303)
+    return c.json({ symbol: symbolPath, active: result.after.active })
+  })
+  .post('/symbol-config/:symbol/delete', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const symbolPath = normalizeSymbolPathParam(c.req.param('symbol'))
+    const isForm = isFormContentType(c.req.header('content-type'))
+    const db = createDb(c.env.DB)
+    const result = await softDeleteSymbol(db, symbolPath, new Date().toISOString())
+    if (result === null) {
+      return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
+    }
+    await writeAuditLog(
+      c,
+      '/admin/symbol-config/:symbol/delete',
+      `symbol=${symbolPath}`,
+      { active: result.before.active },
+      { active: result.after.active },
+    )
+    if (isForm) return c.redirect('/dashboard/symbols', 303)
+    return c.json({ symbol: symbolPath, active: result.after.active })
+  })
 
 /**
  * Validate a single `/admin/macro-events/seed` body entry。
@@ -1309,6 +1431,160 @@ function isYmd(value: string): boolean {
   if (!Number.isFinite(ms)) return false
   const roundTrip = new Date(ms).toISOString().slice(0, 10)
   return roundTrip === value
+}
+
+/**
+ * symbol_config CRUD UI (#292) で受け付ける form/JSON body を共通化して
+ * 解析する。dashboard form は application/x-www-form-urlencoded、CLI は JSON
+ * を送る想定。
+ *
+ *   - symbol: 1〜10 chars、英数字 (`[A-Za-z0-9]`)。JP の 4 桁数字 (e.g. `1570`)
+ *     も合法。upper-case で正規化する。
+ *   - market: 'US' | 'JP'
+ *   - currency: 'USD' | 'JPY' (DB CHECK 制約と一致)
+ *   - active: boolean (form では 'true'/'false'/'on' を許容、checkbox の 'on'
+ *     → true、未送信 → false で扱う)
+ *   - maxNotional: 正の数 or null (空文字 → null)
+ *   - name / bucket / notes: optional string、256 chars 上限
+ */
+function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ValidationError('body must be an object or form-encoded', { field: 'body' })
+  }
+  const raw = body as {
+    symbol?: unknown
+    name?: unknown
+    market?: unknown
+    currency?: unknown
+    active?: unknown
+    max_notional?: unknown
+    maxNotional?: unknown
+    bucket?: unknown
+    notes?: unknown
+  }
+  const symbol = normalizeSymbol(raw.symbol)
+  const market = parseMarket(raw.market)
+  const currency = parseCurrency(raw.currency)
+  // form の checkbox は未送信時に key 自体が来ない (= undefined)。dashboard
+  // form は hidden input で `active=false` を必ず送る運用にするが、未送信は
+  // 安全側に false (= disabled) で受ける。
+  const active = parseFormBool(raw.active, false)
+  const maxNotionalRaw = raw.max_notional ?? raw.maxNotional
+  const maxNotional = parseOptionalPositiveNumber(maxNotionalRaw, 'maxNotional')
+  const name = parseOptionalString(raw.name, 'name')
+  const bucket = parseOptionalString(raw.bucket, 'bucket')
+  const notes = parseOptionalString(raw.notes, 'notes')
+  return { symbol, name, market, currency, active, maxNotional, bucket, notes }
+}
+
+function normalizeSymbol(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new ValidationError('symbol must be a 1-10 char alphanumeric string', { field: 'symbol' })
+  }
+  const trimmed = value.trim().toUpperCase()
+  if (trimmed.length === 0 || trimmed.length > 10) {
+    throw new ValidationError('symbol must be 1-10 chars', { field: 'symbol' })
+  }
+  if (!/^[A-Z0-9]+$/.test(trimmed)) {
+    throw new ValidationError('symbol must be alphanumeric only', { field: 'symbol' })
+  }
+  return trimmed
+}
+
+function normalizeSymbolPathParam(value: string): string {
+  return normalizeSymbol(value)
+}
+
+function parseMarket(value: unknown): 'US' | 'JP' {
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toUpperCase()
+    if (trimmed === 'US' || trimmed === 'JP') return trimmed
+  }
+  throw new ValidationError("market must be 'US' or 'JP'", { field: 'market' })
+}
+
+function parseCurrency(value: unknown): 'USD' | 'JPY' {
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toUpperCase()
+    if (trimmed === 'USD' || trimmed === 'JPY') return trimmed
+  }
+  throw new ValidationError("currency must be 'USD' or 'JPY'", { field: 'currency' })
+}
+
+function parseFormBool(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const norm = value.trim().toLowerCase()
+    if (norm === 'true' || norm === '1' || norm === 'on') return true
+    if (norm === 'false' || norm === '0' || norm === 'off' || norm === '') return false
+  }
+  throw new ValidationError("active must be boolean ('true'/'false')", { field: 'active' })
+}
+
+function parseOptionalPositiveNumber(value: unknown, field: string): number | null {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed === '') return null
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new ValidationError(`${field} must be a positive number or empty`, { field })
+    }
+    return parsed
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new ValidationError(`${field} must be a positive number or empty`, { field })
+    }
+    return value
+  }
+  throw new ValidationError(`${field} must be a positive number or empty`, { field })
+}
+
+function parseOptionalString(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') {
+    throw new ValidationError(`${field} must be a string`, { field })
+  }
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  if (trimmed.length > 256) {
+    throw new ValidationError(`${field} must be <= 256 chars`, { field })
+  }
+  return trimmed
+}
+
+function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
+  return {
+    symbol: row.symbol,
+    name: row.name,
+    market: row.market,
+    currency: row.currency,
+    active: row.active,
+    maxNotional: row.maxNotional,
+    bucket: row.bucket,
+    notes: row.notes,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function isFormContentType(contentType: string | undefined): boolean {
+  const ct = contentType ?? ''
+  return (
+    ct.includes('application/x-www-form-urlencoded') ||
+    ct.includes('multipart/form-data')
+  )
+}
+
+async function readFormOrJsonBody(c: Context<AppBindings>): Promise<unknown> {
+  if (isFormContentType(c.req.header('content-type'))) {
+    const fd = await c.req.formData()
+    const obj: Record<string, unknown> = {}
+    for (const [k, v] of fd.entries()) obj[k] = typeof v === 'string' ? v : ''
+    return obj
+  }
+  return (await c.req.json().catch(() => null)) as unknown
 }
 
 /**
