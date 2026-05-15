@@ -32,10 +32,9 @@ vi.mock('../../src/infrastructure/db/configAuditLog', () => ({
 }))
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
 }
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const authHeader = {}
 
 describe('dashboard XSS (#284)', () => {
   beforeEach(() => {
