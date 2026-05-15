@@ -1,5 +1,6 @@
+import { eq, sql } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
-import { inversePairs, symbolConfig } from './schema'
+import { inversePairs, symbolConfig, type SymbolConfigRow } from './schema'
 
 export type SymbolCurrency = 'USD' | 'JPY'
 export type SymbolMarket = 'US' | 'JP'
@@ -107,6 +108,152 @@ export async function loadSymbolConfig(
     symbolName,
     symbolNotes,
   }
+}
+
+/**
+ * symbol_config 1 行を返す。CRUD UI (#292) の before/after snapshot に使う。
+ * 未存在は `null`。
+ */
+export async function findSymbolConfig(
+  db: DrizzleD1Database,
+  symbol: string,
+): Promise<SymbolConfigRow | null> {
+  const rows = await db.select().from(symbolConfig).where(eq(symbolConfig.symbol, symbol)).limit(1)
+  return rows[0] ?? null
+}
+
+export interface SymbolConfigWriteInput {
+  symbol: string
+  name: string | null
+  market: SymbolMarket
+  currency: SymbolCurrency
+  active: boolean
+  maxNotional: number | null
+  bucket: string | null
+  notes: string | null
+}
+
+/**
+ * CRUD UI (#292) で symbol_config に新規 INSERT する。symbol 既存なら null を
+ * 返し caller が 409 を返す。INSERT 後の最新行を返す。
+ *
+ * pre-check + INSERT は TOCTOU race を作る (並列 INSERT が両方 pre-check
+ * を通過 → 後者が UNIQUE 制約違反で 500 化する)。代わりに INSERT を直接
+ * 試行し、UNIQUE 違反だけを `null` に変換する (= 既存銘柄判定)。
+ */
+export async function insertSymbolConfig(
+  db: DrizzleD1Database,
+  input: SymbolConfigWriteInput,
+  nowIso: string,
+): Promise<SymbolConfigRow | null> {
+  try {
+    await db.insert(symbolConfig).values({
+      symbol: input.symbol,
+      name: input.name,
+      market: input.market,
+      currency: input.currency,
+      active: input.active,
+      maxNotional: input.maxNotional,
+      bucket: input.bucket,
+      notes: input.notes,
+      updatedAt: nowIso,
+    })
+  } catch (err) {
+    if (isUniqueConstraintError(err)) return null
+    throw err
+  }
+  return await findSymbolConfig(db, input.symbol)
+}
+
+/**
+ * SQLite (better-sqlite3 / D1) は UNIQUE 違反を `UNIQUE constraint failed`
+ * を含む Error message で返す。drizzle はそれを wrap した Error で投げる
+ * ので、 message 文字列マッチで判定する (driver による差分を吸収)。
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') return false
+  const message = (err as { message?: unknown }).message
+  if (typeof message !== 'string') return false
+  return message.includes('UNIQUE constraint failed')
+}
+
+/**
+ * CRUD UI (#292) で symbol_config を全列 update する。存在しなければ null を
+ * 返し caller が 404 を返す。symbol 自体は path から固定で来るので変更不可。
+ */
+export async function updateSymbolConfig(
+  db: DrizzleD1Database,
+  input: SymbolConfigWriteInput,
+  nowIso: string,
+): Promise<SymbolConfigRow | null> {
+  const existing = await findSymbolConfig(db, input.symbol)
+  if (existing === null) return null
+  await db
+    .update(symbolConfig)
+    .set({
+      name: input.name,
+      market: input.market,
+      currency: input.currency,
+      active: input.active,
+      maxNotional: input.maxNotional,
+      bucket: input.bucket,
+      notes: input.notes,
+      updatedAt: nowIso,
+    })
+    .where(eq(symbolConfig.symbol, input.symbol))
+  return await findSymbolConfig(db, input.symbol)
+}
+
+/**
+ * Flip `active` 1↔0 atomically. UPDATE 自体は SQL `NOT active` で
+ * read-modify-write race を排除する (並列 2 連打が両方 SELECT で同じ
+ * `before` を読んで同じ値を書き戻すのを防ぐ)。
+ * Not found → null。
+ *
+ * WHY: audit log の before/after は SELECT-UPDATE-SELECT で取るため厳密
+ * には atomic ではない — 高並列時 before/after の遷移を 1 step ずれて
+ * 観測する可能性があるが、DB 上の state 自体は SQL NOT で atomic に
+ * flip するので冪等性は壊れない。POC scope では許容。
+ */
+export async function toggleSymbolActive(
+  db: DrizzleD1Database,
+  symbol: string,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  await db
+    .update(symbolConfig)
+    .set({ active: sql`NOT ${symbolConfig.active}`, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
+}
+
+/**
+ * Soft delete (active=false)。hard delete は FK 影響回避のため避ける。
+ * 既に active=false なら no-op (before==after で audit log も skip される)。
+ */
+export async function softDeleteSymbol(
+  db: DrizzleD1Database,
+  symbol: string,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  if (!before.active) {
+    return { before: beforeSnapshot, after: beforeSnapshot }
+  }
+  await db
+    .update(symbolConfig)
+    .set({ active: false, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
 }
 
 /**
