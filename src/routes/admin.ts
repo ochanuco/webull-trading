@@ -1104,6 +1104,54 @@ export const admin = new Hono<AppBindings>()
     if (isForm) return c.redirect('/dashboard/symbols', 303)
     return c.json({ symbol: symbolPath, deleted: true })
   })
+  /**
+   * symbol lookup helper (form auto-fill 用)。
+   *
+   * Yahoo Finance の public search endpoint で銘柄名を引きつつ、market /
+   * currency は symbol pattern (4 桁数字 = JP / それ以外 = US) から推測する。
+   *
+   * Yahoo 障害時は market / currency だけ返して name は null (form 側で
+   * user が手動入力すれば足りる)。auth は他 admin endpoint と同じ Access 通過
+   * 必須、rate-limit は ADMIN_WRITE と同じ枠で十分 (低頻度操作)。
+   */
+  .get('/symbol-config/lookup', rateLimit('ADMIN_WRITE'), async (c) => {
+    const symbolRaw = c.req.query('symbol') ?? ''
+    const symbol = symbolRaw.trim().toUpperCase()
+    if (!/^[A-Z0-9]{1,10}$/.test(symbol)) {
+      return c.json({ error: 'invalid_symbol', symbol: symbolRaw }, 400)
+    }
+    const isJp = /^\d{4}$/.test(symbol)
+    const market = isJp ? 'JP' : 'US'
+    const currency = isJp ? 'JPY' : 'USD'
+    const query = isJp ? `${symbol}.T` : symbol
+    try {
+      const res = await fetch(
+        `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=5&newsCount=0`,
+        {
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; webull-trading-symbol-lookup/1.0)' },
+          signal: AbortSignal.timeout(5000),
+        },
+      )
+      if (!res.ok) {
+        return c.json({ symbol, name: null, market, currency, source: 'pattern_only', error: `yahoo_${res.status}` })
+      }
+      const data = (await res.json()) as {
+        quotes?: Array<{ symbol?: string; shortname?: string; longname?: string }>
+      }
+      const match = data.quotes?.find((q) => q.symbol === query) ?? data.quotes?.[0] ?? null
+      const name = match?.longname || match?.shortname || null
+      return c.json({ symbol, name, market, currency, source: name ? 'yahoo' : 'pattern_only' })
+    } catch (err) {
+      return c.json({
+        symbol,
+        name: null,
+        market,
+        currency,
+        source: 'pattern_only',
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  })
 
 /**
  * Validate a single `/admin/macro-events/seed` body entry。
