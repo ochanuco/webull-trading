@@ -536,8 +536,14 @@ export const dashboard = new Hono<DashboardBindings>()
       const rows = await loadAllSymbolConfigRows(c.env.DB)
       const errorCode = c.req.query('error') ?? null
       const errorSymbol = c.req.query('symbol') ?? null
+      const filter: SymbolsListFilter = {
+        status: ((c.req.query('status') ?? 'all') as 'all' | 'active' | 'inactive'),
+        market: ((c.req.query('market') ?? 'all') as 'all' | 'US' | 'JP'),
+        bucket: c.req.query('bucket') ?? 'all',
+        q: c.req.query('q') ?? '',
+      }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, errorCode, errorSymbol })),
+        renderLayout(c, '銘柄管理', symbolsListBody({ rows, errorCode, errorSymbol, filter })),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
@@ -5934,49 +5940,115 @@ async function findSymbolConfigForView(
   return rows[0] ?? null
 }
 
+interface SymbolsListFilter {
+  status: 'all' | 'active' | 'inactive'
+  market: 'all' | 'US' | 'JP'
+  bucket: string
+  q: string
+}
+
+function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): SymbolConfigRow[] {
+  const needle = f.q.trim().toLowerCase()
+  return rows.filter((r) => {
+    if (f.status === 'active' && !r.active) return false
+    if (f.status === 'inactive' && r.active) return false
+    if (f.market !== 'all' && r.market !== f.market) return false
+    if (f.bucket !== 'all') {
+      if (f.bucket === '__null__') {
+        if (r.bucket && r.bucket.trim().length > 0) return false
+      } else if ((r.bucket ?? '') !== f.bucket) return false
+    }
+    if (needle) {
+      const hay = `${r.symbol} ${r.name ?? ''}`.toLowerCase()
+      if (hay.indexOf(needle) === -1) return false
+    }
+    return true
+  })
+}
+
 function symbolsListBody(args: {
   rows: SymbolConfigRow[]
   errorCode?: string | null
   errorSymbol?: string | null
+  filter: SymbolsListFilter
 }): string {
-  const { rows, errorCode = null, errorSymbol = null } = args
+  const { rows, errorCode = null, errorSymbol = null, filter } = args
   const errorBanner = renderSymbolErrorBanner(errorCode, errorSymbol)
-  const headerBar = `<p style="margin:0 0 12px">
+  const filtered = applySymbolsListFilter(rows, filter)
+  const activeCount = rows.filter((r) => r.active).length
+  const inactiveCount = rows.length - activeCount
+  // bucket dropdown 用: 全 distinct bucket (NULL 含む)
+  const bucketsSet = new Set<string>()
+  let hasNullBucket = false
+  for (const r of rows) {
+    const b = (r.bucket ?? '').trim()
+    if (b.length === 0) hasNullBucket = true
+    else bucketsSet.add(b)
+  }
+  const bucketOptions = [...bucketsSet].sort()
+
+  const sel = (cur: string, val: string) => (cur === val ? ' selected' : '')
+  const filterBar = `<form method="get" action="/dashboard/symbols" style="margin:0 0 12px;padding:8px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+    <input type="search" name="q" value="${esc(filter.q)}" placeholder="🔍 銘柄 / 名前で絞り込み" style="padding:4px 8px;width:200px">
+    <select name="status" style="padding:4px 6px">
+      <option value="all"${sel(filter.status, 'all')}>全状態</option>
+      <option value="active"${sel(filter.status, 'active')}>有効のみ</option>
+      <option value="inactive"${sel(filter.status, 'inactive')}>無効のみ</option>
+    </select>
+    <select name="market" style="padding:4px 6px">
+      <option value="all"${sel(filter.market, 'all')}>全市場</option>
+      <option value="US"${sel(filter.market, 'US')}>US</option>
+      <option value="JP"${sel(filter.market, 'JP')}>JP</option>
+    </select>
+    <select name="bucket" style="padding:4px 6px">
+      <option value="all"${sel(filter.bucket, 'all')}>全 bucket</option>
+      ${hasNullBucket ? `<option value="__null__"${sel(filter.bucket, '__null__')}>(未分類)</option>` : ''}
+      ${bucketOptions.map((b) => `<option value="${esc(b)}"${sel(filter.bucket, b)}>${esc(b)}</option>`).join('')}
+    </select>
+    <button type="submit" style="padding:4px 12px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">絞り込み</button>
+    <a href="/dashboard/symbols" style="padding:4px 8px;text-decoration:none;font-size:12px;color:#86868b">リセット</a>
+  </form>`
+
+  const headerBar = `<p style="margin:0 0 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols/new" style="padding:6px 12px;background:#06c;color:#fff;border-radius:4px;text-decoration:none">+ 新規追加</a>
-    <span class="muted" style="margin-left:12px;font-size:12px">${rows.length} 件 (active ${rows.filter((r) => r.active).length} / inactive ${rows.filter((r) => !r.active).length})</span>
+    <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
   </p>`
+
   if (rows.length === 0) {
     return `${errorBanner}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
   }
-  const tbody = rows
+  if (filtered.length === 0) {
+    return `${errorBanner}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
+  }
+  const tbody = filtered
     .map((r) => {
       const inactive = !r.active
-      const rowClass = inactive ? ' class="symbol-disabled-row"' : ''
-      const symbolClass = inactive ? ' class="symbol-disabled"' : ''
-      const stateLabel = r.active
-        ? '<span class="ok">active</span>'
-        : '<span class="muted">inactive</span>'
+      const rowStyle = inactive ? ' style="opacity:0.5"' : ''
+      const symStyle = inactive ? ' style="text-decoration:line-through;color:#86868b"' : ''
       const toggleLabel = r.active ? '無効化' : '有効化'
       const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
       const toggleAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/toggle-active`
       const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
-      // hard delete は inactive 行のみ。active 行に削除を出すと「無効化」と機能重複に
-      // なるため、運用フローを「先に無効化 → 確認 → 削除」と段階化。
       const deleteForm = r.active
         ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
         : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去)。元に戻せません。よろしいですか？');">
             <button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button>
           </form>`
-      return `<tr${rowClass}>
-        <td><strong><span${symbolClass}>${esc(r.symbol)}</span></strong></td>
+      const maxNotionalCell = r.maxNotional === null
+        ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
+        : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
+      const bucketCell = r.bucket
+        ? esc(r.bucket)
+        : '<span class="muted" style="font-size:11px">—</span>'
+      const dateOnly = (r.updatedAt || '').slice(0, 10)
+      return `<tr${rowStyle}>
+        <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
-        <td>${esc(r.market)}</td>
-        <td>${esc(r.currency)}</td>
-        <td>${stateLabel}</td>
-        <td>${r.maxNotional === null ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>' : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`}</td>
-        <td>${esc(r.bucket ?? '')}</td>
+        <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
+        <td>${maxNotionalCell}</td>
+        <td>${bucketCell}</td>
         <td>${esc(r.notes ?? '')}</td>
-        <td class="muted">${esc(fmtJst(r.updatedAt))}</td>
+        <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
           <a href="${esc(editHref)}" style="padding:3px 8px;font-size:12px;text-decoration:none">編集</a>
           <form method="post" action="${esc(toggleAction)}" style="display:inline">
@@ -5987,18 +6059,16 @@ function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  return `${errorBanner}${headerBar}
+  return `${errorBanner}${filterBar}${headerBar}
   <table>
     <thead><tr>
-      <th>銘柄<br><span class="muted" style="font-size:10px">symbol</span></th>
-      <th>銘柄名<br><span class="muted" style="font-size:10px">name</span></th>
-      <th>市場<br><span class="muted" style="font-size:10px">market</span></th>
-      <th>通貨<br><span class="muted" style="font-size:10px">currency</span></th>
-      <th>状態</th>
-      <th>1注文上限<br><span class="muted" style="font-size:10px">max_notional</span></th>
-      <th>相関グループ<br><span class="muted" style="font-size:10px">bucket</span></th>
-      <th>メモ<br><span class="muted" style="font-size:10px">notes</span></th>
-      <th>更新<br><span class="muted" style="font-size:10px">updated_at</span></th>
+      <th>銘柄</th>
+      <th>銘柄名</th>
+      <th>市場/通貨</th>
+      <th>1注文上限</th>
+      <th>相関グループ</th>
+      <th>メモ</th>
+      <th>更新日</th>
       <th>操作</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
