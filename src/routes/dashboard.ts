@@ -409,8 +409,8 @@ export const dashboard = new Hono<DashboardBindings>()
   /**
    * Broker probe UI: 同一 origin の `/admin/broker/probe` を browser の fetch で
    * 呼び、生 JSON を整形表示する小さい form ページ。/dashboard/* と /admin/* は
-   * 同じ basicAuthMiddleware で保護されてるので、ブラウザに残ってる認証
-   * credentials がそのまま流用される (再 prompt なし)。サーバー側は probe を
+   * 同じ Cloudflare Access policy で保護されてるので、ブラウザに残ってる Access
+   * cookie がそのまま流用される (再 prompt なし)。サーバー側は probe を
    * proxy せず、純粋にフォーム + 表示器を返すだけ (= 認証ヘッダの転送ロジック
    * 不要、責務分離)。
    */

@@ -184,9 +184,10 @@ export const admin = new Hono<AppBindings>()
     const { enabled, reason } = readToggleBody(body)
 
     const db = createTradingToggleDb(c.env.DB)
+    const actor = extractActor(c.get('actor'))
     const result = await applyTradingToggle(db, {
       enabled,
-      actor: c.env.BASIC_AUTH_USER ?? null,
+      actor,
       reason,
       requestId: c.get('requestId') ?? null,
     })
@@ -194,7 +195,7 @@ export const admin = new Hono<AppBindings>()
       JSON.stringify({
         event: 'trading_toggle_applied',
         requestId: c.get('requestId'),
-        actor: c.env.BASIC_AUTH_USER ?? null,
+        actor,
         before: result.before,
         after: result.after,
         reason,
@@ -1247,7 +1248,7 @@ async function writeAuditLog(
   after: unknown,
 ): Promise<void> {
   if (!c.env.DB) return
-  const actor = extractActor(c.req.header('Authorization'))
+  const actor = extractActor(c.get('actor'))
   try {
     await recordChange(c.env.DB, {
       actor,

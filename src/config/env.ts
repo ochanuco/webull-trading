@@ -1,8 +1,23 @@
 import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
 
 export interface Env {
-  BASIC_AUTH_USER: string
-  BASIC_AUTH_PASSWORD: string
+  /**
+   * Cloudflare Access team domain (e.g. `https://<team>.cloudflareaccess.com`).
+   * Verified via JWKS at `<team>/cdn-cgi/access/certs`. Required for the
+   * Access middleware to attempt verification; if unset *and*
+   * `ACCESS_DEV_BYPASS_USER` is set, the middleware operates in local dev
+   * bypass mode (see `src/middleware/accessJwt.ts`).
+   */
+  CF_ACCESS_TEAM_DOMAIN?: string
+  /** Cloudflare Access application AUD tag (required claim match). */
+  CF_ACCESS_AUD?: string
+  /**
+   * Local-dev only: when set AND `CF_ACCESS_TEAM_DOMAIN` is unset, the
+   * Access middleware skips JWT verification and stamps this string as the
+   * actor on every request. Production must NEVER set this (and is protected
+   * by the team-domain check anyway).
+   */
+  ACCESS_DEV_BYPASS_USER?: string
   SYMBOL_STATE: DurableObjectNamespace<SymbolStateDO>
 }
 

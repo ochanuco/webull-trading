@@ -7,15 +7,23 @@ vi.mock('../../src/trading/reconciliation/reconcileFills', () => ({
 }))
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
   DRY_RUN: 'true',
   TRADING_ENABLED: 'false',
   ALLOWED_SYMBOLS: 'SOXL',
   MAX_ORDER_NOTIONAL: '100',
 }
 
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const unauthEnv = {
+  DRY_RUN: 'true',
+  TRADING_ENABLED: 'false',
+  ALLOWED_SYMBOLS: 'SOXL',
+  MAX_ORDER_NOTIONAL: '100',
+}
+
+// The dev bypass kicks in whenever baseEnv is supplied and no `Cf-Access-Jwt-Assertion`
+// is present, so no per-request header is needed; the empty spread is kept for diff hygiene.
+const authHeader = {}
 
 function fakeSymbolState(captured: { calls: Array<{ symbol: string; amount: number }> }) {
   const stub = {
@@ -43,12 +51,12 @@ function fakeSymbolState(captured: { calls: Array<{ symbol: string; amount: numb
 }
 
 describe('POST /admin/symbols/:symbol/seed-cash', () => {
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
     const res = await app.request(
       '/admin/symbols/SOXL/seed-cash',
       { method: 'POST', body: JSON.stringify({ amount: 100 }) },
-      baseEnv,
+      unauthEnv,
     )
     expect(res.status).toBe(401)
   })
@@ -181,10 +189,10 @@ describe('GET /admin/orders/repair-status', () => {
     return { select: () => chain }
   }
 
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
     const res = await app.request('/admin/orders/repair-status', {}, {
-      ...baseEnv,
+      ...unauthEnv,
       DB: fakeDbReturning(3) as unknown as D1Database,
     })
     expect(res.status).toBe(401)
@@ -263,7 +271,7 @@ describe('POST /admin/symbol-state/:symbol/override-position', () => {
     } as unknown
   }
 
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
     const res = await app.request(
       '/admin/symbol-state/SOXL/override-position',
@@ -271,7 +279,7 @@ describe('POST /admin/symbol-state/:symbol/override-position', () => {
         method: 'POST',
         body: JSON.stringify({ qty: 4, avgPrice: 124.95, reason: 'manual' }),
       },
-      baseEnv,
+      unauthEnv,
     )
     expect(res.status).toBe(401)
   })
@@ -468,9 +476,9 @@ describe('POST /admin/symbols/:symbol/clear-cooldown', () => {
     } as unknown
   }
 
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
-    const res = await app.request('/admin/symbols/SOXL/clear-cooldown', { method: 'POST' }, baseEnv)
+    const res = await app.request('/admin/symbols/SOXL/clear-cooldown', { method: 'POST' }, unauthEnv)
     expect(res.status).toBe(401)
   })
 
@@ -522,7 +530,7 @@ describe('Earnings calendar admin endpoints (#196)', () => {
   }
 
   describe('POST /admin/earnings/seed', () => {
-    it('401s without Basic Auth', async () => {
+    it('401s without Access JWT', async () => {
       const app = createApp()
       const res = await app.request(
         '/admin/earnings/seed',
@@ -530,7 +538,7 @@ describe('Earnings calendar admin endpoints (#196)', () => {
           method: 'POST',
           body: JSON.stringify([{ symbol: 'AAPL', earnings_date: '2026-04-30' }]),
         },
-        { ...baseEnv, DB: {} as unknown as D1Database },
+        { ...unauthEnv, DB: {} as unknown as D1Database },
       )
       expect(res.status).toBe(401)
     })
@@ -756,7 +764,7 @@ describe('Macro event calendar admin endpoints (#196 2/3)', () => {
   }
 
   describe('POST /admin/macro-events/seed', () => {
-    it('401s without Basic Auth', async () => {
+    it('401s without Access JWT', async () => {
       const app = createApp()
       const res = await app.request(
         '/admin/macro-events/seed',
@@ -764,7 +772,7 @@ describe('Macro event calendar admin endpoints (#196 2/3)', () => {
           method: 'POST',
           body: JSON.stringify([{ event_type: 'FOMC', event_date: '2026-06-17' }]),
         },
-        { ...baseEnv, DB: {} as unknown as D1Database },
+        { ...unauthEnv, DB: {} as unknown as D1Database },
       )
       expect(res.status).toBe(401)
     })
@@ -1152,12 +1160,12 @@ describe('POST /admin/orders/sync-holdings', () => {
     vi.restoreAllMocks()
   })
 
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
     const res = await app.request(
       '/admin/orders/sync-holdings',
       { method: 'POST' },
-      baseEnv,
+      unauthEnv,
     )
     expect(res.status).toBe(401)
   })

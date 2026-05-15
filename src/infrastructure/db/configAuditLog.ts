@@ -15,7 +15,13 @@ import { createDb } from './tradeJournalRepo'
  */
 
 export interface RecordChangeParams {
-  /** basic-auth username, or `'ai-agent'` when the header is absent / unparseable. */
+  /**
+   * Identity that performed the mutation. Sourced from
+   * `c.get('actor')` set by the Cloudflare Access middleware (#29) — either an
+   * SSO email or a service-token `common_name`. Missing actor at this layer is
+   * a programmer error because the middleware fails closed (401) when neither
+   * a valid JWT nor the dev bypass is present.
+   */
   actor: string
   /** logical endpoint id (e.g. `/admin/symbols/:symbol/seed-cash`). */
   endpoint: string
@@ -58,29 +64,21 @@ export async function recordChange(
 }
 
 /**
- * Extract basic-auth username from an incoming `Authorization` header. Mirrors
- * the parse that Hono's `basicAuth` middleware already accepted upstream — we
- * just decode again here because Hono does not surface the username in context.
- *
- * Fallback `'ai-agent'` when the header is missing / malformed: every audit row
- * still has an actor, and the bot-vs-human distinction is preserved on the
- * dashboard.
+ * Read the request actor previously stamped by `accessJwtMiddleware` (#29) via
+ * `c.set('actor', ...)`. The middleware fails closed (401) before route
+ * handlers run, so reaching this helper without an actor implies the route
+ * was wired without auth — surface that as a thrown error rather than a
+ * silent `'ai-agent'` fallback that would mask the misconfiguration.
  */
-export function extractActor(authorizationHeader: string | null | undefined): string {
-  if (!authorizationHeader) return 'ai-agent'
-  const match = /^basic\s+(.+)$/i.exec(authorizationHeader.trim())
-  if (!match) return 'ai-agent'
-  const token = match[1]?.trim()
-  if (!token) return 'ai-agent'
-  let decoded: string
-  try {
-    decoded = atob(token)
-  } catch {
-    return 'ai-agent'
+export function extractActor(actor: string | undefined | null): string {
+  if (typeof actor !== 'string') {
+    throw new Error('extractActor: missing actor (request bypassed auth middleware?)')
   }
-  const idx = decoded.indexOf(':')
-  const user = (idx >= 0 ? decoded.slice(0, idx) : decoded).trim()
-  return user.length > 0 ? user : 'ai-agent'
+  const trimmed = actor.trim()
+  if (trimmed.length === 0) {
+    throw new Error('extractActor: empty actor (request bypassed auth middleware?)')
+  }
+  return trimmed
 }
 
 export type ConfigAuditRow = ConfigAuditLogRow

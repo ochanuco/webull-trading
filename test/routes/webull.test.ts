@@ -8,13 +8,12 @@ vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
 }))
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
 }
 
-const authHeader = {
-  Authorization: `Basic ${btoa('admin:secret')}`,
-}
+const unauthEnv = {}
+
+const authHeader = {}
 
 describe('webull routes', () => {
   beforeEach(() => {
@@ -43,7 +42,7 @@ describe('webull routes', () => {
           price: 9,
         }),
       },
-      baseEnv,
+      unauthEnv,
     )
 
     expect(response.status).toBe(401)

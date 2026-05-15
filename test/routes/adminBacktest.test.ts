@@ -3,11 +3,12 @@ import { createApp } from '../../src/app'
 import type { DailyBar } from '../../src/trading/strategy/indicators'
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
 }
 
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const unauthEnv = {}
+
+const authHeader = {}
 
 /**
  * Build a synthetic Yahoo-shaped chart payload from a list of DailyBar.
@@ -102,9 +103,9 @@ describe('GET /admin/backtest', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
-    const res = await app.request('/admin/backtest?symbol=AAPL&from=2024-01-01&to=2024-06-30', {}, baseEnv)
+    const res = await app.request('/admin/backtest?symbol=AAPL&from=2024-01-01&to=2024-06-30', {}, unauthEnv)
     expect(res.status).toBe(401)
   })
 
