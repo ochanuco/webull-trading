@@ -65,3 +65,14 @@ DASHBOARD_BASE_URL=
 # 「DB を間違って ON にしてもこの環境では絶対に発注しない」保険。
 # 受理値: unset / 'true' → DB 尊重、'false' → 強制 OFF、それ以外 → 強制 OFF。
 # TRADING_ENABLED=false
+
+# #277: per-env secrets. `.dev.vars` is local only. For deployed envs use
+# `wrangler secret put <KEY> --env=<dev|staging|production>`. Examples:
+#   wrangler secret put BASIC_AUTH_USER --env=dev
+#   wrangler secret put BASIC_AUTH_PASSWORD --env=dev
+#   wrangler secret put EVENT_INGEST_SECRET --env=dev
+#   wrangler secret put WEBULL_APP_KEY --env=dev
+#   wrangler secret put WEBULL_APP_SECRET --env=dev
+#   wrangler secret put WEBULL_ACCOUNT_ID --env=dev
+# Repeat for --env=staging (sandbox key) and --env=production (live key).
+# Production credentials MUST be distinct from staging/dev to avoid 誤爆.
