@@ -6100,10 +6100,12 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
     </div>
     <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
-    <div style="position:relative">
-      <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" autocomplete="off" placeholder="例: semi / us_large_cap / jp_auto (任意)" oninput="window.suggestSymbolFormBucket(this.value)" onfocus="window.suggestSymbolFormBucket(this.value)" onblur="setTimeout(window.hideSymbolFormBucketSuggest, 150)" style="padding:6px;width:280px">
-      <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownPairs))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:320px;max-height:240px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
-      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存銘柄から suggest (click すると その銘柄の bucket が挿入される / 新規 bucket もそのまま入力で OK)。</p>
+    <div>
+      <div style="position:relative;display:inline-block">
+        <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" autocomplete="off" placeholder="例: semi / us_large_cap / jp_auto (任意)" oninput="window.suggestSymbolFormBucket(this.value)" onfocus="window.suggestSymbolFormBucket(this.value)" onblur="setTimeout(window.hideSymbolFormBucketSuggest, 150)" style="padding:6px;width:280px">
+        <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownPairs))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:320px;max-height:240px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+      </div>
+      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存銘柄から suggest (click するとその銘柄の bucket が挿入される / 新規 bucket もそのまま入力で OK)。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
