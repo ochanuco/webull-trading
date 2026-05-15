@@ -76,7 +76,7 @@ export const dashboard = new Hono<DashboardBindings>()
   .get('/', (c) => c.html(renderLayout(c, 'ダッシュボード', indexBody())))
   .get('/positions', async (c) => {
     if (!c.env.DB || !c.env.SYMBOL_STATE) {
-      return c.html(renderLayout(c, '保有状況', unavailable('DB or SYMBOL_STATE not bound')))
+      return c.html(renderLayout(c, 'ポートフォリオ', unavailable('DB or SYMBOL_STATE not bound')))
     }
     const universe = await loadSymbolUniverse(c.env)
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
@@ -95,11 +95,11 @@ export const dashboard = new Hono<DashboardBindings>()
       ),
       loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
     ])
-    return c.html(renderLayout(c, '保有状況', positionsBody(rows, strategyPriceMap, universe)))
+    return c.html(renderLayout(c, 'ポートフォリオ', positionsBody(rows, strategyPriceMap, universe)))
   })
   .get('/portfolio', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
-      return c.html(renderLayout(c, 'ポートフォリオ', unavailable('PORTFOLIO_STATE not bound')))
+      return c.html(renderLayout(c, '口座サマリ', unavailable('PORTFOLIO_STATE not bound')))
     }
     try {
       const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
@@ -108,9 +108,9 @@ export const dashboard = new Hono<DashboardBindings>()
       const vixRegime = c.env.DB
         ? await loadVixRegimeSnapshot(c.env.DB, c.get('requestId'))
         : null
-      return c.html(renderLayout(c, 'ポートフォリオ', portfolioBody(portfolio, vixRegime)))
+      return c.html(renderLayout(c, '口座サマリ', portfolioBody(portfolio, vixRegime)))
     } catch (err) {
-      return c.html(renderLayout(c, 'ポートフォリオ', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, '口座サマリ', unavailable(messageOf(err))))
     }
   })
   .get('/trades', async (c) => {
@@ -356,7 +356,7 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/cron', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, 'Cron 判定', unavailable('DB not bound')))
+      return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
@@ -401,11 +401,11 @@ export const dashboard = new Hono<DashboardBindings>()
               .limit(limit),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
-      return c.html(renderLayout(c, 'Cron 判定', cronBody(rows, limit, symbolFilter, universe)))
+      return c.html(renderLayout(c, '戦略判定', cronBody(rows, limit, symbolFilter, universe)))
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
-      return c.html(renderLayout(c, 'Cron 判定', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err))))
     }
   })
   /**
@@ -592,9 +592,11 @@ function fmtJst(value: string | Date | null | undefined): string {
 const STYLE = `
   body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
-  nav{margin-bottom:20px;display:flex;gap:12px;flex-wrap:wrap}
+  nav{margin-bottom:20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   nav a{color:#06c;text-decoration:none;padding:4px 10px;border:1px solid #d0d0d5;border-radius:6px;background:#fff}
   nav a:hover{background:#eef}
+  nav .nav-group{color:#86868b;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:0 4px 0 8px;border-left:1px solid #d0d0d5;margin-left:4px}
+  nav .nav-group:first-of-type{border-left:none;margin-left:0;padding-left:0}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
@@ -707,13 +709,16 @@ function layout(title: string, body: string, env?: unknown): string {
 <h1>Webull Trading — ${esc(title)}${badge}</h1>
 <nav>
   <a href="/dashboard">ホーム</a>
-  <a href="/dashboard/positions">保有状況</a>
-  <a href="/dashboard/portfolio">ポートフォリオ</a>
+  <span class="nav-group">取引状況</span>
+  <a href="/dashboard/positions">ポートフォリオ</a>
+  <a href="/dashboard/portfolio">口座サマリ</a>
   <a href="/dashboard/trades">約定履歴</a>
-  <a href="/dashboard/config">設定</a>
-  <a href="/dashboard/cron">Cron</a>
+  <span class="nav-group">戦略・監視</span>
+  <a href="/dashboard/cron">戦略判定</a>
   <a href="/dashboard/charts">チャート</a>
   <a href="/dashboard/alerts">アラート</a>
+  <span class="nav-group">運用</span>
+  <a href="/dashboard/config">設定</a>
   <a href="/dashboard/audit">監査ログ</a>
   <a href="/dashboard/broker-probe" title="Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ">broker 診断</a>
 </nav>
@@ -1093,15 +1098,26 @@ function parseJsonObject(value: string | null | undefined): unknown {
 
 function indexBody(): string {
   return `<p>運用者向け読み取り専用ダッシュボード。各ページは Cloudflare Access で保護されています。</p>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">取引状況</h2>
 <ul>
-  <li><a href="/dashboard/positions">保有状況</a> — 全銘柄の Durable Object 状態 (保有 / 平均取得単価 / 未約定注文 / クールダウン)</li>
-  <li><a href="/dashboard/portfolio">ポートフォリオ</a> — 当日始値資産 / 当日実現損益 / ドローダウン / 緊急停止 (kill-switch)</li>
+  <li><a href="/dashboard/positions">ポートフォリオ</a> — 全銘柄の Durable Object 状態 (保有 / 平均取得単価 / 未約定注文 / クールダウン)</li>
+  <li><a href="/dashboard/portfolio">口座サマリ</a> — 当日始値資産 / 当日実現損益 / ドローダウン / 緊急停止 (kill-switch)</li>
   <li><a href="/dashboard/trades">約定履歴</a> — <code>trade_journal</code> 直近 (既定 50件、<code>?limit=N</code> で可変、最大 200)</li>
-  <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
-  <li><a href="/dashboard/cron">Cron 判定</a> — <code>strategy_decision_log</code> 直近 (<code>?symbol=SOXL</code> で絞り込み可)</li>
+</ul>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">戦略・監視</h2>
+<ul>
+  <li><a href="/dashboard/cron">戦略判定</a> — <code>strategy_decision_log</code> 直近 cron tick の銘柄別判定 (<code>?symbol=SOXL</code> / <code>?requestId=...</code> で絞り込み可)</li>
   <li><a href="/dashboard/charts">チャート</a> — 概要 (エクイティカーブ + ドローダウン) / 取引品質 (PnL 分布 + 統計 + Decision breakdown) / 個別銘柄 (price + SMA50 + entry/exit) を tab 切替</li>
   <li><a href="/dashboard/alerts">アラート</a> — Slack/Discord に push 通知した critical / warning / info の直近 (#141)。webhook 未設定でも D1 に記録される。</li>
+</ul>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">運用</h2>
+<ul>
+  <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
   <li><a href="/dashboard/audit">監査ログ</a> — 状態変更系 admin POST の before/after 差分 (#274)。actor / endpoint / 日付で絞り込み可。</li>
+  <li><a href="/dashboard/broker-probe">broker 診断</a> — Webull broker へ直接 quote / positions を投げて raw レスポンスを観察 (接続診断用)。</li>
 </ul>`
 }
 
@@ -1596,7 +1612,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
 }
 
 /**
- * cooldownUntil を保有状況テーブル向けに整形。null または past timestamp
+ * cooldownUntil をポートフォリオテーブル向けに整形。null または past timestamp
  * (admin /clear-cooldown で epoch 0 が書き込まれた状態等) は「解除済」
  * 扱いで em-dash を返す。strategy 側の `cooldownUntil > now` 判定と表示を
  * 整合させ、"1970-01-01 09:00:00 JST" がクールダウン列に残るように見える
