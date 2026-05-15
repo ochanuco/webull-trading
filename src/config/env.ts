@@ -360,3 +360,16 @@ export interface Env {
 export interface Env {
   WEBULL_PLACE_ORDER_SCHEMA?: string
 }
+
+
+// #276: TRADING_ENABLED env var を deploy-gate (= non-prod / preview の強制 OFF
+// override) として残す。prod は D1 `global_config.trading_enabled` が真値だが、
+// 「env で OFF にしたら DB で ON にしても発注しない」=「より制限的な側が勝つ」
+// 仕様。`true` 明示 / unset は DB を尊重、その他は OFF override 扱い。
+//
+//   env unset / 'true'  → DB の trading_enabled を使う
+//   env が 'false'      → DB が true でも強制 OFF (fail-closed)
+//   env がそれ以外       → 安全側に倒し 強制 OFF (typo は cron 止める方が安全)
+export interface Env {
+  TRADING_ENABLED?: string
+}

@@ -261,6 +261,76 @@ describe('trade routes', () => {
     expect(body.riskDecision.reasons.some((r) => r.toLowerCase().includes('trading'))).toBe(true)
   })
 
+  // #276: env TRADING_ENABLED=false が DB=true を上書きする (より制限的が勝つ)。
+  // `/trade/decide` を通して RiskPolicy が tradingEnabled=false 扱いで reject
+  // することを確認する (= deploy-gate override が実際に発注 path で効く保証)。
+  it('env TRADING_ENABLED=false overrides DB tradingEnabled=true (#276 kill-switch)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const app = createApp()
+
+    const response = await app.request(
+      '/trade/decide',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          symbol: 'SOXL',
+          price: 9,
+          quantity: 2,
+          buyBelow: 10,
+          sellAbove: 20,
+        }),
+      },
+      { ...env, TRADING_ENABLED: 'false' },
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      riskDecision: { allowed: boolean; reasons: string[] }
+    }
+    expect(body.riskDecision.allowed).toBe(false)
+    expect(body.riskDecision.reasons.some((r) => r.toLowerCase().includes('trading'))).toBe(true)
+  })
+
+  // #276 DoD invariant: DRY_RUN=true 時は kill-switch ON (tradingEnabled=true) でも
+  // **絶対に実発注しない**。execution mode が DRY_RUN になり Webull endpoint への
+  // fetch も 0 回であることを確認する。kill-switch ON / DRY_RUN ON の両立シナリオ。
+  it('DRY_RUN=true must NOT place real orders even when kill-switch is ON (#276 DoD)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ dryRun: true, tradingEnabled: true }),
+    )
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const app = createApp()
+
+    const response = await app.request(
+      '/trade/execute',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          symbol: 'SOXL',
+          price: 9,
+          quantity: 2,
+          buyBelow: 10,
+          sellAbove: 20,
+        }),
+      },
+      env,
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      executionResult?: { mode: string; submitted: boolean }
+    }
+    // kill-switch ON だが DRY_RUN は独立して効く: mode='DRY_RUN' で broker 発注なし。
+    expect(body.executionResult?.mode).toBe('DRY_RUN')
+    // Webull endpoint への HTTP は一切走らない。
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('returns 400 for an empty symbol', async () => {
     const app = createApp()
 

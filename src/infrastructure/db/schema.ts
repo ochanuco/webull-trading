@@ -599,3 +599,26 @@ export const configAuditLog = sqliteTable(
 
 export type ConfigAuditLogRow = typeof configAuditLog.$inferSelect
 export type ConfigAuditLogInsert = typeof configAuditLog.$inferInsert
+
+/**
+ * Runtime kill-switch toggle history (issue #276)。`global_config.trading_enabled`
+ * は単一行で「現在値」、こちらは append-only で「いつ誰が何故 ON/OFF にしたか」
+ * を残す。full audit log は #274 で別途扱う想定なので、ここでは kill-switch の
+ * before/after/reason に絞る最小スキーマ。
+ */
+export const tradingToggleHistory = sqliteTable('trading_toggle_history', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  timestamp: text('timestamp').notNull(),
+  /** basic-auth user (admin endpoint 経由は username, dashboard 経由も同様)。 */
+  actor: text('actor'),
+  /** 切替前の trading_enabled。NULL は初回 toggle (snapshot 不能) のみ想定。 */
+  before: integer('before', { mode: 'boolean' }),
+  /** 切替後の trading_enabled。 */
+  after: integer('after', { mode: 'boolean' }).notNull(),
+  /** operator から渡された自由記述の理由。必須 (audit context)。 */
+  reason: text('reason').notNull(),
+  requestId: text('request_id'),
+})
+
+export type TradingToggleHistoryRow = typeof tradingToggleHistory.$inferSelect
+export type TradingToggleHistoryInsert = typeof tradingToggleHistory.$inferInsert

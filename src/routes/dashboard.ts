@@ -1,7 +1,19 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import type { Env } from '../config/env'
+
+/**
+ * Dashboard-local Hono context shape。`AppBindings.Variables` の `requestId` に
+ * 加え、kill-switch banner state を `use('*')` middleware で初頭 load して
+ * 全 route から参照可能にする (#276)。
+ */
+type DashboardBindings = AppBindings & {
+  Variables: AppBindings['Variables'] & {
+    killSwitchState: KillSwitchBannerState | null
+  }
+}
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
+import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import { formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
@@ -32,11 +44,37 @@ import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
  * we surface "unavailable" rather than 500, so a partially-configured env
  * still yields a usable landing.
  */
-export const dashboard = new Hono<AppBindings>()
-  .get('/', (c) => c.html(layout('ダッシュボード', indexBody(), c.env)))
+interface KillSwitchBannerState {
+  dbEnabled: boolean
+  effective: boolean
+  envOverrideActive: boolean
+}
+
+async function loadKillSwitchState(env: Env): Promise<KillSwitchBannerState | null> {
+  if (!env.DB) return null
+  try {
+    const global = await loadGlobalConfigFrom(env)
+    const effective = resolveTradingEnabled(global.tradingEnabled, env.TRADING_ENABLED)
+    return {
+      dbEnabled: global.tradingEnabled,
+      effective,
+      envOverrideActive: effective !== global.tradingEnabled,
+    }
+  } catch {
+    return null
+  }
+}
+
+export const dashboard = new Hono<DashboardBindings>()
+  .use('*', async (c, next) => {
+    const state = await loadKillSwitchState(c.env)
+    c.set('killSwitchState', state)
+    await next()
+  })
+  .get('/', (c) => c.html(renderLayout(c, 'ダッシュボード', indexBody())))
   .get('/positions', async (c) => {
     if (!c.env.DB || !c.env.SYMBOL_STATE) {
-      return c.html(layout('保有状況', unavailable('DB or SYMBOL_STATE not bound'), c.env))
+      return c.html(renderLayout(c, '保有状況', unavailable('DB or SYMBOL_STATE not bound')))
     }
     const universe = await loadSymbolUniverse(c.env)
     const client = new SymbolStateClient(c.env.SYMBOL_STATE)
@@ -55,11 +93,11 @@ export const dashboard = new Hono<AppBindings>()
       ),
       loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
     ])
-    return c.html(layout('保有状況', positionsBody(rows, strategyPriceMap, universe), c.env))
+    return c.html(renderLayout(c, '保有状況', positionsBody(rows, strategyPriceMap, universe)))
   })
   .get('/portfolio', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
-      return c.html(layout('ポートフォリオ', unavailable('PORTFOLIO_STATE not bound'), c.env))
+      return c.html(renderLayout(c, 'ポートフォリオ', unavailable('PORTFOLIO_STATE not bound')))
     }
     try {
       const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
@@ -68,14 +106,14 @@ export const dashboard = new Hono<AppBindings>()
       const vixRegime = c.env.DB
         ? await loadVixRegimeSnapshot(c.env.DB, c.get('requestId'))
         : null
-      return c.html(layout('ポートフォリオ', portfolioBody(portfolio, vixRegime), c.env))
+      return c.html(renderLayout(c, 'ポートフォリオ', portfolioBody(portfolio, vixRegime)))
     } catch (err) {
-      return c.html(layout('ポートフォリオ', unavailable(messageOf(err)), c.env))
+      return c.html(renderLayout(c, 'ポートフォリオ', unavailable(messageOf(err))))
     }
   })
   .get('/trades', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('約定履歴', unavailable('DB not bound'), c.env))
+      return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
     const db = createDb(c.env.DB)
@@ -85,21 +123,21 @@ export const dashboard = new Hono<AppBindings>()
       db.select().from(tradeJournal).orderBy(desc(tradeJournal.id)).limit(limit),
       loadSymbolUniverse(c.env).catch(() => null),
     ])
-    return c.html(layout('約定履歴', tradesBody(rows, limit, universe), c.env))
+    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe)))
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('設定', unavailable('DB not bound'), c.env))
+      return c.html(renderLayout(c, '設定', unavailable('DB not bound')))
     }
     const [global, universe] = await Promise.all([
       loadGlobalConfigFrom(c.env, c.get('requestId')),
       loadSymbolUniverse(c.env),
     ])
-    return c.html(layout('設定', configBody(global, universe), c.env))
+    return c.html(renderLayout(c, '設定', configBody(global, universe)))
   })
   .get('/charts', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('チャート', unavailable('DB not bound'), c.env))
+      return c.html(renderLayout(c, 'チャート', unavailable('DB not bound')))
     }
     try {
       const tab = parseChartsTab(c.req.query('tab'))
@@ -109,7 +147,7 @@ export const dashboard = new Hono<AppBindings>()
       // - symbol:   universe + symbolChart
       if (tab === 'overview') {
         const equity = await loadEquityCurve(c.env.DB)
-        return c.html(layout('チャート', chartsBody({ tab, equity }), c.env))
+        return c.html(renderLayout(c, 'チャート', chartsBody({ tab, equity })))
       }
       if (tab === 'quality') {
         const [decisions, pnls] = await Promise.all([
@@ -117,7 +155,8 @@ export const dashboard = new Hono<AppBindings>()
           loadTradePnls(c.env.DB),
         ])
         return c.html(
-          layout(
+          renderLayout(
+            c,
             'チャート',
             chartsBody({
               tab,
@@ -126,7 +165,6 @@ export const dashboard = new Hono<AppBindings>()
               stats: computeTradeStats(pnls),
               histogram: computePnlHistogram(pnls),
             }),
-            c.env,
           ),
         )
       }
@@ -160,7 +198,8 @@ export const dashboard = new Hono<AppBindings>()
         const referenceChart = charts.find((c) => c.chart !== null)?.chart ?? null
         const zoom = computeZoomRange(zoomFrom, zoomTo, referenceChart)
         return c.html(
-          layout(
+          renderLayout(
+            c,
             'チャート',
             chartsBody({
               tab,
@@ -168,7 +207,6 @@ export const dashboard = new Hono<AppBindings>()
               zoom,
               universe,
             }),
-            c.env,
           ),
         )
       }
@@ -222,7 +260,8 @@ export const dashboard = new Hono<AppBindings>()
       // - lastTimestamp 基準なので休場や POC 開始直後でも broken にならない
       const zoom = computeZoomRange(zoomFrom, zoomTo, symbolChart)
       return c.html(
-        layout(
+        renderLayout(
+          c,
           'チャート',
           chartsBody({
             tab,
@@ -233,11 +272,10 @@ export const dashboard = new Hono<AppBindings>()
             zoom,
             universe,
           }),
-          c.env,
         ),
       )
     } catch (err) {
-      return c.html(layout('チャート', unavailable(messageOf(err)), c.env))
+      return c.html(renderLayout(c, 'チャート', unavailable(messageOf(err))))
     }
   })
   .get('/cron/json', async (c) => {
@@ -316,7 +354,7 @@ export const dashboard = new Hono<AppBindings>()
   })
   .get('/cron', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('Cron 判定', unavailable('DB not bound'), c.env))
+      return c.html(renderLayout(c, 'Cron 判定', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
@@ -361,11 +399,11 @@ export const dashboard = new Hono<AppBindings>()
               .limit(limit),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
-      return c.html(layout('Cron 判定', cronBody(rows, limit, symbolFilter, universe), c.env))
+      return c.html(renderLayout(c, 'Cron 判定', cronBody(rows, limit, symbolFilter, universe)))
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
-      return c.html(layout('Cron 判定', unavailable(messageOf(err)), c.env))
+      return c.html(renderLayout(c, 'Cron 判定', unavailable(messageOf(err))))
     }
   })
   /**
@@ -385,12 +423,12 @@ export const dashboard = new Hono<AppBindings>()
       ? await loadSymbolUniverse(c.env).catch(() => null)
       : null
     return c.html(
-      layout('Broker 診断', brokerProbeBody({ symbol, category, universe }), c.env),
+      renderLayout(c, 'Broker 診断', brokerProbeBody({ symbol, category, universe })),
     )
   })
   .get('/alerts', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('アラート', unavailable('DB not bound'), c.env))
+      return c.html(renderLayout(c, 'アラート', unavailable('DB not bound')))
     }
     const limit = clampAlertLimit(c.req.query('limit'))
     const severityFilter = parseSeverityFilter(c.req.query('severity'))
@@ -409,21 +447,21 @@ export const dashboard = new Hono<AppBindings>()
         loadSymbolUniverse(c.env).catch(() => null),
       ])
       return c.html(
-        layout(
+        renderLayout(
+          c,
           'アラート',
           alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery, universe }),
-          c.env,
         ),
       )
     } catch (err) {
       // 0012 migration 未適用 (= notification_emit_log テーブル無し) を
       // 500 にせず unavailable に落とす。段階的デプロイ時の自己保護。
-      return c.html(layout('アラート', unavailable(messageOf(err)), c.env))
+      return c.html(renderLayout(c, 'アラート', unavailable(messageOf(err))))
     }
   })
   .get('/audit', async (c) => {
     if (!c.env.DB) {
-      return c.html(layout('監査ログ', unavailable('DB not bound')))
+      return c.html(renderLayout(c, '監査ログ', unavailable('DB not bound')))
     }
     const limit = clampAuditLimit(c.req.query('limit'))
     const actorFilter = trimQuery(c.req.query('actor'))
@@ -438,7 +476,8 @@ export const dashboard = new Hono<AppBindings>()
     try {
       const rows = await loadRecentAudit(c.env.DB, options)
       return c.html(
-        layout(
+        renderLayout(
+          c,
           '監査ログ',
           auditBody({
             rows,
@@ -453,7 +492,7 @@ export const dashboard = new Hono<AppBindings>()
     } catch (err) {
       // 0016 migration 未適用 (= config_audit_log テーブル無し) を 500 にせず
       // unavailable に落とす。段階的デプロイ時の自己保護 (alerts と同パターン)。
-      return c.html(layout('監査ログ', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err))))
     }
   })
 
@@ -614,6 +653,45 @@ function envBadgeTitlePrefix(mode: EnvBadgeMode): string {
 function renderEnvBadge(mode: EnvBadgeMode): string {
   const cls = mode === 'LIVE' ? 'live' : mode === 'DRY-RUN' ? 'dry' : 'unknown'
   return `<span class="env-badge ${cls}" title="DRY_RUN=${esc(mode)}">${esc(mode)}</span>`
+}
+
+function renderLayout(
+  c: {
+    env: unknown
+    var: { killSwitchState: KillSwitchBannerState | null }
+  },
+  title: string,
+  body: string,
+): string {
+  const banner = killSwitchBanner(c.var.killSwitchState)
+  return layout(title, banner + body, c.env)
+}
+
+function killSwitchBanner(state: KillSwitchBannerState | null): string {
+  if (state === null) {
+    return '<div class="kill-switch kill-switch-unknown">取引状態: <span class="muted">取得不能 (D1 未接続)</span></div>'
+  }
+  const statusLabel = state.effective
+    ? '<span class="ok">取引 ON (有効)</span>'
+    : '<span class="err">取引 OFF (停止中)</span>'
+  const envNote = state.envOverrideActive
+    ? `<span class="warn" style="margin-left:8px">⚠ env TRADING_ENABLED で deploy-gate ON: DB を ${state.dbEnabled ? 'ON' : 'OFF'} にしても effective は OFF</span>`
+    : ''
+  const disabled = state.envOverrideActive ? 'disabled' : ''
+  const buttonForm = state.effective
+    ? `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" style="display:inline-flex;gap:6px;align-items:center;margin-left:12px">
+        <input type="hidden" name="enabled" value="false"/>
+        <input type="text" name="reason" placeholder="停止理由 (必須)" required maxlength="256" style="padding:3px 6px;font-size:12px;width:200px"/>
+        <button type="submit" ${disabled} style="padding:4px 10px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">取引停止</button>
+       </form>`
+    : `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" onsubmit="return confirm('取引を再開します。本当によろしいですか？');" style="display:inline-flex;gap:6px;align-items:center;margin-left:12px">
+        <input type="hidden" name="enabled" value="true"/>
+        <input type="text" name="reason" placeholder="再開理由 (必須)" required maxlength="256" style="padding:3px 6px;font-size:12px;width:200px"/>
+        <button type="submit" ${disabled} style="padding:4px 10px;font-size:12px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">取引再開</button>
+       </form>`
+  return `<div class="kill-switch" style="padding:8px 12px;margin-bottom:12px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;font-size:13px;display:flex;align-items:center;flex-wrap:wrap">
+    <strong>取引状態:</strong>&nbsp;${statusLabel}${envNote}${buttonForm}
+  </div>`
 }
 
 function layout(title: string, body: string, env?: unknown): string {

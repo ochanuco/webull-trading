@@ -17,6 +17,11 @@ import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastructure/db/schema'
 import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 import {
+  applyTradingToggle,
+  createTradingToggleDb,
+} from '../infrastructure/db/tradingToggleRepo'
+import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
+import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
   type EarningsCalendarSeedInput,
@@ -151,6 +156,62 @@ export const admin = new Hono<AppBindings>()
   .post('/strategy/run', async (c) => {
     const result = await runStrategyCron(c.env)
     return c.json(result)
+  })
+  /**
+   * Runtime kill-switch toggle (issue #276)。`global_config.trading_enabled` を
+   * 切替えて `trading_toggle_history` に append。dashboard 経由は
+   * `application/x-www-form-urlencoded`、CLI 経由は JSON で受ける (Content-Type
+   * で分岐)。dashboard form 後の挙動を素直にするため、form post には HTML 302
+   * で `/dashboard` に戻す。
+   *
+   * Body (JSON or form): `{ enabled: boolean, reason: string }`
+   *
+   * `effective` フィールドで env override 適用後の値を返す: env=false なら DB
+   * を true に書いても `effective=false` で運用者に「env override 効いてる」
+   * を視認させる (saw-tooth な切替えで混乱する事故防止)。
+   */
+  .post('/trading/toggle', async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const contentType = c.req.header('content-type') ?? ''
+    const isForm =
+      contentType.includes('application/x-www-form-urlencoded') ||
+      contentType.includes('multipart/form-data')
+    const body = isForm
+      ? Object.fromEntries((await c.req.formData()).entries())
+      : ((await c.req.json().catch(() => null)) as unknown)
+    const { enabled, reason } = readToggleBody(body)
+
+    const db = createTradingToggleDb(c.env.DB)
+    const result = await applyTradingToggle(db, {
+      enabled,
+      actor: c.env.BASIC_AUTH_USER ?? null,
+      reason,
+      requestId: c.get('requestId') ?? null,
+    })
+    console.log(
+      JSON.stringify({
+        event: 'trading_toggle_applied',
+        requestId: c.get('requestId'),
+        actor: c.env.BASIC_AUTH_USER ?? null,
+        before: result.before,
+        after: result.after,
+        reason,
+      }),
+    )
+    if (isForm) {
+      // Form 経由は dashboard に戻して銀行のような one-click 操作にする。
+      return c.redirect('/dashboard', 303)
+    }
+    const effective = resolveTradingEnabled(result.after, c.env.TRADING_ENABLED)
+    return c.json({
+      before: result.before,
+      after: result.after,
+      effective,
+      envOverrideActive: effective !== result.after,
+      historyId: result.historyId,
+    })
   })
   /**
    * Offline backtest harness for PullbackUptrendStrategy (issue #198)。
@@ -1088,6 +1149,41 @@ function readOverridePositionBody(body: unknown): {
     throw new ValidationError('reason must be <= 256 chars', { field: 'reason' })
   }
   return { qty, avgPrice, openedAt, reason }
+}
+
+/**
+ * `/admin/trading/toggle` の body parser (issue #276)。JSON / form 双方を受け、
+ * `enabled` (boolean) と `reason` (1..256 chars) を strict に validate する。
+ * form value は string で渡るため "true"/"false"/"1"/"0"/"on" を許容。
+ */
+function readToggleBody(body: unknown): { enabled: boolean; reason: string } {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ValidationError('body must be a JSON object or form-encoded', { field: 'body' })
+  }
+  const raw = body as { enabled?: unknown; reason?: unknown }
+  const enabledRaw = raw.enabled
+  let enabled: boolean
+  if (typeof enabledRaw === 'boolean') {
+    enabled = enabledRaw
+  } else if (typeof enabledRaw === 'string') {
+    // form post は string で来る。dashboard form は 'true' / 'false' を送るので
+    // それを正規ケースに、CLI ミス防止に 'on' (HTML checkbox 流儀) も許容。
+    const norm = enabledRaw.trim().toLowerCase()
+    if (norm === 'true' || norm === '1' || norm === 'on') enabled = true
+    else if (norm === 'false' || norm === '0' || norm === 'off') enabled = false
+    else
+      throw new ValidationError("enabled must be boolean ('true'/'false')", { field: 'enabled' })
+  } else {
+    throw new ValidationError('enabled must be a boolean', { field: 'enabled' })
+  }
+  const reasonRaw = raw.reason
+  if (typeof reasonRaw !== 'string' || reasonRaw.trim().length === 0) {
+    throw new ValidationError('reason must be a non-empty string', { field: 'reason' })
+  }
+  if (reasonRaw.length > 256) {
+    throw new ValidationError('reason must be <= 256 chars', { field: 'reason' })
+  }
+  return { enabled, reason: reasonRaw }
 }
 
 function readAmount(body: unknown): number {
