@@ -6034,7 +6034,12 @@ function symbolFormBody(args: SymbolFormArgs): string {
       ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
          <span></span>
          <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
-      : `<input type="text" name="symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" style="padding:6px">`
+      : `<div>
+           <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" style="padding:6px;width:160px">
+           <button type="button" onclick="window.lookupSymbolAutoFill()" style="padding:6px 12px;margin-left:6px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">取得</button>
+           <span id="symbol-form-lookup-status" class="muted" style="font-size:11px;margin-left:8px"></span>
+           <p class="muted" style="margin:4px 0 0;font-size:11px">symbol を入れて「取得」で銘柄名 / 市場 / 通貨を Yahoo Finance から自動補完 (失敗時は市場 / 通貨だけ symbol pattern で推測)。</p>
+         </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
@@ -6042,7 +6047,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
   <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
     <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
     <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
-    <input type="text" name="name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
+    <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
     <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>
     <select name="market" id="symbol-form-market" required style="padding:6px" onchange="window.syncSymbolFormCurrencyFromMarket(this.value)">
       <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
@@ -6089,6 +6094,31 @@ function symbolFormBody(args: SymbolFormArgs): string {
       var sel = document.getElementById('symbol-form-currency');
       if (sel) sel.value = cur;
       window.syncSymbolFormCurrencyUnits(cur);
+    };
+    window.lookupSymbolAutoFill = async function () {
+      var symInput = document.getElementById('symbol-form-symbol');
+      var statusEl = document.getElementById('symbol-form-lookup-status');
+      if (!symInput || !statusEl) return;
+      var sym = (symInput.value || '').trim().toUpperCase();
+      if (!sym) { statusEl.textContent = 'symbol を先に入力してください'; return; }
+      statusEl.textContent = '取得中…';
+      try {
+        var res = await fetch('/admin/symbol-config/lookup?symbol=' + encodeURIComponent(sym), { credentials: 'same-origin' });
+        if (!res.ok) { statusEl.textContent = '取得失敗 (HTTP ' + res.status + ')'; return; }
+        var data = await res.json();
+        var nameInput = document.getElementById('symbol-form-name');
+        var marketSel = document.getElementById('symbol-form-market');
+        var currencySel = document.getElementById('symbol-form-currency');
+        if (data.name && nameInput) nameInput.value = data.name;
+        if (data.market && marketSel) marketSel.value = data.market;
+        if (data.currency && currencySel) currencySel.value = data.currency;
+        if (data.currency) window.syncSymbolFormCurrencyUnits(data.currency);
+        statusEl.textContent = data.name
+          ? '✓ ' + data.source + ' から取得'
+          : '⚠ 名前は取得失敗 (' + data.source + ')、市場/通貨のみ反映';
+      } catch (err) {
+        statusEl.textContent = '取得エラー: ' + (err && err.message ? err.message : err);
+      }
     };
   </script>`
 }
