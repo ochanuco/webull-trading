@@ -6062,10 +6062,11 @@ function symbolFormBody(args: SymbolFormArgs): string {
          <span></span>
          <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
       : `<div>
-           <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" style="padding:6px;width:160px">
-           <button type="button" id="symbol-form-lookup-btn" onclick="window.lookupSymbolAutoFill()" style="padding:6px 12px;margin-left:6px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">取得</button>
-           <span id="symbol-form-lookup-status" class="muted" style="font-size:11px;margin-left:8px"></span>
-           <p class="muted" style="margin:4px 0 0;font-size:11px">symbol を入れて「取得」で銘柄名 / 市場 / 通貨を Yahoo Finance から自動補完 (失敗時は市場 / 通貨だけ symbol pattern で推測)。</p>
+           <div style="position:relative;display:inline-block">
+             <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px">
+             <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+           </div>
+           <p class="muted" style="margin:4px 0 0;font-size:11px">2 文字以上入力で Yahoo Finance から候補を suggest。click で銘柄 / 銘柄名 / 市場 / 通貨を自動入力。JP 銘柄は 4 桁数字 (例: 7203)。</p>
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
@@ -6179,12 +6180,12 @@ function symbolFormBody(args: SymbolFormArgs): string {
         arrow.textContent = ' → ';
         var bucketEl = document.createElement('span');
         bucketEl.style.color = hasBucket ? '#06c' : '#86868b';
-        bucketEl.textContent = hasBucket ? p.bucket : '(未分類、click で「' + p.symbol + '」挿入)';
+        bucketEl.textContent = hasBucket ? p.bucket : '未分類';
         li.appendChild(symEl);
         li.appendChild(arrow);
         li.appendChild(bucketEl);
         if (!hasBucket) {
-          li.title = 'bucket 未設定銘柄。click すると銘柄名 (' + p.symbol + ') が仮挿入される — 必要に応じて編集してください。';
+          li.title = 'click で銘柄名 (' + p.symbol + ') を bucket に仮挿入。';
         }
         li.addEventListener('mousedown', function () {
           window.pickSymbolFormBucket(insertValue);
@@ -6201,45 +6202,66 @@ function symbolFormBody(args: SymbolFormArgs): string {
       window.hideSymbolFormBucketSuggest();
       if (input) input.focus();
     };
-    window.lookupSymbolAutoFill = async function () {
+    window.hideSymbolSuggest = function () {
+      var list = document.getElementById('symbol-form-symbol-suggest');
+      if (list) list.style.display = 'none';
+    };
+    window._symbolSuggestTimer = null;
+    window._symbolSuggestSeq = 0;
+    window.searchSymbolSuggest = function (q) {
+      var list = document.getElementById('symbol-form-symbol-suggest');
+      if (!list) return;
+      var query = (q || '').trim();
+      if (query.length < 2) { list.style.display = 'none'; return; }
+      if (window._symbolSuggestTimer) clearTimeout(window._symbolSuggestTimer);
+      window._symbolSuggestTimer = setTimeout(function () {
+        var mySeq = ++window._symbolSuggestSeq;
+        fetch('/admin/symbol-config/lookup?q=' + encodeURIComponent(query), { credentials: 'same-origin' })
+          .then(function (res) { return res.ok ? res.json() : { matches: [] }; })
+          .then(function (data) {
+            if (mySeq !== window._symbolSuggestSeq) return; // 古い response は捨てる
+            var matches = (data && data.matches) || [];
+            list.innerHTML = '';
+            if (matches.length === 0) {
+              var hint = document.createElement('li');
+              hint.style.cssText = 'padding:6px 10px;color:#86868b;font-size:11px;font-style:italic;cursor:default';
+              hint.textContent = '"' + query + '" に一致する銘柄無し (Yahoo Finance)。手動入力で続行可。';
+              list.appendChild(hint);
+              list.style.display = 'block';
+              return;
+            }
+            matches.forEach(function (m) {
+              var li = document.createElement('li');
+              li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee';
+              var sym = document.createElement('strong');
+              sym.textContent = m.symbol;
+              var nameSpan = document.createElement('span');
+              nameSpan.style.cssText = 'color:#86868b;margin-left:8px;font-size:12px';
+              nameSpan.textContent = (m.name || '?') + ' (' + m.market + '/' + m.currency + ')';
+              li.appendChild(sym);
+              li.appendChild(nameSpan);
+              li.addEventListener('mousedown', function () { window.pickSymbolSuggest(m); });
+              li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
+              li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
+              list.appendChild(li);
+            });
+            list.style.display = 'block';
+          })
+          .catch(function () { list.style.display = 'none'; });
+      }, 250);
+    };
+    window.pickSymbolSuggest = function (m) {
       var symInput = document.getElementById('symbol-form-symbol');
-      var statusEl = document.getElementById('symbol-form-lookup-status');
-      var btn = document.getElementById('symbol-form-lookup-btn');
-      if (!symInput || !statusEl) return;
-      var sym = (symInput.value || '').trim().toUpperCase();
-      if (!sym) { statusEl.textContent = 'symbol を先に入力してください'; return; }
-      statusEl.textContent = '取得中…';
-      if (btn) {
-        btn.disabled = true;
-        btn.dataset.origLabel = btn.textContent || '取得';
-        btn.textContent = '取得中…';
-        btn.style.opacity = '0.6';
-        btn.style.cursor = 'wait';
-      }
-      try {
-        var res = await fetch('/admin/symbol-config/lookup?symbol=' + encodeURIComponent(sym), { credentials: 'same-origin' });
-        if (!res.ok) { statusEl.textContent = '取得失敗 (HTTP ' + res.status + ')'; return; }
-        var data = await res.json();
-        var nameInput = document.getElementById('symbol-form-name');
-        var marketSel = document.getElementById('symbol-form-market');
-        var currencySel = document.getElementById('symbol-form-currency');
-        if (data.name && nameInput) nameInput.value = data.name;
-        if (data.market && marketSel) marketSel.value = data.market;
-        if (data.currency && currencySel) currencySel.value = data.currency;
-        if (data.currency) window.syncSymbolFormCurrencyUnits(data.currency);
-        statusEl.textContent = data.name
-          ? '✓ ' + data.source + ' から取得'
-          : '⚠ 名前は取得失敗 (' + data.source + ')、市場/通貨のみ反映';
-      } catch (err) {
-        statusEl.textContent = '取得エラー: ' + (err && err.message ? err.message : err);
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = btn.dataset.origLabel || '取得';
-          btn.style.opacity = '';
-          btn.style.cursor = 'pointer';
-        }
-      }
+      var nameInput = document.getElementById('symbol-form-name');
+      var marketSel = document.getElementById('symbol-form-market');
+      var currencySel = document.getElementById('symbol-form-currency');
+      if (symInput) symInput.value = m.symbol;
+      if (m.name && nameInput) nameInput.value = m.name;
+      if (m.market && marketSel) marketSel.value = m.market;
+      if (m.currency && currencySel) currencySel.value = m.currency;
+      if (m.currency) window.syncSymbolFormCurrencyUnits(m.currency);
+      window.hideSymbolSuggest();
+      if (symInput) symInput.focus();
     };
   </script>`
 }
