@@ -6,19 +6,8 @@
 #   Override locally by uncommenting the block at the bottom.
 # - Sensitive (personal strategy / credentials / non-public endpoint):
 #   ALLOWED_SYMBOLS / MAX_ORDER_NOTIONAL / SYMBOL_MAX_NOTIONAL /
-#   WEBULL_API_BASE / CF_ACCESS_* / WEBULL_APP_* / WEBULL_ACCOUNT_ID
+#   WEBULL_API_BASE / BASIC_AUTH_* / EVENT_INGEST_SECRET / WEBULL_APP_* / WEBULL_ACCOUNT_ID
 #   → set below for local dev, use `wrangler secret put` for deployed envs.
-
-# Cloudflare Access auth (#29).
-# - Local dev (wrangler dev): set ACCESS_DEV_BYPASS_USER only. The middleware
-#   stamps this string as `actor` on every request. NEVER set this in a
-#   deployed env — production must always go through Access.
-# - dev / staging / production: set CF_ACCESS_TEAM_DOMAIN (full URL, e.g.
-#   https://<team>.cloudflareaccess.com) and CF_ACCESS_AUD (application AUD
-#   tag from the Zero Trust dashboard). DO NOT set ACCESS_DEV_BYPASS_USER.
-ACCESS_DEV_BYPASS_USER=dev@local
-# CF_ACCESS_TEAM_DOMAIN=
-# CF_ACCESS_AUD=
 
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
@@ -87,3 +76,17 @@ DASHBOARD_BASE_URL=
 # refuses to honour it once CF_ACCESS_TEAM_DOMAIN is configured, but make it
 # impossible to mis-set in the first place by leaving it out of `wrangler
 # secret put` invocations entirely.
+
+# #29: Cloudflare Access auth (append 規約)。
+# 旧 BASIC_AUTH_USER / BASIC_AUTH_PASSWORD / EVENT_INGEST_SECRET は廃止。
+# 上の line 9 のコメントに記載があるが、本 PR でこれらは削除済み (現存しない)。
+# - Local dev (wrangler dev): ACCESS_DEV_BYPASS_USER のみ設定。middleware が
+#   この文字列を actor として stamp する。**deployed env では絶対に設定禁止**。
+# - dev / staging / production: CF_ACCESS_TEAM_DOMAIN (full URL、例:
+#   https://<team>.cloudflareaccess.com) と CF_ACCESS_AUD (Zero Trust の
+#   application AUD tag) を `wrangler secret put` で投入。
+#   CF_ACCESS_TEAM_DOMAIN が設定されていると middleware は ACCESS_DEV_BYPASS_USER
+#   を無視するので、deployed env で誤って bypass var を入れても prod-safe。
+ACCESS_DEV_BYPASS_USER=dev@local
+# CF_ACCESS_TEAM_DOMAIN=
+# CF_ACCESS_AUD=

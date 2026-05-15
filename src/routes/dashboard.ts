@@ -733,12 +733,13 @@ function unavailable(reason: string): string {
 /**
  * Broker probe UI body: form + 結果表示器。submit で `/admin/broker/probe` を
  * 同一 origin の fetch (credentials: 'same-origin') で呼び、JSON を pre 整形
- * 表示。auth は browser の既存 basic-auth credentials が流用される。
+ * 表示。auth は browser の既存 Cloudflare Access cookie が流用される (#29 で
+ * basic auth から Access に移行済)。
  *
  * Server-side proxy を介さず client-side fetch にしてる理由:
- *   - dashboard handler が admin endpoint を sub-fetch するには Authorization
- *     ヘッダを request から request へ転送する必要があり、責務が混ざる
- *   - client-side fetch なら browser cred が自然に流れる、ロジック単純
+ *   - dashboard handler が admin endpoint を sub-fetch するには Access JWT を
+ *     request から request へ転送する必要があり、責務が混ざる
+ *   - client-side fetch なら browser の Access cookie が自然に流れる、ロジック単純
  *   - probe payload に Cache-Control: no-store が付いてるので browser cache
  *     にも残らない
  */
@@ -1094,7 +1095,7 @@ function parseJsonObject(value: string | null | undefined): unknown {
 }
 
 function indexBody(): string {
-  return `<p>運用者向け読み取り専用ダッシュボード。各ページは Basic 認証で保護されています。</p>
+  return `<p>運用者向け読み取り専用ダッシュボード。各ページは Cloudflare Access で保護されています。</p>
 <ul>
   <li><a href="/dashboard/positions">保有状況</a> — 全銘柄の Durable Object 状態 (保有 / 平均取得単価 / 未約定注文 / クールダウン)</li>
   <li><a href="/dashboard/portfolio">ポートフォリオ</a> — 当日始値資産 / 当日実現損益 / ドローダウン / 緊急停止 (kill-switch)</li>
