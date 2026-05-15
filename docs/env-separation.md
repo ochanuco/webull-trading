@@ -77,7 +77,7 @@ pnpm wrangler secret put WEBULL_APP_SECRET --env=production
 pnpm wrangler secret delete WEBULL_APP_SECRET --env=production
 ```
 
-rotation 後は対応する env を再 deploy せず即時反映される (Cloudflare 側で worker に re-bind される)。ただし production rotation 時は `pnpm deploy:production --dry-run` で binding 一覧が崩れていない事を確認する。
+rotation 後は対応する env を再 deploy せず即時反映される (Cloudflare 側で worker に re-bind される)。ただし production rotation 時は `pnpm wrangler deploy --env=production --dry-run` で binding 一覧が崩れていない事を確認する (`pnpm deploy:production` は先頭で `wrangler d1 migrations apply --remote` を実行するので dry-run 確認には使えない)。
 
 ## Cron triggers (重要な非自明仕様)
 
