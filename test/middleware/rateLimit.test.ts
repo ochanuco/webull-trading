@@ -124,4 +124,30 @@ describe('rateLimit() middleware on /admin/trading/toggle (STATE_CHANGE)', () =>
     expect(res.status).toBe(200)
     expect(applyTradingToggle).toHaveBeenCalledTimes(1)
   })
+
+  it('fail-opens (allows request) when binding.limit throws', async () => {
+    // RateLimit 側の一時障害で admin/dashboard を 500 で巻き添えにしないことを保証 (CodeRabbit #288)。
+    const app = createApp()
+    const throwingBinding: RateLimit = {
+      async limit() {
+        throw new Error('rate limit upstream down')
+      },
+    }
+    const env = {
+      ...baseEnv,
+      DB: {} as unknown as D1Database,
+      STATE_CHANGE_RATE_LIMIT: throwingBinding,
+    }
+    const res = await app.request(
+      '/admin/trading/toggle',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ enabled: true, reason: 'rl-throw' }),
+      },
+      env,
+    )
+    expect(res.status).toBe(200)
+    expect(applyTradingToggle).toHaveBeenCalledTimes(1)
+  })
 })

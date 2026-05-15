@@ -52,7 +52,24 @@ export function rateLimit(category: RateLimitCategory): MiddlewareHandler<AppBin
     }
 
     const key = resolveRateLimitKey(c)
-    const outcome = await binding.limit({ key })
+    let outcome: { success: boolean }
+    try {
+      outcome = await binding.limit({ key })
+    } catch (err) {
+      // RateLimit binding の一時障害で admin/dashboard を 500 で巻き添えにしない (fail-open)。
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit_check_failed',
+          category,
+          envKey,
+          key,
+          error: err instanceof Error ? err.message : String(err),
+          requestId: c.get('requestId') ?? null,
+        }),
+      )
+      await next()
+      return
+    }
     if (!outcome.success) {
       c.header('Retry-After', '60')
       return c.json({ error: 'rate_limited', retry_after: 60 }, 429)
