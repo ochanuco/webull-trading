@@ -99,8 +99,53 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('<title>ダッシュボード')
+    // #275: env badge prefix ([?] = UNKNOWN since DRY_RUN unset in baseEnv) goes
+    // before the page title.
+    expect(body).toContain('<title>[?] ダッシュボード')
     expect(body).toContain('/dashboard/positions')
+  })
+
+  // #275: header env badge — operator が live / dry-run を画面で即判別できるよう
+  // 全 dashboard page に常時表示する。DRY_RUN env から派生、未設定 / 不正値は
+  // UNKNOWN に倒れて 500 にしない。
+  describe('env badge (#275)', () => {
+    it('renders green DRY-RUN badge when DRY_RUN=true', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/dashboard',
+        { headers: authHeader },
+        { ...baseEnv, DRY_RUN: 'true' },
+      )
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(body).toContain('<title>[DRY] ダッシュボード')
+      expect(body).toContain('class="env-badge dry"')
+      expect(body).toContain('>DRY-RUN<')
+    })
+
+    it('renders red LIVE badge when DRY_RUN=false', async () => {
+      const app = createApp()
+      const res = await app.request(
+        '/dashboard',
+        { headers: authHeader },
+        { ...baseEnv, DRY_RUN: 'false' },
+      )
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(body).toContain('<title>[LIVE] ダッシュボード')
+      expect(body).toContain('class="env-badge live"')
+      expect(body).toContain('>LIVE<')
+    })
+
+    it('renders yellow UNKNOWN badge when DRY_RUN is unset (defensive default)', async () => {
+      const app = createApp()
+      const res = await app.request('/dashboard', { headers: authHeader }, baseEnv)
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(body).toContain('<title>[?] ダッシュボード')
+      expect(body).toContain('class="env-badge unknown"')
+      expect(body).toContain('>UNKNOWN<')
+    })
   })
 
   it('renders positions page with DO state', async () => {
