@@ -6100,18 +6100,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
     </div>
     <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
     <div>
+      <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px;width:280px">
       ${
         knownBuckets.length > 0
-          ? `<input type="search" id="symbol-form-bucket-filter" placeholder="🔍 既存 bucket を絞り込み" oninput="window.filterSymbolFormBuckets(this.value)" style="padding:6px;width:240px;margin-bottom:4px">
-             <br>
-             <select id="symbol-form-bucket-list" size="${Math.min(6, knownBuckets.length)}" onchange="window.pickSymbolFormBucket(this.value)" style="padding:4px;width:240px;font-family:inherit">
-               ${knownBuckets.map((b) => `<option value="${esc(b)}"${b === bucketValue ? ' selected' : ''}>${esc(b)}</option>`).join('')}
-             </select>
-             <p class="muted" style="margin:4px 0 2px;font-size:11px">↑ 既存値から選択、または ↓ で新規入力</p>`
-          : '<p class="muted" style="margin:0 0 4px;font-size:11px">既存 bucket はまだ無し — 下に直接入力してください。</p>'
+          ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+               <span class="muted" style="font-size:11px;margin-right:4px">既存 (click で挿入):</span>
+               ${knownBuckets
+                 .map(
+                   (b) =>
+                     `<button type="button" onclick="window.pickSymbolFormBucket('${esc(b).replace(/'/g, '&#39;')}')" style="padding:2px 8px;font-size:11px;background:#fff;border:1px solid #d0d0d5;border-radius:12px;cursor:pointer;color:#06c">${esc(b)}</button>`,
+                 )
+                 .join('')}
+             </div>`
+          : ''
       }
-      <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" placeholder="新規入力 (任意、空欄なら bucket 未分類)" style="padding:6px;width:240px">
-      <p class="muted" style="margin:4px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。</p>
+      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。空欄なら bucket 未分類。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
@@ -6136,15 +6139,9 @@ function symbolFormBody(args: SymbolFormArgs): string {
     };
     window.pickSymbolFormBucket = function (val) {
       var input = document.getElementById('symbol-form-bucket-input');
-      if (input) input.value = val;
-    };
-    window.filterSymbolFormBuckets = function (q) {
-      var list = document.getElementById('symbol-form-bucket-list');
-      if (!list) return;
-      var needle = (q || '').toLowerCase();
-      for (var i = 0; i < list.options.length; i++) {
-        var opt = list.options[i];
-        opt.hidden = needle.length > 0 && opt.value.toLowerCase().indexOf(needle) === -1;
+      if (input) {
+        input.value = val;
+        input.focus();
       }
     };
     window.lookupSymbolAutoFill = async function () {
