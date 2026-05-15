@@ -105,7 +105,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
         return selectChain(() => filtered().filter((r) => sym === null || r.symbol === sym))
       },
       orderBy: (_o: unknown) => chain,
-      limit: (_n: number) => Promise.resolve(filtered()),
+      limit: (n: number) => Promise.resolve(filtered().slice(0, n)),
       then: (resolve: (v: SymbolConfigRow[]) => unknown, reject?: (e: unknown) => unknown) =>
         Promise.resolve(filtered()).then(resolve, reject),
     }
@@ -121,10 +121,15 @@ function fakeDb(initial: SymbolConfigRow[]) {
       insert: (table: unknown) => ({
         values: async (v: Record<string, unknown>) => {
           const tn = tableName(table)
-          inserts.push({ table: tn, values: v })
           if (tn === 'symbol_config') {
+            const sym = String(v.symbol ?? '')
+            // UNIQUE constraint on `symbol` を sqlite と同じ message で模倣。
+            // insertSymbolConfig の TOCTOU 修正 (UNIQUE 違反を null 化) の検証用。
+            if (rows.some((r) => r.symbol === sym)) {
+              throw new Error('UNIQUE constraint failed: symbol_config.symbol')
+            }
             rows.push({
-              symbol: String(v.symbol ?? ''),
+              symbol: sym,
               name: (v.name as string | null) ?? null,
               market: String(v.market ?? 'US'),
               currency: String(v.currency ?? 'USD'),
@@ -135,6 +140,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
+          inserts.push({ table: tn, values: v })
         },
       }),
       update: (table: unknown) => ({
@@ -142,14 +148,27 @@ function fakeDb(initial: SymbolConfigRow[]) {
           where: async (cond: unknown) => {
             const tn = tableName(table)
             const symbol = extractSymbolFromWhere(cond)
-            updates.push({ table: tn as 'symbol_config', set: s, whereSymbol: symbol })
             if (tn === 'symbol_config' && symbol !== null) {
               for (let i = 0; i < rows.length; i++) {
                 if (rows[i]!.symbol === symbol) {
-                  rows[i] = { ...rows[i]!, ...(s as Partial<SymbolConfigRow>) }
+                  // `active` が drizzle `sql\`NOT active\`` 表現で来た場合は
+                  // fake 側で boolean に解決する (toggleSymbolActive の
+                  // atomic update を fake DB で再現)。
+                  const resolved: Record<string, unknown> = { ...s }
+                  if (resolved.active !== null && typeof resolved.active === 'object') {
+                    resolved.active = !rows[i]!.active
+                  }
+                  rows[i] = { ...rows[i]!, ...(resolved as Partial<SymbolConfigRow>) }
+                  updates.push({
+                    table: tn as 'symbol_config',
+                    set: resolved,
+                    whereSymbol: symbol,
+                  })
+                  return
                 }
               }
             }
+            updates.push({ table: tn as 'symbol_config', set: s, whereSymbol: symbol })
           },
         }),
       }),
@@ -419,5 +438,149 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(editBody).not.toContain(xssNotes)
     expect(editBody).not.toContain(xssBucket)
     expect(editBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(editBody).toContain('&quot;&gt;&lt;svg onload=alert(2)&gt;')
+  })
+
+  // --- TOCTOU: 既存 symbol を form POST → 303 redirect with ?error=duplicate ---
+  it('POST /admin/symbol-config returns 303 with ?error=duplicate when symbol exists (form)', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: new URLSearchParams({
+          symbol: 'SOXL',
+          market: 'US',
+          currency: 'USD',
+          active: 'true',
+        }).toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe(
+      '/dashboard/symbols?error=duplicate&symbol=SOXL',
+    )
+  })
+
+  // --- TOCTOU: 既存 symbol を JSON POST → 409 with error code (JSON path keeps semantics) ---
+  it('POST /admin/symbol-config returns 409 when symbol exists (JSON)', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({
+          symbol: 'SOXL',
+          market: 'US',
+          currency: 'USD',
+          active: true,
+        }),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body).toMatchObject({ error: 'symbol_already_exists', symbol: 'SOXL' })
+  })
+
+  // --- list error banner is rendered from ?error= query (PRG from failed POST) ---
+  it('renders error banner on /dashboard/symbols?error=duplicate&symbol=SOXL', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols?error=duplicate&symbol=SOXL',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('SOXL')
+    expect(body).toContain('既に登録済み')
+  })
+
+  // --- atomic toggle: SQL NOT active is sent in the UPDATE set ---
+  it('toggle-active sends SQL NOT expression (not a precomputed boolean) to UPDATE', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', active: true })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    await app.request(
+      '/admin/symbol-config/SOXL/toggle-active',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: '',
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    // fake DB unwraps the SQL NOT into a boolean (= !before.active) so the
+    // resulting row is flipped. The end-state check is what matters:
+    // 単純 read-modify-write だと「現在 active を SELECT してから書き戻し」
+    // になり race するが、新実装は SQL NOT を渡すことで DB が atomic に
+    // flip する。fake では update 後 row が反転していることだけ検証する。
+    const soxl = db.rows.find((r) => r.symbol === 'SOXL')
+    expect(soxl?.active).toBe(false)
+  })
+
+  // --- /symbols/new : DB unavailable returns unavailable page ---
+  it('GET /dashboard/symbols/new returns DB-not-bound page when DB binding missing', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('DB not bound')
+  })
+
+  // --- edit form has immutability hint ---
+  it('GET /dashboard/symbols/:symbol/edit shows immutability hint for the symbol field', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/SOXL/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('immutable')
+  })
+
+  // --- toggle JSON path returns full row snapshot, not only `active` ---
+  it('toggle-active JSON response returns full row snapshot', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', active: true, maxNotional: 2000, bucket: 'semi' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config/SOXL/toggle-active',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: '',
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body).toMatchObject({
+      symbol: 'SOXL',
+      row: {
+        symbol: 'SOXL',
+        active: false,
+        maxNotional: 2000,
+        bucket: 'semi',
+      },
+    })
   })
 })

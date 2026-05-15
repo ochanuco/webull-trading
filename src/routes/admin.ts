@@ -979,10 +979,12 @@ export const admin = new Hono<AppBindings>()
     const db = createDb(c.env.DB)
     const inserted = await insertSymbolConfig(db, input, new Date().toISOString())
     if (inserted === null) {
-      // 409 with JSON. Form path would normally re-render but caller pattern
-      // here mirrors macro/earnings: dashboard handler does pre-flight check
-      // and shows the form-level validation message before POST. 409 keeps
-      // semantics correct for CLI users.
+      if (isForm) {
+        return c.redirect(
+          `/dashboard/symbols?error=duplicate&symbol=${encodeURIComponent(input.symbol)}`,
+          303,
+        )
+      }
       return c.json({ error: 'symbol_already_exists', symbol: input.symbol }, 409)
     }
     await writeAuditLog(
@@ -1011,10 +1013,22 @@ export const admin = new Hono<AppBindings>()
     const db = createDb(c.env.DB)
     const before = await findSymbolConfig(db, symbolPath)
     if (before === null) {
+      if (isForm) {
+        return c.redirect(
+          `/dashboard/symbols?error=not_found&symbol=${encodeURIComponent(symbolPath)}`,
+          303,
+        )
+      }
       return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
     }
     const after = await updateSymbolConfig(db, input, new Date().toISOString())
     if (after === null) {
+      if (isForm) {
+        return c.redirect(
+          `/dashboard/symbols?error=not_found&symbol=${encodeURIComponent(symbolPath)}`,
+          303,
+        )
+      }
       return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
     }
     await writeAuditLog(
@@ -1036,6 +1050,12 @@ export const admin = new Hono<AppBindings>()
     const db = createDb(c.env.DB)
     const result = await toggleSymbolActive(db, symbolPath, new Date().toISOString())
     if (result === null) {
+      if (isForm) {
+        return c.redirect(
+          `/dashboard/symbols?error=not_found&symbol=${encodeURIComponent(symbolPath)}`,
+          303,
+        )
+      }
       return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
     }
     await writeAuditLog(
@@ -1046,7 +1066,7 @@ export const admin = new Hono<AppBindings>()
       { active: result.after.active },
     )
     if (isForm) return c.redirect('/dashboard/symbols', 303)
-    return c.json({ symbol: symbolPath, active: result.after.active })
+    return c.json({ symbol: symbolPath, row: symbolConfigSnapshot(result.after) })
   })
   .post('/symbol-config/:symbol/delete', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -1057,6 +1077,12 @@ export const admin = new Hono<AppBindings>()
     const db = createDb(c.env.DB)
     const result = await softDeleteSymbol(db, symbolPath, new Date().toISOString())
     if (result === null) {
+      if (isForm) {
+        return c.redirect(
+          `/dashboard/symbols?error=not_found&symbol=${encodeURIComponent(symbolPath)}`,
+          303,
+        )
+      }
       return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
     }
     await writeAuditLog(
@@ -1067,7 +1093,7 @@ export const admin = new Hono<AppBindings>()
       { active: result.after.active },
     )
     if (isForm) return c.redirect('/dashboard/symbols', 303)
-    return c.json({ symbol: symbolPath, active: result.after.active })
+    return c.json({ symbol: symbolPath, row: symbolConfigSnapshot(result.after) })
   })
 
 /**

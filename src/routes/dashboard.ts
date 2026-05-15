@@ -515,12 +515,19 @@ export const dashboard = new Hono<DashboardBindings>()
     }
     try {
       const rows = await loadAllSymbolConfigRows(c.env.DB)
-      return c.html(renderLayout(c, '銘柄管理', symbolsListBody({ rows })))
+      const errorCode = c.req.query('error') ?? null
+      const errorSymbol = c.req.query('symbol') ?? null
+      return c.html(
+        renderLayout(c, '銘柄管理', symbolsListBody({ rows, errorCode, errorSymbol })),
+      )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
     }
   })
   .get('/symbols/new', (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
+    }
     return c.html(
       renderLayout(c, '銘柄管理 - 新規追加', symbolFormBody({ mode: 'new', row: null, error: null })),
     )
@@ -5639,14 +5646,19 @@ async function findSymbolConfigForView(
   return rows[0] ?? null
 }
 
-function symbolsListBody(args: { rows: SymbolConfigRow[] }): string {
-  const { rows } = args
+function symbolsListBody(args: {
+  rows: SymbolConfigRow[]
+  errorCode?: string | null
+  errorSymbol?: string | null
+}): string {
+  const { rows, errorCode = null, errorSymbol = null } = args
+  const errorBanner = renderSymbolErrorBanner(errorCode, errorSymbol)
   const headerBar = `<p style="margin:0 0 12px">
     <a href="/dashboard/symbols/new" style="padding:6px 12px;background:#06c;color:#fff;border-radius:4px;text-decoration:none">+ 新規追加</a>
     <span class="muted" style="margin-left:12px;font-size:12px">${rows.length} 件 (active ${rows.filter((r) => r.active).length} / inactive ${rows.filter((r) => !r.active).length})</span>
   </p>`
   if (rows.length === 0) {
-    return `${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
+    return `${errorBanner}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
   }
   const tbody = rows
     .map((r) => {
@@ -5687,7 +5699,7 @@ function symbolsListBody(args: { rows: SymbolConfigRow[] }): string {
       </tr>`
     })
     .join('')
-  return `${headerBar}
+  return `${errorBanner}${headerBar}
   <table>
     <thead><tr>
       <th>symbol</th><th>name</th><th>market</th><th>currency</th><th>状態</th>
@@ -5695,6 +5707,32 @@ function symbolsListBody(args: { rows: SymbolConfigRow[] }): string {
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
+}
+
+/**
+ * /admin/symbol-config 系 form POST が失敗時に redirect で渡してくる
+ * `?error=...&symbol=...` を表示する banner。known code 以外は generic msg。
+ */
+function renderSymbolErrorBanner(code: string | null, symbol: string | null): string {
+  if (!code) return ''
+  const msg = symbolErrorMessage(code, symbol)
+  return `<p class="err" style="margin:0 0 12px">${esc(msg)}</p>`
+}
+
+function symbolErrorMessage(code: string, symbol: string | null): string {
+  const sym = symbol ?? ''
+  switch (code) {
+    case 'duplicate':
+      return sym
+        ? `symbol "${sym}" は既に登録済みです。`
+        : 'symbol は既に登録済みです。'
+    case 'not_found':
+      return sym ? `symbol "${sym}" が見つかりません。` : 'symbol が見つかりません。'
+    case 'validation':
+      return '入力値に誤りがあります。'
+    default:
+      return `エラーが発生しました (code=${code}).`
+  }
 }
 
 interface SymbolFormArgs {
@@ -5718,7 +5756,9 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const notesValue = row?.notes ?? ''
   const symbolField =
     mode === 'edit'
-      ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">`
+      ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
+         <span></span>
+         <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
       : `<input type="text" name="symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" style="padding:6px">`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
@@ -5744,7 +5784,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="checkbox" name="active" value="true"${activeChecked}> 有効
     </label>
     <label>max_notional</label>
-    <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0" placeholder="空欄で global default を使用" style="padding:6px">
+    <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px">
     <label>bucket</label>
     <input type="text" name="bucket" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap" style="padding:6px">
     <label>notes</label>
