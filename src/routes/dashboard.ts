@@ -6037,15 +6037,18 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
     <input type="text" name="name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
     <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>
-    <select name="market" required style="padding:6px">
+    <select name="market" id="symbol-form-market" required style="padding:6px" onchange="window.syncSymbolFormCurrencyFromMarket(this.value)">
       <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
       <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP (日本)</option>
     </select>
     <label>通貨 <span class="muted" style="font-size:11px">(currency)</span></label>
-    <select name="currency" required style="padding:6px">
-      <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
-      <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
-    </select>
+    <div>
+      <select name="currency" id="symbol-form-currency" required style="padding:6px" onchange="window.syncSymbolFormCurrencyUnits(this.value)">
+        <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
+        <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
+      </select>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">通常は市場と一致 (US→USD / JP→JPY)。HKD ADR 等、市場と異なる決済通貨の銘柄を想定して別 select として残してある。</p>
+    </div>
     <label>状態 <span class="muted" style="font-size:11px">(active)</span></label>
     <label style="display:flex;align-items:center;gap:6px">
       <input type="hidden" name="active" value="false">
@@ -6054,8 +6057,8 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <label>1注文上限 <span class="muted" style="font-size:11px">(max_notional)</span></label>
     <div>
       <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">${esc(currencyValue)} / 1 発注</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_${currencyValue.toLowerCase()}</code> を使用。設定値は per-symbol cap として global より優先。</p>
+      <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
     </div>
     <label>相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
     <input type="text" name="bucket" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px">
@@ -6066,7 +6069,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <button type="submit" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
       <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
     </div>
-  </form>`
+  </form>
+  <script>
+    window.syncSymbolFormCurrencyUnits = function (cur) {
+      var unit = document.getElementById('symbol-form-max-notional-unit');
+      var key = document.getElementById('symbol-form-max-notional-global-key');
+      if (unit) unit.textContent = cur;
+      if (key) key.textContent = cur.toLowerCase();
+    };
+    window.syncSymbolFormCurrencyFromMarket = function (market) {
+      var cur = market === 'JP' ? 'JPY' : 'USD';
+      var sel = document.getElementById('symbol-form-currency');
+      if (sel) sel.value = cur;
+      window.syncSymbolFormCurrencyUnits(cur);
+    };
+  </script>`
 }
 
 // #293 calendar events management UI helpers ===============================
