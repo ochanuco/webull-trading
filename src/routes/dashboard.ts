@@ -6062,7 +6062,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
          <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
       : `<div>
            <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" style="padding:6px;width:160px">
-           <button type="button" onclick="window.lookupSymbolAutoFill()" style="padding:6px 12px;margin-left:6px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">取得</button>
+           <button type="button" id="symbol-form-lookup-btn" onclick="window.lookupSymbolAutoFill()" style="padding:6px 12px;margin-left:6px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">取得</button>
            <span id="symbol-form-lookup-status" class="muted" style="font-size:11px;margin-left:8px"></span>
            <p class="muted" style="margin:4px 0 0;font-size:11px">symbol を入れて「取得」で銘柄名 / 市場 / 通貨を Yahoo Finance から自動補完 (失敗時は市場 / 通貨だけ symbol pattern で推測)。</p>
          </div>`
@@ -6145,10 +6145,16 @@ function symbolFormBody(args: SymbolFormArgs): string {
         list.style.display = 'none';
         return;
       }
-      list.innerHTML = matches.map(function (b) {
-        var safe = String(b).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        return '<li data-bucket="' + safe + '" style="padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee" onmousedown="window.pickSymbolFormBucket(this.getAttribute(\'data-bucket\'))" onmouseover="this.style.background=\'#eef\'" onmouseout="this.style.background=\'#fff\'">' + safe + '</li>';
-      }).join('');
+      list.innerHTML = '';
+      matches.forEach(function (b) {
+        var li = document.createElement('li');
+        li.textContent = b;
+        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee';
+        li.addEventListener('mousedown', function () { window.pickSymbolFormBucket(b); });
+        li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
+        li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
+        list.appendChild(li);
+      });
       list.style.display = 'block';
     };
     window.pickSymbolFormBucket = function (val) {
@@ -6160,10 +6166,18 @@ function symbolFormBody(args: SymbolFormArgs): string {
     window.lookupSymbolAutoFill = async function () {
       var symInput = document.getElementById('symbol-form-symbol');
       var statusEl = document.getElementById('symbol-form-lookup-status');
+      var btn = document.getElementById('symbol-form-lookup-btn');
       if (!symInput || !statusEl) return;
       var sym = (symInput.value || '').trim().toUpperCase();
       if (!sym) { statusEl.textContent = 'symbol を先に入力してください'; return; }
       statusEl.textContent = '取得中…';
+      if (btn) {
+        btn.disabled = true;
+        btn.dataset.origLabel = btn.textContent || '取得';
+        btn.textContent = '取得中…';
+        btn.style.opacity = '0.6';
+        btn.style.cursor = 'wait';
+      }
       try {
         var res = await fetch('/admin/symbol-config/lookup?symbol=' + encodeURIComponent(sym), { credentials: 'same-origin' });
         if (!res.ok) { statusEl.textContent = '取得失敗 (HTTP ' + res.status + ')'; return; }
@@ -6180,6 +6194,13 @@ function symbolFormBody(args: SymbolFormArgs): string {
           : '⚠ 名前は取得失敗 (' + data.source + ')、市場/通貨のみ反映';
       } catch (err) {
         statusEl.textContent = '取得エラー: ' + (err && err.message ? err.message : err);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = btn.dataset.origLabel || '取得';
+          btn.style.opacity = '';
+          btn.style.cursor = 'pointer';
+        }
       }
     };
   </script>`
