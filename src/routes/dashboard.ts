@@ -543,12 +543,17 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
     }
   })
-  .get('/symbols/new', (c) => {
+  .get('/symbols/new', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
     }
+    const knownBuckets = await loadKnownBuckets(c.env.DB).catch(() => [])
     return c.html(
-      renderLayout(c, '銘柄管理 - 新規追加', symbolFormBody({ mode: 'new', row: null, error: null })),
+      renderLayout(
+        c,
+        '銘柄管理 - 新規追加',
+        symbolFormBody({ mode: 'new', row: null, error: null, knownBuckets }),
+      ),
     )
   })
   .get('/symbols/:symbol/edit', async (c) => {
@@ -564,8 +569,13 @@ export const dashboard = new Hono<DashboardBindings>()
       if (row === null) {
         return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(`symbol "${symbol}" not found`)))
       }
+      const knownBuckets = await loadKnownBuckets(c.env.DB).catch(() => [])
       return c.html(
-        renderLayout(c, '銘柄管理 - 編集', symbolFormBody({ mode: 'edit', row, error: null })),
+        renderLayout(
+          c,
+          '銘柄管理 - 編集',
+          symbolFormBody({ mode: 'edit', row, error: null, knownBuckets }),
+        ),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(messageOf(err))))
@@ -5896,6 +5906,20 @@ async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[
   return await drizzle.select().from(symbolConfig).orderBy(asc(symbolConfig.symbol))
 }
 
+/**
+ * symbol_config に登録されている distinct bucket を昇順で。datalist suggestion 用。
+ * NULL / 空白だけの行は除外。
+ */
+async function loadKnownBuckets(db: D1Database): Promise<string[]> {
+  const rows = await loadAllSymbolConfigRows(db)
+  const set = new Set<string>()
+  for (const r of rows) {
+    const b = (r.bucket ?? '').trim()
+    if (b.length > 0) set.add(b)
+  }
+  return [...set].sort()
+}
+
 async function findSymbolConfigForView(
   db: D1Database,
   symbol: string,
@@ -6015,10 +6039,12 @@ interface SymbolFormArgs {
   row: SymbolConfigRow | null
   /** validation error message — POST handler が re-render する時に渡す。 */
   error: string | null
+  /** 既存 bucket 一覧 (DB の distinct 値)、datalist suggestion 用。 */
+  knownBuckets: string[]
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
-  const { mode, row, error } = args
+  const { mode, row, error, knownBuckets } = args
   const action =
     mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
   const symbolValue = row?.symbol ?? ''
@@ -6073,7 +6099,13 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
     </div>
     <label>相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
-    <input type="text" name="bucket" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px">
+    <div>
+      <input type="text" name="bucket" list="symbol-form-bucket-options" value="${esc(bucketValue)}" maxlength="256" placeholder="既存から選択 or 新規入力 (任意)" style="padding:6px;width:240px">
+      <datalist id="symbol-form-bucket-options">
+        ${knownBuckets.map((b) => `<option value="${esc(b)}"></option>`).join('')}
+      </datalist>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限が共有される (\`global_config.bucket_exposure_pct\`)。既存値: ${knownBuckets.length === 0 ? '<em>なし</em>' : knownBuckets.map((b) => `<code>${esc(b)}</code>`).join(' / ')}</p>
+    </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>
