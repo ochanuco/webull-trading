@@ -5945,7 +5945,7 @@ function symbolsListBody(args: {
         <td>${esc(r.market)}</td>
         <td>${esc(r.currency)}</td>
         <td>${stateLabel}</td>
-        <td>${r.maxNotional === null ? '<span class="muted">—</span>' : esc(r.maxNotional)}</td>
+        <td>${r.maxNotional === null ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>' : `${esc(r.maxNotional)} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`}</td>
         <td>${esc(r.bucket ?? '')}</td>
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted">${esc(fmtJst(r.updatedAt))}</td>
@@ -5962,8 +5962,16 @@ function symbolsListBody(args: {
   return `${errorBanner}${headerBar}
   <table>
     <thead><tr>
-      <th>symbol</th><th>name</th><th>market</th><th>currency</th><th>状態</th>
-      <th>max_notional</th><th>bucket</th><th>notes</th><th>updated_at</th><th>操作</th>
+      <th>銘柄<br><span class="muted" style="font-size:10px">symbol</span></th>
+      <th>銘柄名<br><span class="muted" style="font-size:10px">name</span></th>
+      <th>市場<br><span class="muted" style="font-size:10px">market</span></th>
+      <th>通貨<br><span class="muted" style="font-size:10px">currency</span></th>
+      <th>状態</th>
+      <th>1注文上限<br><span class="muted" style="font-size:10px">max_notional</span></th>
+      <th>相関グループ<br><span class="muted" style="font-size:10px">bucket</span></th>
+      <th>メモ<br><span class="muted" style="font-size:10px">notes</span></th>
+      <th>更新<br><span class="muted" style="font-size:10px">updated_at</span></th>
+      <th>操作</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
@@ -6024,31 +6032,35 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
-  <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:120px 1fr;gap:8px;max-width:560px;align-items:center">
-    <label>symbol</label>${symbolField}
-    <label>name</label>
+  <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
+    <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
+    <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
     <input type="text" name="name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
-    <label>market</label>
+    <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>
     <select name="market" required style="padding:6px">
-      <option value="US"${marketValue === 'US' ? ' selected' : ''}>US</option>
-      <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP</option>
+      <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
+      <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP (日本)</option>
     </select>
-    <label>currency</label>
+    <label>通貨 <span class="muted" style="font-size:11px">(currency)</span></label>
     <select name="currency" required style="padding:6px">
-      <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD</option>
-      <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY</option>
+      <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
+      <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
     </select>
-    <label>active</label>
+    <label>状態 <span class="muted" style="font-size:11px">(active)</span></label>
     <label style="display:flex;align-items:center;gap:6px">
       <input type="hidden" name="active" value="false">
-      <input type="checkbox" name="active" value="true"${activeChecked}> 有効
+      <input type="checkbox" name="active" value="true"${activeChecked}> 取引対象として有効
     </label>
-    <label>max_notional</label>
-    <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px">
-    <label>bucket</label>
-    <input type="text" name="bucket" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap" style="padding:6px">
-    <label>notes</label>
-    <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
+    <label>1注文上限 <span class="muted" style="font-size:11px">(max_notional)</span></label>
+    <div>
+      <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">${esc(currencyValue)} / 1 発注</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_${currencyValue.toLowerCase()}</code> を使用。設定値は per-symbol cap として global より優先。</p>
+    </div>
+    <label>相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
+    <input type="text" name="bucket" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px">
+    <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
+    <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>
     <div style="display:flex;gap:8px">
       <button type="submit" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
@@ -6394,7 +6406,10 @@ function eventsBody(args: EventsBodyArgs): string {
       ? '<p class="muted">この範囲には登録された決算がありません。</p>'
       : `<table>
     <thead><tr>
-      <th>symbol</th><th>event_date</th><th>source (notes)</th><th>削除</th>
+      <th>銘柄<br><span class="muted" style="font-size:10px">symbol</span></th>
+      <th>決算日<br><span class="muted" style="font-size:10px">event_date</span></th>
+      <th>備考<br><span class="muted" style="font-size:10px">notes</span></th>
+      <th>操作</th>
     </tr></thead>
     <tbody>${earnings
       .map((r) => {
@@ -6419,7 +6434,10 @@ function eventsBody(args: EventsBodyArgs): string {
       ? '<p class="muted">この範囲には登録されたマクロイベントがありません。</p>'
       : `<table>
     <thead><tr>
-      <th>event_kind</th><th>country / source (notes)</th><th>event_date</th><th>削除</th>
+      <th>イベント種別<br><span class="muted" style="font-size:10px">event_type</span></th>
+      <th>備考<br><span class="muted" style="font-size:10px">国 / notes</span></th>
+      <th>発生日<br><span class="muted" style="font-size:10px">event_date</span></th>
+      <th>操作</th>
     </tr></thead>
     <tbody>${macros
       .map((r) => {
@@ -6442,9 +6460,9 @@ ${earningsNotice}
 <details${earningsFormOpen} style="margin-bottom:12px">
   <summary style="cursor:pointer">+ 追加</summary>
   <form method="post" action="/dashboard/events/earnings/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-    <label>symbol<br><input name="symbol" value="${esc(eEcho.symbol)}" placeholder="AAPL / 7203" required maxlength="16" style="padding:4px 8px;width:140px"></label>
-    <label>event_date<br><input name="earnings_date" type="date" value="${esc(eEcho.earningsDate)}" required style="padding:4px 8px"></label>
-    <label>source (notes, 任意)<br><input name="notes" value="${esc(eEcho.notes)}" placeholder="Q2 2026 BMO" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
+    <label>銘柄<br><input name="symbol" value="${esc(eEcho.symbol)}" placeholder="AAPL / 7203" required maxlength="16" style="padding:4px 8px;width:140px"></label>
+    <label>決算日<br><input name="earnings_date" type="date" value="${esc(eEcho.earningsDate)}" required style="padding:4px 8px"></label>
+    <label>備考 (任意)<br><input name="notes" value="${esc(eEcho.notes)}" placeholder="Q2 2026 BMO" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
     <button type="submit" style="padding:6px 14px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">追加</button>
   </form>
 </details>
@@ -6456,10 +6474,10 @@ ${macroNotice}
 <details${macroFormOpen} style="margin-bottom:12px">
   <summary style="cursor:pointer">+ 追加</summary>
   <form method="post" action="/dashboard/events/macro/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-    <label>event_kind<br><input name="event_type" value="${esc(mEcho.eventType)}" placeholder="FOMC / CPI / NFP" required maxlength="32" style="padding:4px 8px;width:160px"></label>
-    <label>country (任意)<br><input name="country" value="${esc(mEcho.country)}" placeholder="US / JP" maxlength="16" style="padding:4px 8px;width:100px"></label>
-    <label>event_date<br><input name="event_date" type="date" value="${esc(mEcho.eventDate)}" required style="padding:4px 8px"></label>
-    <label>source (notes, 任意)<br><input name="notes" value="${esc(mEcho.notes)}" placeholder="June FOMC" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
+    <label>イベント種別<br><input name="event_type" value="${esc(mEcho.eventType)}" placeholder="FOMC / CPI / NFP" required maxlength="32" style="padding:4px 8px;width:160px"></label>
+    <label>国 (任意)<br><input name="country" value="${esc(mEcho.country)}" placeholder="US / JP" maxlength="16" style="padding:4px 8px;width:100px"></label>
+    <label>発生日<br><input name="event_date" type="date" value="${esc(mEcho.eventDate)}" required style="padding:4px 8px"></label>
+    <label>備考 (任意)<br><input name="notes" value="${esc(mEcho.notes)}" placeholder="June FOMC" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
     <button type="submit" style="padding:6px 14px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">追加</button>
   </form>
 </details>
