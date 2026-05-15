@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import type { Env } from '../config/env'
+import { rateLimit } from '../middleware/rateLimit'
 
 /**
  * Dashboard-local Hono context shape。`AppBindings.Variables` の `requestId` に
@@ -66,6 +67,7 @@ async function loadKillSwitchState(env: Env): Promise<KillSwitchBannerState | nu
 }
 
 export const dashboard = new Hono<DashboardBindings>()
+  .use('*', rateLimit('DASHBOARD'))
   .use('*', async (c, next) => {
     const state = await loadKillSwitchState(c.env)
     c.set('killSwitchState', state)

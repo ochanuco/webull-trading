@@ -2,6 +2,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import type { AppBindings } from '../app'
+import { rateLimit } from '../middleware/rateLimit'
 import { ValidationError } from '../shared/errors'
 import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
 import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
@@ -55,7 +56,7 @@ export const admin = new Hono<AppBindings>()
    * audit log with before/after/reason/requestId. Does NOT touch
    * `pendingOrder` / `cooldownUntil` / `settledCash`.
    */
-  .post('/symbol-state/:symbol/override-position', async (c) => {
+  .post('/symbol-state/:symbol/override-position', rateLimit('ADMIN_WRITE'), async (c) => {
     const symbol = c.req.param('symbol').trim().toUpperCase()
     if (symbol.length === 0) {
       throw new ValidationError('symbol must be a non-empty path param', { field: 'symbol' })
@@ -89,7 +90,7 @@ export const admin = new Hono<AppBindings>()
       updatedAt: state.updatedAt,
     })
   })
-  .post('/symbols/:symbol/seed-cash', async (c) => {
+  .post('/symbols/:symbol/seed-cash', rateLimit('ADMIN_WRITE'), async (c) => {
     const symbol = c.req.param('symbol').trim().toUpperCase()
     if (symbol.length === 0) {
       throw new ValidationError('symbol must be a non-empty path param', { field: 'symbol' })
@@ -119,7 +120,7 @@ export const admin = new Hono<AppBindings>()
    * 使う。PositionStore.setCooldown は string 必須なので `new Date(0).toISOString()`
    * を渡すことで「過去」扱いにして実質クリア。
    */
-  .post('/symbols/:symbol/clear-cooldown', async (c) => {
+  .post('/symbols/:symbol/clear-cooldown', rateLimit('ADMIN_WRITE'), async (c) => {
     const symbol = c.req.param('symbol').trim().toUpperCase()
     if (symbol.length === 0) {
       throw new ValidationError('symbol must be a non-empty path param', { field: 'symbol' })
@@ -170,7 +171,7 @@ export const admin = new Hono<AppBindings>()
    * を true に書いても `effective=false` で運用者に「env override 効いてる」
    * を視認させる (saw-tooth な切替えで混乱する事故防止)。
    */
-  .post('/trading/toggle', async (c) => {
+  .post('/trading/toggle', rateLimit('STATE_CHANGE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
@@ -692,7 +693,7 @@ export const admin = new Hono<AppBindings>()
    * Returns both the before / after snapshot so an operator (or the eventual
    * EOD cron) can log the exact dollar delta that was rolled.
    */
-  .post('/portfolio/roll-daily', async (c) => {
+  .post('/portfolio/roll-daily', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
       throw new ValidationError('PORTFOLIO_STATE binding is not configured', { field: 'env' })
     }
@@ -725,7 +726,7 @@ export const admin = new Hono<AppBindings>()
       },
     })
   })
-  .post('/portfolio/seed-equity', async (c) => {
+  .post('/portfolio/seed-equity', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
       throw new ValidationError('PORTFOLIO_STATE binding is not configured', { field: 'env' })
     }
@@ -758,7 +759,7 @@ export const admin = new Hono<AppBindings>()
    *
    * Body: `[{ symbol: "AAPL", earnings_date: "2026-04-30", notes?: "Q2" }, ...]`
    */
-  .post('/earnings/seed', async (c) => {
+  .post('/earnings/seed', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
@@ -807,7 +808,7 @@ export const admin = new Hono<AppBindings>()
   /**
    * Delete a single earnings row by `id`。誤 seed の取り消し用。404 if not found。
    */
-  .delete('/earnings/:id', async (c) => {
+  .delete('/earnings/:id', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
@@ -838,7 +839,7 @@ export const admin = new Hono<AppBindings>()
    * Body: `[{ event_type: "FOMC", event_date: "2026-06-17",
    *           event_time?: "14:00", notes?: "June FOMC" }, ...]`
    */
-  .post('/macro-events/seed', async (c) => {
+  .post('/macro-events/seed', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
@@ -923,7 +924,7 @@ export const admin = new Hono<AppBindings>()
   /**
    * Delete a single macro event row by `id`。誤 seed の取り消し用。
    */
-  .delete('/macro-events/:id', async (c) => {
+  .delete('/macro-events/:id', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
