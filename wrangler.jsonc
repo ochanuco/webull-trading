@@ -12,6 +12,34 @@
       { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
     ]
   },
+  // #285: Cloudflare Workers RateLimit bindings. State-changing POST endpoints
+  // get a tight cap, other admin writes a looser cap, dashboard GETs a soft
+  // cap. `/events/trade` (bridge ingest) is intentionally NOT rate-limited —
+  // it is high-volume bar/tick fan-in and any cap would drop legitimate market
+  // data. Categories are applied per-route in src/routes/admin.ts and
+  // src/routes/dashboard.ts via the rateLimit() middleware factory.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "STATE_CHANGE_RATE_LIMIT",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 5, "period": 60 }
+      },
+      {
+        "name": "ADMIN_WRITE_RATE_LIMIT",
+        "type": "ratelimit",
+        "namespace_id": "1002",
+        "simple": { "limit": 20, "period": 60 }
+      },
+      {
+        "name": "DASHBOARD_RATE_LIMIT",
+        "type": "ratelimit",
+        "namespace_id": "1003",
+        "simple": { "limit": 60, "period": 60 }
+      }
+    ]
+  },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SymbolStateDO"] },
     { "tag": "v2", "new_sqlite_classes": ["PortfolioStateDO"] },
@@ -43,7 +71,31 @@
           "database_id": "REPLACE_WITH_DEV_ID",
           "migrations_dir": "drizzle"
         }
-      ]
+      ],
+      // #285: per-env RateLimit binding duplicate (wrangler 4 does NOT inherit
+      // top-level `unsafe.bindings` into env.* blocks). See top-level comment.
+      "unsafe": {
+        "bindings": [
+          {
+            "name": "STATE_CHANGE_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1001",
+            "simple": { "limit": 5, "period": 60 }
+          },
+          {
+            "name": "ADMIN_WRITE_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1002",
+            "simple": { "limit": 20, "period": 60 }
+          },
+          {
+            "name": "DASHBOARD_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1003",
+            "simple": { "limit": 60, "period": 60 }
+          }
+        ]
+      }
     },
     "staging": {
       "name": "webull-trading-staging",
@@ -60,7 +112,30 @@
           "database_id": "cbc199f0-5ed8-40b0-b619-6bdb43a400e3",
           "migrations_dir": "drizzle"
         }
-      ]
+      ],
+      // #285: per-env RateLimit binding duplicate.
+      "unsafe": {
+        "bindings": [
+          {
+            "name": "STATE_CHANGE_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1001",
+            "simple": { "limit": 5, "period": 60 }
+          },
+          {
+            "name": "ADMIN_WRITE_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1002",
+            "simple": { "limit": 20, "period": 60 }
+          },
+          {
+            "name": "DASHBOARD_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1003",
+            "simple": { "limit": 60, "period": 60 }
+          }
+        ]
+      }
       // No triggers: staging is manual run only (issue #277).
     },
     "production": {
@@ -79,6 +154,29 @@
           "migrations_dir": "drizzle"
         }
       ],
+      // #285: per-env RateLimit binding duplicate.
+      "unsafe": {
+        "bindings": [
+          {
+            "name": "STATE_CHANGE_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1001",
+            "simple": { "limit": 5, "period": 60 }
+          },
+          {
+            "name": "ADMIN_WRITE_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1002",
+            "simple": { "limit": 20, "period": 60 }
+          },
+          {
+            "name": "DASHBOARD_RATE_LIMIT",
+            "type": "ratelimit",
+            "namespace_id": "1003",
+            "simple": { "limit": 60, "period": 60 }
+          }
+        ]
+      },
       // wrangler 4 does NOT inherit top-level `triggers` once env.* blocks
       // exist, so cron must be re-declared explicitly here (issue #277).
       "triggers": {

@@ -389,3 +389,13 @@ export interface Env {
   CF_ACCESS_AUD?: string
   ACCESS_DEV_BYPASS_USER?: string
 }
+
+
+// #285: Cloudflare Workers `RateLimit` binding (state 変更 / 運用書込 / dashboard
+// soft cap)。`wrangler.jsonc` の `[[unsafe.bindings]]` で各 env に同名で宣言する。
+// local miniflare で binding が認識されないケースは middleware 側で warn → fail-open。
+export interface Env {
+  STATE_CHANGE_RATE_LIMIT?: RateLimit
+  ADMIN_WRITE_RATE_LIMIT?: RateLimit
+  DASHBOARD_RATE_LIMIT?: RateLimit
+}
