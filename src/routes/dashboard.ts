@@ -547,12 +547,12 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
     }
-    const knownBuckets = await loadKnownBuckets(c.env.DB).catch(() => [])
+    const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
     return c.html(
       renderLayout(
         c,
         '銘柄管理 - 新規追加',
-        symbolFormBody({ mode: 'new', row: null, error: null, knownBuckets }),
+        symbolFormBody({ mode: 'new', row: null, error: null, knownPairs }),
       ),
     )
   })
@@ -569,12 +569,12 @@ export const dashboard = new Hono<DashboardBindings>()
       if (row === null) {
         return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(`symbol "${symbol}" not found`)))
       }
-      const knownBuckets = await loadKnownBuckets(c.env.DB).catch(() => [])
+      const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
       return c.html(
         renderLayout(
           c,
           '銘柄管理 - 編集',
-          symbolFormBody({ mode: 'edit', row, error: null, knownBuckets }),
+          symbolFormBody({ mode: 'edit', row, error: null, knownPairs }),
         ),
       )
     } catch (err) {
@@ -5907,17 +5907,18 @@ async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[
 }
 
 /**
- * symbol_config に登録されている distinct bucket を昇順で。datalist suggestion 用。
- * NULL / 空白だけの行は除外。
+ * 銘柄管理 form の bucket suggest 用データ。登録済み (symbol, bucket) ペアを
+ * symbol ASC で返す。bucket が NULL/空 の行も含む (suggest で表示はするが
+ * 選択しても bucket は空のまま — その銘柄が bucket 未分類だと operator に
+ * 視認させる用途)。
  */
-async function loadKnownBuckets(db: D1Database): Promise<string[]> {
+interface SymbolBucketPair {
+  symbol: string
+  bucket: string | null
+}
+async function loadKnownSymbolBuckets(db: D1Database): Promise<SymbolBucketPair[]> {
   const rows = await loadAllSymbolConfigRows(db)
-  const set = new Set<string>()
-  for (const r of rows) {
-    const b = (r.bucket ?? '').trim()
-    if (b.length > 0) set.add(b)
-  }
-  return [...set].sort()
+  return rows.map((r) => ({ symbol: r.symbol, bucket: r.bucket }))
 }
 
 async function findSymbolConfigForView(
@@ -6039,12 +6040,12 @@ interface SymbolFormArgs {
   row: SymbolConfigRow | null
   /** validation error message — POST handler が re-render する時に渡す。 */
   error: string | null
-  /** 既存 bucket 一覧 (DB の distinct 値)、datalist suggestion 用。 */
-  knownBuckets: string[]
+  /** 既存 (symbol, bucket) ペア、bucket 入力の suggest 用。 */
+  knownPairs: SymbolBucketPair[]
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
-  const { mode, row, error, knownBuckets } = args
+  const { mode, row, error, knownPairs } = args
   const action =
     mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
   const symbolValue = row?.symbol ?? ''
@@ -6101,8 +6102,8 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
     <div style="position:relative">
       <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" autocomplete="off" placeholder="例: semi / us_large_cap / jp_auto (任意)" oninput="window.suggestSymbolFormBucket(this.value)" onfocus="window.suggestSymbolFormBucket(this.value)" onblur="setTimeout(window.hideSymbolFormBucketSuggest, 150)" style="padding:6px;width:280px">
-      <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownBuckets))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:280px;max-height:200px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
-      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存値の候補が出る (新規でもそのまま入力で OK)。</p>
+      <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownPairs))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:320px;max-height:240px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存銘柄から suggest (click すると その銘柄の bucket が挿入される / 新規 bucket もそのまま入力で OK)。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
@@ -6140,17 +6141,40 @@ function symbolFormBody(args: SymbolFormArgs): string {
       }
       var known = [];
       try { known = JSON.parse(list.getAttribute('data-known') || '[]'); } catch (e) {}
-      var matches = known.filter(function (b) { return b.toLowerCase().indexOf(query) !== -1 && b.toLowerCase() !== query; });
+      // known は [{ symbol, bucket }] 配列。symbol または bucket の substring 一致を suggest。
+      var matches = known.filter(function (p) {
+        var s = (p.symbol || '').toLowerCase();
+        var b = (p.bucket || '').toLowerCase();
+        return s.indexOf(query) !== -1 || (b.length > 0 && b.indexOf(query) !== -1);
+      });
+      list.innerHTML = '';
       if (matches.length === 0) {
-        list.style.display = 'none';
+        var hint = document.createElement('li');
+        hint.style.cssText = 'padding:6px 10px;color:#86868b;font-size:11px;font-style:italic;cursor:default';
+        hint.textContent = known.length === 0
+          ? '登録済み銘柄がまだありません。"' + q + '" を新規 bucket として登録します。'
+          : '"' + q + '" に一致する既存銘柄/bucket 無し。新規 bucket として登録します。';
+        list.appendChild(hint);
+        list.style.display = 'block';
         return;
       }
-      list.innerHTML = '';
-      matches.forEach(function (b) {
+      matches.forEach(function (p) {
         var li = document.createElement('li');
-        li.textContent = b;
-        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee';
-        li.addEventListener('mousedown', function () { window.pickSymbolFormBucket(b); });
+        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px';
+        var symEl = document.createElement('strong');
+        symEl.textContent = p.symbol;
+        var arrow = document.createElement('span');
+        arrow.style.color = '#86868b';
+        arrow.textContent = ' → ';
+        var bucketEl = document.createElement('span');
+        bucketEl.style.color = p.bucket ? '#06c' : '#c22';
+        bucketEl.textContent = p.bucket || '(未分類)';
+        li.appendChild(symEl);
+        li.appendChild(arrow);
+        li.appendChild(bucketEl);
+        li.addEventListener('mousedown', function () {
+          window.pickSymbolFormBucket(p.bucket || '');
+        });
         li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
         li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
         list.appendChild(li);
