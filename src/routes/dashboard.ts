@@ -6160,25 +6160,38 @@ function symbolFormBody(args: SymbolFormArgs): string {
         list.style.display = 'block';
         return;
       }
+      // bucket を持っている銘柄を上、未分類を下 (= 探しやすい順)
+      matches.sort(function (a, b) {
+        var ab = a.bucket ? 0 : 1, bb = b.bucket ? 0 : 1;
+        if (ab !== bb) return ab - bb;
+        return a.symbol.localeCompare(b.symbol);
+      });
       matches.forEach(function (p) {
+        var hasBucket = !!p.bucket;
         var li = document.createElement('li');
-        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px';
+        li.style.cssText = hasBucket
+          ? 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px'
+          : 'padding:6px 10px;cursor:not-allowed;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px;opacity:0.55';
         var symEl = document.createElement('strong');
         symEl.textContent = p.symbol;
         var arrow = document.createElement('span');
         arrow.style.color = '#86868b';
         arrow.textContent = ' → ';
         var bucketEl = document.createElement('span');
-        bucketEl.style.color = p.bucket ? '#06c' : '#c22';
-        bucketEl.textContent = p.bucket || '(未分類)';
+        bucketEl.style.color = hasBucket ? '#06c' : '#c22';
+        bucketEl.textContent = hasBucket ? p.bucket : '(未分類、選択不可)';
         li.appendChild(symEl);
         li.appendChild(arrow);
         li.appendChild(bucketEl);
-        li.addEventListener('mousedown', function () {
-          window.pickSymbolFormBucket(p.bucket || '');
-        });
-        li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
-        li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
+        if (hasBucket) {
+          li.addEventListener('mousedown', function () {
+            window.pickSymbolFormBucket(p.bucket);
+          });
+          li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
+          li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
+        } else {
+          li.title = 'この銘柄は bucket 未設定のため click 不可。先にこの銘柄の bucket を編集してください。';
+        }
         list.appendChild(li);
       });
       list.style.display = 'block';
