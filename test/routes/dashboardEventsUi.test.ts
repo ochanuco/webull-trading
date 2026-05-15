@@ -209,6 +209,11 @@ describe('dashboard events UI (#293)', () => {
     expect(earningsRepo.bulkUpsert).toHaveBeenCalledWith([
       { symbol: 'AAPL', earningsDate: tomorrow, notes: 'Q2 2026' },
     ])
+    // 監査ログ: 1 件 inserted なので recordChange が呼ばれる (endpoint 一致まで確認)。
+    expect(vi.mocked(recordChange)).toHaveBeenCalled()
+    expect(vi.mocked(recordChange).mock.calls[0]?.[1]?.endpoint).toBe(
+      '/dashboard/events/earnings/seed',
+    )
   })
 
   it('POST add macro → 303 redirect + bulkUpsert called with country folded into notes', async () => {
@@ -245,6 +250,10 @@ describe('dashboard events UI (#293)', () => {
         notes: 'US — June meeting',
       },
     ])
+    expect(vi.mocked(recordChange)).toHaveBeenCalled()
+    expect(vi.mocked(recordChange).mock.calls[0]?.[1]?.endpoint).toBe(
+      '/dashboard/events/macro/seed',
+    )
   })
 
   it('POST delete earnings → 303 redirect + repo.deleteById called', async () => {
@@ -269,6 +278,10 @@ describe('dashboard events UI (#293)', () => {
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/dashboard/events')
     expect(earningsRepo.deleteById).toHaveBeenCalledWith(42)
+    expect(vi.mocked(recordChange)).toHaveBeenCalled()
+    expect(vi.mocked(recordChange).mock.calls[0]?.[1]?.endpoint).toBe(
+      '/dashboard/events/earnings/:id/delete',
+    )
   })
 
   it('POST delete macro → 303 redirect + repo.deleteById called', async () => {
@@ -292,6 +305,10 @@ describe('dashboard events UI (#293)', () => {
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/dashboard/events')
     expect(macroRepo.deleteById).toHaveBeenCalledWith(9)
+    expect(vi.mocked(recordChange)).toHaveBeenCalled()
+    expect(vi.mocked(recordChange).mock.calls[0]?.[1]?.endpoint).toBe(
+      '/dashboard/events/macro/:id/delete',
+    )
   })
 
   it('validation: empty symbol / out-of-range date → 400 re-render with error message', async () => {
@@ -300,12 +317,15 @@ describe('dashboard events UI (#293)', () => {
     vi.mocked(createDb).mockReturnValue(
       fakeListDb([]) as unknown as ReturnType<typeof createDb>,
     )
-    // empty symbol → re-render w/ error, repo NOT called
+    // empty symbol → re-render w/ error, repo NOT called。
+    // 日付は SUT ではないので、`now ± clamp` から確実に外れない "today" を使う
+    // (`'2026-05-15'` のような固定日付だと数か月後に out-of-range で fail する)。
+    const today = new Date().toISOString().slice(0, 10)
     const res1 = await withFakeRepos(earningsRepo, macroRepo, async () => {
       const app = createApp()
       const form = new URLSearchParams()
       form.set('symbol', '')
-      form.set('earnings_date', '2026-05-15')
+      form.set('earnings_date', today)
       return app.request(
         '/dashboard/events/earnings/seed',
         {
@@ -343,6 +363,70 @@ describe('dashboard events UI (#293)', () => {
     const body2 = await res2.text()
     expect(body2).toContain('過去 90 日 〜 未来 365 日')
     expect(earningsRepo.bulkUpsert).not.toHaveBeenCalled()
+  })
+
+  it('clamp upper bound is inclusive at +365d but rejects +366d', async () => {
+    // withinClampRange は date-only inclusive。`now + 366d` は範囲外として 400 を返すこと。
+    const earningsRepo = fakeEarningsRepo()
+    const macroRepo = fakeMacroRepo()
+    vi.mocked(createDb).mockReturnValue(
+      fakeListDb([]) as unknown as ReturnType<typeof createDb>,
+    )
+    const day366 = new Date(Date.now() + 366 * 86_400_000).toISOString().slice(0, 10)
+    const res = await withFakeRepos(earningsRepo, macroRepo, async () => {
+      const app = createApp()
+      const form = new URLSearchParams()
+      form.set('symbol', 'AAPL')
+      form.set('earnings_date', day366)
+      return app.request(
+        '/dashboard/events/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+          body: form.toString(),
+        },
+        { ...baseEnv, DB: {} as D1Database },
+      )
+    })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body).toContain('過去 90 日 〜 未来 365 日')
+    expect(earningsRepo.bulkUpsert).not.toHaveBeenCalled()
+  })
+
+  it('seed earnings with symbol outside universe → save succeeds + warning rendered', async () => {
+    // universe.allowedSymbols に無い "MSFT" を入れる。 spec: "保存は許す + UI で warning"。
+    const earningsRepo = fakeEarningsRepo()
+    const macroRepo = fakeMacroRepo()
+    vi.mocked(createDb).mockReturnValue(
+      fakeListDb([]) as unknown as ReturnType<typeof createDb>,
+    )
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+    const res = await withFakeRepos(earningsRepo, macroRepo, async () => {
+      const app = createApp()
+      const form = new URLSearchParams()
+      form.set('symbol', 'MSFT') // universe は ['AAPL'] のみ
+      form.set('earnings_date', tomorrow)
+      return app.request(
+        '/dashboard/events/earnings/seed',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+          body: form.toString(),
+        },
+        { ...baseEnv, DB: {} as D1Database },
+      )
+    })
+    // 保存 (bulkUpsert) は行われる (non-blocking warning)
+    expect(earningsRepo.bulkUpsert).toHaveBeenCalledWith([
+      { symbol: 'MSFT', earningsDate: tomorrow, notes: null },
+    ])
+    // PRG redirect ではなく 200 で再描画 + warning notice
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('class="warn"')
+    expect(body).toContain('MSFT')
+    expect(body).toContain('symbol_config')
   })
 
   it('XSS regression: notes / event_kind with <script> payload is escaped on render', async () => {

@@ -608,6 +608,7 @@ export const dashboard = new Hono<DashboardBindings>()
             universe,
             errors: null,
             formEcho: null,
+            notice: null,
           }),
         ),
       )
@@ -666,6 +667,14 @@ export const dashboard = new Hono<DashboardBindings>()
         message: `保存に失敗しました: ${messageOf(err)}`,
         earningsEcho: echo,
         macroEcho: null,
+      })
+    }
+    // 保存は成功したが non-blocking warning (universe 外 symbol 等) があれば
+    // PRG redirect を捨てて再描画 (= 200) し、警告を operator に見せる。
+    if (validation.warning) {
+      return await renderEventsWithNotice(c, {
+        section: 'earnings',
+        message: validation.warning,
       })
     }
     return c.redirect('/dashboard/events', 303)
@@ -1403,7 +1412,7 @@ function parseJsonObject(value: string | null | undefined): unknown {
 }
 
 function indexBody(): string {
-  return `<p>運用者向け読み取り専用ダッシュボード。各ページは Cloudflare Access で保護されています。</p>
+  return `<p>運用者向けダッシュボード (一部 page は write 操作あり、すべての変更は監査ログに記録)。各ページは Cloudflare Access で保護されています。</p>
 
 <h2 style="font-size:14px;margin:16px 0 4px 0">取引状況</h2>
 <ul>
@@ -6080,6 +6089,8 @@ interface EventsBodyArgs {
     earnings: EventsEarningsFormEcho | null
     macro: EventsMacroFormEcho | null
   } | null
+  /** 非ブロッキング警告 (例: universe 外 symbol を seed 成功した時)。 */
+  notice: { section: 'earnings' | 'macro'; message: string } | null
 }
 
 /**
@@ -6121,6 +6132,13 @@ interface ValidationOkEarnings {
   symbol: string
   earningsDate: string
   notes: string | null
+  /**
+   * symbol が universe.allowedSymbols に無い場合に立つ非ブロッキング警告。
+   * spec: "universe 外 symbol は保存を許す + UI で warning 表示" — save は通すが
+   * dashboard 側で operator に対して typo の可能性を知らせる。universe が null
+   * (load 失敗) の場合は判定スキップ (= warning なし)。
+   */
+  warning: string | null
 }
 
 interface ValidationFail {
@@ -6138,7 +6156,7 @@ interface ValidationFail {
  */
 function validateEarningsForm(
   echo: EventsEarningsFormEcho,
-  _universe: SymbolUniverse | null,
+  universe: SymbolUniverse | null,
 ): ValidationOkEarnings | ValidationFail {
   const sym = echo.symbol.trim().toUpperCase()
   if (sym.length === 0 || sym.length > 16) {
@@ -6157,11 +6175,21 @@ function validateEarningsForm(
   if (notesRaw.length > 256) {
     return { ok: false, error: 'notes (source) は 256 文字以内にしてください' }
   }
+  // universe が読めた場合のみ allowedSymbols 照合 (case-insensitive)。null の時は
+  // load 失敗なので照合をスキップ — false-positive 警告を避ける。
+  let warning: string | null = null
+  if (universe) {
+    const inUniverse = universe.allowedSymbols.some((s) => s.toUpperCase() === sym)
+    if (!inUniverse) {
+      warning = `symbol "${sym}" は symbol_config (universe) に存在しません。typo でなければ symbol 管理から追加してください。`
+    }
+  }
   return {
     ok: true,
     symbol: sym,
     earningsDate: date,
     notes: notesRaw.length === 0 ? null : notesRaw,
+    warning,
   }
 }
 
@@ -6231,14 +6259,21 @@ function isYmdRoundTrip(value: string): boolean {
   return new Date(ms).toISOString().slice(0, 10) === value
 }
 
-/** 過去 90 日 〜 未来 365 日 (両端含む) に入っているか。 */
+/**
+ * 過去 90 日 〜 未来 365 日 (両端含む) に入っているか。date-only 比較。
+ *
+ * 入力は `YYYY-MM-DD` を UTC 0:00 として解釈。`now` も同じ UTC YMD に丸めた
+ * 上で ±90d / ±365d する。`+ 86_400_000` の slack を付けると 91d / 366d も
+ * 通ってしまうので、UTC YMD epoch ms で純粋に inclusive 比較する。
+ */
 function withinClampRange(ymd: string, now: Date): boolean {
   const t = Date.parse(`${ymd}T00:00:00.000Z`)
   if (!Number.isFinite(t)) return false
-  const ms = now.getTime()
-  const earliest = ms - 90 * 86_400_000
-  const latest = ms + 365 * 86_400_000
-  return t >= earliest - 86_400_000 && t <= latest + 86_400_000
+  const nowYmd = now.toISOString().slice(0, 10)
+  const nowDayMs = Date.parse(`${nowYmd}T00:00:00.000Z`)
+  const earliest = nowDayMs - 90 * 86_400_000
+  const latest = nowDayMs + 365 * 86_400_000
+  return t >= earliest && t <= latest
 }
 
 /**
@@ -6277,9 +6312,49 @@ async function renderEventsWithError(
         universe,
         errors: { section: args.section, message: args.message },
         formEcho: { earnings: args.earningsEcho, macro: args.macroEcho },
+        notice: null,
       }),
     ),
     400,
+  )
+}
+
+/**
+ * 保存は成功したが non-blocking 警告 (universe 外 symbol など) を operator に
+ * 知らせる必要がある時の再描画 helper。HTTP status は 200 (= 保存済み)。
+ */
+async function renderEventsWithNotice(
+  c: Context<DashboardBindings>,
+  args: {
+    section: 'earnings' | 'macro'
+    message: string
+  },
+): Promise<Response> {
+  if (!c.env.DB) {
+    return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+  }
+  const universe = await loadSymbolUniverse(c.env).catch(() => null)
+  const { from, to } = eventsDisplayRange(new Date())
+  const macroRepo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+  const [earnings, macros] = await Promise.all([
+    loadEarningsInRange(c.env.DB, from, to).catch(() => [] as EarningsCalendarRow[]),
+    macroRepo.fetchAll({ fromYmd: from, toYmd: to }).catch(() => [] as MacroEventCalendarRow[]),
+  ])
+  return c.html(
+    renderLayout(
+      c,
+      'イベント',
+      eventsBody({
+        earnings,
+        macros,
+        from,
+        to,
+        universe,
+        errors: null,
+        formEcho: null,
+        notice: { section: args.section, message: args.message },
+      }),
+    ),
   )
 }
 
@@ -6289,7 +6364,7 @@ async function renderEventsWithError(
  * 行が無いセクションは空配列メッセージで表示する (= "未登録" を明示)。
  */
 function eventsBody(args: EventsBodyArgs): string {
-  const { earnings, macros, from, to, universe, errors, formEcho } = args
+  const { earnings, macros, from, to, universe, errors, formEcho, notice } = args
   const earningsErr =
     errors && errors.section === 'earnings'
       ? `<p class="err"><strong>エラー:</strong> ${esc(errors.message)}</p>`
@@ -6297,6 +6372,14 @@ function eventsBody(args: EventsBodyArgs): string {
   const macroErr =
     errors && errors.section === 'macro'
       ? `<p class="err"><strong>エラー:</strong> ${esc(errors.message)}</p>`
+      : ''
+  const earningsNotice =
+    notice && notice.section === 'earnings'
+      ? `<p class="warn"><strong>注意:</strong> ${esc(notice.message)}</p>`
+      : ''
+  const macroNotice =
+    notice && notice.section === 'macro'
+      ? `<p class="warn"><strong>注意:</strong> ${esc(notice.message)}</p>`
       : ''
   // form が前回 submit で開いていた場合は再描画でも開いた状態を維持したい (operator
   // が値を確認しながら修正できる)。エラー有りなら details[open]、無しなら閉じる。
@@ -6355,6 +6438,7 @@ function eventsBody(args: EventsBodyArgs): string {
 
 <h2 style="font-size:15px;margin:20px 0 6px 0">決算 (earnings)</h2>
 ${earningsErr}
+${earningsNotice}
 <details${earningsFormOpen} style="margin-bottom:12px">
   <summary style="cursor:pointer">+ 追加</summary>
   <form method="post" action="/dashboard/events/earnings/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -6368,6 +6452,7 @@ ${earningsTable}
 
 <h2 style="font-size:15px;margin:24px 0 6px 0">マクロイベント (macro)</h2>
 ${macroErr}
+${macroNotice}
 <details${macroFormOpen} style="margin-bottom:12px">
   <summary style="cursor:pointer">+ 追加</summary>
   <form method="post" action="/dashboard/events/macro/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
