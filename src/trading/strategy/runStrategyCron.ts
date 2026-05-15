@@ -34,6 +34,7 @@ import {
   type VixRegimeFilterDecision,
 } from '../risk/vixRegimeFilter'
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
+import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 
 const DEFAULT_EQUITY_USD = 10_000
@@ -165,6 +166,10 @@ export async function runStrategyCron(
     loadSymbolUniverse(env),
   ])
 
+  // env=false は deploy-gate override (#276)。DB が true でも env=false なら
+  // 強制 OFF。より制限的な側が勝つ。
+  const effectiveTradingEnabled = resolveTradingEnabled(global.tradingEnabled, env.TRADING_ENABLED)
+
   // Notifier は cron tick の最序盤で組み立てる: 後続の skipReason 通知や
   // state change 検知が同じ instance を使う (#141)。requestId を伝搬させる
   // ことで `notification_emit_log.request_id` に紐付く。
@@ -176,7 +181,9 @@ export async function runStrategyCron(
   // 内部で握りつぶされる (caller は気にしなくて良い)。
   const watchedNow: WatchedConfig = {
     dryRun: global.dryRun,
-    tradingEnabled: global.tradingEnabled,
+    // env override 適用後の effective 値で遷移を観測する (env=false override が
+    // 効いた瞬間も STATE_CHANGE 通知できる、#276)。
+    tradingEnabled: effectiveTradingEnabled,
     marketHoursCheck: global.marketHoursCheck,
     drawdownKillThreshold: global.drawdownKillThreshold,
   }
@@ -235,7 +242,7 @@ export async function runStrategyCron(
     requestId: options.requestId,
     config: {
       dryRun: global.dryRun,
-      tradingEnabled: global.tradingEnabled,
+      tradingEnabled: effectiveTradingEnabled,
       pullbackRule: defaultRule,
       risk: {
         basePerTradePct: global.riskBasePerTradePct,
@@ -258,7 +265,8 @@ export async function runStrategyCron(
   // Critical な cron skip は #141 で push 通知化する。`trading_disabled` /
   // `no_tradable_symbols` は「設定通り」なので noisy にしないよう **通知しない**
   // (operator は意図的に切ってる場合が多い)。
-  if (!global.tradingEnabled) {
+  // DB と env override の AND 結果で判定 (#276: より制限的な側が勝つ)。
+  if (!effectiveTradingEnabled) {
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'trading_disabled' }
   }
 

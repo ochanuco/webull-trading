@@ -8,6 +8,7 @@ import { TradingService, type TradingConfig } from '../trading/application/Tradi
 import { MockExecution } from '../trading/execution/MockExecution'
 import { WebullExecution } from '../trading/execution/WebullExecution'
 import { DefaultRiskPolicy } from '../trading/risk/DefaultRiskPolicy'
+import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import type { PortfolioStateDO } from '../trading/state/PortfolioStateDO'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -32,7 +33,7 @@ export const trade = new Hono<AppBindings>()
     ])
     const service = createTradingService(request, c.env, universe, global)
     return c.json(
-      service.decide(request, toTradingConfig(request, universe, global), {
+      service.decide(request, toTradingConfig(request, universe, global, c.env.TRADING_ENABLED), {
         requestId,
       }),
     )
@@ -46,7 +47,7 @@ export const trade = new Hono<AppBindings>()
     ])
     const service = createTradingService(request, c.env, universe, global)
     return c.json(
-      await service.executeTrade(request, toTradingConfig(request, universe, global), {
+      await service.executeTrade(request, toTradingConfig(request, universe, global, c.env.TRADING_ENABLED), {
         requestId,
       }),
     )
@@ -111,6 +112,7 @@ function toTradingConfig(
   request: TradeRequest,
   universe: SymbolUniverse,
   global: LoadedGlobalConfig,
+  envTradingEnabled: string | undefined,
 ): TradingConfig {
   // 通貨別の max_order_notional を symbol の currency で選ぶ。universe に
   // 未登録の symbol は URL の 4 桁数字ヒューリスティックにフォールバックする
@@ -121,7 +123,9 @@ function toTradingConfig(
     currency === 'JPY' ? global.maxOrderNotionalJpy : global.maxOrderNotionalUsd
   return {
     dryRun: global.dryRun,
-    tradingEnabled: global.tradingEnabled,
+    // env=false が DB=true を上書きする (#276)。`/trade/execute` から発注
+    // しようとした operator も env override を尊重して reject される。
+    tradingEnabled: resolveTradingEnabled(global.tradingEnabled, envTradingEnabled),
     allowedSymbols: universe.allowedSymbols,
     maxOrderNotional,
     symbolMaxNotional: universe.symbolMaxNotional,

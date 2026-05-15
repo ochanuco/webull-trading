@@ -148,6 +148,58 @@ describe('dashboard', () => {
     })
   })
 
+  // #276: kill-switch banner は全 page 共通の header として layout 内に
+  // prepend される。DB binding がある時のみ表示、effective=true なら「停止」、
+  // false なら「再開」(confirm 付き) ボタンが出る。
+  it('renders kill-switch banner with 取引停止 button when tradingEnabled=true', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('取引 ON (有効)')
+    expect(body).toContain('取引停止')
+    expect(body).toContain('action="/admin/trading/toggle"')
+    expect(body).toContain('name="enabled" value="false"')
+  })
+
+  it('renders kill-switch banner with 取引再開 + confirm() when tradingEnabled=false', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: false }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('取引 OFF (停止中)')
+    expect(body).toContain('取引再開')
+    // 再開 は誤操作防止に HTML confirm()
+    expect(body).toContain('onsubmit="return confirm(')
+    expect(body).toContain('name="enabled" value="true"')
+  })
+
+  it('shows env override warning + disables buttons when env TRADING_ENABLED=false overrides DB=true', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database, TRADING_ENABLED: 'false' }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // env override 適用後の effective は OFF
+    expect(body).toContain('取引 OFF (停止中)')
+    // env override note が出る
+    expect(body).toContain('env TRADING_ENABLED で deploy-gate ON')
+    // button は disabled
+    expect(body).toMatch(/<button[^>]*disabled[^>]*>取引再開<\/button>/)
+  })
+
+
   it('renders positions page with DO state', async () => {
     const env = {
       ...baseEnv,

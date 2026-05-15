@@ -47,6 +47,23 @@ describe('runStrategyCron', () => {
     expect(result.analysis.config.tradingEnabled).toBe(false)
   })
 
+  // #276: env=false が DB=true を上書きする。「より制限的な側が勝つ」 invariant の
+  // cron 経路での確認。DB が true でも env override が効いていれば cron は
+  // trading_disabled で即 skip し、PORTFOLIO_STATE などへ進まない (fail-closed)。
+  it('env TRADING_ENABLED=false overrides DB tradingEnabled=true (#276 kill-switch)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const envWithEnvOverride = {
+      ...env,
+      TRADING_ENABLED: 'false',
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    const result = await runStrategyCron(envWithEnvOverride)
+    expect(result.skipReason).toBe('trading_disabled')
+    // analysis.config.tradingEnabled は effective 値 (env override 適用後) を反映する。
+    expect(result.analysis.config.tradingEnabled).toBe(false)
+  })
+
   it('skips with no_tradable_symbols when universe is empty', async () => {
     vi.mocked(loadSymbolUniverse).mockResolvedValue(
       makeSymbolUniverse({

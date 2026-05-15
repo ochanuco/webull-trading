@@ -58,3 +58,10 @@ DASHBOARD_BASE_URL=
 # は limit_price 不要 / account_id を body)。受理値は 'v1' / 'v2' のみ、
 # それ以外 (空 / whitespace / 任意文字列) は 'v1' fallback。
 # WEBULL_PLACE_ORDER_SCHEMA=v2
+
+# #276: runtime kill-switch の deploy-gate override (optional、append 規約)。
+# prod は D1 `global_config.trading_enabled` が真値だが、env を 'false' に
+# すると DB が ON でも強制 OFF (= より制限的が勝つ)。preview / staging で
+# 「DB を間違って ON にしてもこの環境では絶対に発注しない」保険。
+# 受理値: unset / 'true' → DB 尊重、'false' → 強制 OFF、それ以外 → 強制 OFF。
+# TRADING_ENABLED=false
