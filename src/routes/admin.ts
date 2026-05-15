@@ -154,7 +154,7 @@ export const admin = new Hono<AppBindings>()
    * Honours `global_config.dry_run` via runStrategyCron itself — does NOT
    * bypass. Protected by the same basic-auth as the rest of /admin/*.
    */
-  .post('/strategy/run', async (c) => {
+  .post('/strategy/run', rateLimit('ADMIN_WRITE'), async (c) => {
     const result = await runStrategyCron(c.env)
     return c.json(result)
   })
@@ -342,7 +342,7 @@ export const admin = new Hono<AppBindings>()
    * aged out of the cron lookback window. Use to manually unstick legacy
    * split-brain rows after deploying the marker columns.
    */
-  .post('/orders/reconcile', async (c) => {
+  .post('/orders/reconcile', rateLimit('ADMIN_WRITE'), async (c) => {
     const retryStateApply = parseTruthyQuery(c.req.query('retryStateApply'))
     const summary = await reconcileFills({
       env: c.env,
@@ -405,7 +405,7 @@ export const admin = new Hono<AppBindings>()
    * Body: ignored (POST kept for "this mutates state" intent — `dryRun`
    *   path obviously doesn't, but the verb stays consistent).
    */
-  .post('/orders/sync-holdings', async (c) => {
+  .post('/orders/sync-holdings', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.SYMBOL_STATE) {
       throw new ValidationError('SYMBOL_STATE binding is not configured', { field: 'env' })
     }
