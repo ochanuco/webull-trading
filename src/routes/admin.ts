@@ -17,6 +17,7 @@ import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastructure/db/schema'
 import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
+import { recordPortfolioEquitySnapshot } from '../infrastructure/db/portfolioEquitySnapshotRepo'
 import {
   findSymbolConfig,
   insertSymbolConfig,
@@ -721,6 +722,35 @@ export const admin = new Hono<AppBindings>()
         dailyRealizedPnl: after.dailyRealizedPnl,
       },
     )
+    // 総資産チャート (`/dashboard/portfolio`) 用の時系列スナップショット。
+    // PortfolioStateDO は通貨を区別しない単一値 (慣例的 USD) なので USD カラムに
+    // 書き込み、JPY は per-currency split が入るまで NULL。書込失敗で handler
+    // 本体は止めない (audit と同じ姿勢 — DO 状態変更は既に成立済)。
+    if (c.env.DB) {
+      const drawdownPct =
+        before.dailyStartEquity > 0
+          ? before.dailyRealizedPnl / before.dailyStartEquity
+          : null
+      try {
+        await recordPortfolioEquitySnapshot(c.env.DB, {
+          snapshotAt: after.updatedAt,
+          dailyStartEquityUsd: before.dailyStartEquity,
+          dailyStartEquityJpy: null,
+          dailyRealizedPnlUsd: before.dailyRealizedPnl,
+          dailyRealizedPnlJpy: null,
+          drawdownPct,
+          requestId: c.get('requestId') ?? null,
+        })
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            event: 'portfolio_equity_snapshot_write_failed',
+            endpoint: '/admin/portfolio/roll-daily',
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        )
+      }
+    }
     return c.json({
       rolledAt: after.updatedAt,
       rolledDelta: before.dailyRealizedPnl,

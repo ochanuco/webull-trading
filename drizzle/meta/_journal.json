@@ -127,6 +127,13 @@
       "when": 1778828802046,
       "tag": "0017_trading_toggle_history",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1778863329960,
+      "tag": "0018_portfolio_equity_snapshot",
+      "breakpoints": true
     }
   ]
 }
