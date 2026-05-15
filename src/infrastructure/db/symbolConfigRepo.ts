@@ -233,27 +233,28 @@ export async function toggleSymbolActive(
 }
 
 /**
- * Soft delete (active=false)。hard delete は FK 影響回避のため避ける。
- * 既に active=false なら no-op (before==after で audit log も skip される)。
+ * Hard delete。inactive (active=false) 行のみ削除可、active 行は削除拒否
+ * ({ rejected: 'still_active' } 返却)。
+ *
+ * 旧 soft-delete (active=false 化) は toggle-active で代替できるため重複機能を
+ * 廃止し、UI 上「削除」= row そのものの除去を意味するように整理 (audit row は
+ * 別 table のため、削除後も操作履歴は残る)。
+ *
+ * FK は明示宣言されてないが、削除後に historical trade_journal などが symbol
+ * 文字列を保持するのは OK (orphan reference、表示時 inactive 扱い)。
  */
-export async function softDeleteSymbol(
+export async function hardDeleteSymbol(
   db: DrizzleD1Database,
   symbol: string,
-  nowIso: string,
-): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+): Promise<{ before: SymbolConfigRow } | { rejected: 'still_active' } | null> {
   const before = await findSymbolConfig(db, symbol)
   if (before === null) return null
-  const beforeSnapshot: SymbolConfigRow = { ...before }
-  if (!before.active) {
-    return { before: beforeSnapshot, after: beforeSnapshot }
+  if (before.active) {
+    return { rejected: 'still_active' }
   }
-  await db
-    .update(symbolConfig)
-    .set({ active: false, updatedAt: nowIso })
-    .where(eq(symbolConfig.symbol, symbol))
-  const after = await findSymbolConfig(db, symbol)
-  if (after === null) return null
-  return { before: beforeSnapshot, after }
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  await db.delete(symbolConfig).where(eq(symbolConfig.symbol, symbol))
+  return { before: beforeSnapshot }
 }
 
 /**

@@ -53,6 +53,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
   const rows: SymbolConfigRow[] = [...initial]
   const inserts: InsertCall[] = []
   const updates: UpdateCall[] = []
+  const deletes: { table: string; whereSymbol: string | null }[] = []
 
   const tableName = (t: unknown): InsertCall['table'] => {
     // drizzle SQLite table object stores name in `[Symbol.for('drizzle:Name')]` or `_.name`。
@@ -115,9 +116,21 @@ function fakeDb(initial: SymbolConfigRow[]) {
   return {
     inserts,
     updates,
+    deletes,
     rows,
     drizzleLike: {
       select: () => selectChain(() => rows),
+      delete: (table: unknown) => ({
+        where: async (cond: unknown) => {
+          const tn = tableName(table)
+          const symbol = extractSymbolFromWhere(cond)
+          if (tn === 'symbol_config' && symbol !== null) {
+            const idx = rows.findIndex((r) => r.symbol === symbol)
+            if (idx !== -1) rows.splice(idx, 1)
+          }
+          deletes.push({ table: tn, whereSymbol: symbol })
+        },
+      }),
       insert: (table: unknown) => ({
         values: async (v: Record<string, unknown>) => {
           const tn = tableName(table)
@@ -216,9 +229,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     // action links per row
     expect(body).toContain('/dashboard/symbols/SOXL/edit')
     expect(body).toContain('/admin/symbol-config/SOXL/toggle-active')
-    // soft delete button only on active row
-    expect(body).toContain('/admin/symbol-config/SOXL/delete')
-    expect(body).not.toContain('/admin/symbol-config/7203/delete')
+    // hard delete button only on inactive row (active 行は無効化先行を要求)
+    expect(body).toContain('/admin/symbol-config/7203/delete')
+    expect(body).not.toContain('/admin/symbol-config/SOXL/delete')
     // counts
     expect(body).toContain('active 1 / inactive 1')
   })
@@ -340,8 +353,31 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(JSON.parse(String(auditInsert!.values.afterJson))).toEqual({ active: false })
   })
 
-  // --- POST delete (soft) ---
-  it('POST /admin/symbol-config/:symbol/delete soft-deletes (active=false) without hard delete', async () => {
+  // --- POST delete (hard, inactive only) ---
+  it('POST /admin/symbol-config/:symbol/delete hard-deletes inactive row', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', active: false })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config/SOXL/delete',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: '',
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    // DELETE 1 件、UPDATE は走らないこと
+    const deletes = db.deletes.filter((d) => d.table === 'symbol_config')
+    expect(deletes).toHaveLength(1)
+    const auditInsert = db.inserts.find((i) => i.table === 'config_audit_log')
+    expect(auditInsert).toBeDefined()
+    // audit log の after_json は JSON.stringify(null) = 文字列 "null" (削除を意味)
+    expect(auditInsert!.values.afterJson).toBe('null')
+  })
+
+  it('POST /admin/symbol-config/:symbol/delete on active row → 303 redirect ?error=still_active (no DELETE)', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', active: true })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -355,13 +391,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     expect(res.status).toBe(303)
-    // UPDATE 1 件のみ — DELETE は呼ばれないこと
-    const updates = db.updates.filter((u) => u.table === 'symbol_config')
-    expect(updates).toHaveLength(1)
-    expect(updates[0]!.set).toMatchObject({ active: false })
-    const auditInsert = db.inserts.find((i) => i.table === 'config_audit_log')
-    expect(auditInsert).toBeDefined()
-    expect(JSON.parse(String(auditInsert!.values.afterJson))).toEqual({ active: false })
+    expect(res.headers.get('location')).toBe('/dashboard/symbols?error=still_active&symbol=SOXL')
+    const deletes = db.deletes.filter((d) => d.table === 'symbol_config')
+    expect(deletes).toHaveLength(0)
   })
 
   // --- Validation ---

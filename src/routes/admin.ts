@@ -20,7 +20,7 @@ import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 import {
   findSymbolConfig,
   insertSymbolConfig,
-  softDeleteSymbol,
+  hardDeleteSymbol,
   toggleSymbolActive,
   updateSymbolConfig,
   type SymbolConfigWriteInput,
@@ -1075,7 +1075,7 @@ export const admin = new Hono<AppBindings>()
     const symbolPath = normalizeSymbolPathParam(c.req.param('symbol'))
     const isForm = isFormContentType(c.req.header('content-type'))
     const db = createDb(c.env.DB)
-    const result = await softDeleteSymbol(db, symbolPath, new Date().toISOString())
+    const result = await hardDeleteSymbol(db, symbolPath)
     if (result === null) {
       if (isForm) {
         return c.redirect(
@@ -1085,15 +1085,24 @@ export const admin = new Hono<AppBindings>()
       }
       return c.json({ error: 'symbol_not_found', symbol: symbolPath }, 404)
     }
+    if ('rejected' in result) {
+      if (isForm) {
+        return c.redirect(
+          `/dashboard/symbols?error=still_active&symbol=${encodeURIComponent(symbolPath)}`,
+          303,
+        )
+      }
+      return c.json({ error: 'still_active', symbol: symbolPath }, 400)
+    }
     await writeAuditLog(
       c,
       '/admin/symbol-config/:symbol/delete',
       `symbol=${symbolPath}`,
-      { active: result.before.active },
-      { active: result.after.active },
+      symbolConfigSnapshot(result.before),
+      null,
     )
     if (isForm) return c.redirect('/dashboard/symbols', 303)
-    return c.json({ symbol: symbolPath, row: symbolConfigSnapshot(result.after) })
+    return c.json({ symbol: symbolPath, deleted: true })
   })
 
 /**
