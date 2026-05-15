@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import type { AppBindings } from '../app'
 import type { Env } from '../config/env'
 import { rateLimit } from '../middleware/rateLimit'
@@ -38,11 +39,29 @@ import {
 import type { NotificationSeverity, NotificationEvent } from '../infrastructure/notification/Notifier'
 import { loadVixRegimeSnapshot } from '../infrastructure/notification/vixRegimeChange'
 import type { VixRegime } from '../trading/risk/vixRegimeFilter'
-import { and, asc, desc, eq } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, lte } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
 import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
+// #293 calendar events management UI (earnings + macro)。dashboard 側に form
+// 受け handler を置くのは admin/seed が JSON 専用で `application/x-www-form-urlencoded`
+// を受けない (= HTML form から直接 POST できない) ため。バリデーション失敗時に
+// 入力値を保持したまま再描画する必要があり、PRG redirect だと echo が崩れる。
+// repo 呼び出し + rate-limit + writeAuditLog は admin route と同じ部品を再利用。
+import {
+  createEarningsCalendarDb,
+  createEarningsCalendarRepo,
+  type EarningsCalendarSeedInput,
+} from '../infrastructure/calendar/earningsCalendarRepo'
+import {
+  createMacroEventCalendarDb,
+  createMacroEventCalendarRepo,
+  type MacroEventCalendarSeedInput,
+} from '../infrastructure/calendar/macroEventCalendarRepo'
+import { earningsCalendar, macroEventCalendar } from '../infrastructure/db/schema'
+import type { EarningsCalendarRow, MacroEventCalendarRow } from '../infrastructure/db/schema'
+import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 
 /**
  * Read-only operator dashboard (#121). Server-rendered HTML via Hono — no
@@ -552,6 +571,236 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(messageOf(err))))
     }
   })
+  /**
+   * #293 — earnings + macro event calendar 管理 UI。
+   *
+   * `earnings_calendar` / `macro_event_calendar` への手動 add / delete を
+   * Web UI で行えるようにする。両 calendar とも risk gate のソース
+   * (`earningsGate` / `macroEventGate`) なので, operator が dashboard 経由で
+   * 直接管理できる必要がある (AI agent 経由の curl だけだと運用効率が悪い)。
+   *
+   * 範囲は now-30d 〜 now+30d (直近+近未来の "実際に gate が見る窓") を表示。
+   * 過去 30 日以前 / 365 日以降は dashboard では出さない (operator の関心外
+   * + 一覧の長さを抑える); 必要なら admin GET endpoint で直接読める。
+   */
+  .get('/events', async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+    }
+    try {
+      const universe = await loadSymbolUniverse(c.env).catch(() => null)
+      const { from, to } = eventsDisplayRange(new Date())
+      const earningsRepo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+      const macroRepo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+      const [earnings, macros] = await Promise.all([
+        loadEarningsInRange(c.env.DB, from, to),
+        macroRepo.fetchAll({ fromYmd: from, toYmd: to }),
+      ])
+      return c.html(
+        renderLayout(
+          c,
+          'イベント',
+          eventsBody({
+            earnings,
+            macros,
+            from,
+            to,
+            universe,
+            errors: null,
+            formEcho: null,
+          }),
+        ),
+      )
+    } catch (err) {
+      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
+      // (他 dashboard page と同じ defensive 姿勢)。
+      return c.html(renderLayout(c, 'イベント', unavailable(messageOf(err))))
+    }
+  })
+  /**
+   * earnings 1 行 seed form 受け。HTML form は JSON を送らないので
+   * `application/x-www-form-urlencoded` を parse → 1 件配列に wrap → 既存
+   * repo の `bulkUpsert` を呼ぶ。バリデーション失敗時は再描画 + 入力 echo
+   * (PRG redirect だと form の値が失われる)。
+   */
+  .post('/events/earnings/seed', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+    }
+    const form = Object.fromEntries((await c.req.formData()).entries())
+    const echo: EventsEarningsFormEcho = {
+      symbol: typeof form.symbol === 'string' ? form.symbol : '',
+      earningsDate: typeof form.earnings_date === 'string' ? form.earnings_date : '',
+      notes: typeof form.notes === 'string' ? form.notes : '',
+    }
+    const universe = await loadSymbolUniverse(c.env).catch(() => null)
+    const validation = validateEarningsForm(echo, universe)
+    if (!validation.ok) {
+      return await renderEventsWithError(c, {
+        section: 'earnings',
+        message: validation.error,
+        earningsEcho: echo,
+        macroEcho: null,
+      })
+    }
+    const record: EarningsCalendarSeedInput = {
+      symbol: validation.symbol,
+      earningsDate: validation.earningsDate,
+      notes: validation.notes,
+    }
+    const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+    try {
+      const result = await repo.bulkUpsert([record])
+      if (result.inserted > 0) {
+        await writeEventsAuditLog(
+          c,
+          '/dashboard/events/earnings/seed',
+          `symbol=${record.symbol} date=${record.earningsDate}`,
+          null,
+          { inserted: result.inserted, skipped: result.skipped, records: [record] },
+        )
+      }
+    } catch (err) {
+      return await renderEventsWithError(c, {
+        section: 'earnings',
+        message: `保存に失敗しました: ${messageOf(err)}`,
+        earningsEcho: echo,
+        macroEcho: null,
+      })
+    }
+    return c.redirect('/dashboard/events', 303)
+  })
+  /**
+   * earnings 1 行 delete form 受け。HTML form は DELETE method を送れないので
+   * POST を companion endpoint として用意 (admin の DELETE と独立に, dashboard
+   * 内で完結させる)。rate-limit + audit log は admin と同等に適用。
+   */
+  .post('/events/earnings/:id/delete', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+    }
+    const id = Number(c.req.param('id'))
+    if (!Number.isInteger(id) || id <= 0) {
+      return await renderEventsWithError(c, {
+        section: 'earnings',
+        message: 'invalid id',
+        earningsEcho: null,
+        macroEcho: null,
+      })
+    }
+    const repo = createEarningsCalendarRepo(createEarningsCalendarDb(c.env.DB))
+    const beforeRow = await createDb(c.env.DB)
+      .select()
+      .from(earningsCalendar)
+      .where(eq(earningsCalendar.id, id))
+      .then((rows) => rows[0] ?? null)
+      .catch(() => null)
+    const ok = await repo.deleteById(id).catch(() => false)
+    if (!ok) {
+      return await renderEventsWithError(c, {
+        section: 'earnings',
+        message: `id=${id} は見つかりませんでした`,
+        earningsEcho: null,
+        macroEcho: null,
+      })
+    }
+    await writeEventsAuditLog(
+      c,
+      '/dashboard/events/earnings/:id/delete',
+      `earnings_id=${id}`,
+      beforeRow,
+      null,
+    )
+    return c.redirect('/dashboard/events', 303)
+  })
+  /** macro 1 行 seed form 受け。挙動は earnings と対称。 */
+  .post('/events/macro/seed', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+    }
+    const form = Object.fromEntries((await c.req.formData()).entries())
+    const echo: EventsMacroFormEcho = {
+      eventType: typeof form.event_type === 'string' ? form.event_type : '',
+      country: typeof form.country === 'string' ? form.country : '',
+      eventDate: typeof form.event_date === 'string' ? form.event_date : '',
+      notes: typeof form.notes === 'string' ? form.notes : '',
+    }
+    const validation = validateMacroForm(echo)
+    if (!validation.ok) {
+      return await renderEventsWithError(c, {
+        section: 'macro',
+        message: validation.error,
+        earningsEcho: null,
+        macroEcho: echo,
+      })
+    }
+    const record: MacroEventCalendarSeedInput = {
+      eventType: validation.eventType,
+      eventDate: validation.eventDate,
+      eventTime: null,
+      notes: validation.notes,
+    }
+    const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+    try {
+      const result = await repo.bulkUpsert([record])
+      if (result.inserted > 0) {
+        await writeEventsAuditLog(
+          c,
+          '/dashboard/events/macro/seed',
+          `event_type=${record.eventType} date=${record.eventDate}`,
+          null,
+          { inserted: result.inserted, skipped: result.skipped, records: [record] },
+        )
+      }
+    } catch (err) {
+      return await renderEventsWithError(c, {
+        section: 'macro',
+        message: `保存に失敗しました: ${messageOf(err)}`,
+        earningsEcho: null,
+        macroEcho: echo,
+      })
+    }
+    return c.redirect('/dashboard/events', 303)
+  })
+  /** macro 1 行 delete form 受け。 */
+  .post('/events/macro/:id/delete', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+    }
+    const id = Number(c.req.param('id'))
+    if (!Number.isInteger(id) || id <= 0) {
+      return await renderEventsWithError(c, {
+        section: 'macro',
+        message: 'invalid id',
+        earningsEcho: null,
+        macroEcho: null,
+      })
+    }
+    const repo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+    const beforeRow = await createDb(c.env.DB)
+      .select()
+      .from(macroEventCalendar)
+      .where(eq(macroEventCalendar.id, id))
+      .then((rows) => rows[0] ?? null)
+      .catch(() => null)
+    const ok = await repo.deleteById(id).catch(() => false)
+    if (!ok) {
+      return await renderEventsWithError(c, {
+        section: 'macro',
+        message: `id=${id} は見つかりませんでした`,
+        earningsEcho: null,
+        macroEcho: null,
+      })
+    }
+    await writeEventsAuditLog(
+      c,
+      '/dashboard/events/macro/:id/delete',
+      `macro_event_id=${id}`,
+      beforeRow,
+      null,
+    )
+    return c.redirect('/dashboard/events', 303)
+  })
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -772,6 +1021,7 @@ function layout(title: string, body: string, env?: unknown): string {
   <a href="/dashboard/cron">戦略判定</a>
   <a href="/dashboard/charts">チャート</a>
   <a href="/dashboard/alerts">アラート</a>
+  <a href="/dashboard/events">イベント</a>
   <span class="nav-group">運用</span>
   <a href="/dashboard/config">設定</a>
   <a href="/dashboard/symbols">銘柄管理</a>
@@ -1167,6 +1417,7 @@ function indexBody(): string {
   <li><a href="/dashboard/cron">戦略判定</a> — <code>strategy_decision_log</code> 直近 cron tick の銘柄別判定 (<code>?symbol=SOXL</code> / <code>?requestId=...</code> で絞り込み可)</li>
   <li><a href="/dashboard/charts">チャート</a> — 概要 (エクイティカーブ + ドローダウン) / 取引品質 (PnL 分布 + 統計 + Decision breakdown) / 個別銘柄 (price + SMA50 + entry/exit) を tab 切替</li>
   <li><a href="/dashboard/alerts">アラート</a> — Slack/Discord に push 通知した critical / warning / info の直近 (#141)。webhook 未設定でも D1 に記録される。</li>
+  <li><a href="/dashboard/events">イベント</a> — <code>earnings_calendar</code> / <code>macro_event_calendar</code> の手動 add / delete (#293)。avoid 用 risk gate のソース。</li>
 </ul>
 
 <h2 style="font-size:14px;margin:16px 0 4px 0">運用</h2>
@@ -5795,4 +6046,373 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
     </div>
   </form>`
+}
+
+// #293 calendar events management UI helpers ===============================
+
+/**
+ * `<input value="...">` で再表示する form 入力。バリデーション失敗時は
+ * 入力値を保ったまま再描画する。
+ */
+interface EventsEarningsFormEcho {
+  symbol: string
+  earningsDate: string
+  notes: string
+}
+
+interface EventsMacroFormEcho {
+  /** macro `event_type` (FOMC / CPI / NFP …)。 */
+  eventType: string
+  /** 自由 text の国コード (US / JP …)。schema 上は notes に集約する。 */
+  country: string
+  eventDate: string
+  notes: string
+}
+
+interface EventsBodyArgs {
+  earnings: EarningsCalendarRow[]
+  macros: MacroEventCalendarRow[]
+  from: string
+  to: string
+  universe: SymbolUniverse | null
+  errors: { section: 'earnings' | 'macro'; message: string } | null
+  formEcho: {
+    earnings: EventsEarningsFormEcho | null
+    macro: EventsMacroFormEcho | null
+  } | null
+}
+
+/**
+ * dashboard で表示する範囲 = now-30d 〜 now+30d (= "実際に gate が見る窓")。
+ * `evaluateEarningsGate` / `evaluateMacroEventGate` は近未来の数営業日しか
+ * 見ないので、それを内包しつつ「今月 + 来月」程度を一覧する目安。
+ */
+function eventsDisplayRange(now: Date): { from: string; to: string } {
+  const ms = now.getTime()
+  const from = new Date(ms - 30 * 86_400_000).toISOString().slice(0, 10)
+  const to = new Date(ms + 30 * 86_400_000).toISOString().slice(0, 10)
+  return { from, to }
+}
+
+/**
+ * earnings_calendar を ([fromYmd, toYmd]) 範囲で読む。`fetchByRange` は
+ * symbol 単位 read なので、ここでは全 symbol の range read を直接 SQL で発行
+ * する (dashboard 一覧は universe 全体を横断するため)。
+ */
+async function loadEarningsInRange(
+  db: D1Database,
+  fromYmd: string,
+  toYmd: string,
+): Promise<EarningsCalendarRow[]> {
+  return createDb(db)
+    .select()
+    .from(earningsCalendar)
+    .where(
+      and(
+        gte(earningsCalendar.earningsDate, fromYmd),
+        lte(earningsCalendar.earningsDate, toYmd),
+      ),
+    )
+    .orderBy(asc(earningsCalendar.earningsDate), asc(earningsCalendar.symbol))
+}
+
+interface ValidationOkEarnings {
+  ok: true
+  symbol: string
+  earningsDate: string
+  notes: string | null
+}
+
+interface ValidationFail {
+  ok: false
+  error: string
+}
+
+/**
+ * earnings 1 行 form を validate する。
+ *   - symbol: 1〜16 chars, upper-case 正規化。universe にあれば pass; 無くても
+ *     pass (warn のみ)。「inactive 銘柄でも入れさせる」spec に合わせ active
+ *     判定は無視 (= 入力 → DB は raw に通す)。
+ *   - earnings_date: ISO YYYY-MM-DD, round-trip valid, now-90d 〜 now+365d。
+ *   - notes (= form の `notes` field): 任意, 256 chars 上限。
+ */
+function validateEarningsForm(
+  echo: EventsEarningsFormEcho,
+  _universe: SymbolUniverse | null,
+): ValidationOkEarnings | ValidationFail {
+  const sym = echo.symbol.trim().toUpperCase()
+  if (sym.length === 0 || sym.length > 16) {
+    return { ok: false, error: 'symbol は 1〜16 文字で入力してください' }
+  }
+  // universe 不在は warning にとどめ拒否しない (POC 姿勢、operator が unknown
+  // 銘柄を seed したい場合もある、=> notes に書く運用)。
+  const date = echo.earningsDate.trim()
+  if (!isYmdRoundTrip(date)) {
+    return { ok: false, error: 'event_date は YYYY-MM-DD 形式で実在する日付にしてください' }
+  }
+  if (!withinClampRange(date, new Date())) {
+    return { ok: false, error: 'event_date は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
+  }
+  const notesRaw = echo.notes.trim()
+  if (notesRaw.length > 256) {
+    return { ok: false, error: 'notes (source) は 256 文字以内にしてください' }
+  }
+  return {
+    ok: true,
+    symbol: sym,
+    earningsDate: date,
+    notes: notesRaw.length === 0 ? null : notesRaw,
+  }
+}
+
+interface ValidationOkMacro {
+  ok: true
+  eventType: string
+  eventDate: string
+  notes: string | null
+}
+
+/**
+ * macro 1 行 form を validate する。
+ *
+ * macro schema は `event_kind` / `country` を別 column で持たないため,
+ * country は notes に prefix で混ぜる (`"US — Federal Reserve press release"`)。
+ * spec 上 "country: 自由 text、escapeHtml on render" なので分離保持は必須ではない。
+ */
+function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro | ValidationFail {
+  const kindRaw = echo.eventType.trim()
+  if (kindRaw.length === 0 || kindRaw.length > 32) {
+    return { ok: false, error: 'event_kind は 1〜32 文字で入力してください' }
+  }
+  // schema 制約 `[A-Z0-9_]{1,32}` に合うよう upper-case 化し空白を `_` に
+  // 置換 (`'NFP REV'` → `'NFP_REV'`)。それでも regex に外れる場合は reject。
+  const kind = kindRaw.toUpperCase().replace(/\s+/g, '_')
+  if (!/^[A-Z0-9_]{1,32}$/.test(kind)) {
+    return {
+      ok: false,
+      error: 'event_kind は半角英数 + アンダースコアのみ使えます (例: FOMC / CPI / NFP)',
+    }
+  }
+  const country = echo.country.trim()
+  if (country.length > 16) {
+    return { ok: false, error: 'country は 16 文字以内にしてください' }
+  }
+  const date = echo.eventDate.trim()
+  if (!isYmdRoundTrip(date)) {
+    return { ok: false, error: 'event_date は YYYY-MM-DD 形式で実在する日付にしてください' }
+  }
+  if (!withinClampRange(date, new Date())) {
+    return { ok: false, error: 'event_date は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
+  }
+  const notesPlain = echo.notes.trim()
+  // notes に "country — notes" を畳む。country / notes ともに空なら null。
+  const combined =
+    country.length > 0 && notesPlain.length > 0
+      ? `${country} — ${notesPlain}`
+      : country.length > 0
+        ? country
+        : notesPlain
+  if (combined.length > 256) {
+    return { ok: false, error: 'country + notes (source) の合計は 256 文字以内にしてください' }
+  }
+  return {
+    ok: true,
+    eventType: kind,
+    eventDate: date,
+    notes: combined.length === 0 ? null : combined,
+  }
+}
+
+/** `YYYY-MM-DD` の文法 + 実在日付チェック (admin route の isYmd と同じ)。 */
+function isYmdRoundTrip(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const ms = Date.parse(`${value}T00:00:00.000Z`)
+  if (!Number.isFinite(ms)) return false
+  return new Date(ms).toISOString().slice(0, 10) === value
+}
+
+/** 過去 90 日 〜 未来 365 日 (両端含む) に入っているか。 */
+function withinClampRange(ymd: string, now: Date): boolean {
+  const t = Date.parse(`${ymd}T00:00:00.000Z`)
+  if (!Number.isFinite(t)) return false
+  const ms = now.getTime()
+  const earliest = ms - 90 * 86_400_000
+  const latest = ms + 365 * 86_400_000
+  return t >= earliest - 86_400_000 && t <= latest + 86_400_000
+}
+
+/**
+ * バリデーション失敗時 / delete failure 時の再描画 helper。一覧を再 load して
+ * エラーメッセージ + 入力 echo つきの events ページを返す。HTTP status は 400
+ * (operator 入力起因 — 5xx ではない) を返して PRG 経由ではないことを明示。
+ */
+async function renderEventsWithError(
+  c: Context<DashboardBindings>,
+  args: {
+    section: 'earnings' | 'macro'
+    message: string
+    earningsEcho: EventsEarningsFormEcho | null
+    macroEcho: EventsMacroFormEcho | null
+  },
+): Promise<Response> {
+  if (!c.env.DB) {
+    return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
+  }
+  const universe = await loadSymbolUniverse(c.env).catch(() => null)
+  const { from, to } = eventsDisplayRange(new Date())
+  const macroRepo = createMacroEventCalendarRepo(createMacroEventCalendarDb(c.env.DB))
+  const [earnings, macros] = await Promise.all([
+    loadEarningsInRange(c.env.DB, from, to).catch(() => [] as EarningsCalendarRow[]),
+    macroRepo.fetchAll({ fromYmd: from, toYmd: to }).catch(() => [] as MacroEventCalendarRow[]),
+  ])
+  return c.html(
+    renderLayout(
+      c,
+      'イベント',
+      eventsBody({
+        earnings,
+        macros,
+        from,
+        to,
+        universe,
+        errors: { section: args.section, message: args.message },
+        formEcho: { earnings: args.earningsEcho, macro: args.macroEcho },
+      }),
+    ),
+    400,
+  )
+}
+
+/**
+ * `/dashboard/events` の HTML 本文。earnings (上) + macro (下) の 2 セクション。
+ * 各セクションは「+ 追加」`<details>` 内に form, 一覧テーブルに 削除 form。
+ * 行が無いセクションは空配列メッセージで表示する (= "未登録" を明示)。
+ */
+function eventsBody(args: EventsBodyArgs): string {
+  const { earnings, macros, from, to, universe, errors, formEcho } = args
+  const earningsErr =
+    errors && errors.section === 'earnings'
+      ? `<p class="err"><strong>エラー:</strong> ${esc(errors.message)}</p>`
+      : ''
+  const macroErr =
+    errors && errors.section === 'macro'
+      ? `<p class="err"><strong>エラー:</strong> ${esc(errors.message)}</p>`
+      : ''
+  // form が前回 submit で開いていた場合は再描画でも開いた状態を維持したい (operator
+  // が値を確認しながら修正できる)。エラー有りなら details[open]、無しなら閉じる。
+  const earningsFormOpen = errors?.section === 'earnings' ? ' open' : ''
+  const macroFormOpen = errors?.section === 'macro' ? ' open' : ''
+  const eEcho = formEcho?.earnings ?? { symbol: '', earningsDate: '', notes: '' }
+  const mEcho =
+    formEcho?.macro ?? { eventType: '', country: '', eventDate: '', notes: '' }
+
+  const earningsTable =
+    earnings.length === 0
+      ? '<p class="muted">この範囲には登録された決算がありません。</p>'
+      : `<table>
+    <thead><tr>
+      <th>symbol</th><th>event_date</th><th>source (notes)</th><th>削除</th>
+    </tr></thead>
+    <tbody>${earnings
+      .map((r) => {
+        const inactive = isSymbolInactive(r.symbol, universe)
+        const sym = `<span${inactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</span>${
+          inactive
+            ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(inactiveTooltip(r.symbol, universe))})</span>`
+            : ''
+        }`
+        return `<tr>
+          <td>${sym}</td>
+          <td>${esc(r.earningsDate)}</td>
+          <td>${esc(r.notes ?? '-')}</td>
+          <td><form method="post" action="/dashboard/events/earnings/${r.id}/delete" onsubmit="return confirm('${esc(r.symbol)} ${esc(r.earningsDate)} を削除します。よろしいですか？');" style="margin:0"><button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button></form></td>
+        </tr>`
+      })
+      .join('')}</tbody>
+  </table>`
+
+  const macroTable =
+    macros.length === 0
+      ? '<p class="muted">この範囲には登録されたマクロイベントがありません。</p>'
+      : `<table>
+    <thead><tr>
+      <th>event_kind</th><th>country / source (notes)</th><th>event_date</th><th>削除</th>
+    </tr></thead>
+    <tbody>${macros
+      .map((r) => {
+        return `<tr>
+          <td><code>${esc(r.eventType)}</code></td>
+          <td>${esc(r.notes ?? '-')}</td>
+          <td>${esc(r.eventDate)}</td>
+          <td><form method="post" action="/dashboard/events/macro/${r.id}/delete" onsubmit="return confirm('${esc(r.eventType)} ${esc(r.eventDate)} を削除します。よろしいですか？');" style="margin:0"><button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button></form></td>
+        </tr>`
+      })
+      .join('')}</tbody>
+  </table>`
+
+  return `<p class="muted">期間: ${esc(from)} 〜 ${esc(to)} (now-30d 〜 now+30d)。<code>earnings_calendar</code> / <code>macro_event_calendar</code> は risk gate の avoid ソースです。
+  add は <code>now-90d 〜 now+365d</code> の範囲に clamp します。delete は audit に記録されます。</p>
+
+<h2 style="font-size:15px;margin:20px 0 6px 0">決算 (earnings)</h2>
+${earningsErr}
+<details${earningsFormOpen} style="margin-bottom:12px">
+  <summary style="cursor:pointer">+ 追加</summary>
+  <form method="post" action="/dashboard/events/earnings/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+    <label>symbol<br><input name="symbol" value="${esc(eEcho.symbol)}" placeholder="AAPL / 7203" required maxlength="16" style="padding:4px 8px;width:140px"></label>
+    <label>event_date<br><input name="earnings_date" type="date" value="${esc(eEcho.earningsDate)}" required style="padding:4px 8px"></label>
+    <label>source (notes, 任意)<br><input name="notes" value="${esc(eEcho.notes)}" placeholder="Q2 2026 BMO" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
+    <button type="submit" style="padding:6px 14px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">追加</button>
+  </form>
+</details>
+${earningsTable}
+
+<h2 style="font-size:15px;margin:24px 0 6px 0">マクロイベント (macro)</h2>
+${macroErr}
+<details${macroFormOpen} style="margin-bottom:12px">
+  <summary style="cursor:pointer">+ 追加</summary>
+  <form method="post" action="/dashboard/events/macro/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+    <label>event_kind<br><input name="event_type" value="${esc(mEcho.eventType)}" placeholder="FOMC / CPI / NFP" required maxlength="32" style="padding:4px 8px;width:160px"></label>
+    <label>country (任意)<br><input name="country" value="${esc(mEcho.country)}" placeholder="US / JP" maxlength="16" style="padding:4px 8px;width:100px"></label>
+    <label>event_date<br><input name="event_date" type="date" value="${esc(mEcho.eventDate)}" required style="padding:4px 8px"></label>
+    <label>source (notes, 任意)<br><input name="notes" value="${esc(mEcho.notes)}" placeholder="June FOMC" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
+    <button type="submit" style="padding:6px 14px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">追加</button>
+  </form>
+</details>
+${macroTable}`
+}
+
+/**
+ * dashboard 側 form handler 用の audit log writer (#293)。admin.ts の
+ * writeAuditLog と同形だが route layer が違うので local copy。actor は Access
+ * middleware が `c.set('actor', ...)` 済み (ない場合は extractActor が throw
+ * するので try/catch で潰す — admin 同様 audit 欠落で 500 を返したくない)。
+ */
+async function writeEventsAuditLog(
+  c: Context<DashboardBindings>,
+  endpoint: string,
+  targetKey: string | null,
+  before: unknown,
+  after: unknown,
+): Promise<void> {
+  if (!c.env.DB) return
+  try {
+    const actor = extractActor(c.get('actor'))
+    await recordChange(c.env.DB, {
+      actor,
+      endpoint,
+      targetKey,
+      before,
+      after,
+      requestId: c.get('requestId') ?? null,
+    })
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        event: 'config_audit_log_write_failed',
+        endpoint,
+        targetKey,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  }
 }
