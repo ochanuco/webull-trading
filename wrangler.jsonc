@@ -26,6 +26,25 @@
     ]
   },
   "env": {
+    // dev: separate worker + D1 for remote dev/preview. `wrangler dev` w/o
+    // --env still uses the top-level config (local miniflare + local SQLite).
+    "dev": {
+      "name": "webull-trading-dev",
+      "durable_objects": {
+        "bindings": [
+          { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
+          { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" }
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "webull-trading-dev",
+          "database_id": "REPLACE_WITH_DEV_ID",
+          "migrations_dir": "drizzle"
+        }
+      ]
+    },
     "staging": {
       "name": "webull-trading-staging",
       "durable_objects": {
@@ -42,6 +61,7 @@
           "migrations_dir": "drizzle"
         }
       ]
+      // No triggers: staging is manual run only (issue #277).
     },
     "production": {
       "name": "webull-trading-production",
@@ -58,7 +78,16 @@
           "database_id": "REPLACE_WITH_PRODUCTION_ID",
           "migrations_dir": "drizzle"
         }
-      ]
+      ],
+      // wrangler 4 does NOT inherit top-level `triggers` once env.* blocks
+      // exist, so cron must be re-declared explicitly here (issue #277).
+      "triggers": {
+        "crons": [
+          "*/5 * * * *",
+          "*/15 * * * *",
+          "0 22 * * *"
+        ]
+      }
     }
   }
 }
