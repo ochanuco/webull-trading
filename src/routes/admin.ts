@@ -1248,8 +1248,8 @@ async function writeAuditLog(
   after: unknown,
 ): Promise<void> {
   if (!c.env.DB) return
-  const actor = extractActor(c.get('actor'))
   try {
+    const actor = extractActor(c.get('actor'))
     await recordChange(c.env.DB, {
       actor,
       endpoint,

@@ -65,28 +65,30 @@ DASHBOARD_BASE_URL=
 
 # #277: per-env secrets. `.dev.vars` is local only. For deployed envs use
 # `wrangler secret put <KEY> --env=<dev|staging|production>`. Examples:
-#   wrangler secret put CF_ACCESS_TEAM_DOMAIN --env=dev
-#   wrangler secret put CF_ACCESS_AUD --env=dev
+#   wrangler secret put BASIC_AUTH_USER --env=dev
+#   wrangler secret put BASIC_AUTH_PASSWORD --env=dev
+#   wrangler secret put EVENT_INGEST_SECRET --env=dev
 #   wrangler secret put WEBULL_APP_KEY --env=dev
 #   wrangler secret put WEBULL_APP_SECRET --env=dev
 #   wrangler secret put WEBULL_ACCOUNT_ID --env=dev
 # Repeat for --env=staging (sandbox key) and --env=production (live key).
 # Production credentials MUST be distinct from staging/dev to avoid 誤爆.
-# DO NOT set ACCESS_DEV_BYPASS_USER on any deployed env — the middleware
-# refuses to honour it once CF_ACCESS_TEAM_DOMAIN is configured, but make it
-# impossible to mis-set in the first place by leaving it out of `wrangler
-# secret put` invocations entirely.
 
-# #29: Cloudflare Access auth (append 規約)。
-# 旧 BASIC_AUTH_USER / BASIC_AUTH_PASSWORD / EVENT_INGEST_SECRET は廃止。
-# 上の line 9 のコメントに記載があるが、本 PR でこれらは削除済み (現存しない)。
+# #29: Cloudflare Access auth (append 規約)。本 PR で BASIC_AUTH_USER /
+# BASIC_AUTH_PASSWORD / EVENT_INGEST_SECRET は廃止 (上記 #277 ブロック内の
+# 例示はファイル append-only 規約のため残しているが、これらの secret は実体
+# として存在しない。代わりに以下を投入する)。
 # - Local dev (wrangler dev): ACCESS_DEV_BYPASS_USER のみ設定。middleware が
 #   この文字列を actor として stamp する。**deployed env では絶対に設定禁止**。
 # - dev / staging / production: CF_ACCESS_TEAM_DOMAIN (full URL、例:
 #   https://<team>.cloudflareaccess.com) と CF_ACCESS_AUD (Zero Trust の
-#   application AUD tag) を `wrangler secret put` で投入。
+#   application AUD tag) を `wrangler secret put --env=<env>` で投入。
 #   CF_ACCESS_TEAM_DOMAIN が設定されていると middleware は ACCESS_DEV_BYPASS_USER
 #   を無視するので、deployed env で誤って bypass var を入れても prod-safe。
+#   投入例:
+#     wrangler secret put CF_ACCESS_TEAM_DOMAIN --env=production
+#     wrangler secret put CF_ACCESS_AUD --env=production
+# 旧 BASIC_AUTH_* / EVENT_INGEST_SECRET は wrangler secret delete --env=<env> で除去。
 ACCESS_DEV_BYPASS_USER=dev@local
 # CF_ACCESS_TEAM_DOMAIN=
 # CF_ACCESS_AUD=
