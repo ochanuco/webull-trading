@@ -103,30 +103,22 @@ describe('recordChange', () => {
 })
 
 describe('extractActor', () => {
-  it('returns ai-agent when the Authorization header is absent', () => {
-    expect(extractActor(undefined)).toBe('ai-agent')
-    expect(extractActor(null)).toBe('ai-agent')
-    expect(extractActor('')).toBe('ai-agent')
+  it('returns the actor string set by Access middleware', () => {
+    expect(extractActor('alice@example.com')).toBe('alice@example.com')
   })
 
-  it('decodes basic-auth username (drops password)', () => {
-    const header = `Basic ${btoa('alice:secret')}`
-    expect(extractActor(header)).toBe('alice')
+  it('trims surrounding whitespace', () => {
+    expect(extractActor('  bob  ')).toBe('bob')
   })
 
-  it('handles lowercase scheme and surrounding whitespace', () => {
-    const header = `  basic ${btoa('bob:pw')}  `
-    expect(extractActor(header)).toBe('bob')
+  it('throws when actor is missing (auth middleware was bypassed)', () => {
+    expect(() => extractActor(undefined)).toThrow(/missing actor/)
+    expect(() => extractActor(null)).toThrow(/missing actor/)
   })
 
-  it('falls back to ai-agent on malformed token', () => {
-    expect(extractActor('Bearer abc')).toBe('ai-agent')
-    expect(extractActor('Basic !!!not-base64!!!')).toBe('ai-agent')
-  })
-
-  it('falls back to ai-agent when the decoded username is empty', () => {
-    const header = `Basic ${btoa(':only-password')}`
-    expect(extractActor(header)).toBe('ai-agent')
+  it('throws when actor is empty / whitespace only', () => {
+    expect(() => extractActor('')).toThrow(/empty actor/)
+    expect(() => extractActor('   ')).toThrow(/empty actor/)
   })
 })
 

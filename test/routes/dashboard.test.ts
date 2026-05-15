@@ -20,11 +20,12 @@ vi.mock('../../src/infrastructure/notification/notificationEmitLog', () => ({
 }))
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
 }
 
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const unauthEnv = {}
+
+const authHeader = {}
 
 function fakeSymbolStateNamespace(cooldownUntil: string | null = null) {
   const stub = {
@@ -88,9 +89,9 @@ describe('dashboard', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('401s without basic auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
-    const res = await app.request('/dashboard', {}, baseEnv)
+    const res = await app.request('/dashboard', {}, unauthEnv)
     expect(res.status).toBe(401)
   })
 
@@ -451,9 +452,9 @@ describe('dashboard', () => {
     }
   })
 
-  it('cron page requires basic auth', async () => {
+  it('cron page requires Access JWT', async () => {
     const app = createApp()
-    const res = await app.request('/dashboard/cron', {}, baseEnv)
+    const res = await app.request('/dashboard/cron', {}, unauthEnv)
     expect(res.status).toBe(401)
   })
 
@@ -514,9 +515,9 @@ describe('dashboard', () => {
     expect(await res.text()).toContain('利用不可')
   })
 
-  it('alerts page requires basic auth', async () => {
+  it('alerts page requires Access JWT', async () => {
     const app = createApp()
-    const res = await app.request('/dashboard/alerts', {}, baseEnv)
+    const res = await app.request('/dashboard/alerts', {}, unauthEnv)
     expect(res.status).toBe(401)
   })
 })

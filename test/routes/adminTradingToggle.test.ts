@@ -13,11 +13,12 @@ vi.mock('../../src/infrastructure/db/tradingToggleRepo', async () => {
 })
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
 }
 
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const unauthEnv = {}
+
+const authHeader = {}
 
 describe('POST /admin/trading/toggle', () => {
   beforeEach(() => {
@@ -32,7 +33,7 @@ describe('POST /admin/trading/toggle', () => {
     vi.resetAllMocks()
   })
 
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
     const res = await app.request(
       '/admin/trading/toggle',
@@ -41,7 +42,7 @@ describe('POST /admin/trading/toggle', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: true, reason: 'manual unlock' }),
       },
-      { ...baseEnv, DB: {} as unknown as D1Database },
+      { ...unauthEnv, DB: {} as unknown as D1Database },
     )
     expect(res.status).toBe(401)
     expect(applyTradingToggle).not.toHaveBeenCalled()

@@ -12,13 +12,12 @@ vi.mock('../../src/infrastructure/db/symbolUniverse', () => ({
 }))
 
 const env = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
 }
 
-const authHeader = {
-  Authorization: `Basic ${btoa('admin:secret')}`,
-}
+const unauthEnv = {}
+
+const authHeader = {}
 
 describe('trade routes', () => {
   beforeEach(() => {
@@ -203,7 +202,7 @@ describe('trade routes', () => {
           sellAbove: 20,
         }),
       },
-      env,
+      unauthEnv,
     )
 
     const executeResponse = await app.request(
@@ -221,7 +220,7 @@ describe('trade routes', () => {
           sellAbove: 20,
         }),
       },
-      env,
+      unauthEnv,
     )
 
     expect(decideResponse.status).toBe(401)

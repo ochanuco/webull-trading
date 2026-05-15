@@ -1,8 +1,6 @@
 import type { SymbolStateDO } from '../trading/state/SymbolStateDO'
 
 export interface Env {
-  BASIC_AUTH_USER: string
-  BASIC_AUTH_PASSWORD: string
   SYMBOL_STATE: DurableObjectNamespace<SymbolStateDO>
 }
 
@@ -372,4 +370,22 @@ export interface Env {
 //   env がそれ以外       → 安全側に倒し 強制 OFF (typo は cron 止める方が安全)
 export interface Env {
   TRADING_ENABLED?: string
+}
+
+
+// #29: Cloudflare Access JWT auth (append 規約)。旧 BASIC_AUTH_* / EVENT_INGEST_SECRET
+// は廃止。
+// - CF_ACCESS_TEAM_DOMAIN: team URL (例 https://<team>.cloudflareaccess.com)。
+//   JWKS を `<team>/cdn-cgi/access/certs` から fetch。設定されていれば middleware は
+//   JWT 検証を強制し、ACCESS_DEV_BYPASS_USER を無視する (prod-safe gate)。
+// - CF_ACCESS_AUD: application AUD tag (Zero Trust application 詳細の Application
+//   Audience)。JWT claim と一致しないと 401。
+// - ACCESS_DEV_BYPASS_USER: local dev (wrangler dev) で CF_ACCESS_TEAM_DOMAIN が
+//   未設定 AND `Cf-Access-Jwt-Assertion` ヘッダ無しの時のみ、この文字列を actor として
+//   stamp する。**deployed env では絶対に設定禁止** (上記 gate で実質無効化されるが、
+//   設定自体しない方が誤爆リスクが少ない)。
+export interface Env {
+  CF_ACCESS_TEAM_DOMAIN?: string
+  CF_ACCESS_AUD?: string
+  ACCESS_DEV_BYPASS_USER?: string
 }

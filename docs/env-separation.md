@@ -57,9 +57,14 @@ pnpm wrangler d1 migrations apply webull-trading-production --env=production --r
 
 最小必須:
 
-- `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD`
-- `EVENT_INGEST_SECRET`
+- `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` (#29 Access auth)
 - `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID`
+
+`BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` / `EVENT_INGEST_SECRET` は #29 で
+廃止。既存 deploy は `wrangler secret delete <key> --env=<env>` で除去する。
+deployed env では `ACCESS_DEV_BYPASS_USER` を絶対に投入しない (middleware は
+`CF_ACCESS_TEAM_DOMAIN` が立っていれば bypass を honor しないが、二重防御で
+secret 自体を投入しない運用にする)。
 
 **production の Webull credentials は staging/dev と別物にする**。staging は sandbox key (`api.sandbox.webull.hk`)、production は live key (`openapi.webull.com`)。`WEBULL_API_BASE` も env ごと別 secret として投入する事で混同を防ぐ。
 

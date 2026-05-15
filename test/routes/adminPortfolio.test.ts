@@ -2,15 +2,21 @@ import { describe, expect, it } from 'vitest'
 import { createApp } from '../../src/app'
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
   DRY_RUN: 'true',
   TRADING_ENABLED: 'false',
   ALLOWED_SYMBOLS: 'SOXL',
   MAX_ORDER_NOTIONAL: '100',
 }
 
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const unauthEnv = {
+  DRY_RUN: 'true',
+  TRADING_ENABLED: 'false',
+  ALLOWED_SYMBOLS: 'SOXL',
+  MAX_ORDER_NOTIONAL: '100',
+}
+
+const authHeader = {}
 
 function fakePortfolioState(captured: { calls: Array<{ amount: number }> }) {
   const stub = {
@@ -31,12 +37,12 @@ function fakePortfolioState(captured: { calls: Array<{ amount: number }> }) {
 }
 
 describe('POST /admin/portfolio/seed-equity', () => {
-  it('401s without Basic Auth', async () => {
+  it('401s without Access JWT', async () => {
     const app = createApp()
     const res = await app.request(
       '/admin/portfolio/seed-equity',
       { method: 'POST', body: JSON.stringify({ amount: 100_000 }) },
-      baseEnv,
+      unauthEnv,
     )
     expect(res.status).toBe(401)
   })

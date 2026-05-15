@@ -11,15 +11,14 @@ import { createApp } from '../../src/app'
  */
 
 const baseEnv = {
-  BASIC_AUTH_USER: 'admin',
-  BASIC_AUTH_PASSWORD: 'secret',
+  ACCESS_DEV_BYPASS_USER: 'admin',
   DRY_RUN: 'true',
   TRADING_ENABLED: 'false',
   ALLOWED_SYMBOLS: 'SOXL',
   MAX_ORDER_NOTIONAL: '100',
 }
 
-const authHeader = { Authorization: `Basic ${btoa('admin:secret')}` }
+const authHeader = {}
 
 interface SeedCashCall {
   symbol: string

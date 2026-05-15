@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import type { Env } from './config/env'
 import { auditLogger } from './infrastructure/logger/AuditLogger'
-import { basicAuthMiddleware } from './middleware/basicAuth'
+import { accessJwtMiddleware } from './middleware/accessJwt'
 import { health } from './routes/health'
 import { trade } from './routes/trade'
 // Webull routes (Phase 2 append)
@@ -12,7 +12,7 @@ import type { ErrorHandler } from 'hono'
 
 export type AppBindings = {
   Bindings: Env
-  Variables: { requestId: string }
+  Variables: { requestId: string; actor: string }
 }
 
 export const errorHandler: ErrorHandler<AppBindings> = (err, c) => {
@@ -45,15 +45,15 @@ export const errorHandler: ErrorHandler<AppBindings> = (err, c) => {
 export function createApp() {
   const app = new Hono<AppBindings>()
   app.use('*', auditLogger())
-  app.use('/trade/*', basicAuthMiddleware())
+  app.use('/trade/*', accessJwtMiddleware())
   app.route('/health', health)
   app.route('/trade', trade)
   // Webull routes (Phase 2 append)
-  app.use('/webull/*', basicAuthMiddleware())
+  app.use('/webull/*', accessJwtMiddleware())
   app.route('/webull', webull)
-  app.use('/admin/*', basicAuthMiddleware())
+  app.use('/admin/*', accessJwtMiddleware())
   app.route('/admin', admin)
-  app.use('/dashboard/*', basicAuthMiddleware())
+  app.use('/dashboard/*', accessJwtMiddleware())
   app.route('/dashboard', dashboard)
   app.onError(errorHandler)
   return app

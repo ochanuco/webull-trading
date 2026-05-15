@@ -7,8 +7,6 @@ import { WebhookNotifier } from '../../../src/infrastructure/notification/Webhoo
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
-    BASIC_AUTH_USER: 'u',
-    BASIC_AUTH_PASSWORD: 'p',
     SYMBOL_STATE: undefined as never,
     ...overrides,
   } as Env

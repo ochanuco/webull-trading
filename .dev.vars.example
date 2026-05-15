@@ -9,9 +9,6 @@
 #   WEBULL_API_BASE / BASIC_AUTH_* / EVENT_INGEST_SECRET / WEBULL_APP_* / WEBULL_ACCOUNT_ID
 #   → set below for local dev, use `wrangler secret put` for deployed envs.
 
-BASIC_AUTH_USER=<your-username>
-BASIC_AUTH_PASSWORD=<your-password>
-EVENT_INGEST_SECRET=change-me
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
 # Run `pnpm run accounts` after setting the two above to fetch account_id.
@@ -76,3 +73,22 @@ DASHBOARD_BASE_URL=
 #   wrangler secret put WEBULL_ACCOUNT_ID --env=dev
 # Repeat for --env=staging (sandbox key) and --env=production (live key).
 # Production credentials MUST be distinct from staging/dev to avoid 誤爆.
+
+# #29: Cloudflare Access auth (append 規約)。本 PR で BASIC_AUTH_USER /
+# BASIC_AUTH_PASSWORD / EVENT_INGEST_SECRET は廃止 (上記 #277 ブロック内の
+# 例示はファイル append-only 規約のため残しているが、これらの secret は実体
+# として存在しない。代わりに以下を投入する)。
+# - Local dev (wrangler dev): ACCESS_DEV_BYPASS_USER のみ設定。middleware が
+#   この文字列を actor として stamp する。**deployed env では絶対に設定禁止**。
+# - dev / staging / production: CF_ACCESS_TEAM_DOMAIN (full URL、例:
+#   https://<team>.cloudflareaccess.com) と CF_ACCESS_AUD (Zero Trust の
+#   application AUD tag) を `wrangler secret put --env=<env>` で投入。
+#   CF_ACCESS_TEAM_DOMAIN が設定されていると middleware は ACCESS_DEV_BYPASS_USER
+#   を無視するので、deployed env で誤って bypass var を入れても prod-safe。
+#   投入例:
+#     wrangler secret put CF_ACCESS_TEAM_DOMAIN --env=production
+#     wrangler secret put CF_ACCESS_AUD --env=production
+# 旧 BASIC_AUTH_* / EVENT_INGEST_SECRET は wrangler secret delete --env=<env> で除去。
+ACCESS_DEV_BYPASS_USER=dev@local
+# CF_ACCESS_TEAM_DOMAIN=
+# CF_ACCESS_AUD=
