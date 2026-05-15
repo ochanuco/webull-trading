@@ -6168,30 +6168,29 @@ function symbolFormBody(args: SymbolFormArgs): string {
       });
       matches.forEach(function (p) {
         var hasBucket = !!p.bucket;
+        // 未分類 銘柄 click 時は銘柄名を bucket 値として仮挿入する (operator が編集前提)
+        var insertValue = hasBucket ? p.bucket : p.symbol;
         var li = document.createElement('li');
-        li.style.cssText = hasBucket
-          ? 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px'
-          : 'padding:6px 10px;cursor:not-allowed;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px;opacity:0.55';
+        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px';
         var symEl = document.createElement('strong');
         symEl.textContent = p.symbol;
         var arrow = document.createElement('span');
         arrow.style.color = '#86868b';
         arrow.textContent = ' → ';
         var bucketEl = document.createElement('span');
-        bucketEl.style.color = hasBucket ? '#06c' : '#c22';
-        bucketEl.textContent = hasBucket ? p.bucket : '(未分類、選択不可)';
+        bucketEl.style.color = hasBucket ? '#06c' : '#86868b';
+        bucketEl.textContent = hasBucket ? p.bucket : '(未分類、click で「' + p.symbol + '」挿入)';
         li.appendChild(symEl);
         li.appendChild(arrow);
         li.appendChild(bucketEl);
-        if (hasBucket) {
-          li.addEventListener('mousedown', function () {
-            window.pickSymbolFormBucket(p.bucket);
-          });
-          li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
-          li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
-        } else {
-          li.title = 'この銘柄は bucket 未設定のため click 不可。先にこの銘柄の bucket を編集してください。';
+        if (!hasBucket) {
+          li.title = 'bucket 未設定銘柄。click すると銘柄名 (' + p.symbol + ') が仮挿入される — 必要に応じて編集してください。';
         }
+        li.addEventListener('mousedown', function () {
+          window.pickSymbolFormBucket(insertValue);
+        });
+        li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
+        li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
         list.appendChild(li);
       });
       list.style.display = 'block';
