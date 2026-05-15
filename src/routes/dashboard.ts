@@ -6039,9 +6039,28 @@ interface SymbolFormArgs {
   row: SymbolConfigRow | null
   /** validation error message — POST handler が re-render する時に渡す。 */
   error: string | null
-  /** 既存 bucket 一覧 (DB の distinct 値)、datalist suggestion 用。 */
+  /** 既存 bucket 一覧 (DB の distinct 値)、chip suggestion 用。 */
   knownBuckets: string[]
 }
+
+/**
+ * 銘柄 bucket の推奨 preset。空 DB / 既存値が少ない時の guide 用。
+ * 単なる例示で、operator が自由に新規 bucket を作っても OK。
+ * 既存 bucket と重複する値は表示時に除外される。
+ */
+const SUGGESTED_BUCKETS = [
+  'semi',
+  'etf_3x',
+  'us_large_cap',
+  'us_tech',
+  'crypto',
+  'commodity',
+  'jp_etf',
+  'jp_auto',
+  'jp_tech',
+  'jp_bank',
+  'biotech',
+] as const
 
 function symbolFormBody(args: SymbolFormArgs): string {
   const { mode, row, error, knownBuckets } = args
@@ -6101,19 +6120,31 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
     <div>
       <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" placeholder="例: semi / us_large_cap / jp_auto (任意)" style="padding:6px;width:280px">
-      ${
-        knownBuckets.length > 0
-          ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
-               <span class="muted" style="font-size:11px;margin-right:4px">既存 (click で挿入):</span>
-               ${knownBuckets
-                 .map(
-                   (b) =>
-                     `<button type="button" onclick="window.pickSymbolFormBucket('${esc(b).replace(/'/g, '&#39;')}')" style="padding:2px 8px;font-size:11px;background:#fff;border:1px solid #d0d0d5;border-radius:12px;cursor:pointer;color:#06c">${esc(b)}</button>`,
-                 )
-                 .join('')}
-             </div>`
-          : ''
-      }
+      ${(() => {
+        const knownSet = new Set(knownBuckets)
+        const suggested = SUGGESTED_BUCKETS.filter((b) => !knownSet.has(b))
+        const chip = (b: string, variant: 'existing' | 'suggested') => {
+          const style =
+            variant === 'existing'
+              ? 'padding:2px 8px;font-size:11px;background:#eef;border:1px solid #b0c4f5;border-radius:12px;cursor:pointer;color:#06c'
+              : 'padding:2px 8px;font-size:11px;background:#fff;border:1px dashed #d0d0d5;border-radius:12px;cursor:pointer;color:#86868b'
+          return `<button type="button" onclick="window.pickSymbolFormBucket('${esc(b).replace(/'/g, '&#39;')}')" style="${style}">${esc(b)}</button>`
+        }
+        const sections: string[] = []
+        if (knownBuckets.length > 0) {
+          sections.push(`<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+            <span class="muted" style="font-size:11px;margin-right:4px">既存 (click で挿入):</span>
+            ${knownBuckets.map((b) => chip(b, 'existing')).join('')}
+          </div>`)
+        }
+        if (suggested.length > 0) {
+          sections.push(`<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+            <span class="muted" style="font-size:11px;margin-right:4px">推奨 (click で挿入):</span>
+            ${suggested.map((b) => chip(b, 'suggested')).join('')}
+          </div>`)
+        }
+        return sections.join('')
+      })()}
       <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。空欄なら bucket 未分類。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
