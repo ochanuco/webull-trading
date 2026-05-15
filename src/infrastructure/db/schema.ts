@@ -622,3 +622,43 @@ export const tradingToggleHistory = sqliteTable('trading_toggle_history', {
 
 export type TradingToggleHistoryRow = typeof tradingToggleHistory.$inferSelect
 export type TradingToggleHistoryInsert = typeof tradingToggleHistory.$inferInsert
+
+/**
+ * Daily portfolio equity snapshot (1 row per `rollDaily()` execution). Persists
+ * `PortfolioStateDO.dailyStartEquity` over time so the `/dashboard/portfolio`
+ * page can render the "真の総資産チャート" — cash + holdings — rather than the
+ * `/dashboard/charts?tab=overview` curve which only sums `trade_journal.realized_pnl`.
+ *
+ * USD / JPY are kept as separate columns so multi-currency snapshots can be
+ * recorded without ad-hoc JSON. The DO today stores a single `dailyStartEquity`
+ * number; today this populates USD by default with JPY left NULL until the DO
+ * is split per-currency (out of scope of this PR). Either column may be NULL.
+ *
+ * One row per roll-daily call. We do NOT dedupe within a day — multiple
+ * manual rolls on the same day intentionally produce multiple rows so the
+ * audit trail keeps every transition.
+ */
+export const portfolioEquitySnapshot = sqliteTable(
+  'portfolio_equity_snapshot',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    snapshotAt: text('snapshot_at').notNull(),
+    /** `PortfolioStateDO.dailyStartEquity` 等価 (USD denomination)。 */
+    dailyStartEquityUsd: real('daily_start_equity_usd'),
+    /** `PortfolioStateDO.dailyStartEquity` 等価 (JPY denomination)。 */
+    dailyStartEquityJpy: real('daily_start_equity_jpy'),
+    dailyRealizedPnlUsd: real('daily_realized_pnl_usd'),
+    dailyRealizedPnlJpy: real('daily_realized_pnl_jpy'),
+    /** dailyRealizedPnl / dailyStartEquity (fraction、負が drawdown)。 */
+    drawdownPct: real('drawdown_pct'),
+    /** roll-daily を起こした request id (cron / 手動 trace 用)。任意。 */
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    // chart 表示は snapshotAt ASC で range スキャンする (`loadPortfolioEquitySnapshots`)。
+    snapshotAtIdx: index('portfolio_equity_snapshot_at_idx').on(t.snapshotAt),
+  }),
+)
+
+export type PortfolioEquitySnapshotRow = typeof portfolioEquitySnapshot.$inferSelect
+export type PortfolioEquitySnapshotInsert = typeof portfolioEquitySnapshot.$inferInsert
