@@ -4,12 +4,12 @@ dev / staging / production を worker / D1 / DO namespace / secrets で物理的
 
 ## 4 つの実行プロファイル
 
-| Profile | 起動 | Worker name | D1 | cron | 用途 |
-|---|---|---|---|---|---|
-| local | `pnpm dev` (= `wrangler dev`) | top-level (`webull-trading`) | miniflare local SQLite | なし | 開発機での反復実行 |
-| dev | `pnpm deploy:dev` | `webull-trading-dev` | `webull-trading-dev` (要発行) | なし (manual) | remote dev / preview |
-| staging | `pnpm deploy:staging` | `webull-trading-staging` | `webull-trading-staging` | なし (manual) | sandbox key で integration 検証 |
-| production | `pnpm deploy:production` | `webull-trading-production` | `webull-trading-production` (要発行) | あり (5/15min/22:00 UTC) | 実マネー |
+| Profile | 起動 | Worker name | URL | D1 | cron | 用途 |
+|---|---|---|---|---|---|---|
+| local | `pnpm dev` (= `wrangler dev`) | top-level (`webull-trading`) | `localhost:8787` | miniflare local SQLite | なし | 開発機での反復実行 |
+| dev | `pnpm deploy:dev` | `webull-trading-dev` | `webull-trading-dev.*.workers.dev` | `webull-trading-dev` (要発行) | なし (manual) | remote dev / preview |
+| staging | `pnpm deploy:staging` | `webull-trading-staging` | `trading-staging.chanu.co` | `webull-trading-staging` | なし (manual) | sandbox key で integration 検証 |
+| production | `pnpm deploy:production` | `webull-trading-production` | `trading.chanu.co` | `webull-trading-production` (要発行) | あり (5/15min/22:00 UTC) | 実マネー |
 
 `wrangler dev` (ローカル) はあえて env を切り替えずに top-level config を使う。cron / D1 ID 設定エラーの影響を受けず手元で立ち上がる事を優先するため。
 
