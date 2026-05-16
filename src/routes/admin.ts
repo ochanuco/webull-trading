@@ -1590,6 +1590,10 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     maxNotional?: unknown
     bucket?: unknown
     notes?: unknown
+    time_stop_days_override?: unknown
+    timeStopDaysOverride?: unknown
+    k_atr_override?: unknown
+    kAtrOverride?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -1603,7 +1607,32 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   const name = parseOptionalString(raw.name, 'name')
   const bucket = parseOptionalString(raw.bucket, 'bucket')
   const notes = parseOptionalString(raw.notes, 'notes')
-  return { symbol, name, market, currency, active, maxNotional, bucket, notes }
+  // Per-symbol pullback override (#316)。空文字 / undefined → NULL (= global
+  // default fall-through)。範囲外は ValidationError、DB CHECK と二重防御。
+  const timeStopDaysOverride = parseOptionalIntegerInRange(
+    raw.time_stop_days_override ?? raw.timeStopDaysOverride,
+    'timeStopDaysOverride',
+    1,
+    365,
+  )
+  const kAtrOverride = parseOptionalNumberInRange(
+    raw.k_atr_override ?? raw.kAtrOverride,
+    'kAtrOverride',
+    0.5,
+    5.0,
+  )
+  return {
+    symbol,
+    name,
+    market,
+    currency,
+    active,
+    maxNotional,
+    bucket,
+    notes,
+    timeStopDaysOverride,
+    kAtrOverride,
+  }
 }
 
 function normalizeSymbol(value: unknown): string {
@@ -1671,6 +1700,84 @@ function parseOptionalPositiveNumber(value: unknown, field: string): number | nu
   throw new ValidationError(`${field} must be a positive number or empty`, { field })
 }
 
+/**
+ * Optional integer in [min,max]。空文字 / undefined / null → null (fall-through)。
+ * 整数 (Number.isInteger) でない値は ValidationError。範囲外も ValidationError。
+ * Per-symbol override (#316) で time_stop_days_override の受け口に使う。
+ */
+function parseOptionalIntegerInRange(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): number | null {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed === '') return null
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min || parsed > max) {
+      throw new ValidationError(
+        `${field} must be an integer between ${min} and ${max}, or empty`,
+        { field },
+      )
+    }
+    return parsed
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+      throw new ValidationError(
+        `${field} must be an integer between ${min} and ${max}, or empty`,
+        { field },
+      )
+    }
+    return value
+  }
+  throw new ValidationError(
+    `${field} must be an integer between ${min} and ${max}, or empty`,
+    { field },
+  )
+}
+
+/**
+ * Optional finite float in [min,max]。空文字 / undefined / null → null
+ * (fall-through)。範囲外 / 非数値は ValidationError。Per-symbol override
+ * (#316) で k_atr_override の受け口に使う。
+ */
+function parseOptionalNumberInRange(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): number | null {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed === '') return null
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+      throw new ValidationError(
+        `${field} must be a number between ${min} and ${max}, or empty`,
+        { field },
+      )
+    }
+    return parsed
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value < min || value > max) {
+      throw new ValidationError(
+        `${field} must be a number between ${min} and ${max}, or empty`,
+        { field },
+      )
+    }
+    return value
+  }
+  throw new ValidationError(
+    `${field} must be a number between ${min} and ${max}, or empty`,
+    { field },
+  )
+}
+
 function parseOptionalString(value: unknown, field: string): string | null {
   if (value === undefined || value === null) return null
   if (typeof value !== 'string') {
@@ -1694,6 +1801,8 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     maxNotional: row.maxNotional,
     bucket: row.bucket,
     notes: row.notes,
+    timeStopDaysOverride: row.timeStopDaysOverride,
+    kAtrOverride: row.kAtrOverride,
     updatedAt: row.updatedAt,
   }
 }

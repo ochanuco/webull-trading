@@ -571,11 +571,20 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
     }
     const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
+    // global default は placeholder 表示 (#316) — operator が「空欄なら何の値が
+    // 適用されるか」を一目で把握できるようにする。読込失敗は fallback null で
+    // placeholder 無表示にする (form 自体は出す)。
+    const globalDefaults = await loadGlobalConfigFrom(c.env, c.get('requestId'))
+      .then((g) => ({
+        timeStopDays: g.pullbackDefaultTimeStopDays,
+        kAtr: g.pullbackDefaultKAtr,
+      }))
+      .catch(() => null)
     return c.html(
       renderLayout(
         c,
         '銘柄管理 - 新規追加',
-        symbolFormBody({ mode: 'new', row: null, error: null, knownPairs }),
+        symbolFormBody({ mode: 'new', row: null, error: null, knownPairs, globalDefaults }),
       ),
     )
   })
@@ -593,11 +602,17 @@ export const dashboard = new Hono<DashboardBindings>()
         return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(`symbol "${symbol}" not found`)))
       }
       const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
+      const globalDefaults = await loadGlobalConfigFrom(c.env, c.get('requestId'))
+        .then((g) => ({
+          timeStopDays: g.pullbackDefaultTimeStopDays,
+          kAtr: g.pullbackDefaultKAtr,
+        }))
+        .catch(() => null)
       return c.html(
         renderLayout(
           c,
           '銘柄管理 - 編集',
-          symbolFormBody({ mode: 'edit', row, error: null, knownPairs }),
+          symbolFormBody({ mode: 'edit', row, error: null, knownPairs, globalDefaults }),
         ),
       )
     } catch (err) {
@@ -6289,10 +6304,15 @@ interface SymbolFormArgs {
   error: string | null
   /** 既存 (symbol, bucket) ペア、bucket 入力の suggest 用。 */
   knownPairs: SymbolBucketPair[]
+  /**
+   * Pullback rule の global default。override 入力欄の placeholder に「空欄
+   * なら N が適用される」と見せるために使う (#316)。読込失敗時 null。
+   */
+  globalDefaults: { timeStopDays: number; kAtr: number } | null
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
-  const { mode, row, error, knownPairs } = args
+  const { mode, row, error, knownPairs, globalDefaults } = args
   const action =
     mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
   const symbolValue = row?.symbol ?? ''
@@ -6303,6 +6323,18 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const maxNotionalValue = row?.maxNotional === null || row?.maxNotional === undefined ? '' : String(row.maxNotional)
   const bucketValue = row?.bucket ?? ''
   const notesValue = row?.notes ?? ''
+  const timeStopDaysOverrideValue =
+    row?.timeStopDaysOverride === null || row?.timeStopDaysOverride === undefined
+      ? ''
+      : String(row.timeStopDaysOverride)
+  const kAtrOverrideValue =
+    row?.kAtrOverride === null || row?.kAtrOverride === undefined ? '' : String(row.kAtrOverride)
+  const timeStopPlaceholder = globalDefaults
+    ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
+    : '空欄で global default を使用'
+  const kAtrPlaceholder = globalDefaults
+    ? `空欄で global default (${globalDefaults.kAtr}) を使用`
+    : '空欄で global default を使用'
   const symbolField =
     mode === 'edit'
       ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
@@ -6354,6 +6386,18 @@ function symbolFormBody(args: SymbolFormArgs): string {
         <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownPairs))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:320px;max-height:240px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
       </div>
       <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存銘柄から suggest (click するとその銘柄の bucket が挿入される / 新規 bucket もそのまま入力で OK)。</p>
+    </div>
+    <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
+    <div>
+      <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">日 (business days)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_time_stop_days</code> を使用。3x leveraged ETF (SOXL / 1570 等) は短い hold (5-7) が推奨 (#316)。1-365 の整数。</p>
+    </div>
+    <label>ATR stop 倍率 <span class="muted" style="font-size:11px">(k_atr)</span></label>
+    <div>
+      <input type="number" name="k_atr_override" value="${esc(kAtrOverrideValue)}" step="0.1" min="0.5" max="5.0" placeholder="${esc(kAtrPlaceholder)}" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">× ATR20</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_k_atr</code> を使用。高ボラ銘柄では緩めに (2.5-3.5)、低ボラは引き締めに (1.5-2.0)。0.5-5.0 の数値 (#316)。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>

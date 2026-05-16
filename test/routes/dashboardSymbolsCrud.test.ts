@@ -150,6 +150,8 @@ function fakeDb(initial: SymbolConfigRow[]) {
               maxNotional: (v.maxNotional as number | null) ?? null,
               bucket: (v.bucket as string | null) ?? null,
               notes: (v.notes as string | null) ?? null,
+              timeStopDaysOverride: (v.timeStopDaysOverride as number | null) ?? null,
+              kAtrOverride: (v.kAtrOverride as number | null) ?? null,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -199,6 +201,8 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     maxNotional: 2000,
     bucket: 'semi',
     notes: null,
+    timeStopDaysOverride: null,
+    kAtrOverride: null,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -614,5 +618,197 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
         bucket: 'semi',
       },
     })
+  })
+
+  // --- Per-symbol strategy override (#316) ---
+  it('POST /admin/symbol-config persists timeStopDaysOverride / kAtrOverride from form', async () => {
+    // SOXL (3x leveraged ETF) で time_stop=5 / k_atr=3.0 を入れて DB に
+    // 書かれることを確認。global default は別途 placeholder で表示するだけ。
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'SOXL',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      max_notional: '2000',
+      bucket: 'semi',
+      time_stop_days_override: '5',
+      k_atr_override: '3.0',
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const insert = db.inserts.find((i) => i.table === 'symbol_config')
+    expect(insert).toBeDefined()
+    expect(insert!.values).toMatchObject({
+      symbol: 'SOXL',
+      timeStopDaysOverride: 5,
+      kAtrOverride: 3.0,
+    })
+  })
+
+  it('POST /admin/symbol-config treats empty override fields as NULL (global fall-through)', async () => {
+    // 空文字 → null (= global default を使う) の挙動を保証。3x ETF 以外の
+    // 一般銘柄 form ではこちらが既定の path。
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'AAPL',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      max_notional: '1000',
+      time_stop_days_override: '',
+      k_atr_override: '',
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const insert = db.inserts.find((i) => i.table === 'symbol_config')
+    expect(insert).toBeDefined()
+    expect(insert!.values.timeStopDaysOverride).toBeNull()
+    expect(insert!.values.kAtrOverride).toBeNull()
+  })
+
+  it('POST /admin/symbol-config rejects out-of-range overrides with 400', async () => {
+    // DB CHECK と二重防御。timeStopDays は 1-365 整数、kAtr は 0.5-5.0 float。
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+
+    // timeStop 0 (下限未満)
+    const tooLowDays = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: new URLSearchParams({
+          symbol: 'SOXL',
+          market: 'US',
+          currency: 'USD',
+          active: 'true',
+          time_stop_days_override: '0',
+        }).toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(tooLowDays.status).toBe(400)
+
+    // kAtr 0.1 (下限未満)
+    const tooLowAtr = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: new URLSearchParams({
+          symbol: 'SOXL',
+          market: 'US',
+          currency: 'USD',
+          active: 'true',
+          k_atr_override: '0.1',
+        }).toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(tooLowAtr.status).toBe(400)
+
+    // kAtr 6.0 (上限超え)
+    const tooHighAtr = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: new URLSearchParams({
+          symbol: 'SOXL',
+          market: 'US',
+          currency: 'USD',
+          active: 'true',
+          k_atr_override: '6.0',
+        }).toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(tooHighAtr.status).toBe(400)
+
+    expect(db.inserts.filter((i) => i.table === 'symbol_config')).toHaveLength(0)
+  })
+
+  it('POST /admin/symbol-config/:symbol/update persists override values + audit log', async () => {
+    // Update path で override 値が DB に書かれて audit before/after が乗ること。
+    const db = fakeDb([row({ symbol: 'SOXL', timeStopDaysOverride: null, kAtrOverride: null })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'SOXL',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      max_notional: '2000',
+      bucket: 'semi',
+      time_stop_days_override: '7',
+      k_atr_override: '2.5',
+    })
+    const res = await app.request(
+      '/admin/symbol-config/SOXL/update',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const update = db.updates.find((u) => u.table === 'symbol_config')
+    expect(update).toBeDefined()
+    expect(update!.set).toMatchObject({
+      timeStopDaysOverride: 7,
+      kAtrOverride: 2.5,
+    })
+    const auditInsert = db.inserts.find((i) => i.table === 'config_audit_log')
+    expect(auditInsert).toBeDefined()
+    const before = JSON.parse(String(auditInsert!.values.beforeJson))
+    const after = JSON.parse(String(auditInsert!.values.afterJson))
+    expect(before.timeStopDaysOverride).toBeNull()
+    expect(before.kAtrOverride).toBeNull()
+    expect(after.timeStopDaysOverride).toBe(7)
+    expect(after.kAtrOverride).toBe(2.5)
+  })
+
+  it('GET /dashboard/symbols/:symbol/edit renders override fields with current values + global placeholders', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', timeStopDaysOverride: 5, kAtrOverride: 3.0 })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/SOXL/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // form input が存在
+    expect(body).toContain('name="time_stop_days_override"')
+    expect(body).toContain('name="k_atr_override"')
+    // 現在値が反映 (value 属性)
+    expect(body).toMatch(/name="time_stop_days_override"[^>]*value="5"/)
+    expect(body).toMatch(/name="k_atr_override"[^>]*value="3"/)
+    // placeholder に global default が表示される (makeGlobalConfigSnapshot の値)
+    expect(body).toContain('global default')
   })
 })

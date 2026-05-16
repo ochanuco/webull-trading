@@ -44,6 +44,18 @@ export interface SymbolConfigSnapshot {
    * 銘柄の tooltip 表示に使う。active=0 / active=1 両方含む。
    */
   symbolNotes: Record<string, string>
+  /**
+   * symbol → time_stop_days_override (integer 1-365)。NULL は map に含めない
+   * (= global_config.pullback_default_time_stop_days を使う fall-through)。
+   * 3x leveraged ETF 等で短い hold を強制したい時に使う (#316)。
+   */
+  symbolTimeStopDaysOverride: Record<string, number>
+  /**
+   * symbol → k_atr_override (float 0.5-5.0)。NULL は map に含めない
+   * (= global_config.pullback_default_k_atr を使う fall-through)。
+   * 高ボラ銘柄で ATR stop を緩めたい時に使う (#316)。
+   */
+  symbolKAtrOverride: Record<string, number>
 }
 
 /**
@@ -68,6 +80,8 @@ export async function loadSymbolConfig(
   const symbolMarket: Record<string, SymbolMarket> = {}
   const symbolName: Record<string, string> = {}
   const symbolNotes: Record<string, string> = {}
+  const symbolTimeStopDaysOverride: Record<string, number> = {}
+  const symbolKAtrOverride: Record<string, number> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -97,6 +111,22 @@ export async function loadSymbolConfig(
     if (trimmedNotes && trimmedNotes.length > 0) {
       symbolNotes[symbol] = trimmedNotes
     }
+    // override 値は DB CHECK で範囲済み。Number.isFinite で defensive 確認だけ
+    // 入れて (NaN を絶対に下流に流さない)、NULL は map に出さず fall-through。
+    if (
+      row.timeStopDaysOverride !== null &&
+      row.timeStopDaysOverride !== undefined &&
+      Number.isFinite(row.timeStopDaysOverride)
+    ) {
+      symbolTimeStopDaysOverride[symbol] = row.timeStopDaysOverride
+    }
+    if (
+      row.kAtrOverride !== null &&
+      row.kAtrOverride !== undefined &&
+      Number.isFinite(row.kAtrOverride)
+    ) {
+      symbolKAtrOverride[symbol] = row.kAtrOverride
+    }
   }
   return {
     allowedSymbols,
@@ -107,6 +137,8 @@ export async function loadSymbolConfig(
     symbolMarket,
     symbolName,
     symbolNotes,
+    symbolTimeStopDaysOverride,
+    symbolKAtrOverride,
   }
 }
 
@@ -131,6 +163,16 @@ export interface SymbolConfigWriteInput {
   maxNotional: number | null
   bucket: string | null
   notes: string | null
+  /**
+   * Per-symbol time_stop_days override (NULL = global default 使用、1-365 整数)。
+   * 3x leveraged ETF 等で短い hold を強制 (#316)。
+   */
+  timeStopDaysOverride: number | null
+  /**
+   * Per-symbol k_atr override (NULL = global default 使用、0.5-5.0 float)。
+   * 高ボラ銘柄で ATR stop を緩める (#316)。
+   */
+  kAtrOverride: number | null
 }
 
 /**
@@ -156,6 +198,8 @@ export async function insertSymbolConfig(
       maxNotional: input.maxNotional,
       bucket: input.bucket,
       notes: input.notes,
+      timeStopDaysOverride: input.timeStopDaysOverride,
+      kAtrOverride: input.kAtrOverride,
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -198,6 +242,8 @@ export async function updateSymbolConfig(
       maxNotional: input.maxNotional,
       bucket: input.bucket,
       notes: input.notes,
+      timeStopDaysOverride: input.timeStopDaysOverride,
+      kAtrOverride: input.kAtrOverride,
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))

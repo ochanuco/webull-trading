@@ -27,6 +27,16 @@ export interface SymbolUniverse {
    * dashboard が disabled 銘柄の tooltip 表示に使う。null / 空文字は map に不在。
    */
   symbolNotes: Record<string, string>
+  /**
+   * symbol → time_stop_days override (1-365 整数)。空 map のキーは
+   * global_config.pullback_default_time_stop_days を使う (fall-through、#316)。
+   */
+  symbolTimeStopDaysOverride: Record<string, number>
+  /**
+   * symbol → k_atr override (0.5-5.0 float)。空 map のキーは
+   * global_config.pullback_default_k_atr を使う (fall-through、#316)。
+   */
+  symbolKAtrOverride: Record<string, number>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -56,6 +66,8 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolMarket: config.symbolMarket,
     symbolName: config.symbolName,
     symbolNotes: config.symbolNotes,
+    symbolTimeStopDaysOverride: config.symbolTimeStopDaysOverride,
+    symbolKAtrOverride: config.symbolKAtrOverride,
     inversePairs: pairs,
     source: 'd1',
   }
