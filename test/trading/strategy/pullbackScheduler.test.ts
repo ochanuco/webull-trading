@@ -1451,3 +1451,88 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
     expect(reject?.reason).toContain('sanity_failed cooldown active')
   })
 })
+
+describe('runPullbackScheduler per-symbol rule override (#316)', () => {
+  // 3x leveraged ETF を念頭に「銘柄ごとに timeStopDays / kAtr を上書きできる」
+  // ことを検証。default rule timeStopDays=10、override で 5 にすると holdBD≥5
+  // の銘柄が time-stop SELL に乗る。同じ holdBD で override 無しの銘柄は HOLD。
+  const defaultRule = {
+    stopPct: -0.04,
+    takeProfitPct: 0.07,
+    timeStopDays: 10,
+    pullbackMax: -0.03,
+    pullbackMin: -0.06,
+    minReturn50d: 0.08,
+    requireAboveSma50: true,
+    kAtr: 2.0,
+  }
+
+  it('applies timeStopDays override to the matching symbol and falls through for others', async () => {
+    // 7 BD 前に open した position を 2 銘柄に同条件で持たせ、SOXL 側だけ
+    // timeStopDays=5 override する。SOXL は time-stop SELL、AAPL は default
+    // (10d) 未到達で HOLD。avgPrice=117 は last close=117.5 とほぼ同値で
+    // take-profit / stop-loss を発火させない (時間切れだけが起きる)。
+    const heldState = (symbol: string): SymbolState => ({
+      ...emptySymbolState(symbol, () => now),
+      position: {
+        qty: 5,
+        avgPrice: 117,
+        // 7 business days 前。default rule timeStopDays=10 では未到達、
+        // override timeStopDays=5 では到達する境界。
+        openedAt: new Date('2026-04-09T00:00:00.000Z').toISOString(),
+      },
+    })
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL', 'AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({
+        SOXL: heldState('SOXL'),
+        AAPL: heldState('AAPL'),
+      }),
+      execution,
+      defaultRule,
+      rulesMap: { SOXL: { ...defaultRule, timeStopDays: 5 } },
+      now: () => now,
+    })
+
+    const soxlDecision = summary.decisions.find((d) => d.symbol === 'SOXL')
+    const aaplDecision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    // SOXL は override timeStopDays=5 で time-stop に乗る。
+    expect(soxlDecision?.decision).toBe('SELL')
+    expect(soxlDecision?.reason).toMatch(/time-stop hit.*>=\s*5d/)
+    // AAPL は default の 10d 未到達 — time-stop は発火しない (HOLD 経路)。
+    expect(aaplDecision?.decision).toBe('HOLD')
+    expect(aaplDecision?.reason ?? '').not.toMatch(/time-stop hit/)
+  })
+
+  it('uses defaultRule when rulesMap is empty (NULL override fall-through)', async () => {
+    // Override が無い場合は default 通り。7 BD 前は default (10d) 未到達 →
+    // time-stop は発火せず HOLD で抜ける。
+    const heldState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      position: {
+        qty: 5,
+        avgPrice: 117,
+        // 7 BD 前 → default (10d) 未到達。
+        openedAt: new Date('2026-04-09T00:00:00.000Z').toISOString(),
+      },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: heldState }),
+      execution,
+      defaultRule,
+      // rulesMap 未指定 → 全 symbol が defaultRule を使う。
+      now: () => now,
+    })
+
+    const soxl = summary.decisions.find((d) => d.symbol === 'SOXL')
+    expect(soxl?.decision).toBe('HOLD')
+    expect(soxl?.reason ?? '').not.toMatch(/time-stop hit/)
+  })
+})

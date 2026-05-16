@@ -231,6 +231,23 @@ export async function runStrategyCron(
     requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
     kAtr: global.pullbackDefaultKAtr,
   }
+  // Per-symbol override map (#316)。symbol_config の time_stop_days_override /
+  // k_atr_override を defaultRule に重ね、3x leveraged ETF 等の銘柄固有事情
+  // (短い hold が望ましい / 高ボラで stop を緩めたい) を rule に注入する。
+  // override が NULL の symbol は rulesMap に含めない (= defaultRule そのまま)。
+  const rulesMap: Record<string, typeof defaultRule> = {}
+  const overrideSymbols = new Set<string>([
+    ...Object.keys(universe.symbolTimeStopDaysOverride),
+    ...Object.keys(universe.symbolKAtrOverride),
+  ])
+  for (const sym of overrideSymbols) {
+    rulesMap[sym] = {
+      ...defaultRule,
+      timeStopDays:
+        universe.symbolTimeStopDaysOverride[sym] ?? defaultRule.timeStopDays,
+      kAtr: universe.symbolKAtrOverride[sym] ?? defaultRule.kAtr,
+    }
+  }
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
@@ -546,6 +563,7 @@ export async function runStrategyCron(
       symbolBucketMap: universe.symbolBucket,
       bucketCapMap,
       defaultRule,
+      rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,

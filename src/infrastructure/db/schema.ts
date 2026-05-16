@@ -111,12 +111,30 @@ export const symbolConfig = sqliteTable(
      */
     bucket: text('bucket'),
     notes: text('notes'),
+    /**
+     * 個別銘柄 override (NULL = global_config の default を使う、整数 1-365)。
+     * 3x leveraged ETF 等で短い hold が望ましいケース用 (#316)。
+     */
+    timeStopDaysOverride: integer('time_stop_days_override'),
+    /**
+     * 個別銘柄 override (NULL = global_config の default を使う、float 0.5-5.0)。
+     * 高ボラ銘柄で stop を緩めるケース用 (#316)。
+     */
+    kAtrOverride: real('k_atr_override'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
     currencyEnum: check(
       'symbol_config_currency_enum',
       sql`${t.currency} IN ('USD', 'JPY')`,
+    ),
+    timeStopDaysOverrideRange: check(
+      'symbol_config_time_stop_days_override_range',
+      sql`${t.timeStopDaysOverride} IS NULL OR (${t.timeStopDaysOverride} >= 1 AND ${t.timeStopDaysOverride} <= ${MAX_TIME_STOP_DAYS})`,
+    ),
+    kAtrOverrideRange: check(
+      'symbol_config_k_atr_override_range',
+      sql`${t.kAtrOverride} IS NULL OR (${t.kAtrOverride} >= 0.5 AND ${t.kAtrOverride} <= 5.0)`,
     ),
   }),
 )

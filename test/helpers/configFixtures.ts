@@ -54,6 +54,8 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolMarket: { SOXL: 'US', SOXS: 'US' },
     symbolName: {},
     symbolNotes: {},
+    symbolTimeStopDaysOverride: {},
+    symbolKAtrOverride: {},
     inversePairs: {},
     source: 'd1',
     ...overrides,
