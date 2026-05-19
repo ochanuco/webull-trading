@@ -1,8 +1,12 @@
 /**
  * One-off helper: fetch Webull subscriptions (account_id list) for your app.
  *
- * Usage:
- *   WEBULL_APP_KEY=... WEBULL_APP_SECRET=... WEBULL_TRADE_API_BASE=https://api.sandbox.webull.hk \
+ * Usage (defaults to JP prod host `api.webull.co.jp`):
+ *   WEBULL_APP_KEY=... WEBULL_APP_SECRET=... pnpm run accounts
+ *
+ * UAT で叩く場合は ALB URL を override:
+ *   WEBULL_APP_KEY=... WEBULL_APP_SECRET=... \
+ *     WEBULL_TRADE_API_BASE=https://jp-openapi-alb.uat.webullbroker.com \
  *     pnpm run accounts
  *
  * Copy the account_id into `.dev.vars` as WEBULL_ACCOUNT_ID.
@@ -12,22 +16,16 @@ import { createWebullHttpClient } from '../src/infrastructure/webull/WebullHttpC
 
 const appKey = process.env.WEBULL_APP_KEY
 const appSecret = process.env.WEBULL_APP_SECRET
-const apiBase = process.env.WEBULL_TRADE_API_BASE
 
 if (!appKey || !appSecret) {
   console.error('Set WEBULL_APP_KEY and WEBULL_APP_SECRET in the environment first.')
   process.exit(1)
 }
 
-if (!apiBase) {
-  console.error('Set WEBULL_TRADE_API_BASE (e.g. https://api.sandbox.webull.hk).')
-  process.exit(1)
-}
-
 const client = createWebullHttpClient({
   WEBULL_APP_KEY: appKey,
   WEBULL_APP_SECRET: appSecret,
-  WEBULL_TRADE_API_BASE: apiBase,
+  WEBULL_TRADE_API_BASE: process.env.WEBULL_TRADE_API_BASE,
 })
 
 const subscriptions = await client.listSubscriptions()

@@ -66,9 +66,11 @@ deployed env では `ACCESS_DEV_BYPASS_USER` を絶対に投入しない (middle
 `CF_ACCESS_TEAM_DOMAIN` が立っていれば bypass を honor しないが、二重防御で
 secret 自体を投入しない運用にする)。
 
-**production の Webull credentials は staging/dev と別物にする**。staging は JP UAT key (`jp-openapi-alb.uat.webullbroker.com` — ALB が trade/quotes/events を 1 ホストに束ねてる)、production は JP live key で 3 API が分離されている (下表)。env ごと別 secret として投入する事で混同を防ぐ — UAT は 3 var とも同じ ALB URL、本番は分離 URL。fallback は無いので未投入なら client 生成時 throw (#21)。
+**production の Webull credentials は staging/dev と別物にする**。staging は JP UAT key (`jp-openapi-alb.uat.webullbroker.com` — ALB が trade/quotes/events を 1 ホストに束ねてる)、production は JP live key で 3 API が分離されている (下表)。
 
-| API | 本番 host | 環境変数 |
+host 系 env var は **未設定なら JP prod default に fallback** する (値は SDK の公開 region 定義に書かれており隠す価値なし)。staging / UAT は 3 var とも ALB URL に override 必要、production は env 投入不要 (default が prod を指す)。
+
+| API | 本番 host (= default 値) | 環境変数 (override 用) |
 |---|---|---|
 | trade (account / assets / orders) | `api.webull.co.jp` | `WEBULL_TRADE_API_BASE` |
 | quotes (snapshot / bars) | `data-api.webull.co.jp` | `WEBULL_QUOTES_API_BASE` |

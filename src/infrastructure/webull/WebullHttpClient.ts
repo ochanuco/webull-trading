@@ -100,6 +100,13 @@ const DEFAULT_ORDERS_HISTORY_PATH = '/openapi/account/orders/history'
 const DEFAULT_ORDERS_PLACE_PATH = '/openapi/account/orders/place'
 const DEFAULT_TRADE_VERSION = 'v1'
 const DEFAULT_PLACE_ORDER_SCHEMA: PlaceOrderSchemaVersion = 'v1'
+/**
+ * Webull JP **production** trade host (#21)。値は SDK の region 定義に書かれた
+ * 公開情報なのでハードコード。UAT (`jp-openapi-alb.uat.webullbroker.com`) は
+ * 非公開なので `WEBULL_TRADE_API_BASE` env で override する運用。
+ * source: webull-openapi-python-sdk `webull/core/data/endpoints.json` region=jp。
+ */
+const DEFAULT_TRADE_API_BASE = 'https://api.webull.co.jp'
 
 export class WebullHttpClient {
   private readonly baseUrl: string
@@ -446,10 +453,9 @@ export function createWebullHttpClient(
     if (t === 'v1' || t === 'v2') return t
     return undefined
   }
-  const baseUrl = env.WEBULL_TRADE_API_BASE?.trim()
-  if (!baseUrl) {
-    throw new Error('WEBULL_TRADE_API_BASE is not set')
-  }
+  // env 空 / undefined / whitespace は JP prod default に fallback。env が
+  // 明示的にセットされてれば override (UAT / 将来 region 用)。
+  const baseUrl = env.WEBULL_TRADE_API_BASE?.trim() || DEFAULT_TRADE_API_BASE
   return new WebullHttpClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,

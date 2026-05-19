@@ -480,12 +480,12 @@ export const admin = new Hono<AppBindings>()
    * status / ok / body fields null but msTaken set; response phase: error
    * null). Body is truncated to 4 kB to avoid log blowup on HTML error pages.
    *
-   * Pre-condition: `WEBULL_TRADE_API_BASE` / `WEBULL_QUOTES_API_BASE` / `WEBULL_APP_KEY`
-   * / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID_JP_CASH` must all be set
-   * (non-whitespace). Missing env returns `400 ValidationError` with the
-   * missing var names listed — "I forgot to set X" should never silently
-   * look like "broker rejected". JP UAT (ALB) では trade と quotes に同じ URL を
-   * 入れるが、本番は `data-api.webull.co.jp` に分離するため別 var にしてある。
+   * Pre-condition: `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID_JP_CASH`
+   * must be set (non-whitespace). Missing returns `400 ValidationError` —
+   * "I forgot to set X" should never silently look like "broker rejected".
+   * `WEBULL_TRADE_API_BASE` / `WEBULL_QUOTES_API_BASE` は env 未設定なら JP
+   * prod default (`api.webull.co.jp` / `data-api.webull.co.jp`) を使う (#21)。
+   * UAT で叩く場合は env を explicit に投入する (ALB hostname を override)。
    *
    * Read-only: no DO writes, no D1 writes. Safe to call from operator browser.
    */
@@ -496,20 +496,25 @@ export const admin = new Hono<AppBindings>()
     // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
     // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
     // 400 を返す ("正規の設定" のときだけ probe を走らせる)。
-    const baseUrl = (c.env.WEBULL_TRADE_API_BASE ?? '').trim()
-    const quotesBaseUrl = (c.env.WEBULL_QUOTES_API_BASE ?? '').trim()
+    //
+    // host 系 (WEBULL_TRADE_API_BASE / WEBULL_QUOTES_API_BASE) は env 未設定なら
+    // JP prod default (#21) を使うので missing チェック対象外。env が explicit に
+    // セットされてる時のみ URL format を validate する。
+    const tradeBaseExplicit = (c.env.WEBULL_TRADE_API_BASE ?? '').trim()
+    const quotesBaseExplicit = (c.env.WEBULL_QUOTES_API_BASE ?? '').trim()
+    const baseUrl = tradeBaseExplicit || 'https://api.webull.co.jp'
+    const quotesBaseUrl = quotesBaseExplicit || 'https://data-api.webull.co.jp'
     const appKey = (c.env.WEBULL_APP_KEY ?? '').trim()
     const appSecret = (c.env.WEBULL_APP_SECRET ?? '').trim()
     const accountId = (c.env.WEBULL_ACCOUNT_ID_JP_CASH ?? '').trim()
     const missingEnv: string[] = []
-    if (baseUrl.length === 0) missingEnv.push('WEBULL_TRADE_API_BASE')
-    if (quotesBaseUrl.length === 0) missingEnv.push('WEBULL_QUOTES_API_BASE')
     if (appKey.length === 0) missingEnv.push('WEBULL_APP_KEY')
     if (appSecret.length === 0) missingEnv.push('WEBULL_APP_SECRET')
     if (accountId.length === 0) missingEnv.push('WEBULL_ACCOUNT_ID_JP_CASH')
     // base URL は length > 0 でも http(s):// で parse できないと probeOnce 内の
     // `new URL(args.path, ${baseUrl}/)` が同期的に TypeError を吐いて 500 で
     // 落ちる。明示的に validate して 400 で返す方が運用視点で扱いやすい。
+    // env が explicit にセットされてる値だけチェック (default 値は format 保証済)。
     const validateAbsoluteHttpUrl = (value: string, varName: string): void => {
       if (value.length === 0) return
       let parsed: URL | null = null
@@ -522,8 +527,8 @@ export const admin = new Hono<AppBindings>()
         missingEnv.push(`${varName} (invalid: must be absolute http/https URL)`)
       }
     }
-    validateAbsoluteHttpUrl(baseUrl, 'WEBULL_TRADE_API_BASE')
-    validateAbsoluteHttpUrl(quotesBaseUrl, 'WEBULL_QUOTES_API_BASE')
+    validateAbsoluteHttpUrl(tradeBaseExplicit, 'WEBULL_TRADE_API_BASE')
+    validateAbsoluteHttpUrl(quotesBaseExplicit, 'WEBULL_QUOTES_API_BASE')
     if (missingEnv.length > 0) {
       throw new ValidationError(
         `Webull env var(s) missing or invalid: ${missingEnv.join(', ')}`,

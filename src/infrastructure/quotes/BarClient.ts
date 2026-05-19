@@ -162,14 +162,20 @@ export class WebullBarClient implements BarClient {
   }
 }
 
+/**
+ * Webull JP **production** quotes host (#21)。SDK region=jp の公開値。
+ * UAT (1 ホスト束ね) は `WEBULL_QUOTES_API_BASE` env で override する。
+ * `WebullQuoteClient` と同じ host を共有 (quotes は単一 host)。
+ */
+const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
+
 export function createWebullBarClient(
   env: WebullBarClientEnv,
   options?: { fetchFn?: typeof fetch; timeoutMs?: number },
 ): WebullBarClient {
-  const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim()
-  if (!baseUrl) {
-    throw new Error('WEBULL_QUOTES_API_BASE is not set')
-  }
+  // env 空 / undefined / whitespace は JP prod default。env が明示されてれば
+  // override (UAT / 将来 region 用)。
+  const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim() || DEFAULT_QUOTES_API_BASE
   return new WebullBarClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,

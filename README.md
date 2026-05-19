@@ -166,7 +166,9 @@ Cron:
 |---|---|
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` | `/trade/*` / `/webull/*` / `/admin/*` 認証 |
 | `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID` | broker 署名・口座 |
-| `WEBULL_API_BASE` | sandbox host (非公開) |
+| `WEBULL_TRADE_API_BASE` | trade API host override (#21)。未設定なら JP prod default (`https://api.webull.co.jp`)。UAT は ALB URL を投入 |
+| `WEBULL_QUOTES_API_BASE` | quotes API host override (#21)。未設定なら JP prod default (`https://data-api.webull.co.jp`)。UAT は ALB URL を投入 |
+| `WEBULL_EVENTS_API_BASE` | events API host override (#21、consumer 未実装)。未設定なら JP prod default (`https://events-api.webull.co.jp`) |
 | `WEBULL_GRPC_ENDPOINT` | bridge の gRPC 接続先 (非公開) |
 | `EVENT_INGEST_URL` | bridge 側から叩く Worker URL (`https://.../events/trade`) |
 | `EVENT_INGEST_SECRET` | `/events/trade` header |
@@ -179,12 +181,16 @@ pnpm wrangler secret list --env=staging   # 9 件揃ったか確認
 
 ### Webull account_id を取得する
 
-Webull sandbox は dashboard で account_id を見られないので、app_key + app_secret だけで API を叩いて取得する:
+Webull sandbox は dashboard で account_id を見られないので、app_key + app_secret だけで API を叩いて取得する。host は env 未設定なら JP prod default (`api.webull.co.jp`):
 
 ```bash
 WEBULL_APP_KEY="$(op read 'op://Personal/WEBULL_APP_KEY/credential')" \
 WEBULL_APP_SECRET="$(op read 'op://Personal/WEBULL_APP_SECRET/credential')" \
-WEBULL_API_BASE=https://api.sandbox.webull.hk \
+  pnpm run accounts
+
+# UAT で叩く場合は ALB URL を override:
+WEBULL_APP_KEY=... WEBULL_APP_SECRET=... \
+WEBULL_TRADE_API_BASE=https://jp-openapi-alb.uat.webullbroker.com \
   pnpm run accounts
 ```
 

@@ -14,17 +14,17 @@ WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
 # Run `pnpm run accounts` after setting the two above to fetch account_id.
 WEBULL_ACCOUNT_ID=
-# Webull JP host (#21)。JP UAT (`jp-openapi-alb.uat.webullbroker.com`) では ALB が
-# trade/quotes/events を 1 ホストに束ねるので 3 var とも同じ値を入れる。JP 本番では
-#   WEBULL_TRADE_API_BASE=https://api.webull.co.jp
-#   WEBULL_QUOTES_API_BASE=https://data-api.webull.co.jp
-#   WEBULL_EVENTS_API_BASE=https://events-api.webull.co.jp
-# のように分離する。fallback 無し (未設定なら client 生成時 throw)。
-# events は本リポジトリにまだ consumer が無いが、SDK の region 定義に存在するため
-# 将来用に declare してある (= 設定漏れを発見しやすくするため空でも書いておく)。
-WEBULL_TRADE_API_BASE=
-WEBULL_QUOTES_API_BASE=
-WEBULL_EVENTS_API_BASE=
+# Webull JP host (#21)。env 未設定なら JP **prod** default に fallback:
+#   WEBULL_TRADE_API_BASE  default = https://api.webull.co.jp
+#   WEBULL_QUOTES_API_BASE default = https://data-api.webull.co.jp
+#   WEBULL_EVENTS_API_BASE default = https://events-api.webull.co.jp  (consumer 未実装)
+# JP UAT (`jp-openapi-alb.uat.webullbroker.com`) では ALB が trade/quotes/events を
+# 1 ホストに束ねるので、UAT を叩くときは 3 var とも UAT ALB URL に override する。
+# 本番は default で動くので prod env では secret 投入不要 (= 設定漏れ事故が起き
+# 得ない)。default は SDK の公開 region 定義より取得 (endpoints.json region=jp)。
+# WEBULL_TRADE_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
+# WEBULL_QUOTES_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
+# WEBULL_EVENTS_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
 ALLOWED_SYMBOLS=SOXL,SOXS
 MAX_ORDER_NOTIONAL=100
 SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}

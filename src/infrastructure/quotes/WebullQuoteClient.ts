@@ -70,6 +70,11 @@ interface RawSnapshotEntry {
 // - `extend_hour_required=false` + `overnight_required=false` REQUIRED
 //   (omitting them → 417 Expectation Failed; see probe trace in #84)
 const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
+/**
+ * Webull JP **production** quotes host (#21)。SDK region=jp の公開値。
+ * UAT (1 ホスト束ね) は `WEBULL_QUOTES_API_BASE` env で override する。
+ */
+const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
@@ -175,10 +180,9 @@ export function createWebullQuoteClient(
   env: WebullQuoteClientEnv,
   options?: { fetchFn?: typeof fetch; timeoutMs?: number; now?: () => Date },
 ): WebullQuoteClient {
-  const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim()
-  if (!baseUrl) {
-    throw new Error('WEBULL_QUOTES_API_BASE is not set')
-  }
+  // env 空 / undefined / whitespace は JP prod default。env が明示されてれば
+  // override (UAT / 将来 region 用)。
+  const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim() || DEFAULT_QUOTES_API_BASE
   return new WebullQuoteClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
