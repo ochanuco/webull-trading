@@ -6,6 +6,7 @@ import {
 import { WebullAuth } from '../../../src/infrastructure/webull/WebullAuth'
 
 const baseAuth = new WebullAuth({ appKey: 'ak', appSecret: 'sk' })
+const TEST_BASE_URL = 'https://test.example'
 
 function mockFetch(responseBody: unknown, init: ResponseInit = { status: 200 }): typeof fetch {
   const json = JSON.stringify(responseBody)
@@ -46,7 +47,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
       capturedHeaders = new Headers(init?.headers)
       return new Response(JSON.stringify({ data: [] }), { status: 200 })
     }) as unknown as typeof fetch
-    const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
+    const client = new WebullQuoteClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     await client.getSnapshots(['SOXL'], 'US_ETF')
     expect(capturedUrl?.pathname).toBe('/openapi/market-data/stock/snapshot')
     expect(capturedUrl?.searchParams.get('extend_hour_required')).toBe('false')
@@ -67,7 +68,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
     }) as unknown as typeof fetch
     const overridePath = '/openapi/market-data/snapshot'
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       quotePath: overridePath,
     })
@@ -86,14 +87,14 @@ describe('WebullQuoteClient.getSnapshots', () => {
       expect(url.searchParams.get('category')).toBe('US_ETF')
       return new Response(JSON.stringify({ data: [] }), { status: 200 })
     }) as unknown as typeof fetch
-    const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
+    const client = new WebullQuoteClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     await client.getSnapshots(['SOXL'], 'US_ETF')
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   it('returns an empty array when no symbols are requested', async () => {
     const fetchFn = vi.fn() as unknown as typeof fetch
-    const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
+    const client = new WebullQuoteClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     const result = await client.getSnapshots([], 'US_STOCK')
     expect(result).toEqual([])
     expect(fetchFn).not.toHaveBeenCalled()
@@ -107,7 +108,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
       ],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })
@@ -128,7 +129,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
       ],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })
@@ -138,7 +139,7 @@ describe('WebullQuoteClient.getSnapshots', () => {
 
   it('throws BrokerRequestError on non-2xx response', async () => {
     const fetchFn = mockFetch({ error: 'bad' }, { status: 500 })
-    const client = new WebullQuoteClient({ auth: baseAuth, fetchFn })
+    const client = new WebullQuoteClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     await expect(client.getSnapshots(['AAPL'], 'US_STOCK')).rejects.toThrow(/status 500/)
   })
 })

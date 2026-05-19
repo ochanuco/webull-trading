@@ -48,13 +48,17 @@ export interface BarClient {
 export interface WebullBarClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_API_BASE?: string
+  /**
+   * Quotes host (#21)。JP 本番では trade と分離 (`data-api.webull.co.jp`)。
+   * JP UAT (ALB) では trade と同じ URL を入れる。未設定は fail-closed で throw。
+   */
+  WEBULL_QUOTES_API_BASE?: string
   WEBULL_BARS_PATH?: string
 }
 
 interface WebullBarClientOptions {
   auth: WebullAuth
-  baseUrl?: string
+  baseUrl: string
   barsPath?: string
   timeoutMs?: number
   fetchFn?: typeof fetch
@@ -74,7 +78,7 @@ export class WebullBarClient implements BarClient {
   private readonly fetchFn: typeof fetch
 
   constructor(private readonly options: WebullBarClientOptions) {
-    this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     // JP UAT tenant (jp-openapi-alb.uat.webullbroker.com) only exposes the
     // v2 bars endpoint at `/openapi/market-data/stock/bars`. The Java SDK's
     // v1 `/openapi/market-data/bars` returns 404 on this tenant. See #84
@@ -162,12 +166,16 @@ export function createWebullBarClient(
   env: WebullBarClientEnv,
   options?: { fetchFn?: typeof fetch; timeoutMs?: number },
 ): WebullBarClient {
+  const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim()
+  if (!baseUrl) {
+    throw new Error('WEBULL_QUOTES_API_BASE is not set')
+  }
   return new WebullBarClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
     }),
-    baseUrl: env.WEBULL_API_BASE,
+    baseUrl,
     barsPath: env.WEBULL_BARS_PATH,
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,

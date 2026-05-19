@@ -480,10 +480,12 @@ export const admin = new Hono<AppBindings>()
    * status / ok / body fields null but msTaken set; response phase: error
    * null). Body is truncated to 4 kB to avoid log blowup on HTML error pages.
    *
-   * Pre-condition: `WEBULL_API_BASE` / `WEBULL_APP_KEY` / `WEBULL_APP_SECRET`
-   * / `WEBULL_ACCOUNT_ID_JP_CASH` must all be set (non-whitespace). Missing
-   * env returns `400 ValidationError` with the missing var names listed —
-   * "I forgot to set X" should never silently look like "broker rejected".
+   * Pre-condition: `WEBULL_TRADE_API_BASE` / `WEBULL_QUOTES_API_BASE` / `WEBULL_APP_KEY`
+   * / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID_JP_CASH` must all be set
+   * (non-whitespace). Missing env returns `400 ValidationError` with the
+   * missing var names listed — "I forgot to set X" should never silently
+   * look like "broker rejected". JP UAT (ALB) では trade と quotes に同じ URL を
+   * 入れるが、本番は `data-api.webull.co.jp` に分離するため別 var にしてある。
    *
    * Read-only: no DO writes, no D1 writes. Safe to call from operator browser.
    */
@@ -494,29 +496,34 @@ export const admin = new Hono<AppBindings>()
     // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
     // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
     // 400 を返す ("正規の設定" のときだけ probe を走らせる)。
-    const baseUrl = (c.env.WEBULL_API_BASE ?? '').trim()
+    const baseUrl = (c.env.WEBULL_TRADE_API_BASE ?? '').trim()
+    const quotesBaseUrl = (c.env.WEBULL_QUOTES_API_BASE ?? '').trim()
     const appKey = (c.env.WEBULL_APP_KEY ?? '').trim()
     const appSecret = (c.env.WEBULL_APP_SECRET ?? '').trim()
     const accountId = (c.env.WEBULL_ACCOUNT_ID_JP_CASH ?? '').trim()
     const missingEnv: string[] = []
-    if (baseUrl.length === 0) missingEnv.push('WEBULL_API_BASE')
+    if (baseUrl.length === 0) missingEnv.push('WEBULL_TRADE_API_BASE')
+    if (quotesBaseUrl.length === 0) missingEnv.push('WEBULL_QUOTES_API_BASE')
     if (appKey.length === 0) missingEnv.push('WEBULL_APP_KEY')
     if (appSecret.length === 0) missingEnv.push('WEBULL_APP_SECRET')
     if (accountId.length === 0) missingEnv.push('WEBULL_ACCOUNT_ID_JP_CASH')
-    // baseUrl は length > 0 でも http(s):// で parse できないと probeOnce 内の
+    // base URL は length > 0 でも http(s):// で parse できないと probeOnce 内の
     // `new URL(args.path, ${baseUrl}/)` が同期的に TypeError を吐いて 500 で
     // 落ちる。明示的に validate して 400 で返す方が運用視点で扱いやすい。
-    if (baseUrl.length > 0) {
+    const validateAbsoluteHttpUrl = (value: string, varName: string): void => {
+      if (value.length === 0) return
       let parsed: URL | null = null
       try {
-        parsed = new URL(baseUrl)
+        parsed = new URL(value)
       } catch {
         parsed = null
       }
       if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
-        missingEnv.push('WEBULL_API_BASE (invalid: must be absolute http/https URL)')
+        missingEnv.push(`${varName} (invalid: must be absolute http/https URL)`)
       }
     }
+    validateAbsoluteHttpUrl(baseUrl, 'WEBULL_TRADE_API_BASE')
+    validateAbsoluteHttpUrl(quotesBaseUrl, 'WEBULL_QUOTES_API_BASE')
     if (missingEnv.length > 0) {
       throw new ValidationError(
         `Webull env var(s) missing or invalid: ${missingEnv.join(', ')}`,
@@ -542,8 +549,14 @@ export const admin = new Hono<AppBindings>()
       path: string
       query: Record<string, string>
       version?: string
+      /**
+       * 既定は trade host (`WEBULL_TRADE_API_BASE`)。snapshot probe は quotes host
+       * (`WEBULL_QUOTES_API_BASE`) を明示的に渡す — JP 本番では data-api 系に
+       * 分離されてるため。
+       */
+      host?: string
     }): Promise<ProbeResult> {
-      const url = new URL(args.path, `${baseUrl}/`)
+      const url = new URL(args.path, `${args.host ?? baseUrl}/`)
       for (const [k, v] of Object.entries(args.query)) url.searchParams.set(k, v)
 
       let headers: Record<string, string>
@@ -631,6 +644,9 @@ export const admin = new Hono<AppBindings>()
           overnight_required: 'false',
         },
         version: 'v2',
+        // JP 本番は trade と quotes が別ホスト (`data-api.webull.co.jp`)。
+        // JP UAT (ALB) では同じ URL が入るので no-op。
+        host: quotesBaseUrl,
       }),
       // OLD: WebullHttpClient.getPositions (現行 cron が叩く path + v1)
       probeOnce({
@@ -670,7 +686,7 @@ export const admin = new Hono<AppBindings>()
     c.header('Cache-Control', 'no-store')
     return c.json({
       timestamp: new Date().toISOString(),
-      sandbox: baseUrl,
+      sandbox: { trade: baseUrl, quotes: quotesBaseUrl },
       input: { symbol, category, accountIdConfigured: accountId.length > 0 },
       quote: quoteResult,
       // 後方互換: dashboard UI が `positions` を保有銘柄リスト描画に使うので

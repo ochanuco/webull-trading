@@ -3,6 +3,7 @@ import { WebullBarClient } from '../../../src/infrastructure/quotes/BarClient'
 import { WebullAuth } from '../../../src/infrastructure/webull/WebullAuth'
 
 const baseAuth = new WebullAuth({ appKey: 'ak', appSecret: 'sk' })
+const TEST_BASE_URL = 'https://test.example'
 
 function mockJsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -40,7 +41,7 @@ describe('WebullBarClient.getDailyBars', () => {
       ]),
     ) as unknown as typeof fetch
 
-    const client = new WebullBarClient({ auth: baseAuth, fetchFn })
+    const client = new WebullBarClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     const bars = await client.getDailyBars('SOXL', 2)
 
     expect(bars).toHaveLength(2)
@@ -68,7 +69,7 @@ describe('WebullBarClient.getDailyBars', () => {
       return mockJsonResponse({ data: [] })
     }) as unknown as typeof fetch
 
-    const client = new WebullBarClient({ auth: baseAuth, fetchFn })
+    const client = new WebullBarClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     await client.getDailyBars('SOXL', 30)
 
     expect(capturedUrl?.pathname).toBe('/openapi/market-data/stock/bars')
@@ -92,7 +93,7 @@ describe('WebullBarClient.getDailyBars', () => {
       return mockJsonResponse({ data: [] })
     }) as unknown as typeof fetch
 
-    const client = new WebullBarClient({ auth: baseAuth, fetchFn })
+    const client = new WebullBarClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
     await client.getDailyBars('SOXL', 1)
     await client.getDailyBars('AAPL', 1)
     await client.getDailyBars('285A', 1)
@@ -111,7 +112,7 @@ describe('WebullBarClient.getDailyBars', () => {
     }) as unknown as typeof fetch
 
     const client = new WebullBarClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       barsPath: '/market-data/candles',
     })

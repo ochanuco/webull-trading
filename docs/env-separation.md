@@ -66,7 +66,13 @@ deployed env では `ACCESS_DEV_BYPASS_USER` を絶対に投入しない (middle
 `CF_ACCESS_TEAM_DOMAIN` が立っていれば bypass を honor しないが、二重防御で
 secret 自体を投入しない運用にする)。
 
-**production の Webull credentials は staging/dev と別物にする**。staging は sandbox key (`api.sandbox.webull.hk`)、production は live key (`openapi.webull.com`)。`WEBULL_API_BASE` も env ごと別 secret として投入する事で混同を防ぐ。
+**production の Webull credentials は staging/dev と別物にする**。staging は JP UAT key (`jp-openapi-alb.uat.webullbroker.com` — ALB が trade/quotes/events を 1 ホストに束ねてる)、production は JP live key で 3 API が分離されている (下表)。env ごと別 secret として投入する事で混同を防ぐ — UAT は 3 var とも同じ ALB URL、本番は分離 URL。fallback は無いので未投入なら client 生成時 throw (#21)。
+
+| API | 本番 host | 環境変数 |
+|---|---|---|
+| trade (account / assets / orders) | `api.webull.co.jp` | `WEBULL_TRADE_API_BASE` |
+| quotes (snapshot / bars) | `data-api.webull.co.jp` | `WEBULL_QUOTES_API_BASE` |
+| events (consumer 未実装、SDK 定義のみ) | `events-api.webull.co.jp` | `WEBULL_EVENTS_API_BASE` |
 
 ### 4. DO namespace
 

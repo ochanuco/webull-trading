@@ -2,7 +2,7 @@
  * One-off helper: fetch Webull subscriptions (account_id list) for your app.
  *
  * Usage:
- *   WEBULL_APP_KEY=... WEBULL_APP_SECRET=... WEBULL_API_BASE=https://api.sandbox.webull.hk \
+ *   WEBULL_APP_KEY=... WEBULL_APP_SECRET=... WEBULL_TRADE_API_BASE=https://api.sandbox.webull.hk \
  *     pnpm run accounts
  *
  * Copy the account_id into `.dev.vars` as WEBULL_ACCOUNT_ID.
@@ -12,7 +12,7 @@ import { createWebullHttpClient } from '../src/infrastructure/webull/WebullHttpC
 
 const appKey = process.env.WEBULL_APP_KEY
 const appSecret = process.env.WEBULL_APP_SECRET
-const apiBase = process.env.WEBULL_API_BASE
+const apiBase = process.env.WEBULL_TRADE_API_BASE
 
 if (!appKey || !appSecret) {
   console.error('Set WEBULL_APP_KEY and WEBULL_APP_SECRET in the environment first.')
@@ -20,14 +20,14 @@ if (!appKey || !appSecret) {
 }
 
 if (!apiBase) {
-  console.error('Set WEBULL_API_BASE (e.g. https://api.sandbox.webull.hk).')
+  console.error('Set WEBULL_TRADE_API_BASE (e.g. https://api.sandbox.webull.hk).')
   process.exit(1)
 }
 
 const client = createWebullHttpClient({
   WEBULL_APP_KEY: appKey,
   WEBULL_APP_SECRET: appSecret,
-  WEBULL_API_BASE: apiBase,
+  WEBULL_TRADE_API_BASE: apiBase,
 })
 
 const subscriptions = await client.listSubscriptions()
