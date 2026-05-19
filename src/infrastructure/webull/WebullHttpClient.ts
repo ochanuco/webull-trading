@@ -23,6 +23,12 @@ export interface WebullClientEnv {
    */
   WEBULL_TRADE_API_BASE?: string
   /**
+   * 2FA 経由で発行された `x-access-token` 値 (#21)。設定時のみ `x-access-token`
+   * ヘッダを emit、signature には含めない。未設定でも client 自体は作れる
+   * (broker 側で 401 が出れば運用時に発覚する)。
+   */
+  WEBULL_ACCESS_TOKEN?: string
+  /**
    * JP CASH account ID. On the Webull JP tenant this is a multi-currency
    * cash account that holds BOTH JPY and USD positions (the probe confirmed
    * pre-existing AAPL / NVDA / MSFT positions alongside 1570 / 7011), so
@@ -461,6 +467,7 @@ export function createWebullHttpClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
+      accessToken: env.WEBULL_ACCESS_TOKEN,
     }),
     accountId: env.WEBULL_ACCOUNT_ID_JP_CASH,
     baseUrl,

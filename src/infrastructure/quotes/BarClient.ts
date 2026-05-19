@@ -55,6 +55,8 @@ export interface WebullBarClientEnv {
    * セットされてれば override。
    */
   WEBULL_QUOTES_API_BASE?: string
+  /** 2FA 発行 `x-access-token` (#21)。詳細は `WebullClientEnv.WEBULL_ACCESS_TOKEN`。 */
+  WEBULL_ACCESS_TOKEN?: string
   WEBULL_BARS_PATH?: string
 }
 
@@ -182,6 +184,7 @@ export function createWebullBarClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
+      accessToken: env.WEBULL_ACCESS_TOKEN,
     }),
     baseUrl,
     barsPath: env.WEBULL_BARS_PATH,

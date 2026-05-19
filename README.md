@@ -169,6 +169,7 @@ Cron:
 | `WEBULL_TRADE_API_BASE` | trade API host override (#21)。未設定なら JP prod default (`https://api.webull.co.jp`)。UAT は ALB URL を投入 |
 | `WEBULL_QUOTES_API_BASE` | quotes API host override (#21)。未設定なら JP prod default (`https://data-api.webull.co.jp`)。UAT は ALB URL を投入 |
 | `WEBULL_EVENTS_API_BASE` | events API host override (#21、consumer 未実装)。未設定なら JP prod default (`https://events-api.webull.co.jp`) |
+| `WEBULL_ACCESS_TOKEN` | `x-access-token` ヘッダ値 (#21)。operator が Webull 公式ツールで 2FA 経由発行した token を投入。signature とは直交する supplemental auth。15 days inactivity で INVALID 化 (再発行 / 監視は follow-up issue で扱う) |
 | `WEBULL_GRPC_ENDPOINT` | bridge の gRPC 接続先 (非公開) |
 | `EVENT_INGEST_URL` | bridge 側から叩く Worker URL (`https://.../events/trade`) |
 | `EVENT_INGEST_SECRET` | `/events/trade` header |

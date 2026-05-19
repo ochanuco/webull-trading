@@ -30,6 +30,8 @@ export interface WebullQuoteClientEnv {
    * セットされてれば override。
    */
   WEBULL_QUOTES_API_BASE?: string
+  /** 2FA 発行 `x-access-token` (#21)。詳細は `WebullClientEnv.WEBULL_ACCESS_TOKEN`。 */
+  WEBULL_ACCESS_TOKEN?: string
   /**
    * Optional override for the snapshot endpoint path. Webull UAT endpoints are
    * not finalised for this POC, so the path is kept configurable per
@@ -189,6 +191,7 @@ export function createWebullQuoteClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
+      accessToken: env.WEBULL_ACCESS_TOKEN,
     }),
     baseUrl,
     quotePath: env.WEBULL_QUOTE_PATH,
