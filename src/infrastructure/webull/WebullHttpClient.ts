@@ -14,7 +14,14 @@ import { WebullAuth } from './WebullAuth'
 export interface WebullClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_API_BASE?: string
+  /**
+   * Webull **trade** API host (account / assets / orders)。JP 本番では
+   * `api.webull.co.jp`、JP UAT では `jp-openapi-alb.uat.webullbroker.com`
+   * (ALB が trade/quotes/events を 1 ホストに束ねる)。未設定 / 空 / whitespace
+   * なら JP prod default (`DEFAULT_TRADE_API_BASE`) に fallback、env が
+   * explicit にセットされてれば override (#21)。
+   */
+  WEBULL_TRADE_API_BASE?: string
   /**
    * JP CASH account ID. On the Webull JP tenant this is a multi-currency
    * cash account that holds BOTH JPY and USD positions (the probe confirmed
@@ -67,7 +74,7 @@ interface WebullHttpClientOptions {
   auth: WebullAuth
   /** JP CASH account id — required. Receives every order (US + JP). */
   accountId?: string
-  baseUrl?: string
+  baseUrl: string
   timeoutMs?: number
   retry?: WebullRetryOptions
   fetchFn?: typeof fetch
@@ -94,6 +101,13 @@ const DEFAULT_ORDERS_HISTORY_PATH = '/openapi/account/orders/history'
 const DEFAULT_ORDERS_PLACE_PATH = '/openapi/account/orders/place'
 const DEFAULT_TRADE_VERSION = 'v1'
 const DEFAULT_PLACE_ORDER_SCHEMA: PlaceOrderSchemaVersion = 'v1'
+/**
+ * Webull JP **production** trade host (#21)。値は SDK の region 定義に書かれた
+ * 公開情報なのでハードコード。UAT (`jp-openapi-alb.uat.webullbroker.com`) は
+ * 非公開なので `WEBULL_TRADE_API_BASE` env で override する運用。
+ * source: webull-openapi-python-sdk `webull/core/data/endpoints.json` region=jp。
+ */
+const DEFAULT_TRADE_API_BASE = 'https://api.webull.co.jp'
 
 export class WebullHttpClient {
   private readonly baseUrl: string
@@ -109,7 +123,7 @@ export class WebullHttpClient {
   private readonly placeOrderSchema: PlaceOrderSchemaVersion
 
   constructor(private readonly options: WebullHttpClientOptions) {
-    this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.host = new URL(this.baseUrl).host
     this.timeoutMs = options.timeoutMs ?? 5000
     // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
@@ -412,7 +426,7 @@ export function createWebullHttpClient(
   // #257: env で trade/account path を上書き可能。受理条件:
   //   - 文字列であること
   //   - trim 後が非空
-  //   - `/` で始まる絶対パス (= WEBULL_API_BASE を bypass する絶対 URL を弾く、
+  //   - `/` で始まる絶対パス (= WEBULL_TRADE_API_BASE を bypass する絶対 URL を弾く、
   //     CodeRabbit #264 finding)
   // 上記を満たさない場合は undefined を返して default path にフォールバック。
   const trim = (v: string | undefined): string | undefined => {
@@ -440,13 +454,16 @@ export function createWebullHttpClient(
     if (t === 'v1' || t === 'v2') return t
     return undefined
   }
+  // env 空 / undefined / whitespace は JP prod default に fallback。env が
+  // 明示的にセットされてれば override (UAT / 将来 region 用)。
+  const baseUrl = env.WEBULL_TRADE_API_BASE?.trim() || DEFAULT_TRADE_API_BASE
   return new WebullHttpClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
     }),
     accountId: env.WEBULL_ACCOUNT_ID_JP_CASH,
-    baseUrl: env.WEBULL_API_BASE,
+    baseUrl,
     timeoutMs: options?.timeoutMs,
     retry: options?.retry,
     fetchFn: options?.fetchFn,

@@ -3,6 +3,7 @@ import { WebullQuoteClient } from '../../../src/infrastructure/quotes/WebullQuot
 import { WebullAuth } from '../../../src/infrastructure/webull/WebullAuth'
 
 const baseAuth = new WebullAuth({ appKey: 'ak', appSecret: 'sk' })
+const TEST_BASE_URL = 'https://test.example'
 
 function mockFetch(responseBody: unknown, init: ResponseInit = { status: 200 }): typeof fetch {
   const json = JSON.stringify(responseBody)
@@ -23,7 +24,7 @@ describe('WebullQuoteClient.getSnapshots bid/ask', () => {
       data: [{ symbol: 'SOXL', last_price: 10.25, bid: '10.24', ask: 10.26 }],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })
@@ -38,7 +39,7 @@ describe('WebullQuoteClient.getSnapshots bid/ask', () => {
       data: [{ symbol: 'SOXL', last_price: 10.25, bid_price: 10.2 }],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })
@@ -53,7 +54,7 @@ describe('WebullQuoteClient.getSnapshots bid/ask', () => {
       data: [{ symbol: 'SOXL', last_price: 10.25, bp: '10.1', ap: '10.3' }],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })
@@ -67,7 +68,7 @@ describe('WebullQuoteClient.getSnapshots bid/ask', () => {
       data: [{ symbol: 'SOXL', last_price: 10.25 }],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })
@@ -87,7 +88,7 @@ describe('WebullQuoteClient.getSnapshots bid/ask', () => {
       ],
     })
     const client = new WebullQuoteClient({
-      auth: baseAuth,
+      auth: baseAuth, baseUrl: TEST_BASE_URL,
       fetchFn,
       now: () => new Date('2026-04-18T10:00:05.000Z'),
     })

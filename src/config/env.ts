@@ -46,7 +46,7 @@ export interface Env {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
   WEBULL_ACCOUNT_ID_JP_CASH?: string
-  WEBULL_API_BASE?: string
+  WEBULL_TRADE_API_BASE?: string
   /** Override the snapshot endpoint path (POC: UAT 未確定なので env で差し替え). */
   WEBULL_QUOTE_PATH?: string
 }
@@ -320,7 +320,7 @@ export interface Env {
 // は末尾 append 規約)。新 OpenAPI docs (#251) で `/openapi/account/*` →
 // `/openapi/assets/positions` / `/openapi/trade/order/*` への drift。env を
 // 切替えるだけで段階移行できる。default は旧 path、未設定 / 空 / whitespace
-// のみ / `/` で始まらない値は fallback (絶対 URL 注入で WEBULL_API_BASE を
+// のみ / `/` で始まらない値は fallback (絶対 URL 注入で WEBULL_TRADE_API_BASE を
 // bypass する事故防止、CodeRabbit #264)。
 //
 //   旧                                  →  新
@@ -398,4 +398,22 @@ export interface Env {
   STATE_CHANGE_RATE_LIMIT?: RateLimit
   ADMIN_WRITE_RATE_LIMIT?: RateLimit
   DASHBOARD_RATE_LIMIT?: RateLimit
+}
+
+
+// #21: Webull JP 本番ホスト分離 (append 規約)。
+// JP 本番では 3 つの API host が分離されてる:
+//   trade  : api.webull.co.jp         → WEBULL_TRADE_API_BASE
+//   quotes : data-api.webull.co.jp    → WEBULL_QUOTES_API_BASE
+//   events : events-api.webull.co.jp  → WEBULL_EVENTS_API_BASE (consumer 未実装、reserved)
+// 値は SDK の公開 region 定義 (webull-openapi-python-sdk endpoints.json) に
+// 載っており隠す価値はゼロなので、各 client factory は env 未設定 / 空 /
+// whitespace のとき JP **prod** default に fallback する。env が explicit に
+// セットされてれば override (UAT / 将来 region 用)。JP UAT
+// (jp-openapi-alb.uat.webullbroker.com) は ALB が全部を 1 ホストに束ねるので、
+// UAT を叩くときは 3 var とも UAT ALB URL を override 投入する運用。
+// events API は consumer がまだ無いので declare のみ (default は引いてある)。
+export interface Env {
+  WEBULL_QUOTES_API_BASE?: string
+  WEBULL_EVENTS_API_BASE?: string
 }

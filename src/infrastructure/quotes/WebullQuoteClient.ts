@@ -23,7 +23,13 @@ export interface QuoteResult {
 export interface WebullQuoteClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  WEBULL_API_BASE?: string
+  /**
+   * Quotes host (#21)。JP 本番では trade とホストが分離 (`data-api.webull.co.jp`)。
+   * JP UAT (ALB) では trade と同じ URL を入れる。未設定 / 空 / whitespace なら
+   * JP prod default (`DEFAULT_QUOTES_API_BASE`) に fallback、env が explicit に
+   * セットされてれば override。
+   */
+  WEBULL_QUOTES_API_BASE?: string
   /**
    * Optional override for the snapshot endpoint path. Webull UAT endpoints are
    * not finalised for this POC, so the path is kept configurable per
@@ -34,7 +40,7 @@ export interface WebullQuoteClientEnv {
 
 interface WebullQuoteClientOptions {
   auth: WebullAuth
-  baseUrl?: string
+  baseUrl: string
   quotePath?: string
   timeoutMs?: number
   fetchFn?: typeof fetch
@@ -56,15 +62,21 @@ interface RawSnapshotEntry {
   ap?: number | string
 }
 
-// Confirmed working combination on the JP UAT tenant (our `WEBULL_API_BASE`
-// resolves to jp-openapi-alb.uat.webullbroker.com — not the generic
-// api.sandbox.webull.hk fallback):
+// Confirmed working combination on the JP UAT tenant (our `WEBULL_QUOTES_API_BASE`
+// resolves to jp-openapi-alb.uat.webullbroker.com — the JP UAT ALB which serves
+// trade/quotes/events from a single host; JP 本番では `data-api.webull.co.jp`
+// に分離される):
 // - path `/openapi/market-data/stock/snapshot`
 // - x-version: v2
 // - category: US_ETF / US_STOCK (underscore — matches EasyEnum.__str__ = name)
 // - `extend_hour_required=false` + `overnight_required=false` REQUIRED
 //   (omitting them → 417 Expectation Failed; see probe trace in #84)
 const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
+/**
+ * Webull JP **production** quotes host (#21)。SDK region=jp の公開値。
+ * UAT (1 ホスト束ね) は `WEBULL_QUOTES_API_BASE` env で override する。
+ */
+const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
@@ -80,7 +92,7 @@ export class WebullQuoteClient {
   private readonly now: () => Date
 
   constructor(private readonly options: WebullQuoteClientOptions) {
-    this.baseUrl = (options.baseUrl ?? 'https://api.sandbox.webull.hk').replace(/\/+$/, '')
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.quotePath = options.quotePath ?? DEFAULT_QUOTE_PATH
     this.timeoutMs = options.timeoutMs ?? 5000
     // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
@@ -170,12 +182,15 @@ export function createWebullQuoteClient(
   env: WebullQuoteClientEnv,
   options?: { fetchFn?: typeof fetch; timeoutMs?: number; now?: () => Date },
 ): WebullQuoteClient {
+  // env 空 / undefined / whitespace は JP prod default。env が明示されてれば
+  // override (UAT / 将来 region 用)。
+  const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim() || DEFAULT_QUOTES_API_BASE
   return new WebullQuoteClient({
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
     }),
-    baseUrl: env.WEBULL_API_BASE,
+    baseUrl,
     quotePath: env.WEBULL_QUOTE_PATH,
     timeoutMs: options?.timeoutMs,
     fetchFn: options?.fetchFn,

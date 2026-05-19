@@ -6,15 +6,25 @@
 #   Override locally by uncommenting the block at the bottom.
 # - Sensitive (personal strategy / credentials / non-public endpoint):
 #   ALLOWED_SYMBOLS / MAX_ORDER_NOTIONAL / SYMBOL_MAX_NOTIONAL /
-#   WEBULL_API_BASE / BASIC_AUTH_* / EVENT_INGEST_SECRET / WEBULL_APP_* / WEBULL_ACCOUNT_ID
+#   WEBULL_TRADE_API_BASE / WEBULL_QUOTES_API_BASE / WEBULL_EVENTS_API_BASE /
+#   BASIC_AUTH_* / EVENT_INGEST_SECRET / WEBULL_APP_* / WEBULL_ACCOUNT_ID
 #   → set below for local dev, use `wrangler secret put` for deployed envs.
 
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
 # Run `pnpm run accounts` after setting the two above to fetch account_id.
 WEBULL_ACCOUNT_ID=
-# Sandbox default. Use https://openapi.webull.com for production.
-WEBULL_API_BASE=https://api.sandbox.webull.hk
+# Webull JP host (#21)。env 未設定なら JP **prod** default に fallback:
+#   WEBULL_TRADE_API_BASE  default = https://api.webull.co.jp
+#   WEBULL_QUOTES_API_BASE default = https://data-api.webull.co.jp
+#   WEBULL_EVENTS_API_BASE default = https://events-api.webull.co.jp  (consumer 未実装)
+# JP UAT (`jp-openapi-alb.uat.webullbroker.com`) では ALB が trade/quotes/events を
+# 1 ホストに束ねるので、UAT を叩くときは 3 var とも UAT ALB URL に override する。
+# 本番は default で動くので prod env では secret 投入不要 (= 設定漏れ事故が起き
+# 得ない)。default は SDK の公開 region 定義より取得 (endpoints.json region=jp)。
+# WEBULL_TRADE_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
+# WEBULL_QUOTES_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
+# WEBULL_EVENTS_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
 ALLOWED_SYMBOLS=SOXL,SOXS
 MAX_ORDER_NOTIONAL=100
 SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
@@ -38,7 +48,7 @@ DASHBOARD_BASE_URL=
 # #257: trade/account endpoint path 上書き (optional、append at end 規約)。
 # default は旧 path (/openapi/account/*)。staging で新 path に切替えるとき
 # 設定する。値は `/` で始まる絶対パスのみ受理、空 / whitespace / 相対 URL
-# は default fallback (broken request 投げない / WEBULL_API_BASE bypass 防止)。
+# は default fallback (broken request 投げない / WEBULL_TRADE_API_BASE bypass 防止)。
 # WEBULL_PATH_POSITIONS=/openapi/assets/positions
 # WEBULL_PATH_ORDERS_HISTORY=/openapi/trade/order/history
 # WEBULL_PATH_ORDERS_PLACE=/openapi/trade/order/place

@@ -624,7 +624,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
       )
@@ -643,7 +643,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           WEBULL_PATH_POSITIONS: '/openapi/assets/positions',
           WEBULL_PATH_ORDERS_HISTORY: '/openapi/trade/order/history',
           WEBULL_PATH_ORDERS_PLACE: '/openapi/trade/order/place',
@@ -659,7 +659,7 @@ describe('WebullHttpClient', () => {
     })
 
     it('rejects override values that are not absolute paths (security: prevent base URL bypass)', async () => {
-      // 絶対 URL や相対値だと WEBULL_API_BASE を bypass されるリスクがあるので、
+      // 絶対 URL や相対値だと WEBULL_TRADE_API_BASE を bypass されるリスクがあるので、
       // `/` で始まらない値は default fallback (CodeRabbit #264)。
       const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
         new Response(JSON.stringify([]), { status: 200 }),
@@ -669,7 +669,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           // 絶対 URL や 相対 path は reject されて default fallback
           WEBULL_PATH_POSITIONS: 'https://attacker.example.com/positions',
           WEBULL_PATH_ORDERS_HISTORY: 'orders/history',
@@ -691,7 +691,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           // 空文字 / whitespace-only は "未設定" 扱い (broken request 回避)
           WEBULL_PATH_POSITIONS: '   ',
           WEBULL_PATH_ORDERS_HISTORY: '',
@@ -716,7 +716,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
       )
@@ -735,7 +735,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           WEBULL_TRADE_VERSION: 'v2',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
@@ -755,7 +755,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           // 任意文字列 / 空 / whitespace は v1 fallback (auth signing が壊れる
           // のを防ぐ strict allow-list)
           WEBULL_TRADE_VERSION: 'v3',
@@ -783,7 +783,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
       )
@@ -810,7 +810,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           WEBULL_PLACE_ORDER_SCHEMA: 'v2',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
@@ -836,7 +836,7 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_KEY: 'k',
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
-          WEBULL_API_BASE: 'https://broker.example.test',
+          WEBULL_TRADE_API_BASE: 'https://broker.example.test',
           // 任意文字列 / 空 は v1 fallback (broken body 防止)
           WEBULL_PLACE_ORDER_SCHEMA: 'v3',
         },
