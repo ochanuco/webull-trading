@@ -25,7 +25,9 @@ export interface WebullQuoteClientEnv {
   WEBULL_APP_SECRET?: string
   /**
    * Quotes host (#21)。JP 本番では trade とホストが分離 (`data-api.webull.co.jp`)。
-   * JP UAT (ALB) では trade と同じ URL を入れる。未設定は fail-closed で throw。
+   * JP UAT (ALB) では trade と同じ URL を入れる。未設定 / 空 / whitespace なら
+   * JP prod default (`DEFAULT_QUOTES_API_BASE`) に fallback、env が explicit に
+   * セットされてれば override。
    */
   WEBULL_QUOTES_API_BASE?: string
   /**

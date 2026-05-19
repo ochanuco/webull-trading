@@ -406,12 +406,13 @@ export interface Env {
 //   trade  : api.webull.co.jp         → WEBULL_TRADE_API_BASE
 //   quotes : data-api.webull.co.jp    → WEBULL_QUOTES_API_BASE
 //   events : events-api.webull.co.jp  → WEBULL_EVENTS_API_BASE (consumer 未実装、reserved)
-// JP UAT (jp-openapi-alb.uat.webullbroker.com) は ALB が全部を 1 ホストに束ねて
-// ルーティングするので、UAT では 3 var とも同じ URL を入れて使う。fallback は
-// 設けない (= 未設定なら client 生成時 throw)。誤ったホストに request が流れる
-// 事故を絶対に防ぐためで、operator は本番切替時に必ず 3 つとも投入する。
-// events API は SDK の region 定義 (webull-openapi-python-sdk endpoints.json) に
-// 存在するが、本リポジトリにはまだ consumer がない。declare のみ。
+// 値は SDK の公開 region 定義 (webull-openapi-python-sdk endpoints.json) に
+// 載っており隠す価値はゼロなので、各 client factory は env 未設定 / 空 /
+// whitespace のとき JP **prod** default に fallback する。env が explicit に
+// セットされてれば override (UAT / 将来 region 用)。JP UAT
+// (jp-openapi-alb.uat.webullbroker.com) は ALB が全部を 1 ホストに束ねるので、
+// UAT を叩くときは 3 var とも UAT ALB URL を override 投入する運用。
+// events API は consumer がまだ無いので declare のみ (default は引いてある)。
 export interface Env {
   WEBULL_QUOTES_API_BASE?: string
   WEBULL_EVENTS_API_BASE?: string

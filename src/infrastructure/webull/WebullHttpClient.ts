@@ -17,8 +17,9 @@ export interface WebullClientEnv {
   /**
    * Webull **trade** API host (account / assets / orders)。JP 本番では
    * `api.webull.co.jp`、JP UAT では `jp-openapi-alb.uat.webullbroker.com`
-   * (ALB が trade/quotes/events を 1 ホストに束ねる)。未設定なら fail-closed
-   * で throw (#21)。
+   * (ALB が trade/quotes/events を 1 ホストに束ねる)。未設定 / 空 / whitespace
+   * なら JP prod default (`DEFAULT_TRADE_API_BASE`) に fallback、env が
+   * explicit にセットされてれば override (#21)。
    */
   WEBULL_TRADE_API_BASE?: string
   /**
