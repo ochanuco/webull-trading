@@ -79,6 +79,43 @@ describe('WebullAuth helpers', () => {
     expect(withVersion['x-signature']).toBe(withoutVersion['x-signature'])
   })
 
+  it('emits x-access-token when accessToken is set, without affecting the signature', async () => {
+    // #21: token flow is supplemental to the HMAC-SHA1 scheme — the token must
+    // ride in `x-access-token` but not enter the canonical string. Compare
+    // signatures with/without the token to lock that behaviour.
+    const common = {
+      method: 'GET' as const,
+      path: '/account/profile',
+      appKey: 'app-key',
+      appSecret: 'app-secret',
+      host: 'api.sandbox.webull.hk',
+      nonce: 'nonce-1',
+      timestamp: '2026-04-18T12:30:45Z',
+    }
+
+    const withToken = await buildSignedHeaders({ ...common, accessToken: 'tok-abc' })
+    const withoutToken = await buildSignedHeaders({ ...common })
+
+    expect(withToken['x-access-token']).toBe('tok-abc')
+    expect(withoutToken['x-access-token']).toBeUndefined()
+    expect(withToken['x-signature']).toBe(withoutToken['x-signature'])
+  })
+
+  it('treats whitespace-only accessToken as unset (avoid silent "I set it" footgun)', async () => {
+    const common = {
+      method: 'GET' as const,
+      path: '/account/profile',
+      appKey: 'app-key',
+      appSecret: 'app-secret',
+      host: 'api.sandbox.webull.hk',
+      nonce: 'nonce-1',
+      timestamp: '2026-04-18T12:30:45Z',
+    }
+
+    const result = await buildSignedHeaders({ ...common, accessToken: '   ' })
+    expect(result['x-access-token']).toBeUndefined()
+  })
+
   it('matches the HMAC-SHA1 worked example from Webull docs', async () => {
     const encodedSignString =
       '%2Ftrade%2Fplace_order%26a1%3Dwebull%26a2%3D123%26a3%3Dxxx%26host%3Dapi.webull.com%26q1%3Dyyy%26x-app-key%3D776da210ab4a452795d74e726ebd74b6%26x-signature-algorithm%3DHMAC-SHA1%26x-signature-nonce%3D48ef5afed43d4d91ae514aaeafbc29ba%26x-signature-version%3D1.0%26x-timestamp%3D2022-01-04T03%3A55%3A31Z%26E296C96787E1A309691CEF3692F5EEDD'

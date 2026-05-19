@@ -417,3 +417,20 @@ export interface Env {
   WEBULL_QUOTES_API_BASE?: string
   WEBULL_EVENTS_API_BASE?: string
 }
+
+
+// #21: Webull `x-access-token` flow (append 規約)。
+// signature + 2FA token の hybrid auth (developer.webull.co.jp/apis/docs/authentication/token):
+//   1. operator が Webull 公式ツールで token 発行 → PENDING
+//   2. Webull モバイルアプリで 2FA SMS verify (5 min 以内) → NORMAL 化
+//   3. その token 文字列を `wrangler secret put WEBULL_ACCESS_TOKEN --env=<env>` で投入
+//   4. 各 client が `x-access-token` ヘッダで request に付ける
+// token は signature の canonical string に **含めない** (SDK / docs 通り、x-version
+// と同じく supplemental ヘッダ扱い)。15 days inactivity で INVALID 化するので、
+// 期限切れ監視 / 再投入は別 issue で扱う (#21 follow-up)。テスト環境では token
+// auto-NORMAL なので staging では未設定でも動くが、prod では設定漏れ → 401。
+// 設定漏れ自体は fail-closed ではない (= signing だけで動く path もあるかもしれない
+// ので未設定でも client は作成成功) — 401 の broker error で発覚させる方針。
+export interface Env {
+  WEBULL_ACCESS_TOKEN?: string
+}

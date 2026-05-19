@@ -12,6 +12,13 @@ export interface WebullAuthConfig {
   appKey?: string
   appSecret?: string
   version?: string
+  /**
+   * 2FA 経由で発行された `x-access-token` 値 (#21)。token flow は signature と
+   * 直交する supplemental auth (developer.webull.co.jp/apis/docs/authentication/token)。
+   * 設定があれば `createHeaders()` が `x-access-token` を返却 headers に乗せるが、
+   * canonical string には含めない (= 署名対象外)。
+   */
+  accessToken?: string
 }
 
 export interface BuildSignedHeadersInput {
@@ -25,6 +32,8 @@ export interface BuildSignedHeadersInput {
   nonce?: string
   timestamp?: string
   version?: string
+  /** x-access-token (#21)。signing 対象外、設定があれば返却 headers に mix。 */
+  accessToken?: string
 }
 
 interface CanonicalStringInput {
@@ -46,8 +55,9 @@ export class WebullAuth {
     nonce,
     timestamp,
     version,
+    accessToken,
   }: Omit<BuildSignedHeadersInput, 'appKey' | 'appSecret'>): Promise<Record<string, string>> {
-    const { appKey, appSecret, version: configVersion } = this.config
+    const { appKey, appSecret, version: configVersion, accessToken: configToken } = this.config
 
     if (!appKey || !appSecret) {
       throw new Error('Missing Webull credentials')
@@ -64,6 +74,7 @@ export class WebullAuth {
       nonce,
       timestamp,
       version: version ?? configVersion,
+      accessToken: accessToken ?? configToken,
     })
   }
 }
@@ -79,6 +90,7 @@ export async function buildSignedHeaders({
   nonce = crypto.randomUUID(),
   timestamp = isoTimestampNoMillis(),
   version,
+  accessToken,
 }: BuildSignedHeadersInput): Promise<Record<string, string>> {
   const normalizedMethod = method.toUpperCase()
   if (normalizedMethod !== 'GET' && normalizedMethod !== 'POST') {
@@ -107,9 +119,14 @@ export async function buildSignedHeaders({
   const encodedString = urlEncodeCanonical(stringToSign)
   const signature = await hmacSha1Base64(appSecret, encodedString)
 
+  // x-access-token は signature と同じく supplemental ヘッダ扱い (canonical
+  // string に含めない)。trim 後が空文字なら未設定として扱う = whitespace-only な
+  // secret 投入事故で「token あるつもり」になるのを防ぐ。
+  const trimmedToken = accessToken?.trim()
   return {
     ...signingHeaders,
     ...(version === undefined ? {} : { 'x-version': version }),
+    ...(trimmedToken ? { 'x-access-token': trimmedToken } : {}),
     'x-signature': signature,
   }
 }

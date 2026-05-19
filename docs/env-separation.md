@@ -76,6 +76,15 @@ host 系 env var は **未設定なら JP prod default に fallback** する (�
 | quotes (snapshot / bars) | `data-api.webull.co.jp` | `WEBULL_QUOTES_API_BASE` |
 | events (consumer 未実装、SDK 定義のみ) | `events-api.webull.co.jp` | `WEBULL_EVENTS_API_BASE` |
 
+### `x-access-token` (#21、2FA supplemental auth)
+
+signature とは直交する 2FA-backed token。`WEBULL_ACCESS_TOKEN` env var に値を入れると各 client が `x-access-token` ヘッダを request に付与する。
+
+- **取得**: operator が Webull 公式ツールで token 発行 → モバイルアプリで 2FA SMS verify (5 min 以内) → status `NORMAL` 化した token 文字列を `wrangler secret put WEBULL_ACCESS_TOKEN --env=<env>` で投入
+- **テスト環境**: 2FA 不要で auto-`NORMAL`、staging では未設定でも動く可能性あり
+- **production**: 設定漏れだと 401 で発覚する設計 (fail-closed throw ではない、broker error で気付く)
+- **inactivity 15 日**: API call が 15 日途絶えると `INVALID` 化、再 verify 必要 → 期限切れ監視 / 自動再発行は別 issue (#21 follow-up) で扱う
+
 ### 4. DO namespace
 
 `durable_objects.bindings` は `class_name` ベース。env ごとに worker name が違うので Cloudflare が自動的に別 namespace を割り当てる (`namespace_id` 手動指定不要)。データ移行 / 共有が必要になったら明示的に `script_name` を切る事を検討する (現状不要)。
