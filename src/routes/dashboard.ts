@@ -67,6 +67,14 @@ import {
 import { earningsCalendar, macroEventCalendar } from '../infrastructure/db/schema'
 import type { EarningsCalendarRow, MacroEventCalendarRow } from '../infrastructure/db/schema'
 import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
+// #21 Phase B follow-up: Webull token 管理 UI (seed / status / refresh)。
+// admin/webull-token は JSON API、こちらは HTML form + redirect で operator が
+// browser から完結できるようにする (DevTools fetch を強要しない)。
+import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
+import { WebullAuth } from '../infrastructure/webull/WebullAuth'
+import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
+import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
+import type { WebullTokenState } from '../trading/state/WebullTokenStateDO'
 
 /**
  * Read-only operator dashboard (#121). Server-rendered HTML via Hono — no
@@ -858,9 +866,195 @@ export const dashboard = new Hono<DashboardBindings>()
     )
     return c.redirect('/dashboard/events', 303)
   })
+  /**
+   * #21 Phase B follow-up: Webull `x-access-token` 管理 UI。
+   *
+   * - GET                    : 現状表示 (status / expires / tokenHint / 各タイムスタンプ) + seed form + refresh button
+   * - POST /seed             : form の token 文字列を broker で再 verify (`checkToken`) してから DO 書込
+   * - POST /refresh          : `refreshWebullToken(env, {force:true})` を叩いて DO を更新
+   *
+   * いずれも token plaintext は HTML に乗せない (head/tail だけの tokenHint)。
+   * Cache-Control: no-store 付与で browser / 中間 cache を防ぐ。
+   * writeAuditLog 経由で D1 に "誰がいつ" の trail を残す (CodeRabbit #326 同等)。
+   */
+  .get('/webull-token', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    if (!c.env.WEBULL_TOKEN_STATE) {
+      return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured')))
+    }
+    const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
+    const state = await store.getState().catch(() => null)
+    const notice = c.req.query('notice') ?? null
+    const error = c.req.query('error') ?? null
+    return c.html(
+      renderLayout(c, 'Webull token', renderWebullTokenBody({ state, notice, error })),
+    )
+  })
+  .post('/webull-token/seed', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.WEBULL_TOKEN_STATE) {
+      return c.redirect('/dashboard/webull-token?error=WEBULL_TOKEN_STATE+binding+is+not+configured', 303)
+    }
+    if (!c.env.WEBULL_APP_KEY || !c.env.WEBULL_APP_SECRET) {
+      return c.redirect('/dashboard/webull-token?error=WEBULL_APP_KEY+%2F+WEBULL_APP_SECRET+missing', 303)
+    }
+    const form = await c.req.formData()
+    const rawToken = (form.get('token')?.toString() ?? '').trim()
+    if (rawToken.length === 0) {
+      return c.redirect('/dashboard/webull-token?error=token+is+required', 303)
+    }
+    const tokenClient = new WebullTokenClient({
+      auth: new WebullAuth({
+        appKey: c.env.WEBULL_APP_KEY,
+        appSecret: c.env.WEBULL_APP_SECRET,
+      }),
+      baseUrl: c.env.WEBULL_TRADE_API_BASE?.trim() || 'https://api.webull.co.jp',
+    })
+    // operator 貼り付け値が NORMAL かを broker で再確認。期限切れ / PENDING を
+    // DO に保存させないため (TOC-TOU 防御、admin endpoint と同じ理由)。
+    let dto: Awaited<ReturnType<typeof tokenClient.checkToken>>
+    try {
+      dto = await tokenClient.checkToken(rawToken)
+    } catch (err) {
+      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent(`checkToken failed: ${messageOf(err)}`)}`, 303)
+    }
+    if (dto.status !== 'NORMAL') {
+      return c.redirect(
+        `/dashboard/webull-token?error=${encodeURIComponent(`token status is ${dto.status}, only NORMAL can be seeded`)}`,
+        303,
+      )
+    }
+    const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
+    const before = await store.getState().catch(() => null)
+    const seeded = await store.seedToken({
+      token: dto.token,
+      expires: dto.expires,
+      status: dto.status,
+    })
+    await writeEventsAuditLog(
+      c,
+      '/dashboard/webull-token/seed',
+      'webull-token=singleton',
+      before
+        ? { status: before.status, expires: before.expires, fetchedAt: before.fetchedAt }
+        : null,
+      { status: seeded.status, expires: seeded.expires, fetchedAt: seeded.fetchedAt },
+    )
+    return c.redirect('/dashboard/webull-token?notice=seeded', 303)
+  })
+  .post('/webull-token/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.WEBULL_TOKEN_STATE) {
+      return c.redirect('/dashboard/webull-token?error=WEBULL_TOKEN_STATE+binding+is+not+configured', 303)
+    }
+    const summary = await refreshWebullToken(c.env, { force: true })
+    await writeEventsAuditLog(
+      c,
+      '/dashboard/webull-token/refresh',
+      'webull-token=singleton',
+      summary.before
+        ? { status: summary.before.status, expires: summary.before.expires, fetchedAt: summary.before.fetchedAt }
+        : null,
+      summary.after
+        ? {
+            status: summary.after.status,
+            expires: summary.after.expires,
+            fetchedAt: summary.after.fetchedAt,
+            refreshed: summary.refreshed,
+            skippedReason: summary.skippedReason ?? null,
+            failureReason: summary.failureReason ?? null,
+          }
+        : { refreshed: summary.refreshed, skippedReason: summary.skippedReason ?? null },
+    )
+    if (summary.refreshed) {
+      return c.redirect('/dashboard/webull-token?notice=refreshed', 303)
+    }
+    const why = summary.failureReason ?? summary.skippedReason ?? 'no change'
+    return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`refresh: ${why}`)}`, 303)
+  })
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * #21 Phase B follow-up: Webull token 管理 UI の HTML body。token plaintext は
+ * 一切埋め込まない (tokenHint だけ)。notice / error は redirect 後の query string
+ * 経由で受け取る (PRG パターン)。
+ */
+function renderWebullTokenBody(args: {
+  state: WebullTokenState | null
+  notice: string | null
+  error: string | null
+}): string {
+  const { state, notice, error } = args
+  const banner = error
+    ? `<p class="warn">⚠ ${esc(error)}</p>`
+    : notice
+      ? `<p class="ok">✓ ${esc(notice)}</p>`
+      : ''
+
+  const stateSection = state
+    ? renderWebullTokenStateTable(state)
+    : '<p>DO is empty — まだ seed されていません。下の form から投入してください。</p>'
+
+  return `
+<section style="max-width:760px">
+  <p style="color:#666">
+    Webull <code>x-access-token</code> の状態確認 / 投入 / 強制 refresh を行います。
+    token 文字列は <code>pnpm run issue-token</code> で取得 (Webull モバイルアプリで 2FA verify 必要)。
+    取得した NORMAL token を下の form に貼り付けて「seed」してください。
+  </p>
+  ${banner}
+  <h2>現在の状態</h2>
+  ${stateSection}
+
+  <h2>新規 seed (or 上書き)</h2>
+  <form method="post" action="/dashboard/webull-token/seed" style="display:flex;flex-direction:column;gap:8px;max-width:720px">
+    <label for="token" style="font-weight:bold">token 文字列 (NORMAL のみ受理):</label>
+    <textarea id="token" name="token" rows="3" required
+      placeholder="pnpm run issue-token の stdout を丸ごと貼り付け"
+      style="font-family:ui-monospace,monospace;padding:6px;border:1px solid #ccc;border-radius:4px"
+    ></textarea>
+    <button type="submit" style="padding:8px 16px;background:#28a;color:#fff;border:none;border-radius:4px;cursor:pointer;align-self:flex-start">
+      seed (broker で再 verify 後に DO 書込)
+    </button>
+  </form>
+
+  <h2 style="margin-top:24px">手動 refresh</h2>
+  <p style="color:#666">
+    既存 token を Webull に渡して <code>createToken(existingToken)</code> を強制実行します。
+    通常は daily cron (22:00 UTC) で自動的に走るため、ボタンは「期限間近を待たずに更新したい」「失敗事象を再現したい」など特殊用途のみ。
+  </p>
+  <form method="post" action="/dashboard/webull-token/refresh" onsubmit="return confirm('手動 refresh を実行します。よろしいですか?');">
+    <button type="submit" style="padding:8px 16px;background:#888;color:#fff;border:none;border-radius:4px;cursor:pointer">
+      refresh now
+    </button>
+  </form>
+</section>`
+}
+
+function renderWebullTokenStateTable(state: WebullTokenState): string {
+  const statusClass = state.status === 'NORMAL' ? 'ok' : 'warn'
+  // expires は ms / sec 両対応 (Webull docs 未明示)。10^12 以上を ms 扱い。
+  const expiresMs = state.expires >= 1e12 ? state.expires : state.expires * 1000
+  const expiresIso = Number.isFinite(expiresMs) ? new Date(expiresMs).toISOString() : '(invalid)'
+  const tokenHint = state.token.length > 10
+    ? `${state.token.slice(0, 6)}...${state.token.slice(-4)}`
+    : '<redacted>'
+  return `
+<table style="border-collapse:collapse;margin-bottom:16px">
+  <tr><th style="text-align:left;padding:4px 12px 4px 0">status</th>
+      <td><span class="${statusClass}">${esc(state.status)}</span></td></tr>
+  <tr><th style="text-align:left;padding:4px 12px 4px 0">tokenHint</th>
+      <td><code>${esc(tokenHint)}</code></td></tr>
+  <tr><th style="text-align:left;padding:4px 12px 4px 0">expires</th>
+      <td>${esc(String(state.expires))} <span class="muted">(${esc(expiresIso)})</span></td></tr>
+  <tr><th style="text-align:left;padding:4px 12px 4px 0">fetchedAt</th>
+      <td>${esc(state.fetchedAt)}</td></tr>
+  <tr><th style="text-align:left;padding:4px 12px 4px 0">lastAttemptAt</th>
+      <td>${esc(state.lastAttemptAt ?? '(never)')}</td></tr>
+  <tr><th style="text-align:left;padding:4px 12px 4px 0">lastSuccessAt</th>
+      <td>${esc(state.lastSuccessAt ?? '(never)')}</td></tr>
+</table>`
 }
 
 /**
@@ -1087,6 +1281,7 @@ function layout(title: string, body: string, env?: unknown): string {
   <a href="/dashboard/symbols">銘柄管理</a>
   <a href="/dashboard/audit">監査ログ</a>
   <a href="/dashboard/broker-probe" title="Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ">broker 診断</a>
+  <a href="/dashboard/webull-token" title="Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)">Webull token</a>
 </nav>
 ${body}
 <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
