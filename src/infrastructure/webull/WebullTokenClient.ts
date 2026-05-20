@@ -155,8 +155,17 @@ function normalizeAccessToken(json: unknown, path: string): WebullAccessTokenDto
   const expires = typeof obj.expires === 'number' ? obj.expires : Number(obj.expires)
   const statusRaw = typeof obj.status === 'string' ? obj.status : null
   if (!token || !Number.isFinite(expires) || statusRaw === null) {
+    // Mask the token in error output. raw token を JSON.stringify でログ /
+    // スタックに残すと、認証情報がエラー解析チャネルに漏れる (CodeRabbit
+    // #325 review)。
+    const masked: Record<string, unknown> = { ...obj }
+    if (typeof obj.token === 'string' && obj.token.length > 10) {
+      masked.token = `${obj.token.slice(0, 6)}...${obj.token.slice(-4)}`
+    } else if (typeof obj.token === 'string') {
+      masked.token = '<redacted>'
+    }
     throw new BrokerRequestError(
-      `Webull token response missing token/expires/status: ${JSON.stringify(obj)}`,
+      `Webull token response missing token/expires/status: ${JSON.stringify(masked)}`,
       `POST ${path}`,
     )
   }
