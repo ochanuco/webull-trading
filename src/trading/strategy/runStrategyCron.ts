@@ -10,7 +10,8 @@ import {
 } from '../../infrastructure/notification/configStateChange'
 import { createNotifier } from '../../infrastructure/notification/createNotifier'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
-import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
+import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
+import { createWebullTradeClient } from '../../infrastructure/webull/WebullTradeClient'
 import { MockExecution } from '../execution/MockExecution'
 import { WebullExecution } from '../execution/WebullExecution'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
@@ -443,12 +444,13 @@ export async function runStrategyCron(
   const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
-  // Single Webull client instance shared between WebullExecution (order
-  // submit) and the SELL_QTY_EXCEED fallback (positions read). DRY_RUN
-  // path constructs nothing live — fallback resolver is also undefined so
-  // MockExecution can never trip the fallback retry path.
-  const liveWebullClient = global.dryRun ? null : createWebullHttpClient(env)
-  const execution = liveWebullClient ? new WebullExecution(liveWebullClient) : new MockExecution()
+  // #21: trade と read を別 client に分離。WebullTradeClient は ENVIRONMENT
+  // で staging gate を持つ (= staging からの live order を構造的に防ぐ)。
+  // DRY_RUN path では両方 null、MockExecution が選ばれ fallback resolver も
+  // 未注入なので read 側も触れない。
+  const liveTradeClient = global.dryRun ? null : createWebullTradeClient(env)
+  const liveReadClient = global.dryRun ? null : createWebullReadClient(env)
+  const execution = liveTradeClient ? new WebullExecution(liveTradeClient) : new MockExecution()
   // notifier は関数冒頭で組み立て済み (#141)。BUY/SELL emit / per-symbol
   // bar fetch error / broker submit error は scheduler 内で注入された
   // notifier を使う (#199 経路のまま)。
@@ -586,11 +588,11 @@ export async function runStrategyCron(
       // (`WebullHttpClient.getAvailableQtyForSymbol`) に閉じている。
       // resolver 側で例外を握り潰さず、scheduler 側 (`tryFallbackSell`) が
       // null fallback して元の SELL_QTY_EXCEED エラーを再 throw する。
-      ...(liveWebullClient
+      ...(liveReadClient
         ? {
             sellFallback: {
               getAvailableQty: (symbol: string) =>
-                liveWebullClient.getAvailableQtyForSymbol(symbol),
+                liveReadClient.getAvailableQtyForSymbol(symbol),
             },
           }
         : {}),

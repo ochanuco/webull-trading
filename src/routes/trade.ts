@@ -2,7 +2,8 @@ import { Hono } from 'hono'
 import type { AppBindings } from '../app'
 import { loadGlobalConfigFrom, type LoadedGlobalConfig } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
-import { createWebullHttpClient, type WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
+import type { WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
+import { createWebullTradeClient } from '../infrastructure/webull/WebullTradeClient'
 import { ValidationError } from '../shared/errors'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
 import { MockExecution } from '../trading/execution/MockExecution'
@@ -79,13 +80,14 @@ export function createTradingService(
   env: {
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
     PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
+    ENVIRONMENT?: string
   } & WebullClientEnv,
   universe: SymbolUniverse,
   global: LoadedGlobalConfig,
 ): TradingService {
   const execution = global.dryRun
     ? new MockExecution()
-    : new WebullExecution(createWebullHttpClient(env))
+    : new WebullExecution(createWebullTradeClient(env))
 
   return new TradingService(
     new FixedRuleStrategy(request.buyBelow, request.sellAbove),

@@ -3,7 +3,7 @@ import { alias } from 'drizzle-orm/sqlite-core'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
-import { createWebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
+import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
@@ -264,7 +264,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   if (uniqueCandidates.length === 0) return summary
 
   summary.inspected = uniqueCandidates.length
-  const client = createWebullHttpClient(options.env)
+  const client = createWebullReadClient(options.env)
 
   for (const row of uniqueCandidates) {
     const coid = row.clientOrderId
