@@ -6,7 +6,10 @@ import { rateLimit } from '../middleware/rateLimit'
 import { ValidationError } from '../shared/errors'
 import { createWebullReadClient } from '../infrastructure/webull/WebullReadClient'
 import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
-import { resolveAccessToken } from '../infrastructure/webull/resolveAccessToken'
+import {
+  resolveAccessToken,
+  resolveAccessTokenWithSource,
+} from '../infrastructure/webull/resolveAccessToken'
 import { WebullAuth } from '../infrastructure/webull/WebullAuth'
 import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
 import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
@@ -546,8 +549,11 @@ export const admin = new Hono<AppBindings>()
     // #21 Phase B: DO or env 由来の `x-access-token` を resolve。NORMAL token が
     // あれば全 probe call に乗せる (none なら省略、broker が 401 で発覚する)。
     // この probe は client factory を経由せず buildSignedHeaders を直接呼んでた
-    // ため Phase B 直後は seed しても 401 が消えないバグだった (PR #328 follow-up)。
-    const accessToken = await resolveAccessToken(c.env)
+    // ため Phase B 直後は seed しても 401 が消えないバグだった (PR #329)。
+    // 診断ラベル (source / length) を probe response に乗せて「token が乗ったが
+    // broker が reject」と「そもそも token が未配信」を切り分け可能にする。
+    const tokenResolved = await resolveAccessTokenWithSource(c.env)
+    const accessToken = tokenResolved.token
 
     // 全 phase で同じキーを返す uniform shape (CodeRabbit #243)。jq / curl から
     // 結果を比較・集計するときに「auth phase だけキーが少ない」状況を避ける。
@@ -707,6 +713,15 @@ export const admin = new Hono<AppBindings>()
       timestamp: new Date().toISOString(),
       sandbox: { trade: baseUrl, quotes: quotesBaseUrl },
       input: { symbol, category, accountIdConfigured: accountId.length > 0 },
+      // #21 token diagnostic: source ('do_normal' なら DO 由来 NORMAL token を
+      // 使った正常 path / 'env' は Phase A fallback / 'none' は token なし
+      // = broker は INVALID_TOKEN を返す)。length は値の長さだけで plaintext は
+      // 出さない (browser cache / log 経由の漏洩防止)。
+      accessToken: {
+        source: tokenResolved.source,
+        length: accessToken?.length ?? 0,
+        doStatus: tokenResolved.doStatus ?? null,
+      },
       quote: quoteResult,
       // 後方互換: dashboard UI が `positions` を保有銘柄リスト描画に使うので
       // 旧 path 結果を従来通り返す。
