@@ -1518,12 +1518,13 @@ function brokerProbeBody(args: {
   // 1570=JP_ETF、US は SOXL/SOXS/SPY/QQQ=US_ETF それ以外=US_STOCK)。
   const universeLinks = renderUniverseLinks(args.universe)
   return `<p class="muted" style="font-size:12px">
-  Webull broker (現状: JP UAT <code>jp-openapi-alb.uat.webullbroker.com</code>) に
-  <code>/openapi/market-data/stock/snapshot</code> + <code>/openapi/account/positions</code>
-  を直接 fetch して raw レスポンスを表示します。click した銘柄について broker に
-  quote を問合せて生応答 (status / error_code / request_id) が見えます。任意の
-  symbol / category で叩きたい場合は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>
-  を直接実行してください。
+  Webull broker (host は <code>WEBULL_TRADE_API_BASE</code> / <code>WEBULL_QUOTES_API_BASE</code> から決定、
+  未設定なら JP prod default) に <code>/openapi/market-data/stock/snapshot</code> +
+  <code>/openapi/account/positions</code> を直接 fetch して raw レスポンスを表示します。
+  click した銘柄について broker に quote を問合せて生応答 (status / error_code / request_id)
+  が見えます。実際に使われた host は meta セクションの <code>sandbox.trade</code> /
+  <code>sandbox.quotes</code> で確認可。任意の symbol / category で叩きたい場合は
+  <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code> を直接実行してください。
 </p>
 <div style="display:flex;gap:14px;align-items:center;margin-bottom:12px">
   <span class="muted" id="probe-status" style="font-size:12px">読み込み中...</span>
