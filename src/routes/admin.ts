@@ -722,6 +722,15 @@ export const admin = new Hono<AppBindings>()
         length: accessToken?.length ?? 0,
         doStatus: tokenResolved.doStatus ?? null,
       },
+      // #21 app_key diagnostic: staging / production の WEBULL_APP_KEY が
+      // 手元 1Password 値と一致してるかを確認するための head 6 文字 (32 文字 hex
+      // の先頭 6 文字は十分公開しても安全)。token と app_key が違う app に紐付く
+      // と broker が INVALID_TOKEN を返すため、operator が手元値と並べて確認できる
+      // ようにする。
+      appKey: {
+        length: appKey.length,
+        head: appKey.slice(0, 6),
+      },
       quote: quoteResult,
       // 後方互換: dashboard UI が `positions` を保有銘柄リスト描画に使うので
       // 旧 path 結果を従来通り返す。
