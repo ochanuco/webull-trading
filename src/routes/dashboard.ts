@@ -912,10 +912,22 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.redirect('/dashboard/webull-token?error=WEBULL_APP_KEY+%2F+WEBULL_APP_SECRET+missing', 303)
     }
     const form = await c.req.formData()
-    const rawToken = (form.get('token')?.toString() ?? '').trim()
-    if (rawToken.length === 0) {
+    const rawPaste = (form.get('token')?.toString() ?? '').trim()
+    if (rawPaste.length === 0) {
       return c.redirect('/dashboard/webull-token?error=token+is+required', 303)
     }
+    // issue-token script の出力丸ごと貼り付けても OK にする。stderr の
+    // diagnostic ("[issue-token] ...") や wrangler suggest 行 ("pnpm wrangler
+    // ...") を strip、残った 1 行が NORMAL token。複数行残ったら曖昧として
+    // error にする (operator に何を貼ったか判別させる)。
+    const extraction = extractTokenFromPaste(rawPaste)
+    if (!extraction.ok) {
+      return c.redirect(
+        `/dashboard/webull-token?error=${encodeURIComponent(extraction.error)}`,
+        303,
+      )
+    }
+    const rawToken = extraction.token
     const tokenClient = new WebullTokenClient({
       auth: new WebullAuth({
         appKey: c.env.WEBULL_APP_KEY,
@@ -1018,6 +1030,48 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * `pnpm run issue-token` の出力から実 token (NORMAL の stdout 行) を抽出する。
+ *
+ * operator が terminal の出力丸ごと貼ったケースに耐性をつけるため:
+ *   - `[issue-token] ...` 始まりの diagnostic は捨てる
+ *   - wrangler instruction (`pnpm wrangler ...`, `(paste the value...)`) は捨てる
+ *   - 空行 / whitespace-only は捨てる
+ *   - 残った 1 行 = NORMAL token
+ *
+ * 複数行残った場合は何が token か判別不能として error。operator は不要行を
+ * 削って再 submit する。
+ *
+ * exported for testing。
+ */
+export function extractTokenFromPaste(raw: string):
+  | { ok: true; token: string }
+  | { ok: false; error: string } {
+  const candidates = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !line.startsWith('[issue-token]'))
+    .filter((line) => !line.startsWith('pnpm '))
+    .filter((line) => !line.startsWith('(paste'))
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      error:
+        'token line not found — did the issue-token flow finish with status=NORMAL? (the PENDING summary like "0197...7689" is NOT the actual token)',
+    }
+  }
+  if (candidates.length > 1) {
+    // 余分な行が残ってる: operator に何を貼ってるか伝えるため head 部分を含める。
+    const preview = candidates.map((c) => c.slice(0, 32)).join(' | ')
+    return {
+      ok: false,
+      error: `expected 1 token line, found ${candidates.length}: ${preview}`,
+    }
+  }
+  return { ok: true, token: candidates[0]! }
+}
+
+/**
  * #21 Phase B follow-up: Webull token 管理 UI の HTML body。token plaintext は
  * 一切埋め込まない (tokenHint だけ)。notice / error は redirect 後の query string
  * 経由で受け取る (PRG パターン)。
@@ -1050,14 +1104,33 @@ function renderWebullTokenBody(args: {
   ${stateSection}
 
   <h2>新規 seed (or 上書き)</h2>
+  <details style="margin-bottom:8px">
+    <summary style="cursor:pointer;color:#555">📋 何を貼ればいい？</summary>
+    <div style="padding:8px 0 0 16px;color:#555;font-size:13px;line-height:1.6">
+      <p><code>pnpm run issue-token</code> を最後まで完了させる (status=NORMAL になる) と、
+      stdout の <strong>最後の 1 行</strong> に長い英数字の token が出力されます。<br>
+      diagnostic ログ (<code>[issue-token] ...</code> で始まる行) を含めて全文貼り付けても OK
+      — server-side で token 行だけ自動抽出します。</p>
+      <p>⚠ ログ内の <code>received: 0197e6...7689</code> のような <strong>"..." 入りの短い文字列は
+      実 token ではなく表示用の省略形</strong> です。2FA verify を完了するまで実 token は
+      出力されません。</p>
+      <p>例 (NORMAL 化したときの末尾出力):</p>
+      <pre style="background:#f6f8fa;padding:8px;border-radius:4px;overflow:auto;font-size:12px">[issue-token] poll (60s elapsed): 0197e6...7689 (status=NORMAL)
+[issue-token] NORMAL token acquired. Inject via:
+  pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=&lt;dev|staging|production&gt;
+  (paste the value printed below)
+
+0197e6abcd1234567890fedcba9876543210...   ← この長い行が実 token</pre>
+    </div>
+  </details>
   <form method="post" action="/dashboard/webull-token/seed" style="display:flex;flex-direction:column;gap:8px;max-width:720px">
-    <label for="token" style="font-weight:bold">token 文字列 (NORMAL のみ受理):</label>
-    <textarea id="token" name="token" rows="3" required
-      placeholder="pnpm run issue-token の stdout を丸ごと貼り付け"
+    <label for="token" style="font-weight:bold">issue-token の出力を貼り付け (丸ごとで OK):</label>
+    <textarea id="token" name="token" rows="6" required
+      placeholder="例:&#10;[issue-token] NORMAL token acquired. Inject via:&#10;  pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=production&#10;&#10;0197e6abcd1234567890fedcba9876543210..."
       style="font-family:ui-monospace,monospace;padding:6px;border:1px solid #ccc;border-radius:4px"
     ></textarea>
     <button type="submit" style="padding:8px 16px;background:#28a;color:#fff;border:none;border-radius:4px;cursor:pointer;align-self:flex-start">
-      seed (broker で再 verify 後に DO 書込)
+      seed (token 行を自動抽出 → broker で再 verify → DO 書込)
     </button>
   </form>
 
