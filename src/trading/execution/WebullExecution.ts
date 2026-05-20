@@ -1,12 +1,15 @@
 import { toExecutionResult } from '../../infrastructure/webull/mapper'
-import type { WebullHttpClient } from '../../infrastructure/webull/WebullHttpClient'
+import type { WebullTradeClient } from '../../infrastructure/webull/WebullTradeClient'
 import { BrokerRequestError } from '../../shared/errors'
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
 import type { Execution } from './Execution'
 
 export class WebullExecution implements Execution {
-  constructor(private readonly client: Pick<WebullHttpClient, 'placeOrder'>) {}
+  // #21: `WebullTradeClient` 経由でしか trade API に触れない。staging からの
+  // 誤発注は client constructor で disable されているため、ここに来た時点で
+  // production deploy + ENVIRONMENT=production の不変条件が満たされている。
+  constructor(private readonly client: Pick<WebullTradeClient, 'placeOrder'>) {}
 
   async execute(intent: OrderIntent): Promise<ExecutionResult> {
     try {

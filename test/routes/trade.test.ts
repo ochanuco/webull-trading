@@ -165,6 +165,9 @@ describe('trade routes', () => {
       },
       {
         ...env,
+        // #21: WebullTradeClient は ENVIRONMENT='production' 以外を fail-safe
+        // で拒否する。LIVE 経路の test ではこのラベルが必須。
+        ENVIRONMENT: 'production',
         WEBULL_APP_KEY: 'app-key',
         WEBULL_APP_SECRET: 'app-secret',
         WEBULL_TRADE_API_BASE: 'https://broker.example.test',

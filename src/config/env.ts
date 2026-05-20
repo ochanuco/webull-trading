@@ -419,6 +419,23 @@ export interface Env {
 }
 
 
+// Cross-cutting: deploy 環境ラベル (append 規約)。`wrangler.jsonc::env.<env>.vars`
+// で各 env に **hardcode** される (= deploy artifact に焼き込まれる)。secret では
+// 上書きされ得るが、その時点で operator が意図してる行為とみなす (= 偶発事故
+// 防止が主目的、悪意ある書換は防げない)。`WebullTradeClient` で
+// `ENVIRONMENT === 'staging'` を検知して staging からの live order を絶対に出さ
+// ないために使う (Webull JP は 1 user = 1 app の制約で staging/prod で API key
+// 分離できないため、コード側で trade を gate する必要がある)。
+//   - dev:        'dev'        (wrangler.jsonc env.dev.vars)
+//   - staging:    'staging'    (wrangler.jsonc env.staging.vars)
+//   - production: 'production' (wrangler.jsonc env.production.vars)
+// 'production' は省略可だが、明示することで「staging gate を抜けたら本番」
+// という意図が読みやすくなる。
+export interface Env {
+  ENVIRONMENT?: string
+}
+
+
 // #21: Webull `x-access-token` flow (append 規約)。
 // signature + 2FA token の hybrid auth (developer.webull.co.jp/apis/docs/authentication/token):
 //   1. operator が Webull 公式ツールで token 発行 → PENDING

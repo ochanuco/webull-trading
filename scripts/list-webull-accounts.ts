@@ -12,7 +12,7 @@
  * Copy the account_id into `.dev.vars` as WEBULL_ACCOUNT_ID.
  */
 
-import { createWebullHttpClient } from '../src/infrastructure/webull/WebullHttpClient'
+import { createWebullReadClient } from '../src/infrastructure/webull/WebullReadClient'
 
 const appKey = process.env.WEBULL_APP_KEY
 const appSecret = process.env.WEBULL_APP_SECRET
@@ -22,7 +22,7 @@ if (!appKey || !appSecret) {
   process.exit(1)
 }
 
-const client = createWebullHttpClient({
+const client = createWebullReadClient({
   WEBULL_APP_KEY: appKey,
   WEBULL_APP_SECRET: appSecret,
   WEBULL_TRADE_API_BASE: process.env.WEBULL_TRADE_API_BASE,

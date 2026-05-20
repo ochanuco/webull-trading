@@ -58,6 +58,11 @@
     // --env still uses the top-level config (local miniflare + local SQLite).
     "dev": {
       "name": "webull-trading-dev",
+      "vars": {
+        // #21: live trade を gate するため env を識別するラベル。`WebullTradeClient`
+        // が `ENVIRONMENT !== 'production'` のとき placeOrder を throw する。
+        "ENVIRONMENT": "dev"
+      },
       "durable_objects": {
         "bindings": [
           { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
@@ -99,6 +104,13 @@
     },
     "staging": {
       "name": "webull-trading-staging",
+      "vars": {
+        // #21: live trade を gate するため env を識別するラベル。Webull JP は
+        // 1 user = 1 app の制約で staging/prod で API key 分離できないため、コード
+        // 側で staging からの live order を絶対に止める。`WebullTradeClient` が
+        // 'staging' を検知すると placeOrder で throw。
+        "ENVIRONMENT": "staging"
+      },
       "routes": [
         { "pattern": "trading-staging.chanu.co", "custom_domain": true }
       ],
@@ -143,6 +155,11 @@
     },
     "production": {
       "name": "webull-trading-production",
+      "vars": {
+        // #21: `WebullTradeClient` の trade gate を通すラベル。'production' のときだけ
+        // placeOrder が実行可能。他の値 (staging / dev / 未設定) は強制 DRY_RUN。
+        "ENVIRONMENT": "production"
+      },
       "routes": [
         { "pattern": "trading.chanu.co", "custom_domain": true }
       ],

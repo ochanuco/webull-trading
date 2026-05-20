@@ -4,7 +4,7 @@ import type { Context } from 'hono'
 import type { AppBindings } from '../app'
 import { rateLimit } from '../middleware/rateLimit'
 import { ValidationError } from '../shared/errors'
-import { createWebullHttpClient } from '../infrastructure/webull/WebullHttpClient'
+import { createWebullReadClient } from '../infrastructure/webull/WebullReadClient'
 import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -440,7 +440,7 @@ export const admin = new Hono<AppBindings>()
       allowedSymbols = universe.allowedSymbols
     }
 
-    const webull = createWebullHttpClient(c.env)
+    const webull = createWebullReadClient(c.env)
     const positionStore = new SymbolStateClient(c.env.SYMBOL_STATE)
     const result = await syncHoldings(
       {
@@ -708,7 +708,7 @@ export const admin = new Hono<AppBindings>()
     if (clientOrderId.length === 0) {
       throw new ValidationError('clientOrderId must be non-empty', { field: 'clientOrderId' })
     }
-    const client = createWebullHttpClient(c.env)
+    const client = createWebullReadClient(c.env)
     const detail = await client.findOrderByClientId(clientOrderId)
     if (!detail) {
       return c.json({ error: 'order_not_found_in_recent_history', clientOrderId }, 404)
