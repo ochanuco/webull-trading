@@ -543,6 +543,12 @@ export const admin = new Hono<AppBindings>()
       )
     }
 
+    // #21 Phase B: DO or env 由来の `x-access-token` を resolve。NORMAL token が
+    // あれば全 probe call に乗せる (none なら省略、broker が 401 で発覚する)。
+    // この probe は client factory を経由せず buildSignedHeaders を直接呼んでた
+    // ため Phase B 直後は seed しても 401 が消えないバグだった (PR #328 follow-up)。
+    const accessToken = await resolveAccessToken(c.env)
+
     // 全 phase で同じキーを返す uniform shape (CodeRabbit #243)。jq / curl から
     // 結果を比較・集計するときに「auth phase だけキーが少ない」状況を避ける。
     // 値が無い場合は null を入れ、`error` は response phase では null にする。
@@ -581,6 +587,7 @@ export const admin = new Hono<AppBindings>()
           appKey,
           appSecret,
           version: args.version,
+          accessToken,
         })
       } catch (e) {
         return {
