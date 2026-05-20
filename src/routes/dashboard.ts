@@ -1061,11 +1061,12 @@ export function extractTokenFromPaste(raw: string):
     }
   }
   if (candidates.length > 1) {
-    // 余分な行が残ってる: operator に何を貼ってるか伝えるため head 部分を含める。
-    const preview = candidates.map((c) => c.slice(0, 32)).join(' | ')
+    // 候補プレビューを URL に含めると token 断片が browser 履歴 / access log に
+    // 漏れる (CodeRabbit #328)。件数のみ返して、operator は form 側で
+    // 不要行を削って再 submit する。
     return {
       ok: false,
-      error: `expected 1 token line, found ${candidates.length}: ${preview}`,
+      error: `expected 1 token line, found ${candidates.length}. remove non-token lines and retry`,
     }
   }
   return { ok: true, token: candidates[0]! }
@@ -1115,18 +1116,18 @@ function renderWebullTokenBody(args: {
       実 token ではなく表示用の省略形</strong> です。2FA verify を完了するまで実 token は
       出力されません。</p>
       <p>例 (NORMAL 化したときの末尾出力):</p>
-      <pre style="background:#f6f8fa;padding:8px;border-radius:4px;overflow:auto;font-size:12px">[issue-token] poll (60s elapsed): 0197e6...7689 (status=NORMAL)
+      <pre style="background:#f6f8fa;padding:8px;border-radius:4px;overflow:auto;font-size:12px">[issue-token] poll (60s elapsed): xxxxxx...yyyy (status=NORMAL)
 [issue-token] NORMAL token acquired. Inject via:
   pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=&lt;dev|staging|production&gt;
   (paste the value printed below)
 
-0197e6abcd1234567890fedcba9876543210...   ← この長い行が実 token</pre>
+&lt;long alphanumeric NORMAL token string&gt;   ← この行が実 token</pre>
     </div>
   </details>
   <form method="post" action="/dashboard/webull-token/seed" style="display:flex;flex-direction:column;gap:8px;max-width:720px">
     <label for="token" style="font-weight:bold">issue-token の出力を貼り付け (丸ごとで OK):</label>
     <textarea id="token" name="token" rows="6" required
-      placeholder="例:&#10;[issue-token] NORMAL token acquired. Inject via:&#10;  pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=production&#10;&#10;0197e6abcd1234567890fedcba9876543210..."
+      placeholder="例:&#10;[issue-token] NORMAL token acquired. Inject via:&#10;  pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=production&#10;&#10;<long alphanumeric NORMAL token string>"
       style="font-family:ui-monospace,monospace;padding:6px;border:1px solid #ccc;border-radius:4px"
     ></textarea>
     <button type="submit" style="padding:8px 16px;background:#28a;color:#fff;border:none;border-radius:4px;cursor:pointer;align-self:flex-start">
