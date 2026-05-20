@@ -451,3 +451,16 @@ export interface Env {
 export interface Env {
   ENVIRONMENT?: string
 }
+
+
+// #21 Phase B: Webull `x-access-token` の runtime state を持つ DO (append 規約)。
+// Phase A で operator が `pnpm run issue-token` で取得した token を、admin
+// endpoint 経由でこの DO に seed する。cron が定期的に `WebullTokenClient.
+// createToken(existingToken)` で refresh して書き戻す。WEBULL_ACCESS_TOKEN env
+// (Phase A の bootstrap path) は DO seed が無い時の fallback として残し、両方
+// 揃ってる場合は DO 側を優先する (= 自動 refresh が効く状態を「正」と扱う)。
+import type { WebullTokenStateDO } from '../trading/state/WebullTokenStateDO'
+
+export interface Env {
+  WEBULL_TOKEN_STATE?: DurableObjectNamespace<WebullTokenStateDO>
+}

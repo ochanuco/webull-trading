@@ -1,8 +1,10 @@
 import { Hono } from 'hono'
 import type { AppBindings } from '../app'
+import type { Env } from '../config/env'
 import { loadGlobalConfigFrom, type LoadedGlobalConfig } from '../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import type { WebullClientEnv } from '../infrastructure/webull/WebullHttpClient'
+import { resolveAccessToken } from '../infrastructure/webull/resolveAccessToken'
 import { createWebullTradeClient } from '../infrastructure/webull/WebullTradeClient'
 import { ValidationError } from '../shared/errors'
 import { TradingService, type TradingConfig } from '../trading/application/TradingService'
@@ -32,7 +34,7 @@ export const trade = new Hono<AppBindings>()
       loadSymbolUniverse(c.env),
       loadGlobalConfigFrom(c.env, requestId),
     ])
-    const service = createTradingService(request, c.env, universe, global)
+    const service = await createTradingService(request, c.env, universe, global)
     return c.json(
       service.decide(request, toTradingConfig(request, universe, global, c.env.TRADING_ENABLED), {
         requestId,
@@ -46,7 +48,7 @@ export const trade = new Hono<AppBindings>()
       loadSymbolUniverse(c.env),
       loadGlobalConfigFrom(c.env, requestId),
     ])
-    const service = createTradingService(request, c.env, universe, global)
+    const service = await createTradingService(request, c.env, universe, global)
     return c.json(
       await service.executeTrade(request, toTradingConfig(request, universe, global, c.env.TRADING_ENABLED), {
         requestId,
@@ -75,19 +77,24 @@ async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeReques
   }
 }
 
-export function createTradingService(
+export async function createTradingService(
   request: TradeRequest,
-  env: {
+  env: Env & {
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>
     PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
     ENVIRONMENT?: string
   } & WebullClientEnv,
   universe: SymbolUniverse,
   global: LoadedGlobalConfig,
-): TradingService {
+): Promise<TradingService> {
+  // Phase B: trade client は DO 由来 token を優先 (fallback で env)。decide()
+  // のときも resolve するが、broker call 自体は execute() で初めて発火するので
+  // 余計な network call にはならない (DO は同一 isolate 内で cache 済)。
   const execution = global.dryRun
     ? new MockExecution()
-    : new WebullExecution(createWebullTradeClient(env))
+    : new WebullExecution(
+        createWebullTradeClient(env, { accessToken: await resolveAccessToken(env) }),
+      )
 
   return new TradingService(
     new FixedRuleStrategy(request.buyBelow, request.sellAbove),

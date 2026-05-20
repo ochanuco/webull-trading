@@ -5,6 +5,11 @@ import type { AppBindings } from '../app'
 import { rateLimit } from '../middleware/rateLimit'
 import { ValidationError } from '../shared/errors'
 import { createWebullReadClient } from '../infrastructure/webull/WebullReadClient'
+import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
+import { resolveAccessToken } from '../infrastructure/webull/resolveAccessToken'
+import { WebullAuth } from '../infrastructure/webull/WebullAuth'
+import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
+import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
 import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -440,7 +445,9 @@ export const admin = new Hono<AppBindings>()
       allowedSymbols = universe.allowedSymbols
     }
 
-    const webull = createWebullReadClient(c.env)
+    const webull = createWebullReadClient(c.env, {
+      accessToken: await resolveAccessToken(c.env),
+    })
     const positionStore = new SymbolStateClient(c.env.SYMBOL_STATE)
     const result = await syncHoldings(
       {
@@ -703,12 +710,118 @@ export const admin = new Hono<AppBindings>()
       orderHistoryNew,
     })
   })
+  /**
+   * #21 Phase B: `WebullTokenStateDO` operator endpoints。
+   *
+   * - GET /webull-token        : 現在の状態 metadata を返す (token plaintext は返却しない)
+   * - POST /webull-token/seed  : operator が `pnpm run issue-token` で取得した NORMAL token を投入
+   * - POST /webull-token/refresh: 手動 refresh トリガー (cron 待たずに更新)
+   */
+  .get('/webull-token', async (c) => {
+    if (!c.env.WEBULL_TOKEN_STATE) {
+      throw new ValidationError('WEBULL_TOKEN_STATE binding is not configured', { field: 'env' })
+    }
+    const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
+    const state = await store.getState()
+    if (!state) {
+      return c.json({ seeded: false, state: null })
+    }
+    // token plaintext は返さない (audit log / browser cache / screenshot に
+    // 漏れないため)。head/tail だけ表示して operator が「どの token か」を
+    // 識別できれば十分。
+    const tokenHint = state.token.length > 10
+      ? `${state.token.slice(0, 6)}...${state.token.slice(-4)}`
+      : '<redacted>'
+    return c.json({
+      seeded: true,
+      state: {
+        tokenHint,
+        expires: state.expires,
+        status: state.status,
+        fetchedAt: state.fetchedAt,
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessAt: state.lastSuccessAt,
+      },
+    })
+  })
+  .post('/webull-token/seed', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.WEBULL_TOKEN_STATE) {
+      throw new ValidationError('WEBULL_TOKEN_STATE binding is not configured', { field: 'env' })
+    }
+    const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null
+    const rawToken = typeof body?.token === 'string' ? body.token.trim() : ''
+    if (rawToken.length === 0) {
+      throw new ValidationError('body.token must be a non-empty string', { field: 'token' })
+    }
+    if (!c.env.WEBULL_APP_KEY || !c.env.WEBULL_APP_SECRET) {
+      throw new ValidationError(
+        'WEBULL_APP_KEY / WEBULL_APP_SECRET must be set to verify the seeded token',
+        { field: 'env' },
+      )
+    }
+    // operator が貼り付けた token が本当に NORMAL かを broker 側で再確認してから DO に保存。
+    // (Phase A の issue-token script では verify 済だが、time-of-check vs time-of-use の
+    // ズレを締めるため。期限切れ間近の token を seed されても弾ける)
+    const tokenClient = new WebullTokenClient({
+      auth: new WebullAuth({
+        appKey: c.env.WEBULL_APP_KEY,
+        appSecret: c.env.WEBULL_APP_SECRET,
+      }),
+      baseUrl: c.env.WEBULL_TRADE_API_BASE?.trim() || 'https://api.webull.co.jp',
+    })
+    const dto = await tokenClient.checkToken(rawToken)
+    if (dto.status !== 'NORMAL') {
+      return c.json(
+        { error: 'token_not_normal', status: dto.status },
+        409,
+      )
+    }
+    const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
+    const seeded = await store.seedToken({
+      token: dto.token,
+      expires: dto.expires,
+      status: dto.status,
+    })
+    return c.json({
+      seeded: true,
+      state: {
+        expires: seeded.expires,
+        status: seeded.status,
+        fetchedAt: seeded.fetchedAt,
+      },
+    })
+  })
+  .post('/webull-token/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.WEBULL_TOKEN_STATE) {
+      throw new ValidationError('WEBULL_TOKEN_STATE binding is not configured', { field: 'env' })
+    }
+    // force=true で「期限まで余裕あるからスキップ」のロジックを bypass。
+    const summary = await refreshWebullToken(c.env, { force: true })
+    return c.json({
+      refreshed: summary.refreshed,
+      skippedReason: summary.skippedReason ?? null,
+      failureReason: summary.failureReason ?? null,
+      // before/after の token plaintext は返さない (上記 GET と同じ理由)。
+      // status / 時刻のみ。
+      after: summary.after
+        ? {
+            expires: summary.after.expires,
+            status: summary.after.status,
+            fetchedAt: summary.after.fetchedAt,
+            lastAttemptAt: summary.after.lastAttemptAt,
+            lastSuccessAt: summary.after.lastSuccessAt,
+          }
+        : null,
+    })
+  })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
     if (clientOrderId.length === 0) {
       throw new ValidationError('clientOrderId must be non-empty', { field: 'clientOrderId' })
     }
-    const client = createWebullReadClient(c.env)
+    const client = createWebullReadClient(c.env, {
+      accessToken: await resolveAccessToken(c.env),
+    })
     const detail = await client.findOrderByClientId(clientOrderId)
     if (!detail) {
       return c.json({ error: 'order_not_found_in_recent_history', clientOrderId }, 404)

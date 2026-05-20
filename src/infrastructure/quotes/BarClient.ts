@@ -175,7 +175,12 @@ const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
 
 export function createWebullBarClient(
   env: WebullBarClientEnv,
-  options?: { fetchFn?: typeof fetch; timeoutMs?: number },
+  options?: {
+    fetchFn?: typeof fetch
+    timeoutMs?: number
+    /** Phase B: resolveAccessToken 由来の override (DO 優先)。 */
+    accessToken?: string
+  },
 ): WebullBarClient {
   // env 空 / undefined / whitespace は JP prod default。env が明示されてれば
   // override (UAT / 将来 region 用)。
@@ -184,7 +189,7 @@ export function createWebullBarClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
-      accessToken: env.WEBULL_ACCESS_TOKEN,
+      accessToken: options?.accessToken ?? env.WEBULL_ACCESS_TOKEN,
     }),
     baseUrl,
     barsPath: env.WEBULL_BARS_PATH,

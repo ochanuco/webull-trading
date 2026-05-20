@@ -83,5 +83,7 @@ export function createWebullTradeClient(
   env: WebullTradeClientEnv,
   options?: Parameters<typeof createWebullHttpClient>[1],
 ): WebullTradeClient {
+  // `options.accessToken` (Phase B の resolveAccessToken 由来) を WebullHttpClient
+  // に thru で渡す。env.WEBULL_ACCESS_TOKEN は DO 未投入時の fallback。
   return new WebullTradeClient(createWebullHttpClient(env, options), env)
 }

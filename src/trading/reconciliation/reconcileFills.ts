@@ -3,6 +3,7 @@ import { alias } from 'drizzle-orm/sqlite-core'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { tradeJournal } from '../../infrastructure/db/schema'
+import { resolveAccessToken } from '../../infrastructure/webull/resolveAccessToken'
 import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
@@ -264,7 +265,10 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   if (uniqueCandidates.length === 0) return summary
 
   summary.inspected = uniqueCandidates.length
-  const client = createWebullReadClient(options.env)
+  // Phase B: DO 由来 token を優先 (fallback で env)。
+  const client = createWebullReadClient(options.env, {
+    accessToken: await resolveAccessToken(options.env),
+  })
 
   for (const row of uniqueCandidates) {
     const coid = row.clientOrderId
