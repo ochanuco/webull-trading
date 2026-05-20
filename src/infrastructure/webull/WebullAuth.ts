@@ -1,5 +1,37 @@
-const WEBULL_SIGNATURE_ALGORITHM = 'HMAC-SHA1'
 const WEBULL_SIGNATURE_VERSION = '1.0'
+
+/**
+ * Webull SDK の `webull/core/utils/common.py::is_not_upgrade_api_host` と完全一致
+ * させた host 集合。これらの host だけが **HMAC-SHA1 + MD5 body** で signing
+ * (legacy / sandbox / 一部 UAT)、それ以外の host (JP の `api.webull.co.jp` 等
+ * production endpoint 含む) は **HMAC-SHA256 + SHA256 body** が要求される。
+ *
+ * 本番 JP host (`api.webull.co.jp`) を SHA1 で叩くと account/trade endpoint が
+ * `401 INVALID_TOKEN` で reject される事を staging probe で実証 (#21 Phase B
+ * follow-up)。SDK の挙動を忠実に移植する事で本番 broker と整合させる。
+ */
+export const HMAC_SHA1_HOSTS: ReadonlySet<string> = new Set([
+  'api.webull.com',
+  'events-api.webull.com',
+  'api.webull.hk',
+  'events-api.webull.hk',
+  'pre-openapi-us-alb.webullbroker.com',
+  'pre-openapi-us-events.webullbroker.com',
+  'pre-openapi-alb.webullbroker.com',
+  'pre-openapi-events.webullbroker.com',
+  'us-openapi-alb.uat.webullbroker.com',
+  'us-openapi-events.uat.webullbroker.com',
+  'hk-openapi.uat.webullbroker.com',
+  'hk-openapi-events-api.uat.webullbroker.com',
+  'api.sandbox.webull.hk',
+  'events-api.sandbox.webull.hk',
+])
+
+export type SignerAlgorithm = 'HMAC-SHA1' | 'HMAC-SHA256'
+
+export function pickSignerAlgorithm(host: string): SignerAlgorithm {
+  return HMAC_SHA1_HOSTS.has(host) ? 'HMAC-SHA1' : 'HMAC-SHA256'
+}
 
 type SignablePrimitive = string | number | boolean
 type SignableValue =
@@ -97,27 +129,39 @@ export async function buildSignedHeaders({
     throw new Error(`Unsupported Webull signing method: ${method}`)
   }
 
-  // The Python SDK (webullsdkcore.auth.composer.default_signature_composer) signs
-  // exactly these six headers + optional query/body, regardless of whether the
-  // request carries an x-version header. Including x-version in the canonical
-  // string makes Webull reject the signature as UNAUTHORIZED.
+  // SDK の `default_signature_composer` と同等の signing header 集合。x-version /
+  // x-signature / x-access-token は canonical string から除外 (含めると signature
+  // が UNAUTHORIZED で reject される)。signing algorithm は host base で
+  // HMAC-SHA1 / HMAC-SHA256 を自動選択 (SDK の `is_not_upgrade_api_host` ロジック
+  // を移植、#21 Phase B follow-up)。
+  const algorithm = pickSignerAlgorithm(host)
   const signingHeaders = {
     host,
     'x-app-key': appKey,
-    'x-signature-algorithm': WEBULL_SIGNATURE_ALGORITHM,
+    'x-signature-algorithm': algorithm,
     'x-signature-nonce': nonce,
     'x-signature-version': WEBULL_SIGNATURE_VERSION,
     'x-timestamp': timestamp,
   }
-  const bodyMd5 = body === undefined || body.length === 0 ? undefined : await md5UpperHex(body)
+  // body hash は algorithm と pair で決まる: HMAC-SHA1 → MD5 / HMAC-SHA256 → SHA256
+  // (SDK の `_get_body_string` 参照)。signing canonical の最後に hex-upper を入れる。
+  const bodyHash =
+    body === undefined || body.length === 0
+      ? undefined
+      : algorithm === 'HMAC-SHA256'
+        ? await sha256UpperHex(body)
+        : await md5UpperHex(body)
   const stringToSign = canonicalString({
     path,
     query,
     headers: signingHeaders,
-    bodyMd5,
+    bodyMd5: bodyHash,
   })
   const encodedString = urlEncodeCanonical(stringToSign)
-  const signature = await hmacSha1Base64(appSecret, encodedString)
+  const signature =
+    algorithm === 'HMAC-SHA256'
+      ? await hmacSha256Base64(appSecret, encodedString)
+      : await hmacSha1Base64(appSecret, encodedString)
 
   // x-access-token は signature と同じく supplemental ヘッダ扱い (canonical
   // string に含めない)。trim 後が空文字なら未設定として扱う = whitespace-only な
@@ -180,6 +224,32 @@ export async function hmacSha1Base64(secret: string, value: string): Promise<str
   )
   const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))
   return toBase64(signature)
+}
+
+/**
+ * HMAC-SHA256 + base64 — JP 本番 host (SDK 上で `is_not_upgrade_api_host` が true)
+ * の signing 用。secret は `<app_secret>&` の trailing `&` 付き (SHA1 と共通)。
+ */
+export async function hmacSha256Base64(secret: string, value: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(`${secret}&`),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))
+  return toBase64(signature)
+}
+
+/**
+ * SHA-256 hex (大文字)。SDK の `sha256_hex(content).upper()` と等価。HMAC-SHA256
+ * 経路の body hash 用 (HMAC-SHA1 経路は MD5 を使う、`md5UpperHex` 参照)。
+ */
+export async function sha256UpperHex(value: string): Promise<string> {
+  const input = new TextEncoder().encode(value)
+  const digest = await crypto.subtle.digest('SHA-256', input)
+  return toHex(digest).toUpperCase()
 }
 
 export async function md5UpperHex(value: string): Promise<string> {

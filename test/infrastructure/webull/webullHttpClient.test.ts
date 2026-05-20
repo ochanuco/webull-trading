@@ -105,7 +105,10 @@ describe('WebullHttpClient', () => {
       'Content-Type': 'application/json',
       host: 'broker.example.test',
       'x-app-key': 'app-key',
-      'x-signature-algorithm': 'HMAC-SHA1',
+      // host が SDK の upgrade_hosts に含まれない場合は HMAC-SHA256 (#21 Phase B
+      // follow-up)。`broker.example.test` は fake host なので default の SHA256
+      // 経路に乗る。本物の prod (api.webull.co.jp) も同じく SHA256。
+      'x-signature-algorithm': 'HMAC-SHA256',
       'x-signature-version': '1.0',
       'x-signature-nonce': expect.any(String),
       'x-timestamp': expect.any(String),
