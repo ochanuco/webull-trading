@@ -1,36 +1,26 @@
 const WEBULL_SIGNATURE_VERSION = '1.0'
 
-/**
- * Webull SDK の `webull/core/utils/common.py::is_not_upgrade_api_host` と完全一致
- * させた host 集合。これらの host だけが **HMAC-SHA1 + MD5 body** で signing
- * (legacy / sandbox / 一部 UAT)、それ以外の host (JP の `api.webull.co.jp` 等
- * production endpoint 含む) は **HMAC-SHA256 + SHA256 body** が要求される。
- *
- * 本番 JP host (`api.webull.co.jp`) を SHA1 で叩くと account/trade endpoint が
- * `401 INVALID_TOKEN` で reject される事を staging probe で実証 (#21 Phase B
- * follow-up)。SDK の挙動を忠実に移植する事で本番 broker と整合させる。
- */
-export const HMAC_SHA1_HOSTS: ReadonlySet<string> = new Set([
-  'api.webull.com',
-  'events-api.webull.com',
-  'api.webull.hk',
-  'events-api.webull.hk',
-  'pre-openapi-us-alb.webullbroker.com',
-  'pre-openapi-us-events.webullbroker.com',
-  'pre-openapi-alb.webullbroker.com',
-  'pre-openapi-events.webullbroker.com',
-  'us-openapi-alb.uat.webullbroker.com',
-  'us-openapi-events.uat.webullbroker.com',
-  'hk-openapi.uat.webullbroker.com',
-  'hk-openapi-events-api.uat.webullbroker.com',
-  'api.sandbox.webull.hk',
-  'events-api.sandbox.webull.hk',
-])
-
 export type SignerAlgorithm = 'HMAC-SHA1' | 'HMAC-SHA256'
 
-export function pickSignerAlgorithm(host: string): SignerAlgorithm {
-  return HMAC_SHA1_HOSTS.has(host) ? 'HMAC-SHA1' : 'HMAC-SHA256'
+/**
+ * Webull の signing algorithm は **x-version (= API version) を見て決まる**
+ * 事を JP 本番 probe で実証 (#21 Phase B follow-up):
+ *
+ *   - v1 endpoint (`/openapi/account/*`) + SHA256 → 401 `SIGNATURE_ALGORITHM_NOT_SUPPORTED`
+ *   - v2 endpoint (`/openapi/assets/*` / `/openapi/trade/*`) + SHA256 → signing 通過
+ *     (broker は SHA256 を受理。別 layer で INVALID_TOKEN になる事はあるがそれは
+ *      signature の問題ではない)
+ *
+ * Webull SDK は host base で switch する実装になってるが、SDK は host ごとに
+ * 「使う endpoint version」を間接的に固定してるだけで、実態は version base。
+ * 我々のコードは v1 / v2 両 path を probe / drift 比較するため、host base だと
+ * v1 + 新 host で SHA256 を送って `SIGNATURE_ALGORITHM_NOT_SUPPORTED` になる
+ * (PR #331 で踏んだバグ)。version base に切替えてこれを解消。
+ *
+ * version 未指定 (legacy caller) は SHA1 default (= v1 互換)。
+ */
+export function pickSignerAlgorithm(version: string | undefined): SignerAlgorithm {
+  return version === 'v2' ? 'HMAC-SHA256' : 'HMAC-SHA1'
 }
 
 type SignablePrimitive = string | number | boolean
@@ -131,10 +121,11 @@ export async function buildSignedHeaders({
 
   // SDK の `default_signature_composer` と同等の signing header 集合。x-version /
   // x-signature / x-access-token は canonical string から除外 (含めると signature
-  // が UNAUTHORIZED で reject される)。signing algorithm は host base で
-  // HMAC-SHA1 / HMAC-SHA256 を自動選択 (SDK の `is_not_upgrade_api_host` ロジック
-  // を移植、#21 Phase B follow-up)。
-  const algorithm = pickSignerAlgorithm(host)
+  // が UNAUTHORIZED で reject される)。signing algorithm は **x-version base**
+  // で HMAC-SHA1 / HMAC-SHA256 を自動選択 (#21 Phase B follow-up、JP 本番 probe
+  // で v1=SHA1 / v2=SHA256 必須が判明)。host base ではない (SDK の host-based
+  // 実装は SDK 自身が version を間接固定してたから動いてただけ)。
+  const algorithm = pickSignerAlgorithm(version)
   const signingHeaders = {
     host,
     'x-app-key': appKey,
