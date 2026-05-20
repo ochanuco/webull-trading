@@ -169,7 +169,7 @@ Cron:
 | `WEBULL_TRADE_API_BASE` | trade API host override (#21)。未設定なら JP prod default (`https://api.webull.co.jp`)。UAT は ALB URL を投入 |
 | `WEBULL_QUOTES_API_BASE` | quotes API host override (#21)。未設定なら JP prod default (`https://data-api.webull.co.jp`)。UAT は ALB URL を投入 |
 | `WEBULL_EVENTS_API_BASE` | events API host override (#21、consumer 未実装)。未設定なら JP prod default (`https://events-api.webull.co.jp`) |
-| `WEBULL_ACCESS_TOKEN` | `x-access-token` ヘッダ値 (#21)。operator が Webull 公式ツールで 2FA 経由発行した token を投入。signature とは直交する supplemental auth。15 days inactivity で INVALID 化 (再発行 / 監視は follow-up issue で扱う) |
+| `WEBULL_ACCESS_TOKEN` | `x-access-token` ヘッダ値 (#21)。signature とは直交する supplemental auth、JP 本番では必須。`pnpm run issue-token` で発行 + 2FA verify して取得する (下記参照)。15 days inactivity で INVALID 化 (自動 refresh は #21 Phase B で扱う) |
 | `WEBULL_GRPC_ENDPOINT` | bridge の gRPC 接続先 (非公開) |
 | `EVENT_INGEST_URL` | bridge 側から叩く Worker URL (`https://.../events/trade`) |
 | `EVENT_INGEST_SECRET` | `/events/trade` header |
@@ -194,6 +194,32 @@ WEBULL_APP_KEY=... WEBULL_APP_SECRET=... \
 WEBULL_TRADE_API_BASE=https://jp-openapi-alb.uat.webullbroker.com \
   pnpm run accounts
 ```
+
+### Webull `x-access-token` を発行する (#21)
+
+JP 本番では signature に加えて 2FA-backed `x-access-token` が必須。`pnpm run issue-token` が `/openapi/auth/token/create` を叩いて PENDING token を発行し、operator が Webull モバイルアプリで 2FA SMS verify を完了するのを poll で待ち、NORMAL になった token を stdout に出力する。
+
+```bash
+# 1. Operator script を起動
+WEBULL_APP_KEY="$(op read 'op://Personal/WEBULL_APP_KEY/credential')" \
+WEBULL_APP_SECRET="$(op read 'op://Personal/WEBULL_APP_SECRET/credential')" \
+  pnpm run issue-token
+
+# 2. ログに表示された PENDING token を確認し、Webull モバイルアプリで 5 分以内に
+#    2FA SMS verify を完了する。script は 30 秒毎に check_token を poll する。
+
+# 3. status=NORMAL になると stdout に token 文字列だけが出力されるので、
+#    そのまま wrangler に流し込める:
+pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=production
+# (上で出力された token 文字列を貼り付ける)
+
+# refresh (既存 token を引き継いで更新したい場合):
+WEBULL_APP_KEY=... WEBULL_APP_SECRET=... \
+WEBULL_EXISTING_TOKEN=<old token> \
+  pnpm run issue-token
+```
+
+15 days inactivity で `INVALID` 化する。手動再発行は同じ手順、自動 refresh は #21 Phase B (DO ベース) で扱う。
 
 ## D1 セットアップ (初回のみ)
 
