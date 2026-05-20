@@ -20,7 +20,7 @@ import { reconcileFills } from '../trading/reconciliation/reconcileFills'
 import { syncHoldings } from '../trading/reconciliation/syncHoldings'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
-import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
+import { YahooBarClient, toYahooSymbol } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastructure/db/schema'
@@ -648,8 +648,9 @@ export const admin = new Hono<AppBindings>()
      * Yahoo は JP 銘柄に `.T` suffix を付ける convention (YahooBarClient/QuoteClient と同じ)。
      */
     async function probeYahooSnapshot(symbolForProbe: string): Promise<ProbeResult> {
-      const isJp = /^\d{4}$/.test(symbolForProbe) || /^[0-9]+[A-Z]$/.test(symbolForProbe)
-      const yahooSymbol = isJp ? `${symbolForProbe}.T` : symbolForProbe
+      // JP 判定は `toYahooSymbol` に一本化 (CodeRabbit #334)。re-implement すると
+      // YahooBarClient / YahooQuoteClient の convention 変更時にズレる。
+      const yahooSymbol = toYahooSymbol(symbolForProbe)
       const url = new URL(
         `/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`,
         'https://query1.finance.yahoo.com',

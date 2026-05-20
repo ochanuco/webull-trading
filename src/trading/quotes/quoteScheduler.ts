@@ -64,9 +64,22 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
   const { grouped, unsupported } = groupSymbolsByCategory(symbols)
   const fetchedAt = now().toISOString()
 
-  // JP symbols have no working snapshot endpoint yet — mark as skipped so the
-  // summary reflects "known unfetchable" rather than a silent drop.
-  for (const symbol of unsupported) summary.skipped.push(symbol)
+  // `groupSymbolsByCategory` は Webull の制約 (JP snapshot endpoint なし) で
+  // JP 銘柄を `unsupported` に分類する。Yahoo は `.T` suffix で JP も普通に
+  // 取得できるので、Yahoo 経路では unsupported を fetch 対象に戻す。
+  // Webull 経路では従来通り skip (CodeRabbit #334)。
+  const clientSupportsJp = client.source !== 'webull-snapshot'
+  if (clientSupportsJp) {
+    // Yahoo (or 将来の同等 client): unsupported (= JP) を US_STOCK に混ぜて投げる。
+    // category は Yahoo 側で ignore されるので分類は便宜上のもの。
+    if (unsupported.length > 0) {
+      grouped.US_STOCK.push(...unsupported)
+    }
+  } else {
+    // Webull: JP snapshot は依然 unsupported。summary に "known unfetchable"
+    // として残す (silent drop を避ける)。
+    for (const symbol of unsupported) summary.skipped.push(symbol)
+  }
 
   for (const [category, group] of Object.entries(grouped) as Array<[WebullQuoteCategory, string[]]>) {
     if (group.length === 0) continue
