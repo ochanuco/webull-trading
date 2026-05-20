@@ -20,7 +20,7 @@ import { reconcileFills } from '../trading/reconciliation/reconcileFills'
 import { syncHoldings } from '../trading/reconciliation/syncHoldings'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
-import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
+import { YahooBarClient, toYahooSymbol } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastructure/db/schema'
@@ -642,6 +642,60 @@ export const admin = new Hono<AppBindings>()
       }
     }
 
+    /**
+     * Yahoo Finance 経由の同 symbol snapshot probe (#21 follow-up)。`probeOnce`
+     * と同じ uniform shape を返すが auth/signing 不要なので fetch を直接叩く。
+     * Yahoo は JP 銘柄に `.T` suffix を付ける convention (YahooBarClient/QuoteClient と同じ)。
+     */
+    async function probeYahooSnapshot(symbolForProbe: string): Promise<ProbeResult> {
+      // JP 判定は `toYahooSymbol` に一本化 (CodeRabbit #334)。re-implement すると
+      // YahooBarClient / YahooQuoteClient の convention 変更時にズレる。
+      const yahooSymbol = toYahooSymbol(symbolForProbe)
+      const url = new URL(
+        `/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`,
+        'https://query1.finance.yahoo.com',
+      )
+      url.searchParams.set('interval', '1m')
+      url.searchParams.set('range', '1d')
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10_000)
+      const t0 = Date.now()
+      try {
+        const response = await fetch(url.href, {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            // Yahoo は anonymous request を 429 で返すので browser-like UA を付ける。
+            'User-Agent': 'Mozilla/5.0',
+          },
+          signal: controller.signal,
+        })
+        const body = await response.text()
+        clearTimeout(timeoutId)
+        return {
+          phase: 'response',
+          status: response.status,
+          ok: response.ok,
+          bodyTruncated: body.slice(0, 4000),
+          bodyLength: body.length,
+          msTaken: Date.now() - t0,
+          error: null,
+        }
+      } catch (e) {
+        clearTimeout(timeoutId)
+        return {
+          phase: 'fetch',
+          status: null,
+          ok: null,
+          bodyTruncated: null,
+          bodyLength: null,
+          msTaken: Date.now() - t0,
+          error: e instanceof Error ? e.message : String(e),
+        }
+      }
+    }
+
     // #251 / #254: drift 検証のため旧 path (v1) と 新 path (v2) を **並列** で
     // 叩いて比較する。各セクションを result 配列の object として返却:
     //   - quote (path 共通、v2 ヘッダ): 既存
@@ -651,6 +705,7 @@ export const admin = new Hono<AppBindings>()
     // 後方互換維持 (`positions` field 名据え置き)、新 path 結果は追加 field。
     const [
       quoteResult,
+      quoteYahooResult,
       positionsOld,
       positionsNew,
       orderHistoryOld,
@@ -673,6 +728,11 @@ export const admin = new Hono<AppBindings>()
         // JP UAT (ALB) では同じ URL が入るので no-op。
         host: quotesBaseUrl,
       }),
+      // Yahoo Finance を quote 用 backup source として probe (#21 follow-up)。
+      // 現状 strategy cron の default 経路でもあり、Webull JP の market-data API
+      // が稼働開始する前まで主軸を担う。auth/signing は不要なので probeOnce ではなく
+      // 直接 fetch する小 helper を呼ぶ。
+      probeYahooSnapshot(symbol),
       // OLD: WebullHttpClient.getPositions (現行 cron が叩く path + v1)
       probeOnce({
         method: 'GET',
@@ -739,6 +799,9 @@ export const admin = new Hono<AppBindings>()
       positionsNew,
       orderHistoryOld,
       orderHistoryNew,
+      // Yahoo Finance 経由の同 symbol snapshot (#21 follow-up)。Webull の data-api
+      // が応答しない状況での代替経路の生死を可視化する。
+      quoteYahoo: quoteYahooResult,
     })
   })
   /**
