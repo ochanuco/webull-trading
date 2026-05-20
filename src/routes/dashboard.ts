@@ -883,7 +883,21 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured')))
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
-    const state = await store.getState().catch(() => null)
+    // DO read 失敗を「DO 空」と区別する (CodeRabbit #327)。前者は障害、後者は
+    // 初期状態。混同すると operator が「seed されてないだけ」と誤判断して
+    // 不要な seed 操作を試みる事故が起きる。
+    let state: WebullTokenState | null = null
+    let stateError: string | null = null
+    try {
+      state = await store.getState()
+    } catch (err) {
+      stateError = messageOf(err)
+    }
+    if (stateError) {
+      return c.html(
+        renderLayout(c, 'Webull token', unavailable(`WEBULL_TOKEN_STATE read failed: ${stateError}`)),
+      )
+    }
     const notice = c.req.query('notice') ?? null
     const error = c.req.query('error') ?? null
     return c.html(
@@ -924,28 +938,49 @@ export const dashboard = new Hono<DashboardBindings>()
       )
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
-    const before = await store.getState().catch(() => null)
-    const seeded = await store.seedToken({
-      token: dto.token,
-      expires: dto.expires,
-      status: dto.status,
-    })
-    await writeEventsAuditLog(
-      c,
-      '/dashboard/webull-token/seed',
-      'webull-token=singleton',
-      before
-        ? { status: before.status, expires: before.expires, fetchedAt: before.fetchedAt }
-        : null,
-      { status: seeded.status, expires: seeded.expires, fetchedAt: seeded.fetchedAt },
-    )
-    return c.redirect('/dashboard/webull-token?notice=seeded', 303)
+    // store.seedToken が throw した場合に 500 で落とさず `?error=` で UI に
+    // 戻す (CodeRabbit #327)。getState 失敗は audit log の before が null に
+    // なるだけなので無害、引き続き catch で抑制。
+    try {
+      const before = await store.getState().catch(() => null)
+      const seeded = await store.seedToken({
+        token: dto.token,
+        expires: dto.expires,
+        status: dto.status,
+      })
+      await writeEventsAuditLog(
+        c,
+        '/dashboard/webull-token/seed',
+        'webull-token=singleton',
+        before
+          ? { status: before.status, expires: before.expires, fetchedAt: before.fetchedAt }
+          : null,
+        { status: seeded.status, expires: seeded.expires, fetchedAt: seeded.fetchedAt },
+      )
+      return c.redirect('/dashboard/webull-token?notice=seeded', 303)
+    } catch (err) {
+      return c.redirect(
+        `/dashboard/webull-token?error=${encodeURIComponent(`seed failed: ${messageOf(err)}`)}`,
+        303,
+      )
+    }
   })
   .post('/webull-token/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.WEBULL_TOKEN_STATE) {
       return c.redirect('/dashboard/webull-token?error=WEBULL_TOKEN_STATE+binding+is+not+configured', 303)
     }
-    const summary = await refreshWebullToken(c.env, { force: true })
+    // refreshWebullToken 自体は throw しない (内部で catch して failureReason に
+    // 詰める) 設計だが、念のため try で囲み、失敗系は ?error= に乗せる
+    // (CodeRabbit #327: failureReason ありを notice 緑バナーに混ぜない)。
+    let summary: Awaited<ReturnType<typeof refreshWebullToken>>
+    try {
+      summary = await refreshWebullToken(c.env, { force: true })
+    } catch (err) {
+      return c.redirect(
+        `/dashboard/webull-token?error=${encodeURIComponent(`refresh threw: ${messageOf(err)}`)}`,
+        303,
+      )
+    }
     await writeEventsAuditLog(
       c,
       '/dashboard/webull-token/refresh',
@@ -967,7 +1002,14 @@ export const dashboard = new Hono<DashboardBindings>()
     if (summary.refreshed) {
       return c.redirect('/dashboard/webull-token?notice=refreshed', 303)
     }
-    const why = summary.failureReason ?? summary.skippedReason ?? 'no change'
+    if (summary.failureReason) {
+      return c.redirect(
+        `/dashboard/webull-token?error=${encodeURIComponent(`refresh failed: ${summary.failureReason}`)}`,
+        303,
+      )
+    }
+    // skip は正常系 (期限まで余裕あり等)。緑 notice で OK。
+    const why = summary.skippedReason ?? 'no change'
     return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`refresh: ${why}`)}`, 303)
   })
 
