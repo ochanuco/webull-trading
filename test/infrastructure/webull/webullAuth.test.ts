@@ -119,37 +119,47 @@ describe('WebullAuth helpers', () => {
     expect(result['x-access-token']).toBeUndefined()
   })
 
-  // #21 Phase B follow-up: SDK の `is_not_upgrade_api_host` ロジックに沿った host
-  // base のアルゴ選択。JP 本番 host (`api.webull.co.jp` 等) が SHA1 で signing
-  // されると broker が `401 INVALID_TOKEN` で reject する事を staging probe で実証
-  // したため、SDK と同じ挙動に固定する。
-  describe('pickSignerAlgorithm (host-based selection)', () => {
-    it.each([
-      'api.webull.com',
-      'api.webull.hk',
-      'api.sandbox.webull.hk',
-      'us-openapi-alb.uat.webullbroker.com',
-      'hk-openapi.uat.webullbroker.com',
-    ])('uses HMAC-SHA1 for upgrade_hosts member %s', (host) => {
-      expect(pickSignerAlgorithm(host)).toBe('HMAC-SHA1')
+  // #21 Phase B follow-up: signing algorithm の選択は **x-version base** で行う
+  // (JP 本番 probe で v1 endpoint + SHA256 が `SIGNATURE_ALGORITHM_NOT_SUPPORTED`
+  // で reject される事を実証)。SDK は host base 実装だが、それは host ごとに
+  // 「使う endpoint version」を固定してた副次効果で動いてただけ。
+  describe('pickSignerAlgorithm (version-based selection)', () => {
+    it('uses HMAC-SHA1 for v1 (or unspecified) endpoint', () => {
+      expect(pickSignerAlgorithm('v1')).toBe('HMAC-SHA1')
+      expect(pickSignerAlgorithm(undefined)).toBe('HMAC-SHA1')
     })
 
-    it.each([
-      // JP 本番 (主目的)
-      'api.webull.co.jp',
-      'data-api.webull.co.jp',
-      'events-api.webull.co.jp',
-      // JP UAT (SDK 定義上は SHA256 host だが、broker 自体は SHA1 も受理してる
-      // (実機 staging probe で確認)。SDK 仕様に従って SHA256 にする方が安全。)
-      'jp-openapi-alb.uat.webullbroker.com',
-      // 未知の host も default で SHA256 (新 region 等が追加されても fail-safe)
-      'api.webull.example.com',
-    ])('uses HMAC-SHA256 for non-upgrade host %s', (host) => {
-      expect(pickSignerAlgorithm(host)).toBe('HMAC-SHA256')
+    it('uses HMAC-SHA256 for v2 endpoint', () => {
+      expect(pickSignerAlgorithm('v2')).toBe('HMAC-SHA256')
+    })
+
+    // 想定外の値は安全側で SHA1 にする (broker が v1 として扱えば許容、v2 として
+    // 扱えば signature の前段で reject なので fail-fast)。
+    it('falls back to HMAC-SHA1 for unknown version values', () => {
+      expect(pickSignerAlgorithm('v3-future')).toBe('HMAC-SHA1')
+      expect(pickSignerAlgorithm('')).toBe('HMAC-SHA1')
     })
   })
 
-  it('buildSignedHeaders emits x-signature-algorithm=HMAC-SHA256 for JP prod host', async () => {
+  it('buildSignedHeaders emits x-signature-algorithm=HMAC-SHA256 for v2 endpoint', async () => {
+    const headers = await buildSignedHeaders({
+      method: 'GET',
+      path: '/openapi/assets/positions',
+      query: { account_id: 'acct-1' },
+      appKey: 'app-key',
+      appSecret: 'app-secret',
+      host: 'api.webull.co.jp',
+      nonce: 'nonce-1',
+      timestamp: '2026-05-20T00:00:00Z',
+      version: 'v2',
+    })
+    expect(headers['x-signature-algorithm']).toBe('HMAC-SHA256')
+  })
+
+  it('buildSignedHeaders emits x-signature-algorithm=HMAC-SHA1 for v1 endpoint (even on JP prod host)', async () => {
+    // 同じ host (api.webull.co.jp) でも v1 endpoint なら SHA1 を使う。
+    // JP 本番 probe で v1+SHA256 → SIGNATURE_ALGORITHM_NOT_SUPPORTED だった事の
+    // regression lock。
     const headers = await buildSignedHeaders({
       method: 'GET',
       path: '/openapi/account/positions',
@@ -159,29 +169,14 @@ describe('WebullAuth helpers', () => {
       host: 'api.webull.co.jp',
       nonce: 'nonce-1',
       timestamp: '2026-05-20T00:00:00Z',
-    })
-    expect(headers['x-signature-algorithm']).toBe('HMAC-SHA256')
-  })
-
-  it('buildSignedHeaders emits x-signature-algorithm=HMAC-SHA1 for UAT HK host', async () => {
-    const headers = await buildSignedHeaders({
-      method: 'GET',
-      path: '/openapi/account/positions',
-      query: { account_id: 'acct-1' },
-      appKey: 'app-key',
-      appSecret: 'app-secret',
-      host: 'api.sandbox.webull.hk',
-      nonce: 'nonce-1',
-      timestamp: '2026-05-20T00:00:00Z',
+      version: 'v1',
     })
     expect(headers['x-signature-algorithm']).toBe('HMAC-SHA1')
   })
 
-  it('SHA256 path uses SHA256 body hash (not MD5) in the canonical string', async () => {
-    // Sign with JP prod host (SHA256) and a body. Then re-create the canonical
-    // string with the same body's SHA256 hex and confirm the signature matches
-    // a manual HMAC-SHA256 over that canonical. SHA1 + MD5 must NOT produce the
-    // same value (i.e. the algorithm switch is taking effect).
+  it('SHA256 path (v2) uses SHA256 body hash (not MD5) in the canonical string', async () => {
+    // v2 endpoint + body で SHA256 経路を踏み、canonical/signature が SHA256 で
+    // 組まれてる事を確認。SHA1 と比較して異なる値になる = 切替が effective。
     const body = '{"a":1}'
     const headers = await buildSignedHeaders({
       method: 'POST',
@@ -192,10 +187,10 @@ describe('WebullAuth helpers', () => {
       host: 'api.webull.co.jp',
       nonce: 'nonce-1',
       timestamp: '2026-05-20T00:00:00Z',
+      version: 'v2',
     })
     expect(headers['x-signature-algorithm']).toBe('HMAC-SHA256')
 
-    // 再現テスト: signing canonical を組み立てて HMAC-SHA256 で署名 → 一致確認。
     const bodyHash = await sha256UpperHex(body)
     const canonical = canonicalString({
       path: '/openapi/trade/order/place',
@@ -212,7 +207,6 @@ describe('WebullAuth helpers', () => {
     const expected = await hmacSha256Base64('app-secret', urlEncodeCanonical(canonical))
     expect(headers['x-signature']).toBe(expected)
 
-    // SHA1 で同じ canonical を署名すると **異なる値** になる事を確認 = 切替が effective。
     const sha1Sig = await hmacSha1Base64('app-secret', urlEncodeCanonical(canonical))
     expect(headers['x-signature']).not.toBe(sha1Sig)
   })
