@@ -2,25 +2,34 @@ import type { Env } from '../../config/env'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import {
   groupSymbolsByCategory,
-  WebullQuoteClient,
-  createWebullQuoteClient,
   type QuoteResult,
   type WebullQuoteCategory,
 } from '../../infrastructure/quotes/WebullQuoteClient'
+import { YahooQuoteClient } from '../../infrastructure/quotes/YahooQuoteClient'
 import type { QuoteSnapshot } from '../state/types'
 
-const QUOTE_SOURCE = 'webull-snapshot'
+/**
+ * snapshot client が満たすべき shape (#21 follow-up)。Webull / Yahoo を
+ * 並列で扱えるよう interface を抽出。`source` は QuoteSnapshot に転写され
+ * dashboard / log で「今どの data source か」を区別可能にする。
+ */
+export interface SnapshotClient {
+  readonly source: string
+  getSnapshots(symbols: string[], category: WebullQuoteCategory): Promise<QuoteResult[]>
+}
 
 export interface QuoteRunSummary {
   fetched: number
   persisted: number
   skipped: string[]
   errors: Array<{ category: WebullQuoteCategory; message: string }>
+  /** 実際に使われた snapshot source (`'yahoo-snapshot'` / `'webull-snapshot'`)。 */
+  source: string
 }
 
 interface RunQuoteFeedOptions {
   env: Env
-  client?: WebullQuoteClient
+  client?: SnapshotClient
   now?: () => Date
 }
 
@@ -36,10 +45,22 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
   const universe = await loadSymbolUniverse(env)
   const symbols = universe.allowedSymbols
 
-  const summary: QuoteRunSummary = { fetched: 0, persisted: 0, skipped: [], errors: [] }
+  // default は Yahoo Finance (#21 follow-up)。Webull JP の market-data API
+  // (`data-api.webull.co.jp`) がまだ運用開始してない (DNS は存在するが TCP 無応答
+  // + `api.webull.co.jp/openapi/market-data/*` が 404) ので、運用開始するまでは
+  // Yahoo 経由で snapshot を取る。Webull market-data が live になったら caller
+  // 側で `WebullQuoteClient` を `options.client` に渡せば切替可能。
+  const client: SnapshotClient = options.client ?? new YahooQuoteClient({ now })
+
+  const summary: QuoteRunSummary = {
+    fetched: 0,
+    persisted: 0,
+    skipped: [],
+    errors: [],
+    source: client.source,
+  }
   if (symbols.length === 0) return summary
 
-  const client = options.client ?? createWebullQuoteClient(env, { now })
   const { grouped, unsupported } = groupSymbolsByCategory(symbols)
   const fetchedAt = now().toISOString()
 
@@ -73,7 +94,10 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
         price: result.price,
         asOf: result.asOf,
         fetchedAt,
-        source: QUOTE_SOURCE,
+        // `client.source` から取る ('yahoo-snapshot' / 'webull-snapshot')。
+        // hardcoded constant をやめ、実際に使った client から動的に取る事で
+        // 切替時の source 漏れを防ぐ。
+        source: client.source,
       }
       if (result.bid !== undefined) quote.bid = result.bid
       if (result.ask !== undefined) quote.ask = result.ask

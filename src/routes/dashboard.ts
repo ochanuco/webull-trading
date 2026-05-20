@@ -1542,8 +1542,11 @@ function brokerProbeBody(args: {
   <button type="button" class="probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK" style="padding:4px 12px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">AAPL (US_STOCK)</button>
 </div>
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 <span class="muted" id="probe-current" style="font-size:12px;font-weight:normal"></span></h2>
+<h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 (Webull) <span class="muted" id="probe-current" style="font-size:12px;font-weight:normal"></span></h2>
 <pre id="probe-quote" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">(まだ probe 未実行)</pre>
+
+<h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 (Yahoo Finance) <span class="muted" style="font-size:12px;font-weight:normal">— strategy cron が default で使う source</span></h2>
+<pre id="probe-quote-yahoo" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">(まだ probe 未実行)</pre>
 
 <h2 style="font-size:14px;margin:16px 0 4px 0">meta</h2>
 <pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px">(まだ probe 未実行)</pre>
@@ -1677,6 +1680,8 @@ function brokerProbeBody(args: {
         // CodeRabbit #262: body fields が欠けてても UI を必ず更新して stale を
         // 残さない。quote / positions / 各 raw を **常に** 上書き。
         quoteEl.textContent = body.quote ? prettify(body.quote) : '(no data)';
+        var quoteYahooEl = document.getElementById('probe-quote-yahoo');
+        if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
         renderPositionsList(body.positions || null);
         // drift 比較: 新 path 結果も raw + table へ。値が無くても "(no data)"
         // を入れて stale 表示にしない。
