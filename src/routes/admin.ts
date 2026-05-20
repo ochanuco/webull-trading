@@ -723,12 +723,14 @@ export const admin = new Hono<AppBindings>()
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
     const state = await store.getState()
+    // token plaintext は返さない (audit log / browser cache / screenshot に
+    // 漏れないため)。head/tail だけ表示して operator が「どの token か」を
+    // 識別できれば十分。さらに browser / intermediary cache にも残らない
+    // よう Cache-Control: no-store (CodeRabbit #326)。
+    c.header('Cache-Control', 'no-store')
     if (!state) {
       return c.json({ seeded: false, state: null })
     }
-    // token plaintext は返さない (audit log / browser cache / screenshot に
-    // 漏れないため)。head/tail だけ表示して operator が「どの token か」を
-    // 識別できれば十分。
     const tokenHint = state.token.length > 10
       ? `${state.token.slice(0, 6)}...${state.token.slice(-4)}`
       : '<redacted>'
@@ -777,11 +779,31 @@ export const admin = new Hono<AppBindings>()
       )
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
+    const before = await store.getState()
     const seeded = await store.seedToken({
       token: dto.token,
       expires: dto.expires,
       status: dto.status,
     })
+    // 監査ログには token plaintext は含めず metadata のみ (CodeRabbit #326)。
+    // 「誰がいつ seed したか」が requestId / actor 付きで D1 に残る。
+    await writeAuditLog(
+      c,
+      '/admin/webull-token/seed',
+      'webull-token=singleton',
+      before
+        ? {
+            status: before.status,
+            expires: before.expires,
+            fetchedAt: before.fetchedAt,
+          }
+        : null,
+      {
+        status: seeded.status,
+        expires: seeded.expires,
+        fetchedAt: seeded.fetchedAt,
+      },
+    )
     return c.json({
       seeded: true,
       state: {
@@ -797,6 +819,30 @@ export const admin = new Hono<AppBindings>()
     }
     // force=true で「期限まで余裕あるからスキップ」のロジックを bypass。
     const summary = await refreshWebullToken(c.env, { force: true })
+    // 監査ログ: 手動 refresh が走った事実 (とその結果) を残す (CodeRabbit #326)。
+    // token plaintext は出さず、status と時刻だけ before/after に積む。
+    await writeAuditLog(
+      c,
+      '/admin/webull-token/refresh',
+      'webull-token=singleton',
+      summary.before
+        ? {
+            status: summary.before.status,
+            expires: summary.before.expires,
+            fetchedAt: summary.before.fetchedAt,
+          }
+        : null,
+      summary.after
+        ? {
+            status: summary.after.status,
+            expires: summary.after.expires,
+            fetchedAt: summary.after.fetchedAt,
+            refreshed: summary.refreshed,
+            skippedReason: summary.skippedReason ?? null,
+            failureReason: summary.failureReason ?? null,
+          }
+        : { refreshed: summary.refreshed, skippedReason: summary.skippedReason ?? null },
+    )
     return c.json({
       refreshed: summary.refreshed,
       skippedReason: summary.skippedReason ?? null,
