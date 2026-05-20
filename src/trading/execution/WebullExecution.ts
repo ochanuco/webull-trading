@@ -1,5 +1,8 @@
 import { toExecutionResult } from '../../infrastructure/webull/mapper'
-import type { WebullTradeClient } from '../../infrastructure/webull/WebullTradeClient'
+import {
+  TradeDisabledError,
+  type WebullTradeClient,
+} from '../../infrastructure/webull/WebullTradeClient'
 import { BrokerRequestError } from '../../shared/errors'
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
@@ -19,7 +22,10 @@ export class WebullExecution implements Execution {
       // Preserve the upstream broker error when it's already a
       // BrokerRequestError (status + class). Rethrow as-is so callers see
       // the real 4xx/5xx status classification from brokerErrorForStatus.
-      if (error instanceof BrokerRequestError) {
+      // TradeDisabledError は broker に到達してない (= ENVIRONMENT gate で止めた)
+      // 状態を表すので、broker error として log に乗ると "broker rejected" と誤読
+      // される。原クラスのまま再送出して両者を分離する。
+      if (error instanceof BrokerRequestError || error instanceof TradeDisabledError) {
         throw error
       }
       const detail = error instanceof Error ? error.message : String(error)
