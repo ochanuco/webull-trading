@@ -3,6 +3,7 @@ import type { Env } from './config/env'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { createNotifier } from './infrastructure/notification/createNotifier'
+import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
@@ -22,6 +23,7 @@ const CRON_PORTFOLIO_ROLL = '0 22 * * *'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
 export { PortfolioStateDO } from './trading/state/PortfolioStateDO'
+export { WebullTokenStateDO } from './trading/state/WebullTokenStateDO'
 
 const app = createApp()
 
@@ -51,7 +53,62 @@ export default {
     const requestId = crypto.randomUUID()
 
     if (event.cron === CRON_PORTFOLIO_ROLL) {
+      // 22:00 UTC daily: portfolio rollover + Webull access-token refresh.
+      // Token は 15 days inactivity で INVALID 化するので、daily check で
+      // expires 残り 7 days 以内なら createToken(existingToken) で更新する。
+      // 取引時間外に動かす事で broker API への副作用 (rate limit etc) を最小化。
       ctx.waitUntil(runPortfolioRoll(env, requestId))
+      ctx.waitUntil(
+        refreshWebullToken(env).then(
+          (summary) => {
+            console.log(
+              JSON.stringify({
+                event: 'webull_token_refresh',
+                requestId,
+                refreshed: summary.refreshed,
+                skippedReason: summary.skippedReason ?? null,
+                failureReason: summary.failureReason ?? null,
+                lastSuccessAt: summary.after?.lastSuccessAt ?? null,
+              }),
+            )
+            // refresh が失敗したら operator action が必要 (token 再発行 → seed)。
+            // critical 通知で push する (cron は 24h 後の next tick まで待つので
+            // 早めに気付かせたい)。skip は通常運用なので通知しない。
+            if (summary.failureReason) {
+              ctx.waitUntil(
+                createNotifier(env, { requestId })
+                  .notify({
+                    type: 'ERROR',
+                    message: `Webull token refresh failed: ${summary.failureReason}. Run \`pnpm run issue-token\` and POST /admin/webull-token/seed.`,
+                    cause: 'webull_token_refresh',
+                    severity: 'critical',
+                  })
+                  .catch(() => undefined),
+              )
+            }
+          },
+          (error) => {
+            const message = error instanceof Error ? error.message : String(error)
+            console.error(
+              JSON.stringify({
+                event: 'webull_token_refresh_error',
+                requestId,
+                message,
+              }),
+            )
+            ctx.waitUntil(
+              createNotifier(env, { requestId })
+                .notify({
+                  type: 'ERROR',
+                  message: `Webull token refresh threw: ${message}`,
+                  cause: 'webull_token_refresh',
+                  severity: 'critical',
+                })
+                .catch(() => undefined),
+            )
+          },
+        ),
+      )
       return
     }
 

@@ -427,7 +427,17 @@ export class WebullHttpClient {
 
 export function createWebullHttpClient(
   env: WebullClientEnv,
-  options?: { fetchFn?: typeof fetch; timeoutMs?: number; retry?: WebullRetryOptions },
+  options?: {
+    fetchFn?: typeof fetch
+    timeoutMs?: number
+    retry?: WebullRetryOptions
+    /**
+     * Runtime-resolved `x-access-token` (#21 Phase B)。`resolveAccessToken(env)`
+     * の戻り値を caller が await して渡す形。指定があれば `env.WEBULL_ACCESS_TOKEN`
+     * を上書き (= DO 由来の値を優先)。
+     */
+    accessToken?: string
+  },
 ): WebullHttpClient {
   // #257: env で trade/account path を上書き可能。受理条件:
   //   - 文字列であること
@@ -467,7 +477,7 @@ export function createWebullHttpClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
-      accessToken: env.WEBULL_ACCESS_TOKEN,
+      accessToken: options?.accessToken ?? env.WEBULL_ACCESS_TOKEN,
     }),
     accountId: env.WEBULL_ACCOUNT_ID_JP_CASH,
     baseUrl,

@@ -49,5 +49,7 @@ export function createWebullReadClient(
   env: WebullClientEnv,
   options?: Parameters<typeof createWebullHttpClient>[1],
 ): WebullReadClient {
+  // `options.accessToken` は Phase B の resolveAccessToken 由来。WebullHttpClient
+  // に thru で渡す (env.WEBULL_ACCESS_TOKEN は DO 未投入時の fallback)。
   return new WebullReadClient(createWebullHttpClient(env, options))
 }

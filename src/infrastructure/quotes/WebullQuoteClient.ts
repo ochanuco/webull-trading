@@ -182,7 +182,13 @@ export class WebullQuoteClient {
 
 export function createWebullQuoteClient(
   env: WebullQuoteClientEnv,
-  options?: { fetchFn?: typeof fetch; timeoutMs?: number; now?: () => Date },
+  options?: {
+    fetchFn?: typeof fetch
+    timeoutMs?: number
+    now?: () => Date
+    /** Phase B: resolveAccessToken 由来の override (DO 優先)。 */
+    accessToken?: string
+  },
 ): WebullQuoteClient {
   // env 空 / undefined / whitespace は JP prod default。env が明示されてれば
   // override (UAT / 将来 region 用)。
@@ -191,7 +197,7 @@ export function createWebullQuoteClient(
     auth: new WebullAuth({
       appKey: env.WEBULL_APP_KEY,
       appSecret: env.WEBULL_APP_SECRET,
-      accessToken: env.WEBULL_ACCESS_TOKEN,
+      accessToken: options?.accessToken ?? env.WEBULL_ACCESS_TOKEN,
     }),
     baseUrl,
     quotePath: env.WEBULL_QUOTE_PATH,

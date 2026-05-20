@@ -10,6 +10,7 @@ import {
 } from '../../infrastructure/notification/configStateChange'
 import { createNotifier } from '../../infrastructure/notification/createNotifier'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
+import { resolveAccessToken } from '../../infrastructure/webull/resolveAccessToken'
 import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
 import { createWebullTradeClient } from '../../infrastructure/webull/WebullTradeClient'
 import { MockExecution } from '../execution/MockExecution'
@@ -447,9 +448,11 @@ export async function runStrategyCron(
   // #21: trade と read を別 client に分離。WebullTradeClient は ENVIRONMENT
   // で staging gate を持つ (= staging からの live order を構造的に防ぐ)。
   // DRY_RUN path では両方 null、MockExecution が選ばれ fallback resolver も
-  // 未注入なので read 側も触れない。
-  const liveTradeClient = global.dryRun ? null : createWebullTradeClient(env)
-  const liveReadClient = global.dryRun ? null : createWebullReadClient(env)
+  // 未注入なので read 側も触れない。Phase B: live path のみ token を DO から
+  // resolve (DRY_RUN なら broker call が無いので無駄に DO を叩かない)。
+  const accessToken = global.dryRun ? undefined : await resolveAccessToken(env)
+  const liveTradeClient = global.dryRun ? null : createWebullTradeClient(env, { accessToken })
+  const liveReadClient = global.dryRun ? null : createWebullReadClient(env, { accessToken })
   const execution = liveTradeClient ? new WebullExecution(liveTradeClient) : new MockExecution()
   // notifier は関数冒頭で組み立て済み (#141)。BUY/SELL emit / per-symbol
   // bar fetch error / broker submit error は scheduler 内で注入された
