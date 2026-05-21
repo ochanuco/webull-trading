@@ -4,7 +4,7 @@ webull-trading を本番口座 (`webull-trading-production`) に投入する手�
 
 POC 段階を脱して live trade を有効化するときの "推奨フロー" は:
 
-```
+```text
 [A] 事前準備 (D1 / secret 投入 + DO seed)
     ↓
 [B] deploy + probe で疎通確認
