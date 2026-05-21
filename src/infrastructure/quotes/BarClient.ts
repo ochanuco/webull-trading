@@ -74,6 +74,11 @@ interface WebullBarClientOptions {
  * the response mapper is forgiving — any bar missing a usable close is
  * filtered out instead of throwing. Once the production path is known, this
  * client can be locked down.
+ *
+ * @deprecated since 2026-05-22 — JP 本番の market-data API がまだ稼働してない
+ * ため、strategy cron は {@link YahooBarClient} を default で使う構造に切替済。
+ * 本 class は将来 Webull JP が bars API を運用開始したときの切戻し用に残してある
+ * のみで、現時点で実 callers は無い。
  */
 export class WebullBarClient implements BarClient {
   private readonly baseUrl: string
@@ -173,6 +178,10 @@ export class WebullBarClient implements BarClient {
  */
 const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
 
+/**
+ * @deprecated since 2026-05-22 — see {@link WebullBarClient}。default では
+ * {@link YahooBarClient} を使う設計に移行済。
+ */
 export function createWebullBarClient(
   env: WebullBarClientEnv,
   options?: {
