@@ -20,7 +20,11 @@ describe('WebullExecution', () => {
         order_id: 'ord-123',
       }),
     }
-    const execution = new WebullExecution(client)
+    // test 用に WebullTradeClient の `placeOrder` のみ実装した minimal mock を
+    // 型 cast で渡す。`isLiveTradingEnabled` getter は WebullExecution が読まないので不要。
+    const execution = new WebullExecution(
+      client as unknown as ConstructorParameters<typeof WebullExecution>[0],
+    )
 
     await expect(execution.execute(intent)).resolves.toEqual({
       mode: 'LIVE',
@@ -35,7 +39,11 @@ describe('WebullExecution', () => {
     const client = {
       placeOrder: vi.fn().mockRejectedValue(new Error('network down')),
     }
-    const execution = new WebullExecution(client)
+    // test 用に WebullTradeClient の `placeOrder` のみ実装した minimal mock を
+    // 型 cast で渡す。`isLiveTradingEnabled` getter は WebullExecution が読まないので不要。
+    const execution = new WebullExecution(
+      client as unknown as ConstructorParameters<typeof WebullExecution>[0],
+    )
 
     await expect(execution.execute(intent)).rejects.toBeInstanceOf(BrokerRequestError)
     await expect(execution.execute(intent)).rejects.toMatchObject({

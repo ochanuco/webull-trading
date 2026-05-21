@@ -12,7 +12,10 @@ export class WebullExecution implements Execution {
   // #21: `WebullTradeClient` 経由でしか trade API に触れない。staging からの
   // 誤発注は client constructor で disable されているため、ここに来た時点で
   // production deploy + ENVIRONMENT=production の不変条件が満たされている。
-  constructor(private readonly client: Pick<WebullTradeClient, 'placeOrder'>) {}
+  // 旧 `Pick<WebullHttpClient, 'placeOrder'>` 時代の narrowing は削除済 — 今は
+  // WebullTradeClient 自体が placeOrder + isLiveTradingEnabled のみ持つ薄い
+  // facade なので Pick で絞る意味がない (#21 Phase B 後 cleanup)。
+  constructor(private readonly client: WebullTradeClient) {}
 
   async execute(intent: OrderIntent): Promise<ExecutionResult> {
     try {

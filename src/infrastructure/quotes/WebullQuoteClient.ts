@@ -85,6 +85,13 @@ const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
  * HMAC-SHA1 canonical signing used by {@link WebullHttpClient}. Scope for #37-B
  * is read-only last-price + asOf so the cron handler can land a
  * {@link QuoteSnapshot} into each symbol's Durable Object.
+ *
+ * @deprecated since 2026-05-22 — JP 本番の market-data API がまだ稼働してない
+ * (`data-api.webull.co.jp` の TCP 443 が応答せず、`api.webull.co.jp` 上の
+ * `/openapi/market-data/*` は `404 Route Not Found`)。strategy cron は
+ * {@link YahooQuoteClient} を default で使う構造に切替済 (PR #334)。本 class
+ * は `/admin/broker/probe` で疎通監視用に残してあるのみ。Webull JP が
+ * market-data API を運用開始したら deprecation 解除して default に戻す予定。
  */
 export class WebullQuoteClient {
   private readonly baseUrl: string
@@ -180,6 +187,10 @@ export class WebullQuoteClient {
   }
 }
 
+/**
+ * @deprecated since 2026-05-22 — see {@link WebullQuoteClient}。default では
+ * {@link YahooQuoteClient} を使う設計に移行済。
+ */
 export function createWebullQuoteClient(
   env: WebullQuoteClientEnv,
   options?: {
