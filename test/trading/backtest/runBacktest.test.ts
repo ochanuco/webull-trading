@@ -39,7 +39,11 @@ function buildBars(start: number, factors: number[], startDate = '2025-01-01'): 
   return bars
 }
 
-/** 50 warmup bars at constant ~+1%/d so 50d return clears the trend filter. */
+/**
+ * 50+ warmup bars at constant ~+1%/d so the trend filter clears.
+ * #318 で return lookback は 20d に短縮されたが、+1%/d × 20d ≈ +22% > +8% で
+ * 引き続き trend filter を通過する。
+ */
 function uptrendWarmup(start: number): DailyBar[] {
   return buildBars(start, Array(60).fill(1.01))
 }
@@ -55,7 +59,8 @@ describe('runBacktest', () => {
   })
 
   it('produces no trades when bars are pure downtrend (no BUY signal)', async () => {
-    // Constant 1% daily decline → 50d return < 0 → entry.trend_50d_return fails → HOLD.
+    // Constant 1% daily decline → trend return < 0 → entry.trend_50d_return fails → HOLD.
+    // (trace 識別子 `entry.trend_50d_return` は #318 後も historical 維持、実 lookback は 20d。)
     const bars = buildBars(100, Array(120).fill(0.99))
     const result = await runBacktest(bars, BASE_PARAMS)
     expect(result.totalTrades).toBe(0)

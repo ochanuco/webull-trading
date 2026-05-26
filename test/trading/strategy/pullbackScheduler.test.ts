@@ -15,13 +15,24 @@ import type { DailyBar } from '../../../src/trading/strategy/indicators'
 const now = new Date('2026-04-20T14:30:00.000Z')
 
 function uptrendBars(): DailyBar[] {
-  // 60 bars, uptrend ~+15% over 50d, ending with a mild -4% pullback from high.
+  // #318: short-term swing 整合化で trend filter は 20d return ベースになった。
+  // closes[-20] vs last の return が +8% を超えるよう、最後の 20 営業日に
+  // しっかりした上昇を入れる:
+  //   - 40 bars: slow uptrend (warmup for SMA50)
+  //   - 15 bars: steeper leg → 高値 122 まで
+  //   - 5 bars: 高値到達 → mild -4% pullback (BUY ゾーン)
+  // 結果: closes[-20] ≈ 108 (bar 40)、last = 117.5、20d return ≈ +8.8%。
   const bars: DailyBar[] = []
-  for (let i = 0; i < 55; i += 1) {
-    const close = 100 + i * 0.4 // slow uptrend, ends at ~121.6
+  for (let i = 0; i < 40; i += 1) {
+    const close = 100 + i * 0.2 // gentle warmup, bar 39 close = 107.8
     bars.push(synth(i, close))
   }
-  // The 20d high hit at bar 55
+  // bar 40 close = 108、20d return baseline がここに据わる。
+  for (let i = 40; i < 55; i += 1) {
+    const close = 108 + (i - 40) * 1.0 // steeper, bar 54 close = 122
+    bars.push(synth(i, close))
+  }
+  // The 10d (was 20d, #318) high hit at bar 55
   bars.push(synth(55, 122))
   bars.push(synth(56, 121))
   bars.push(synth(57, 120))

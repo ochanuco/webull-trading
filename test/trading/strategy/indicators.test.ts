@@ -17,7 +17,7 @@ describe('computePullbackIndicators', () => {
     expect(computePullbackIndicators(makeBars([1, 2, 3]))).toBeNull()
   })
 
-  it('computes sma50 / return50d / high20d / low20d from the tail window', () => {
+  it('computes sma50 / return50d (20d) / high20d (10d) / low20d from the tail window', () => {
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const result = computePullbackIndicators(makeBars(closes))
     expect(result).not.toBeNull()
@@ -25,12 +25,14 @@ describe('computePullbackIndicators', () => {
     expect(r.price).toBe(159)
     // sma50 = average of closes 110..159 = (110+159)/2 = 134.5
     expect(r.sma50).toBeCloseTo(134.5, 4)
-    // 50d return: last vs closes[-50] = closes[10] = 110 → (159 - 110)/110
-    expect(r.return50d).toBeCloseTo((159 - 110) / 110, 4)
-    // high20d = max of highs for last 20 bars. highs are close*1.01.
+    // #318: return lookback は 20 営業日。last vs closes[-20] = closes[40] = 140
+    // → (159 - 140)/140
+    expect(r.return50d).toBeCloseTo((159 - 140) / 140, 4)
+    // #318: high lookback は 10 営業日。max of highs for last 10 bars。
+    // highs are close*1.01、最新 10 closes = 150..159 → max = 159 * 1.01。
     expect(r.high20d).toBeCloseTo(159 * 1.01, 4)
-    // low20d = min of lows for last 20 bars. lows are close*0.99, last 20 closes
-    // are 140..159 → min = 140 * 0.99
+    // low20d は変更なし (20 日窓のまま、dashboard 表示用)。
+    // lows are close*0.99, last 20 closes are 140..159 → min = 140 * 0.99
     expect(r.low20d).toBeCloseTo(140 * 0.99, 4)
   })
 
@@ -47,7 +49,8 @@ describe('computePullbackIndicators', () => {
   describe('intradayPrice override', () => {
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const bars = makeBars(closes)
-    // daily close ベースの fixture 値: last = 159, sma50 = 134.5, return50d = (159-110)/110
+    // #318: daily close ベースの fixture 値: last = 159, sma50 = 134.5、
+    // return50d (実体は 20d) = (159-140)/140、high20d (実体は 10d) = 159*1.01。
     const dailyOnly = computePullbackIndicators(bars)!
 
     it('uses intradayPrice as price when provided and positive', () => {

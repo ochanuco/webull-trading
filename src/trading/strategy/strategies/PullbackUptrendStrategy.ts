@@ -4,7 +4,15 @@ import type { PendingOrderLock, PositionState } from '../../state/types'
 export interface PullbackIndicators {
   price: number
   sma50: number
+  /**
+   * 騰落率トレンド filter (entry condition)。**issue #318 で lookback を
+   * 50d → 20d に短縮**。フィールド名は historical (storage/dashboard 互換)。
+   */
   return50d: number
+  /**
+   * 押し目買いの reference high。**issue #318 で lookback を 20d → 10d に
+   * 短縮**。フィールド名は historical (storage/dashboard 互換)。
+   */
   high20d: number
   atr20: number
   baselineAtr20: number
@@ -22,8 +30,12 @@ export interface SymbolRule {
   /** Pullback range: deeper bound. Default -0.06. */
   pullbackMin: number
   /**
-   * Minimum 50-day return required to consider the stock in an uptrend.
+   * Minimum N-day return required to consider the stock in an uptrend.
    * Default 0.08. Set negative to effectively disable the filter.
+   *
+   * **issue #318**: lookback は indicators.ts で 20 営業日。フィールド名
+   * (`minReturn50d`) は global_config 列名 / TS interface 互換のため historical
+   * に維持。renaming は #318 follow-up で。
    */
   minReturn50d: number
   /**
@@ -142,7 +154,9 @@ export class PullbackUptrendStrategy {
     const ind = input.indicators
     if (ind.return50d <= rule.minReturn50d) {
       trace.push(step('entry.trend_50d_return', false, ind.return50d, '>', rule.minReturn50d))
-      return hold(input, `50d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`, trace)
+      // #318: lookback は 20 営業日 (フィールド名は historical)。reason は人間
+      // 向け表示なので「20d return」と書いて誤読を避ける。
+      return hold(input, `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`, trace)
     }
     trace.push(step('entry.trend_50d_return', true, ind.return50d, '>', rule.minReturn50d))
 
@@ -154,7 +168,8 @@ export class PullbackUptrendStrategy {
 
     if (ind.high20d <= 0) {
       trace.push(step('entry.high20d_valid', false, ind.high20d, '>', 0))
-      return hold(input, 'invalid 20d high', trace)
+      // #318: lookback は 10 営業日 (フィールド名は historical)。
+      return hold(input, 'invalid 10d high', trace)
     }
     trace.push(step('entry.high20d_valid', true, ind.high20d, '>', 0))
 
@@ -171,7 +186,7 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('entry.pullback_not_too_deep', true, pullback, '>=', rule.pullbackMin))
     trace.push(step('entry.adopt_buy', true, pullback, 'between', [rule.pullbackMin, rule.pullbackMax]))
-    return buy(input, `pullback ${pullback.toFixed(4)} in uptrend (50d return ${ind.return50d.toFixed(4)})`, trace)
+    return buy(input, `pullback ${pullback.toFixed(4)} in uptrend (20d return ${ind.return50d.toFixed(4)})`, trace)
   }
 }
 
@@ -245,9 +260,12 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'guard.pending_order_absent': '未約定注文がない',
   'guard.cooldown_inactive': 'クールダウン中ではない',
   'route.position_open': '建玉を保有中',
-  'entry.trend_50d_return': '50日騰落率が上昇トレンド条件を満たす',
+  // #318: trace 識別子 (`entry.trend_50d_return` / `entry.high20d_valid`) は
+  // 既存 decision_log と互換維持のため据え置き。**表示文字列のみ実 lookback に
+  // 合わせて 20日 / 10日 と表記**。
+  'entry.trend_50d_return': '20日騰落率が上昇トレンド条件を満たす',
   'entry.above_sma50': '株価が50日移動平均線を上回る',
-  'entry.high20d_valid': '直近20日高値が有効',
+  'entry.high20d_valid': '直近10日高値が有効',
   'entry.pullback_not_too_shallow': '押し目が浅すぎない',
   'entry.pullback_not_too_deep': '押し目が深すぎない',
   'entry.adopt_buy': '買い採用',
