@@ -1,9 +1,11 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
+  applyFillExposure,
   applyRealizedPnlOnce,
   applyRealizedPnl,
   rollDaily,
   seedDailyStartEquity,
+  seedOpenExposure,
   setTradingDisabledUntil,
   type PortfolioTransitionContext,
 } from './portfolioStateTransitions'
@@ -47,6 +49,24 @@ export class PortfolioStateDO extends DurableObject<object> {
     return result
   }
 
+  async applyFillExposure(args: {
+    currency: 'USD' | 'JPY'
+    side: 'BUY' | 'SELL'
+    notional: number
+  }): Promise<PortfolioState> {
+    const state = await this.load()
+    const next = applyFillExposure(state, args, this.transitionCtx)
+    await this.save(next)
+    return next
+  }
+
+  async seedOpenExposure(args: { usd?: number; jpy?: number }): Promise<PortfolioState> {
+    const state = await this.load()
+    const next = seedOpenExposure(state, args, this.transitionCtx)
+    await this.save(next)
+    return next
+  }
+
   async setTradingDisabledUntil(iso: string | null): Promise<PortfolioState> {
     const state = await this.load()
     const next = setTradingDisabledUntil(state, iso, this.transitionCtx)
@@ -79,14 +99,31 @@ export class PortfolioStateDO extends DurableObject<object> {
   }
 
   private normalize(state: PortfolioState): PortfolioState {
+    const raw = state as {
+      appliedClientOrderIds?: unknown
+      lastRolledAt?: unknown
+      openExposureUsd?: unknown
+      openExposureJpy?: unknown
+    }
     return {
       ...state,
-      appliedClientOrderIds: Array.isArray((state as { appliedClientOrderIds?: unknown }).appliedClientOrderIds)
+      appliedClientOrderIds: Array.isArray(raw.appliedClientOrderIds)
         ? state.appliedClientOrderIds
         : [],
-      lastRolledAt: !('lastRolledAt' in state) || (state as { lastRolledAt?: unknown }).lastRolledAt === undefined
+      lastRolledAt: !('lastRolledAt' in state) || raw.lastRolledAt === undefined
         ? null
         : state.lastRolledAt,
+      // #77: backfill open-exposure counters for DO instances persisted before
+      // the field was added. `undefined`/non-finite reads as 0 so the gate
+      // starts from a clean baseline without an explicit migration step.
+      openExposureUsd:
+        typeof raw.openExposureUsd === 'number' && Number.isFinite(raw.openExposureUsd)
+          ? raw.openExposureUsd
+          : 0,
+      openExposureJpy:
+        typeof raw.openExposureJpy === 'number' && Number.isFinite(raw.openExposureJpy)
+          ? raw.openExposureJpy
+          : 0,
     }
   }
 }

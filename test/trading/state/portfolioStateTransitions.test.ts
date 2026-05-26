@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyFillExposure,
   applyRealizedPnl,
   applyRealizedPnlOnce,
   rollDaily,
   seedDailyStartEquity,
+  seedOpenExposure,
   setTradingDisabledUntil,
 } from '../../../src/trading/state/portfolioStateTransitions'
 import { emptyPortfolioState } from '../../../src/trading/state/portfolioTypes'
@@ -130,6 +132,98 @@ describe('portfolioStateTransitions', () => {
       }
       const { after } = rollDaily(armed, { now: fixedNow })
       expect(after.tradingDisabledUntil).toBe('2026-04-22T00:00:00.000Z')
+    })
+  })
+
+  // #77: per-currency open BUY exposure tracker. BUY adds notional, SELL
+  // subtracts (clamp >=0). USD and JPY are independent budgets.
+  describe('applyFillExposure', () => {
+    it('BUY adds notional to the matching currency openExposure', () => {
+      const s0 = emptyPortfolioState(fixedNow)
+      const s1 = applyFillExposure(
+        s0,
+        { currency: 'USD', side: 'BUY', notional: 500 },
+        { now: fixedNow },
+      )
+      expect(s1.openExposureUsd).toBe(500)
+      expect(s1.openExposureJpy).toBe(0)
+      expect(s1.updatedAt).toBe('2026-04-21T10:00:00.000Z')
+    })
+
+    it('SELL subtracts notional', () => {
+      const s0 = { ...emptyPortfolioState(fixedNow), openExposureUsd: 800 }
+      const s1 = applyFillExposure(
+        s0,
+        { currency: 'USD', side: 'SELL', notional: 300 },
+        { now: fixedNow },
+      )
+      expect(s1.openExposureUsd).toBe(500)
+    })
+
+    it('SELL clamps to >= 0 when exposure is already at zero', () => {
+      const s0 = emptyPortfolioState(fixedNow)
+      const s1 = applyFillExposure(
+        s0,
+        { currency: 'USD', side: 'SELL', notional: 500 },
+        { now: fixedNow },
+      )
+      expect(s1.openExposureUsd).toBe(0)
+    })
+
+    it('USD and JPY budgets do not interfere', () => {
+      const s0 = emptyPortfolioState(fixedNow)
+      const s1 = applyFillExposure(
+        s0,
+        { currency: 'USD', side: 'BUY', notional: 1_000 },
+        { now: fixedNow },
+      )
+      const s2 = applyFillExposure(
+        s1,
+        { currency: 'JPY', side: 'BUY', notional: 250_000 },
+        { now: fixedNow },
+      )
+      expect(s2.openExposureUsd).toBe(1_000)
+      expect(s2.openExposureJpy).toBe(250_000)
+
+      const s3 = applyFillExposure(
+        s2,
+        { currency: 'JPY', side: 'SELL', notional: 100_000 },
+        { now: fixedNow },
+      )
+      expect(s3.openExposureUsd).toBe(1_000)
+      expect(s3.openExposureJpy).toBe(150_000)
+    })
+
+    it('rejects non-finite / negative notional', () => {
+      const s0 = emptyPortfolioState(fixedNow)
+      expect(() =>
+        applyFillExposure(s0, { currency: 'USD', side: 'BUY', notional: NaN }, { now: fixedNow }),
+      ).toThrow('Invalid applyFillExposure notional')
+      expect(() =>
+        applyFillExposure(s0, { currency: 'USD', side: 'BUY', notional: -1 }, { now: fixedNow }),
+      ).toThrow('Invalid applyFillExposure notional')
+    })
+  })
+
+  describe('seedOpenExposure', () => {
+    it('overwrites only the provided side', () => {
+      const s0 = {
+        ...emptyPortfolioState(fixedNow),
+        openExposureUsd: 100,
+        openExposureJpy: 200_000,
+      }
+      const next = seedOpenExposure(s0, { usd: 0 }, { now: fixedNow })
+      expect(next.openExposureUsd).toBe(0)
+      expect(next.openExposureJpy).toBe(200_000)
+    })
+
+    it('rejects negative / non-finite values', () => {
+      expect(() =>
+        seedOpenExposure(emptyPortfolioState(fixedNow), { usd: -1 }, { now: fixedNow }),
+      ).toThrow('Invalid seedOpenExposure usd')
+      expect(() =>
+        seedOpenExposure(emptyPortfolioState(fixedNow), { jpy: NaN }, { now: fixedNow }),
+      ).toThrow('Invalid seedOpenExposure jpy')
     })
   })
 })

@@ -75,6 +75,26 @@ export interface TradingServiceOptions {
    * avgPrice と lastQuote.price の gap が |pct| を超えれば reject。
    */
   gapRejectPct?: number
+  /**
+   * Portfolio-wide BUY exposure ceiling expressed as a fraction of
+   * per-currency total capital. The gate rejects a BUY when
+   * `openExposure[currency] + orderNotional > totalCapital[currency] *
+   * maxPortfolioExposurePct`. Default 0.6 (= 60%). #77.
+   */
+  maxPortfolioExposurePct?: number
+  /**
+   * Account-wide capital baseline per currency. `null` for either side
+   * disables the exposure gate for that currency (= POC fail-open default
+   * when the operator has not seeded a number yet). #77.
+   */
+  totalCapitalUsd?: number | null
+  totalCapitalJpy?: number | null
+  /**
+   * Symbol → currency lookup populated from `symbol_config`. Required by
+   * the portfolio exposure gate; the gate falls back to a JP 4-digit
+   * heuristic when the map is missing or the symbol is unknown. #77.
+   */
+  symbolCurrency?: Record<string, 'USD' | 'JPY'>
   now?: () => Date
 }
 
@@ -83,6 +103,7 @@ const DEFAULT_SPREAD_LIMITS = { US: 0.0025, JP: 0.006 } as const
 const DEFAULT_STALE_QUOTE_MS = 15 * 60 * 1_000
 const DEFAULT_GAP_REJECT_PCT = 0.03
 const DEFAULT_DRAWDOWN_KILL_THRESHOLD = -0.02
+const DEFAULT_MAX_PORTFOLIO_EXPOSURE_PCT = 0.6
 
 export class TradingService {
   private readonly positionStore?: PositionStore
@@ -93,6 +114,10 @@ export class TradingService {
   private readonly spreadLimits: { US: number; JP: number }
   private readonly staleQuoteMs: number
   private readonly gapRejectPct: number
+  private readonly maxPortfolioExposurePct: number
+  private readonly totalCapitalUsd: number | null
+  private readonly totalCapitalJpy: number | null
+  private readonly symbolCurrency: Record<string, 'USD' | 'JPY'>
   private readonly now: () => Date
 
   constructor(
@@ -142,6 +167,16 @@ export class TradingService {
       options.gapRejectPct > 0
         ? options.gapRejectPct
         : DEFAULT_GAP_REJECT_PCT
+    this.maxPortfolioExposurePct =
+      options.maxPortfolioExposurePct !== undefined &&
+      Number.isFinite(options.maxPortfolioExposurePct) &&
+      options.maxPortfolioExposurePct > 0 &&
+      options.maxPortfolioExposurePct <= 1
+        ? options.maxPortfolioExposurePct
+        : DEFAULT_MAX_PORTFOLIO_EXPOSURE_PCT
+    this.totalCapitalUsd = sanitizeTotalCapital(options.totalCapitalUsd)
+    this.totalCapitalJpy = sanitizeTotalCapital(options.totalCapitalJpy)
+    this.symbolCurrency = options.symbolCurrency ?? {}
     this.now = options.now ?? (() => new Date())
   }
 
@@ -267,6 +302,31 @@ export class TradingService {
           }
         }
       }
+
+      // #77 portfolio exposure ceiling. Only applies to BUY (SELL reduces
+      // exposure). Skipped when `total_capital_<currency>` is unset (null) —
+      // POC default = "operator has not seeded a capital baseline yet, leave
+      // the gate disabled rather than fail-close all entries with a 0
+      // ceiling". USD and JPY budgets are independent.
+      if (decision.orderIntent.side === 'BUY') {
+        const currency = this.resolveSymbolCurrency(decision.orderIntent.symbol)
+        const totalCapital = currency === 'USD' ? this.totalCapitalUsd : this.totalCapitalJpy
+        if (totalCapital !== null) {
+          const ceiling = totalCapital * this.maxPortfolioExposurePct
+          const current =
+            currency === 'USD' ? portfolio.openExposureUsd : portfolio.openExposureJpy
+          const projected = current + decision.orderIntent.notional
+          if (projected > ceiling) {
+            return {
+              allowed: false,
+              riskDecision: appendReason(
+                decision.riskDecision,
+                `portfolio exposure exceeded: ${currency} projected ${projected.toFixed(2)} > ceiling ${ceiling.toFixed(2)} (open ${current.toFixed(2)} + order ${decision.orderIntent.notional.toFixed(2)}; cap ${totalCapital} * ${this.maxPortfolioExposurePct})`,
+              ),
+            }
+          }
+        }
+      }
     }
 
     // Per-symbol gate を pure function に集約 (issue #138 — cron 側と unify)。
@@ -320,6 +380,17 @@ export class TradingService {
     return { allowed: true }
   }
 
+  private resolveSymbolCurrency(symbol: string): 'USD' | 'JPY' {
+    const upper = symbol.toUpperCase()
+    const mapped = this.symbolCurrency[upper]
+    if (mapped === 'USD' || mapped === 'JPY') return mapped
+    // Fallback heuristic kept consistent with `routes/trade.ts`:
+    // 4-digit numeric ticker → JPY, anything else → USD. The gate only
+    // triggers when `total_capital_<currency>` is set, so a misclassified
+    // symbol on an unseeded currency still routes through (= no false reject).
+    return /^\d{4}$/.test(upper) ? 'JPY' : 'USD'
+  }
+
   private createOrderIntent(signal: Signal): OrderIntent | undefined {
     if (signal.action === 'HOLD') {
       return undefined
@@ -334,6 +405,12 @@ export class TradingService {
       clientOrderId: crypto.randomUUID().replaceAll('-', ''),
     }
   }
+}
+
+function sanitizeTotalCapital(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  if (!Number.isFinite(value) || value <= 0) return null
+  return value
 }
 
 function endOfUtcDay(now: Date): Date {

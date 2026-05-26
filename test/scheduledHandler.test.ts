@@ -36,6 +36,12 @@ function makeStore(opts: {
     async setTradingDisabledUntil() {
       return opts.before
     },
+    async applyFillExposure() {
+      return opts.before
+    },
+    async seedOpenExposure() {
+      return opts.before
+    },
     async rollDaily() {
       calls++
       if (opts.throwOnRoll) throw opts.throwOnRoll
@@ -72,6 +78,8 @@ describe('runPortfolioRoll (issue #140)', () => {
       appliedClientOrderIds: [],
       tradingDisabledUntil: null,
       lastRolledAt: null,
+      openExposureUsd: 0,
+      openExposureJpy: 0,
       updatedAt: '2026-04-25T22:00:00.000Z',
     }
     const after: PortfolioState = {
@@ -80,6 +88,8 @@ describe('runPortfolioRoll (issue #140)', () => {
       appliedClientOrderIds: [],
       tradingDisabledUntil: null,
       lastRolledAt: '2026-04-25T22:00:00.000Z',
+      openExposureUsd: 0,
+      openExposureJpy: 0,
       updatedAt: '2026-04-25T22:00:00.000Z',
     }
     const fixture = makeStore({ before, after })
@@ -121,6 +131,8 @@ describe('runPortfolioRoll (issue #140)', () => {
       appliedClientOrderIds: [],
       tradingDisabledUntil: null,
       lastRolledAt: null,
+      openExposureUsd: 0,
+      openExposureJpy: 0,
       updatedAt: '2026-04-25T22:00:00.000Z',
     }
     const fixture = makeStore({ before, after: before, throwOnRoll: new Error('DO unreachable') })

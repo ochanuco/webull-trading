@@ -357,6 +357,8 @@ function makeSymbolStateNamespace(stub: SymbolStateStub): unknown {
 interface PortfolioStateStub {
   applyRealizedPnl: ReturnType<typeof vi.fn>
   applyRealizedPnlOnce: ReturnType<typeof vi.fn>
+  applyFillExposure?: ReturnType<typeof vi.fn>
+  seedOpenExposure?: ReturnType<typeof vi.fn>
 }
 
 function makePortfolioNamespace(stub: PortfolioStateStub): unknown {
@@ -751,6 +753,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     const portfolioStub: PortfolioStateStub = {
       applyRealizedPnl: vi.fn(async () => ({})),
       applyRealizedPnlOnce: vi.fn(async () => ({ state: {}, applied: true })),
+      applyFillExposure: vi.fn(async () => ({})),
     }
 
     const summary = await reconcileFills({
@@ -786,7 +789,18 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     }
     const first = makeFakeDb([row], { failStateAppliedAtOnce: true })
     const second = makeFakeDb([row])
-    vi.mocked(createDb).mockReturnValueOnce(first.db).mockReturnValueOnce(second.db)
+    // #77: reconcileFills now also calls `createDb` once at startup for the
+    // symbol_universe lookup (= 2 createDb invocations per reconcileFills
+    // call). Queue an extra "universe" fake before each pass — the universe
+    // load is wrapped in try/catch so its result doesn't have to be a real
+    // symbol_config row set; an empty fake DB whose SELECT throws is fine
+    // (handler falls back to the JP-numeric currency heuristic).
+    const universeFake = makeFakeDb([])
+    vi.mocked(createDb)
+      .mockReturnValueOnce(universeFake.db)
+      .mockReturnValueOnce(first.db)
+      .mockReturnValueOnce(universeFake.db)
+      .mockReturnValueOnce(second.db)
     vi.mocked(createWebullHttpClient).mockReturnValue(
       makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
     )
@@ -799,6 +813,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       applyRealizedPnlOnce: vi.fn()
         .mockResolvedValueOnce({ state: {}, applied: true })
         .mockResolvedValueOnce({ state: {}, applied: false }),
+      applyFillExposure: vi.fn(async () => ({})),
     }
 
     const env = {

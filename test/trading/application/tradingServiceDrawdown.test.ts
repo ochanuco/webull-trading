@@ -83,6 +83,23 @@ function makePortfolioStore(initial: PortfolioState): {
       current = { ...current, tradingDisabledUntil: iso }
       return current
     },
+    async applyFillExposure(args: { currency: 'USD' | 'JPY'; side: 'BUY' | 'SELL'; notional: number }) {
+      const delta = args.side === 'BUY' ? args.notional : -args.notional
+      if (args.currency === 'USD') {
+        current = { ...current, openExposureUsd: Math.max(0, current.openExposureUsd + delta) }
+      } else {
+        current = { ...current, openExposureJpy: Math.max(0, current.openExposureJpy + delta) }
+      }
+      return current
+    },
+    async seedOpenExposure(args: { usd?: number; jpy?: number }) {
+      current = {
+        ...current,
+        ...(args.usd !== undefined ? { openExposureUsd: args.usd } : {}),
+        ...(args.jpy !== undefined ? { openExposureJpy: args.jpy } : {}),
+      }
+      return current
+    },
     async rollDaily() {
       const before = current
       const nextStart = current.dailyStartEquity + current.dailyRealizedPnl

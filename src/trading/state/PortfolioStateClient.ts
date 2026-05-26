@@ -36,6 +36,18 @@ export class PortfolioStateClient implements PortfolioStore {
     return this.stub().setTradingDisabledUntil(iso)
   }
 
+  applyFillExposure(args: {
+    currency: 'USD' | 'JPY'
+    side: 'BUY' | 'SELL'
+    notional: number
+  }): Promise<PortfolioState> {
+    return this.stub().applyFillExposure(args)
+  }
+
+  seedOpenExposure(args: { usd?: number; jpy?: number }): Promise<PortfolioState> {
+    return this.stub().seedOpenExposure(args)
+  }
+
   rollDaily(): Promise<{ before: PortfolioState; after: PortfolioState }> {
     return this.stub().rollDaily()
   }
