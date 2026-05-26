@@ -36,8 +36,11 @@ const riskConfig: PerSymbolRiskConfig = {
 }
 
 function uptrendBars(): DailyBar[] {
+  // #318: 20d return + 10d high で BUY 成立する形状。
+  // closes[-20] ≈ 108 (bar 40)、last = 117.5、20d return ≈ +8.8% (> +8% threshold)。
   const bars: DailyBar[] = []
-  for (let i = 0; i < 55; i += 1) bars.push(synth(i, 100 + i * 0.4))
+  for (let i = 0; i < 40; i += 1) bars.push(synth(i, 100 + i * 0.2))
+  for (let i = 40; i < 55; i += 1) bars.push(synth(i, 108 + (i - 40) * 1.0))
   bars.push(synth(55, 122))
   bars.push(synth(56, 121))
   bars.push(synth(57, 120))

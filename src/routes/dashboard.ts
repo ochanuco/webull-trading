@@ -2562,16 +2562,19 @@ export function localizeReason(en: string | null | undefined): string {
 
   // === 未保有の entry 判定 (様子見) ===
   // 「移動平均線割れ」は日本株の慣用表現。
+  // #318: trend filter の reason は `20d return ...`、historical decision_log
+  // 行は `50d return ...` (#318 前) を含むので両方を受ける。
   s = s.replace(
-    /^50d return (\S+) <= (\S+) trend threshold$/,
+    /^(?:20d|50d) return (\S+) <= (\S+) trend threshold$/,
     (_m, r, t) =>
-      `様子見: 上昇トレンド未成立 (50日騰落率 ${fmtPct(r)} ≤ 条件 ${fmtPct(t)})`,
+      `様子見: 上昇トレンド未成立 (騰落率 ${fmtPct(r)} ≤ 条件 ${fmtPct(t)})`,
   )
   s = s.replace(
     /^price (\S+) <= sma50 (\S+)$/,
     '様子見: 50日移動平均線割れ (株価 $1 ≤ 移動平均 $2)',
   )
-  s = s.replace(/^invalid 20d high$/, 'データ不足: 直近20日高値を算出できず')
+  // #318: invalid high reason も新旧両形式を受ける。
+  s = s.replace(/^invalid (?:10d|20d) high$/, 'データ不足: 直近高値を算出できず')
   s = s.replace(
     /^pullback (\S+) > (\S+) \(not deep enough\)$/,
     (_m, p, t) => `様子見: 押し目が浅い (下落率 ${fmtPct(p)} > 条件 ${fmtPct(t)})`,
@@ -2583,10 +2586,11 @@ export function localizeReason(en: string | null | undefined): string {
   )
 
   // === BUY signal (押し目買い成立) ===
+  // #318: BUY reason は `20d return ...`、historical 行 (`50d return ...`) も受ける。
   s = s.replace(
-    /^pullback (\S+) in uptrend \(50d return (\S+)\)$/,
+    /^pullback (\S+) in uptrend \((?:20d|50d) return (\S+)\)$/,
     (_m, p, r) =>
-      `買い: 上昇トレンド中の押し目買い (下落率 ${fmtPct(p)}、50日騰落率 ${fmtPct(r)})`,
+      `買い: 上昇トレンド中の押し目買い (下落率 ${fmtPct(p)}、騰落率 ${fmtPct(r)})`,
   )
 
   // === Sizing 系 reject (発注スキップ) ===

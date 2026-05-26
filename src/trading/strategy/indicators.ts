@@ -15,7 +15,22 @@ export interface DailyBar {
 export interface PullbackIndicatorSnapshot {
   price: number
   sma50: number
+  /**
+   * 騰落率トレンド filter。**issue #318 で window を 50d → 20d に短縮した**
+   * 短期 swing 整合化 (20d return + 10d high + 10d hold)。
+   *
+   * フィールド名 (`return50d`) は historical reasons でそのまま (D1 の
+   * `strategy_decision_log.indicators_json` / dashboard / 既存 schema との
+   * 互換維持のため)。**実体は 20 日リターン**。renaming は #318 follow-up。
+   */
   return50d: number
+  /**
+   * 押し目買いの reference high。**issue #318 で window を 20d → 10d に短縮**
+   * (短期 swing で 10d 高値からの押し目を捉える)。
+   *
+   * フィールド名 (`high20d`) は dashboard / 既存 indicators_json との互換維持
+   * のためそのまま。**実体は 10 日高値**。
+   */
   high20d: number
   /**
    * 20 日安値 (low20d) — 戦略 ロジック上は未使用、dashboard 個別銘柄チャートで
@@ -34,26 +49,36 @@ export interface PullbackIndicatorSnapshot {
  * `intradayPrice` (optional) は cron が当日最新 1h close を渡す経路。指定が
  * あればそれを `price` として採用 (= chart 表示の candle と整合する fill 価格)。
  * NaN / Infinity / 0 / 負値 / null / undefined はすべて無視して daily close
- * (前日終値) に fallback し、既存挙動と等価になる。SMA50 / ATR / return50d /
- * high20d / low20d は引き続き daily bars から計算する (intradayPrice は影響
+ * (前日終値) に fallback し、既存挙動と等価になる。SMA50 / ATR / return /
+ * high / low20d は引き続き daily bars から計算する (intradayPrice は影響
  * しない)。
+ *
+ * **issue #318**: 短期 swing 整合化のため return lookback を 20d、pullback
+ * reference high lookback を 10d に短縮。フィールド名 (`return50d` /
+ * `high20d`) は storage / dashboard 互換のため据え置き。
  */
 export function computePullbackIndicators(
   bars: DailyBar[],
   intradayPrice?: number | null,
 ): PullbackIndicatorSnapshot | null {
+  // SMA50 が 50 bars を必要とするので最小要件は 50。return/high の lookback が
+  // 短くなっても warmup 要件は SMA50 に律速されたまま。
   if (bars.length < 50) return null
 
   const closes = bars.map((b) => b.close)
   const highs = bars.map((b) => b.high)
   const lows = bars.map((b) => b.low)
   const last = closes[closes.length - 1]!
-  const baseline = closes[closes.length - 50]!
+  // #318: return lookback は 20 営業日。`closes[-20]` を baseline に使う。
+  const baseline = closes[closes.length - 20]!
   if (baseline <= 0) return null
 
   const sma50 = average(closes.slice(-50))
-  const high20d = Math.max(...highs.slice(-20))
+  // #318: pullback の reference high は 10 営業日。entry condition が
+  // 「price <= high10d * (1 + pullbackMax)」になり、押し目判定が短期化する。
+  const high20d = Math.max(...highs.slice(-10))
   const low20d = Math.min(...lows.slice(-20))
+  // #318: return lookback 20 営業日に対応。`(last - closes[-20]) / closes[-20]`。
   const return50d = (last - baseline) / baseline
 
   const trueRanges = computeTrueRanges(bars)

@@ -9,9 +9,17 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
   })
 
   describe('未保有 (様子見 / データ不足)', () => {
-    it('50d return unmet', () => {
+    // #318: trend filter は 20d return (短期 swing 整合化)。historical 行は
+    // `50d return ...` を含むので両方の入力を受け、同じ localized 出力を返す。
+    it('20d return unmet', () => {
+      expect(localizeReason('20d return 0.0108 <= 0.03 trend threshold')).toBe(
+        '様子見: 上昇トレンド未成立 (騰落率 +1.08% ≤ 条件 +3.00%)',
+      )
+    })
+
+    it('legacy 50d return reason still localizes (backward compat)', () => {
       expect(localizeReason('50d return 0.0108 <= 0.03 trend threshold')).toBe(
-        '様子見: 上昇トレンド未成立 (50日騰落率 +1.08% ≤ 条件 +3.00%)',
+        '様子見: 上昇トレンド未成立 (騰落率 +1.08% ≤ 条件 +3.00%)',
       )
     })
 
@@ -33,9 +41,15 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
-    it('invalid 20d high', () => {
+    it('invalid 10d high', () => {
+      expect(localizeReason('invalid 10d high')).toBe(
+        'データ不足: 直近高値を算出できず',
+      )
+    })
+
+    it('legacy invalid 20d high still localizes (backward compat)', () => {
       expect(localizeReason('invalid 20d high')).toBe(
-        'データ不足: 直近20日高値を算出できず',
+        'データ不足: 直近高値を算出できず',
       )
     })
   })
@@ -67,9 +81,16 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
   })
 
   describe('BUY (押し目買い)', () => {
-    it('uptrend pullback → 買い', () => {
+    // #318: 20d return into new code path、historical 行は 50d 形式。
+    it('uptrend pullback (20d return) → 買い', () => {
+      expect(localizeReason('pullback -0.03 in uptrend (20d return 0.12)')).toBe(
+        '買い: 上昇トレンド中の押し目買い (下落率 -3.00%、騰落率 +12.00%)',
+      )
+    })
+
+    it('legacy uptrend pullback (50d return) still localizes (backward compat)', () => {
       expect(localizeReason('pullback -0.03 in uptrend (50d return 0.12)')).toBe(
-        '買い: 上昇トレンド中の押し目買い (下落率 -3.00%、50日騰落率 +12.00%)',
+        '買い: 上昇トレンド中の押し目買い (下落率 -3.00%、騰落率 +12.00%)',
       )
     })
   })
