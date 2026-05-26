@@ -66,9 +66,65 @@ wrangler tail --format=json | jq 'select(.client_order_id=="<id>")'
 
 ## Caveats
 
-- Logs older than the Workers Logs retention window (default 3 days unless you have Logpush) are gone. For longer retention, enable Logpush to R2 or an external sink (tracked separately in POC follow-ups).
+- Logs older than the Workers Logs retention window (default 3 days unless you have Logpush) only survive in R2 if logpush has been enabled — see [R2 Logpush archive queries](#r2-logpush-archive-queries-207).
 - `exit` events are only emitted once position tracking lands (issue #37). Until then, use `fill` as the latest trade-lifecycle record.
 - `realized_pnl` is emitted by the caller of `logExit` — correctness depends on whoever closes the position computing it against the right base currency.
+
+## R2 Logpush archive queries (#207)
+
+Once R2 logpush is configured (Cloudflare dashboard → Workers & Pages → Logpush → destination = R2 bucket, e.g. `webull-trading-logs`), Workers Logs older than the in-product retention are persisted as gzipped NDJSON shards in R2 with a date-partitioned key layout that Cloudflare manages. The recipes below assume the operator has read access to the bucket via `wrangler` (the deploy account already has the right scope) and `jq` locally.
+
+> ⚠️ This section describes the **expected workflow**. The Logpush job and its R2 bucket are not provisioned by code — they are configured in the Cloudflare dashboard (issue #207). Until that's done, none of the commands below will return data.
+
+### List shards for a given day
+
+```sh
+# Replace BUCKET / YYYY/MM/DD with the bucket name configured in Logpush and the
+# target date. Cloudflare's default key layout is
+# `<dataset>/dt=YYYY-MM-DD/hr=HH/<shard>.json.gz` but check the Logpush job's
+# "Destination path" setting if the layout was customised.
+wrangler r2 object list "$BUCKET" --prefix "workers_trace_events/dt=2026-01-15/"
+```
+
+### Pull a shard and filter for `strategy_cron_error`
+
+```sh
+# Cloudflare ships gzipped NDJSON. Stream-decompress and pipe to jq.
+wrangler r2 object get "$BUCKET" "workers_trace_events/dt=2026-01-15/hr=14/<shard>.json.gz" \
+  | gunzip \
+  | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("strategy_cron_error"))'
+```
+
+### Span a date range (90 days ago example)
+
+```sh
+# Loops day-by-day. Slow but predictable — for one-off forensics, not for
+# routine dashboarding. GNU date users: substitute `date -d '90 days ago'`.
+target_day=$(date -u -v-90d +%Y-%m-%d)
+for hr in $(seq -w 0 23); do
+  wrangler r2 object list "$BUCKET" --prefix "workers_trace_events/dt=$target_day/hr=$hr/" --json \
+    | jq -r '.[]? | .key' \
+    | while read -r key; do
+        wrangler r2 object get "$BUCKET" "$key" | gunzip
+      done
+done | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("strategy_cron_error"))'
+```
+
+### Pin a single `request_id` across the archive
+
+```sh
+# When dashboard / D1 references a request_id older than Workers Logs retention,
+# the full per-request trace can still be reconstructed from R2.
+wrangler r2 object get "$BUCKET" "workers_trace_events/dt=2026-01-15/hr=14/<shard>.json.gz" \
+  | gunzip \
+  | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("<request_id>"))'
+```
+
+### Caveats specific to R2 archive
+
+- Logpush emits the **raw Workers Logs envelope**, not the parsed `event` payload. NDJSON lines are `{ "TimestampMs": ..., "Logs": [{ "Message": [...] }] }` shaped — the original `event` / `cause` / `message` fields appear as the string inside `.Logs[].Message[0]`. The `jq` filters above grep against that string; for typed access, parse it with `fromjson?` after extracting.
+- Cloudflare's default sample rate is 100%, but if the Logpush job is configured with `sampling_rate < 1.0`, low-volume events (`strategy_cron_error` is intentionally rare) can be dropped — set sampling to 1.0 for error/audit traffic.
+- The R2 bucket's lifecycle rule defines how far back the archive goes (POC default: 90 days per issue #207). Older shards are deleted by Cloudflare R2 lifecycle; no recovery path.
 
 ---
 
