@@ -103,7 +103,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
     expect(fixture.calls).toBe(1)
     const logs = logSpy.mock.calls
-      .map((args) => args[0])
+      .map((args: unknown[]) => args[0])
       .filter((s): s is string => typeof s === 'string' && s.includes('portfolio_roll_run'))
     expect(logs).toHaveLength(1)
     const first = logs[0]
@@ -120,7 +120,7 @@ describe('runPortfolioRoll (issue #140)', () => {
   it('emits portfolio_roll_skipped (warn) when PORTFOLIO_STATE binding is missing', async () => {
     await runPortfolioRoll(baseEnv, 'req-2', { now: nowOnSessionDay })
     const skipped = warnSpy.mock.calls
-      .map((args) => args[0])
+      .map((args: unknown[]) => args[0])
       .filter((s): s is string => typeof s === 'string' && s.includes('portfolio_roll_skipped'))
     expect(skipped).toHaveLength(1)
     const first = skipped[0]
@@ -152,7 +152,7 @@ describe('runPortfolioRoll (issue #140)', () => {
       }),
     ).resolves.toBeUndefined()
     const errors = errorSpy.mock.calls
-      .map((args) => args[0])
+      .map((args: unknown[]) => args[0])
       .filter((s): s is string => typeof s === 'string' && s.includes('portfolio_roll_error'))
     expect(errors).toHaveLength(1)
     const first = errors[0]
@@ -177,7 +177,7 @@ describe('runPortfolioRoll (issue #140)', () => {
 
     function expectSkippedWithReason(reasonMatch: RegExp): void {
       const skipped = warnSpy.mock.calls
-        .map((args) => args[0])
+        .map((args: unknown[]) => args[0])
         .filter((s): s is string => typeof s === 'string' && s.includes('daily_roll_skipped'))
       expect(skipped).toHaveLength(1)
       const first = skipped[0]
