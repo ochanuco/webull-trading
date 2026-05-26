@@ -964,7 +964,8 @@ export const admin = new Hono<AppBindings>()
     // `maxPages` is hard-capped at 20 so a typo / abuse can't fan out into a
     // huge broker batch — 20 * 50 = 1000 rows is plenty for ops use.
     const maxPages = parsePositiveIntQuery(c.req.query('maxPages'), { max: 20 })
-    const pageSize = parsePositiveIntQuery(c.req.query('pageSize'), { max: 200 })
+    // Webull /openapi/account/orders/history accepts page_size 10–100 only.
+    const pageSize = parsePositiveIntQuery(c.req.query('pageSize'), { max: 100 })
     const client = createWebullReadClient(c.env, {
       accessToken: await resolveAccessToken(c.env),
     })
