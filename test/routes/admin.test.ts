@@ -125,6 +125,8 @@ describe('POST /admin/orders/reconcile', () => {
       updated: [],
       stillPending: [],
       notFound: [],
+      notFoundRecentWindow: [],
+      notFoundAfterDeepLookup: [],
       errors: [],
       stateApplied: 0,
       stateApplyFailed: 0,

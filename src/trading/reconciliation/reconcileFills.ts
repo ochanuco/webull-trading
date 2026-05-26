@@ -31,7 +31,27 @@ export interface ReconcileSummary {
   inspected: number
   updated: Array<{ clientOrderId: string; status: string; realizedPnl?: number }>
   stillPending: Array<{ clientOrderId: string; status?: string }>
+  /**
+   * Union of `notFoundRecentWindow` and `notFoundAfterDeepLookup` — preserved
+   * so dashboards / alerting that read `summary.notFound` keep working. New
+   * callers should prefer the more specific buckets to tell "still inside the
+   * recent first-page window" apart from "broker really doesn't have it any
+   * more". (#139)
+   */
   notFound: string[]
+  /**
+   * Coids that missed the initial single-page lookup. Without a deep-lookup
+   * sweep (`historyMaxPages=1`) this is the only notFound bucket — the order
+   * may simply have rotated off page 1 of broker history; do not treat it as
+   * authoritative absence.
+   */
+  notFoundRecentWindow: string[]
+  /**
+   * Coids that still missed after walking up to `historyMaxPages` of broker
+   * history. Stronger signal that the order truly doesn't exist on the broker
+   * side (e.g. rejected pre-acceptance, or out of broker retention window).
+   */
+  notFoundAfterDeepLookup: string[]
   errors: Array<{ clientOrderId: string; message: string }>
   /**
    * Number of rows where the DO state apply succeeded on this run (whether
@@ -77,6 +97,22 @@ export interface ReconcileSummary {
 const MAX_REPAIR_ATTEMPTS = 5
 
 /**
+ * Default candidate-window for the SELECT on the post_submit cohort. 48 hours
+ * is long enough to ride out a brief cron pause without re-scanning the whole
+ * table every tick. Overridable per call via `ReconcileOptions.lookbackMs`
+ * (#139): callers that need to catch up from a longer pause can widen it.
+ */
+const DEFAULT_LOOKBACK_MS = 48 * 3_600_000
+
+/**
+ * Default cap on rows inspected per call. Keeps a single invocation bounded
+ * so a backlog doesn't fan out into a runaway batch. Overridable via
+ * `ReconcileOptions.limit` (#139) when the operator wants to drain a larger
+ * backlog deliberately.
+ */
+const DEFAULT_ROW_LIMIT = 50
+
+/**
  * `state_apply_error` substrings that we treat as "no further retry will
  * help" — repeated reconcile cycles will keep producing the same failure.
  * Distinct from transient errors (`broker_5xx`, `network`, `DO unavailable`,
@@ -107,6 +143,23 @@ interface ReconcileOptions {
   lookbackMs?: number
   /** Cap on rows inspected per call so a single invocation doesn't fan out. */
   limit?: number
+  /**
+   * Bound on how many pages of Webull order history we sweep when the initial
+   * single-page lookup misses. `1` (default) preserves prior behaviour — a
+   * single 50-row request per row, no deep sweep. Operator-driven retries
+   * (e.g. catching up after a cron pause) can pass a larger value so older
+   * fills still inside broker retention get reconciled. (#139)
+   *
+   * The deep sweep only triggers for the fresh-poll cohort (broker_status
+   * NULL); the repair cohort never re-polls Webull.
+   */
+  historyMaxPages?: number
+  /**
+   * Page size used for both the initial lookup and the deep-lookup sweep.
+   * Default 50. Larger values reduce request count at the cost of larger
+   * responses; the broker may also enforce its own ceiling.
+   */
+  historyPageSize?: number
   now?: () => Date
   /**
    * When true, the SELECT also picks up `broker_status='FILLED' AND
@@ -160,6 +213,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     updated: [],
     stillPending: [],
     notFound: [],
+    notFoundRecentWindow: [],
+    notFoundAfterDeepLookup: [],
     errors: [],
     stateApplied: 0,
     stateApplyFailed: 0,
@@ -173,8 +228,14 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   // `new Date()` at each call site makes back-catch-up runs lengthen the
   // cooldown window incorrectly.
   const runNow = now()
-  const since = new Date(runNow.getTime() - (options.lookbackMs ?? 48 * 3_600_000)).toISOString()
-  const limit = options.limit ?? 50
+  const since = new Date(runNow.getTime() - (options.lookbackMs ?? DEFAULT_LOOKBACK_MS)).toISOString()
+  const limit = options.limit ?? DEFAULT_ROW_LIMIT
+  // Deep-lookup sweep settings (#139). Default `historyMaxPages=1` preserves
+  // the prior single-page behaviour, so cron callers see no change in broker
+  // load. Callers that want to recover from a long pause (operator retry,
+  // admin endpoint) pass a larger bound.
+  const historyMaxPages = Math.max(1, options.historyMaxPages ?? 1)
+  const historyPageSize = options.historyPageSize ?? 50
 
   const db = createDb(options.env.DB)
   // Two cohorts in one query:
@@ -414,7 +475,9 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
 
     let detail: WebullOrderDetailDto | undefined
     try {
-      detail = await client.findOrderByClientId(coid)
+      // Initial single-page lookup — covers the typical case where the
+      // order is still on the first page of broker history.
+      detail = await client.findOrderByClientId(coid, { pageSize: historyPageSize })
     } catch (error) {
       summary.errors.push({
         clientOrderId: coid,
@@ -424,8 +487,37 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     }
 
     if (!detail) {
-      summary.notFound.push(coid)
-      continue
+      if (historyMaxPages <= 1) {
+        // No deep-lookup configured — record as recent-window miss only. We
+        // cannot say whether the order rotated off page 1 or never existed
+        // on the broker side, so callers must not treat this as authoritative
+        // absence.
+        summary.notFoundRecentWindow.push(coid)
+        summary.notFound.push(coid)
+        continue
+      }
+      // Deep-lookup sweep: walk pages 2..maxPages. Bounded to avoid
+      // unbounded broker pressure. We still only allow a single result per
+      // row, so the loop returns as soon as the coid is hit or pages run out.
+      try {
+        detail = await client.findOrderByClientId(coid, {
+          maxPages: historyMaxPages,
+          pageSize: historyPageSize,
+        })
+      } catch (error) {
+        summary.errors.push({
+          clientOrderId: coid,
+          message: error instanceof Error ? error.message : String(error),
+        })
+        continue
+      }
+      if (!detail) {
+        // Even the deep sweep didn't find it — stronger signal that the
+        // broker really doesn't have the order.
+        summary.notFoundAfterDeepLookup.push(coid)
+        summary.notFound.push(coid)
+        continue
+      }
     }
 
     // P0 raw response capture for JP tenant. We've observed the JP UAT

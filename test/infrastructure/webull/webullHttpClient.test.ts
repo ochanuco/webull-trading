@@ -154,7 +154,81 @@ describe('WebullHttpClient', () => {
     expect(u.pathname).toBe('/openapi/account/orders/history')
     expect(u.searchParams.get('account_id')).toBe('acct-1')
     expect(u.searchParams.get('page_size')).toBe('50')
+    // 1-indexed `page` param emitted on every request (#139). Even the
+    // single-page default case sends `page=1` so the broker has consistent
+    // semantics across single- and deep-lookup callers.
+    expect(u.searchParams.get('page')).toBe('1')
     expect(detail?.status).toBe('FILLED')
+  })
+
+  // #139: pagination. When the target coid is not on page 1 but is on page 2
+  // and the caller opts into `maxPages=2`, the client walks both pages and
+  // returns the match from page 2.
+  it('findOrderByClientId walks subsequent pages when maxPages > 1 and the target is on page 2', async () => {
+    const pageSize = 2
+    const pageRows: Record<string, unknown[]> = {
+      '1': [
+        { client_order_id: 'page1-a', status: 'PENDING' },
+        { client_order_id: 'page1-b', status: 'PENDING' },
+      ],
+      '2': [
+        { client_order_id: 'target-coid', symbol: 'SOXL', status: 'FILLED', filled_quantity: '1' },
+        { client_order_id: 'page2-b', status: 'PENDING' },
+      ],
+    }
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      const page = url.searchParams.get('page') ?? '1'
+      return new Response(JSON.stringify(pageRows[page] ?? []), { status: 200 })
+    })
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('target-coid', { maxPages: 3, pageSize })
+    expect(detail?.status).toBe('FILLED')
+    // Page 1 was scanned (no match), page 2 returned the match — loop stops.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const requestedPages = fetchMock.mock.calls.map((call) =>
+      new URL(String(call[0])).searchParams.get('page'),
+    )
+    expect(requestedPages).toEqual(['1', '2'])
+    // page_size is forwarded as requested.
+    expect(new URL(String(fetchMock.mock.calls[0]![0])).searchParams.get('page_size')).toBe('2')
+  })
+
+  // #139: bounded sweep. With `maxPages=2` we must not request page 3 even
+  // when the broker keeps returning full pages — caller's quota stays
+  // proportional to the cap they asked for.
+  it('findOrderByClientId stops at maxPages even when broker keeps returning full pages', async () => {
+    const pageSize = 2
+    const fullPage = [
+      { client_order_id: 'fill-1', status: 'PENDING' },
+      { client_order_id: 'fill-2', status: 'PENDING' },
+    ]
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
+      new Response(JSON.stringify(fullPage), { status: 200 }),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('never-matches', { maxPages: 2, pageSize })
+    expect(detail).toBeUndefined()
+    // Exactly maxPages requests, never page 3.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const requestedPages = fetchMock.mock.calls.map((call) =>
+      new URL(String(call[0])).searchParams.get('page'),
+    )
+    expect(requestedPages).toEqual(['1', '2'])
+  })
+
+  // #139: a short page (rows.length < pageSize) signals end-of-history, so we
+  // stop early and don't pay for further empty page calls.
+  it('findOrderByClientId stops early when the broker returns a short page', async () => {
+    const pageSize = 50
+    // Single row returned — far short of pageSize=50 → loop must not request page 2.
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify([{ client_order_id: 'unrelated' }]), { status: 200 }),
+    )
+    const client = createClient(fetchMock)
+    const detail = await client.findOrderByClientId('never-matches', { maxPages: 5, pageSize })
+    expect(detail).toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('findOrderByClientId throws BrokerRequestError when no account id is configured', async () => {

@@ -368,7 +368,13 @@ function makePortfolioNamespace(stub: PortfolioStateStub): unknown {
 
 function makeWebullStub(detailByCoid: Record<string, unknown>) {
   return {
-    findOrderByClientId: vi.fn(async (coid: string) => detailByCoid[coid]),
+    // Second arg (opts) is forwarded by reconcileFills to opt into deep
+    // lookup (#139). The stub ignores it but the type must accept it so
+    // tests can read it from `.mock.calls`.
+    findOrderByClientId: vi.fn(
+      async (coid: string, _opts?: { maxPages?: number; pageSize?: number }) =>
+        detailByCoid[coid],
+    ),
   }
 }
 
@@ -1439,6 +1445,93 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('"event":"reconcile_auto_abandon"'),
       )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // notFound bucket split (#139). The broker-side history call may miss for
+  // two reasons: (a) the order rotated off the recent first-page window, or
+  // (b) the order doesn't exist on the broker at all. We separate the two so
+  // dashboards / alerting can treat "deep lookup also missed" as a stronger
+  // signal than "first page didn't have it".
+  // ---------------------------------------------------------------------------
+  describe('notFound split: recent-window vs after-deep-lookup', () => {
+    it('classifies as notFoundRecentWindow when historyMaxPages=1 and broker returns nothing', async () => {
+      const row: CandidateRow = {
+        id: 501,
+        clientOrderId: 'coid-missing-1',
+        symbol: 'SOXL',
+        side: 'BUY',
+        brokerStatus: null,
+        filledQty: null,
+        filledPrice: null,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 0,
+      }
+      const { db } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      const webullStub = makeWebullStub({})
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        // historyMaxPages omitted → default 1 → no deep sweep.
+      })
+
+      // Single lookup, no deep sweep.
+      expect(webullStub.findOrderByClientId).toHaveBeenCalledTimes(1)
+      expect(summary.notFoundRecentWindow).toEqual(['coid-missing-1'])
+      expect(summary.notFoundAfterDeepLookup).toEqual([])
+      // Legacy bucket still populated so existing dashboards keep working.
+      expect(summary.notFound).toEqual(['coid-missing-1'])
+    })
+
+    it('classifies as notFoundAfterDeepLookup when historyMaxPages>1 and deep sweep also misses', async () => {
+      const row: CandidateRow = {
+        id: 502,
+        clientOrderId: 'coid-missing-deep',
+        symbol: 'SOXL',
+        side: 'BUY',
+        brokerStatus: null,
+        filledQty: null,
+        filledPrice: null,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 0,
+      }
+      const { db } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      const webullStub = makeWebullStub({})
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        historyMaxPages: 5,
+      })
+
+      // Two lookups: initial single-page, then deep sweep with maxPages.
+      expect(webullStub.findOrderByClientId).toHaveBeenCalledTimes(2)
+      // The deep-sweep call carried the bounded maxPages.
+      const deepCall = webullStub.findOrderByClientId.mock.calls[1]!
+      expect(deepCall[1]).toMatchObject({ maxPages: 5 })
+      expect(summary.notFoundRecentWindow).toEqual([])
+      expect(summary.notFoundAfterDeepLookup).toEqual(['coid-missing-deep'])
+      expect(summary.notFound).toEqual(['coid-missing-deep'])
     })
   })
 })
