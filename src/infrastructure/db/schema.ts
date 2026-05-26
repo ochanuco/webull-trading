@@ -148,6 +148,14 @@ export type SymbolConfigInsert = typeof symbolConfig.$inferInsert
  * correlation cap の env 置換)。
  *
  * 1 方向だけ書き込めば十分 — repo 側で bidirectional に展開する。
+ *
+ * **戦略意図 (#315 regime hedge 明文化)**: 同 sector の 3x leveraged ETF を
+ * 同時 universe に入れる構成は dead-money リスクを生む可能性があったが、
+ * この table 経由で「inverse 相手に open position がある間は BUY 不可」を強制
+ * する事で 1 銘柄 active な regime hedge として動作する。SOXL pullback で entry
+ * → trend 続行で hold、regime 反転で SELL → クールダウン後に SOXS 側 entry、
+ * の交互運用を想定。bucket cap (semi) は notional の上限を別に持つので、
+ * 両方が同時に in-flight になる事も無い。
  */
 export const inversePairs = sqliteTable('inverse_pairs', {
   symbol: text('symbol').primaryKey(),
