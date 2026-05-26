@@ -113,6 +113,13 @@ export async function createTradingService(
       staleQuoteMs: global.staleQuoteMs,
       gapRejectPct: global.gapRejectPct,
       drawdownKillThreshold: global.drawdownKillThreshold,
+      // #77 portfolio exposure gate. `total_capital_*` null disables the
+      // check for that currency. `symbolCurrency` is required to route the
+      // ceiling to the correct budget (USD vs JPY).
+      maxPortfolioExposurePct: global.maxPortfolioExposurePct,
+      totalCapitalUsd: global.totalCapitalUsd,
+      totalCapitalJpy: global.totalCapitalJpy,
+      symbolCurrency: universe.symbolCurrency,
     },
   )
 }

@@ -1472,6 +1472,73 @@ export const admin = new Hono<AppBindings>()
       })
     }
   })
+  /**
+   * #77 portfolio exposure gate: operator-supplied baseline for
+   * `openExposure{Usd,Jpy}`. Use after a holdings rebuild (e.g.
+   * `/admin/orders/sync-holdings`) when the on-DO counter has drifted from
+   * broker truth, or to zero things out on a fresh tenant.
+   *
+   * Body: `{ usd?: number, jpy?: number }`. Either side may be omitted to
+   * leave that currency's counter untouched. Numbers must be finite >= 0.
+   * At least one of the two must be present.
+   */
+  .post('/portfolio/seed-exposure', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.PORTFOLIO_STATE) {
+      throw new ValidationError('PORTFOLIO_STATE binding is not configured', { field: 'env' })
+    }
+    const body = (await c.req.json().catch(() => null)) as unknown
+    const args = readSeedExposureBody(body)
+    const client = new PortfolioStateClient(c.env.PORTFOLIO_STATE)
+    const before = await safeGetPortfolioState(client)
+    const state = await client.seedOpenExposure(args)
+    await writeAuditLog(
+      c,
+      '/admin/portfolio/seed-exposure',
+      'portfolio=daily',
+      {
+        openExposureUsd: before?.openExposureUsd ?? null,
+        openExposureJpy: before?.openExposureJpy ?? null,
+      },
+      {
+        openExposureUsd: state.openExposureUsd,
+        openExposureJpy: state.openExposureJpy,
+      },
+    )
+    return c.json({
+      openExposureUsd: state.openExposureUsd,
+      openExposureJpy: state.openExposureJpy,
+      updatedAt: state.updatedAt,
+    })
+  })
+
+/**
+ * Parse `/admin/portfolio/seed-exposure` body. At least one of `usd` / `jpy`
+ * must be a finite number >= 0; the other can be omitted (= leave that
+ * currency untouched). Reject negatives and NaN.
+ */
+function readSeedExposureBody(body: unknown): { usd?: number; jpy?: number } {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ValidationError('body must be a JSON object with { usd?, jpy? }', { field: 'body' })
+  }
+  const raw = body as { usd?: unknown; jpy?: unknown }
+  const out: { usd?: number; jpy?: number } = {}
+  if (raw.usd !== undefined && raw.usd !== null) {
+    if (typeof raw.usd !== 'number' || !Number.isFinite(raw.usd) || raw.usd < 0) {
+      throw new ValidationError('usd must be a finite number >= 0', { field: 'usd' })
+    }
+    out.usd = raw.usd
+  }
+  if (raw.jpy !== undefined && raw.jpy !== null) {
+    if (typeof raw.jpy !== 'number' || !Number.isFinite(raw.jpy) || raw.jpy < 0) {
+      throw new ValidationError('jpy must be a finite number >= 0', { field: 'jpy' })
+    }
+    out.jpy = raw.jpy
+  }
+  if (out.usd === undefined && out.jpy === undefined) {
+    throw new ValidationError('at least one of usd / jpy must be provided', { field: 'body' })
+  }
+  return out
+}
 
 /**
  * Validate a single `/admin/macro-events/seed` body entry。

@@ -11,4 +11,20 @@ export interface PortfolioStore {
   applyRealizedPnl(delta: number): Promise<PortfolioState>
   setTradingDisabledUntil(iso: string | null): Promise<PortfolioState>
   rollDaily(): Promise<{ before: PortfolioState; after: PortfolioState }>
+  /**
+   * Mutate `openExposure{Usd,Jpy}` from a terminal fill. BUY adds notional,
+   * SELL subtracts (clamped >= 0). Called by reconcileFills after the
+   * realized-pnl path; read by the portfolio exposure gate (#77).
+   */
+  applyFillExposure(args: {
+    currency: 'USD' | 'JPY'
+    side: 'BUY' | 'SELL'
+    notional: number
+  }): Promise<PortfolioState>
+  /**
+   * Operator override for `openExposure{Usd,Jpy}` — used by
+   * `/admin/portfolio/seed-exposure` to snap to a known baseline after a
+   * holdings rebuild. Either side can be omitted.
+   */
+  seedOpenExposure(args: { usd?: number; jpy?: number }): Promise<PortfolioState>
 }

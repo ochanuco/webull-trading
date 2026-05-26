@@ -13,6 +13,16 @@ export interface PortfolioState {
    * the runStrategyCron pre-flight to detect stale rollovers (issue #140).
    */
   lastRolledAt: string | null
+  /**
+   * Currently-open BUY notional in USD across all symbols. BUY fills add to
+   * this, SELL fills subtract. Clamped to >= 0 to avoid drift when SELLs
+   * run ahead of their BUYs (e.g. seeded position). Read by the portfolio
+   * exposure gate against `global_config.total_capital_usd *
+   * max_portfolio_exposure_pct` (#77).
+   */
+  openExposureUsd: number
+  /** JPY counterpart of {@link openExposureUsd}. Independent budget. */
+  openExposureJpy: number
   updatedAt: string
 }
 
@@ -23,6 +33,8 @@ export function emptyPortfolioState(now: () => Date = () => new Date()): Portfol
     appliedClientOrderIds: [],
     tradingDisabledUntil: null,
     lastRolledAt: null,
+    openExposureUsd: 0,
+    openExposureJpy: 0,
     updatedAt: now().toISOString(),
   }
 }

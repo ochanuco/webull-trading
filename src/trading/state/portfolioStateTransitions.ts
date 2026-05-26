@@ -97,6 +97,69 @@ export function setTradingDisabledUntil(
 }
 
 /**
+ * BUY fill: add notional to the currency-specific openExposure. SELL fill:
+ * subtract, but clamp to >= 0 so we never go negative even if a SELL runs
+ * ahead of its BUY (e.g. position seeded out-of-band, or a stale fill
+ * arrives after `seedOpenExposure` reset the counter).
+ *
+ * Pure: returns a new state. The portfolio exposure gate (#77) reads
+ * `openExposure{Usd,Jpy}` and compares against `total_capital_* *
+ * max_portfolio_exposure_pct`.
+ */
+export function applyFillExposure(
+  state: PortfolioState,
+  args: { currency: 'USD' | 'JPY'; side: 'BUY' | 'SELL'; notional: number },
+  ctx: PortfolioTransitionContext = defaultCtx,
+): PortfolioState {
+  if (!Number.isFinite(args.notional) || args.notional < 0) {
+    throw new Error(
+      `Invalid applyFillExposure notional: ${args.notional} (must be a finite number >= 0)`,
+    )
+  }
+  const delta = args.side === 'BUY' ? args.notional : -args.notional
+  if (args.currency === 'USD') {
+    return {
+      ...state,
+      openExposureUsd: Math.max(0, state.openExposureUsd + delta),
+      updatedAt: ctx.now().toISOString(),
+    }
+  }
+  return {
+    ...state,
+    openExposureJpy: Math.max(0, state.openExposureJpy + delta),
+    updatedAt: ctx.now().toISOString(),
+  }
+}
+
+/**
+ * Operator override: snap one or both `openExposure*` counters to a known
+ * baseline. Used by `/admin/portfolio/seed-exposure` to reset after an
+ * out-of-band position rebuild. Either side can be omitted to leave that
+ * currency's counter untouched.
+ */
+export function seedOpenExposure(
+  state: PortfolioState,
+  args: { usd?: number; jpy?: number },
+  ctx: PortfolioTransitionContext = defaultCtx,
+): PortfolioState {
+  const next: PortfolioState = { ...state }
+  if (args.usd !== undefined) {
+    if (!Number.isFinite(args.usd) || args.usd < 0) {
+      throw new Error(`Invalid seedOpenExposure usd: ${args.usd} (must be a finite number >= 0)`)
+    }
+    next.openExposureUsd = args.usd
+  }
+  if (args.jpy !== undefined) {
+    if (!Number.isFinite(args.jpy) || args.jpy < 0) {
+      throw new Error(`Invalid seedOpenExposure jpy: ${args.jpy} (must be a finite number >= 0)`)
+    }
+    next.openExposureJpy = args.jpy
+  }
+  next.updatedAt = ctx.now().toISOString()
+  return next
+}
+
+/**
  * EOD rollover: computes `nextStart = dailyStartEquity + dailyRealizedPnl`,
  * resets `dailyRealizedPnl` to 0, and returns both the before and after states.
  * This is the atomic version that prevents races with `applyRealizedPnl`.

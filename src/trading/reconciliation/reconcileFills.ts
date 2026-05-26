@@ -8,6 +8,8 @@ import { createWebullReadClient } from '../../infrastructure/webull/WebullReadCl
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
+import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
+import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
 
@@ -175,6 +177,30 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   const runNow = now()
   const since = new Date(runNow.getTime() - (options.lookbackMs ?? 48 * 3_600_000)).toISOString()
   const limit = options.limit ?? 50
+
+  // #77 portfolio exposure tracking: resolve symbol → currency once so each
+  // fill apply can update `openExposure{Usd,Jpy}` without per-row DB hits.
+  // Best-effort: a failure here (DB transient, fake DB in tests) falls back
+  // to the JP-numeric heuristic inside `applyFillToState` (see
+  // `resolveFillCurrency`). The exposure counter is informational for the
+  // gate — a missed update is recoverable via `/admin/portfolio/seed-exposure`.
+  // Loaded BEFORE the main `db` handle so `createDb` mock ordering in tests
+  // remains stable (main SELECT uses the second mock return).
+  let symbolCurrency: Record<string, SymbolCurrency> | undefined
+  if (options.env.PORTFOLIO_STATE) {
+    try {
+      const universe = await loadSymbolUniverse(options.env)
+      symbolCurrency = universe.symbolCurrency
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: 'reconcile_symbol_currency_load_failed',
+          requestId: options.requestId,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
 
   const db = createDb(options.env.DB)
   // Two cohorts in one query:
@@ -398,6 +424,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         realizedPnl,
         runNow,
         nowIso: runNow.toISOString(),
+        symbolCurrency,
       })
       if (ok) {
         summary.stateApplied += 1
@@ -551,6 +578,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           realizedPnl,
           runNow,
           nowIso: runNow.toISOString(),
+          symbolCurrency,
         })
         if (ok) {
           summary.stateApplied += 1
@@ -667,6 +695,10 @@ async function tryApplyAndStamp(args: {
   realizedPnl: number | null
   runNow: Date
   nowIso: string
+  /** Symbol → currency map preloaded by `reconcileFills` (#77). Undefined
+   * when the universe load failed — `applyFillToState` falls back to the
+   * JP-numeric heuristic. */
+  symbolCurrency?: Record<string, SymbolCurrency>
 }): Promise<boolean> {
   const {
     env,
@@ -681,6 +713,7 @@ async function tryApplyAndStamp(args: {
     realizedPnl,
     runNow,
     nowIso,
+    symbolCurrency,
   } = args
 
   try {
@@ -694,6 +727,7 @@ async function tryApplyAndStamp(args: {
       filledPrice,
       realizedPnl,
       runNow,
+      symbolCurrency,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -884,8 +918,21 @@ async function applyFillToState(args: {
   /** Reconcile run basis time — used for cooldown expiry so back-catch-up runs
    * don't lengthen the window past the original fill's next trading day. */
   runNow: Date
+  /** Pre-loaded symbol → currency map (#77 portfolio exposure tracking). */
+  symbolCurrency?: Record<string, SymbolCurrency>
 }): Promise<void> {
-  const { env, requestId, clientOrderId, symbol, side, filledQty, filledPrice, realizedPnl, runNow } = args
+  const {
+    env,
+    requestId,
+    clientOrderId,
+    symbol,
+    side,
+    filledQty,
+    filledPrice,
+    realizedPnl,
+    runNow,
+    symbolCurrency,
+  } = args
   let symbolApplied = false
   let portfolioApplied = false
 
@@ -903,6 +950,40 @@ async function applyFillToState(args: {
   if (side === 'SELL' && realizedPnl !== null && env.PORTFOLIO_STATE) {
     const result = await new PortfolioStateClient(env.PORTFOLIO_STATE).applyRealizedPnlOnce(clientOrderId, realizedPnl)
     portfolioApplied = result.applied
+  }
+
+  // #77 portfolio exposure tracking. BUY adds, SELL subtracts (clamped >=0
+  // inside the DO). Non-fatal: a failure here must not poison the journal
+  // marker because the position-side apply (SymbolStateDO.recordFillOnce)
+  // is already idempotent via clientOrderId. The exposure counter drift can
+  // be repaired via `/admin/portfolio/seed-exposure`. We only fire the call
+  // when SymbolStateDO.recordFillOnce reported a fresh apply (`symbolApplied`)
+  // so repair retries don't double-count exposure.
+  if (env.PORTFOLIO_STATE && symbolApplied) {
+    const currency = resolveFillCurrency(symbol, symbolCurrency)
+    const notional = filledPrice * filledQty
+    if (Number.isFinite(notional) && notional > 0) {
+      try {
+        await new PortfolioStateClient(env.PORTFOLIO_STATE).applyFillExposure({
+          currency,
+          side,
+          notional,
+        })
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: 'reconcile_exposure_apply_error',
+            requestId,
+            clientOrderId,
+            symbol,
+            side,
+            currency,
+            notional,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        )
+      }
+    }
   }
 
   // Stop-out cooldown: a losing exit parks the symbol until the next trading
@@ -1124,10 +1205,29 @@ function resolveFilledPrice(
   return candidate
 }
 
+/**
+ * Symbol → currency lookup for the #77 portfolio exposure tracker. Prefer
+ * the preloaded `symbol_config` map; if missing (universe load failed, or
+ * symbol not in `symbol_config`) fall back to the same JP-numeric heuristic
+ * the `/trade/*` route uses (4-digit numeric = JPY, else USD). The fallback
+ * keeps exposure tracking alive on misconfigured environments without
+ * silently misclassifying a US ETF as JPY.
+ */
+function resolveFillCurrency(
+  symbol: string,
+  symbolCurrency: Record<string, SymbolCurrency> | undefined,
+): SymbolCurrency {
+  const upper = symbol.toUpperCase()
+  const mapped = symbolCurrency?.[upper]
+  if (mapped === 'USD' || mapped === 'JPY') return mapped
+  return /^\d{4}$/.test(upper) ? 'JPY' : 'USD'
+}
+
 // Exposed for tests.
 export const _internal = {
   TERMINAL_STATUSES,
   pickFilledPrice,
   resolveFilledPrice,
+  resolveFillCurrency,
   shouldRetryStateApply,
 }
