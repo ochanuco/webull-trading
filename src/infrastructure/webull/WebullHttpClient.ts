@@ -164,9 +164,18 @@ export class WebullHttpClient {
    * idempotency key.
    *
    * `/openapi/account/orders/detail` returns 404 on the JP UAT tenant, so we
-   * fetch the first page of `/openapi/account/orders/history` and filter
-   * client-side. If the order is older than that window the caller gets
-   * `undefined`; a wider pagination sweep is out of scope for the MVP.
+   * sweep `/openapi/account/orders/history` and filter client-side. Default is
+   * a single-page lookup (50 rows) to preserve cron-poll behaviour. Callers
+   * that need deeper history (e.g. operator-driven deep lookup, reconcile
+   * retry) can pass `{ maxPages: N }` for a bounded multi-page sweep — the
+   * loop stops as soon as the target coid is found, the broker returns a
+   * short page (less than `pageSize`), or `maxPages` has been visited (#139).
+   *
+   * Webull `/openapi/account/orders/history` accepts a 1-indexed `page` query
+   * param. Pages are walked sequentially (1, 2, ...) so we do not re-query
+   * page 1 if the caller wants `maxPages=2`. Iterating in serial keeps quota
+   * usage proportional to need; with no docs on a server-side hard cap, the
+   * caller is responsible for setting `maxPages` to a sane bound (default 1).
    *
    * 新 OpenAPI docs (#251) では response が wrapper 形式 (`{client_order_id,
    * combo_type, orders[]}`) に変わってる。\`normalizeOrderHistoryRow\` で
@@ -175,21 +184,34 @@ export class WebullHttpClient {
    */
   async findOrderByClientId(
     clientOrderId: string,
-    pageSize = 50,
+    opts: { maxPages?: number; pageSize?: number } = {},
   ): Promise<WebullOrderDetailDto | undefined> {
-    const page = await this.request<unknown[]>(
-      'GET',
-      this.ordersHistoryPath,
-      {
-        query: { account_id: this.requireAccountId(), page_size: String(pageSize) },
-      },
-    )
-    if (!Array.isArray(page)) return undefined
-    for (const raw of page) {
-      const normalized = normalizeOrderHistoryRow(
-        raw as WebullOrderHistoryWrapperDto | WebullOrderDetailDto,
+    const pageSize = opts.pageSize ?? 50
+    const maxPages = Math.max(1, opts.maxPages ?? 1)
+    const accountId = this.requireAccountId()
+    for (let page = 1; page <= maxPages; page += 1) {
+      const rows = await this.request<unknown[]>(
+        'GET',
+        this.ordersHistoryPath,
+        {
+          query: {
+            account_id: accountId,
+            page_size: String(pageSize),
+            page: String(page),
+          },
+        },
       )
-      if (normalized.client_order_id === clientOrderId) return normalized
+      if (!Array.isArray(rows)) return undefined
+      for (const raw of rows) {
+        const normalized = normalizeOrderHistoryRow(
+          raw as WebullOrderHistoryWrapperDto | WebullOrderDetailDto,
+        )
+        if (normalized.client_order_id === clientOrderId) return normalized
+      }
+      // A short page means we have reached the tail of broker-side history —
+      // there is nothing more to sweep, so stop early instead of paying the
+      // cost of a final empty request that we know will not match.
+      if (rows.length < pageSize) return undefined
     }
     return undefined
   }

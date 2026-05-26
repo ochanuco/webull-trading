@@ -959,12 +959,28 @@ export const admin = new Hono<AppBindings>()
     if (clientOrderId.length === 0) {
       throw new ValidationError('clientOrderId must be non-empty', { field: 'clientOrderId' })
     }
+    // #139: operator can opt into a bounded deep-lookup sweep via query
+    // params. Default behaviour (no params) is the prior single-page lookup.
+    // `maxPages` is hard-capped at 20 so a typo / abuse can't fan out into a
+    // huge broker batch — 20 * 50 = 1000 rows is plenty for ops use.
+    const maxPages = parsePositiveIntQuery(c.req.query('maxPages'), { max: 20 })
+    const pageSize = parsePositiveIntQuery(c.req.query('pageSize'), { max: 200 })
     const client = createWebullReadClient(c.env, {
       accessToken: await resolveAccessToken(c.env),
     })
-    const detail = await client.findOrderByClientId(clientOrderId)
+    const detail = await client.findOrderByClientId(clientOrderId, {
+      ...(maxPages !== undefined ? { maxPages } : {}),
+      ...(pageSize !== undefined ? { pageSize } : {}),
+    })
     if (!detail) {
-      return c.json({ error: 'order_not_found_in_recent_history', clientOrderId }, 404)
+      return c.json(
+        {
+          error: 'order_not_found_in_recent_history',
+          clientOrderId,
+          maxPagesScanned: maxPages ?? 1,
+        },
+        404,
+      )
     }
     return c.json(detail)
   })
@@ -1757,6 +1773,25 @@ function parseTruthyQuery(value: string | undefined): boolean {
   if (value === undefined) return false
   const normalized = value.trim().toLowerCase()
   return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+
+/**
+ * Parse a positive integer query param with an upper bound. Returns
+ * `undefined` for absent / unparseable / out-of-range values so the caller
+ * falls back to its built-in default (= zero broker pressure from a typo).
+ * (#139)
+ */
+function parsePositiveIntQuery(
+  value: string | undefined,
+  { max }: { max: number },
+): number | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return undefined
+  const n = Number(trimmed)
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return undefined
+  if (n > max) return undefined
+  return n
 }
 
 /**

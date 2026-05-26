@@ -31,9 +31,9 @@ export class WebullReadClient {
 
   findOrderByClientId(
     clientOrderId: string,
-    pageSize?: number,
+    opts?: { maxPages?: number; pageSize?: number },
   ): Promise<WebullOrderDetailDto | undefined> {
-    return this.http.findOrderByClientId(clientOrderId, pageSize)
+    return this.http.findOrderByClientId(clientOrderId, opts)
   }
 
   getPositions(): Promise<WebullPositionDto[]> {
