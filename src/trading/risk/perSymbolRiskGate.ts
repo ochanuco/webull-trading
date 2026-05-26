@@ -106,6 +106,9 @@ export function evaluatePerSymbolRisk(
   }
 
   // 3. inverse pair (BUY only)。呼び出し側が pre-fetch した inverseState を見る。
+  //    (#315) この check が SOXL/SOXS を「regime hedge」として運用するための
+  //    要 — 同時に両建てになる dead-money 状態を構造的に発生させない。一方を
+  //    SELL し終わってから他方の BUY が通る、交互運用が前提。
   if (side === 'BUY') {
     const inverseSymbol = config.inversePairs[symbol.toUpperCase()]
     if (inverseSymbol && input.inverseState) {
