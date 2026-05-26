@@ -66,6 +66,8 @@ const TSE_2026_CLOSURES: ReadonlySet<string> = new Set([
 /** Hard-coded holiday data の有効年セット。範囲外は呼び出し側で fail-closed。 */
 const TSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026])
 
+// formatToParts ベースで year / month / day を抜く理由は usMarketCalendar.ts
+// 参照 (#349 — runtime-portable な YYYY-MM-DD 組立)。
 const JP_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Tokyo',
   year: 'numeric',
@@ -78,17 +80,41 @@ const JP_WEEKDAY_FORMATTER = new Intl.DateTimeFormat('en-US', {
   weekday: 'short',
 })
 
-/** `date` (UTC instant) を Asia/Tokyo の "YYYY-MM-DD" に format。 */
+interface YmdParts {
+  ymd: string
+  year: number
+}
+
+function extractJpYmdParts(date: Date): YmdParts | null {
+  let year = ''
+  let month = ''
+  let day = ''
+  for (const part of JP_YMD_FORMATTER.formatToParts(date)) {
+    if (part.type === 'year') year = part.value
+    else if (part.type === 'month') month = part.value
+    else if (part.type === 'day') day = part.value
+  }
+  if (!year || !month || !day) return null
+  const yearInt = Number.parseInt(year, 10)
+  if (!Number.isFinite(yearInt)) return null
+  return { ymd: `${year}-${month}-${day}`, year: yearInt }
+}
+
+/**
+ * `date` (UTC instant) を Asia/Tokyo の "YYYY-MM-DD" に format。
+ *
+ * formatToParts ベースで runtime drift に強い (#349)。抽出失敗時は空文字 →
+ * caller (`isTseSessionDay`) で fail-closed (false) になる。
+ */
 export function formatJpYmd(date: Date): string {
-  return JP_YMD_FORMATTER.format(date)
+  return extractJpYmdParts(date)?.ymd ?? ''
 }
 
 /** `date` 時点の JP 暦日が hard-coded supported range に含まれているか。 */
 export function isWithinSupportedRange(date: Date): boolean {
-  const ymd = formatJpYmd(date)
-  const year = Number.parseInt(ymd.slice(0, 4), 10)
-  if (!Number.isFinite(year)) return false
-  return TSE_SUPPORTED_YEARS.has(year)
+  const parts = extractJpYmdParts(date)
+  if (!parts) return false
+  return TSE_SUPPORTED_YEARS.has(parts.year)
 }
 
 /**
