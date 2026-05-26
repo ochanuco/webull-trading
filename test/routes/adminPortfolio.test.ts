@@ -211,6 +211,8 @@ describe('POST /admin/portfolio/seed-exposure (#77)', () => {
   it('accepts only one side (jpy alone) leaving usd untouched', async () => {
     const app = createApp()
     const captured = { calls: [] as Array<{ usd?: number; jpy?: number }> }
+    // Seed a non-zero USD so a regression that silently zeroes USD would fail.
+    const initial = { openExposureUsd: 123, openExposureJpy: 0 }
     const res = await app.request(
       '/admin/portfolio/seed-exposure',
       {
@@ -218,9 +220,16 @@ describe('POST /admin/portfolio/seed-exposure (#77)', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jpy: 12_345 }),
       },
-      { ...baseEnv, PORTFOLIO_STATE: fakePortfolioExposureState(captured) },
+      { ...baseEnv, PORTFOLIO_STATE: fakePortfolioExposureState(captured, initial) },
     )
     expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      openExposureUsd: number
+      openExposureJpy: number
+      updatedAt: string
+    }
+    expect(body.openExposureUsd).toBe(123)
+    expect(body.openExposureJpy).toBe(12_345)
     expect(captured.calls).toEqual([{ jpy: 12_345 }])
   })
 })
