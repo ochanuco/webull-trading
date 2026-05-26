@@ -17,8 +17,13 @@ const intent: OrderIntent = {
 
 const okResponse: WebullPlaceOrderResponseDto = { order_id: 'ord-1' }
 
-function fakeHttp(): { placeOrder: ReturnType<typeof vi.fn> } {
-  return { placeOrder: vi.fn(async () => okResponse) }
+// vitest v4 infers `vi.fn()` as `Mock<Procedure | Constructable>` which does
+// not satisfy `Pick<WebullHttpClient, 'placeOrder'>['placeOrder']`. Pin the
+// generic to the exact method signature so v4 typecheck accepts the stub and
+// v2 keeps working (the generic form is supported by both versions).
+type PlaceOrderFn = (intent: OrderIntent) => Promise<WebullPlaceOrderResponseDto>
+function fakeHttp(): { placeOrder: ReturnType<typeof vi.fn<PlaceOrderFn>> } {
+  return { placeOrder: vi.fn<PlaceOrderFn>(async () => okResponse) }
 }
 
 describe('WebullTradeClient', () => {
