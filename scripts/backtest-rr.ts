@@ -42,10 +42,13 @@ interface PerSymbolStats {
   exitReasonCount: Record<ExitReason, number>
   exitReasonAvgPnl: Record<ExitReason, number>
   exitReasonHoldDays: Record<ExitReason, number>
+  exitReasonPnls: Record<ExitReason, number[]>
   timeStopStats: { count: number; mean: number; median: number; std: number } | null
   expectancy: number
   realizedRR: number | null
 }
+
+const HISTOGRAM_BIN_WIDTH = 200 // USD-equivalent bins (#317 DoD)
 
 async function main() {
   const client = new YahooBarClient({ timeoutMs: 15_000 })
@@ -77,6 +80,12 @@ async function main() {
     perSymbol.push(makeStats(symbol, label, result))
   }
 
+  if (perSymbol.length === 0) {
+    throw new Error(
+      'No symbol produced a backtest result (all Yahoo fetches failed or were skipped). Cannot render report.',
+    )
+  }
+
   const report = renderReport(perSymbol)
   console.log('\n' + report)
 
@@ -91,12 +100,14 @@ function makeStats(symbol: string, label: string, result: BacktestResult): PerSy
   const exitReasonCount: Record<ExitReason, number> = { TP: 0, STOP: 0, TIME_STOP: 0, END_OF_DATA: 0 }
   const exitReasonPnlSum: Record<ExitReason, number> = { TP: 0, STOP: 0, TIME_STOP: 0, END_OF_DATA: 0 }
   const exitReasonHoldSum: Record<ExitReason, number> = { TP: 0, STOP: 0, TIME_STOP: 0, END_OF_DATA: 0 }
+  const exitReasonPnls: Record<ExitReason, number[]> = { TP: [], STOP: [], TIME_STOP: [], END_OF_DATA: [] }
   const timeStopPnls: number[] = []
 
   for (const t of result.trades) {
     exitReasonCount[t.exitReason] += 1
     exitReasonPnlSum[t.exitReason] += t.realizedPnl
     exitReasonHoldSum[t.exitReason] += t.holdingDays
+    exitReasonPnls[t.exitReason].push(t.realizedPnl)
     if (t.exitReason === 'TIME_STOP') timeStopPnls.push(t.realizedPnl)
   }
 
@@ -115,7 +126,50 @@ function makeStats(symbol: string, label: string, result: BacktestResult): PerSy
   const expectancy = result.winRate * result.avgWin + (1 - result.winRate) * result.avgLoss
   const realizedRR = result.avgLoss !== 0 ? result.avgWin / Math.abs(result.avgLoss) : null
 
-  return { symbol, label, result, exitReasonCount, exitReasonAvgPnl, exitReasonHoldDays, timeStopStats, expectancy, realizedRR }
+  return {
+    symbol,
+    label,
+    result,
+    exitReasonCount,
+    exitReasonAvgPnl,
+    exitReasonHoldDays,
+    exitReasonPnls,
+    timeStopStats,
+    expectancy,
+    realizedRR,
+  }
+}
+
+interface HistogramBin {
+  from: number
+  to: number
+  count: number
+}
+
+/**
+ * Fixed-bin histogram of `values` with width `binWidth`. Range auto-determined
+ * from the data, then snapped to bin boundaries. Empty input → empty array.
+ */
+function histogram(values: number[], binWidth: number): HistogramBin[] {
+  if (values.length === 0) return []
+  let min = values[0]!
+  let max = values[0]!
+  for (const v of values) {
+    if (v < min) min = v
+    if (v > max) max = v
+  }
+  const binMin = Math.floor(min / binWidth) * binWidth
+  const binMax = Math.ceil((max + Number.EPSILON) / binWidth) * binWidth
+  const bins: HistogramBin[] = []
+  for (let b = binMin; b < binMax; b += binWidth) {
+    bins.push({ from: b, to: b + binWidth, count: 0 })
+  }
+  if (bins.length === 0) bins.push({ from: binMin, to: binMin + binWidth, count: 0 })
+  for (const v of values) {
+    const idx = Math.min(bins.length - 1, Math.floor((v - binMin) / binWidth))
+    bins[idx]!.count += 1
+  }
+  return bins
 }
 
 function mapAvg(sum: Record<ExitReason, number>, count: Record<ExitReason, number>): Record<ExitReason, number> {
@@ -210,6 +264,27 @@ function renderReport(stats: PerSymbolStats[]): string {
   }
 
   lines.push('')
+  lines.push('## PnL histograms (per symbol × exit_reason)')
+  lines.push('')
+  lines.push(`Fixed bin width: \$${HISTOGRAM_BIN_WIDTH}. Empty rows omitted.`)
+  lines.push('')
+  for (const s of stats) {
+    for (const reason of ['TP', 'STOP', 'TIME_STOP', 'END_OF_DATA'] as const) {
+      const pnls = s.exitReasonPnls[reason]
+      if (pnls.length === 0) continue
+      const bins = histogram(pnls, HISTOGRAM_BIN_WIDTH)
+      lines.push(`### ${s.symbol} — ${reason} (n=${pnls.length})`)
+      lines.push('')
+      lines.push('| bin | count |')
+      lines.push('|---|---|')
+      for (const b of bins) {
+        if (b.count === 0) continue
+        lines.push(`| ${money(b.from)} ~ ${money(b.to)} | ${b.count} |`)
+      }
+      lines.push('')
+    }
+  }
+
   lines.push('## Average holding days by exit reason')
   lines.push('')
   lines.push('| symbol | TP days | STOP days | TIME_STOP days | END_OF_DATA days |')
