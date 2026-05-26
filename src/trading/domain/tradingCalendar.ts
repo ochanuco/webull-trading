@@ -14,10 +14,15 @@ export type TradingMarket = 'JP' | 'US'
 
 const MS_PER_DAY = 86_400_000
 
-// TODO: 2028 以降の祝日を運用入り前に追記する。
+// TODO(annual): 2028 以降の祝日を運用入り前に追記する。
 // JP: 東証休業日 (国民の祝日 + 振替休日 + 年始 1/1–1/3 + 大晦日 12/31)
 // US NYSE: 9 祝日 + Good Friday。土日と重なる祝日は observed day (振替) を入れる。
-const HOLIDAYS: Record<TradingMarket, ReadonlySet<string>> = {
+//
+// このテーブルは market holiday set の単一情報源 (#354)。
+// `src/infrastructure/calendar/{us,jp}MarketCalendar.ts` の tz-aware
+// session-day check も `NYSE_CLOSURES` / `TSE_CLOSURES` re-export を経由して
+// 同じデータを参照する。
+export const HOLIDAYS: Record<TradingMarket, ReadonlySet<string>> = {
   JP: new Set<string>([
     // 2026
     '2026-01-01', // 元日 (exchange closed)
@@ -84,6 +89,14 @@ const HOLIDAYS: Record<TradingMarket, ReadonlySet<string>> = {
     '2027-12-31', // New Year's Day observed (Jan 1 2028 is Sat)
   ]),
 }
+
+/**
+ * `HOLIDAYS` の market 別 alias。infrastructure 層の tz-aware session-day check
+ * が import するためだけに公開する (#354)。新しい消費者は `HOLIDAYS[market]`
+ * を使うか、`isTradingDay` 等の関数 API を使うこと。
+ */
+export const NYSE_CLOSURES: ReadonlySet<string> = HOLIDAYS.US
+export const TSE_CLOSURES: ReadonlySet<string> = HOLIDAYS.JP
 
 function toYmdUtc(date: Date): string {
   return date.toISOString().slice(0, 10)
