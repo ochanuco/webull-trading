@@ -14,7 +14,7 @@
 
 | 実体 | 場所 | いつ使う |
 |---|---|---|
-| `trading-developer` skill | `.claude/skills/trading-developer/` | 取引系コード (`src/trading/`, `bridge/`, `src/infrastructure/webull/`) を触る時。ドメイン姿勢と safety invariants を自動で適用 |
+| `trading-developer` skill | `.claude/skills/trading-developer/` | 取引系コード (`src/trading/`, `src/infrastructure/webull/`) を触る時。ドメイン姿勢と safety invariants を自動で適用 |
 | `trading-strategist` agent | `.claude/agents/trading-strategist.md` | 戦略設計・backtest 議論。コード実装は main に戻す。`Task(subagent_type="trading-strategist", ...)` で呼ぶ |
 | `phase-scope` skill | `.claude/skills/phase-scope/` | PR 作成前 / CodeRabbit 指摘受領時。scope 判定して他 Phase に回す判断 |
 | `coderabbit-policy` skill | `.claude/skills/coderabbit-policy/` | findings の apply / skip 判断、スキップ理由テンプレ |
@@ -41,8 +41,7 @@
 
 ### POC 後の follow-up
 - [#21](https://github.com/ochanuco/webull-trading/issues/21) Webull OpenAPI 実運用化 (canonical signing / live 疎通 / エラー細分化)
-- [#22](https://github.com/ochanuco/webull-trading/issues/22) gRPC bridge 本実装 (Webull proto / runtime deploy)
-- [#23](https://github.com/ochanuco/webull-trading/issues/23) Risk policy 詳細化 (DST / halt / PDT / short locate / settlement)
+- [#23](https://github.com/ochanuco/webull-trading/issues/23) Risk policy 詳細化 (halt / PDT / short locate / settlement — DST は #338 で解決済)
 - [#24](https://github.com/ochanuco/webull-trading/issues/24) Production operational readiness (secrets / CI / deploy / observability)
 
 ## 迷ったら
