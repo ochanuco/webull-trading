@@ -208,4 +208,130 @@ describe('DefaultRiskPolicy', () => {
 
     expect(decision.allowed).toBe(true)
   })
+
+  describe('market hours DST handling', () => {
+    const buyIntent = {
+      symbol: 'SOXL',
+      side: 'BUY' as const,
+      quantity: 2,
+      price: 10,
+      notional: 20,
+      clientOrderId: 'test-coid',
+    }
+    const marketHoursInput = {
+      ...baseInput,
+      orderIntent: buyIntent,
+      marketHoursCheck: true,
+    }
+
+    it('opens at 09:30 EST in winter (UTC-5)', () => {
+      // 2026-01-15 14:30 UTC = 09:30 EST (Thursday)
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-01-15T14:30:00.000Z'),
+      })
+      expect(decision.allowed).toBe(true)
+    })
+
+    it('is closed one minute before open in winter (EST)', () => {
+      // 2026-01-15 14:29 UTC = 09:29 EST
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-01-15T14:29:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+      expect(decision.reasons.some((r) => r.toLowerCase().includes('market hours'))).toBe(true)
+    })
+
+    it('opens at 09:30 EDT in summer (UTC-4)', () => {
+      // 2026-07-15 13:30 UTC = 09:30 EDT (Wednesday)
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-07-15T13:30:00.000Z'),
+      })
+      expect(decision.allowed).toBe(true)
+    })
+
+    it('is closed one minute before open in summer (EDT)', () => {
+      // 2026-07-15 13:29 UTC = 09:29 EDT
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-07-15T13:29:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+    })
+
+    it('is closed at the 16:00 EDT boundary (close exclusive)', () => {
+      // 2026-07-15 20:00 UTC = 16:00 EDT
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-07-15T20:00:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+    })
+
+    it('is open one minute before close in winter (EST)', () => {
+      // 2026-01-15 20:59 UTC = 15:59 EST
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-01-15T20:59:00.000Z'),
+      })
+      expect(decision.allowed).toBe(true)
+    })
+
+    it('rejects Saturday in NY even when the UTC clock looks active', () => {
+      // 2026-04-25 15:00 UTC = 11:00 EDT on Saturday
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-04-25T15:00:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+    })
+
+    it('uses NY weekday: late Sunday UTC that maps to NY Sunday is rejected', () => {
+      // 2026-04-26 20:00 UTC = 16:00 EDT on Sunday
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-04-26T20:00:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+    })
+
+    it('uses NY weekday: Friday UTC night that maps to NY Friday is still NY Friday (outside hours)', () => {
+      // 2026-04-24 23:30 UTC = 19:30 EDT Friday (after close, but Friday in NY)
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-04-24T23:30:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+    })
+
+    it('handles the DST spring-forward day (2026-03-08)', () => {
+      // After 02:00 local on 2026-03-08, NY shifts EST→EDT.
+      // 13:30 UTC on 2026-03-08 = 09:30 EDT (already on DST).
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-03-08T13:30:00.000Z'),
+      })
+      // Sunday in NY → still rejected by weekend rule, which is the correct conservative answer.
+      expect(decision.allowed).toBe(false)
+
+      // 13:30 UTC on Monday 2026-03-09 = 09:30 EDT → open.
+      const nextDay = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-03-09T13:30:00.000Z'),
+      })
+      expect(nextDay.allowed).toBe(true)
+    })
+
+    it('handles the DST fall-back day (2026-11-01)', () => {
+      // 2026-11-01 is Sunday — closed.
+      // Monday 2026-11-02 after fall-back: 14:30 UTC = 09:30 EST → open.
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-11-02T14:30:00.000Z'),
+      })
+      expect(decision.allowed).toBe(true)
+    })
+  })
 })
