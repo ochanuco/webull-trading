@@ -1,0 +1,13 @@
+# pnpm 11+ moved settings out of package.json's "pnpm" block.
+# esbuild / sharp / workerd ship native postinstall scripts that
+# wrangler / vitest / workers require — allow them explicitly.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
+
+# pnpm 11 defaults minimumReleaseAge to 24h as a supply-chain check. That
+# blocks every fresh Renovate lockfile-bump PR for the first day, which this
+# repo can't tolerate during POC. 0 = disabled; revisit once we have a
+# non-bot release gating layer.
+minimumReleaseAge: 0
