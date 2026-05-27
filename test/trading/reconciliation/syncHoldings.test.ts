@@ -204,7 +204,7 @@ describe('syncHoldings', () => {
     // Audit log emitted once for the actual sync (NVDA error path doesn't log).
     const syncLogs = logSpy.mock.calls
       .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
-      .filter((p): p is { event: string } => p !== null && p.event === 'holdings_sync_applied')
+      .filter((p: unknown): p is { event: string } => p !== null && (p as { event?: unknown }).event === 'holdings_sync_applied')
     expect(syncLogs).toHaveLength(1)
   })
 
