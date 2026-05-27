@@ -104,7 +104,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     expect(fixture.calls).toBe(1)
     const logs = logSpy.mock.calls
       .map((args: unknown[]) => args[0])
-      .filter((s): s is string => typeof s === 'string' && s.includes('portfolio_roll_run'))
+      .filter((s: unknown): s is string => typeof s === 'string' && s.includes('portfolio_roll_run'))
     expect(logs).toHaveLength(1)
     const first = logs[0]
     if (!first) throw new Error('portfolio_roll_run log was not emitted')
@@ -121,7 +121,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     await runPortfolioRoll(baseEnv, 'req-2', { now: nowOnSessionDay })
     const skipped = warnSpy.mock.calls
       .map((args: unknown[]) => args[0])
-      .filter((s): s is string => typeof s === 'string' && s.includes('portfolio_roll_skipped'))
+      .filter((s: unknown): s is string => typeof s === 'string' && s.includes('portfolio_roll_skipped'))
     expect(skipped).toHaveLength(1)
     const first = skipped[0]
     if (!first) throw new Error('portfolio_roll_skipped log was not emitted')
@@ -153,7 +153,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     ).resolves.toBeUndefined()
     const errors = errorSpy.mock.calls
       .map((args: unknown[]) => args[0])
-      .filter((s): s is string => typeof s === 'string' && s.includes('portfolio_roll_error'))
+      .filter((s: unknown): s is string => typeof s === 'string' && s.includes('portfolio_roll_error'))
     expect(errors).toHaveLength(1)
     const first = errors[0]
     if (!first) throw new Error('portfolio_roll_error log was not emitted')
@@ -178,7 +178,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     function expectSkippedWithReason(reasonMatch: RegExp): void {
       const skipped = warnSpy.mock.calls
         .map((args: unknown[]) => args[0])
-        .filter((s): s is string => typeof s === 'string' && s.includes('daily_roll_skipped'))
+        .filter((s: unknown): s is string => typeof s === 'string' && s.includes('daily_roll_skipped'))
       expect(skipped).toHaveLength(1)
       const first = skipped[0]
       if (!first) throw new Error('daily_roll_skipped log was not emitted')
