@@ -72,42 +72,38 @@ wrangler tail --format=json | jq 'select(.client_order_id=="<id>")'
 
 ## R2 Logpush archive queries (#207)
 
-Once R2 logpush is configured (Cloudflare dashboard → Workers & Pages → Logpush → destination = R2 bucket, e.g. `webull-trading-logs`), Workers Logs older than the in-product retention are persisted as gzipped NDJSON shards in R2 with a date-partitioned key layout that Cloudflare manages. The recipes below assume the operator has read access to the bucket via `wrangler` (the deploy account already has the right scope) and `jq` locally.
+Workers Logs older than the in-product retention are mirrored to R2 by a Logpush job that Cloudflare provisions automatically when "R2 (automatic setup)" is chosen in the dashboard. The destination bucket name is **`cloudflare-managed-b3e9122f`** (auto-assigned — Cloudflare's automatic setup always creates a fresh `cloudflare-managed-*` bucket; the pre-created `webull-trading-logs` bucket from the earlier MCP step ended up unused and can be deleted). A 90-day lifecycle rule (`logpush-90d`) is attached so shards expire on their own.
 
-> ⚠️ This section describes the **expected workflow**. The Logpush job and its R2 bucket are not provisioned by code — they are configured in the Cloudflare dashboard (issue #207). Until that's done, none of the commands below will return data.
+### Bucket / object layout
 
-### List shards for a given day
+- Bucket: `cloudflare-managed-b3e9122f`
+- Top-level prefix: `YYYYMMDD/` (one per UTC date — e.g. `20260527/`)
+  - The `00010101/` prefix that may show up is Cloudflare's "epoch sentinel" placeholder; it has no real events.
+- Each day folder contains gzipped NDJSON shards (`*.json.gz`).
+
+Set the bucket name in a shell variable for the recipes below:
 
 ```sh
-# Replace BUCKET / YYYY/MM/DD with the bucket name configured in Logpush and the
-# target date. Cloudflare's default key layout is
-# `<dataset>/dt=YYYY-MM-DD/hr=HH/<shard>.json.gz` but check the Logpush job's
-# "Destination path" setting if the layout was customised.
-wrangler r2 object list "$BUCKET" --prefix "workers_trace_events/dt=2026-01-15/"
+export BUCKET=cloudflare-managed-b3e9122f
+```
+
+### Listing day folders
+
+```sh
+wrangler r2 bucket info "$BUCKET"             # bucket-level metadata (size, object_count)
+# Cloudflare R2 doesn't have a bare-`r2 object list` CLI; use the dashboard or
+# the S3-compatible endpoint via aws-cli + r2 credentials when programmatic
+# listing is needed. The dashboard's "browse" tab is enough for ad-hoc forensics.
 ```
 
 ### Pull a shard and filter for `strategy_cron_error`
 
 ```sh
 # Cloudflare ships gzipped NDJSON. Stream-decompress and pipe to jq.
-wrangler r2 object get "$BUCKET" "workers_trace_events/dt=2026-01-15/hr=14/<shard>.json.gz" \
+# Replace <shard>.json.gz with an actual key from the dashboard's day folder.
+wrangler r2 object get "$BUCKET/20260115/<shard>.json.gz" \
   | gunzip \
   | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("strategy_cron_error"))'
-```
-
-### Span a date range (90 days ago example)
-
-```sh
-# Loops day-by-day. Slow but predictable — for one-off forensics, not for
-# routine dashboarding. GNU date users: substitute `date -d '90 days ago'`.
-target_day=$(date -u -v-90d +%Y-%m-%d)
-for hr in $(seq -w 0 23); do
-  wrangler r2 object list "$BUCKET" --prefix "workers_trace_events/dt=$target_day/hr=$hr/" --json \
-    | jq -r '.[]? | .key' \
-    | while read -r key; do
-        wrangler r2 object get "$BUCKET" "$key" | gunzip
-      done
-done | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("strategy_cron_error"))'
 ```
 
 ### Pin a single `request_id` across the archive
@@ -115,7 +111,7 @@ done | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("strategy_cron_
 ```sh
 # When dashboard / D1 references a request_id older than Workers Logs retention,
 # the full per-request trace can still be reconstructed from R2.
-wrangler r2 object get "$BUCKET" "workers_trace_events/dt=2026-01-15/hr=14/<shard>.json.gz" \
+wrangler r2 object get "$BUCKET/20260115/<shard>.json.gz" \
   | gunzip \
   | jq -c 'select((.Logs[]?.Message[0] | tostring) | contains("<request_id>"))'
 ```
@@ -123,8 +119,9 @@ wrangler r2 object get "$BUCKET" "workers_trace_events/dt=2026-01-15/hr=14/<shar
 ### Caveats specific to R2 archive
 
 - Logpush emits the **raw Workers Logs envelope**, not the parsed `event` payload. NDJSON lines are `{ "TimestampMs": ..., "Logs": [{ "Message": [...] }] }` shaped — the original `event` / `cause` / `message` fields appear as the string inside `.Logs[].Message[0]`. The `jq` filters above grep against that string; for typed access, parse it with `fromjson?` after extracting.
-- Cloudflare's default sample rate is 100%, but if the Logpush job is configured with `sampling_rate < 1.0`, low-volume events (`strategy_cron_error` is intentionally rare) can be dropped — set sampling to 1.0 for error/audit traffic.
-- The R2 bucket's lifecycle rule defines how far back the archive goes (POC default: 90 days per issue #207). Older shards are deleted by Cloudflare R2 lifecycle; no recovery path.
+- Cloudflare's default sample rate is 100%; the automatic setup keeps it at 100% so low-volume events (`strategy_cron_error` is intentionally rare) are not dropped.
+- The bucket has a 90-day lifecycle rule (`logpush-90d`). Older shards are auto-deleted by Cloudflare R2; no recovery path.
+- Programmatic full-bucket scans need the S3-compatible R2 endpoint + an R2 API token (the Logpush automatic setup already issued one — find it under R2 → Manage R2 API Tokens). Day-folder browsing in the dashboard is sufficient for ad-hoc forensics.
 
 ---
 
