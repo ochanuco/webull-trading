@@ -27,6 +27,8 @@ pnpm deploy:production
 ```
 
 scripts は `wrangler d1 migrations apply --env=<env> --remote` → `wrangler deploy --env=<env>` の 2 段。migration 失敗時は deploy 走らない。
+`pnpm deploy` は unqualified top-level deploy 事故を避けるため default では失敗する。
+意図して top-level worker を deploy する場合だけ `ALLOW_UNQUALIFIED_DEPLOY=1 pnpm deploy` を使う。
 
 ## ユーザー側の初期作業 (実マネー前)
 
@@ -119,6 +121,7 @@ staging で cron を試したい場合は `env.staging` に `triggers` を一時
 pnpm exec wrangler deploy --env=dev        --dry-run
 pnpm exec wrangler deploy --env=staging    --dry-run
 pnpm exec wrangler deploy --env=production --dry-run
+pnpm verify:production-d1
 ```
 
 dry-run 出力に出る binding 一覧 (D1 name / DO class) と cron 一覧を見て、env ごとに分離されている事を確認する。`REPLACE_WITH_*` のまま deploy しようとすると `wrangler d1 migrations apply` が先に失敗する設計。

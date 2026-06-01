@@ -464,3 +464,15 @@ import type { WebullTokenStateDO } from '../trading/state/WebullTokenStateDO'
 export interface Env {
   WEBULL_TOKEN_STATE?: DurableObjectNamespace<WebullTokenStateDO>
 }
+
+
+// #379 / #376: first-live production readiness policy. These are not trading
+// gates by themselves; they bound `/admin/production-readiness` so the operator
+// gets a fail-closed preflight before deleting the production TRADING_ENABLED
+// deploy gate.
+export interface Env {
+  FIRST_LIVE_MAX_ACTIVE_SYMBOLS?: string
+  FIRST_LIVE_MAX_ORDER_NOTIONAL_USD?: string
+  FIRST_LIVE_MAX_ORDER_NOTIONAL_JPY?: string
+  ROLLBACK_REHEARSAL_MAX_AGE_HOURS?: string
+}

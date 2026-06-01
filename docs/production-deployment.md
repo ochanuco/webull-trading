@@ -28,6 +28,9 @@ pnpm wrangler d1 create webull-trading-production
 
 # Migration を流す
 pnpm wrangler d1 migrations apply webull-trading-production --env=production --remote
+
+# wrangler.jsonc の production D1 binding が placeholder でないことを確認
+pnpm verify:production-d1
 ```
 
 ### A2. Secret を production env に投入
@@ -114,7 +117,13 @@ op run -- pnpm run issue-token
   "positions":      { "phase": "response", "status": 200, "bodyTruncated": "[...]" },
   "positionsNew":   { "phase": "response", "status": 200, ... },
   "orderHistoryOld":{ "phase": "response", "status": 200, "bodyTruncated": "[]" },
-  "orderHistoryNew":{ "phase": "response", "status": 200, "bodyTruncated": "[]" }
+  "orderHistoryNew":{ "phase": "response", "status": 200, "bodyTruncated": "[]" },
+  "readiness": {
+    "tokenOk": true,
+    "tradeEndpointsOk": true,
+    "newTradeEndpointsOk": true,
+    "yahooQuoteOk": true
+  }
 }
 ```
 
@@ -159,6 +168,15 @@ op run -- pnpm run issue-token
 - `/dashboard/portfolio` で累積 PnL を観察
 - 通知 (Slack/Discord) が想定通り飛ぶか確認
 
+### C5. rollback rehearsal
+
+live 有効化前に最低 1 回、停止手段を実演して audit log に残す:
+
+- `/dashboard/config` で `dryRun=true` に戻せること
+- `/dashboard/cron` の「取引停止」ボタンで `trading_enabled=false` に落とせること
+- `pnpm wrangler secret put TRADING_ENABLED --env=production` で `false` を再投入できること
+- `/dashboard/webull-token` から token 状態を確認できること
+
 ## [D] Live 有効化
 
 paper trading で問題なければ、以下 3 step で live trade を有効化:
@@ -172,6 +190,13 @@ paper trading で問題なければ、以下 3 step で live trade を有効化:
 同 page から toggle。env override で依然強制 OFF なので発注しない (= 2 重 safety net 維持)。
 
 ### D3. env `TRADING_ENABLED` を削除
+
+削除前に preflight を実行:
+
+```bash
+curl https://trading.chanu.co/admin/production-readiness
+# → "ready": true かつ fail check が無いこと
+```
 
 ```bash
 pnpm wrangler secret delete TRADING_ENABLED --env=production

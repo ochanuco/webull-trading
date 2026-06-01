@@ -40,6 +40,7 @@ import {
   createTradingToggleDb,
 } from '../infrastructure/db/tradingToggleRepo'
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
+import { collectProductionReadiness } from '../trading/runtime/productionReadiness'
 import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
@@ -59,6 +60,15 @@ import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendS
  * and should only be called for initial seeding or reconciliation.
  */
 export const admin = new Hono<AppBindings>()
+  /**
+   * Production readiness preflight (#375-#380)。Read-only: D1 / DO / env の
+   * 現在状態を集約し、live enablement 前に fail-closed で確認できるようにする。
+   * Broker 実通信は `/admin/broker/probe` に分離し、ここでは発注経路に触れない。
+   */
+  .get('/production-readiness', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    return c.json(await collectProductionReadiness(c.env, c.get('requestId')))
+  })
   /**
    * Operator override for a corrupted `position`. Used when a past reconcile
    * race left DO state with a qty above broker truth (#215) — the regular
@@ -802,6 +812,20 @@ export const admin = new Hono<AppBindings>()
       // Yahoo Finance 経由の同 symbol snapshot (#21 follow-up)。Webull の data-api
       // が応答しない状況での代替経路の生死を可視化する。
       quoteYahoo: quoteYahooResult,
+      readiness: {
+        tokenOk: tokenResolved.source === 'do_normal',
+        tradeEndpointsOk:
+          positionsOld.phase === 'response' &&
+          positionsOld.status === 200 &&
+          orderHistoryOld.phase === 'response' &&
+          orderHistoryOld.status === 200,
+        newTradeEndpointsOk:
+          positionsNew.phase === 'response' &&
+          positionsNew.status === 200 &&
+          orderHistoryNew.phase === 'response' &&
+          orderHistoryNew.status === 200,
+        yahooQuoteOk: quoteYahooResult.phase === 'response' && quoteYahooResult.status === 200,
+      },
     })
   })
   /**

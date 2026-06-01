@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "tsx scripts/guard-deploy.ts && wrangler deploy",
     "deploy:dev": "wrangler d1 migrations apply webull-trading-dev --env=dev --remote && wrangler deploy --env=dev",
     "deploy:staging": "wrangler d1 migrations apply webull-trading-staging --env=staging --remote && wrangler deploy --env=staging",
     "deploy:production": "wrangler d1 migrations apply webull-trading-production --env=production --remote && wrangler deploy --env=production",
@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "accounts": "tsx scripts/list-webull-accounts.ts",
-    "issue-token": "tsx scripts/issue-webull-token.ts"
+    "issue-token": "tsx scripts/issue-webull-token.ts",
+    "verify:production-d1": "tsx scripts/verify-production-d1.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
