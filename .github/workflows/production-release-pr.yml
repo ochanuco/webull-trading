@@ -130,7 +130,6 @@ jobs:
             echo
             echo "## Merge前チェック"
             echo
-            echo "- [ ] \`production deploy preflight\` が通っている"
             echo "- [ ] Cloudflare Workers Builds の production branch が \`production\` になっている"
             echo "- [ ] rollback 手順を直近で確認している"
             echo "- [ ] \`/admin/production-readiness\` に \`fail\` がない"
