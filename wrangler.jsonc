@@ -178,7 +178,7 @@
         {
           "binding": "DB",
           "database_name": "webull-trading-production",
-          "database_id": "REPLACE_WITH_PRODUCTION_ID",
+          "database_id": "2257d669-0a3c-497d-9be1-15626b2522bb",
           "migrations_dir": "drizzle"
         }
       ],
