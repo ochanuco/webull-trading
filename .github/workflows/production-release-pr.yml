@@ -60,7 +60,25 @@ jobs:
           git checkout -B release/production origin/main
           git push --force-with-lease "https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" release/production
 
+      - name: Check production delta
+        id: production_delta
+        env:
+          PRODUCTION_RELEASE_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+        run: |
+          remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags "$remote" production:refs/remotes/origin/production
+
+          ahead_count="$(git rev-list --count origin/production..release/production)"
+          if [ "$ahead_count" = "0" ]; then
+            echo "::notice::production is already up to date with main; skipping production release PR creation."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "release/production is $ahead_count commit(s) ahead of production."
+          fi
+
       - name: Create or update production PR
+        if: steps.production_delta.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
           TITLE: "release: promote main to production [skip-coderabbit]"
