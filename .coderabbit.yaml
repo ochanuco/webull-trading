@@ -11,6 +11,9 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    ignore_title_keywords:
+      - "[skip-coderabbit]"
+      - "release: promote main to production"
 
   path_filters:
     - "!.local/**"
