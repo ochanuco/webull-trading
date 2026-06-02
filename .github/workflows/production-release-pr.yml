@@ -55,10 +55,18 @@ jobs:
         env:
           PRODUCTION_RELEASE_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
         run: |
+          remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_release_sha="$(git ls-remote --heads "$remote" release/production | cut -f1)"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B release/production origin/main
-          git push --force-with-lease "https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" release/production
+
+          if [ -n "$remote_release_sha" ]; then
+            git push --force-with-lease=refs/heads/release/production:"$remote_release_sha" "$remote" release/production:refs/heads/release/production
+          else
+            git push "$remote" release/production:refs/heads/release/production
+          fi
 
       - name: Check production delta
         id: production_delta
