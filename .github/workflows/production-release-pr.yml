@@ -106,27 +106,40 @@ jobs:
         if: steps.production_delta.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
-          TITLE: "release: promote main to production [skip-coderabbit]"
-          BODY: |
-            ## Purpose
-
-            Promote the current `main` branch to the `production` branch.
-
-            This PR is a release gate, not a second code-review stage. CodeRabbit is intentionally skipped for release PRs; normal feature PRs into `main` remain reviewed.
-
-            ## Required before merge
-
-            - [ ] `production preflight` check passes
-            - [ ] Cloudflare Workers Builds production branch is `production`
-            - [ ] Production D1 binding is no longer a placeholder
-            - [ ] Rollback path has been rehearsed recently
-            - [ ] `/admin/production-readiness` has no `fail` checks
-            - [ ] Release PR was created by `PRODUCTION_RELEASE_TOKEN`, not the default `GITHUB_TOKEN`
-
-            ## Deployment
-
-            Merging this PR into `production` lets Cloudflare Workers Builds run the production build command.
         run: |
+          release_prs="$(
+            git log --reverse --pretty=format:%s origin/production..release/production \
+              | grep -Eo '#[0-9]+' \
+              | awk '!seen[$0]++ { print "- " $0 }'
+          )"
+
+          if [ -z "$release_prs" ]; then
+            release_prs="- PR 番号を commit message から特定できませんでした"
+          fi
+
+          {
+            echo "## 概要"
+            echo
+            echo "\`main\` の現在の内容を \`production\` に昇格するリリースPRです。"
+            echo
+            echo "このPRは本番昇格の承認ゲートであり、コードの再レビュー用ではありません。通常のコードレビューとCIは \`main\` に入る通常PRで完了済みです。"
+            echo
+            echo "## リリース対象PR"
+            echo
+            echo "$release_prs"
+            echo
+            echo "## Merge前チェック"
+            echo
+            echo "- [ ] \`production deploy preflight\` が通っている"
+            echo "- [ ] Cloudflare Workers Builds の production branch が \`production\` になっている"
+            echo "- [ ] rollback 手順を直近で確認している"
+            echo "- [ ] \`/admin/production-readiness\` に \`fail\` がない"
+            echo
+            echo "## Deploy"
+            echo
+            echo "このPRを \`production\` に merge すると、Cloudflare Workers Builds が production deploy を開始します。"
+          } > release-pr-body.md
+
           existing="$(gh pr list \
             --base production \
             --head release/production \
@@ -135,8 +148,9 @@ jobs:
             --jq '.[0].number // empty')"
 
           if [ -n "$existing" ]; then
-            gh pr edit "$existing" --title "$TITLE" --body "$BODY"
+            gh pr edit "$existing" --body-file release-pr-body.md
             echo "Updated PR #$existing"
           else
-            gh pr create --base production --head release/production --title "$TITLE" --body "$BODY"
+            title="$(TZ=Asia/Tokyo date '+🚀リリース%Y-%m-%d %H:%M:%S')"
+            gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
           fi

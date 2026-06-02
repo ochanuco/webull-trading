@@ -14,6 +14,7 @@ reviews:
     ignore_title_keywords:
       - "[skip-coderabbit]"
       - "release: promote main to production"
+      - "🚀リリース"
 
   path_filters:
     - "!.local/**"

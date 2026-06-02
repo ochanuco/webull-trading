@@ -36,7 +36,9 @@ pnpm install --frozen-lockfile && pnpm deploy:production
 
 `main` push で `release/production` branch を `main` に更新し、`production` 向け PR を作成または更新する。
 
-この PR は「コードの再レビュー」ではなく「本番昇格の承認ゲート」。title に `[skip-coderabbit]` を含め、`.coderabbit.yaml` 側でも CodeRabbit auto review を skip する。
+この PR は「コードの再レビュー」ではなく「本番昇格の承認ゲート」。初回作成時の title は `🚀リリースyyyy-MM-dd HH:mm:ss` (Asia/Tokyo) にし、その後 `main` に追加 PR が merge されても title は維持する。Description には `production..release/production` に含まれる PR 番号 (`#xxx`) を一覧する。
+
+`.coderabbit.yaml` 側では release PR title keyword で CodeRabbit auto review を skip する。
 
 `production` がすでに `main` と同じ commit を指している場合、release PR に差分がないため workflow は PR 作成を skip して success にする。初回 bootstrap 直後や、production が main に追いついている状態ではこれが期待値。
 
