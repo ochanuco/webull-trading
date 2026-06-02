@@ -2,7 +2,7 @@
   "name": "webull-trading",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.3.0",
+  "packageManager": "pnpm@11.5.1",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "tsx scripts/guard-deploy.ts && wrangler deploy",
