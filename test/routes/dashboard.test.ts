@@ -100,53 +100,8 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // #275: env badge prefix ([?] = UNKNOWN since DRY_RUN unset in baseEnv) goes
-    // before the page title.
-    expect(body).toContain('<title>[?] ダッシュボード')
+    expect(body).toContain('<title>ダッシュボード')
     expect(body).toContain('/dashboard/positions')
-  })
-
-  // #275: header env badge — operator が live / dry-run を画面で即判別できるよう
-  // 全 dashboard page に常時表示する。DRY_RUN env から派生、未設定 / 不正値は
-  // UNKNOWN に倒れて 500 にしない。
-  describe('env badge (#275)', () => {
-    it('renders green DRY-RUN badge when DRY_RUN=true', async () => {
-      const app = createApp()
-      const res = await app.request(
-        '/dashboard',
-        { headers: authHeader },
-        { ...baseEnv, DRY_RUN: 'true' },
-      )
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('<title>[DRY] ダッシュボード')
-      expect(body).toContain('class="env-badge dry"')
-      expect(body).toContain('>DRY-RUN<')
-    })
-
-    it('renders red LIVE badge when DRY_RUN=false', async () => {
-      const app = createApp()
-      const res = await app.request(
-        '/dashboard',
-        { headers: authHeader },
-        { ...baseEnv, DRY_RUN: 'false' },
-      )
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('<title>[LIVE] ダッシュボード')
-      expect(body).toContain('class="env-badge live"')
-      expect(body).toContain('>LIVE<')
-    })
-
-    it('renders yellow UNKNOWN badge when DRY_RUN is unset (defensive default)', async () => {
-      const app = createApp()
-      const res = await app.request('/dashboard', { headers: authHeader }, baseEnv)
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('<title>[?] ダッシュボード')
-      expect(body).toContain('class="env-badge unknown"')
-      expect(body).toContain('>UNKNOWN<')
-    })
   })
 
   // #276: kill-switch banner は全 page 共通の header として layout 内に
@@ -304,6 +259,69 @@ describe('dashboard', () => {
     const body = await res.text()
     expect(body).toContain('global_config')
     expect(body).toContain('SOXL')
+  })
+
+  // #dashboard-mf-layout: overview パネル ON/OFF フォーム。createDb mock 未設定 →
+  // loadOverviewPanelsCsv が default fallback → 4 パネルすべて checked で描画。
+  it('renders overview panel toggle form on config page (all checked by default)', async () => {
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard/config', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).toContain('action="/dashboard/config/overview-panels"')
+    for (const k of ['kpi', 'equity', 'composition', 'recent']) {
+      expect(body).toContain(`value="${k}"`)
+    }
+    expect((body.match(/name="panels"[^>]*checked/g) ?? []).length).toBe(4)
+  })
+
+  it('saves overview panel selection (303 redirect, CSV deduped + invalid dropped)', async () => {
+    let storedCsv: string | undefined
+    let insertedValues: Record<string, unknown> | undefined
+    // setOverviewPanels は db.batch([select(before), insert().values().onConflictDoUpdate()])。
+    // select/insert は batch に渡す statement を組むだけ (mock では空 obj)、実 read は batch が返す。
+    // batch 呼び出し自体を spy して原子更新 (read→write 退行) の回帰ガードにする。
+    const batchSpy = vi.fn(async (_stmts: unknown[]) => [[{ value: 'kpi,equity,composition,recent' }], {}])
+    vi.mocked(createDb).mockReturnValue({
+      select: () => ({ from: () => ({ where: () => ({ limit: () => ({}) }) }) }),
+      insert: () => ({
+        values: (vals: Record<string, unknown>) => {
+          insertedValues = vals
+          return {
+            onConflictDoUpdate: (cfg: { set: { overviewPanels: string } }) => {
+              storedCsv = cfg.set.overviewPanels
+              return {}
+            },
+          }
+        },
+      }),
+      batch: batchSpy,
+    } as unknown as ReturnType<typeof createDb>)
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/config/overview-panels',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams([
+          ['panels', 'kpi'],
+          ['panels', 'recent'],
+          ['panels', 'kpi'],
+          ['panels', 'bogus'],
+        ]).toString(),
+      },
+      env,
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/dashboard/config')
+    expect(storedCsv).toBe('kpi,recent')
+    // upsert の insert 部の payload も検証 (初回作成時に正しい行が入る)。
+    expect(insertedValues).toMatchObject({ id: 'default', overviewPanels: 'kpi,recent' })
+    expect(typeof insertedValues?.updatedAt).toBe('string')
+    // 原子更新の回帰ガード: 1 回の batch に before-read + upsert の 2 statement。
+    expect(batchSpy).toHaveBeenCalledTimes(1)
+    expect((batchSpy.mock.calls[0]![0] as unknown[]).length).toBe(2)
   })
 
   it('escapes potentially-unsafe symbol names on config page', async () => {
@@ -519,6 +537,24 @@ describe('dashboard', () => {
     const app = createApp()
     const res = await app.request('/dashboard/alerts', {}, unauthEnv)
     expect(res.status).toBe(401)
+  })
+})
+
+import { parseOverviewPanels, ALL_OVERVIEW_PANELS } from '../../src/routes/dashboard'
+
+describe('parseOverviewPanels', () => {
+  it('parses a valid CSV into the panel set', () => {
+    expect([...parseOverviewPanels('kpi,recent')].sort()).toEqual(['kpi', 'recent'])
+  })
+  it('ignores invalid tokens and whitespace', () => {
+    expect([...parseOverviewPanels(' kpi , bogus , equity ')].sort()).toEqual(['equity', 'kpi'])
+  })
+  it('empty / all-invalid / null / undefined → all panels (fallback)', () => {
+    const all = [...ALL_OVERVIEW_PANELS].sort()
+    expect([...parseOverviewPanels('')].sort()).toEqual(all)
+    expect([...parseOverviewPanels('x,y')].sort()).toEqual(all)
+    expect([...parseOverviewPanels(null)].sort()).toEqual(all)
+    expect([...parseOverviewPanels(undefined)].sort()).toEqual(all)
   })
 })
 

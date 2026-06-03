@@ -15,8 +15,10 @@ type DashboardBindings = AppBindings & {
   }
 }
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
+import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/globalConfigRepo'
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
+import type { SymbolCurrency } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -111,7 +113,61 @@ export const dashboard = new Hono<DashboardBindings>()
     c.set('killSwitchState', state)
     await next()
   })
-  .get('/', (c) => c.html(renderLayout(c, 'ダッシュボード', indexBody())))
+  .get('/', async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'ダッシュボード', unavailable('DB not bound')))
+    }
+    try {
+      const db = createDb(c.env.DB)
+      const universe = await loadSymbolUniverse(c.env)
+      const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
+      const symbolClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
+      const range = parseEquityRange(c.req.query('range'))
+      const [panelsCsv, portfolio, snapshots, positions, strategyPriceMap, recentTrades, vixRegime, global] =
+        await Promise.all([
+          loadOverviewPanelsCsv(db),
+          c.env.PORTFOLIO_STATE
+            ? new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio().catch(() => null)
+            : Promise.resolve(null),
+          safeLoadPortfolioSnapshots(c.env.DB, range),
+          symbolClient
+            ? Promise.all(
+                allDisplaySymbols.map(async (sym) => {
+                  try {
+                    return { sym, state: await symbolClient.getState(sym), error: null as string | null }
+                  } catch (err) {
+                    return { sym, state: null as SymbolState | null, error: messageOf(err) }
+                  }
+                }),
+              )
+            : Promise.resolve([] as Array<{ sym: string; state: SymbolState | null; error: string | null }>),
+          loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
+          loadRecentFills(c.env.DB, 8),
+          c.env.DB
+            ? loadVixRegimeSnapshot(c.env.DB, c.get('requestId')).catch(() => null)
+            : Promise.resolve(null),
+          loadGlobalConfigFrom(c.env, c.get('requestId')),
+        ])
+      const data: OverviewData = {
+        panels: parseOverviewPanels(panelsCsv),
+        portfolio,
+        snapshots,
+        range,
+        positions,
+        strategyPriceMap,
+        recentTrades,
+        vixRegime,
+        dryRun: global.dryRun,
+        // env TRADING_ENABLED の deploy-gate を反映した effective 値 (CodeRabbit #397:
+        // 上部バナーと同じ resolveTradingEnabled を通し、生 DB 値との食い違いを防ぐ)。
+        tradingEnabled: resolveTradingEnabled(global.tradingEnabled, c.env.TRADING_ENABLED),
+        universe,
+      }
+      return c.html(renderLayout(c, 'ダッシュボード', overviewBody(data)))
+    } catch (err) {
+      return c.html(renderLayout(c, 'ダッシュボード', unavailable(messageOf(err))))
+    }
+  })
   .get('/positions', async (c) => {
     if (!c.env.DB || !c.env.SYMBOL_STATE) {
       return c.html(renderLayout(c, 'ポートフォリオ', unavailable('DB or SYMBOL_STATE not bound')))
@@ -181,11 +237,43 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '設定', unavailable('DB not bound')))
     }
-    const [global, universe] = await Promise.all([
+    const [global, universe, panelsCsv] = await Promise.all([
       loadGlobalConfigFrom(c.env, c.get('requestId')),
       loadSymbolUniverse(c.env),
+      loadOverviewPanelsCsv(createDb(c.env.DB)),
     ])
-    return c.html(renderLayout(c, '設定', configBody(global, universe)))
+    return c.html(
+      renderLayout(c, '設定', configBody(global, universe, parseOverviewPanels(panelsCsv))),
+    )
+  })
+  // #dashboard-mf-layout: overview パネル ON/OFF を保存。HTML form (checkbox 複数) →
+  // 有効 key を CSV 化して global_config に書き、PRG で /dashboard/config に戻る。
+  .post('/config/overview-panels', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '設定', unavailable('DB not bound')))
+    }
+    const db = createDb(c.env.DB)
+    const form = await c.req.formData()
+    const selected = form
+      .getAll('panels')
+      .map(String)
+      .filter((s) => (ALL_OVERVIEW_PANELS as readonly string[]).includes(s))
+    const csv = Array.from(new Set(selected)).join(',')
+    // CodeRabbit #397: global_config への永続変更なので before/after + requestId を
+    // 構造化ログに残す (audit 追跡)。display 設定なので config_audit_log table までは使わない。
+    // before は setOverviewPanels の batch (= write と同一 transaction) から取得し
+    // 同時更新でも監査がズレないようにする。
+    const { before } = await setOverviewPanels(db, csv, new Date().toISOString())
+    console.log(
+      JSON.stringify({
+        event: 'overview_panels_updated',
+        requestId: c.get('requestId') ?? null,
+        actor: extractActor(c.get('actor')),
+        before,
+        after: csv,
+      }),
+    )
+    return c.redirect('/dashboard/config', 303)
   })
   .get('/charts', async (c) => {
     if (!c.env.DB) {
@@ -1264,13 +1352,46 @@ function fmtJst(value: string | Date | null | undefined): string {
 }
 
 const STYLE = `
-  body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f7;color:#1d1d1f}
+  body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
-  nav{margin-bottom:20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  nav a{color:#06c;text-decoration:none;padding:4px 10px;border:1px solid #d0d0d5;border-radius:6px;background:#fff}
-  nav a:hover{background:#eef}
-  nav .nav-group{color:#86868b;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:0 4px 0 8px;border-left:1px solid #d0d0d5;margin-left:4px}
-  nav .nav-group:first-of-type{border-left:none;margin-left:0;padding-left:0}
+  /* mf-dashboard 風 shell: 左 sidebar + main */
+  .app{display:flex;min-height:100vh;align-items:stretch}
+  .sidebar{flex:0 0 216px;background:#fff;border-right:1px solid #d0d0d5;padding:16px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto}
+  .sidebar .brand{font-weight:700;font-size:15px;padding:4px 8px 12px;color:#1d1d1f}
+  .sidebar nav{display:flex;flex-direction:column;gap:2px}
+  .sidebar .nav-group{color:#86868b;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:12px 8px 4px}
+  .sidebar .nav-link{color:#1d1d1f;text-decoration:none;padding:7px 10px;border-radius:7px;font-size:13px}
+  .sidebar .nav-link:hover{background:#f0f0f3}
+  .sidebar .nav-link.active{background:#06c;color:#fff;font-weight:600}
+  .main{flex:1;min-width:0;padding:24px}
+  .main .page-title{margin:0 0 16px;font-size:22px}
+  @media(max-width:780px){
+    .app{flex-direction:column}
+    .sidebar{flex:none;width:auto;height:auto;position:static;border-right:none;border-bottom:1px solid #d0d0d5;flex-direction:row;flex-wrap:wrap;align-items:center}
+    .sidebar nav{flex-direction:row;flex-wrap:wrap}
+    .sidebar .nav-group{padding:4px 8px}
+    .main{padding:16px}
+  }
+  /* KPI カード */
+  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+  .kpi-card{background:#fff;border:1px solid #d0d0d5;border-radius:10px;padding:14px}
+  .kpi-label{color:#86868b;font-size:12px;margin-bottom:6px}
+  .kpi-value{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+  .kpi-sub{font-size:12px;margin-top:4px;font-variant-numeric:tabular-nums}
+  /* パネル (カード) */
+  .panel{background:#fff;border:1px solid #d0d0d5;border-radius:10px;padding:16px;margin-bottom:16px}
+  .panel>.panel-title{margin:0 0 12px;font-size:14px;font-weight:700}
+  .panel-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:780px){.panel-row{grid-template-columns:1fr}}
+  .panel table{border:none;border-radius:0}
+  /* bar (構成比 / movers) */
+  .bar-track{background:#f0f0f3;border-radius:4px;height:8px;overflow:hidden;margin-top:3px}
+  .bar-fill{height:8px;border-radius:4px;background:#06c}
+  .bar-fill.up{background:#057a55}.bar-fill.down{background:#c22}
+  .rank-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;font-size:13px;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700}
+  .pill.dry{background:#057a55;color:#fff}.pill.live{background:#c22;color:#fff}
+  .pill.on{background:#057a55;color:#fff}.pill.off{background:#86868b;color:#fff}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
@@ -1294,42 +1415,11 @@ const STYLE = `
   tr.symbol-disabled-row{background:#fafafa}
   tr.symbol-disabled-row td{color:#86868b}
   .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
-  .env-badge{display:inline-block;margin-left:10px;padding:2px 10px;font-size:11px;font-weight:700;letter-spacing:0.5px;border-radius:10px;vertical-align:middle}
-  .env-badge.live{background:#c22;color:#fff}
-  .env-badge.dry{background:#057a55;color:#fff}
-  .env-badge.unknown{background:#f5c518;color:#3a2a00}
 `
-
-/**
- * Env badge (#275): operator が画面で live / dry-run を即判別できるよう、
- * 全 dashboard page の header に常時表示するための env state derivation。
- * `c.env` 未配線 / `DRY_RUN` 未設定でも 500 を起こさないよう defensive に default。
- */
-export type EnvBadgeMode = 'LIVE' | 'DRY-RUN' | 'UNKNOWN'
-
-export function resolveEnvBadgeMode(env: unknown): EnvBadgeMode {
-  const raw =
-    env && typeof env === 'object' && 'DRY_RUN' in env
-      ? (env as { DRY_RUN?: unknown }).DRY_RUN
-      : undefined
-  if (raw === 'true') return 'DRY-RUN'
-  if (raw === 'false') return 'LIVE'
-  return 'UNKNOWN'
-}
-
-function envBadgeTitlePrefix(mode: EnvBadgeMode): string {
-  if (mode === 'LIVE') return '[LIVE]'
-  if (mode === 'DRY-RUN') return '[DRY]'
-  return '[?]'
-}
-
-function renderEnvBadge(mode: EnvBadgeMode): string {
-  const cls = mode === 'LIVE' ? 'live' : mode === 'DRY-RUN' ? 'dry' : 'unknown'
-  return `<span class="env-badge ${cls}" title="DRY_RUN=${esc(mode)}">${esc(mode)}</span>`
-}
 
 function renderLayout(
   c: {
+    req: { path: string }
     env: unknown
     var: { killSwitchState: KillSwitchBannerState | null }
   },
@@ -1337,7 +1427,64 @@ function renderLayout(
   body: string,
 ): string {
   const banner = killSwitchBanner(c.var.killSwitchState)
-  return layout(title, banner + body, c.env)
+  return layout(title, banner + body, c.req.path)
+}
+
+/** Sidebar nav 定義 (mf-dashboard 風 shell)。active link は path 完全一致で強調。 */
+const NAV_GROUPS: ReadonlyArray<{
+  label?: string
+  links: ReadonlyArray<{ href: string; text: string; title?: string }>
+}> = [
+  { links: [{ href: '/dashboard', text: 'ホーム' }] },
+  {
+    label: '取引状況',
+    links: [
+      { href: '/dashboard/positions', text: 'ポートフォリオ' },
+      { href: '/dashboard/portfolio', text: '口座サマリ' },
+      { href: '/dashboard/trades', text: '約定履歴' },
+    ],
+  },
+  {
+    label: '戦略・監視',
+    links: [
+      { href: '/dashboard/cron', text: '戦略判定' },
+      { href: '/dashboard/charts', text: 'チャート' },
+      { href: '/dashboard/alerts', text: 'アラート' },
+      { href: '/dashboard/events', text: 'イベント' },
+    ],
+  },
+  {
+    label: '運用',
+    links: [
+      { href: '/dashboard/config', text: '設定' },
+      { href: '/dashboard/symbols', text: '銘柄管理' },
+      { href: '/dashboard/audit', text: '監査ログ' },
+      {
+        href: '/dashboard/broker-probe',
+        text: 'broker 診断',
+        title: 'Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ',
+      },
+      {
+        href: '/dashboard/webull-token',
+        text: 'Webull token',
+        title: 'Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)',
+      },
+    ],
+  },
+]
+
+function renderSidebarNav(activePath?: string): string {
+  return NAV_GROUPS.map((g) => {
+    const head = g.label ? `<div class="nav-group">${esc(g.label)}</div>` : ''
+    const links = g.links
+      .map((l) => {
+        const active = activePath === l.href ? ' active' : ''
+        const t = l.title ? ` title="${esc(l.title)}"` : ''
+        return `<a class="nav-link${active}" href="${l.href}"${t}>${esc(l.text)}</a>`
+      })
+      .join('')
+    return head + links
+  }).join('')
 }
 
 function killSwitchBanner(state: KillSwitchBannerState | null): string {
@@ -1367,40 +1514,27 @@ function killSwitchBanner(state: KillSwitchBannerState | null): string {
   </div>`
 }
 
-function layout(title: string, body: string, env?: unknown): string {
-  const mode = resolveEnvBadgeMode(env)
-  const titlePrefix = envBadgeTitlePrefix(mode)
-  const badge = renderEnvBadge(mode)
+function layout(title: string, body: string, activePath?: string): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${titlePrefix} ${esc(title)} — Webull Trading</title>
+<title>${esc(title)} — Webull Trading</title>
 <style>${STYLE}</style>
 </head>
 <body>
-<h1>Webull Trading — ${esc(title)}${badge}</h1>
-<nav>
-  <a href="/dashboard">ホーム</a>
-  <span class="nav-group">取引状況</span>
-  <a href="/dashboard/positions">ポートフォリオ</a>
-  <a href="/dashboard/portfolio">口座サマリ</a>
-  <a href="/dashboard/trades">約定履歴</a>
-  <span class="nav-group">戦略・監視</span>
-  <a href="/dashboard/cron">戦略判定</a>
-  <a href="/dashboard/charts">チャート</a>
-  <a href="/dashboard/alerts">アラート</a>
-  <a href="/dashboard/events">イベント</a>
-  <span class="nav-group">運用</span>
-  <a href="/dashboard/config">設定</a>
-  <a href="/dashboard/symbols">銘柄管理</a>
-  <a href="/dashboard/audit">監査ログ</a>
-  <a href="/dashboard/broker-probe" title="Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ">broker 診断</a>
-  <a href="/dashboard/webull-token" title="Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)">Webull token</a>
-</nav>
-${body}
-<div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">Webull Trading</div>
+    <nav>${renderSidebarNav(activePath)}</nav>
+  </aside>
+  <main class="main">
+    <h1 class="page-title">${esc(title)}</h1>
+    ${body}
+    <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
+  </main>
+</div>
 </body>
 </html>`
 }
@@ -1779,31 +1913,246 @@ function parseJsonObject(value: string | null | undefined): unknown {
   }
 }
 
-function indexBody(): string {
-  return `<p>運用者向けダッシュボード (一部 page は write 操作あり、すべての変更は監査ログに記録)。各ページは Cloudflare Access で保護されています。</p>
+// #dashboard-mf-layout: overview パネル定義。設定で ON/OFF (default 全表示)。
+export type OverviewPanel = 'kpi' | 'equity' | 'composition' | 'recent'
+export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = ['kpi', 'equity', 'composition', 'recent']
+export const OVERVIEW_PANEL_LABELS: Record<OverviewPanel, string> = {
+  kpi: 'KPI カード (総資産 / 当日損益 / 建玉数 / エクスポージャー)',
+  equity: '資産推移チャート (期間タブ)',
+  composition: '資産構成 + 含み損益ランキング',
+  recent: '最近の約定 + VIX / リスク状態',
+}
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">取引状況</h2>
-<ul>
-  <li><a href="/dashboard/positions">ポートフォリオ</a> — 全銘柄の Durable Object 状態 (保有 / 平均取得単価 / 未約定注文 / クールダウン)</li>
-  <li><a href="/dashboard/portfolio">口座サマリ</a> — 当日始値資産 / 当日実現損益 / ドローダウン / 緊急停止 (kill-switch)</li>
-  <li><a href="/dashboard/trades">約定履歴</a> — <code>trade_journal</code> 直近 (既定 50件、<code>?limit=N</code> で可変、最大 200)</li>
-</ul>
+/** CSV を有効パネル集合へ。不正値は無視、空 (未設定/全部不正) は全表示。 */
+export function parseOverviewPanels(csv: string | null | undefined): Set<OverviewPanel> {
+  const set = new Set<OverviewPanel>()
+  for (const tok of (csv ?? '').split(',').map((s) => s.trim())) {
+    if ((ALL_OVERVIEW_PANELS as readonly string[]).includes(tok)) set.add(tok as OverviewPanel)
+  }
+  return set.size === 0 ? new Set(ALL_OVERVIEW_PANELS) : set
+}
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">戦略・監視</h2>
-<ul>
-  <li><a href="/dashboard/cron">戦略判定</a> — <code>strategy_decision_log</code> 直近 cron tick の銘柄別判定 (<code>?symbol=SOXL</code> / <code>?requestId=...</code> で絞り込み可)</li>
-  <li><a href="/dashboard/charts">チャート</a> — 概要 (エクイティカーブ + ドローダウン) / 取引品質 (PnL 分布 + 統計 + Decision breakdown) / 個別銘柄 (price + SMA50 + entry/exit) を tab 切替</li>
-  <li><a href="/dashboard/alerts">アラート</a> — Slack/Discord に push 通知した critical / warning / info の直近 (#141)。webhook 未設定でも D1 に記録される。</li>
-  <li><a href="/dashboard/events">イベント</a> — <code>earnings_calendar</code> / <code>macro_event_calendar</code> の手動 add / delete (#293)。avoid 用 risk gate のソース。</li>
-</ul>
+interface OverviewData {
+  panels: Set<OverviewPanel>
+  portfolio: {
+    dailyStartEquity: number
+    dailyRealizedPnl: number
+    openExposureUsd: number
+    openExposureJpy: number
+    tradingDisabledUntil: string | null
+    updatedAt: string
+  } | null
+  snapshots: PortfolioEquitySnapshotRow[]
+  range: EquityRange
+  positions: Array<{ sym: string; state: SymbolState | null; error: string | null }>
+  strategyPriceMap: Map<string, { price: number; asOf: string }>
+  recentTrades: Array<{
+    id: number
+    timestamp: string
+    symbol: string | null
+    side: string | null
+    filledQty: number | null
+    filledPrice: number | null
+    realizedPnl: number | null
+    brokerStatus: string | null
+  }>
+  vixRegime: VixRegime | null
+  dryRun: boolean
+  tradingEnabled: boolean
+  universe: SymbolUniverse
+}
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">運用</h2>
-<ul>
-  <li><a href="/dashboard/config">設定</a> — <code>global_config</code> + 有効な <code>symbol_config</code></li>
-  <li><a href="/dashboard/symbols">銘柄管理</a> — <code>symbol_config</code> CRUD (#292)。追加 / 編集 / 有効化切替 / soft delete。</li>
-  <li><a href="/dashboard/audit">監査ログ</a> — 状態変更系 admin POST の before/after 差分 (#274)。actor / endpoint / 日付で絞り込み可。</li>
-  <li><a href="/dashboard/broker-probe">broker 診断</a> — Webull broker へ直接 quote / positions を投げて raw レスポンスを観察 (接続診断用)。</li>
-</ul>`
+/** 開いている建玉 (qty != 0) を評価額・含み損益% 付きで抽出。 */
+interface OpenPositionView {
+  sym: string
+  qty: number
+  currency: SymbolCurrency
+  price: number | null
+  marketValue: number | null
+  pnlPct: number | null
+}
+
+/**
+ * overview「最近の約定」用の直近 fill ロード。post_submit 行は side が null
+ * (writer は pre_submit にしか入れない) なので client_order_id で pre_submit と
+ * self-JOIN して side を引く (loadSymbolChart と同方針)。pre_submit が無い古い fill は
+ * realized_pnl の有無から推測 (null=BUY / 非null=SELL)。
+ */
+async function loadRecentFills(
+  db: D1Database,
+  limit: number,
+): Promise<OverviewData['recentTrades']> {
+  const result = await db
+    .prepare(
+      `SELECT ps.id AS id, ps.timestamp AS timestamp, ps.symbol AS symbol,
+         COALESCE(pre.side, CASE WHEN ps.realized_pnl IS NOT NULL THEN 'SELL' ELSE 'BUY' END) AS side,
+         ps.filled_qty AS filledQty, ps.filled_price AS filledPrice,
+         ps.realized_pnl AS realizedPnl, ps.broker_status AS brokerStatus
+       FROM trade_journal AS ps
+       LEFT JOIN trade_journal AS pre
+         ON pre.client_order_id = ps.client_order_id AND pre.trade_event_type = 'pre_submit'
+       WHERE ps.trade_event_type = 'post_submit' AND ps.filled_price IS NOT NULL
+       ORDER BY ps.id DESC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{
+      id: number
+      timestamp: string
+      symbol: string | null
+      side: string | null
+      filledQty: number | null
+      filledPrice: number | null
+      realizedPnl: number | null
+      brokerStatus: string | null
+    }>()
+  return result.results ?? []
+}
+
+function collectOpenPositions(data: OverviewData): OpenPositionView[] {
+  const out: OpenPositionView[] = []
+  for (const r of data.positions) {
+    const pos = r.state?.position
+    if (!r.state || !pos || pos.qty === 0) continue
+    const webull = r.state.lastQuote
+      ? { price: r.state.lastQuote.price, source: r.state.lastQuote.source, asOf: r.state.lastQuote.asOf ?? r.state.lastQuote.fetchedAt }
+      : null
+    const yahoo = data.strategyPriceMap.get(r.state.symbol) ?? null
+    const quote = pickFreshQuote(webull, yahoo)
+    const price = quote?.price ?? null
+    const pnlPct = price !== null && pos.avgPrice > 0 ? ((price - pos.avgPrice) / pos.avgPrice) * 100 : null
+    out.push({
+      sym: r.state.symbol,
+      qty: pos.qty,
+      currency: data.universe.symbolCurrency[r.state.symbol] ?? 'USD',
+      price,
+      marketValue: price !== null ? pos.qty * price : null,
+      pnlPct,
+    })
+  }
+  return out
+}
+
+function kpiCard(label: string, value: string, sub?: string, subClass?: string): string {
+  const subHtml = sub ? `<div class="kpi-sub ${subClass ?? 'muted'}">${sub}</div>` : ''
+  return `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${value}</div>${subHtml}</div>`
+}
+
+function renderKpiPanel(data: OverviewData, open: OpenPositionView[]): string {
+  const p = data.portfolio
+  const dd = p && p.dailyStartEquity > 0 ? (p.dailyRealizedPnl / p.dailyStartEquity) * 100 : null
+  const pnlClass = p == null ? 'muted' : p.dailyRealizedPnl >= 0 ? 'ok' : 'err'
+  const cards = [
+    kpiCard('当日始値資産', p ? fmtNumber(p.dailyStartEquity, 2) : '—', '口座 dailyStartEquity'),
+    kpiCard(
+      '当日実現損益',
+      p ? `<span class="${pnlClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</span>` : '—',
+      dd === null ? undefined : `DD ${fmtNumber(dd, 2)}%`,
+      dd === null ? 'muted' : dd >= 0 ? 'ok' : 'err',
+    ),
+    kpiCard('建玉数', String(open.length), '保有中の銘柄数'),
+    kpiCard(
+      'Open exposure',
+      p ? `${fmtNumber(p.openExposureUsd, 0)}<span class="muted" style="font-size:12px"> USD</span>` : '—',
+      p ? `${fmtNumber(p.openExposureJpy, 0)} JPY` : undefined,
+    ),
+  ].join('')
+  return `<div class="kpi-grid">${cards}</div>`
+}
+
+function renderCompositionPanel(open: OpenPositionView[]): string {
+  if (open.length === 0) {
+    return `<div class="panel"><div class="panel-title">資産構成 / 含み損益ランキング</div><p class="muted">保有中の建玉がありません。</p></div>`
+  }
+  // 通貨内シェアで構成比 bar を正規化 (USD/JPY を混ぜない)。
+  const sumByCcy: Record<string, number> = {}
+  for (const o of open) {
+    if (o.marketValue !== null) sumByCcy[o.currency] = (sumByCcy[o.currency] ?? 0) + Math.abs(o.marketValue)
+  }
+  const composition = [...open]
+    .sort((a, b) => (Math.abs(b.marketValue ?? 0)) - (Math.abs(a.marketValue ?? 0)))
+    .map((o) => {
+      const total = sumByCcy[o.currency] ?? 0
+      const share = o.marketValue !== null && total > 0 ? (Math.abs(o.marketValue) / total) * 100 : 0
+      const valueText = o.marketValue !== null ? `${fmtNumber(o.marketValue, 0)} ${o.currency}` : '—'
+      return `<div class="rank-row"><span>${esc(o.sym)} <span class="muted" style="font-size:11px">${fmtNumber(share, 1)}%</span></span><span>${valueText}</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:${share.toFixed(1)}%"></div></div>`
+    })
+    .join('')
+  // 含み損益% ランキング (up / down)。
+  const ranked = open.filter((o) => o.pnlPct !== null) as Array<OpenPositionView & { pnlPct: number }>
+  const gainers = [...ranked].filter((o) => o.pnlPct >= 0).sort((a, b) => b.pnlPct - a.pnlPct).slice(0, 5)
+  const losers = [...ranked].filter((o) => o.pnlPct < 0).sort((a, b) => a.pnlPct - b.pnlPct).slice(0, 5)
+  const rankRow = (o: OpenPositionView & { pnlPct: number }) =>
+    `<div class="rank-row"><span>${esc(o.sym)}</span><span class="${o.pnlPct >= 0 ? 'ok' : 'err'}">${fmtNumber(o.pnlPct, 2)}%</span></div>`
+  const rankCol = (title: string, items: Array<OpenPositionView & { pnlPct: number }>) =>
+    `<div><div class="muted" style="font-size:12px;margin-bottom:4px">${esc(title)}</div>${items.length ? items.map(rankRow).join('') : '<p class="muted">—</p>'}</div>`
+  return `<div class="panel">
+    <div class="panel-title">資産構成 / 含み損益ランキング</div>
+    <p class="muted" style="font-size:12px;margin-top:0">構成比は通貨内シェア。ランキングは含み損益% (現在値 vs 平均取得単価)。</p>
+    <div class="panel-row">
+      <div><div class="muted" style="font-size:12px;margin-bottom:4px">構成 (評価額)</div>${composition}</div>
+      <div class="panel-row" style="grid-template-columns:1fr 1fr">${rankCol('上昇', gainers)}${rankCol('下落', losers)}</div>
+    </div>
+  </div>`
+}
+
+function renderRecentPanel(data: OverviewData): string {
+  const trades = data.recentTrades
+    .map((t) => {
+      const sideClass = t.side === 'BUY' ? 'ok' : t.side === 'SELL' ? 'err' : 'muted'
+      const pnl = t.realizedPnl !== null ? formatRealizedPnl(t.realizedPnl) : '<span class="muted">—</span>'
+      return `<tr>
+        <td class="muted" style="font-size:12px">${esc(fmtJst(t.timestamp))}</td>
+        <td><strong>${esc(displaySymbol(t.symbol ?? '—', data.universe))}</strong></td>
+        <td class="${sideClass}">${esc(t.side ?? '—')}</td>
+        <td>${t.filledQty !== null ? esc(t.filledQty) : '—'}</td>
+        <td>${t.filledPrice !== null ? fmtNumber(t.filledPrice, 2) : '—'}</td>
+        <td>${pnl}</td>
+      </tr>`
+    })
+    .join('')
+  const recentTable = data.recentTrades.length
+    ? `<table><thead><tr><th>時刻</th><th>銘柄</th><th>売買</th><th>数量</th><th>約定値</th><th>実損益</th></tr></thead><tbody>${trades}</tbody></table>`
+    : '<p class="muted">約定履歴がありません。</p>'
+  const dryPill = data.dryRun
+    ? '<span class="pill dry">DRY-RUN</span>'
+    : '<span class="pill live">LIVE</span>'
+  const tradingPill = data.tradingEnabled
+    ? '<span class="pill on">取引 ON</span>'
+    : '<span class="pill off">取引 OFF</span>'
+  return `<div class="panel">
+    <div class="panel-title">最近の約定 / リスク状態</div>
+    <div class="panel-row">
+      <div>${recentTable}<div style="margin-top:8px"><a href="/dashboard/trades">約定履歴をすべて見る →</a></div></div>
+      <div>
+        <table><tbody>
+          <tr><th>実行モード</th><td>${dryPill} <span class="muted" style="font-size:11px">(D1 dry_run)</span></td></tr>
+          <tr><th>取引 (effective)</th><td>${tradingPill} <span class="muted" style="font-size:11px">(env override 反映後)</span></td></tr>
+          <tr><th>VIX レジーム</th><td>${renderVixRegimeCell(data.vixRegime)}</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+  </div>`
+}
+
+function overviewBody(data: OverviewData): string {
+  const open = collectOpenPositions(data)
+  const sections: string[] = []
+  if (data.panels.has('kpi')) sections.push(renderKpiPanel(data, open))
+  if (data.panels.has('equity')) {
+    sections.push(
+      `<div class="panel">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div>`,
+    )
+  }
+  if (data.panels.has('composition')) sections.push(renderCompositionPanel(open))
+  if (data.panels.has('recent')) sections.push(renderRecentPanel(data))
+  if (sections.length === 0) {
+    sections.push(
+      '<p class="muted">表示パネルが選択されていません。<a href="/dashboard/config">設定</a>でパネルを有効化してください。</p>',
+    )
+  }
+  return sections.join('')
 }
 
 /**
@@ -2025,8 +2374,9 @@ async function safeLoadPortfolioSnapshots(
 function renderPortfolioEquityChart(
   snapshots: PortfolioEquitySnapshotRow[],
   range: EquityRange,
+  basePath = '/dashboard/portfolio',
 ): string {
-  const rangeTabs = renderEquityRangeTabs(range)
+  const rangeTabs = renderEquityRangeTabs(range, basePath)
   if (snapshots.length === 0) {
     return `<h3 style="margin-top:24px">総資産チャート</h3>
     ${rangeTabs}
@@ -2112,7 +2462,7 @@ function renderPortfolioEquityChart(
   <script>${initScript}</script>`
 }
 
-function renderEquityRangeTabs(active: EquityRange): string {
+function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portfolio'): string {
   const options: Array<{ id: EquityRange; label: string }> = [
     { id: '30d', label: '30 日' },
     { id: '90d', label: '90 日' },
@@ -2122,7 +2472,7 @@ function renderEquityRangeTabs(active: EquityRange): string {
   const links = options
     .map((opt) => {
       const cls = opt.id === active ? 'tab tab-active' : 'tab'
-      return `<a class="${cls}" href="/dashboard/portfolio?range=${opt.id}">${opt.label}</a>`
+      return `<a class="${cls}" href="${basePath}?range=${opt.id}">${opt.label}</a>`
     })
     .join(' ')
   return `<div class="tab-strip" style="margin-top:12px">${links}</div>`
@@ -2255,7 +2605,17 @@ function tradesBody(
 function configBody(
   global: Awaited<ReturnType<typeof loadGlobalConfigFrom>>,
   universe: Awaited<ReturnType<typeof loadSymbolUniverse>>,
+  overviewPanels: Set<OverviewPanel>,
 ): string {
+  // #dashboard-mf-layout: overview パネル ON/OFF。POST → PRG redirect (#293 と同型)。
+  const panelForm = `<details open>
+    <summary>ダッシュボード overview パネル表示</summary>
+    <form method="post" action="/dashboard/config/overview-panels" style="margin:8px 0;display:flex;flex-direction:column;gap:6px;max-width:560px">
+      ${ALL_OVERVIEW_PANELS.map((k) => `<label style="font-size:13px"><input type="checkbox" name="panels" value="${k}"${overviewPanels.has(k) ? ' checked' : ''}/> ${esc(OVERVIEW_PANEL_LABELS[k])}</label>`).join('')}
+      <div><button type="submit" style="padding:4px 12px;font-size:13px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer">保存</button></div>
+    </form>
+    <p class="muted" style="font-size:12px"><code>/dashboard</code> の overview に表示するパネル。全て OFF にすると全表示に戻ります。</p>
+  </details>`
   // 列名 (snake_case) は SQL での copy-paste 互換のため英字のまま残し、
   // 日本語説明は別列に分離。これで `UPDATE global_config SET xxx = ...` が
   // そのまま使える。
@@ -2301,7 +2661,8 @@ function configBody(
         </tr>`
     })
     .join('')
-  return `<details open>
+  return `${panelForm}
+  <details open>
     <summary>グローバル設定 (global_config)</summary>
     <table>
       <thead><tr><th>Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>

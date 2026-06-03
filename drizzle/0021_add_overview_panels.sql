@@ -1,0 +1,1 @@
+ALTER TABLE `global_config` ADD `overview_panels` text DEFAULT 'kpi,equity,composition,recent' NOT NULL;

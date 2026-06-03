@@ -249,6 +249,13 @@ export const globalConfig = sqliteTable(
      * default 0.5 (= 半分に縮小)。0..1 で運用想定。
      */
     vixWarningSizeScale: real('vix_warning_size_scale').notNull().default(0.5),
+    /**
+     * Dashboard overview パネルの表示 ON/OFF (#dashboard-mf-layout)。有効パネル
+     * key の CSV。表示専用設定なので trading config (`GlobalConfigSnapshot`) には
+     * 通さず、dashboard が専用 read (`loadOverviewPanels`) で参照する。
+     * key: kpi / equity / composition / recent。default は全表示。
+     */
+    overviewPanels: text('overview_panels').notNull().default('kpi,equity,composition,recent'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
