@@ -1,0 +1,14 @@
+-- bucket_exposure_pct を global_config に追加。
+-- #126 (sector bucket exposure cap) で schema.ts / drizzle meta snapshot には
+-- `bucket_exposure_pct` 列が宣言されたが、対応する migration SQL が生成されず、
+-- 全 D1 (dev/staging/production/local) で列が物理的に欠損していた。結果:
+--   - 空 global_config への INSERT (= 初回 toggle / seed) が
+--     `no such column: bucket_exposure_pct` で失敗
+--   - 全列 SELECT (loadGlobalConfig) も同例外 → cron は fail-closed / dashboard degrade
+-- production を最新 main から deploy した際に顕在化 (#390 後の初回 toggle で 500)。
+--
+-- 0015 (vix) と同じく SQLite は ALTER TABLE ADD COLUMN で CHECK 制約を直接
+-- 付けられないため、range 制約 (>0 AND <=1) は schema.ts 側宣言のままにし、
+-- 本 migration は列追加 + default のみ (default 0.3 は #126 の POC 既定)。
+-- 0007 のような table-rebuild は副作用が大きいので避ける。
+ALTER TABLE `global_config` ADD COLUMN `bucket_exposure_pct` real NOT NULL DEFAULT 0.3;
