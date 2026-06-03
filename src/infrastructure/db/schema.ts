@@ -219,6 +219,17 @@ export const globalConfig = sqliteTable(
      */
     pullbackDefaultKAtr: real('pullback_default_k_atr').notNull().default(2.0),
     /**
+     * 過熱ガード (#strategy-overextension-guards): `(price-sma50)/sma50` がこの比率超
+     * で BUY 見送り。+3x レバ ETF の blowoff 高値掴み回避。POC default 0.60 (+60%)。
+     */
+    pullbackDefaultMaxSma50DeviationPct: real('pullback_default_max_sma50_deviation_pct')
+      .notNull()
+      .default(0.6),
+    /**
+     * ボラ過熱ガード: `atr20/baselineAtr20` がこの比率超で BUY 見送り。POC default 1.5。
+     */
+    pullbackDefaultMaxAtrRatio: real('pullback_default_max_atr_ratio').notNull().default(1.5),
+    /**
      * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
      * pullbackSizing に渡る。#23 Lane 2。
      */
@@ -333,6 +344,10 @@ export const globalConfig = sqliteTable(
       'global_config_pullback_default_k_atr_range',
       sql`${t.pullbackDefaultKAtr} > 0 AND ${t.pullbackDefaultKAtr} <= 10`,
     ),
+    // 過熱ガード 2 列 (max_sma50_deviation_pct / max_atr_ratio) は 0015(vix) と同様、
+    // ALTER ADD COLUMN で追加するため DB CHECK は付けない (SQLite 制約)。範囲の
+    // 妥当性はゲートが本質的に fail-safe (異常値でも BUY を抑制する方向) なため、
+    // 将来の table-rebuild migration でまとめて CHECK 投入予定。
     // 相対関係を DB で縛る: min > max だと BUY 条件を満たす pullback 幅が
     // 空集合になり戦略が静かに停止する。runtime UPDATE の typo 防止。
     pullbackDefaultPullbackWindowOrder: check(

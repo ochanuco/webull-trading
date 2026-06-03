@@ -18,6 +18,9 @@ const LEVERAGED_RULE: SymbolRule = {
   minReturn50d: 0.08,
   requireAboveSma50: true,
   kAtr: 2.5,
+  // 過熱ガードは既存ケースでは無効化 (大きい値)。ガード検証は専用 describe で実施。
+  maxSma50DeviationPct: 100,
+  maxAtrRatio: 100,
 }
 
 /** Build a valid BUY-triggering input; individual tests mutate one field. */
@@ -59,6 +62,8 @@ describe('PullbackUptrendStrategy entry', () => {
       ['route.position_open', false],
       ['entry.trend_50d_return', true],
       ['entry.above_sma50', true],
+      ['entry.not_overextended', true],
+      ['entry.vol_not_elevated', true],
       ['entry.high20d_valid', true],
       ['entry.pullback_not_too_shallow', true],
       ['entry.pullback_not_too_deep', true],
@@ -83,6 +88,31 @@ describe('PullbackUptrendStrategy entry', () => {
     input.indicators.price = 89
     input.indicators.high20d = 100
     expect(strategy.decide(input).action).toBe('HOLD')
+  })
+
+  // #strategy-overextension-guards: SMA50 上方乖離が上限超 → 過熱で見送り。
+  it('HOLDs (overextended) when price is too far above sma50', () => {
+    const input = goodEntryInput()
+    input.indicators.sma50 = 50 // price 96 → deviation +92% > default 0.6
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.reason).toMatch(/overextended/)
+    expect(signal.trace?.at(-1)).toMatchObject({ label: 'entry.not_overextended', passed: false })
+  })
+
+  // #strategy-overextension-guards: 直近 ATR が baseline 比で過大 → ボラ過熱で見送り。
+  it('HOLDs (volatility elevated) when atr20 exceeds maxAtrRatio of baseline', () => {
+    const input = goodEntryInput()
+    input.indicators.atr20 = 4 // baselineAtr20=1.5 → ratio 2.67 > default 1.5
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.reason).toMatch(/volatility elevated/)
+    expect(signal.trace?.at(-1)).toMatchObject({ label: 'entry.vol_not_elevated', passed: false })
+  })
+
+  it('still BUYs at moderate extension / normal volatility (gates do not over-block)', () => {
+    // price 96 / sma50 90 → dev +6.7% < 0.6、atr 比 1.0 < 1.5 → 両ガード通過で BUY。
+    expect(strategy.decide(goodEntryInput()).action).toBe('BUY')
   })
 
   it('HOLDs when pullback is shallower than -3%', () => {
