@@ -89,6 +89,49 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
 })
 
 /**
+ * Dashboard overview パネル表示設定 (#dashboard-mf-layout)。`global_config.overview_panels`
+ * の CSV を読み書きする。表示専用なので `GlobalConfigSnapshot` / cron 経路には通さず、
+ * dashboard だけが参照する独立 read/write。
+ */
+export const OVERVIEW_PANELS_DEFAULT = 'kpi,equity,composition,recent'
+
+export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<string> {
+  try {
+    const rows = await db
+      .select({ value: globalConfig.overviewPanels })
+      .from(globalConfig)
+      .where(eq(globalConfig.id, 'default'))
+      .limit(1)
+    const v = rows[0]?.value
+    return typeof v === 'string' && v.trim().length > 0 ? v : OVERVIEW_PANELS_DEFAULT
+  } catch {
+    // 列未 migration / D1 エラーは全表示 default に倒す (overview は描画継続)。
+    return OVERVIEW_PANELS_DEFAULT
+  }
+}
+
+/** `applyTradingToggle` と同様、row 未 seed なら INSERT で作る。 */
+export async function setOverviewPanels(
+  db: DrizzleD1Database,
+  csv: string,
+  nowIso: string,
+): Promise<void> {
+  const existing = await db
+    .select({ id: globalConfig.id })
+    .from(globalConfig)
+    .where(eq(globalConfig.id, 'default'))
+    .limit(1)
+  if (existing[0]) {
+    await db
+      .update(globalConfig)
+      .set({ overviewPanels: csv, updatedAt: nowIso })
+      .where(eq(globalConfig.id, 'default'))
+  } else {
+    await db.insert(globalConfig).values({ id: 'default', overviewPanels: csv, updatedAt: nowIso })
+  }
+}
+
+/**
  * VIX 値の application-level validation。
  *
  * 0015 migration は ALTER TABLE ADD COLUMN しか実行しておらず CHECK 制約は
