@@ -142,21 +142,7 @@ export const dashboard = new Hono<DashboardBindings>()
               )
             : Promise.resolve([] as Array<{ sym: string; state: SymbolState | null; error: string | null }>),
           loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
-          db
-            .select({
-              id: tradeJournal.id,
-              timestamp: tradeJournal.timestamp,
-              symbol: tradeJournal.symbol,
-              side: tradeJournal.side,
-              filledQty: tradeJournal.filledQty,
-              filledPrice: tradeJournal.filledPrice,
-              realizedPnl: tradeJournal.realizedPnl,
-              brokerStatus: tradeJournal.brokerStatus,
-            })
-            .from(tradeJournal)
-            .where(eq(tradeJournal.tradeEventType, 'post_submit'))
-            .orderBy(desc(tradeJournal.id))
-            .limit(8),
+          loadRecentFills(c.env.DB, 8),
           c.env.DB
             ? loadVixRegimeSnapshot(c.env.DB, c.get('requestId')).catch(() => null)
             : Promise.resolve(null),
@@ -172,7 +158,9 @@ export const dashboard = new Hono<DashboardBindings>()
         recentTrades,
         vixRegime,
         dryRun: global.dryRun,
-        tradingEnabled: global.tradingEnabled,
+        // env TRADING_ENABLED の deploy-gate を反映した effective 値 (CodeRabbit #397:
+        // 上部バナーと同じ resolveTradingEnabled を通し、生 DB 値との食い違いを防ぐ)。
+        tradingEnabled: resolveTradingEnabled(global.tradingEnabled, c.env.TRADING_ENABLED),
         universe,
       }
       return c.html(renderLayout(c, 'ダッシュボード', overviewBody(data)))
@@ -264,13 +252,26 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '設定', unavailable('DB not bound')))
     }
+    const db = createDb(c.env.DB)
     const form = await c.req.formData()
     const selected = form
       .getAll('panels')
       .map(String)
       .filter((s) => (ALL_OVERVIEW_PANELS as readonly string[]).includes(s))
     const csv = Array.from(new Set(selected)).join(',')
-    await setOverviewPanels(createDb(c.env.DB), csv, new Date().toISOString())
+    // CodeRabbit #397: global_config への永続変更なので before/after + requestId を
+    // 構造化ログに残す (audit 追跡)。display 設定なので config_audit_log table までは使わない。
+    const before = await loadOverviewPanelsCsv(db)
+    await setOverviewPanels(db, csv, new Date().toISOString())
+    console.log(
+      JSON.stringify({
+        event: 'overview_panels_updated',
+        requestId: c.get('requestId') ?? null,
+        actor: extractActor(c.get('actor')),
+        before,
+        after: csv,
+      }),
+    )
     return c.redirect('/dashboard/config', 303)
   })
   .get('/charts', async (c) => {
@@ -1970,6 +1971,43 @@ interface OpenPositionView {
   pnlPct: number | null
 }
 
+/**
+ * overview「最近の約定」用の直近 fill ロード。post_submit 行は side が null
+ * (writer は pre_submit にしか入れない) なので client_order_id で pre_submit と
+ * self-JOIN して side を引く (loadSymbolChart と同方針)。pre_submit が無い古い fill は
+ * realized_pnl の有無から推測 (null=BUY / 非null=SELL)。
+ */
+async function loadRecentFills(
+  db: D1Database,
+  limit: number,
+): Promise<OverviewData['recentTrades']> {
+  const result = await db
+    .prepare(
+      `SELECT ps.id AS id, ps.timestamp AS timestamp, ps.symbol AS symbol,
+         COALESCE(pre.side, CASE WHEN ps.realized_pnl IS NOT NULL THEN 'SELL' ELSE 'BUY' END) AS side,
+         ps.filled_qty AS filledQty, ps.filled_price AS filledPrice,
+         ps.realized_pnl AS realizedPnl, ps.broker_status AS brokerStatus
+       FROM trade_journal AS ps
+       LEFT JOIN trade_journal AS pre
+         ON pre.client_order_id = ps.client_order_id AND pre.trade_event_type = 'pre_submit'
+       WHERE ps.trade_event_type = 'post_submit' AND ps.filled_price IS NOT NULL
+       ORDER BY ps.id DESC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{
+      id: number
+      timestamp: string
+      symbol: string | null
+      side: string | null
+      filledQty: number | null
+      filledPrice: number | null
+      realizedPnl: number | null
+      brokerStatus: string | null
+    }>()
+  return result.results ?? []
+}
+
 function collectOpenPositions(data: OverviewData): OpenPositionView[] {
   const out: OpenPositionView[] = []
   for (const r of data.positions) {
@@ -2089,7 +2127,7 @@ function renderRecentPanel(data: OverviewData): string {
       <div>
         <table><tbody>
           <tr><th>実行モード</th><td>${dryPill} <span class="muted" style="font-size:11px">(D1 dry_run)</span></td></tr>
-          <tr><th>取引 (trading_enabled)</th><td>${tradingPill}</td></tr>
+          <tr><th>取引 (effective)</th><td>${tradingPill} <span class="muted" style="font-size:11px">(env override 反映後)</span></td></tr>
           <tr><th>VIX レジーム</th><td>${renderVixRegimeCell(data.vixRegime)}</td></tr>
         </tbody></table>
       </div>

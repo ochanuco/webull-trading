@@ -110,25 +110,22 @@ export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<stri
   }
 }
 
-/** `applyTradingToggle` と同様、row 未 seed なら INSERT で作る。 */
+/**
+ * row 未 seed でも作れるよう upsert で原子的に書く (CodeRabbit #397: read-then-write
+ * は同時 POST で INSERT 主キー衝突し得る)。他列は schema default 任せ。
+ */
 export async function setOverviewPanels(
   db: DrizzleD1Database,
   csv: string,
   nowIso: string,
 ): Promise<void> {
-  const existing = await db
-    .select({ id: globalConfig.id })
-    .from(globalConfig)
-    .where(eq(globalConfig.id, 'default'))
-    .limit(1)
-  if (existing[0]) {
-    await db
-      .update(globalConfig)
-      .set({ overviewPanels: csv, updatedAt: nowIso })
-      .where(eq(globalConfig.id, 'default'))
-  } else {
-    await db.insert(globalConfig).values({ id: 'default', overviewPanels: csv, updatedAt: nowIso })
-  }
+  await db
+    .insert(globalConfig)
+    .values({ id: 'default', overviewPanels: csv, updatedAt: nowIso })
+    .onConflictDoUpdate({
+      target: globalConfig.id,
+      set: { overviewPanels: csv, updatedAt: nowIso },
+    })
 }
 
 /**

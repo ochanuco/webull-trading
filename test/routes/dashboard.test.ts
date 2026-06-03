@@ -278,16 +278,19 @@ describe('dashboard', () => {
   it('saves overview panel selection (303 redirect, CSV deduped + invalid dropped)', async () => {
     let storedCsv: string | undefined
     vi.mocked(createDb).mockReturnValue({
+      // loadOverviewPanelsCsv (before-read) → value 無し → default fallback。
       select: () => ({
-        from: () => ({ where: () => ({ limit: async () => [{ id: 'default' }] }) }),
+        from: () => ({ where: () => ({ limit: async () => [{ value: undefined }] }) }),
       }),
-      update: () => ({
-        set: (vals: { overviewPanels: string }) => {
-          storedCsv = vals.overviewPanels
-          return { where: async () => undefined }
-        },
+      // setOverviewPanels は upsert: insert().values().onConflictDoUpdate()。
+      insert: () => ({
+        values: () => ({
+          onConflictDoUpdate: (cfg: { set: { overviewPanels: string } }) => {
+            storedCsv = cfg.set.overviewPanels
+            return Promise.resolve(undefined)
+          },
+        }),
       }),
-      insert: () => ({ values: async () => undefined }),
     } as unknown as ReturnType<typeof createDb>)
     const env = { ...baseEnv, DB: {} as D1Database }
     const app = createApp()
@@ -539,8 +542,8 @@ describe('parseOverviewPanels', () => {
     const all = [...ALL_OVERVIEW_PANELS].sort()
     expect([...parseOverviewPanels('')].sort()).toEqual(all)
     expect([...parseOverviewPanels('x,y')].sort()).toEqual(all)
-    expect(parseOverviewPanels(null).size).toBe(ALL_OVERVIEW_PANELS.length)
-    expect(parseOverviewPanels(undefined).size).toBe(ALL_OVERVIEW_PANELS.length)
+    expect([...parseOverviewPanels(null)].sort()).toEqual(all)
+    expect([...parseOverviewPanels(undefined)].sort()).toEqual(all)
   })
 })
 
