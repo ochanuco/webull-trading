@@ -141,6 +141,13 @@
       "when": 1778895040599,
       "tag": "0019_numerous_nightshade",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1780400611000,
+      "tag": "0020_add_bucket_exposure_pct",
+      "breakpoints": true
     }
   ]
 }
