@@ -316,6 +316,18 @@ export const admin = new Hono<AppBindings>()
       kAtr: readOptionalNumber(c.req.query('kAtr'), 'kAtr', global.pullbackDefaultKAtr, {
         mustBePositive: true,
       }),
+      maxSma50DeviationPct: readOptionalNumber(
+        c.req.query('maxSma50DeviationPct'),
+        'maxSma50DeviationPct',
+        global.pullbackDefaultMaxSma50DeviationPct,
+        { mustBePositive: true },
+      ),
+      maxAtrRatio: readOptionalNumber(
+        c.req.query('maxAtrRatio'),
+        'maxAtrRatio',
+        global.pullbackDefaultMaxAtrRatio,
+        { mustBePositive: true },
+      ),
     }
 
     // Need at least 50 warmup bars before `from` for SMA50; estimate generous

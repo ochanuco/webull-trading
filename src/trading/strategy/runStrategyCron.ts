@@ -85,6 +85,8 @@ export interface StrategyCronAnalysis {
       minReturn50d: number
       requireAboveSma50: boolean
       kAtr: number
+      maxSma50DeviationPct: number
+      maxAtrRatio: number
     }
     risk: {
       basePerTradePct: number
@@ -232,6 +234,8 @@ export async function runStrategyCron(
     minReturn50d: global.pullbackDefaultMinReturn50d,
     requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
     kAtr: global.pullbackDefaultKAtr,
+    maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
+    maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
   }
   // Per-symbol override map (#316)。symbol_config の time_stop_days_override /
   // k_atr_override を defaultRule に重ね、3x leveraged ETF 等の銘柄固有事情

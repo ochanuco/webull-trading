@@ -2787,6 +2787,14 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     label: 'ATR 倍率',
     detail: '損切り幅を ATR (日々の値動き幅) の何倍にするか。2.0 が標準。大きくすると激しい値動き銘柄でも余裕を持って保有、小さいと早めに損切り。',
   },
+  pullback_default_max_sma50_deviation_pct: {
+    label: '過熱ガード: SMA50 上方乖離上限 (比率)',
+    detail: '株価が 50 日移動平均をこの比率超で上回る過熱局面では押し目買いを見送る。0.6 = +60%。+3x レバ ETF の高値掴み回避。小さいほど厳しく BUY を抑制。',
+  },
+  pullback_default_max_atr_ratio: {
+    label: '過熱ガード: ATR比上限 (倍)',
+    detail: '直近 ATR が baseline (長期平均) のこの倍率を超える高ボラ局面では押し目買いを見送る。1.5 = baseline の 1.5 倍。ボラ・レジーム破綻時の entry を抑制。',
+  },
   risk_base_per_trade_pct: {
     label: '基本リスク率 (比率)',
     detail: '1 回のトレードで失ってよい割合 (対 総資本)。0.004 = 0.4%。大きくすると 1 回あたりの建玉サイズ↑、連敗時の損失↑。',
@@ -2944,6 +2952,15 @@ export function localizeReason(en: string | null | undefined): string {
     /^pullback (\S+) < (\S+) \(too deep\)$/,
     (_m, p, t) =>
       `様子見: 押し目が深すぎる/下落転換懸念 (下落率 ${fmtPct(p)} < 許容 ${fmtPct(t)})`,
+  )
+  // #strategy-overextension-guards: 過熱 / ボラ過熱 ガード。
+  s = s.replace(
+    /^sma50 deviation (\S+) > (\S+) \(overextended\)$/,
+    (_m, d, t) => `様子見: 過熱 (移動平均からの上方乖離 ${fmtPct(d)} > 条件 ${fmtPct(t)})`,
+  )
+  s = s.replace(
+    /^atr ratio (\S+) > (\S+) \(volatility elevated\)$/,
+    (_m, r, t) => `様子見: ボラ過熱 (ATR比 ${r}倍 > 条件 ${t}倍)`,
   )
 
   // === BUY signal (押し目買い成立) ===

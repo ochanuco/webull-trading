@@ -1,0 +1,2 @@
+ALTER TABLE `global_config` ADD `pullback_default_max_sma50_deviation_pct` real DEFAULT 0.6 NOT NULL;--> statement-breakpoint
+ALTER TABLE `global_config` ADD `pullback_default_max_atr_ratio` real DEFAULT 1.5 NOT NULL;

@@ -41,6 +41,18 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
+    it('overextended (SMA50 上方乖離過大)', () => {
+      expect(localizeReason('sma50 deviation 0.9200 > 0.6 (overextended)')).toBe(
+        '様子見: 過熱 (移動平均からの上方乖離 +92.00% > 条件 +60.00%)',
+      )
+    })
+
+    it('volatility elevated (ATR比過大)', () => {
+      expect(localizeReason('atr ratio 2.67 > 1.5 (volatility elevated)')).toBe(
+        '様子見: ボラ過熱 (ATR比 2.67倍 > 条件 1.5倍)',
+      )
+    })
+
     it('invalid 10d high', () => {
       expect(localizeReason('invalid 10d high')).toBe(
         'データ不足: 直近高値を算出できず',

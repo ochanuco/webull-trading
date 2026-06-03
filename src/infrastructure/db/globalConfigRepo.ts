@@ -32,6 +32,10 @@ export interface GlobalConfigSnapshot {
   pullbackDefaultRequireAboveSma50: boolean
   /** ATR multiplier for vol-adaptive stop。default 2.0。 */
   pullbackDefaultKAtr: number
+  /** 過熱ガード: SMA50 上方乖離がこの比率超で BUY 見送り (#strategy-overextension-guards)。 */
+  pullbackDefaultMaxSma50DeviationPct: number
+  /** ボラ過熱ガード: atr20/baselineAtr20 がこの比率超で BUY 見送り。 */
+  pullbackDefaultMaxAtrRatio: number
   /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
   riskBasePerTradePct: number
   /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
@@ -79,6 +83,8 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultMinReturn50d: 0.08,
   pullbackDefaultRequireAboveSma50: true,
   pullbackDefaultKAtr: 2.0,
+  pullbackDefaultMaxSma50DeviationPct: 0.6,
+  pullbackDefaultMaxAtrRatio: 1.5,
   riskBasePerTradePct: 0.004,
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
@@ -273,6 +279,8 @@ export async function loadGlobalConfig(
             pullbackDefaultMinReturn50d: globalConfig.pullbackDefaultMinReturn50d,
             pullbackDefaultRequireAboveSma50: globalConfig.pullbackDefaultRequireAboveSma50,
             pullbackDefaultKAtr: globalConfig.pullbackDefaultKAtr,
+            pullbackDefaultMaxSma50DeviationPct: globalConfig.pullbackDefaultMaxSma50DeviationPct,
+            pullbackDefaultMaxAtrRatio: globalConfig.pullbackDefaultMaxAtrRatio,
             riskBasePerTradePct: globalConfig.riskBasePerTradePct,
             riskDdHalfThreshold: globalConfig.riskDdHalfThreshold,
             riskDdHaltThreshold: globalConfig.riskDdHaltThreshold,
@@ -306,6 +314,8 @@ export async function loadGlobalConfig(
             pullbackDefaultMinReturn50d: legacyRow.pullbackDefaultMinReturn50d,
             pullbackDefaultRequireAboveSma50: legacyRow.pullbackDefaultRequireAboveSma50,
             pullbackDefaultKAtr: legacyRow.pullbackDefaultKAtr,
+            pullbackDefaultMaxSma50DeviationPct: legacyRow.pullbackDefaultMaxSma50DeviationPct,
+            pullbackDefaultMaxAtrRatio: legacyRow.pullbackDefaultMaxAtrRatio,
             riskBasePerTradePct: legacyRow.riskBasePerTradePct,
             riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
             riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
@@ -357,6 +367,8 @@ export async function loadGlobalConfig(
     pullbackDefaultMinReturn50d: row.pullbackDefaultMinReturn50d,
     pullbackDefaultRequireAboveSma50: row.pullbackDefaultRequireAboveSma50,
     pullbackDefaultKAtr: row.pullbackDefaultKAtr,
+    pullbackDefaultMaxSma50DeviationPct: row.pullbackDefaultMaxSma50DeviationPct,
+    pullbackDefaultMaxAtrRatio: row.pullbackDefaultMaxAtrRatio,
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,
