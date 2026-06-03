@@ -1294,39 +1294,7 @@ const STYLE = `
   tr.symbol-disabled-row{background:#fafafa}
   tr.symbol-disabled-row td{color:#86868b}
   .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
-  .env-badge{display:inline-block;margin-left:10px;padding:2px 10px;font-size:11px;font-weight:700;letter-spacing:0.5px;border-radius:10px;vertical-align:middle}
-  .env-badge.live{background:#c22;color:#fff}
-  .env-badge.dry{background:#057a55;color:#fff}
-  .env-badge.unknown{background:#f5c518;color:#3a2a00}
 `
-
-/**
- * Env badge (#275): operator が画面で live / dry-run を即判別できるよう、
- * 全 dashboard page の header に常時表示するための env state derivation。
- * `c.env` 未配線 / `DRY_RUN` 未設定でも 500 を起こさないよう defensive に default。
- */
-export type EnvBadgeMode = 'LIVE' | 'DRY-RUN' | 'UNKNOWN'
-
-export function resolveEnvBadgeMode(env: unknown): EnvBadgeMode {
-  const raw =
-    env && typeof env === 'object' && 'DRY_RUN' in env
-      ? (env as { DRY_RUN?: unknown }).DRY_RUN
-      : undefined
-  if (raw === 'true') return 'DRY-RUN'
-  if (raw === 'false') return 'LIVE'
-  return 'UNKNOWN'
-}
-
-function envBadgeTitlePrefix(mode: EnvBadgeMode): string {
-  if (mode === 'LIVE') return '[LIVE]'
-  if (mode === 'DRY-RUN') return '[DRY]'
-  return '[?]'
-}
-
-function renderEnvBadge(mode: EnvBadgeMode): string {
-  const cls = mode === 'LIVE' ? 'live' : mode === 'DRY-RUN' ? 'dry' : 'unknown'
-  return `<span class="env-badge ${cls}" title="DRY_RUN=${esc(mode)}">${esc(mode)}</span>`
-}
 
 function renderLayout(
   c: {
@@ -1337,7 +1305,7 @@ function renderLayout(
   body: string,
 ): string {
   const banner = killSwitchBanner(c.var.killSwitchState)
-  return layout(title, banner + body, c.env)
+  return layout(title, banner + body)
 }
 
 function killSwitchBanner(state: KillSwitchBannerState | null): string {
@@ -1367,20 +1335,17 @@ function killSwitchBanner(state: KillSwitchBannerState | null): string {
   </div>`
 }
 
-function layout(title: string, body: string, env?: unknown): string {
-  const mode = resolveEnvBadgeMode(env)
-  const titlePrefix = envBadgeTitlePrefix(mode)
-  const badge = renderEnvBadge(mode)
+function layout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${titlePrefix} ${esc(title)} — Webull Trading</title>
+<title>${esc(title)} — Webull Trading</title>
 <style>${STYLE}</style>
 </head>
 <body>
-<h1>Webull Trading — ${esc(title)}${badge}</h1>
+<h1>Webull Trading — ${esc(title)}</h1>
 <nav>
   <a href="/dashboard">ホーム</a>
   <span class="nav-group">取引状況</span>
