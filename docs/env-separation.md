@@ -29,6 +29,7 @@ pnpm deploy:production
 scripts は `wrangler d1 migrations apply --env=<env> --remote` → `wrangler deploy --env=<env>` の 2 段。migration 失敗時は deploy 走らない。
 `pnpm deploy` は unqualified top-level deploy 事故を避けるため default では失敗する。
 意図して top-level worker を deploy する場合だけ `ALLOW_UNQUALIFIED_DEPLOY=1 pnpm deploy` を使う。
+本番の通常 CD は `production` branch への release PR merge を Cloudflare Workers Builds が検知する方式。詳細は [production-cd.md](production-cd.md)。
 
 ## ユーザー側の初期作業 (実マネー前)
 
