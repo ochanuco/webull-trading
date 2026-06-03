@@ -280,6 +280,8 @@ describe('dashboard', () => {
     let insertedValues: Record<string, unknown> | undefined
     // setOverviewPanels は db.batch([select(before), insert().values().onConflictDoUpdate()])。
     // select/insert は batch に渡す statement を組むだけ (mock では空 obj)、実 read は batch が返す。
+    // batch 呼び出し自体を spy して原子更新 (read→write 退行) の回帰ガードにする。
+    const batchSpy = vi.fn(async (_stmts: unknown[]) => [[{ value: 'kpi,equity,composition,recent' }], {}])
     vi.mocked(createDb).mockReturnValue({
       select: () => ({ from: () => ({ where: () => ({ limit: () => ({}) }) }) }),
       insert: () => ({
@@ -293,7 +295,7 @@ describe('dashboard', () => {
           }
         },
       }),
-      batch: async () => [[{ value: 'kpi,equity,composition,recent' }], {}],
+      batch: batchSpy,
     } as unknown as ReturnType<typeof createDb>)
     const env = { ...baseEnv, DB: {} as D1Database }
     const app = createApp()
@@ -317,6 +319,9 @@ describe('dashboard', () => {
     // upsert の insert 部の payload も検証 (初回作成時に正しい行が入る)。
     expect(insertedValues).toMatchObject({ id: 'default', overviewPanels: 'kpi,recent' })
     expect(typeof insertedValues?.updatedAt).toBe('string')
+    // 原子更新の回帰ガード: 1 回の batch に before-read + upsert の 2 statement。
+    expect(batchSpy).toHaveBeenCalledTimes(1)
+    expect((batchSpy.mock.calls[0]![0] as unknown[]).length).toBe(2)
   })
 
   it('escapes potentially-unsafe symbol names on config page', async () => {
