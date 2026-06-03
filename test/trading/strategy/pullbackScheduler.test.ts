@@ -1476,6 +1476,10 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
     minReturn50d: 0.08,
     requireAboveSma50: true,
     kAtr: 2.0,
+    // 過熱ガードは既存 scheduler テストでは無効化 (大きい値) し entry の従来挙動を維持。
+    // ガード自体の検証は pullbackUptrendStrategy.test.ts の専用ケースで行う。
+    maxSma50DeviationPct: 100,
+    maxAtrRatio: 100,
   }
 
   it('applies timeStopDays override to the matching symbol and falls through for others', async () => {

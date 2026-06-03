@@ -49,6 +49,19 @@ export interface SymbolRule {
    * POC 推奨域 1.5–2.5。
    */
   kAtr: number
+  /**
+   * 過熱ガード (#strategy-overextension-guards)。`(price - sma50) / sma50` が
+   * この比率を超える (= SMA50 から上方に乖離しすぎ) 局面では BUY を見送る。
+   * 0.60 = +60%。強トレンドの初動も切るが、+3x レバ ETF の高値掴み
+   * (mean-reversion ゾーンでの entry) を避ける fail-safe 側ガード。
+   */
+  maxSma50DeviationPct: number
+  /**
+   * ボラ過熱ガード。`atr20 / baselineAtr20` がこの比率を超える (= 直近ボラが
+   * baseline 対比で膨らみすぎ) 局面では BUY を見送る。1.5 = baseline の 1.5 倍。
+   * 既存の atr-floor (低ボラで size 半減) と対になる高ボラ側の上限。
+   */
+  maxAtrRatio: number
 }
 
 /**
@@ -65,6 +78,8 @@ export const TEST_DEFAULT_RULE: SymbolRule = Object.freeze({
   minReturn50d: 0.08,
   requireAboveSma50: true,
   kAtr: 2.0,
+  maxSma50DeviationPct: 0.6,
+  maxAtrRatio: 1.5,
 })
 
 export interface PullbackInput {
@@ -166,6 +181,28 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('entry.above_sma50', true, ind.price, '>', ind.sma50, rule.requireAboveSma50 ? undefined : 'disabled by rule'))
 
+    // 過熱ガード (#strategy-overextension-guards): trend は成立していても SMA50 から
+    // 上方に乖離しすぎた blowoff では押し目買いを見送る (+3x の高値掴み回避)。
+    const sma50Deviation = ind.sma50 > 0 ? (ind.price - ind.sma50) / ind.sma50 : 0
+    if (sma50Deviation > rule.maxSma50DeviationPct) {
+      trace.push(step('entry.not_overextended', false, sma50Deviation, '<=', rule.maxSma50DeviationPct))
+      return hold(
+        input,
+        `sma50 deviation ${sma50Deviation.toFixed(4)} > ${rule.maxSma50DeviationPct} (overextended)`,
+        trace,
+      )
+    }
+    trace.push(step('entry.not_overextended', true, sma50Deviation, '<=', rule.maxSma50DeviationPct))
+
+    // ボラ過熱ガード: 直近 ATR が baseline 対比で膨らみすぎた regime 破綻局面の
+    // entry を抑制。baseline 不明 (<=0) のときは gate を素通り (情報不足で止めない)。
+    const atrRatio = ind.baselineAtr20 > 0 ? ind.atr20 / ind.baselineAtr20 : 0
+    if (atrRatio > rule.maxAtrRatio) {
+      trace.push(step('entry.vol_not_elevated', false, atrRatio, '<=', rule.maxAtrRatio))
+      return hold(input, `atr ratio ${atrRatio.toFixed(2)} > ${rule.maxAtrRatio} (volatility elevated)`, trace)
+    }
+    trace.push(step('entry.vol_not_elevated', true, atrRatio, '<=', rule.maxAtrRatio))
+
     if (ind.high20d <= 0) {
       trace.push(step('entry.high20d_valid', false, ind.high20d, '>', 0))
       // #318: lookback は 10 営業日 (フィールド名は historical)。
@@ -265,6 +302,8 @@ const TRACE_LABEL_JA: Record<string, string> = {
   // 合わせて 20日 / 10日 と表記**。
   'entry.trend_50d_return': '20日騰落率が上昇トレンド条件を満たす',
   'entry.above_sma50': '株価が50日移動平均線を上回る',
+  'entry.not_overextended': '移動平均からの上方乖離が過大でない',
+  'entry.vol_not_elevated': 'ボラティリティが過熱していない',
   'entry.high20d_valid': '直近10日高値が有効',
   'entry.pullback_not_too_shallow': '押し目が浅すぎない',
   'entry.pullback_not_too_deep': '押し目が深すぎない',
