@@ -89,6 +89,61 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
 })
 
 /**
+ * Dashboard overview パネル表示設定 (#dashboard-mf-layout)。`global_config.overview_panels`
+ * の CSV を読み書きする。表示専用なので `GlobalConfigSnapshot` / cron 経路には通さず、
+ * dashboard だけが参照する独立 read/write。
+ */
+export const OVERVIEW_PANELS_DEFAULT = 'kpi,equity,composition,recent'
+
+export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<string> {
+  try {
+    const rows = await db
+      .select({ value: globalConfig.overviewPanels })
+      .from(globalConfig)
+      .where(eq(globalConfig.id, 'default'))
+      .limit(1)
+    const v = rows[0]?.value
+    return typeof v === 'string' && v.trim().length > 0 ? v : OVERVIEW_PANELS_DEFAULT
+  } catch {
+    // 列未 migration / D1 エラーは全表示 default に倒す (overview は描画継続)。
+    return OVERVIEW_PANELS_DEFAULT
+  }
+}
+
+/**
+ * overview_panels を upsert で書く。row 未 seed でも作れ、同時 POST でも INSERT
+ * 主キー衝突しない (CodeRabbit #397)。
+ *
+ * 旧値 read と write を **同一 D1 batch (= 1 transaction)** に束ね、監査ログ用の
+ * `before` が write と原子境界を共有するようにする (CodeRabbit #397 2nd round:
+ * 別操作だと同時更新で before/after がズレ誤監査になる)。`before` を返す。
+ * 他列は schema default 任せ。
+ */
+export async function setOverviewPanels(
+  db: DrizzleD1Database,
+  csv: string,
+  nowIso: string,
+): Promise<{ before: string }> {
+  const results = await db.batch([
+    db
+      .select({ value: globalConfig.overviewPanels })
+      .from(globalConfig)
+      .where(eq(globalConfig.id, 'default'))
+      .limit(1),
+    db
+      .insert(globalConfig)
+      .values({ id: 'default', overviewPanels: csv, updatedAt: nowIso })
+      .onConflictDoUpdate({
+        target: globalConfig.id,
+        set: { overviewPanels: csv, updatedAt: nowIso },
+      }),
+  ])
+  const beforeRows = results[0] as Array<{ value: string | null }>
+  const prev = beforeRows[0]?.value
+  return { before: typeof prev === 'string' && prev.trim().length > 0 ? prev : OVERVIEW_PANELS_DEFAULT }
+}
+
+/**
  * VIX 値の application-level validation。
  *
  * 0015 migration は ALTER TABLE ADD COLUMN しか実行しておらず CHECK 制約は
