@@ -26,7 +26,7 @@ importers:
         version: 0.31.10
       tsx:
         specifier: ^4.20.6
-        version: 4.22.3
+        version: 4.22.4
       typescript:
         specifier: ^6.0.0
         version: 6.0.3
@@ -1414,8 +1414,8 @@ packages:
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
-  tsx@4.22.3:
-    resolution: {integrity: sha512-mdoNxBC/cSQObGGVQ5Bpn5i+yv7j68gk3Nfm3wFjcJg3Z0Mix9jzAFfP12prmm5eVGmDKtp0yyArrs0Q+8gZHg==}
+  tsx@4.22.4:
+    resolution: {integrity: sha512-X8EX+XV4QR5xCsrgxaED954zTDfY8KqlDtskKEL0cHhyS/P8b4IFOvGDQpsC9Q1XnLq915wEfwwY/zzskCtmhg==}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
@@ -2169,7 +2169,7 @@ snapshots:
       '@drizzle-team/brocli': 0.10.2
       '@esbuild-kit/esm-loader': 2.6.5
       esbuild: 0.25.12
-      tsx: 4.22.3
+      tsx: 4.22.4
 
   drizzle-orm@0.45.2(@cloudflare/workers-types@4.20260603.1):
     optionalDependencies:
@@ -2504,7 +2504,7 @@ snapshots:
   tslib@2.8.1:
     optional: true
 
-  tsx@4.22.3:
+  tsx@4.22.4:
     dependencies:
       esbuild: 0.28.0
     optionalDependencies:
@@ -2528,7 +2528,7 @@ snapshots:
     optionalDependencies:
       esbuild: 0.28.0
       fsevents: 2.3.3
-      tsx: 4.22.3
+      tsx: 4.22.4
 
   vitest@4.1.8(vite@8.0.14(esbuild@0.28.0)(tsx@4.22.3)):
     dependencies:
