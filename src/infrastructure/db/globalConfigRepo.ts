@@ -111,21 +111,36 @@ export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<stri
 }
 
 /**
- * row 未 seed でも作れるよう upsert で原子的に書く (CodeRabbit #397: read-then-write
- * は同時 POST で INSERT 主キー衝突し得る)。他列は schema default 任せ。
+ * overview_panels を upsert で書く。row 未 seed でも作れ、同時 POST でも INSERT
+ * 主キー衝突しない (CodeRabbit #397)。
+ *
+ * 旧値 read と write を **同一 D1 batch (= 1 transaction)** に束ね、監査ログ用の
+ * `before` が write と原子境界を共有するようにする (CodeRabbit #397 2nd round:
+ * 別操作だと同時更新で before/after がズレ誤監査になる)。`before` を返す。
+ * 他列は schema default 任せ。
  */
 export async function setOverviewPanels(
   db: DrizzleD1Database,
   csv: string,
   nowIso: string,
-): Promise<void> {
-  await db
-    .insert(globalConfig)
-    .values({ id: 'default', overviewPanels: csv, updatedAt: nowIso })
-    .onConflictDoUpdate({
-      target: globalConfig.id,
-      set: { overviewPanels: csv, updatedAt: nowIso },
-    })
+): Promise<{ before: string }> {
+  const results = await db.batch([
+    db
+      .select({ value: globalConfig.overviewPanels })
+      .from(globalConfig)
+      .where(eq(globalConfig.id, 'default'))
+      .limit(1),
+    db
+      .insert(globalConfig)
+      .values({ id: 'default', overviewPanels: csv, updatedAt: nowIso })
+      .onConflictDoUpdate({
+        target: globalConfig.id,
+        set: { overviewPanels: csv, updatedAt: nowIso },
+      }),
+  ])
+  const beforeRows = results[0] as Array<{ value: string | null }>
+  const prev = beforeRows[0]?.value
+  return { before: typeof prev === 'string' && prev.trim().length > 0 ? prev : OVERVIEW_PANELS_DEFAULT }
 }
 
 /**

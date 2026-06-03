@@ -261,8 +261,9 @@ export const dashboard = new Hono<DashboardBindings>()
     const csv = Array.from(new Set(selected)).join(',')
     // CodeRabbit #397: global_config への永続変更なので before/after + requestId を
     // 構造化ログに残す (audit 追跡)。display 設定なので config_audit_log table までは使わない。
-    const before = await loadOverviewPanelsCsv(db)
-    await setOverviewPanels(db, csv, new Date().toISOString())
+    // before は setOverviewPanels の batch (= write と同一 transaction) から取得し
+    // 同時更新でも監査がズレないようにする。
+    const { before } = await setOverviewPanels(db, csv, new Date().toISOString())
     console.log(
       JSON.stringify({
         event: 'overview_panels_updated',

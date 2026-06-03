@@ -277,20 +277,23 @@ describe('dashboard', () => {
 
   it('saves overview panel selection (303 redirect, CSV deduped + invalid dropped)', async () => {
     let storedCsv: string | undefined
+    let insertedValues: Record<string, unknown> | undefined
+    // setOverviewPanels は db.batch([select(before), insert().values().onConflictDoUpdate()])。
+    // select/insert は batch に渡す statement を組むだけ (mock では空 obj)、実 read は batch が返す。
     vi.mocked(createDb).mockReturnValue({
-      // loadOverviewPanelsCsv (before-read) → value 無し → default fallback。
-      select: () => ({
-        from: () => ({ where: () => ({ limit: async () => [{ value: undefined }] }) }),
-      }),
-      // setOverviewPanels は upsert: insert().values().onConflictDoUpdate()。
+      select: () => ({ from: () => ({ where: () => ({ limit: () => ({}) }) }) }),
       insert: () => ({
-        values: () => ({
-          onConflictDoUpdate: (cfg: { set: { overviewPanels: string } }) => {
-            storedCsv = cfg.set.overviewPanels
-            return Promise.resolve(undefined)
-          },
-        }),
+        values: (vals: Record<string, unknown>) => {
+          insertedValues = vals
+          return {
+            onConflictDoUpdate: (cfg: { set: { overviewPanels: string } }) => {
+              storedCsv = cfg.set.overviewPanels
+              return {}
+            },
+          }
+        },
       }),
+      batch: async () => [[{ value: 'kpi,equity,composition,recent' }], {}],
     } as unknown as ReturnType<typeof createDb>)
     const env = { ...baseEnv, DB: {} as D1Database }
     const app = createApp()
@@ -311,6 +314,9 @@ describe('dashboard', () => {
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/dashboard/config')
     expect(storedCsv).toBe('kpi,recent')
+    // upsert の insert 部の payload も検証 (初回作成時に正しい行が入る)。
+    expect(insertedValues).toMatchObject({ id: 'default', overviewPanels: 'kpi,recent' })
+    expect(typeof insertedValues?.updatedAt).toBe('string')
   })
 
   it('escapes potentially-unsafe symbol names on config page', async () => {
