@@ -4,6 +4,7 @@ import {
   type WebullHttpClient,
 } from './WebullHttpClient'
 import type {
+  WebullAccountBalanceDto,
   WebullAccountDto,
   WebullOrderDetailDto,
   WebullPositionDto,
@@ -27,6 +28,10 @@ export class WebullReadClient {
 
   getAccount(): Promise<WebullAccountDto> {
     return this.http.getAccount()
+  }
+
+  getAccountBalance(): Promise<WebullAccountBalanceDto> {
+    return this.http.getAccountBalance()
   }
 
   findOrderByClientId(

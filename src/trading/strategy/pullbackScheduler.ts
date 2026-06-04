@@ -14,6 +14,7 @@ import {
   type DailyBar,
 } from './indicators'
 import { computePullbackSizing } from './pullbackSizing'
+import type { BuyingPowerLedger } from './buyingPower'
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
 import {
@@ -81,6 +82,13 @@ export interface PullbackSchedulerOptions {
    * USD で FX 取得失敗時は undefined を渡し、budget 銘柄を fail-closed させる。
    */
   fxJpyPerSymbolCcy?: number
+  /**
+   * 口座買付余力の共有プール台帳 (#415)。指定時、BUY の submit 直前に notional を
+   * JPY 換算して `tryReserve` し、超過 / `unavailable` は pre-trade で reject する
+   * (Webull 417 をローカルで先回り)。runs (USD/JPY) をまたいで同一 ledger を共有
+   * する想定。未指定 (DryRun / legacy / test) は pool ゲート無効。
+   */
+  buyingPower?: BuyingPowerLedger
   /**
    * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
    * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
@@ -767,6 +775,34 @@ export async function runPullbackScheduler(
       }
     }
 
+    // #415: 買付余力 pool ゲート (BUY only)。notional を JPY 換算して共有台帳の残余力と
+    // 突き合わせ、unavailable / 不足は pre-trade で reject (Webull 417 をローカル先回り)。
+    // 減算は約定成立後 (loop は逐次なので check→commit で整合)。SELL/exit は対象外。
+    if (intent.side === 'BUY' && options.buyingPower) {
+      const ledger = options.buyingPower
+      const notionalJpy = intent.notional * (options.fxJpyPerSymbolCcy ?? 1)
+      const insufficient = ledger.status !== 'ok' || notionalJpy > ledger.remainingJpy
+      if (insufficient) {
+        const reason =
+          ledger.status !== 'ok'
+            ? `risk: buying-power unavailable (${ledger.reason ?? 'fetch failed'})`
+            : `risk: insufficient buying power (notionalJpy ${Math.round(notionalJpy)} > remaining ${Math.round(ledger.remainingJpy)})`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('risk.buying_power_pool', false, Math.round(notionalJpy), '<=', Math.round(ledger.remainingJpy), reason),
+          ),
+        })
+        continue
+      }
+    }
+
     const expiresAtMs = now().getTime() + pendingLockTtlMs
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
       const reason = `invalid expiresAt computed from pendingLockTtlMs: ${pendingLockTtlMs}`
@@ -943,6 +979,8 @@ export async function runPullbackScheduler(
     // Increment counters only after successful execution.
     if (executedIntent.side === 'BUY') {
       summary.buys += 1
+      // #415: 約定した BUY 分の買付余力を共有台帳から減算 (次銘柄の pool 判定に反映)。
+      options.buyingPower?.tryReserve(intent.notional * (options.fxJpyPerSymbolCcy ?? 1))
     } else {
       summary.sells += 1
     }
@@ -1161,6 +1199,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
+  'risk.buying_power_pool': '口座買付余力プール (発注前)',
   'risk.sanity_failed_cooldown': 'sanity_failed cooldown (broker stub 疑い)',
   'broker.submit': '証券会社への発注送信',
   'broker.sell_qty_fallback': 'SELL 数量超過時の broker available qty 再 submit',

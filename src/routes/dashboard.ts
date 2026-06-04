@@ -1687,6 +1687,12 @@ function brokerProbeBody(args: {
 <h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 (Yahoo Finance) <span class="muted" style="font-size:12px;font-weight:normal">— strategy cron が default で使う source</span></h2>
 <pre id="probe-quote-yahoo" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">(まだ probe 未実行)</pre>
 
+<h2 style="font-size:14px;margin:16px 0 4px 0">買付余力 (buying power) <span class="muted" style="font-size:11px">#415</span></h2>
+<p class="muted" style="font-size:11px;margin:0 0 4px 0">
+  発注前の共有プール pre-trade ゲートが使う口座買付余力。通貨別 <code>buying_power</code> を表示。取得失敗時は cron が当 tick の BUY を全見送り (fail-closed)。
+</p>
+<div id="probe-buying-power" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:13px">(まだ probe 未実行)</div>
+
 <h2 style="font-size:14px;margin:16px 0 4px 0">meta</h2>
 <pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px">(まだ probe 未実行)</pre>
 
@@ -1830,6 +1836,7 @@ function brokerProbeBody(args: {
         if (positionsNewRaw) positionsNewRaw.textContent = prettify(body.positionsNew);
         if (orderOldRaw) orderOldRaw.textContent = prettify(body.orderHistoryOld);
         if (orderNewRaw) orderNewRaw.textContent = prettify(body.orderHistoryNew);
+        renderBuyingPower(body);
         renderDriftTable(body);
         metaEl.textContent = JSON.stringify({
           timestamp: body.timestamp,
@@ -1844,6 +1851,46 @@ function brokerProbeBody(args: {
       .finally(function () {
         refreshBtn.disabled = false;
       });
+  }
+
+  // #415: 買付余力を描画。balance probe 候補 (account/balance v1, assets/balance v2)
+  // のうち最初に 200 を返したものを parse し、通貨別 buying_power を出す。
+  // どれも 200 でなければ ⚠ unavailable (= cron は当 tick の BUY を全見送り)。
+  function renderBuyingPower(body) {
+    var el = document.getElementById('probe-buying-power');
+    if (!el) return;
+    var candidates = [
+      { label: '/openapi/account/balance (v1)', section: body.balanceAccountV1 },
+      { label: '/openapi/assets/balance (v2)', section: body.balanceAssetsV2 },
+    ];
+    var hit = null;
+    for (var i = 0; i < candidates.length; i++) {
+      var s = candidates[i].section;
+      if (s && s.phase === 'response' && s.status === 200 && typeof s.bodyTruncated === 'string') {
+        var parsed = null;
+        try { parsed = JSON.parse(s.bodyTruncated); } catch (_) { parsed = null; }
+        if (parsed) { hit = { label: candidates[i].label, body: parsed }; break; }
+      }
+    }
+    if (!hit) {
+      el.innerHTML = '<span style="color:#c22;font-weight:600">⚠ 取得不可 (unavailable)</span> ' +
+        '<span class="muted" style="font-size:11px">— balance endpoint がどれも 200 を返さず。cron は当 tick の BUY を fail-closed で見送ります。</span>';
+      return;
+    }
+    var b = hit.body;
+    var assets = Array.isArray(b.account_currency_assets) ? b.account_currency_assets : [];
+    var rows = assets.map(function (a) {
+      return '<tr><td style="padding:2px 10px 2px 0"><code>' + (a.currency || '?') + '</code></td>' +
+        '<td style="padding:2px 10px;text-align:right;font-variant-numeric:tabular-nums">' + formatNumber(a.buying_power) + '</td>' +
+        '<td style="padding:2px 10px;text-align:right;font-variant-numeric:tabular-nums" class="muted">cash ' + formatNumber(a.cash_balance) + '</td></tr>';
+    }).join('');
+    el.innerHTML =
+      '<div style="margin-bottom:4px"><span style="color:#0a8a0a;font-weight:600">✅ 取得 OK</span> ' +
+      '<span class="muted" style="font-size:11px">via ' + hit.label + ' / 基準通貨 ' + (b.total_asset_currency || '?') +
+      ' / 総現金 ' + formatNumber(b.total_cash_balance) + '</span></div>' +
+      '<table style="font-size:12px;border-collapse:collapse"><thead><tr class="muted">' +
+      '<th style="text-align:left;padding:2px 10px 2px 0">通貨</th><th style="text-align:right;padding:2px 10px">買付余力</th><th></th></tr></thead>' +
+      '<tbody>' + (rows || '<tr><td colspan="3" class="muted">(通貨別資産なし)</td></tr>') + '</tbody></table>';
   }
 
   // drift 比較テーブルを描画。各行は status / msTaken を旧/新 並列表示。
@@ -1864,7 +1911,8 @@ function brokerProbeBody(args: {
     }
     tableBody.innerHTML =
       row('positions', body.positions, body.positionsNew) +
-      row('order history', body.orderHistoryOld, body.orderHistoryNew);
+      row('order history', body.orderHistoryOld, body.orderHistoryNew) +
+      row('account balance', body.balanceAccountV1, body.balanceAssetsV2);
   }
 
   function onPickClick(ev) {
