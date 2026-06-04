@@ -898,7 +898,9 @@ export async function runPullbackScheduler(
           symbol: upper,
           decision: 'ERROR',
           // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
-          reason: `broker submit error: ${messageOf(error)}`,
+          // localize は `^broker submit error: ` を prefix match するので、発注内容
+          // (何口 / $ と ¥) は **message の後ろ**に付けて prefix を壊さない (#417)。
+          reason: `broker submit error: ${messageOf(error)} [${describeOrderAmount(intent, options.fxJpyPerSymbolCcy)}]`,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('broker.submit', false, messageOf(error), '==', 'submitted')),
         })
@@ -1154,6 +1156,23 @@ function buildIntent(symbol: string, side: 'BUY' | 'SELL', qty: number, price: n
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 発注しようとした数量・金額を「何口 / いくら」で人間可読に整形する (#417 follow-up)。
+ * USD 銘柄 (fx>0 かつ !=1) は **$ と ¥ を併記** (notional × USD/JPY)、JPY 銘柄 (fx=1) は ¥、
+ * fx 不明は通貨記号なし。decision log の reason に付けて 417 等の原因切り分けに使う。
+ */
+function describeOrderAmount(intent: OrderIntent, fxJpyPerSymbolCcy: number | undefined): string {
+  const { quantity: qty, price: px, notional } = intent
+  const yen = (n: number) => `¥${Math.round(n).toLocaleString('en-US')}`
+  if (fxJpyPerSymbolCcy !== undefined && Number.isFinite(fxJpyPerSymbolCcy) && fxJpyPerSymbolCcy > 0) {
+    if (fxJpyPerSymbolCcy === 1) {
+      return `発注内容: ${qty}口 @ ${yen(px)} = ${yen(notional)}`
+    }
+    return `発注内容: ${qty}口 @ $${px} = $${notional.toFixed(2)} ≈ ${yen(notional * fxJpyPerSymbolCcy)} (USD/JPY ${fxJpyPerSymbolCcy})`
+  }
+  return `発注内容: ${qty}口 @ ${px} = ${notional} (通貨不明)`
 }
 
 function appendTrace(

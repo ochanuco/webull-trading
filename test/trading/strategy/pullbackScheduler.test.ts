@@ -1698,3 +1698,59 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
     expect(rejected.some((d) => /insufficient buying power/.test(d.reason ?? ''))).toBe(true)
   })
 })
+
+describe('runPullbackScheduler broker-error decision embeds order amount (#417)', () => {
+  it('includes qty + USD/JPY notional in the ERROR reason for a USD symbol', async () => {
+    const throwing: Execution & { calls: unknown[] } = {
+      calls: [],
+      async execute(intent) {
+        ;(throwing.calls as unknown[]).push(intent)
+        throw new BrokerClientError(
+          'Webull request failed permanently with status 417: {"error_code":"OAUTH_OPENAPI_ORDER_BUYING_POWER_NOT_ENOUGH"}',
+          'POST /openapi/account/orders/place',
+          { brokerStatus: 417 },
+        )
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: throwing,
+      symbolLotSizeMap: { AAPL: 1 },
+      fxJpyPerSymbolCcy: 150,
+      now: () => now,
+    })
+    const err = summary.decisions.find((d) => d.decision === 'ERROR')
+    expect(err).toBeDefined()
+    // localize 用の prefix は維持 (発注内容は message の後ろ)。
+    expect(err?.reason).toMatch(/^broker submit error: /)
+    expect(err?.reason).toMatch(/発注内容: \d+口/)
+    expect(err?.reason).toContain('$') // USD notional
+    expect(err?.reason).toContain('¥') // JPY 換算
+    expect(err?.reason).toContain('USD/JPY 150')
+  })
+
+  it('shows ¥ only for a JPY symbol (fx=1)', async () => {
+    const throwing: Execution & { calls: unknown[] } = {
+      calls: [],
+      async execute() {
+        throw new BrokerClientError('boom 417', 'POST /place', { brokerStatus: 417 })
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: throwing,
+      symbolLotSizeMap: { AAPL: 1 },
+      fxJpyPerSymbolCcy: 1,
+      now: () => now,
+    })
+    const err = summary.decisions.find((d) => d.decision === 'ERROR')
+    expect(err?.reason).toMatch(/発注内容: \d+口 @ ¥/)
+    expect(err?.reason).not.toContain('USD/JPY')
+  })
+})
