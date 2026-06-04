@@ -2033,7 +2033,7 @@ function isYmd(value: string): boolean {
  *   - active: boolean (form では 'true'/'false'/'on' を許容、checkbox の 'on'
  *     → true、未送信 → false で扱う)
  *   - maxNotional: 正の数 or null (空文字 → null)
- *   - name / bucket / notes: optional string、256 chars 上限
+ *   - name / notes: optional string、256 chars 上限
  */
 function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -2047,7 +2047,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     active?: unknown
     max_notional?: unknown
     maxNotional?: unknown
-    bucket?: unknown
     notes?: unknown
     time_stop_days_override?: unknown
     timeStopDaysOverride?: unknown
@@ -2064,7 +2063,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   const maxNotionalRaw = raw.max_notional ?? raw.maxNotional
   const maxNotional = parseOptionalPositiveNumber(maxNotionalRaw, 'maxNotional')
   const name = parseOptionalString(raw.name, 'name')
-  const bucket = parseOptionalString(raw.bucket, 'bucket')
   const notes = parseOptionalString(raw.notes, 'notes')
   // Per-symbol pullback override (#316)。空文字 / undefined → NULL (= global
   // default fall-through)。範囲外は ValidationError、DB CHECK と二重防御。
@@ -2087,7 +2085,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     currency,
     active,
     maxNotional,
-    bucket,
     notes,
     timeStopDaysOverride,
     kAtrOverride,
@@ -2271,7 +2268,6 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     currency: row.currency,
     active: row.active,
     maxNotional: row.maxNotional,
-    bucket: row.bucket,
     notes: row.notes,
     timeStopDaysOverride: row.timeStopDaysOverride,
     kAtrOverride: row.kAtrOverride,

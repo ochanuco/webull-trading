@@ -162,6 +162,13 @@
       "when": 1780493734427,
       "tag": "0022_add_overextension_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1780572943376,
+      "tag": "0023_drop_bucket_columns",
+      "breakpoints": true
     }
   ]
 }

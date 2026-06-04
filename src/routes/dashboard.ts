@@ -656,7 +656,6 @@ export const dashboard = new Hono<DashboardBindings>()
       const filter: SymbolsListFilter = {
         status: ((c.req.query('status') ?? 'all') as 'all' | 'active' | 'inactive'),
         market: ((c.req.query('market') ?? 'all') as 'all' | 'US' | 'JP'),
-        bucket: c.req.query('bucket') ?? 'all',
         q: c.req.query('q') ?? '',
       }
       return c.html(
@@ -670,7 +669,6 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
     }
-    const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
     // global default は placeholder 表示 (#316) — operator が「空欄なら何の値が
     // 適用されるか」を一目で把握できるようにする。読込失敗は fallback null で
     // placeholder 無表示にする (form 自体は出す)。
@@ -684,7 +682,7 @@ export const dashboard = new Hono<DashboardBindings>()
       renderLayout(
         c,
         '銘柄管理 - 新規追加',
-        symbolFormBody({ mode: 'new', row: null, error: null, knownPairs, globalDefaults }),
+        symbolFormBody({ mode: 'new', row: null, error: null, globalDefaults }),
       ),
     )
   })
@@ -701,7 +699,6 @@ export const dashboard = new Hono<DashboardBindings>()
       if (row === null) {
         return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(`symbol "${symbol}" not found`)))
       }
-      const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
       const globalDefaults = await loadGlobalConfigFrom(c.env, c.get('requestId'))
         .then((g) => ({
           timeStopDays: g.pullbackDefaultTimeStopDays,
@@ -716,7 +713,7 @@ export const dashboard = new Hono<DashboardBindings>()
         renderLayout(
           c,
           '銘柄管理 - 編集',
-          symbolFormBody({ mode: 'edit', row, error: null, knownPairs, globalDefaults, currentInverse }),
+          symbolFormBody({ mode: 'edit', row, error: null, globalDefaults, currentInverse }),
         ),
       )
     } catch (err) {
@@ -2815,10 +2812,6 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     label: 'risk halt 閾値 (比率、負)',
     detail: '日次損失がこの率を超えたら 1 回のリスクを 0 に (新規 entry 停止)。-0.10 = -10%。drawdown_kill より前の緊急ブレーキ。',
   },
-  bucket_exposure_pct: {
-    label: '同グループ建玉上限率 (比率)',
-    detail: '同じグループ (例: 半導体 ETF) の合計をこの率まで保有可。0.30 = 総資本の 30%。大きくすると集中投資↑、小さいと分散↑。',
-  },
   vix_warning_threshold: {
     label: 'VIX 警戒閾値',
     detail: '恐怖指数 (VIX) がこの値を超えたら新規買いの数量を縮小。25 が標準。下げると早めに用心、上げると VIX 高でも普段通り。',
@@ -3007,24 +3000,6 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
   s = s.replace(/^broker submit error: /, '発注エラー: 証券会社側で拒否 — ')
 
-  // === Bucket cap (同グループ建玉上限) ===
-  // "建玉上限" は信用取引で広く使われる正統用語。bucket は運用者が任意に
-  // 付けるグループタグ (半導体 3x / JP 自動車 等) で、必ずしも業種ではない
-  // ので「同グループ」で表現。
-  s = s.replace(
-    /^bucket cap: (\S+) projected (\S+) > (\S+)$/,
-    '発注スキップ: 同グループ建玉上限超過 ($1 合計 $2 > 上限 $3)',
-  )
-  // bucketExposureGate.ts は `bucket cap: X invalid cap Y` / `... invalid addNotional Y`
-  // の 2 形で emit する (非有限 / ≤0 のとき fail-closed reject)。
-  s = s.replace(
-    /^bucket cap: (\S+) invalid cap (\S+)$/,
-    '発注スキップ: 同グループ建玉上限が無効 ($1 の上限 $2)',
-  )
-  s = s.replace(
-    /^bucket cap: (\S+) invalid addNotional (\S+)$/,
-    'データ不足: 同グループ発注金額が無効 ($1 の金額 $2)',
-  )
   return s
 }
 
@@ -6811,21 +6786,6 @@ async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[
   return await drizzle.select().from(symbolConfig).orderBy(asc(symbolConfig.symbol))
 }
 
-/**
- * 銘柄管理 form の bucket suggest 用データ。登録済み (symbol, bucket) ペアを
- * symbol ASC で返す。bucket が NULL/空 の行も含む (suggest で表示はするが
- * 選択しても bucket は空のまま — その銘柄が bucket 未分類だと operator に
- * 視認させる用途)。
- */
-interface SymbolBucketPair {
-  symbol: string
-  bucket: string | null
-}
-async function loadKnownSymbolBuckets(db: D1Database): Promise<SymbolBucketPair[]> {
-  const rows = await loadAllSymbolConfigRows(db)
-  return rows.map((r) => ({ symbol: r.symbol, bucket: r.bucket }))
-}
-
 async function findSymbolConfigForView(
   db: D1Database,
   symbol: string,
@@ -6842,7 +6802,6 @@ async function findSymbolConfigForView(
 interface SymbolsListFilter {
   status: 'all' | 'active' | 'inactive'
   market: 'all' | 'US' | 'JP'
-  bucket: string
   q: string
 }
 
@@ -6852,11 +6811,6 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
     if (f.status === 'active' && !r.active) return false
     if (f.status === 'inactive' && r.active) return false
     if (f.market !== 'all' && r.market !== f.market) return false
-    if (f.bucket !== 'all') {
-      if (f.bucket === '__null__') {
-        if (r.bucket && r.bucket.trim().length > 0) return false
-      } else if ((r.bucket ?? '') !== f.bucket) return false
-    }
     if (needle) {
       const hay = `${r.symbol} ${r.name ?? ''}`.toLowerCase()
       if (hay.indexOf(needle) === -1) return false
@@ -6877,15 +6831,6 @@ function symbolsListBody(args: {
   const filtered = applySymbolsListFilter(rows, filter)
   const activeCount = rows.filter((r) => r.active).length
   const inactiveCount = rows.length - activeCount
-  // bucket dropdown 用: 全 distinct bucket (NULL 含む)
-  const bucketsSet = new Set<string>()
-  let hasNullBucket = false
-  for (const r of rows) {
-    const b = (r.bucket ?? '').trim()
-    if (b.length === 0) hasNullBucket = true
-    else bucketsSet.add(b)
-  }
-  const bucketOptions = [...bucketsSet].sort()
 
   const sel = (cur: string, val: string) => (cur === val ? ' selected' : '')
   const filterBar = `<form method="get" action="/dashboard/symbols" style="margin:0 0 12px;padding:8px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
@@ -6899,11 +6844,6 @@ function symbolsListBody(args: {
       <option value="all"${sel(filter.market, 'all')}>全市場</option>
       <option value="US"${sel(filter.market, 'US')}>US</option>
       <option value="JP"${sel(filter.market, 'JP')}>JP</option>
-    </select>
-    <select name="bucket" style="padding:4px 6px">
-      <option value="all"${sel(filter.bucket, 'all')}>全 bucket</option>
-      ${hasNullBucket ? `<option value="__null__"${sel(filter.bucket, '__null__')}>(未分類)</option>` : ''}
-      ${bucketOptions.map((b) => `<option value="${esc(b)}"${sel(filter.bucket, b)}>${esc(b)}</option>`).join('')}
     </select>
     <button type="submit" style="padding:4px 12px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">絞り込み</button>
     <a href="/dashboard/symbols" style="padding:4px 8px;text-decoration:none;font-size:12px;color:#86868b">リセット</a>
@@ -6948,9 +6888,6 @@ function symbolsListBody(args: {
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
-      const bucketCell = r.bucket
-        ? esc(r.bucket)
-        : '<span class="muted" style="font-size:11px">—</span>'
       // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
       // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
       // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
@@ -6975,7 +6912,6 @@ function symbolsListBody(args: {
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${maxNotionalCell}</td>
-        <td>${bucketCell}</td>
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
@@ -6996,7 +6932,6 @@ function symbolsListBody(args: {
       <th>銘柄名</th>
       <th>市場/通貨</th>
       <th>1注文上限</th>
-      <th>相関グループ</th>
       <th>メモ</th>
       <th>更新日</th>
       <th>操作</th>
@@ -7118,8 +7053,6 @@ interface SymbolFormArgs {
   row: SymbolConfigRow | null
   /** validation error message — POST handler が re-render する時に渡す。 */
   error: string | null
-  /** 既存 (symbol, bucket) ペア、bucket 入力の suggest 用。 */
-  knownPairs: SymbolBucketPair[]
   /**
    * Pullback rule の global default。override 入力欄の placeholder に「空欄
    * なら N が適用される」と見せるために使う (#316)。読込失敗時 null。
@@ -7130,7 +7063,7 @@ interface SymbolFormArgs {
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
-  const { mode, row, error, knownPairs, globalDefaults } = args
+  const { mode, row, error, globalDefaults } = args
   const currentInverse = args.currentInverse ?? null
   const action =
     mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
@@ -7140,7 +7073,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const currencyValue = row?.currency ?? 'USD'
   const activeChecked = (row?.active ?? true) ? ' checked' : ''
   const maxNotionalValue = row?.maxNotional === null || row?.maxNotional === undefined ? '' : String(row.maxNotional)
-  const bucketValue = row?.bucket ?? ''
   const notesValue = row?.notes ?? ''
   const timeStopDaysOverrideValue =
     row?.timeStopDaysOverride === null || row?.timeStopDaysOverride === undefined
@@ -7199,7 +7131,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
              <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
              <ul id="symbol-form-inverse-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
-           <p class="muted" style="margin:4px 0 0;font-size:11px">bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成、市場 / 通貨 / 相関グループ / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。銘柄欄と同じく Yahoo Finance から候補を suggest。</p>
+           <p class="muted" style="margin:4px 0 0;font-size:11px">bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成、市場 / 通貨 / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。銘柄欄と同じく Yahoo Finance から候補を suggest。</p>
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
@@ -7235,14 +7167,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
     </div>
-    <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
-    <div>
-      <div style="position:relative;display:inline-block">
-        <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" autocomplete="off" placeholder="例: semi / us_large_cap / jp_auto (任意)" oninput="window.suggestSymbolFormBucket(this.value)" onfocus="window.suggestSymbolFormBucket(this.value)" onblur="setTimeout(window.hideSymbolFormBucketSuggest, 150)" style="padding:6px;width:280px">
-        <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownPairs))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:320px;max-height:240px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
-      </div>
-      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存銘柄から suggest (click するとその銘柄の bucket が挿入される / 新規 bucket もそのまま入力で OK)。</p>
-    </div>
     <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
     <div>
       <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:160px">
@@ -7275,79 +7199,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
       var sel = document.getElementById('symbol-form-currency');
       if (sel) sel.value = cur;
       window.syncSymbolFormCurrencyUnits(cur);
-    };
-    window.hideSymbolFormBucketSuggest = function () {
-      var list = document.getElementById('symbol-form-bucket-suggest');
-      if (list) list.style.display = 'none';
-    };
-    window.suggestSymbolFormBucket = function (q) {
-      var list = document.getElementById('symbol-form-bucket-suggest');
-      var input = document.getElementById('symbol-form-bucket-input');
-      if (!list || !input) return;
-      var query = (q || '').toLowerCase().trim();
-      if (query.length < 2) {
-        list.style.display = 'none';
-        return;
-      }
-      var known = [];
-      try { known = JSON.parse(list.getAttribute('data-known') || '[]'); } catch (e) {}
-      // known は [{ symbol, bucket }] 配列。symbol または bucket の substring 一致を suggest。
-      var matches = known.filter(function (p) {
-        var s = (p.symbol || '').toLowerCase();
-        var b = (p.bucket || '').toLowerCase();
-        return s.indexOf(query) !== -1 || (b.length > 0 && b.indexOf(query) !== -1);
-      });
-      list.innerHTML = '';
-      if (matches.length === 0) {
-        var hint = document.createElement('li');
-        hint.style.cssText = 'padding:6px 10px;color:#86868b;font-size:11px;font-style:italic;cursor:default';
-        hint.textContent = known.length === 0
-          ? '登録済み銘柄がまだありません。"' + q + '" を新規 bucket として登録します。'
-          : '"' + q + '" に一致する既存銘柄/bucket 無し。新規 bucket として登録します。';
-        list.appendChild(hint);
-        list.style.display = 'block';
-        return;
-      }
-      // bucket を持っている銘柄を上、未分類を下 (= 探しやすい順)
-      matches.sort(function (a, b) {
-        var ab = a.bucket ? 0 : 1, bb = b.bucket ? 0 : 1;
-        if (ab !== bb) return ab - bb;
-        return a.symbol.localeCompare(b.symbol);
-      });
-      matches.forEach(function (p) {
-        var hasBucket = !!p.bucket;
-        // 未分類 銘柄 click 時は銘柄名を bucket 値として仮挿入する (operator が編集前提)
-        var insertValue = hasBucket ? p.bucket : p.symbol;
-        var li = document.createElement('li');
-        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px';
-        var symEl = document.createElement('strong');
-        symEl.textContent = p.symbol;
-        var arrow = document.createElement('span');
-        arrow.style.color = '#86868b';
-        arrow.textContent = ' → ';
-        var bucketEl = document.createElement('span');
-        bucketEl.style.color = hasBucket ? '#06c' : '#86868b';
-        bucketEl.textContent = hasBucket ? p.bucket : '未分類';
-        li.appendChild(symEl);
-        li.appendChild(arrow);
-        li.appendChild(bucketEl);
-        if (!hasBucket) {
-          li.title = 'click で銘柄名 (' + p.symbol + ') を bucket に仮挿入。';
-        }
-        li.addEventListener('mousedown', function () {
-          window.pickSymbolFormBucket(insertValue);
-        });
-        li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
-        li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
-        list.appendChild(li);
-      });
-      list.style.display = 'block';
-    };
-    window.pickSymbolFormBucket = function (val) {
-      var input = document.getElementById('symbol-form-bucket-input');
-      if (input) input.value = val;
-      window.hideSymbolFormBucketSuggest();
-      if (input) input.focus();
     };
     // 汎用 Yahoo lookup suggest コア。listId の <ul> に候補を描画し、click で pick(m)。
     window._symbolSuggestTimer = {};

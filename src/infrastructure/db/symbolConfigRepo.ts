@@ -23,11 +23,6 @@ export interface SymbolConfigSnapshot {
   /** symbol → currency ('USD' / 'JPY')。Risk gate が global 通貨別 cap を引くのに使う。active=0 含む。 */
   symbolCurrency: Record<string, SymbolCurrency>
   /**
-   * symbol → bucket tag。NULL bucket は map に含めない (gate 側で未分類扱い
-   * = 個別銘柄判定)。相関集約 cap (#23 Lane 3) で使う。active=0 含む。
-   */
-  symbolBucket: Record<string, string>
-  /**
    * symbol → market ('US' | 'JP')。dashboard が JP 銘柄表示を「番号-会社名」
    * に切り替える判定に使う。CHECK 制約は schema 側に無いので 'US' / 'JP'
    * 以外が混ざる場合は 'US' fallback (defensive)。active=0 含む。
@@ -76,7 +71,6 @@ export async function loadSymbolConfig(
   const inactiveSymbols: string[] = []
   const symbolMaxNotional: Record<string, number> = {}
   const symbolCurrency: Record<string, SymbolCurrency> = {}
-  const symbolBucket: Record<string, string> = {}
   const symbolMarket: Record<string, SymbolMarket> = {}
   const symbolName: Record<string, string> = {}
   const symbolNotes: Record<string, string> = {}
@@ -93,12 +87,6 @@ export async function loadSymbolConfig(
       symbolMaxNotional[symbol] = row.maxNotional
     }
     symbolCurrency[symbol] = row.currency === 'JPY' ? 'JPY' : 'USD'
-    // bucket を trim + lowercase で正規化しないと 'semi' / ' semi' / 'SEMI'
-    // が別 bucket 扱いになって集中 cap が実質回避される (CodeRabbit #126)。
-    const normalizedBucket = row.bucket?.trim().toLowerCase()
-    if (normalizedBucket) {
-      symbolBucket[symbol] = normalizedBucket
-    }
     // schema 上 market は 'US' | 'JP' 想定だが CHECK 制約は無いので
     // 不正値は 'US' fallback (defensive)。dashboard 表示の「JP のみ
     // 番号-会社名」判定に使う。
@@ -133,7 +121,6 @@ export async function loadSymbolConfig(
     inactiveSymbols,
     symbolMaxNotional,
     symbolCurrency,
-    symbolBucket,
     symbolMarket,
     symbolName,
     symbolNotes,
@@ -161,7 +148,6 @@ export interface SymbolConfigWriteInput {
   currency: SymbolCurrency
   active: boolean
   maxNotional: number | null
-  bucket: string | null
   notes: string | null
   /**
    * Per-symbol time_stop_days override (NULL = global default 使用、1-365 整数)。
@@ -196,7 +182,6 @@ export async function insertSymbolConfig(
       currency: input.currency,
       active: input.active,
       maxNotional: input.maxNotional,
-      bucket: input.bucket,
       notes: input.notes,
       timeStopDaysOverride: input.timeStopDaysOverride,
       kAtrOverride: input.kAtrOverride,
@@ -240,7 +225,6 @@ export async function updateSymbolConfig(
       currency: input.currency,
       active: input.active,
       maxNotional: input.maxNotional,
-      bucket: input.bucket,
       notes: input.notes,
       timeStopDaysOverride: input.timeStopDaysOverride,
       kAtrOverride: input.kAtrOverride,
@@ -402,7 +386,7 @@ export interface CreateSymbolPairResult {
  * bull/bear を 1 フォームで対登録する (#315)。D1 batch で原子的に:
  *   1. primary symbol_config INSERT (重複は 'duplicate' を返す)
  *   2. counterpart symbol_config を INSERT ... ON CONFLICT DO NOTHING
- *      (market/currency/bucket/maxNotional は primary 継承、name/override は空)
+ *      (market/currency/maxNotional は primary 継承、name/override は空)
  *   3. inverse_pairs リンク (1:1、既存リンクは buildInversePairWrite が掃除)
  *
  * primary が既存銘柄の場合は何も作らず 'duplicate' を返す (caller が 409/echo)。
@@ -442,7 +426,6 @@ export async function createSymbolPair(
       currency: primary.currency,
       active: true,
       maxNotional: primary.maxNotional,
-      bucket: primary.bucket,
       notes: null,
       timeStopDaysOverride: null,
       kAtrOverride: null,

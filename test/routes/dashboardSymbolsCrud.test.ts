@@ -150,7 +150,6 @@ function fakeDb(initial: SymbolConfigRow[]) {
               currency: String(v.currency ?? 'USD'),
               active: v.active === true || v.active === 1,
               maxNotional: (v.maxNotional as number | null) ?? null,
-              bucket: (v.bucket as string | null) ?? null,
               notes: (v.notes as string | null) ?? null,
               timeStopDaysOverride: (v.timeStopDaysOverride as number | null) ?? null,
               kAtrOverride: (v.kAtrOverride as number | null) ?? null,
@@ -205,7 +204,6 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     currency: 'USD',
     active: true,
     maxNotional: 2000,
-    bucket: 'semi',
     notes: null,
     timeStopDaysOverride: null,
     kAtrOverride: null,
@@ -223,8 +221,8 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   // --- List page ---
   it('renders /dashboard/symbols list with active + inactive rows', async () => {
     const db = fakeDb([
-      row({ symbol: 'SOXL', name: 'Direxion Semi 3X', active: true, maxNotional: 2000, bucket: 'semi' }),
-      row({ symbol: '7203', name: 'トヨタ自動車', market: 'JP', currency: 'JPY', active: false, maxNotional: null, bucket: null, notes: 'paused' }),
+      row({ symbol: 'SOXL', name: 'Direxion Semi 3X', active: true, maxNotional: 2000 }),
+      row({ symbol: '7203', name: 'トヨタ自動車', market: 'JP', currency: 'JPY', active: false, maxNotional: null, notes: 'paused' }),
     ])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -258,7 +256,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '1500',
-      bucket: 'us_large_cap',
       notes: '',
     })
     const res = await app.request(
@@ -280,7 +277,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: true,
       maxNotional: 1500,
-      bucket: 'us_large_cap',
       name: 'ProShares UltraPro QQQ',
     })
     const auditInsert = db.inserts.find((i) => i.table === 'config_audit_log')
@@ -300,7 +296,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 
   // --- POST update ---
   it('POST /admin/symbol-config/:symbol/update writes audit with before/after diff', async () => {
-    const db = fakeDb([row({ symbol: 'SOXL', maxNotional: 2000, bucket: 'semi' })])
+    const db = fakeDb([row({ symbol: 'SOXL', maxNotional: 2000 })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
     const form = new URLSearchParams({
@@ -310,7 +306,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '3000',
-      bucket: 'semi',
       notes: 'bumped',
     })
     const res = await app.request(
@@ -455,10 +450,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 
   // --- XSS regression ---
-  it('escapes <script>/<svg> payloads in notes / bucket on list and edit pages', async () => {
+  it('escapes <script> payloads in notes on list and edit pages', async () => {
     const xssNotes = '<script>alert(1)</script>'
-    const xssBucket = '"><svg onload=alert(2)>'
-    const db = fakeDb([row({ symbol: 'SOXL', notes: xssNotes, bucket: xssBucket })])
+    const db = fakeDb([row({ symbol: 'SOXL', notes: xssNotes })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
 
@@ -466,9 +460,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const listRes = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const listBody = await listRes.text()
     expect(listBody).not.toContain(xssNotes)
-    expect(listBody).not.toContain(xssBucket)
     expect(listBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(listBody).toContain('&quot;&gt;&lt;svg onload=alert(2)&gt;')
 
     // edit page
     const editRes = await app.request(
@@ -478,9 +470,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     const editBody = await editRes.text()
     expect(editBody).not.toContain(xssNotes)
-    expect(editBody).not.toContain(xssBucket)
     expect(editBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(editBody).toContain('&quot;&gt;&lt;svg onload=alert(2)&gt;')
   })
 
   // --- TOCTOU: 既存 symbol を form POST → 303 redirect with ?error=duplicate ---
@@ -601,7 +591,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 
   // --- toggle JSON path returns full row snapshot, not only `active` ---
   it('toggle-active JSON response returns full row snapshot', async () => {
-    const db = fakeDb([row({ symbol: 'SOXL', active: true, maxNotional: 2000, bucket: 'semi' })])
+    const db = fakeDb([row({ symbol: 'SOXL', active: true, maxNotional: 2000 })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
     const res = await app.request(
@@ -621,7 +611,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
         symbol: 'SOXL',
         active: false,
         maxNotional: 2000,
-        bucket: 'semi',
       },
     })
   })
@@ -639,7 +628,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '2000',
-      bucket: 'semi',
       time_stop_days_override: '5',
       k_atr_override: '3.0',
     })
@@ -767,7 +755,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '2000',
-      bucket: 'semi',
       time_stop_days_override: '7',
       k_atr_override: '2.5',
     })
@@ -850,7 +837,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '500',
-      bucket: 'tech_3x',
       inverse_symbol: 'soxs',
     })
     const res = await app.request(
@@ -866,11 +852,10 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(res.headers.get('location')).toBe('/dashboard/symbols')
     // primary + counterpart の symbol_config が両方作られる
     expect(db.rows.map((r) => r.symbol).sort()).toEqual(['SOXL', 'SOXS'])
-    // counterpart は primary から market/currency/bucket を継承
+    // counterpart は primary から market/currency を継承
     const soxs = db.rows.find((r) => r.symbol === 'SOXS')!
     expect(soxs.market).toBe('US')
     expect(soxs.currency).toBe('USD')
-    expect(soxs.bucket).toBe('tech_3x')
     // inverse_pairs リンクが書かれる
     expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
   })
@@ -923,7 +908,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 import { orderRowsByPair, assignPairColors, pairRoles } from '../../src/routes/dashboard'
 
 describe('#315 inverse-pair list grouping', () => {
-  const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol, bucket: null })
+  const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol })
 
   it('orderRowsByPair places the counterpart right after its primary', () => {
     const rows = [r('AAPL'), r('SOXL'), r('TQQQ'), r('SOXS'), r('SQQQ')]

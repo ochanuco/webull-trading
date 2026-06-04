@@ -21,7 +21,6 @@ import {
   TEST_DEFAULT_RULE,
   type SymbolRule,
 } from './strategies/PullbackUptrendStrategy'
-import { decideBucketGate } from '../risk/bucketExposureGate'
 import { evaluateEarningsGate } from '../risk/earningsGate'
 import {
   DEFAULT_MACRO_GATE_CONFIG,
@@ -59,16 +58,6 @@ export interface PullbackSchedulerOptions {
    * markets should invoke the scheduler once per lot-size.
    */
   lotSize?: number
-  /**
-   * symbol → bucket tag ('semi' 等)。同一 bucket の open position 合計
-   * notional を bucketCapMap で clamp する。未指定 symbol は個別判定。
-   */
-  symbolBucketMap?: Record<string, string>
-  /**
-   * bucket → 合計 notional 上限 (単一 currency の absolute 値)。呼び出し側
-   * (runStrategyCron) が NAV × exposure_pct で算出する。
-   */
-  bucketCapMap?: Record<string, number>
   /**
    * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
    * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
@@ -337,33 +326,6 @@ export async function runPullbackScheduler(
     }
   }
 
-  // Bucket pre-scan: sum the open-position notional per bucket across all
-  // symbols in this run so the BUY gate can refuse an entry that would push
-  // the bucket over `bucketCapMap[bucket]`. Skipped entirely when no bucket
-  // map provided. Quote source: lastQuote ?? avgPrice — cron runs at :15 so
-  // quote feed (*/5) should have populated lastQuote already; avgPrice is a
-  // safe fallback that just charges bucket at cost basis.
-  const bucketExposure: Record<string, number> = {}
-  if (options.symbolBucketMap && options.bucketCapMap) {
-    for (const sym of options.symbols) {
-      const bucket = options.symbolBucketMap[sym.toUpperCase()]
-      if (!bucket) continue
-      try {
-        const s = await options.positionStore.getState(sym.toUpperCase())
-        if (s.position !== null && s.position.qty > 0) {
-          const px = s.lastQuote?.price ?? s.position.avgPrice
-          if (Number.isFinite(px) && px > 0) {
-            bucketExposure[bucket] = (bucketExposure[bucket] ?? 0) + s.position.qty * px
-          }
-        }
-      } catch {
-        // Pre-scan failure for one symbol shouldn't block the rest of the
-        // scheduler. The per-symbol loop below will retry getState and
-        // surface errors in `summary.errors`.
-      }
-    }
-  }
-
   for (const symbol of options.symbols) {
     summary.evaluated += 1
     const upper = symbol.toUpperCase()
@@ -469,12 +431,6 @@ export async function runPullbackScheduler(
     }
 
     let intent: OrderIntent
-    // BUY 経路で bucketCap check が pass した場合のみ set される pending update。
-    // 後続 gate (earnings / perSymbolRisk) が reject すると未 commit のまま破棄、
-    // pass で初めて bucketExposure に反映する (CodeRabbit #196 review)。
-    // 過去仕様では check 直後に commit していたため、reject された BUY が同一
-    // bucket の後続銘柄に「占有済」とみなされる over-counting bug があった。
-    let pendingBucketUpdate: { bucket: string; newExposure: number } | null = null
     if (signal.action === 'BUY') {
       const rule = strategy.resolveRule(upper)
       const sizing = computePullbackSizing({
@@ -504,14 +460,11 @@ export async function runPullbackScheduler(
         })
         continue
       }
-      // VIX regime filter (issue #196 3/3) — sizing 直後 / bucket gate 直前で適用。
+      // VIX regime filter (issue #196 3/3) — sizing 直後に適用。
       //   - critical (sizeScale === 0): BUY 全 reject
       //   - warning (0 < sizeScale < 1): qty = floor(qty * sizeScale / lot) * lot
       //   - normal (sizeScale === 1): no-op
       // SELL は VIX 関係なく通すため、ここで scaling しても OK (BUY 経路だけ)。
-      // sizing 後 / bucket 前に置く理由:
-      //   - 縮小後の notional で bucket cap を判定したい (= over-block を避ける)
-      //   - 同時に VIX critical の reject は bucket 計算前に確定させたい (前段判定)
       let scaledQuantity = sizing.quantity
       if (options.vixDecision) {
         if (options.vixDecision.sizeScale === 0) {
@@ -590,32 +543,6 @@ export async function runPullbackScheduler(
           trace: appendTrace(signal.trace, traceStep('scheduler.notional_valid', false, notional, '>', 0)),
         })
         continue
-      }
-      const bucket = options.symbolBucketMap?.[upper]
-      const bucketDecision = decideBucketGate({
-        bucket,
-        currentExposure: bucket ? bucketExposure[bucket] ?? 0 : 0,
-        addNotional: notional,
-        cap: bucket ? options.bucketCapMap?.[bucket] : undefined,
-      })
-      if (!bucketDecision.allowed) {
-        const reason = bucketDecision.reason ?? 'bucket cap'
-        summary.rejected.push({ symbol: upper, reason })
-        await emitDecision({
-          symbol: upper,
-          decision: 'REJECT',
-          reason,
-          price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
-          trace: appendTrace(signal.trace, traceStep('risk.bucket_cap', false, notional, '<=', bucket ? options.bucketCapMap?.[bucket] ?? null : null, reason)),
-        })
-        continue
-      }
-      // bucketExposure の commit はまだ行わない。後続の earnings / perSymbolRisk
-      // gate が reject する可能性があり、その場合に同 bucket 後続銘柄の判定を
-      // over-count させてはいけない。実 commit は全 gate pass 後に下で行う。
-      if (bucket && bucketDecision.newExposure !== undefined) {
-        pendingBucketUpdate = { bucket, newExposure: bucketDecision.newExposure }
       }
       intent = buildIntent(upper, 'BUY', scaledQuantity, indicators.price)
     } else {
@@ -782,14 +709,6 @@ export async function runPullbackScheduler(
         })
         continue
       }
-    }
-
-    // 全 gate (bucket / earnings / macro / perSymbolRisk) を通過したので、
-    // ここで初めて bucketExposure を新 exposure に置き換える。これより前
-    // (= bucket gate 直後) で commit すると、reject された BUY が同 bucket の
-    // 後続銘柄を誤って弾く (CodeRabbit #196 review)。
-    if (pendingBucketUpdate) {
-      bucketExposure[pendingBucketUpdate.bucket] = pendingBucketUpdate.newExposure
     }
 
     const expiresAtMs = now().getTime() + pendingLockTtlMs
@@ -1181,7 +1100,6 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'scheduler.position_qty_valid': '建玉数量が有効',
   'scheduler.pending_lock_expiry_valid': '注文ロック期限が有効',
   'scheduler.pending_lock_acquired': '注文ロックを取得できた',
-  'risk.bucket_cap': '同グループ建玉上限内',
   'risk.earnings_calendar': '決算日カレンダーゲート',
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',

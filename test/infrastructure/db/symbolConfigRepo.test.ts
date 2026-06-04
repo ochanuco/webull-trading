@@ -192,7 +192,6 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   currency: 'USD',
   active: true,
   maxNotional: 500,
-  bucket: 'tech_3x',
   notes: null,
   timeStopDaysOverride: null,
   kAtrOverride: null,
