@@ -1,5 +1,6 @@
 /**
- * Per-symbol risk gate (pure).
+ * Per-symbol risk gate (pure, except one observability `console.warn` when the
+ * spread guard is skipped for a bid/ask-less quote source — see gate 4 / #411).
  *
  * 7 つの per-symbol guard を一つの pure function に集約する。manual
  * `/trade/execute` 経路 (TradingService) と cron (`runPullbackScheduler`) の
@@ -9,7 +10,8 @@
  *   1. settled cash (BUY only): notional > settledCash で reject
  *   2. inverse pair (BUY only): inverse 銘柄の建玉が残っていれば reject
  *   3. quote freshness (BUY only / halt fallback): lastQuote.fetchedAt が staleQuoteMs を超えれば reject
- *   4. spread guard (BUY only): bid/ask 欠損 / 異常 / spread% が limit 超で reject
+ *   4. spread guard (BUY only): 異常 / spread% が limit 超で reject。bid/ask 欠損は
+ *      source 次第 — Yahoo 等 bid/ask 非対応 source は適用外で通す、それ以外は fail-closed (issue #411)
  *   5. gap re-eval (BUY only): avgPrice と lastQuote.price の |gap| > gapRejectPct で reject
  *   6. JP 値幅制限 (BUY only): JP 銘柄かつ band 外 limit price で reject
  *   7. (option) cooldown: state.cooldownUntil が未来なら reject
@@ -30,8 +32,19 @@
  */
 import type { QuoteSnapshot, SymbolState } from '../state/types'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
+import { YAHOO_QUOTE_SOURCE } from '../../infrastructure/quotes/YahooQuoteClient'
 import { isWithinJpPriceBand } from './jpPriceBand'
 import { computeSpreadPct } from './spreadGuard'
+
+/**
+ * Quote source が構造的に bid/ask を持たない (= spread を計算できない) もの。
+ * Yahoo `/v8/chart` meta は bid/ask を返さない (PR #334 で default 化)。これらの
+ * source で bid/ask 欠損は「異常」ではなく「仕様」なので、spread guard を
+ * **適用外 (skip)** にして発注を通す (degraded but tradeable)。Webull 等 bid/ask を
+ * 返すべき source での欠損は従来通り fail-closed。Webull market-data 復活で
+ * bid/ask が実データになれば本 set を空にして本来運用へ戻す (issue #411 = 案B)。
+ */
+const QUOTE_SOURCES_WITHOUT_BID_ASK: ReadonlySet<string> = new Set([YAHOO_QUOTE_SOURCE])
 
 export interface PerSymbolRiskInput {
   symbol: string
@@ -134,7 +147,8 @@ export function evaluatePerSymbolRisk(
   }
 
   // 5. spread guard (BUY only)。SELL/exit は wide spread でも実行優先。
-  //    bid/ask 欠損は fail-closed (lastQuote 有り前提)。
+  //    bid/ask 欠損は source 次第: Yahoo 等 bid/ask 非対応 source は適用外で通し、
+  //    それ以外 (Webull 等) は fail-closed (issue #411 で恒久対応 = Webull bid/ask)。
   if (side === 'BUY') {
     const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits)
     if (spreadReason !== null) {
@@ -180,6 +194,19 @@ function evaluateSpreadGate(
   const bid = lastQuote.bid
   const ask = lastQuote.ask
   if (bid === undefined || ask === undefined) {
+    // 案A (issue #411): bid/ask を構造的に持たない source (Yahoo) では spread を
+    // 適用外にして通す。それ以外 (Webull 等) の欠損は異常なので fail-closed 継続。
+    if (QUOTE_SOURCES_WITHOUT_BID_ASK.has(lastQuote.source)) {
+      // 安全弁を一段緩めるので observability に明示 (構造化ログ)。
+      console.warn(
+        JSON.stringify({
+          event: 'spread_guard_skipped_no_bidask',
+          symbol,
+          source: lastQuote.source,
+        }),
+      )
+      return null
+    }
     return 'spread unknown, bid/ask missing'
   }
   const market = inferWebullMarket(symbol)
