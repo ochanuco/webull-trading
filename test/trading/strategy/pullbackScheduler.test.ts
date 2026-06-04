@@ -1567,3 +1567,45 @@ describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
     expect(aapl?.reason).toMatch(/lot-size-round/)
   })
 })
+
+describe('runPullbackScheduler budget-alloc basis fail-closed (#417 buying-power)', () => {
+  it('fail-closed (no BUY) for a budget symbol when budgetBasisJpy is undefined (total_capital_jpy 未設定)', async () => {
+    // total_capital_jpy=null → runStrategyCron は budgetBasisJpy=undefined を渡す。
+    // 幻の資本で sizing せず発注見送り (過大発注 → Webull 417 を防ぐ)。
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      symbolBudgetAllocPctMap: { AAPL: 0.35 },
+      budgetBasisJpy: undefined,
+      fxJpyPerSymbolCcy: 150,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('REJECT')
+  })
+
+  it('places a BUY for a budget symbol once budgetBasisJpy is a real account total', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      symbolBudgetAllocPctMap: { AAPL: 0.35 },
+      budgetBasisJpy: 1_000_000, // ¥1M × 35% / 150 ≈ $2,333 → 数株
+      fxJpyPerSymbolCcy: 150,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+})
