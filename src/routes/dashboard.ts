@@ -7096,7 +7096,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
              <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
              <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
-           <p class="muted" style="margin:4px 0 0;font-size:11px">2 文字以上入力で Yahoo Finance から候補を suggest。click で銘柄 / 銘柄名 / 市場 / 通貨を自動入力。JP 銘柄は 4 桁数字 (例: 7203)。</p>
          </div>`
   // #315: 登録モード選択 (単体 / インバース対)。new のみ。
   const modeSelector =
@@ -7134,7 +7133,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
              <input type="hidden" name="inverse_market" id="symbol-form-inverse-market" value="">
              <input type="hidden" name="inverse_currency" id="symbol-form-inverse-currency" value="">
            </div>
-           <p class="muted" style="margin:4px 0 0;font-size:11px">bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成、市場 / 通貨 / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。銘柄欄と同じく Yahoo Finance から候補を suggest。</p>
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
