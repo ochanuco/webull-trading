@@ -56,6 +56,12 @@ export interface SymbolConfigSnapshot {
    * (= 従来の risk-% sizing)。fixed-% 配分モードの sizing に使う (#budget-alloc)。
    */
   symbolBudgetAllocPct: Record<string, number>
+  /**
+   * symbol → lot_size (売買単位、integer >= 1)。NULL / 不正は map に**含めない**。
+   * 下流 (cron sizing) は map に無い銘柄を fail-closed (発注見送り) 扱いにする
+   * — blanket default に倒さない (#symbol-lot-size)。
+   */
+  symbolLotSize: Record<string, number>
 }
 
 /**
@@ -82,6 +88,7 @@ export async function loadSymbolConfig(
   const symbolTimeStopDaysOverride: Record<string, number> = {}
   const symbolKAtrOverride: Record<string, number> = {}
   const symbolBudgetAllocPct: Record<string, number> = {}
+  const symbolLotSize: Record<string, number> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -131,6 +138,17 @@ export async function loadSymbolConfig(
     ) {
       symbolBudgetAllocPct[symbol] = row.budgetAllocPct
     }
+    // lot_size は integer >= 1 のみ採用。NULL / 非整数 / <1 は map に出さず
+    // (= 下流 fail-closed)。blanket default に倒さない (#symbol-lot-size)。
+    if (
+      row.lotSize !== null &&
+      row.lotSize !== undefined &&
+      Number.isFinite(row.lotSize) &&
+      Number.isInteger(row.lotSize) &&
+      row.lotSize >= 1
+    ) {
+      symbolLotSize[symbol] = row.lotSize
+    }
   }
   return {
     allowedSymbols,
@@ -143,6 +161,7 @@ export async function loadSymbolConfig(
     symbolTimeStopDaysOverride,
     symbolKAtrOverride,
     symbolBudgetAllocPct,
+    symbolLotSize,
   }
 }
 
@@ -181,6 +200,12 @@ export interface SymbolConfigWriteInput {
    * (#budget-alloc)。
    */
   budgetAllocPct: number | null
+  /**
+   * 売買単位 (integer >= 1)。**入力必須** — admin parse が未入力を弾く。NULL は
+   * 既存行 (migration 前) のみで、cron sizing は NULL を fail-closed 扱いにする
+   * (#symbol-lot-size)。
+   */
+  lotSize: number | null
 }
 
 /**
@@ -208,6 +233,7 @@ export async function insertSymbolConfig(
       timeStopDaysOverride: input.timeStopDaysOverride,
       kAtrOverride: input.kAtrOverride,
       budgetAllocPct: input.budgetAllocPct,
+      lotSize: input.lotSize,
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -252,6 +278,7 @@ export async function updateSymbolConfig(
       timeStopDaysOverride: input.timeStopDaysOverride,
       kAtrOverride: input.kAtrOverride,
       budgetAllocPct: input.budgetAllocPct,
+      lotSize: input.lotSize,
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))
@@ -493,6 +520,9 @@ export async function createSymbolPair(
       kAtrOverride: null,
       // regime hedge は片方ずつ建てるので counterpart も同じ予算配分%を継承。
       budgetAllocPct: primary.budgetAllocPct,
+      // インバース対は同じ商品種別 (両方 3x ETF 等) なので売買単位も primary 継承。
+      // 異なる場合は counterpart を個別編集で上書きする (#symbol-lot-size)。
+      lotSize: primary.lotSize,
       updatedAt: nowIso,
     })
     await db.batch([delLink, insCounterpart, insLink])

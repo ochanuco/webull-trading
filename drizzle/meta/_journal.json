@@ -176,6 +176,13 @@
       "when": 1780576185111,
       "tag": "0024_add_symbol_budget_alloc_pct",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1780582507641,
+      "tag": "0025_add_symbol_lot_size",
+      "breakpoints": true
     }
   ]
 }
