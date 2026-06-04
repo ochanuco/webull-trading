@@ -6920,14 +6920,16 @@ function symbolsListBody(args: {
   if (filtered.length === 0) {
     return `${errorBanner}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
-  // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ↔バッジ。
+  // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ツリー表記。
   const ordered = orderRowsByPair(filtered, inversePairs)
   const pairColor = assignPairColors(ordered, inversePairs)
+  const roles = pairRoles(ordered, inversePairs)
   const tbody = ordered
     .map((r) => {
       const inactive = !r.active
       const sym = r.symbol.toUpperCase()
       const inverse = inversePairs[sym] ?? null
+      const role = roles.get(sym) ?? null
       const bg = pairColor.get(sym)
       const rowStyleParts: string[] = []
       if (inactive) rowStyleParts.push('opacity:0.5')
@@ -6949,13 +6951,15 @@ function symbolsListBody(args: {
       const bucketCell = r.bucket
         ? esc(r.bucket)
         : '<span class="muted" style="font-size:11px">—</span>'
-      const inverseCell = inverse
-        ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse)}/edit" title="インバース対 (相手に建玉がある間は BUY 見送り #315)" style="text-decoration:none;white-space:nowrap">↔ ${esc(inverse)}</a>`
-        : '<span class="muted" style="font-size:11px">—</span>'
+      // ツリー表記: 対の上段は ┌、下段は └。相手 symbol を title + リンクに。
+      const treeGlyph = role === 'top' ? '┌─' : role === 'bottom' ? '└─' : ''
+      const treeCell = inverse
+        ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse)}/edit" title="インバース対: ${esc(inverse)} (相手に建玉がある間は BUY 見送り #315)" style="text-decoration:none;color:#06c;font-family:monospace;white-space:nowrap">${treeGlyph}</a>`
+        : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
       return `<tr${rowStyle}>
+        <td style="font-family:monospace;color:#06c;text-align:center;padding-right:0;width:28px">${treeCell}</td>
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
-        <td>${inverseCell}</td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${maxNotionalCell}</td>
@@ -6975,8 +6979,8 @@ function symbolsListBody(args: {
   return `${errorBanner}${filterBar}${headerBar}
   <table>
     <thead><tr>
+      <th style="width:28px" title="インバース対のツリー表記"></th>
       <th>銘柄</th>
-      <th>インバース対</th>
       <th>銘柄名</th>
       <th>市場/通貨</th>
       <th>1注文上限</th>
@@ -7041,6 +7045,28 @@ export function assignPairColors(
     }
   }
   return color
+}
+
+/**
+ * ordered list 上で各 symbol のツリー位置を判定 (#315 ツリー表記)。
+ * 直後が自分の対 → 'top' (┌)、直前が自分の対 → 'bottom' (└)、対なし → null。
+ * orderRowsByPair で対は隣接済みなので前後 1 行で判定できる。
+ */
+export function pairRoles(
+  ordered: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+): Map<string, 'top' | 'bottom'> {
+  const roles = new Map<string, 'top' | 'bottom'>()
+  for (let i = 0; i < ordered.length; i++) {
+    const sym = ordered[i]!.symbol.toUpperCase()
+    const inv = inversePairs[sym]
+    if (!inv) continue
+    const next = ordered[i + 1]?.symbol.toUpperCase()
+    const prev = ordered[i - 1]?.symbol.toUpperCase()
+    if (next === inv) roles.set(sym, 'top')
+    else if (prev === inv) roles.set(sym, 'bottom')
+  }
+  return roles
 }
 
 /**
@@ -7128,7 +7154,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
            </div>
            <p class="muted" style="margin:4px 0 0;font-size:11px">2 文字以上入力で Yahoo Finance から候補を suggest。click で銘柄 / 銘柄名 / 市場 / 通貨を自動入力。JP 銘柄は 4 桁数字 (例: 7203)。</p>
          </div>`
-  // #315: インバース対の連動登録。new では入力欄 (任意)、edit では現在の対を表示。
+  // #315: 登録モード選択 (単体 / インバース対)。new のみ。
+  const modeSelector =
+    mode === 'new'
+      ? `<div style="grid-column:1/-1;display:flex;gap:16px;align-items:center;padding:8px 10px;background:#f5f5f7;border-radius:6px">
+           <strong style="font-size:13px">登録モード:</strong>
+           <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+             <input type="radio" name="reg_mode" value="single" checked onchange="window.setSymbolRegMode('single')"> 単体登録
+           </label>
+           <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+             <input type="radio" name="reg_mode" value="inverse" onchange="window.setSymbolRegMode('inverse')"> インバース対で登録
+           </label>
+         </div>`
+      : ''
+  // #315: インバース対。new ではモード選択で表示切替する入力欄 (銘柄欄と同じ Yahoo
+  // autocomplete)、edit では現在の対を表示。
   const inverseField =
     mode === 'edit'
       ? `<label>インバース対 <span class="muted" style="font-size:11px">(inverse)</span></label>
@@ -7138,19 +7178,23 @@ function symbolFormBody(args: SymbolFormArgs): string {
                ? `<span>↔ <a href="/dashboard/symbols/${encodeURIComponent(currentInverse)}/edit"><strong>${esc(currentInverse)}</strong></a></span>
                   <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に建玉がある間は BUY を見送ります (#315)。対の変更は一度削除して再登録してください。</p>`
                : `<span class="muted">未設定 (対なし)</span>
-                  <p class="muted" style="margin:4px 0 0;font-size:11px">対を組むには、相手銘柄の新規追加時に「インバース銘柄」を指定してください。</p>`
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">対を組むには、相手銘柄の新規追加時に「インバース対で登録」を選んでください。</p>`
            }
          </div>`
-      : `<label>インバース銘柄 <span class="muted" style="font-size:11px">(inverse・任意)</span></label>
-         <div>
-           <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS (任意)" autocomplete="off" style="padding:6px;width:200px;text-transform:uppercase">
-           <p class="muted" style="margin:4px 0 0;font-size:11px">入力すると bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成し、市場 / 通貨 / 相関グループ / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。空欄なら単独登録。</p>
+      : `<label id="symbol-form-inverse-label" style="display:none">インバース銘柄 <span class="muted" style="font-size:11px">(inverse)</span></label>
+         <div id="symbol-form-inverse-row" style="display:none">
+           <div style="position:relative;display:inline-block">
+             <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
+             <ul id="symbol-form-inverse-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+           </div>
+           <p class="muted" style="margin:4px 0 0;font-size:11px">bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成、市場 / 通貨 / 相関グループ / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。銘柄欄と同じく Yahoo Finance から候補を suggest。</p>
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
   <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
+    ${modeSelector}
     <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
     ${inverseField}
     <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
@@ -7293,24 +7337,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
       window.hideSymbolFormBucketSuggest();
       if (input) input.focus();
     };
-    window.hideSymbolSuggest = function () {
-      var list = document.getElementById('symbol-form-symbol-suggest');
-      if (list) list.style.display = 'none';
-    };
-    window._symbolSuggestTimer = null;
-    window._symbolSuggestSeq = 0;
-    window.searchSymbolSuggest = function (q) {
-      var list = document.getElementById('symbol-form-symbol-suggest');
+    // 汎用 Yahoo lookup suggest コア。listId の <ul> に候補を描画し、click で pick(m)。
+    window._symbolSuggestTimer = {};
+    window._symbolSuggestSeq = {};
+    window._renderSymbolSuggest = function (q, listId, pick) {
+      var list = document.getElementById(listId);
       if (!list) return;
       var query = (q || '').trim();
       if (query.length < 2) { list.style.display = 'none'; return; }
-      if (window._symbolSuggestTimer) clearTimeout(window._symbolSuggestTimer);
-      window._symbolSuggestTimer = setTimeout(function () {
-        var mySeq = ++window._symbolSuggestSeq;
+      if (window._symbolSuggestTimer[listId]) clearTimeout(window._symbolSuggestTimer[listId]);
+      window._symbolSuggestTimer[listId] = setTimeout(function () {
+        var mySeq = (window._symbolSuggestSeq[listId] = (window._symbolSuggestSeq[listId] || 0) + 1);
         fetch('/admin/symbol-config/lookup?q=' + encodeURIComponent(query), { credentials: 'same-origin' })
           .then(function (res) { return res.ok ? res.json() : { matches: [] }; })
           .then(function (data) {
-            if (mySeq !== window._symbolSuggestSeq) return; // 古い response は捨てる
+            if (mySeq !== window._symbolSuggestSeq[listId]) return; // 古い response は捨てる
             var matches = (data && data.matches) || [];
             list.innerHTML = '';
             if (matches.length === 0) {
@@ -7331,7 +7372,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
               nameSpan.textContent = (m.name || '?') + ' (' + m.market + '/' + m.currency + ')';
               li.appendChild(sym);
               li.appendChild(nameSpan);
-              li.addEventListener('mousedown', function () { window.pickSymbolSuggest(m); });
+              li.addEventListener('mousedown', function () { pick(m); });
               li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
               li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
               list.appendChild(li);
@@ -7340,6 +7381,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
           })
           .catch(function () { list.style.display = 'none'; });
       }, 250);
+    };
+    // 主銘柄欄: pick で銘柄 / 名前 / 市場 / 通貨を自動入力。
+    window.hideSymbolSuggest = function () {
+      var list = document.getElementById('symbol-form-symbol-suggest');
+      if (list) list.style.display = 'none';
+    };
+    window.searchSymbolSuggest = function (q) {
+      window._renderSymbolSuggest(q, 'symbol-form-symbol-suggest', window.pickSymbolSuggest);
     };
     window.pickSymbolSuggest = function (m) {
       var symInput = document.getElementById('symbol-form-symbol');
@@ -7353,6 +7402,33 @@ function symbolFormBody(args: SymbolFormArgs): string {
       if (m.currency) window.syncSymbolFormCurrencyUnits(m.currency);
       window.hideSymbolSuggest();
       if (symInput) symInput.focus();
+    };
+    // インバース銘柄欄: 同じ Yahoo suggest だが pick は inverse 入力だけを埋める
+    // (主銘柄の name/market/currency は上書きしない)。
+    window.hideInverseSuggest = function () {
+      var list = document.getElementById('symbol-form-inverse-suggest');
+      if (list) list.style.display = 'none';
+    };
+    window.searchInverseSuggest = function (q) {
+      window._renderSymbolSuggest(q, 'symbol-form-inverse-suggest', window.pickInverseSuggest);
+    };
+    window.pickInverseSuggest = function (m) {
+      var inv = document.getElementById('symbol-form-inverse');
+      if (inv) { inv.value = m.symbol; inv.focus(); }
+      window.hideInverseSuggest();
+    };
+    // 登録モード切替: 単体 / インバース対。inverse 欄の表示と required を制御。
+    window.setSymbolRegMode = function (modeVal) {
+      var label = document.getElementById('symbol-form-inverse-label');
+      var rowEl = document.getElementById('symbol-form-inverse-row');
+      var inv = document.getElementById('symbol-form-inverse');
+      var show = modeVal === 'inverse';
+      if (label) label.style.display = show ? '' : 'none';
+      if (rowEl) rowEl.style.display = show ? '' : 'none';
+      if (inv) {
+        if (show) { inv.setAttribute('required', 'required'); }
+        else { inv.removeAttribute('required'); inv.value = ''; window.hideInverseSuggest(); }
+      }
     };
   </script>`
 }

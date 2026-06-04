@@ -831,6 +831,12 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const body = await res.text()
     expect(body).toContain('name="inverse_symbol"')
     expect(body).toContain('対で登録')
+    // 登録モード選択 (単体 / インバース対)
+    expect(body).toContain('name="reg_mode"')
+    expect(body).toContain('value="single"')
+    expect(body).toContain('value="inverse"')
+    // inverse 欄は同じ Yahoo autocomplete (searchInverseSuggest)
+    expect(body).toContain('window.searchInverseSuggest')
   })
 
   it('POST with inverse_symbol creates both symbols + inverse_pairs link, 303', async () => {
@@ -914,7 +920,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 })
 
-import { orderRowsByPair, assignPairColors } from '../../src/routes/dashboard'
+import { orderRowsByPair, assignPairColors, pairRoles } from '../../src/routes/dashboard'
 
 describe('#315 inverse-pair list grouping', () => {
   const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol, bucket: null })
@@ -951,5 +957,22 @@ describe('#315 inverse-pair list grouping', () => {
     const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
     const color = assignPairColors(rows, pairs)
     expect(color.has('SOXL')).toBe(false)
+  })
+
+  it('pairRoles marks primary as top (┌) and counterpart as bottom (└), unpaired none', () => {
+    const rows = [r('SOXL'), r('SOXS'), r('AAPL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const ordered = orderRowsByPair(rows, pairs)
+    const roles = pairRoles(ordered, pairs)
+    expect(roles.get('SOXL')).toBe('top')
+    expect(roles.get('SOXS')).toBe('bottom')
+    expect(roles.has('AAPL')).toBe(false)
+  })
+
+  it('pairRoles assigns no role when counterpart is not adjacent (half-present)', () => {
+    const rows = [r('SOXL'), r('AAPL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const roles = pairRoles(orderRowsByPair(rows, pairs), pairs)
+    expect(roles.has('SOXL')).toBe(false)
   })
 })
