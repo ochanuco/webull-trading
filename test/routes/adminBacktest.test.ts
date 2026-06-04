@@ -90,7 +90,6 @@ vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
     riskBasePerTradePct: 0.004,
     riskDdHalfThreshold: -0.05,
     riskDdHaltThreshold: -0.10,
-    bucketExposurePct: 0.30,
   }),
 }))
 

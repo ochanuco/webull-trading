@@ -94,14 +94,12 @@ export interface StrategyCronAnalysis {
       ddHalfThreshold: number
       ddHaltThreshold: number
       drawdownKillThreshold: number
-      bucketExposurePct: number
     }
   }
   universe: {
     symbols: string[]
     byCurrency: Record<SymbolCurrency, string[]>
     symbolMaxNotional: Record<string, number>
-    symbolBucket: Record<string, string>
   }
   portfolio?: {
     dailyStartEquity: number
@@ -125,7 +123,6 @@ export interface StrategyCronAnalysis {
     equity: number
     lotSize: number
     symbols: string[]
-    bucketCapMap: Record<string, number>
   }>
   decisions: PullbackDecisionTrace[]
 }
@@ -272,14 +269,12 @@ export async function runStrategyCron(
         ddHalfThreshold: global.riskDdHalfThreshold,
         ddHaltThreshold: global.riskDdHaltThreshold,
         drawdownKillThreshold: global.drawdownKillThreshold,
-        bucketExposurePct: global.bucketExposurePct,
       },
     },
     universe: {
       symbols: universe.allowedSymbols,
       byCurrency,
       symbolMaxNotional: universe.symbolMaxNotional,
-      symbolBucket: universe.symbolBucket,
     },
     runs: [],
     decisions: [],
@@ -541,24 +536,11 @@ export async function runStrategyCron(
   }
 
   for (const run of runs) {
-    // Bucket cap: per-currency NAV × global.bucketExposurePct。
-    // 同一 bucket の合計 open notional がこれを超える BUY は reject。
-    // bucket が未分類 (symbol_config.bucket NULL) の symbol は素通り。
-    const buckets = new Set<string>()
-    for (const sym of run.symbols) {
-      const b = universe.symbolBucket[sym.toUpperCase()]
-      if (b) buckets.add(b)
-    }
-    const bucketCapMap: Record<string, number> = {}
-    for (const b of buckets) {
-      bucketCapMap[b] = run.equity * global.bucketExposurePct
-    }
     analysis.runs.push({
       currency: run.currency,
       equity: run.equity,
       lotSize: run.lotSize,
       symbols: run.symbols,
-      bucketCapMap,
     })
     const decisionDb = strategyDecisionDbOrUndefined(env)
     const sub = await runPullbackScheduler({
@@ -569,8 +551,6 @@ export async function runStrategyCron(
       positionStore,
       execution,
       symbolCapMap: universe.symbolMaxNotional,
-      symbolBucketMap: universe.symbolBucket,
-      bucketCapMap,
       defaultRule,
       rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,

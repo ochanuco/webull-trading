@@ -1134,7 +1134,6 @@ describe('POST /admin/orders/sync-holdings', () => {
       inactiveSymbols: [],
       symbolMaxNotional: {},
       symbolCurrency: {},
-      symbolBucket: {},
       symbolMarket: {},
       symbolName: {},
       symbolNotes: {},

@@ -27,6 +27,9 @@ import { earningsCalendar, macroEventCalendar, tradeJournal } from '../infrastru
 import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 import { recordPortfolioEquitySnapshot } from '../infrastructure/db/portfolioEquitySnapshotRepo'
 import {
+  createSymbolPair,
+  type CounterpartMeta,
+  deleteInversePairsForSymbol,
   findSymbolConfig,
   insertSymbolConfig,
   hardDeleteSymbol,
@@ -1334,7 +1337,48 @@ export const admin = new Hono<AppBindings>()
     const body = await readFormOrJsonBody(c)
     const input = parseSymbolConfigBody(body)
     const db = createDb(c.env.DB)
-    const inserted = await insertSymbolConfig(db, input, new Date().toISOString())
+    const now = new Date().toISOString()
+
+    // #315: inverse_symbol が指定されたら bull/bear を対で登録する (連動登録)。
+    const inverseSymbol = parseInverseSymbolField(body)
+    if (inverseSymbol !== null) {
+      if (inverseSymbol === input.symbol) {
+        if (isForm) {
+          return c.redirect(
+            `/dashboard/symbols?error=inverse_self&symbol=${encodeURIComponent(input.symbol)}`,
+            303,
+          )
+        }
+        return c.json({ error: 'inverse_self', symbol: input.symbol }, 400)
+      }
+      const pair = await createSymbolPair(db, input, inverseSymbol, now, parseCounterpartMeta(body))
+      if (pair.primary === 'duplicate') {
+        if (isForm) {
+          return c.redirect(
+            `/dashboard/symbols?error=duplicate&symbol=${encodeURIComponent(input.symbol)}`,
+            303,
+          )
+        }
+        return c.json({ error: 'symbol_already_exists', symbol: input.symbol }, 409)
+      }
+      const primaryRow = await findSymbolConfig(db, input.symbol)
+      await writeAuditLog(
+        c,
+        '/admin/symbol-config',
+        `symbol=${input.symbol} inverse=${inverseSymbol} counterpartCreated=${pair.counterpartCreated}`,
+        null,
+        primaryRow ? symbolConfigSnapshot(primaryRow) : { symbol: input.symbol, inverse: inverseSymbol },
+      )
+      if (isForm) return c.redirect('/dashboard/symbols', 303)
+      return c.json({
+        symbol: input.symbol,
+        inverse: inverseSymbol,
+        counterpartCreated: pair.counterpartCreated,
+        row: primaryRow ? symbolConfigSnapshot(primaryRow) : null,
+      })
+    }
+
+    const inserted = await insertSymbolConfig(db, input, now)
     if (inserted === null) {
       if (isForm) {
         return c.redirect(
@@ -1451,10 +1495,13 @@ export const admin = new Hono<AppBindings>()
       }
       return c.json({ error: 'still_active', symbol: symbolPath }, 400)
     }
+    // #315: half-pair を残さないよう inverse_pairs のリンクも cascade 削除
+    // (相手の symbol_config 行は残す)。symbol_config 削除成功後に実行。
+    await deleteInversePairsForSymbol(db, symbolPath)
     await writeAuditLog(
       c,
       '/admin/symbol-config/:symbol/delete',
-      `symbol=${symbolPath}`,
+      `symbol=${symbolPath} (inverse links cascaded)`,
       symbolConfigSnapshot(result.before),
       null,
     )
@@ -1987,7 +2034,7 @@ function isYmd(value: string): boolean {
  *   - active: boolean (form では 'true'/'false'/'on' を許容、checkbox の 'on'
  *     → true、未送信 → false で扱う)
  *   - maxNotional: 正の数 or null (空文字 → null)
- *   - name / bucket / notes: optional string、256 chars 上限
+ *   - name / notes: optional string、256 chars 上限
  */
 function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -2001,7 +2048,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     active?: unknown
     max_notional?: unknown
     maxNotional?: unknown
-    bucket?: unknown
     notes?: unknown
     time_stop_days_override?: unknown
     timeStopDaysOverride?: unknown
@@ -2018,7 +2064,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   const maxNotionalRaw = raw.max_notional ?? raw.maxNotional
   const maxNotional = parseOptionalPositiveNumber(maxNotionalRaw, 'maxNotional')
   const name = parseOptionalString(raw.name, 'name')
-  const bucket = parseOptionalString(raw.bucket, 'bucket')
   const notes = parseOptionalString(raw.notes, 'notes')
   // Per-symbol pullback override (#316)。空文字 / undefined → NULL (= global
   // default fall-through)。範囲外は ValidationError、DB CHECK と二重防御。
@@ -2041,7 +2086,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     currency,
     active,
     maxNotional,
-    bucket,
     notes,
     timeStopDaysOverride,
     kAtrOverride,
@@ -2064,6 +2108,38 @@ function normalizeSymbol(value: unknown): string {
 
 function normalizeSymbolPathParam(value: string): string {
   return normalizeSymbol(value)
+}
+
+/**
+ * `inverse_symbol` (連動登録用、任意) を抽出。未指定 / 空文字 → null (= 単一登録)。
+ * 指定時は symbol と同じ正規化 (1-10 英数大文字) を通す。#315。
+ */
+function parseInverseSymbolField(body: unknown): string | null {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return null
+  const raw = (body as { inverse_symbol?: unknown; inverseSymbol?: unknown })
+  const value = raw.inverse_symbol ?? raw.inverseSymbol
+  if (value === undefined || value === null) return null
+  if (typeof value === 'string' && value.trim().length === 0) return null
+  return normalizeSymbol(value)
+}
+
+/**
+ * 連動登録時の counterpart メタ (Yahoo lookup 由来、任意)。form の hidden field
+ * `inverse_name` / `inverse_market` / `inverse_currency` を拾い、counterpart の
+ * symbol_config に焼く (インバース銘柄名を一覧に出すため #315)。market/currency が
+ * 不正値なら undefined を返し createSymbolPair 側で primary 継承に倒す。
+ */
+function parseCounterpartMeta(body: unknown): CounterpartMeta {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return {}
+  const raw = body as { inverse_name?: unknown; inverse_market?: unknown; inverse_currency?: unknown }
+  const name =
+    typeof raw.inverse_name === 'string' && raw.inverse_name.trim().length > 0
+      ? raw.inverse_name.trim().slice(0, 256)
+      : null
+  const market = raw.inverse_market === 'US' || raw.inverse_market === 'JP' ? raw.inverse_market : undefined
+  const currency =
+    raw.inverse_currency === 'USD' || raw.inverse_currency === 'JPY' ? raw.inverse_currency : undefined
+  return { name, market, currency }
 }
 
 function parseMarket(value: unknown): 'US' | 'JP' {
@@ -2212,7 +2288,6 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     currency: row.currency,
     active: row.active,
     maxNotional: row.maxNotional,
-    bucket: row.bucket,
     notes: row.notes,
     timeStopDaysOverride: row.timeStopDaysOverride,
     kAtrOverride: row.kAtrOverride,

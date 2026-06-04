@@ -30,7 +30,7 @@ const baseEnv = {
 const authHeader = {}
 
 interface InsertCall {
-  table: 'symbol_config' | 'config_audit_log' | 'unknown'
+  table: 'symbol_config' | 'config_audit_log' | 'inverse_pairs' | 'unknown'
   values: Record<string, unknown>
 }
 interface UpdateCall {
@@ -62,10 +62,12 @@ function fakeDb(initial: SymbolConfigRow[]) {
       const v = (t as Record<symbol, unknown>)[sym]
       if (v === 'symbol_config') return 'symbol_config'
       if (v === 'config_audit_log') return 'config_audit_log'
+      if (v === 'inverse_pairs') return 'inverse_pairs'
     }
     const inner = (t as { _?: { name?: string } })?._?.name
     if (inner === 'symbol_config') return 'symbol_config'
     if (inner === 'config_audit_log') return 'config_audit_log'
+    if (inner === 'inverse_pairs') return 'inverse_pairs'
     return 'unknown'
   }
 
@@ -148,7 +150,6 @@ function fakeDb(initial: SymbolConfigRow[]) {
               currency: String(v.currency ?? 'USD'),
               active: v.active === true || v.active === 1,
               maxNotional: (v.maxNotional as number | null) ?? null,
-              bucket: (v.bucket as string | null) ?? null,
               notes: (v.notes as string | null) ?? null,
               timeStopDaysOverride: (v.timeStopDaysOverride as number | null) ?? null,
               kAtrOverride: (v.kAtrOverride as number | null) ?? null,
@@ -187,6 +188,10 @@ function fakeDb(initial: SymbolConfigRow[]) {
           },
         }),
       }),
+      // repo の setInversePair / createSymbolPair / deleteInversePairsForSymbol が使う。
+      // fake の insert().values() / delete().where() は呼び出し時に即実行され Promise を
+      // 返すので、batch は既に走った statement を待つだけで良い (#315)。
+      batch: (stmts: Promise<unknown>[]) => Promise.all(stmts),
     },
   }
 }
@@ -199,7 +204,6 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     currency: 'USD',
     active: true,
     maxNotional: 2000,
-    bucket: 'semi',
     notes: null,
     timeStopDaysOverride: null,
     kAtrOverride: null,
@@ -217,8 +221,8 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   // --- List page ---
   it('renders /dashboard/symbols list with active + inactive rows', async () => {
     const db = fakeDb([
-      row({ symbol: 'SOXL', name: 'Direxion Semi 3X', active: true, maxNotional: 2000, bucket: 'semi' }),
-      row({ symbol: '7203', name: 'トヨタ自動車', market: 'JP', currency: 'JPY', active: false, maxNotional: null, bucket: null, notes: 'paused' }),
+      row({ symbol: 'SOXL', name: 'Direxion Semi 3X', active: true, maxNotional: 2000 }),
+      row({ symbol: '7203', name: 'トヨタ自動車', market: 'JP', currency: 'JPY', active: false, maxNotional: null, notes: 'paused' }),
     ])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -252,7 +256,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '1500',
-      bucket: 'us_large_cap',
       notes: '',
     })
     const res = await app.request(
@@ -274,7 +277,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: true,
       maxNotional: 1500,
-      bucket: 'us_large_cap',
       name: 'ProShares UltraPro QQQ',
     })
     const auditInsert = db.inserts.find((i) => i.table === 'config_audit_log')
@@ -294,7 +296,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 
   // --- POST update ---
   it('POST /admin/symbol-config/:symbol/update writes audit with before/after diff', async () => {
-    const db = fakeDb([row({ symbol: 'SOXL', maxNotional: 2000, bucket: 'semi' })])
+    const db = fakeDb([row({ symbol: 'SOXL', maxNotional: 2000 })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
     const form = new URLSearchParams({
@@ -304,7 +306,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '3000',
-      bucket: 'semi',
       notes: 'bumped',
     })
     const res = await app.request(
@@ -449,10 +450,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 
   // --- XSS regression ---
-  it('escapes <script>/<svg> payloads in notes / bucket on list and edit pages', async () => {
+  it('escapes <script> payloads in notes on list and edit pages', async () => {
     const xssNotes = '<script>alert(1)</script>'
-    const xssBucket = '"><svg onload=alert(2)>'
-    const db = fakeDb([row({ symbol: 'SOXL', notes: xssNotes, bucket: xssBucket })])
+    const db = fakeDb([row({ symbol: 'SOXL', notes: xssNotes })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
 
@@ -460,9 +460,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const listRes = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const listBody = await listRes.text()
     expect(listBody).not.toContain(xssNotes)
-    expect(listBody).not.toContain(xssBucket)
     expect(listBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(listBody).toContain('&quot;&gt;&lt;svg onload=alert(2)&gt;')
 
     // edit page
     const editRes = await app.request(
@@ -472,9 +470,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     const editBody = await editRes.text()
     expect(editBody).not.toContain(xssNotes)
-    expect(editBody).not.toContain(xssBucket)
     expect(editBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(editBody).toContain('&quot;&gt;&lt;svg onload=alert(2)&gt;')
   })
 
   // --- TOCTOU: 既存 symbol を form POST → 303 redirect with ?error=duplicate ---
@@ -595,7 +591,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 
   // --- toggle JSON path returns full row snapshot, not only `active` ---
   it('toggle-active JSON response returns full row snapshot', async () => {
-    const db = fakeDb([row({ symbol: 'SOXL', active: true, maxNotional: 2000, bucket: 'semi' })])
+    const db = fakeDb([row({ symbol: 'SOXL', active: true, maxNotional: 2000 })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
     const res = await app.request(
@@ -615,7 +611,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
         symbol: 'SOXL',
         active: false,
         maxNotional: 2000,
-        bucket: 'semi',
       },
     })
   })
@@ -633,7 +628,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '2000',
-      bucket: 'semi',
       time_stop_days_override: '5',
       k_atr_override: '3.0',
     })
@@ -761,7 +755,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '2000',
-      bucket: 'semi',
       time_stop_days_override: '7',
       k_atr_override: '2.5',
     })
@@ -810,5 +803,181 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toMatch(/name="k_atr_override"[^>]*value="3"/)
     // placeholder に global default が表示される (makeGlobalConfigSnapshot の値)
     expect(body).toContain('global default')
+  })
+
+  // --- #315 inverse-pair linked registration ---
+  it('new form shows inverse_symbol input', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('name="inverse_symbol"')
+    expect(body).toContain('対で登録')
+    // 登録モード選択 (単体 / インバース対)
+    expect(body).toContain('name="reg_mode"')
+    expect(body).toContain('value="single"')
+    expect(body).toContain('value="inverse"')
+    // inverse 欄は同じ Yahoo autocomplete (searchInverseSuggest)
+    expect(body).toContain('window.searchInverseSuggest')
+  })
+
+  it('POST with inverse_symbol creates both symbols + inverse_pairs link, 303', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'soxl',
+      name: 'Direxion Semi 3X',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      max_notional: '500',
+      inverse_symbol: 'soxs',
+      // Yahoo pick 由来の counterpart メタ (一覧でインバース側の銘柄名を出す #315)
+      inverse_name: 'Direxion Daily Semiconductor Bear 3X Shares',
+      inverse_market: 'US',
+      inverse_currency: 'USD',
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/dashboard/symbols')
+    // primary + counterpart の symbol_config が両方作られる
+    expect(db.rows.map((r) => r.symbol).sort()).toEqual(['SOXL', 'SOXS'])
+    // counterpart は Yahoo メタの銘柄名 / market / currency を焼く
+    const soxs = db.rows.find((r) => r.symbol === 'SOXS')!
+    expect(soxs.name).toBe('Direxion Daily Semiconductor Bear 3X Shares')
+    expect(soxs.market).toBe('US')
+    expect(soxs.currency).toBe('USD')
+    // inverse_pairs リンクが書かれる
+    expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
+  })
+
+  it('new form inputs carry password-manager opt-out (data-1p-ignore)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // symbol / inverse 入力に 1Password / LastPass の autofill 抑止属性が付く
+    expect((body.match(/data-1p-ignore="true"/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect(body).toContain('name="inverse_name"')
+  })
+
+  it('POST with inverse_symbol equal to symbol → 303 error (inverse_self)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'soxl',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      inverse_symbol: 'SOXL',
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toContain('error=inverse_self')
+    expect(db.rows.length).toBe(0)
+  })
+
+  it('delete cascades inverse_pairs link removal', async () => {
+    const db = fakeDb([row({ symbol: 'SOXS', active: false })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config/SOXS/delete',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: '',
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    // symbol_config 削除 + inverse_pairs に対する delete が発行される
+    expect(db.deletes.some((d) => d.table === 'symbol_config')).toBe(true)
+    expect(db.deletes.some((d) => d.table === 'inverse_pairs')).toBe(true)
+  })
+})
+
+import { orderRowsByPair, assignPairColors, pairRoles } from '../../src/routes/dashboard'
+
+describe('#315 inverse-pair list grouping', () => {
+  const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol })
+
+  it('orderRowsByPair places the counterpart right after its primary', () => {
+    const rows = [r('AAPL'), r('SOXL'), r('TQQQ'), r('SOXS'), r('SQQQ')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' }
+    const ordered = orderRowsByPair(rows, pairs).map((x) => x.symbol)
+    // AAPL(対なし) → SOXL+SOXS → TQQQ+SQQQ。primary の直後に相手が来る。
+    expect(ordered).toEqual(['AAPL', 'SOXL', 'SOXS', 'TQQQ', 'SQQQ'])
+  })
+
+  it('orderRowsByPair leaves unpaired and half-present pairs in place', () => {
+    const rows = [r('SOXL'), r('AAPL')] // SOXS は一覧に居ない
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const ordered = orderRowsByPair(rows, pairs).map((x) => x.symbol)
+    expect(ordered).toEqual(['SOXL', 'AAPL'])
+  })
+
+  it('assignPairColors colors both sides of a present pair with the same color, alternating per pair', () => {
+    const rows = [r('SOXL'), r('SOXS'), r('TQQQ'), r('SQQQ'), r('AAPL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' }
+    const ordered = orderRowsByPair(rows, pairs)
+    const color = assignPairColors(ordered, pairs)
+    // 同一ペアは同色、別ペアは別色、対なしは無着色。
+    expect(color.get('SOXL')).toBe(color.get('SOXS'))
+    expect(color.get('TQQQ')).toBe(color.get('SQQQ'))
+    expect(color.get('SOXL')).not.toBe(color.get('TQQQ'))
+    expect(color.has('AAPL')).toBe(false)
+  })
+
+  it('assignPairColors skips half-present pairs (counterpart not in list)', () => {
+    const rows = [r('SOXL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const color = assignPairColors(rows, pairs)
+    expect(color.has('SOXL')).toBe(false)
+  })
+
+  it('pairRoles marks primary as top (┌) and counterpart as bottom (└), unpaired none', () => {
+    const rows = [r('SOXL'), r('SOXS'), r('AAPL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const ordered = orderRowsByPair(rows, pairs)
+    const roles = pairRoles(ordered, pairs)
+    expect(roles.get('SOXL')).toBe('top')
+    expect(roles.get('SOXS')).toBe('bottom')
+    expect(roles.has('AAPL')).toBe(false)
+  })
+
+  it('pairRoles assigns no role when counterpart is not adjacent (half-present)', () => {
+    const rows = [r('SOXL'), r('AAPL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const roles = pairRoles(orderRowsByPair(rows, pairs), pairs)
+    expect(roles.has('SOXL')).toBe(false)
   })
 })

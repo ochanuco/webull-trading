@@ -1,0 +1,1314 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "86dea85f-6a2e-40dd-b74d-e83dc935ea14",
+  "prevId": "c1777cfc-7bc6-474f-8aba-ebf055dff4d4",
+  "tables": {
+    "config_audit_log": {
+      "name": "config_audit_log",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "timestamp": {
+          "name": "timestamp",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "actor": {
+          "name": "actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "endpoint": {
+          "name": "endpoint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "target_key": {
+          "name": "target_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "before_json": {
+          "name": "before_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "after_json": {
+          "name": "after_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "config_audit_log_timestamp_id_idx": {
+          "name": "config_audit_log_timestamp_id_idx",
+          "columns": [
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "config_audit_log_actor_timestamp_id_idx": {
+          "name": "config_audit_log_actor_timestamp_id_idx",
+          "columns": [
+            "actor",
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "config_audit_log_endpoint_timestamp_id_idx": {
+          "name": "config_audit_log_endpoint_timestamp_id_idx",
+          "columns": [
+            "endpoint",
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "config_state_snapshot": {
+      "name": "config_state_snapshot",
+      "columns": {
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "snapshot_at": {
+          "name": "snapshot_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "earnings_calendar": {
+      "name": "earnings_calendar",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "symbol": {
+          "name": "symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "earnings_date": {
+          "name": "earnings_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(datetime('now'))"
+        }
+      },
+      "indexes": {
+        "earnings_calendar_symbol_date_unique": {
+          "name": "earnings_calendar_symbol_date_unique",
+          "columns": [
+            "symbol",
+            "earnings_date"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "global_config": {
+      "name": "global_config",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "dry_run": {
+          "name": "dry_run",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "trading_enabled": {
+          "name": "trading_enabled",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "market_hours_check": {
+          "name": "market_hours_check",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "max_order_notional": {
+          "name": "max_order_notional",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 100
+        },
+        "max_order_notional_usd": {
+          "name": "max_order_notional_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 2000
+        },
+        "max_order_notional_jpy": {
+          "name": "max_order_notional_jpy",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 100000
+        },
+        "total_capital_usd": {
+          "name": "total_capital_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "total_capital_jpy": {
+          "name": "total_capital_jpy",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "max_portfolio_exposure_pct": {
+          "name": "max_portfolio_exposure_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.6
+        },
+        "drawdown_kill_threshold": {
+          "name": "drawdown_kill_threshold",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": -0.02
+        },
+        "stale_quote_ms": {
+          "name": "stale_quote_ms",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 900000
+        },
+        "gap_reject_pct": {
+          "name": "gap_reject_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.03
+        },
+        "spread_limit_pct_us": {
+          "name": "spread_limit_pct_us",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.0025
+        },
+        "spread_limit_pct_jp": {
+          "name": "spread_limit_pct_jp",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.006
+        },
+        "pullback_default_stop_pct": {
+          "name": "pullback_default_stop_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": -0.04
+        },
+        "pullback_default_take_profit_pct": {
+          "name": "pullback_default_take_profit_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.07
+        },
+        "pullback_default_time_stop_days": {
+          "name": "pullback_default_time_stop_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 10
+        },
+        "pullback_default_pullback_max": {
+          "name": "pullback_default_pullback_max",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": -0.03
+        },
+        "pullback_default_pullback_min": {
+          "name": "pullback_default_pullback_min",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": -0.06
+        },
+        "pullback_default_min_return_50d": {
+          "name": "pullback_default_min_return_50d",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.08
+        },
+        "pullback_default_require_above_sma50": {
+          "name": "pullback_default_require_above_sma50",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "pullback_default_k_atr": {
+          "name": "pullback_default_k_atr",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 2
+        },
+        "pullback_default_max_sma50_deviation_pct": {
+          "name": "pullback_default_max_sma50_deviation_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.6
+        },
+        "pullback_default_max_atr_ratio": {
+          "name": "pullback_default_max_atr_ratio",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1.5
+        },
+        "risk_base_per_trade_pct": {
+          "name": "risk_base_per_trade_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.004
+        },
+        "risk_dd_half_threshold": {
+          "name": "risk_dd_half_threshold",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": -0.05
+        },
+        "risk_dd_halt_threshold": {
+          "name": "risk_dd_halt_threshold",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": -0.1
+        },
+        "vix_warning_threshold": {
+          "name": "vix_warning_threshold",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 25
+        },
+        "vix_critical_threshold": {
+          "name": "vix_critical_threshold",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 30
+        },
+        "vix_warning_size_scale": {
+          "name": "vix_warning_size_scale",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0.5
+        },
+        "overview_panels": {
+          "name": "overview_panels",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'kpi,equity,composition,recent'"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "global_config_max_order_notional_range": {
+          "name": "global_config_max_order_notional_range",
+          "value": "\"global_config\".\"max_order_notional\" > 0 AND \"global_config\".\"max_order_notional\" <= 10000000"
+        },
+        "global_config_max_order_notional_usd_range": {
+          "name": "global_config_max_order_notional_usd_range",
+          "value": "\"global_config\".\"max_order_notional_usd\" > 0 AND \"global_config\".\"max_order_notional_usd\" <= 1000000"
+        },
+        "global_config_max_order_notional_jpy_range": {
+          "name": "global_config_max_order_notional_jpy_range",
+          "value": "\"global_config\".\"max_order_notional_jpy\" > 0 AND \"global_config\".\"max_order_notional_jpy\" <= 100000000"
+        },
+        "global_config_total_capital_usd_range": {
+          "name": "global_config_total_capital_usd_range",
+          "value": "\"global_config\".\"total_capital_usd\" IS NULL OR \"global_config\".\"total_capital_usd\" > 0"
+        },
+        "global_config_total_capital_jpy_range": {
+          "name": "global_config_total_capital_jpy_range",
+          "value": "\"global_config\".\"total_capital_jpy\" IS NULL OR \"global_config\".\"total_capital_jpy\" > 0"
+        },
+        "global_config_max_portfolio_exposure_pct_range": {
+          "name": "global_config_max_portfolio_exposure_pct_range",
+          "value": "\"global_config\".\"max_portfolio_exposure_pct\" > 0 AND \"global_config\".\"max_portfolio_exposure_pct\" <= 1"
+        },
+        "global_config_drawdown_kill_threshold_range": {
+          "name": "global_config_drawdown_kill_threshold_range",
+          "value": "\"global_config\".\"drawdown_kill_threshold\" >= -1 AND \"global_config\".\"drawdown_kill_threshold\" <= 0"
+        },
+        "global_config_stale_quote_ms_range": {
+          "name": "global_config_stale_quote_ms_range",
+          "value": "\"global_config\".\"stale_quote_ms\" >= 0"
+        },
+        "global_config_gap_reject_pct_range": {
+          "name": "global_config_gap_reject_pct_range",
+          "value": "\"global_config\".\"gap_reject_pct\" >= 0 AND \"global_config\".\"gap_reject_pct\" <= 1"
+        },
+        "global_config_spread_limit_pct_us_range": {
+          "name": "global_config_spread_limit_pct_us_range",
+          "value": "\"global_config\".\"spread_limit_pct_us\" >= 0 AND \"global_config\".\"spread_limit_pct_us\" <= 1"
+        },
+        "global_config_spread_limit_pct_jp_range": {
+          "name": "global_config_spread_limit_pct_jp_range",
+          "value": "\"global_config\".\"spread_limit_pct_jp\" >= 0 AND \"global_config\".\"spread_limit_pct_jp\" <= 1"
+        },
+        "global_config_pullback_default_stop_pct_range": {
+          "name": "global_config_pullback_default_stop_pct_range",
+          "value": "\"global_config\".\"pullback_default_stop_pct\" < 0 AND \"global_config\".\"pullback_default_stop_pct\" >= -1"
+        },
+        "global_config_pullback_default_take_profit_pct_range": {
+          "name": "global_config_pullback_default_take_profit_pct_range",
+          "value": "\"global_config\".\"pullback_default_take_profit_pct\" > 0 AND \"global_config\".\"pullback_default_take_profit_pct\" <= 1"
+        },
+        "global_config_pullback_default_time_stop_days_range": {
+          "name": "global_config_pullback_default_time_stop_days_range",
+          "value": "\"global_config\".\"pullback_default_time_stop_days\" > 0 AND \"global_config\".\"pullback_default_time_stop_days\" <= ?"
+        },
+        "global_config_pullback_default_pullback_max_range": {
+          "name": "global_config_pullback_default_pullback_max_range",
+          "value": "\"global_config\".\"pullback_default_pullback_max\" <= 0 AND \"global_config\".\"pullback_default_pullback_max\" >= -1"
+        },
+        "global_config_pullback_default_pullback_min_range": {
+          "name": "global_config_pullback_default_pullback_min_range",
+          "value": "\"global_config\".\"pullback_default_pullback_min\" <= 0 AND \"global_config\".\"pullback_default_pullback_min\" >= -1"
+        },
+        "global_config_pullback_default_min_return_50d_range": {
+          "name": "global_config_pullback_default_min_return_50d_range",
+          "value": "\"global_config\".\"pullback_default_min_return_50d\" >= -1 AND \"global_config\".\"pullback_default_min_return_50d\" <= 10"
+        },
+        "global_config_pullback_default_k_atr_range": {
+          "name": "global_config_pullback_default_k_atr_range",
+          "value": "\"global_config\".\"pullback_default_k_atr\" > 0 AND \"global_config\".\"pullback_default_k_atr\" <= 10"
+        },
+        "global_config_pullback_default_pullback_window_order": {
+          "name": "global_config_pullback_default_pullback_window_order",
+          "value": "\"global_config\".\"pullback_default_pullback_min\" <= \"global_config\".\"pullback_default_pullback_max\""
+        },
+        "global_config_risk_base_per_trade_pct_range": {
+          "name": "global_config_risk_base_per_trade_pct_range",
+          "value": "\"global_config\".\"risk_base_per_trade_pct\" > 0 AND \"global_config\".\"risk_base_per_trade_pct\" <= 1"
+        },
+        "global_config_risk_dd_half_threshold_range": {
+          "name": "global_config_risk_dd_half_threshold_range",
+          "value": "\"global_config\".\"risk_dd_half_threshold\" < 0 AND \"global_config\".\"risk_dd_half_threshold\" >= -1"
+        },
+        "global_config_risk_dd_halt_threshold_range": {
+          "name": "global_config_risk_dd_halt_threshold_range",
+          "value": "\"global_config\".\"risk_dd_halt_threshold\" < 0 AND \"global_config\".\"risk_dd_halt_threshold\" >= -1"
+        },
+        "global_config_risk_dd_threshold_order": {
+          "name": "global_config_risk_dd_threshold_order",
+          "value": "\"global_config\".\"risk_dd_halt_threshold\" <= \"global_config\".\"risk_dd_half_threshold\""
+        },
+        "global_config_vix_warning_threshold_range": {
+          "name": "global_config_vix_warning_threshold_range",
+          "value": "\"global_config\".\"vix_warning_threshold\" > 0 AND \"global_config\".\"vix_warning_threshold\" <= 200"
+        },
+        "global_config_vix_critical_threshold_range": {
+          "name": "global_config_vix_critical_threshold_range",
+          "value": "\"global_config\".\"vix_critical_threshold\" > 0 AND \"global_config\".\"vix_critical_threshold\" <= 200"
+        },
+        "global_config_vix_threshold_order": {
+          "name": "global_config_vix_threshold_order",
+          "value": "\"global_config\".\"vix_warning_threshold\" <= \"global_config\".\"vix_critical_threshold\""
+        },
+        "global_config_vix_warning_size_scale_range": {
+          "name": "global_config_vix_warning_size_scale_range",
+          "value": "\"global_config\".\"vix_warning_size_scale\" >= 0 AND \"global_config\".\"vix_warning_size_scale\" <= 1"
+        }
+      }
+    },
+    "inverse_pairs": {
+      "name": "inverse_pairs",
+      "columns": {
+        "symbol": {
+          "name": "symbol",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "inverse": {
+          "name": "inverse",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "macro_event_calendar": {
+      "name": "macro_event_calendar",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "event_type": {
+          "name": "event_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_date": {
+          "name": "event_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_time": {
+          "name": "event_time",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(datetime('now'))"
+        }
+      },
+      "indexes": {
+        "macro_event_calendar_type_date_unique": {
+          "name": "macro_event_calendar_type_date_unique",
+          "columns": [
+            "event_type",
+            "event_date"
+          ],
+          "isUnique": true
+        },
+        "macro_event_calendar_date_idx": {
+          "name": "macro_event_calendar_date_idx",
+          "columns": [
+            "event_date"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "notification_emit_log": {
+      "name": "notification_emit_log",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "timestamp": {
+          "name": "timestamp",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "event_type": {
+          "name": "event_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "severity": {
+          "name": "severity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "symbol": {
+          "name": "symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cause": {
+          "name": "cause",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "message": {
+          "name": "message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "notification_emit_log_timestamp_id_idx": {
+          "name": "notification_emit_log_timestamp_id_idx",
+          "columns": [
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "notification_emit_log_severity_timestamp_id_idx": {
+          "name": "notification_emit_log_severity_timestamp_id_idx",
+          "columns": [
+            "severity",
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "notification_emit_log_event_type_timestamp_id_idx": {
+          "name": "notification_emit_log_event_type_timestamp_id_idx",
+          "columns": [
+            "event_type",
+            "timestamp",
+            "id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "portfolio_equity_snapshot": {
+      "name": "portfolio_equity_snapshot",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "snapshot_at": {
+          "name": "snapshot_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "daily_start_equity_usd": {
+          "name": "daily_start_equity_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "daily_start_equity_jpy": {
+          "name": "daily_start_equity_jpy",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "daily_realized_pnl_usd": {
+          "name": "daily_realized_pnl_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "daily_realized_pnl_jpy": {
+          "name": "daily_realized_pnl_jpy",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "drawdown_pct": {
+          "name": "drawdown_pct",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "portfolio_equity_snapshot_at_idx": {
+          "name": "portfolio_equity_snapshot_at_idx",
+          "columns": [
+            "snapshot_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "strategy_decision_log": {
+      "name": "strategy_decision_log",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "timestamp": {
+          "name": "timestamp",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "symbol": {
+          "name": "symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "price": {
+          "name": "price",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "indicators_json": {
+          "name": "indicators_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "client_order_id": {
+          "name": "client_order_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "strategy_decision_log_symbol_id_idx": {
+          "name": "strategy_decision_log_symbol_id_idx",
+          "columns": [
+            "symbol",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "strategy_decision_log_coid_idx": {
+          "name": "strategy_decision_log_coid_idx",
+          "columns": [
+            "client_order_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "symbol_config": {
+      "name": "symbol_config",
+      "columns": {
+        "symbol": {
+          "name": "symbol",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "market": {
+          "name": "market",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'USD'"
+        },
+        "active": {
+          "name": "active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "max_notional": {
+          "name": "max_notional",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "time_stop_days_override": {
+          "name": "time_stop_days_override",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "k_atr_override": {
+          "name": "k_atr_override",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "symbol_config_currency_enum": {
+          "name": "symbol_config_currency_enum",
+          "value": "\"symbol_config\".\"currency\" IN ('USD', 'JPY')"
+        },
+        "symbol_config_time_stop_days_override_range": {
+          "name": "symbol_config_time_stop_days_override_range",
+          "value": "\"symbol_config\".\"time_stop_days_override\" IS NULL OR (\"symbol_config\".\"time_stop_days_override\" >= 1 AND \"symbol_config\".\"time_stop_days_override\" <= ?)"
+        },
+        "symbol_config_k_atr_override_range": {
+          "name": "symbol_config_k_atr_override_range",
+          "value": "\"symbol_config\".\"k_atr_override\" IS NULL OR (\"symbol_config\".\"k_atr_override\" >= 0.5 AND \"symbol_config\".\"k_atr_override\" <= 5.0)"
+        }
+      }
+    },
+    "trade_journal": {
+      "name": "trade_journal",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "timestamp": {
+          "name": "timestamp",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "trade_event_type": {
+          "name": "trade_event_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "client_order_id": {
+          "name": "client_order_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "order_id": {
+          "name": "order_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "symbol": {
+          "name": "symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "strategy_name": {
+          "name": "strategy_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "signal_action": {
+          "name": "signal_action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "signal_reason": {
+          "name": "signal_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "risk_allowed": {
+          "name": "risk_allowed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "risk_reasons": {
+          "name": "risk_reasons",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "side": {
+          "name": "side",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "limit_price": {
+          "name": "limit_price",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "notional": {
+          "name": "notional",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "latency_ms": {
+          "name": "latency_ms",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "broker_status": {
+          "name": "broker_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "mode": {
+          "name": "mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "submitted": {
+          "name": "submitted",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "filled_qty": {
+          "name": "filled_qty",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "filled_price": {
+          "name": "filled_price",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "realized_pnl": {
+          "name": "realized_pnl",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "hold_days": {
+          "name": "hold_days",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "exit_reason": {
+          "name": "exit_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_class": {
+          "name": "error_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error_message": {
+          "name": "error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "state_applied_at": {
+          "name": "state_applied_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "state_apply_error": {
+          "name": "state_apply_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "state_apply_attempts": {
+          "name": "state_apply_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "trading_toggle_history": {
+      "name": "trading_toggle_history",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "timestamp": {
+          "name": "timestamp",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "actor": {
+          "name": "actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "before": {
+          "name": "before",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "after": {
+          "name": "after",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}
