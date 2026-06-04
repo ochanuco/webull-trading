@@ -2113,6 +2113,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     kAtrOverride?: unknown
     budget_alloc_pct?: unknown
     budgetAllocPct?: unknown
+    lot_size?: unknown
+    lotSize?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2150,6 +2152,9 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     100,
   )
   const budgetAllocPct = budgetAllocPctRaw === null ? null : budgetAllocPctRaw / 100
+  // 売買単位は **入力必須** (空欄/未指定はエラー)。fallback しない (#symbol-lot-size)。
+  // 整数 1-100000 (JP 個別株=100 / ETF=1 / US=1 を想定、上限は防御的に広め)。
+  const lotSize = parseRequiredIntegerInRange(raw.lot_size ?? raw.lotSize, 'lotSize', 1, 100_000)
   return {
     symbol,
     name,
@@ -2161,7 +2166,41 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     timeStopDaysOverride,
     kAtrOverride,
     budgetAllocPct,
+    lotSize,
   }
+}
+
+/**
+ * 必須 integer in [min,max]。空文字 / undefined / null は **エラー** (fallback
+ * しない、#symbol-lot-size)。売買単位 lot_size の受け口。
+ */
+function parseRequiredIntegerInRange(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): number {
+  const invalid = () => {
+    throw new ValidationError(`${field} is required and must be an integer between ${min} and ${max}`, {
+      field,
+    })
+  }
+  if (value === undefined || value === null) invalid()
+  let parsed: number
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed === '') invalid()
+    parsed = Number(trimmed)
+  } else if (typeof value === 'number') {
+    parsed = value
+  } else {
+    invalid()
+    return 0 // unreachable (invalid throws), satisfies type checker
+  }
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min || parsed > max) {
+    invalid()
+  }
+  return parsed
 }
 
 function normalizeSymbol(value: unknown): string {

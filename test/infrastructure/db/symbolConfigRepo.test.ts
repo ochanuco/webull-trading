@@ -233,6 +233,7 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   timeStopDaysOverride: null,
   kAtrOverride: null,
   budgetAllocPct: null,
+  lotSize: 1,
 })
 
 describe('setInversePair', () => {

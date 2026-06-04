@@ -121,6 +121,15 @@ export const symbolConfig = sqliteTable(
      * SQLite ALTER 制約で付けず admin parse + 将来 rebuild で担保。
      */
     budgetAllocPct: real('budget_alloc_pct'),
+    /**
+     * 売買単位 (1 注文の最小ロット = 1単元の株数 / ETF の口数)。NULL = 未設定。
+     * **fallback しない**: cron sizing は NULL を fail-closed (発注見送り) として扱う
+     * (誤った blanket 100/1 で過大・過小発注しないため #symbol-lot-size)。US 株/ETF・
+     * JP ETF は通常 1、JP 個別株は 100。フォームは Yahoo `quoteType`/market から推奨値を
+     * プリフィルするが、確定値は手入力必須。range CHECK は SQLite ALTER 制約を避け
+     * admin parse + 将来 rebuild で担保 (budget_alloc_pct と同方針)。
+     */
+    lotSize: integer('lot_size'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

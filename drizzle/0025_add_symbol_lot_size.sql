@@ -1,0 +1,1 @@
+ALTER TABLE `symbol_config` ADD `lot_size` integer;
