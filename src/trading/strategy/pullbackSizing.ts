@@ -9,12 +9,25 @@ export interface PullbackSizingInput {
   /** Optional symbol-specific absolute notional cap. */
   symbolCap?: number
   /**
-   * Per-symbol budget allocation fraction of NAV (0..1)。指定されると **fixed-%
-   * 配分モード**になり risk-% / ATR floor を bypass して
-   * `notional = min(equity * budgetAllocPct, symbolCap)` で sizing する (#budget-alloc)。
+   * Per-symbol budget allocation fraction (0..1)。指定されると **fixed-% 配分モード**に
+   * なり risk-% / ATR floor を bypass して、**口座(円)単一プール**に対する割合で sizing
+   * する (#budget-jpy-base-fx)。
+   *   targetSymbolCcy = (budgetBasisJpy * budgetAllocPct) / fxJpyPerSymbolCcy
+   *   notional = min(targetSymbolCcy, symbolCap) → floor(/price) → lot
    * 小口座で risk-% sizing が 0 株になる高額レバ ETF 用。NULL は従来の risk sizing。
    */
   budgetAllocPct?: number
+  /**
+   * 予算配分モードの基準額 = 口座総額 (円)。`total_capital_jpy` を流用。
+   * budgetAllocPct 指定時に必須 (finite>0 でなければ fail-closed)。
+   */
+  budgetBasisJpy?: number
+  /**
+   * 1 単位の symbol 通貨 = 何円か (JPY 銘柄=1、USD 銘柄=USD/JPY レート)。
+   * budgetAllocPct 指定時に必須 (finite>0 でなければ fail-closed)。USD で FX 取得
+   * 失敗 (null) のときは呼び出し側が未指定にして fail-closed させる。
+   */
+  fxJpyPerSymbolCcy?: number
   /** Risk fraction of NAV per trade. Default 0.004 (0.4%). */
   riskPerTradePct?: number
   /** ATR floor ratio. If atr20 < baselineAtr20 * this, size is halved. Default 0.5. */
@@ -79,26 +92,38 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   let riskBudget: number | undefined
 
   if (input.budgetAllocPct !== undefined) {
-    // === fixed-% 予算配分モード (#budget-alloc) ===
-    // notional = min(equity * pct, symbolCap)。risk-% / ATR floor は使わない。
-    // 小口座で高額レバ ETF を「予算の N%」で建てるための path。
+    // === fixed-% 予算配分モード (#budget-jpy-base-fx) ===
+    // 口座(円)単一プールに対する割合で sizing。risk-% / ATR floor は使わない。
+    //   targetSymbolCcy = (budgetBasisJpy * pct) / fxJpyPerSymbolCcy
+    //   notional = min(targetSymbolCcy, symbolCap)
+    // 小口座で高額レバ ETF を「口座の N%」で建てるための path。
     //
-    // budgetAllocPct が「指定済み」なら厳密検証して fail-closed。NaN / <=0 / >1 の
-    // 不正値で risk-% にフォールバックすると想定外サイジングになるため (CodeRabbit
-    // #405)、ここで 0 qty 返却して止める (loadSymbolConfig は 0<pct<=1 のみ通すが
-    // 二重防御)。
+    // budgetAllocPct / budgetBasisJpy / fxJpyPerSymbolCcy のいずれかが不正なら
+    // **fail-closed (0 qty)**。risk-% へ fallback すると想定外サイジングになるため、
+    // また USD で FX 取得失敗 (fxJpyPerSymbolCcy 未指定/非有限) のときも発注しない。
     if (!Number.isFinite(input.budgetAllocPct) || input.budgetAllocPct <= 0 || input.budgetAllocPct > 1) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
+    }
+    if (
+      input.budgetBasisJpy === undefined ||
+      !Number.isFinite(input.budgetBasisJpy) ||
+      input.budgetBasisJpy <= 0 ||
+      input.fxJpyPerSymbolCcy === undefined ||
+      !Number.isFinite(input.fxJpyPerSymbolCcy) ||
+      input.fxJpyPerSymbolCcy <= 0
+    ) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
     }
     if (!Number.isFinite(input.entryPrice) || input.entryPrice <= 0) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop' }
     }
-    const rawNotional = input.equity * input.budgetAllocPct
-    if (!Number.isFinite(rawNotional) || rawNotional <= 0) {
+    // 口座円 × pct を symbol 通貨に換算 (JPY 銘柄は fx=1 で素通り)。
+    const targetSymbolCcy = (input.budgetBasisJpy * input.budgetAllocPct) / input.fxJpyPerSymbolCcy
+    if (!Number.isFinite(targetSymbolCcy) || targetSymbolCcy <= 0) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
     }
-    let target = rawNotional
-    // %優先・絶対上限は安全弁: min(予算×%, symbolCap)。
+    let target = targetSymbolCcy
+    // %優先・絶対上限は安全弁: min(換算後 target, symbolCap)。
     if (input.symbolCap !== undefined && target > input.symbolCap) {
       target = input.symbolCap
       capped = true

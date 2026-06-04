@@ -6893,7 +6893,7 @@ function symbolsListBody(args: {
       const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
       const budgetCell = `<div style="display:flex;align-items:center;gap:6px;min-width:170px">
           <input type="range" name="pct_${esc(r.symbol)}" form="symbol-budget-form" min="0" max="100" step="5" value="${allocPctNum}"
-            data-symbol="${esc(r.symbol)}" data-currency="${esc(r.currency)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
+            data-symbol="${esc(r.symbol)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
             oninput="window.onBudgetSlide(this)" style="width:110px;vertical-align:middle">
           <span id="budget-label-${esc(r.symbol)}" class="muted" style="font-size:12px;width:42px;text-align:right;font-variant-numeric:tabular-nums">${allocPctNum === 0 ? 'risk' : allocPctNum + '%'}</span>
         </div>`
@@ -6956,7 +6956,6 @@ function symbolsListBody(args: {
       .filter((r) => r.budgetAllocPct != null && r.budgetAllocPct > 0)
       .map((r) => ({
         s: r.symbol.toUpperCase(),
-        ccy: r.currency,
         pct: Math.round((r.budgetAllocPct as number) * 1000) / 10,
         inv: inversePairs[r.symbol.toUpperCase()] ?? null,
       })),
@@ -7001,16 +7000,17 @@ const BUDGET_LADDER_JS = `
     // filter で非表示の銘柄の配分が meter から欠落しないようにするため (CodeRabbit #405)。
     var bySym = {};
     (window.__budgetBaseline || []).forEach(function (b) {
-      if (b.pct > 0) bySym[b.s] = { ccy: b.ccy, pct: b.pct, inv: b.inv };
+      if (b.pct > 0) bySym[b.s] = { pct: b.pct, inv: b.inv };
     });
     var sliders = document.querySelectorAll('input[name^="pct_"]');
     sliders.forEach(function (s) {
       var sym = s.getAttribute('data-symbol');
       var v = Number(s.value);
-      if (v > 0) bySym[sym] = { ccy: s.getAttribute('data-currency'), pct: v, inv: s.getAttribute('data-inverse') };
+      if (v > 0) bySym[sym] = { pct: v, inv: s.getAttribute('data-inverse') };
       else delete bySym[sym]; // 0 にした表示中銘柄は除外 (baseline 値で復活させない)
     });
-    var usage = {};
+    // 口座(円)単一プールに対する使用率を 1 本で合算。インバース対は max を1回計上。
+    var used = 0;
     var counted = {};
     Object.keys(bySym).forEach(function (sym) {
       var e = bySym[sym];
@@ -7019,22 +7019,18 @@ const BUDGET_LADDER_JS = `
         if (counted[key]) return;
         counted[key] = true;
         var invPct = bySym[e.inv] ? bySym[e.inv].pct : 0;
-        usage[e.ccy] = (usage[e.ccy] || 0) + Math.max(e.pct, invPct);
+        used += Math.max(e.pct, invPct);
       } else {
-        usage[e.ccy] = (usage[e.ccy] || 0) + e.pct;
+        used += e.pct;
       }
     });
-    var ccys = ['USD', 'JPY'].filter(function (c) { return (usage[c] || 0) > 0; });
-    // sticky バー内のコンパクトゲージ (確定ボタン横、同時建玉ベース)。
-    barMeter.innerHTML = ccys.map(function (ccy) {
-      var u = usage[ccy] || 0;
-      var w = Math.min(100, u);
-      var col = u > 100 ? '#c22' : u > 80 ? '#b25000' : '#057a55';
-      return '<span title="同時建玉ベースの予算使用率 (インバース対は max を1回計上)" style="display:flex;align-items:center;gap:6px;font-size:12px;flex:1;min-width:0">'
-        + '<span class="muted" style="white-space:nowrap">' + ccy + '</span>'
-        + '<span class="bar-track" style="flex:1;min-width:40px;height:8px"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
-        + '<span style="font-variant-numeric:tabular-nums;color:' + col + ';white-space:nowrap">' + u.toFixed(0) + '%' + (u > 100 ? '⚠' : '') + '</span></span>';
-    }).join('');
+    if (used <= 0) { barMeter.innerHTML = ''; return; }
+    var w = Math.min(100, used);
+    var col = used > 100 ? '#c22' : used > 80 ? '#b25000' : '#057a55';
+    barMeter.innerHTML = '<span title="同時建玉ベースの口座(円)予算使用率 (インバース対は max を1回計上)" style="display:flex;align-items:center;gap:6px;font-size:12px;flex:1;min-width:0">'
+      + '<span class="muted" style="white-space:nowrap">口座予算</span>'
+      + '<span class="bar-track" style="flex:1;min-width:40px;height:8px"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
+      + '<span style="font-variant-numeric:tabular-nums;color:' + col + ';white-space:nowrap">' + used.toFixed(0) + '% / 100%' + (used > 100 ? ' ⚠超過' : '') + '</span></span>';
   };
 `
 
@@ -7051,34 +7047,34 @@ function budgetLadderControls(): string {
 }
 
 /**
- * #budget-alloc: 同時建玉ベースの予算使用率 (per currency, %)。
- * インバース対は同時に片方しか建たないので max(両側) で1回だけ計上、
- * standalone と別ペアは加算。total_capital に対する「最大同時コミット率」。
+ * #budget-jpy-base-fx: 同時建玉ベースの口座(円)予算使用率 (単一 %)。
+ * budget_alloc_pct は通貨に関係なく「口座(円)全体に対する割合」なので、通貨で分けず
+ * 1 本に合算する。インバース対は同時に片方しか建たないので max(両側) で1回だけ計上、
+ * standalone と別ペアは加算 = 「口座に対する最大同時コミット率 (%)」。
  */
 export function computeBudgetUsage(
-  rows: Array<{ symbol: string; currency: string; budgetAllocPct: number | null }>,
+  rows: Array<{ symbol: string; budgetAllocPct: number | null }>,
   inversePairs: Record<string, string>,
-): Record<string, number> {
-  const pctBySym = new Map<string, { currency: string; pct: number }>()
+): number {
+  const pctBySym = new Map<string, number>()
   for (const r of rows) {
     const pct = r.budgetAllocPct != null && r.budgetAllocPct > 0 ? r.budgetAllocPct * 100 : 0
-    if (pct > 0) pctBySym.set(r.symbol.toUpperCase(), { currency: r.currency, pct })
+    if (pct > 0) pctBySym.set(r.symbol.toUpperCase(), pct)
   }
-  const usage: Record<string, number> = {}
+  let used = 0
   const countedPair = new Set<string>()
-  for (const [sym, { currency, pct }] of pctBySym) {
+  for (const [sym, pct] of pctBySym) {
     const inv = inversePairs[sym]
     if (inv) {
       const key = [sym, inv].sort().join('|')
       if (countedPair.has(key)) continue
       countedPair.add(key)
-      const invPct = pctBySym.get(inv)?.pct ?? 0
-      usage[currency] = (usage[currency] ?? 0) + Math.max(pct, invPct)
+      used += Math.max(pct, pctBySym.get(inv) ?? 0)
     } else {
-      usage[currency] = (usage[currency] ?? 0) + pct
+      used += pct
     }
   }
-  return usage
+  return used
 }
 
 /**
@@ -7317,8 +7313,8 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <label>予算配分 <span class="muted" style="font-size:11px">(%)</span></label>
     <div>
       <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で risk-% sizing" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% of 総資本</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">指定すると <strong>1 注文 = 総資本 (<code>total_capital</code>) × この%</strong> で sizing (risk-% sizing を bypass)。小口座で高額レバ ETF を建てる用。上限は <code>min(予算×%, 1注文上限)</code>。空欄なら従来の risk-% sizing。</p>
+      <span class="muted" style="font-size:12px;margin-left:6px">% of 口座(円)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">指定すると <strong>1 注文 = 口座総額 (<code>total_capital_jpy</code>) × この%</strong> で sizing (risk-% を bypass)。USD 銘柄は USD/JPY レートで自動換算 (レート取得失敗時は発注見送り = fail-closed)。上限は <code>min(予算×%, 1注文上限)</code>。空欄なら従来の risk-% sizing。</p>
     </div>
     <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
     <div>

@@ -60,10 +60,19 @@ export interface PullbackSchedulerOptions {
   lotSize?: number
   /**
    * symbol → budget_alloc_pct (0<pct<=1)。指定 symbol は fixed-% 配分 sizing
-   * (notional = min(equity * pct, symbolCap)) に切替わる (#budget-alloc)。
+   * (口座(円)単一プールに対する割合) に切替わる (#budget-jpy-base-fx)。
    * 未指定 symbol は従来の risk-% sizing。
    */
   symbolBudgetAllocPctMap?: Record<string, number>
+  /**
+   * 予算配分の基準額 = 口座総額 (円、`total_capital_jpy`)。budget 銘柄の sizing 基準。
+   */
+  budgetBasisJpy?: number
+  /**
+   * この run の symbol 通貨 1 単位 = 何円か (JPY run=1、USD run=USD/JPY レート)。
+   * USD で FX 取得失敗時は undefined を渡し、budget 銘柄を fail-closed させる。
+   */
+  fxJpyPerSymbolCcy?: number
   /**
    * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
    * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
@@ -450,6 +459,8 @@ export async function runPullbackScheduler(
         lotSize: options.lotSize,
         kAtr: rule.kAtr,
         budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
+        budgetBasisJpy: options.budgetBasisJpy,
+        fxJpyPerSymbolCcy: options.fxJpyPerSymbolCcy,
       })
       if (sizing.quantity <= 0) {
         const reason = buildSizingRejectReason(sizing, {
