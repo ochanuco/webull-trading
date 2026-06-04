@@ -413,6 +413,39 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     expect(reject?.reason).toContain('bid/ask missing')
   })
 
+  it('places a BUY when bid/ask is missing but the source lacks it (Yahoo, #411 案A)', async () => {
+    // TQQQ 再現: Yahoo feed は price のみで bid/ask 無し → spread guard を適用外に
+    // して通す (fail-closed しない)。console.warn の skip ログは抑制。
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const state: SymbolState = {
+        ...emptySymbolState('AAPL', () => now),
+        lastQuote: {
+          price: 118,
+          asOf: now.toISOString(),
+          fetchedAt: now.toISOString(),
+          source: 'yahoo-snapshot',
+          bid: undefined,
+          ask: undefined,
+        },
+      }
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['AAPL'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({ AAPL: state }),
+        execution,
+        perSymbolRisk: baseRiskConfig,
+        now: () => now,
+      })
+      expect(summary.buys).toBe(1)
+      expect(execution.calls).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('rejects BUY when inverseState shows an open position', async () => {
     const inverse: SymbolState = {
       ...emptySymbolState('SQQQ', () => now),
