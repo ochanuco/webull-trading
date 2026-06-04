@@ -334,6 +334,15 @@ export interface Env {
 }
 
 
+// #415: Account Balance endpoint path override (append at end)。買付余力 pool
+// pre-trade ゲート用。default v1 `/openapi/account/balance` (JP probe で 200 確認)。
+// `WEBULL_TRADE_VERSION=v2` 運用なら `/openapi/assets/balance` を指定する (同 shape)。
+// 未設定 / 空 / `/` 始まりでない値は fallback (絶対 URL 注入防止)。
+export interface Env {
+  WEBULL_PATH_ACCOUNT_BALANCE?: string
+}
+
+
 // #258: trade/account routes に送る x-version ヘッダ値の env override
 // (append at end)。default 'v1' (= 現行挙動)。新 OpenAPI docs では v2 必須化
 // の方向だが、旧 path も v1 alias で受理されてるので staging で env 切替えて
