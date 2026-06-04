@@ -6888,6 +6888,15 @@ function symbolsListBody(args: {
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
+      // 予算配分 ladder slider (#budget-alloc): 5%刻み。確定するまで client 側で仮調整、
+      // form="symbol-budget-form" で一括 POST。inverse 相手は JS が同期する。
+      const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
+      const budgetCell = `<div style="display:flex;align-items:center;gap:6px;min-width:170px">
+          <input type="range" name="pct_${esc(r.symbol)}" form="symbol-budget-form" min="0" max="100" step="5" value="${allocPctNum}"
+            data-symbol="${esc(r.symbol)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
+            oninput="window.onBudgetSlide(this)" style="width:110px;vertical-align:middle">
+          <span id="budget-label-${esc(r.symbol)}" class="muted" style="font-size:12px;width:42px;text-align:right;font-variant-numeric:tabular-nums">${allocPctNum === 0 ? 'risk' : allocPctNum + '%'}</span>
+        </div>`
       // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
       // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
       // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
@@ -6912,6 +6921,7 @@ function symbolsListBody(args: {
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${maxNotionalCell}</td>
+        <td>${budgetCell}</td>
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
@@ -6932,12 +6942,56 @@ function symbolsListBody(args: {
       <th>銘柄名</th>
       <th>市場/通貨</th>
       <th>1注文上限</th>
+      <th>予算配分</th>
       <th>メモ</th>
       <th>更新日</th>
       <th>操作</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${budgetLadderControls()}
+  <script>${BUDGET_LADDER_JS}</script>`
+}
+
+// #budget-alloc ladder の client JS: slider 移動でラベル更新 + インバース相手の
+// slider を同値に同期 + 「未確定」バーを表示。保存は確定ボタン押下の form POST のみ
+// (即保存しない = 確定するまで仮)。
+const BUDGET_LADDER_JS = `
+  window.__budgetDirty = {};
+  window.__fmtBudget = function (v) { return Number(v) <= 0 ? 'risk' : v + '%'; };
+  window.__setBudgetSlider = function (sym, v) {
+    var sl = document.querySelector('input[name="pct_' + sym + '"]');
+    var lb = document.getElementById('budget-label-' + sym);
+    if (sl) sl.value = v;
+    if (lb) lb.textContent = window.__fmtBudget(v);
+  };
+  window.onBudgetSlide = function (el) {
+    var sym = el.getAttribute('data-symbol');
+    var inv = el.getAttribute('data-inverse');
+    var v = el.value;
+    var lb = document.getElementById('budget-label-' + sym);
+    if (lb) lb.textContent = window.__fmtBudget(v);
+    // インバース対は同値に同期 (#315 regime hedge)。相手 slider が一覧に在れば揃える。
+    if (inv) window.__setBudgetSlider(inv, v);
+    window.__budgetDirty[sym] = true;
+    if (inv) window.__budgetDirty[inv] = true;
+    var bar = document.getElementById('symbol-budget-bar');
+    var note = document.getElementById('symbol-budget-dirty');
+    if (bar) bar.style.display = 'flex';
+    if (note) note.textContent = Object.keys(window.__budgetDirty).length + ' 銘柄を変更中';
+  };
+`
+
+/** 予算配分 ladder の確定 / 取消 バー。slider は form attr で此処の form に紐づく。 */
+function budgetLadderControls(): string {
+  return `<form id="symbol-budget-form" method="post" action="/admin/symbol-config/budget-alloc"></form>
+  <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,0.06)">
+    <strong style="font-size:13px">予算配分の変更（未確定）</strong>
+    <span id="symbol-budget-dirty" class="muted" style="font-size:12px"></span>
+    <span style="flex:1"></span>
+    <a href="/dashboard/symbols" style="padding:5px 12px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">取消</a>
+    <button type="submit" form="symbol-budget-form" style="padding:5px 14px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">確定して保存</button>
+  </div>`
 }
 
 /**

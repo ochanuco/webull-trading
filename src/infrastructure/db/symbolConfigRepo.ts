@@ -287,6 +287,29 @@ export async function toggleSymbolActive(
 }
 
 /**
+ * budget_alloc_pct だけを更新する focused update (#budget-alloc ラダー調整用)。
+ * `pct` は fraction (0<pct<=1) or null (= risk-% sizing に戻す)。存在しなければ null。
+ * before/after を返し caller が audit / inverse 同期に使う。
+ */
+export async function updateBudgetAllocPct(
+  db: DrizzleD1Database,
+  symbol: string,
+  pct: number | null,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  await db
+    .update(symbolConfig)
+    .set({ budgetAllocPct: pct, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
+}
+
+/**
  * Hard delete。inactive (active=false) 行のみ削除可、active 行は削除拒否
  * ({ rejected: 'still_active' } 返却)。
  *

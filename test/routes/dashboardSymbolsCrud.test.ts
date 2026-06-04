@@ -907,6 +907,53 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toMatch(/name="budget_alloc_pct"[^>]*value="40"/)
   })
 
+  it('list renders budget-allocation ladder slider + confirm button (tentative until 確定)', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', budgetAllocPct: 0.4 })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    // slider が form="symbol-budget-form" に紐づき、現在値 40 が反映
+    expect(body).toContain('name="pct_SOXL"')
+    expect(body).toContain('form="symbol-budget-form"')
+    expect(body).toMatch(/name="pct_SOXL"[^>]*value="40"/)
+    // 確定ボタン (即保存しない)
+    expect(body).toContain('確定して保存')
+    expect(body).toContain('action="/admin/symbol-config/budget-alloc"')
+  })
+
+  it('bulk budget-alloc POST converts % → fraction (÷100), 303', async () => {
+    let lastSetPct: number | null | undefined
+    // chain mock: from() は await で [] (loadInversePairs)、where().limit() で
+    // SOXL 行 (findSymbolConfig)、update().set().where() で set 値を捕捉。
+    const chain: Record<string, unknown> = {}
+    chain.from = () => chain
+    chain.where = () => chain
+    chain.limit = async () => [{ symbol: 'SOXL', budgetAllocPct: null }]
+    chain.then = (resolve: (v: unknown[]) => unknown) => Promise.resolve([]).then(resolve)
+    vi.mocked(createDb).mockReturnValue({
+      select: () => chain,
+      update: () => ({
+        set: (vals: { budgetAllocPct: number | null }) => ({
+          where: async () => {
+            lastSetPct = vals.budgetAllocPct
+          },
+        }),
+      }),
+      insert: () => ({ values: async () => undefined }),
+    } as never)
+    const app = createApp()
+    const form = new URLSearchParams({ pct_SOXL: '40' })
+    const res = await app.request(
+      '/admin/symbol-config/budget-alloc',
+      { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.toString() },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/dashboard/symbols')
+    expect(lastSetPct).toBeCloseTo(0.4, 6)
+  })
+
   it('new form inputs carry password-manager opt-out (data-1p-ignore)', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
