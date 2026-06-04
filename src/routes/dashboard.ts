@@ -2778,11 +2778,13 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   total_capital_usd: {
     label: '運用資本 (USD)',
-    detail: 'US 株に割り当てる運用資金 (ドル)。この金額を元に 1 回のリスク額や保有上限を計算します。',
+    detail:
+      'risk-% sizing (stop 距離ベース) の US 株 equity 基準 (ドル)。budget配分% (budget_alloc_pct) 指定銘柄は通貨に関係なく total_capital_jpy 単一プールを使うため、こちらは不要 (USD risk-% 銘柄がある時のみ設定)。',
   },
   total_capital_jpy: {
-    label: '運用資本 (JPY)',
-    detail: '日本株に割り当てる運用資金 (円)。この金額を元に 1 回のリスク額や保有上限を計算します。',
+    label: '運用資本 (JPY / 口座総額)',
+    detail:
+      '口座の運用資本 (円)。budget配分% (budget_alloc_pct) 指定銘柄は通貨に関係なく **この円総額が単一プール基準** (USD 銘柄も USD/JPY で円換算して sizing、#407)。risk-% sizing の日本株 equity 基準も兼ねる。買付余力 pool ゲートの円換算基準でもある (#415)。',
   },
   max_portfolio_exposure_pct: {
     label: 'portfolio exposure 上限率 (比率)',
