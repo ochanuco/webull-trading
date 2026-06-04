@@ -28,6 +28,7 @@ import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
 import { recordPortfolioEquitySnapshot } from '../infrastructure/db/portfolioEquitySnapshotRepo'
 import {
   createSymbolPair,
+  type CounterpartMeta,
   deleteInversePairsForSymbol,
   findSymbolConfig,
   insertSymbolConfig,
@@ -1350,7 +1351,7 @@ export const admin = new Hono<AppBindings>()
         }
         return c.json({ error: 'inverse_self', symbol: input.symbol }, 400)
       }
-      const pair = await createSymbolPair(db, input, inverseSymbol, now)
+      const pair = await createSymbolPair(db, input, inverseSymbol, now, parseCounterpartMeta(body))
       if (pair.primary === 'duplicate') {
         if (isForm) {
           return c.redirect(
@@ -2120,6 +2121,25 @@ function parseInverseSymbolField(body: unknown): string | null {
   if (value === undefined || value === null) return null
   if (typeof value === 'string' && value.trim().length === 0) return null
   return normalizeSymbol(value)
+}
+
+/**
+ * 連動登録時の counterpart メタ (Yahoo lookup 由来、任意)。form の hidden field
+ * `inverse_name` / `inverse_market` / `inverse_currency` を拾い、counterpart の
+ * symbol_config に焼く (インバース銘柄名を一覧に出すため #315)。market/currency が
+ * 不正値なら undefined を返し createSymbolPair 側で primary 継承に倒す。
+ */
+function parseCounterpartMeta(body: unknown): CounterpartMeta {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return {}
+  const raw = body as { inverse_name?: unknown; inverse_market?: unknown; inverse_currency?: unknown }
+  const name =
+    typeof raw.inverse_name === 'string' && raw.inverse_name.trim().length > 0
+      ? raw.inverse_name.trim().slice(0, 256)
+      : null
+  const market = raw.inverse_market === 'US' || raw.inverse_market === 'JP' ? raw.inverse_market : undefined
+  const currency =
+    raw.inverse_currency === 'USD' || raw.inverse_currency === 'JPY' ? raw.inverse_currency : undefined
+  return { name, market, currency }
 }
 
 function parseMarket(value: unknown): 'US' | 'JP' {

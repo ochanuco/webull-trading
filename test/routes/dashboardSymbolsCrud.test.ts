@@ -838,6 +838,10 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       active: 'true',
       max_notional: '500',
       inverse_symbol: 'soxs',
+      // Yahoo pick 由来の counterpart メタ (一覧でインバース側の銘柄名を出す #315)
+      inverse_name: 'Direxion Daily Semiconductor Bear 3X Shares',
+      inverse_market: 'US',
+      inverse_currency: 'USD',
     })
     const res = await app.request(
       '/admin/symbol-config',
@@ -852,12 +856,28 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(res.headers.get('location')).toBe('/dashboard/symbols')
     // primary + counterpart の symbol_config が両方作られる
     expect(db.rows.map((r) => r.symbol).sort()).toEqual(['SOXL', 'SOXS'])
-    // counterpart は primary から market/currency を継承
+    // counterpart は Yahoo メタの銘柄名 / market / currency を焼く
     const soxs = db.rows.find((r) => r.symbol === 'SOXS')!
+    expect(soxs.name).toBe('Direxion Daily Semiconductor Bear 3X Shares')
     expect(soxs.market).toBe('US')
     expect(soxs.currency).toBe('USD')
     // inverse_pairs リンクが書かれる
     expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
+  })
+
+  it('new form inputs carry password-manager opt-out (data-1p-ignore)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // symbol / inverse 入力に 1Password / LastPass の autofill 抑止属性が付く
+    expect((body.match(/data-1p-ignore="true"/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect(body).toContain('name="inverse_name"')
   })
 
   it('POST with inverse_symbol equal to symbol → 303 error (inverse_self)', async () => {

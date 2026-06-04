@@ -382,11 +382,19 @@ export interface CreateSymbolPairResult {
   counterpartCreated: boolean
 }
 
+/** counterpart 銘柄のメタ (Yahoo lookup 由来)。未指定列は primary 継承 / name は null。 */
+export interface CounterpartMeta {
+  name?: string | null
+  market?: SymbolMarket
+  currency?: SymbolCurrency
+}
+
 /**
  * bull/bear を 1 フォームで対登録する (#315)。D1 batch で原子的に:
  *   1. primary symbol_config INSERT (重複は 'duplicate' を返す)
  *   2. counterpart symbol_config を INSERT ... ON CONFLICT DO NOTHING
- *      (market/currency/maxNotional は primary 継承、name/override は空)
+ *      (name/market/currency は counterpart メタ (Yahoo 由来) を優先、無ければ
+ *       market/currency は primary 継承・name は null。maxNotional は primary 継承)
  *   3. inverse_pairs リンク (1:1、既存リンクは buildInversePairWrite が掃除)
  *
  * primary が既存銘柄の場合は何も作らず 'duplicate' を返す (caller が 409/echo)。
@@ -396,6 +404,7 @@ export async function createSymbolPair(
   primary: SymbolConfigWriteInput,
   inverseSymbol: string,
   nowIso: string,
+  counterpartMeta: CounterpartMeta = {},
 ): Promise<CreateSymbolPairResult> {
   const primarySym = primary.symbol.trim().toUpperCase()
   const counterpartSym = inverseSymbol.trim().toUpperCase()
@@ -416,14 +425,16 @@ export async function createSymbolPair(
   const counterpartBefore = await findSymbolConfig(db, counterpartSym)
   const [delLink, insLink] = buildInversePairWrite(db, primarySym, counterpartSym, nowIso)
 
-  // counterpart を primary から継承して新規作成 (既存なら触らない)。
-  // name / override は空 (後で編集)。link 掃除 → counterpart 作成 → link 作成 の順。
+  // counterpart を新規作成 (既存なら触らない)。name/market/currency は Yahoo 由来
+  // メタを優先 (インバース銘柄名を一覧に出すため)、無ければ primary 継承。
+  // link 掃除 → counterpart 作成 → link 作成 の順。
   if (counterpartBefore === null) {
+    const counterpartName = counterpartMeta.name?.trim()
     const insCounterpart = db.insert(symbolConfig).values({
       symbol: counterpartSym,
-      name: null,
-      market: primary.market,
-      currency: primary.currency,
+      name: counterpartName && counterpartName.length > 0 ? counterpartName : null,
+      market: counterpartMeta.market ?? primary.market,
+      currency: counterpartMeta.currency ?? primary.currency,
       active: true,
       maxNotional: primary.maxNotional,
       notes: null,

@@ -7093,7 +7093,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
          <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
       : `<div>
            <div style="position:relative;display:inline-block">
-             <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px">
+             <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px">
              <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
            <p class="muted" style="margin:4px 0 0;font-size:11px">2 文字以上入力で Yahoo Finance から候補を suggest。click で銘柄 / 銘柄名 / 市場 / 通貨を自動入力。JP 銘柄は 4 桁数字 (例: 7203)。</p>
@@ -7128,8 +7128,11 @@ function symbolFormBody(args: SymbolFormArgs): string {
       : `<label id="symbol-form-inverse-label" style="display:none">インバース銘柄 <span class="muted" style="font-size:11px">(inverse)</span></label>
          <div id="symbol-form-inverse-row" style="display:none">
            <div style="position:relative;display:inline-block">
-             <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
+             <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
              <ul id="symbol-form-inverse-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+             <input type="hidden" name="inverse_name" id="symbol-form-inverse-name" value="">
+             <input type="hidden" name="inverse_market" id="symbol-form-inverse-market" value="">
+             <input type="hidden" name="inverse_currency" id="symbol-form-inverse-currency" value="">
            </div>
            <p class="muted" style="margin:4px 0 0;font-size:11px">bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成、市場 / 通貨 / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。銘柄欄と同じく Yahoo Finance から候補を suggest。</p>
          </div>`
@@ -7278,6 +7281,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
     window.pickInverseSuggest = function (m) {
       var inv = document.getElementById('symbol-form-inverse');
       if (inv) { inv.value = m.symbol; inv.focus(); }
+      // counterpart の銘柄名 / 市場 / 通貨を hidden field に焼く (#315: 一覧で
+      // インバース側の銘柄名を出すため。空 pick / 手動入力時は空のまま)。
+      var nm = document.getElementById('symbol-form-inverse-name');
+      var mk = document.getElementById('symbol-form-inverse-market');
+      var cur = document.getElementById('symbol-form-inverse-currency');
+      if (nm) nm.value = m.name || '';
+      if (mk) mk.value = m.market || '';
+      if (cur) cur.value = m.currency || '';
       window.hideInverseSuggest();
     };
     // 登録モード切替: 単体 / インバース対。inverse 欄の表示と required を制御。
