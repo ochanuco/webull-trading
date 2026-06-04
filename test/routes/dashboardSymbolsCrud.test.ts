@@ -1014,7 +1014,47 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 })
 
-import { orderRowsByPair, assignPairColors, pairRoles } from '../../src/routes/dashboard'
+import { orderRowsByPair, assignPairColors, pairRoles, computeBudgetUsage } from '../../src/routes/dashboard'
+
+describe('#budget-alloc computeBudgetUsage (concurrent-position meter)', () => {
+  const rec = (symbol: string, currency: string, budgetAllocPct: number | null) => ({ symbol, currency, budgetAllocPct })
+
+  it('counts an inverse pair once via max (only one side held at a time)', () => {
+    // SOXL 40% / SOXS 40% (synced) → pair contributes 40, not 80.
+    const usage = computeBudgetUsage(
+      [rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.4)],
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+    )
+    expect(usage.USD).toBeCloseTo(40, 6)
+  })
+
+  it('uses max when the two sides differ', () => {
+    const usage = computeBudgetUsage(
+      [rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.2)],
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+    )
+    expect(usage.USD).toBeCloseTo(40, 6)
+  })
+
+  it('adds standalone symbols and separate pairs; groups by currency', () => {
+    const usage = computeBudgetUsage(
+      [
+        rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.4), // pair → 40
+        rec('TQQQ', 'USD', 0.3), rec('SQQQ', 'USD', 0.3), // pair → 30
+        rec('AAPL', 'USD', 0.1), // standalone → 10
+        rec('1570', 'JPY', 0.5), rec('1357', 'JPY', 0.5), // JPY pair → 50
+      ],
+      { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ', '1570': '1357', '1357': '1570' },
+    )
+    expect(usage.USD).toBeCloseTo(80, 6) // 40+30+10
+    expect(usage.JPY).toBeCloseTo(50, 6)
+  })
+
+  it('ignores null / 0 allocations', () => {
+    const usage = computeBudgetUsage([rec('SOXL', 'USD', null), rec('AAPL', 'USD', 0)], {})
+    expect(usage.USD).toBeUndefined()
+  })
+})
 
 describe('#315 inverse-pair list grouping', () => {
   const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol })

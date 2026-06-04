@@ -6893,7 +6893,7 @@ function symbolsListBody(args: {
       const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
       const budgetCell = `<div style="display:flex;align-items:center;gap:6px;min-width:170px">
           <input type="range" name="pct_${esc(r.symbol)}" form="symbol-budget-form" min="0" max="100" step="5" value="${allocPctNum}"
-            data-symbol="${esc(r.symbol)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
+            data-symbol="${esc(r.symbol)}" data-currency="${esc(r.currency)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
             oninput="window.onBudgetSlide(this)" style="width:110px;vertical-align:middle">
           <span id="budget-label-${esc(r.symbol)}" class="muted" style="font-size:12px;width:42px;text-align:right;font-variant-numeric:tabular-nums">${allocPctNum === 0 ? 'risk' : allocPctNum + '%'}</span>
         </div>`
@@ -6934,7 +6934,8 @@ function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  return `${errorBanner}${filterBar}${headerBar}
+  const budgetMeter = renderBudgetMeter(computeBudgetUsage(rows, inversePairs))
+  return `${errorBanner}${filterBar}${headerBar}${budgetMeter}
   <table>
     <thead><tr>
       <th style="width:28px" title="インバース対のツリー表記"></th>
@@ -6979,8 +6980,80 @@ const BUDGET_LADDER_JS = `
     var note = document.getElementById('symbol-budget-dirty');
     if (bar) bar.style.display = 'flex';
     if (note) note.textContent = Object.keys(window.__budgetDirty).length + ' 銘柄を変更中';
+    window.__recomputeBudgetMeter();
+  };
+  // 同時建玉ベースの予算使用率を全 slider から再計算してメーターを再描画。
+  // インバース対は max を 1 回だけ計上 (片側のみ建つため)。
+  window.__recomputeBudgetMeter = function () {
+    var box = document.getElementById('symbol-budget-meter');
+    if (!box) return;
+    var sliders = document.querySelectorAll('input[name^="pct_"]');
+    var bySym = {};
+    sliders.forEach(function (s) {
+      var v = Number(s.value);
+      if (v > 0) bySym[s.getAttribute('data-symbol')] = { ccy: s.getAttribute('data-currency'), pct: v, inv: s.getAttribute('data-inverse') };
+    });
+    var usage = {};
+    var counted = {};
+    Object.keys(bySym).forEach(function (sym) {
+      var e = bySym[sym];
+      if (e.inv) {
+        var key = [sym, e.inv].sort().join('|');
+        if (counted[key]) return;
+        counted[key] = true;
+        var invPct = bySym[e.inv] ? bySym[e.inv].pct : 0;
+        usage[e.ccy] = (usage[e.ccy] || 0) + Math.max(e.pct, invPct);
+      } else {
+        usage[e.ccy] = (usage[e.ccy] || 0) + e.pct;
+      }
+    });
+    var ccys = ['USD', 'JPY'].filter(function (c) { return (usage[c] || 0) > 0; });
+    if (ccys.length === 0) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    var html = '<div class="muted" style="font-size:11px;margin-bottom:4px">インバース対は片側のみ建つため max を 1 回計上。total_capital に対する最大同時コミット率。</div>';
+    ccys.forEach(function (ccy) {
+      var used = usage[ccy] || 0;
+      var w = Math.min(100, used);
+      var color = used > 100 ? '#c22' : used > 80 ? '#b25000' : '#057a55';
+      html += '<div data-ccy="' + ccy + '" style="margin:2px 0">'
+        + '<div style="display:flex;justify-content:space-between;font-size:12px"><span>' + ccy + ' 予算使用率 (同時建玉ベース)</span>'
+        + '<span style="font-variant-numeric:tabular-nums;color:' + color + '">' + used.toFixed(0) + '% / 100%' + (used > 100 ? ' ⚠超過' : '') + '</span></div>'
+        + '<div class="bar-track" style="height:8px"><div class="bar-fill" style="width:' + w.toFixed(0) + '%;background:' + color + '"></div></div></div>';
+    });
+    box.className = 'panel';
+    box.style.cssText = 'margin:0 0 12px;padding:10px 12px';
+    box.innerHTML = html;
+    box.style.display = 'block';
   };
 `
+
+/**
+ * #budget-alloc: 同時建玉ベースの予算使用率メーター (per currency)。slider 変更で
+ * JS が live 更新する (id 固定の bar / label を書き換え)。0 通貨は出さない。
+ */
+function renderBudgetMeter(usage: Record<string, number>): string {
+  const currencies = ['USD', 'JPY'].filter((c) => (usage[c] ?? 0) > 0)
+  if (currencies.length === 0) {
+    // 何も配分が無くても JS が後で表示できるよう箱だけ用意 (初期 hidden)。
+    return `<div id="symbol-budget-meter" style="display:none;margin:0 0 12px"></div>`
+  }
+  const bar = (ccy: string) => {
+    const used = usage[ccy] ?? 0
+    const w = Math.min(100, used)
+    const over = used > 100
+    const color = over ? '#c22' : used > 80 ? '#b25000' : '#057a55'
+    return `<div data-ccy="${ccy}" style="margin:2px 0">
+        <div style="display:flex;justify-content:space-between;font-size:12px">
+          <span>${ccy} 予算使用率 (同時建玉ベース)</span>
+          <span class="budget-meter-val" style="font-variant-numeric:tabular-nums;color:${color}">${used.toFixed(0)}% / 100%${over ? ' ⚠超過' : ''}</span>
+        </div>
+        <div class="bar-track" style="height:8px"><div class="budget-meter-fill bar-fill" style="width:${w.toFixed(0)}%;background:${color}"></div></div>
+      </div>`
+  }
+  return `<div id="symbol-budget-meter" class="panel" style="margin:0 0 12px;padding:10px 12px">
+    <div class="muted" style="font-size:11px;margin-bottom:4px">インバース対は片側のみ建つため max を 1 回計上。total_capital に対する最大同時コミット率。</div>
+    ${currencies.map(bar).join('')}
+  </div>`
+}
 
 /** 予算配分 ladder の確定 / 取消 バー。slider は form attr で此処の form に紐づく。 */
 function budgetLadderControls(): string {
@@ -6992,6 +7065,37 @@ function budgetLadderControls(): string {
     <a href="/dashboard/symbols" style="padding:5px 12px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">取消</a>
     <button type="submit" form="symbol-budget-form" style="padding:5px 14px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">確定して保存</button>
   </div>`
+}
+
+/**
+ * #budget-alloc: 同時建玉ベースの予算使用率 (per currency, %)。
+ * インバース対は同時に片方しか建たないので max(両側) で1回だけ計上、
+ * standalone と別ペアは加算。total_capital に対する「最大同時コミット率」。
+ */
+export function computeBudgetUsage(
+  rows: Array<{ symbol: string; currency: string; budgetAllocPct: number | null }>,
+  inversePairs: Record<string, string>,
+): Record<string, number> {
+  const pctBySym = new Map<string, { currency: string; pct: number }>()
+  for (const r of rows) {
+    const pct = r.budgetAllocPct != null && r.budgetAllocPct > 0 ? r.budgetAllocPct * 100 : 0
+    if (pct > 0) pctBySym.set(r.symbol.toUpperCase(), { currency: r.currency, pct })
+  }
+  const usage: Record<string, number> = {}
+  const countedPair = new Set<string>()
+  for (const [sym, { currency, pct }] of pctBySym) {
+    const inv = inversePairs[sym]
+    if (inv) {
+      const key = [sym, inv].sort().join('|')
+      if (countedPair.has(key)) continue
+      countedPair.add(key)
+      const invPct = pctBySym.get(inv)?.pct ?? 0
+      usage[currency] = (usage[currency] ?? 0) + Math.max(pct, invPct)
+    } else {
+      usage[currency] = (usage[currency] ?? 0) + pct
+    }
+  }
+  return usage
 }
 
 /**
