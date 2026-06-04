@@ -6951,14 +6951,26 @@ function symbolsListBody(args: {
       const bucketCell = r.bucket
         ? esc(r.bucket)
         : '<span class="muted" style="font-size:11px">—</span>'
-      // ツリー表記: 対の上段は ┌、下段は └。相手 symbol を title + リンクに。
-      const treeGlyph = role === 'top' ? '┌─' : role === 'bottom' ? '└─' : ''
-      const treeCell = inverse
-        ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse)}/edit" title="インバース対: ${esc(inverse)} (相手に建玉がある間は BUY 見送り #315)" style="text-decoration:none;color:#06c;font-family:monospace;white-space:nowrap">${treeGlyph}</a>`
+      // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
+      // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
+      // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
+      const treeTitle = inverse
+        ? `インバース対: ${esc(inverse)} (相手に建玉がある間は BUY 見送り #315)`
+        : ''
+      const connBase =
+        'position:absolute;left:11px;width:9px;border-left:2px solid #06c;display:block'
+      const connStyle =
+        role === 'top'
+          ? `${connBase};top:50%;bottom:0;border-top:2px solid #06c;border-top-left-radius:6px`
+          : role === 'bottom'
+            ? `${connBase};top:0;bottom:50%;border-bottom:2px solid #06c;border-bottom-left-radius:6px`
+            : ''
+      const treeCell = connStyle
+        ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse!)}/edit" title="${treeTitle}" style="${connStyle}"></a>`
         : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
       return `<tr${rowStyle}>
-        <td style="font-family:monospace;color:#06c;text-align:center;padding-right:0;width:28px">${treeCell}</td>
+        <td style="position:relative;width:28px;padding:0">${treeCell}</td>
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
