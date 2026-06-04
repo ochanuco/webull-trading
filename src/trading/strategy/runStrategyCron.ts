@@ -42,7 +42,8 @@ import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSumma
 
 const DEFAULT_EQUITY_USD = 10_000
 const DEFAULT_EQUITY_JPY = 1_500_000
-const JP_LOT_SIZE = 100
+// 売買単位は per-symbol (symbol_config.lot_size) で持つ。未設定銘柄は scheduler
+// 側で fail-closed (発注見送り) — blanket default に倒さない (#symbol-lot-size)。
 
 /**
  * sanity_failed cooldown window (ms)。直近この期間内に同 symbol で broker
@@ -122,7 +123,6 @@ export interface StrategyCronAnalysis {
   runs: Array<{
     currency: SymbolCurrency
     equity: number
-    lotSize: number
     symbols: string[]
   }>
   decisions: PullbackDecisionTrace[]
@@ -518,12 +518,11 @@ export async function runStrategyCron(
   // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
   // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
   const summary: PullbackRunSummary = { ...emptySummary(), vix: vixDecision }
-  const runs: Array<{ currency: SymbolCurrency; equity: number; lotSize: number; symbols: string[] }> = []
+  const runs: Array<{ currency: SymbolCurrency; equity: number; symbols: string[] }> = []
   if (byCurrency.USD.length > 0) {
     runs.push({
       currency: 'USD',
       equity: sanitizeEquity(global.totalCapitalUsd, DEFAULT_EQUITY_USD),
-      lotSize: 1,
       symbols: byCurrency.USD,
     })
   }
@@ -531,7 +530,6 @@ export async function runStrategyCron(
     runs.push({
       currency: 'JPY',
       equity: sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY),
-      lotSize: JP_LOT_SIZE,
       symbols: byCurrency.JPY,
     })
   }
@@ -551,7 +549,6 @@ export async function runStrategyCron(
     analysis.runs.push({
       currency: run.currency,
       equity: run.equity,
-      lotSize: run.lotSize,
       symbols: run.symbols,
     })
     // JPY 銘柄は fx=1。USD 銘柄は usdJpyRate (null なら undefined → budget 銘柄 fail-closed)。
@@ -560,7 +557,7 @@ export async function runStrategyCron(
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
       equity: run.equity,
-      lotSize: run.lotSize,
+      symbolLotSizeMap: universe.symbolLotSize,
       barClient,
       positionStore,
       execution,

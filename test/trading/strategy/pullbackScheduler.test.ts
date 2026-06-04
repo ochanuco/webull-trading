@@ -1474,3 +1474,63 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
     expect(soxl?.reason ?? '').not.toMatch(/time-stop hit/)
   })
 })
+
+describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
+  it('fail-closed (no BUY) when symbolLotSizeMap is provided but the symbol is absent', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      // map は渡すが AAPL を含めない → lot_size 未設定扱い → 発注見送り。
+      symbolLotSizeMap: { SOXL: 1 },
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.reason).toMatch(/missing-lot-size/)
+    expect(summary.rejected).toContainEqual(
+      expect.objectContaining({ symbol: 'AAPL', reason: expect.stringMatching(/missing-lot-size/) }),
+    )
+  })
+
+  it('places a BUY when the symbol has a lot_size in the map', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('rounds a JP-style lot=100 symbol down to a whole unit (single-unit-or-zero)', async () => {
+    // lot=100 で equity が 1 単元に届かない → lot-size-round で 0 株 reject。
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 100 },
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.reason).toMatch(/lot-size-round/)
+  })
+})

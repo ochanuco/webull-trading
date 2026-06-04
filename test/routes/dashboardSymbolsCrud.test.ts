@@ -154,6 +154,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
               timeStopDaysOverride: (v.timeStopDaysOverride as number | null) ?? null,
               kAtrOverride: (v.kAtrOverride as number | null) ?? null,
               budgetAllocPct: (v.budgetAllocPct as number | null) ?? null,
+              lotSize: (v.lotSize as number | null) ?? null,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -209,6 +210,7 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     timeStopDaysOverride: null,
     kAtrOverride: null,
     budgetAllocPct: null,
+    lotSize: 1,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -258,6 +260,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '1500',
+      lot_size: '1',
       notes: '',
     })
     const res = await app.request(
@@ -308,6 +311,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '3000',
+      lot_size: '1',
       notes: 'bumped',
     })
     const res = await app.request(
@@ -403,6 +407,42 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(deletes).toHaveLength(0)
   })
 
+  // --- lot_size 入力必須 (#symbol-lot-size) ---
+  it('validation: rejects missing / empty / non-integer lot_size with 400 (required, no fallback)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+
+    const post = (extra: Record<string, string>) =>
+      app.request(
+        '/admin/symbol-config',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+          body: new URLSearchParams({
+            symbol: 'TQQQ',
+            market: 'US',
+            currency: 'USD',
+            active: 'true',
+            ...extra,
+          }).toString(),
+        },
+        { ...baseEnv, DB: {} as D1Database },
+      )
+
+    // lot_size 欄が無い → 400 (fallback しない)
+    expect((await post({})).status).toBe(400)
+    // 空文字 → 400
+    expect((await post({ lot_size: '' })).status).toBe(400)
+    // 0 / 負 / 非整数 → 400
+    expect((await post({ lot_size: '0' })).status).toBe(400)
+    expect((await post({ lot_size: '-1' })).status).toBe(400)
+    expect((await post({ lot_size: '1.5' })).status).toBe(400)
+
+    // どれも insert は走っていない (fail-closed)
+    expect(db.inserts.filter((i) => i.table === 'symbol_config')).toHaveLength(0)
+  })
+
   // --- Validation ---
   it('validation: rejects empty symbol / unknown market / negative max_notional with 400', async () => {
     const db = fakeDb([])
@@ -490,6 +530,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
           market: 'US',
           currency: 'USD',
           active: 'true',
+          lot_size: '1',
         }).toString(),
       },
       { ...baseEnv, DB: {} as D1Database },
@@ -515,6 +556,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
           market: 'US',
           currency: 'USD',
           active: true,
+          lot_size: 1,
         }),
       },
       { ...baseEnv, DB: {} as D1Database },
@@ -630,6 +672,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '2000',
+      lot_size: '1',
       time_stop_days_override: '5',
       k_atr_override: '3.0',
     })
@@ -664,6 +707,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '1000',
+      lot_size: '1',
       time_stop_days_override: '',
       k_atr_override: '',
     })
@@ -757,6 +801,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '2000',
+      lot_size: '1',
       time_stop_days_override: '7',
       k_atr_override: '2.5',
     })
@@ -839,6 +884,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       currency: 'USD',
       active: 'true',
       max_notional: '500',
+      lot_size: '1',
       inverse_symbol: 'soxs',
       // Yahoo pick 由来の counterpart メタ (一覧でインバース側の銘柄名を出す #315)
       inverse_name: 'Direxion Daily Semiconductor Bear 3X Shares',
@@ -863,6 +909,8 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(soxs.name).toBe('Direxion Daily Semiconductor Bear 3X Shares')
     expect(soxs.market).toBe('US')
     expect(soxs.currency).toBe('USD')
+    // counterpart は同じ商品種別なので売買単位を primary 継承 (#symbol-lot-size)
+    expect(soxs.lotSize).toBe(1)
     // inverse_pairs リンクが書かれる
     expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
   })
@@ -876,6 +924,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       market: 'JP',
       currency: 'JPY',
       active: 'true',
+      lot_size: '1', // 1570 (日経レバ ETF) は 1口
       budget_alloc_pct: '40', // 40% → 0.4
     })
     const res = await app.request(
@@ -978,6 +1027,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       market: 'US',
       currency: 'USD',
       active: 'true',
+      lot_size: '1',
       inverse_symbol: 'SOXL',
     })
     const res = await app.request(

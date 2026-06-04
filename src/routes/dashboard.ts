@@ -6888,6 +6888,11 @@ function symbolsListBody(args: {
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
+      // 売買単位 (lot_size)。未設定は fail-closed (発注見送り) なので赤字警告で明示。
+      const lotSizeCell =
+        r.lotSize == null
+          ? '<span class="err" title="売買単位が未設定です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
+          : `${esc(String(r.lotSize))} <span class="muted" style="font-size:11px">${r.lotSize === 1 ? '株/口' : '株'}</span>`
       // 予算配分 ladder slider (#budget-alloc): 5%刻み。確定するまで client 側で仮調整、
       // form="symbol-budget-form" で一括 POST。inverse 相手は JS が同期する。
       const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
@@ -6920,6 +6925,7 @@ function symbolsListBody(args: {
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
+        <td>${lotSizeCell}</td>
         <td>${maxNotionalCell}</td>
         <td>${budgetCell}</td>
         <td>${esc(r.notes ?? '')}</td>
@@ -6941,6 +6947,7 @@ function symbolsListBody(args: {
       <th>銘柄</th>
       <th>銘柄名</th>
       <th>市場/通貨</th>
+      <th>売買単位</th>
       <th>1注文上限</th>
       <th>予算配分</th>
       <th>メモ</th>
@@ -7210,6 +7217,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const currencyValue = row?.currency ?? 'USD'
   const activeChecked = (row?.active ?? true) ? ' checked' : ''
   const maxNotionalValue = row?.maxNotional === null || row?.maxNotional === undefined ? '' : String(row.maxNotional)
+  const lotSizeValue = row?.lotSize === null || row?.lotSize === undefined ? '' : String(row.lotSize)
   const notesValue = row?.notes ?? ''
   const timeStopDaysOverrideValue =
     row?.timeStopDaysOverride === null || row?.timeStopDaysOverride === undefined
@@ -7304,6 +7312,13 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="hidden" name="active" value="false">
       <input type="checkbox" name="active" value="true"${activeChecked}> 取引対象として有効
     </label>
+    <label>売買単位 <span class="muted" style="font-size:11px">(lot_size)</span></label>
+    <div>
+      <input type="number" name="lot_size" id="symbol-form-lot-size" value="${esc(lotSizeValue)}" required step="1" min="1" max="100000" placeholder="必須: 1注文の最小単位" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">株/口 (1単元)</span>
+      <span id="symbol-form-lot-suggest" class="muted" style="font-size:11px;margin-left:6px"></span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px"><strong>入力必須</strong> (fallback しません)。1 注文の最小発注数 = 1単元の株数/口数。<strong>JP 個別株は通常 100、ETF (1570/1357 等) と US 株は 1</strong>。未設定の銘柄は cron が発注を見送ります (fail-closed)。Yahoo から銘柄を選ぶと種別 (ETF/個別株) に応じた推奨値を自動入力します (確定は手入力で上書き可)。</p>
+    </div>
     <label>1注文上限 <span class="muted" style="font-size:11px">(max_notional)</span></label>
     <div>
       <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
@@ -7412,8 +7427,25 @@ function symbolFormBody(args: SymbolFormArgs): string {
       if (m.market && marketSel) marketSel.value = m.market;
       if (m.currency && currencySel) currencySel.value = m.currency;
       if (m.currency) window.syncSymbolFormCurrencyUnits(m.currency);
+      window.suggestLotSizeFromMatch(m);
       window.hideSymbolSuggest();
       if (symInput) symInput.focus();
+    };
+    // Yahoo quoteType + market から売買単位の推奨値を自動入力する。
+    // ETF → 1 口、JP 個別株 (EQUITY) → 100 株、US 個別株 → 1 株。あくまで推奨で、
+    // operator が手入力で上書き可能 (確定は手入力必須・fail-closed なので #symbol-lot-size)。
+    window.suggestLotSizeFromMatch = function (m) {
+      var lotInput = document.getElementById('symbol-form-lot-size');
+      var hint = document.getElementById('symbol-form-lot-suggest');
+      if (!lotInput) return;
+      var qt = (m.quoteType || '').toUpperCase();
+      var mkt = (m.market || 'US').toUpperCase();
+      var suggested = qt === 'ETF' ? 1 : (mkt === 'JP' ? 100 : 1);
+      lotInput.value = String(suggested);
+      if (hint) {
+        var kind = qt === 'ETF' ? 'ETF' : (mkt === 'JP' ? 'JP 個別株' : 'US 株');
+        hint.textContent = '推奨: ' + suggested + ' (' + kind + ')。要確認';
+      }
     };
     // インバース銘柄欄: 同じ Yahoo suggest だが pick は inverse 入力だけを埋める
     // (主銘柄の name/market/currency は上書きしない)。

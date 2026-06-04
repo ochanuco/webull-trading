@@ -53,11 +53,19 @@ export interface PullbackSchedulerOptions {
   riskPerTradePct?: number
   pendingLockTtlMs?: number
   /**
-   * Exchange lot size for this run (e.g. 100 for TSE). Default 1. Applied
-   * uniformly to all symbols in this invocation — callers running mixed
-   * markets should invoke the scheduler once per lot-size.
+   * @deprecated Run 単位の一律 lot。後方互換のため残置 (test 用)。production の
+   * `runStrategyCron` は渡さず `symbolLotSizeMap` を使う。symbol が map にも
+   * これにも無ければ fail-closed (#symbol-lot-size)。
    */
   lotSize?: number
+  /**
+   * symbol → lot_size (売買単位、integer >= 1)。`lotSize` (run 単位) より優先。
+   * **この map を渡した時点で lot 必須モードになる**: map に該当 symbol が無い
+   * BUY は fail-closed (発注見送り) — blanket default に倒さない (#symbol-lot-size)。
+   * production (`runStrategyCron`) は常にこれを渡す。map も `lotSize` も渡さない
+   * legacy caller のみ従来の lot=1 に倒す (旧 unit test 後方互換)。
+   */
+  symbolLotSizeMap?: Record<string, number>
   /**
    * symbol → budget_alloc_pct (0<pct<=1)。指定 symbol は fixed-% 配分 sizing
    * (口座(円)単一プールに対する割合) に切替わる (#budget-jpy-base-fx)。
@@ -448,6 +456,36 @@ export async function runPullbackScheduler(
     let intent: OrderIntent
     if (signal.action === 'BUY') {
       const rule = strategy.resolveRule(upper)
+      // 売買単位は per-symbol map を優先。production (`runStrategyCron`) は常に
+      // `symbolLotSizeMap` を渡す (空でも) ので、**map にあるのに該当 symbol が
+      // 無い = lot_size 未設定 → fail-closed** (発注見送り、#symbol-lot-size)。
+      // 誤った blanket lot で過大/過小発注しない。`symbolLotSizeMap` も
+      // `lotSize` も一切渡さない legacy caller (旧 unit test 等) のみ従来の lot=1。
+      const resolvedLotSize =
+        options.symbolLotSizeMap?.[upper] ??
+        options.lotSize ??
+        (options.symbolLotSizeMap === undefined ? 1 : undefined)
+      if (
+        resolvedLotSize === undefined ||
+        !Number.isFinite(resolvedLotSize) ||
+        !Number.isInteger(resolvedLotSize) ||
+        resolvedLotSize < 1
+      ) {
+        const reason = `sizing rejected: missing-lot-size (symbol ${upper} has no lot_size configured, entry ${indicators.price})`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'REJECT',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('sizing.lot_size_configured', false, undefined, undefined, undefined, 'missing-lot-size'),
+          ),
+        })
+        continue
+      }
       const sizing = computePullbackSizing({
         equity: options.equity,
         entryPrice: indicators.price,
@@ -456,7 +494,7 @@ export async function runPullbackScheduler(
         baselineAtr20: indicators.baselineAtr20,
         symbolCap: options.symbolCapMap?.[upper],
         riskPerTradePct: options.riskPerTradePct,
-        lotSize: options.lotSize,
+        lotSize: resolvedLotSize,
         kAtr: rule.kAtr,
         budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
         budgetBasisJpy: options.budgetBasisJpy,
@@ -464,7 +502,7 @@ export async function runPullbackScheduler(
       })
       if (sizing.quantity <= 0) {
         const reason = buildSizingRejectReason(sizing, {
-          lotSize: options.lotSize ?? 1,
+          lotSize: resolvedLotSize,
           entryPrice: indicators.price,
         })
         summary.rejected.push({ symbol: upper, reason })
@@ -507,7 +545,7 @@ export async function runPullbackScheduler(
           // warning: qty を `floor(qty * scale / lot) * lot` で lot に揃える。
           // lot=1 の US 株は単純な floor、lot=100 の JP 株は単元未満で 0 になり得る。
           // 結果が 0 になった場合は次の `scaledQuantity <= 0` reject で拾う。
-          const lot = options.lotSize ?? 1
+          const lot = resolvedLotSize
           const rawScaled = sizing.quantity * options.vixDecision.sizeScale
           scaledQuantity = lot > 1
             ? Math.floor(rawScaled / lot) * lot
@@ -1112,6 +1150,7 @@ function labelJa(label: string): string {
 
 const TRACE_LABEL_JA: Record<string, string> = {
   'sizing.quantity_positive': '発注数量が1株/1単元以上ある',
+  'sizing.lot_size_configured': '売買単位 (lot_size) が設定済み',
   'scheduler.price_valid': '株価が有効',
   'scheduler.notional_valid': '発注金額が有効',
   'scheduler.sell_position_exists': '売却対象の建玉がある',

@@ -41,6 +41,11 @@ export interface SymbolUniverse {
    * fixed-% 予算配分モード (#budget-alloc)。
    */
   symbolBudgetAllocPct: Record<string, number>
+  /**
+   * symbol → lot_size (売買単位、integer >= 1)。NULL は map に不在
+   * (= cron sizing が fail-closed)。blanket default に倒さない (#symbol-lot-size)。
+   */
+  symbolLotSize: Record<string, number>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -72,6 +77,7 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolTimeStopDaysOverride: config.symbolTimeStopDaysOverride,
     symbolKAtrOverride: config.symbolKAtrOverride,
     symbolBudgetAllocPct: config.symbolBudgetAllocPct,
+    symbolLotSize: config.symbolLotSize,
     inversePairs: pairs,
     source: 'd1',
   }
