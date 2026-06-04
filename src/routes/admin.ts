@@ -2053,6 +2053,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     timeStopDaysOverride?: unknown
     k_atr_override?: unknown
     kAtrOverride?: unknown
+    budget_alloc_pct?: unknown
+    budgetAllocPct?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2079,6 +2081,15 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     0.5,
     5.0,
   )
+  // 予算配分: form は **% (0<pct<=100)** で送る。fraction (0<pct<=1) に変換して保存
+  // (#budget-alloc)。空 / undefined → NULL (= 従来の risk-% sizing)。範囲外は 400。
+  const budgetAllocPctRaw = parseOptionalNumberInRange(
+    raw.budget_alloc_pct ?? raw.budgetAllocPct,
+    'budgetAllocPct',
+    0.0001,
+    100,
+  )
+  const budgetAllocPct = budgetAllocPctRaw === null ? null : budgetAllocPctRaw / 100
   return {
     symbol,
     name,
@@ -2089,6 +2100,7 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     notes,
     timeStopDaysOverride,
     kAtrOverride,
+    budgetAllocPct,
   }
 }
 
@@ -2291,6 +2303,7 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     notes: row.notes,
     timeStopDaysOverride: row.timeStopDaysOverride,
     kAtrOverride: row.kAtrOverride,
+    budgetAllocPct: row.budgetAllocPct,
     updatedAt: row.updatedAt,
   }
 }

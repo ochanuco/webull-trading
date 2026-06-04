@@ -551,6 +551,7 @@ export async function runStrategyCron(
       positionStore,
       execution,
       symbolCapMap: universe.symbolMaxNotional,
+      symbolBudgetAllocPctMap: universe.symbolBudgetAllocPct,
       defaultRule,
       rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,

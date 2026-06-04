@@ -7086,6 +7086,11 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const kAtrPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.kAtr}) を使用`
     : '空欄で global default を使用'
+  // 予算配分は DB に fraction (0..1) 保存、表示は % (×100)。
+  const budgetAllocPctValue =
+    row?.budgetAllocPct === null || row?.budgetAllocPct === undefined
+      ? ''
+      : String(Math.round(row.budgetAllocPct * 1000) / 10)
   const symbolField =
     mode === 'edit'
       ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
@@ -7167,6 +7172,12 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
       <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
+    </div>
+    <label>予算配分 <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で risk-% sizing" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% of 総資本</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">指定すると <strong>1 注文 = 総資本 (<code>total_capital</code>) × この%</strong> で sizing (risk-% sizing を bypass)。小口座で高額レバ ETF を建てる用。上限は <code>min(予算×%, 1注文上限)</code>。空欄なら従来の risk-% sizing。</p>
     </div>
     <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
     <div>

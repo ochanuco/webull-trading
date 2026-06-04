@@ -36,6 +36,11 @@ export interface SymbolUniverse {
    * global_config.pullback_default_k_atr を使う (fall-through、#316)。
    */
   symbolKAtrOverride: Record<string, number>
+  /**
+   * symbol → budget_alloc_pct (0<pct<=1)。空 map のキーは従来の risk-% sizing。
+   * fixed-% 予算配分モード (#budget-alloc)。
+   */
+  symbolBudgetAllocPct: Record<string, number>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -66,6 +71,7 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolNotes: config.symbolNotes,
     symbolTimeStopDaysOverride: config.symbolTimeStopDaysOverride,
     symbolKAtrOverride: config.symbolKAtrOverride,
+    symbolBudgetAllocPct: config.symbolBudgetAllocPct,
     inversePairs: pairs,
     source: 'd1',
   }

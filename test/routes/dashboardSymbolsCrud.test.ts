@@ -153,6 +153,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
               notes: (v.notes as string | null) ?? null,
               timeStopDaysOverride: (v.timeStopDaysOverride as number | null) ?? null,
               kAtrOverride: (v.kAtrOverride as number | null) ?? null,
+              budgetAllocPct: (v.budgetAllocPct as number | null) ?? null,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -207,6 +208,7 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     notes: null,
     timeStopDaysOverride: null,
     kAtrOverride: null,
+    budgetAllocPct: null,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -863,6 +865,46 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(soxs.currency).toBe('USD')
     // inverse_pairs リンクが書かれる
     expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
+  })
+
+  it('POST persists budget_alloc_pct as a fraction (% input ÷ 100)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: '1570',
+      market: 'JP',
+      currency: 'JPY',
+      active: 'true',
+      budget_alloc_pct: '40', // 40% → 0.4
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
+    expect(inserted.values.budgetAllocPct).toBeCloseTo(0.4, 6)
+  })
+
+  it('edit form shows 予算配分 (%) field', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', budgetAllocPct: 0.4 })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/SOXL/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('name="budget_alloc_pct"')
+    // fraction 0.4 → 表示は 40 (%)
+    expect(body).toMatch(/name="budget_alloc_pct"[^>]*value="40"/)
   })
 
   it('new form inputs carry password-manager opt-out (data-1p-ignore)', async () => {
