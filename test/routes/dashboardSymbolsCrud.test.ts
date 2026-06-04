@@ -1016,43 +1016,34 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 
 import { orderRowsByPair, assignPairColors, pairRoles, computeBudgetUsage } from '../../src/routes/dashboard'
 
-describe('#budget-alloc computeBudgetUsage (concurrent-position meter)', () => {
-  const rec = (symbol: string, currency: string, budgetAllocPct: number | null) => ({ symbol, currency, budgetAllocPct })
+describe('#budget-jpy-base-fx computeBudgetUsage (single account % meter)', () => {
+  const rec = (symbol: string, budgetAllocPct: number | null) => ({ symbol, budgetAllocPct })
 
   it('counts an inverse pair once via max (only one side held at a time)', () => {
     // SOXL 40% / SOXS 40% (synced) → pair contributes 40, not 80.
-    const usage = computeBudgetUsage(
-      [rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.4)],
-      { SOXL: 'SOXS', SOXS: 'SOXL' },
-    )
-    expect(usage.USD).toBeCloseTo(40, 6)
+    expect(computeBudgetUsage([rec('SOXL', 0.4), rec('SOXS', 0.4)], { SOXL: 'SOXS', SOXS: 'SOXL' })).toBeCloseTo(40, 6)
   })
 
   it('uses max when the two sides differ', () => {
-    const usage = computeBudgetUsage(
-      [rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.2)],
-      { SOXL: 'SOXS', SOXS: 'SOXL' },
-    )
-    expect(usage.USD).toBeCloseTo(40, 6)
+    expect(computeBudgetUsage([rec('SOXL', 0.4), rec('SOXS', 0.2)], { SOXL: 'SOXS', SOXS: 'SOXL' })).toBeCloseTo(40, 6)
   })
 
-  it('adds standalone symbols and separate pairs; groups by currency', () => {
-    const usage = computeBudgetUsage(
+  it('sums standalone + separate pairs across currencies into one account % (FX-agnostic)', () => {
+    // 口座(円)に対する割合なので通貨混在でも 1 本に合算: 40 + 30 + 10 + 50 = 130 (超過)。
+    const used = computeBudgetUsage(
       [
-        rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.4), // pair → 40
-        rec('TQQQ', 'USD', 0.3), rec('SQQQ', 'USD', 0.3), // pair → 30
-        rec('AAPL', 'USD', 0.1), // standalone → 10
-        rec('1570', 'JPY', 0.5), rec('1357', 'JPY', 0.5), // JPY pair → 50
+        rec('SOXL', 0.4), rec('SOXS', 0.4), // pair → 40
+        rec('TQQQ', 0.3), rec('SQQQ', 0.3), // pair → 30
+        rec('AAPL', 0.1), // standalone → 10
+        rec('1570', 0.5), rec('1357', 0.5), // JP pair → 50
       ],
       { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ', '1570': '1357', '1357': '1570' },
     )
-    expect(usage.USD).toBeCloseTo(80, 6) // 40+30+10
-    expect(usage.JPY).toBeCloseTo(50, 6)
+    expect(used).toBeCloseTo(130, 6)
   })
 
-  it('ignores null / 0 allocations', () => {
-    const usage = computeBudgetUsage([rec('SOXL', 'USD', null), rec('AAPL', 'USD', 0)], {})
-    expect(usage.USD).toBeUndefined()
+  it('ignores null / 0 allocations (returns 0)', () => {
+    expect(computeBudgetUsage([rec('SOXL', null), rec('AAPL', 0)], {})).toBe(0)
   })
 })
 

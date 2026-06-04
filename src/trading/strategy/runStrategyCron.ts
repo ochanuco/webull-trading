@@ -1,5 +1,6 @@
 import type { Env } from '../../config/env'
 import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
+import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
@@ -535,6 +536,17 @@ export async function runStrategyCron(
     })
   }
 
+  // #budget-jpy-base-fx: 予算配分は口座(円)単一プール基準。USD 銘柄を「円予算 → USD」
+  // 換算するため USD/JPY を 1 回だけ取得 (USD 側に budget 銘柄がある時のみ)。取得失敗
+  // /異常値は null → USD budget 銘柄は sizing 側で fail-closed (発注見送り)。
+  const budgetBasisJpy = sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY)
+  const usdHasBudgetSymbol = byCurrency.USD.some(
+    (s) => universe.symbolBudgetAllocPct[s.toUpperCase()] !== undefined,
+  )
+  const usdJpyRate = usdHasBudgetSymbol
+    ? await loadUsdJpyRate({ requestId: options.requestId })
+    : null
+
   for (const run of runs) {
     analysis.runs.push({
       currency: run.currency,
@@ -542,6 +554,8 @@ export async function runStrategyCron(
       lotSize: run.lotSize,
       symbols: run.symbols,
     })
+    // JPY 銘柄は fx=1。USD 銘柄は usdJpyRate (null なら undefined → budget 銘柄 fail-closed)。
+    const fxJpyPerSymbolCcy = run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined)
     const decisionDb = strategyDecisionDbOrUndefined(env)
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
@@ -552,6 +566,8 @@ export async function runStrategyCron(
       execution,
       symbolCapMap: universe.symbolMaxNotional,
       symbolBudgetAllocPctMap: universe.symbolBudgetAllocPct,
+      budgetBasisJpy,
+      fxJpyPerSymbolCcy,
       defaultRule,
       rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,

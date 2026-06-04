@@ -158,51 +158,58 @@ describe('computePullbackSizing', () => {
   })
 })
 
-describe('computePullbackSizing — fixed-% budget allocation (#budget-alloc)', () => {
-  it('sizes by notional = equity * budgetAllocPct (bypasses risk-% / ATR floor)', () => {
-    // 総資本 100k の 40% = 40,000 を price 35,000 で → floor(40000/35000) = 1 株。
+describe('computePullbackSizing — fixed-% budget allocation, JPY account + FX (#budget-jpy-base-fx)', () => {
+  it('JPY symbol (fx=1): notional = budgetBasisJpy * pct (bypasses risk-% / ATR floor)', () => {
+    // 口座 ¥100k の 40% = ¥40,000 を price ¥35,000 (JPY 銘柄) で → floor(40000/35000)=1。
     const result = computePullbackSizing(
-      baseInput({ equity: 100_000, entryPrice: 35_000, budgetAllocPct: 0.4, atr20: 5000, baselineAtr20: 1000 }),
+      baseInput({ entryPrice: 35_000, budgetAllocPct: 0.4, budgetBasisJpy: 100_000, fxJpyPerSymbolCcy: 1, atr20: 5000, baselineAtr20: 1000 }),
     )
     expect(result.quantity).toBe(1)
     expect(result.notional).toBe(35_000)
-    // risk-% なら floor(400 / stop) = 0 株のはず。budget-alloc で 1 株建つ。
     expect(result.capped).toBe(false)
   })
 
-  it('clamps to symbolCap when budget*pct exceeds it (min semantics)', () => {
-    // 40% = 40,000 だが symbolCap 30,000 → min。floor(30000/10000)=3。
+  it('USD symbol: converts JPY budget via USD/JPY (¥100k×40% / 150 = $266.7 → floor($/price))', () => {
+    // ¥40,000 / 150 = $266.67 を USD price $50 で → floor(266.67/50)=5。
     const result = computePullbackSizing(
-      baseInput({ equity: 100_000, entryPrice: 10_000, budgetAllocPct: 0.4, symbolCap: 30_000 }),
+      baseInput({ entryPrice: 50, budgetAllocPct: 0.4, budgetBasisJpy: 100_000, fxJpyPerSymbolCcy: 150 }),
+    )
+    expect(result.quantity).toBe(5)
+  })
+
+  it('clamps to symbolCap when converted target exceeds it (min semantics)', () => {
+    // JPY 銘柄、¥40,000 だが symbolCap ¥30,000 → min。floor(30000/10000)=3。
+    const result = computePullbackSizing(
+      baseInput({ entryPrice: 10_000, budgetAllocPct: 0.4, budgetBasisJpy: 100_000, fxJpyPerSymbolCcy: 1, symbolCap: 30_000 }),
     )
     expect(result.quantity).toBe(3)
-    expect(result.notional).toBe(30_000)
     expect(result.capReason).toBe('symbol-cap')
   })
 
-  it('uses budget pct even when below symbolCap (% wins, abs is only a ceiling)', () => {
-    // 20% = 20,000 < symbolCap 50,000 → 予算% を採用。floor(20000/10000)=2。
-    const result = computePullbackSizing(
-      baseInput({ equity: 100_000, entryPrice: 10_000, budgetAllocPct: 0.2, symbolCap: 50_000 }),
-    )
-    expect(result.quantity).toBe(2)
-    expect(result.notional).toBe(20_000)
-  })
-
   it('respects lot size in budget-alloc mode', () => {
-    // 40% = 40,000、price 100、lot 100 → floor(400/100)*100 = 400。
+    // ¥40,000、price ¥100、lot 100 → floor(400/100)*100 = 400。
     const result = computePullbackSizing(
-      baseInput({ equity: 100_000, entryPrice: 100, budgetAllocPct: 0.4, lotSize: 100 }),
+      baseInput({ entryPrice: 100, budgetAllocPct: 0.4, budgetBasisJpy: 100_000, fxJpyPerSymbolCcy: 1, lotSize: 100 }),
     )
     expect(result.quantity).toBe(400)
   })
 
-  it('rejects (qty 0) when budget*pct is too small for one share', () => {
-    // 1% = 1,000 だが price 35,000 → floor(1000/35000)=0。
+  it('fail-closed (qty 0) when FX is missing for a USD symbol (fxJpyPerSymbolCcy undefined)', () => {
+    // USD 銘柄で USD/JPY 取得失敗 → budgetBasisJpy はあるが fx 未指定 → 発注見送り。
     const result = computePullbackSizing(
-      baseInput({ equity: 100_000, entryPrice: 35_000, budgetAllocPct: 0.01 }),
+      baseInput({ entryPrice: 50, budgetAllocPct: 0.4, budgetBasisJpy: 100_000 }),
     )
     expect(result.quantity).toBe(0)
+    expect(result.capped).toBe(true)
+  })
+
+  it('fail-closed when budgetBasisJpy missing/invalid', () => {
+    for (const bad of [undefined, 0, -1, Number.NaN]) {
+      const result = computePullbackSizing(
+        baseInput({ entryPrice: 100, budgetAllocPct: 0.4, budgetBasisJpy: bad as number | undefined, fxJpyPerSymbolCcy: 1 }),
+      )
+      expect(result.quantity).toBe(0)
+    }
   })
 
   it('falls back to risk-% sizing when budgetAllocPct is undefined', () => {
@@ -210,10 +217,11 @@ describe('computePullbackSizing — fixed-% budget allocation (#budget-alloc)', 
     expect(result.quantity).toBe(100) // 従来通り
   })
 
-  it('fail-closed (qty 0) on invalid budgetAllocPct instead of risk-% fallback (CodeRabbit #405)', () => {
-    // budgetAllocPct が指定済みだが範囲外 (>1) / NaN / <=0 → 0 qty で止める。
+  it('fail-closed (qty 0) on invalid budgetAllocPct instead of risk-% fallback', () => {
     for (const bad of [1.5, 0, -0.1, Number.NaN]) {
-      const result = computePullbackSizing(baseInput({ budgetAllocPct: bad }))
+      const result = computePullbackSizing(
+        baseInput({ budgetAllocPct: bad, budgetBasisJpy: 100_000, fxJpyPerSymbolCcy: 1 }),
+      )
       expect(result.quantity).toBe(0)
       expect(result.capped).toBe(true)
     }
