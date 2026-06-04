@@ -876,6 +876,38 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
+   * #415: 口座買付余力の軽量 JSON。dashboard (ホーム / 銘柄設定) が client-side
+   * fetch して表示する用 (broker/probe と同じく credentials: 'same-origin' で
+   * CF Access cookie を流用)。live token が無い / broker エラーは fail-safe で
+   * `status:'unavailable'` を返し、ページ描画は壊さない。通貨別 buying_power を
+   * そのまま返す (FX 換算はせず、表示側で通貨別に出す)。
+   */
+  .get('/buying-power', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    try {
+      const accessToken = await resolveAccessToken(c.env)
+      const balance = await createWebullReadClient(c.env, { accessToken }).getAccountBalance()
+      const assets = Array.isArray(balance.account_currency_assets) ? balance.account_currency_assets : []
+      const byCurrency = assets.map((a) => ({
+        currency: (a.currency ?? '?').toUpperCase(),
+        buyingPower: Number(a.buying_power),
+        cash: Number(a.cash_balance),
+      }))
+      return c.json({
+        status: 'ok' as const,
+        asOf: new Date().toISOString(),
+        baseCurrency: balance.total_asset_currency ?? null,
+        totalCash: Number(balance.total_cash_balance),
+        byCurrency,
+      })
+    } catch (e) {
+      return c.json({
+        status: 'unavailable' as const,
+        reason: e instanceof Error ? e.message : String(e),
+      })
+    }
+  })
+  /**
    * #21 Phase B: `WebullTokenStateDO` operator endpoints。
    *
    * - GET /webull-token        : 現在の状態 metadata を返す (token plaintext は返却しない)

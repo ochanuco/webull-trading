@@ -246,6 +246,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).not.toContain('/admin/symbol-config/SOXL/delete')
     // counts (post-cleanup format)
     expect(body).toContain('有効 1 / 無効 1')
+    // #415: 買付余力バッジ (client-side fetch) がページに含まれる
+    expect(body).toContain('buying-power-badge')
+    expect(body).toContain('/admin/buying-power')
   })
 
   it('list flags NULL / invalid lot_size as ⚠ 未設定 (matches runtime fail-closed, CodeRabbit #409)', async () => {

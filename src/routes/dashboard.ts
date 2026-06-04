@@ -2189,6 +2189,44 @@ function renderRecentPanel(data: OverviewData): string {
   </div>`
 }
 
+/**
+ * 口座買付余力バッジ (#415)。SSR はブロックせず、client-side で `/admin/buying-power`
+ * を fetch して通貨別 buying_power を描画する (broker-probe と同じく CF Access cookie
+ * 流用)。取得失敗は ⚠ 表示でページは壊さない。ホーム / 銘柄設定の両方で使う。
+ */
+function buyingPowerBadge(): string {
+  return `<div id="buying-power-badge" class="panel" style="display:flex;align-items:center;gap:8px;font-size:13px;padding:10px 14px">
+    <strong>買付余力</strong> <span class="muted">読込中…</span>
+  </div>
+  <script>
+  (function () {
+    var el = document.getElementById('buying-power-badge');
+    if (!el) return;
+    fetch('/admin/buying-power', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : { status: 'unavailable', reason: 'http ' + r.status }; })
+      .then(function (d) {
+        if (!d || d.status !== 'ok') {
+          el.innerHTML = '<strong>買付余力</strong> <span style="color:#c22;font-weight:600">⚠ 取得不可</span>' +
+            ' <span class="muted" style="font-size:11px">' + ((d && d.reason) ? String(d.reason).slice(0, 80) : '') + '</span>';
+          return;
+        }
+        var parts = (d.byCurrency || []).map(function (a) {
+          var bp = Number(a.buyingPower);
+          var sym = a.currency === 'JPY' ? '¥' : (a.currency === 'USD' ? '$' : '');
+          var v = isFinite(bp) ? bp.toLocaleString('ja-JP', { maximumFractionDigits: a.currency === 'JPY' ? 0 : 2 }) : a.buyingPower;
+          var zero = isFinite(bp) && bp <= 0;
+          return '<span style="' + (zero ? 'color:#86868b' : 'font-weight:600') + '">' + a.currency + ' ' + sym + v + '</span>';
+        });
+        el.innerHTML = '<strong>買付余力</strong> ' + (parts.join(' &nbsp;/&nbsp; ') || '—') +
+          ' <span class="muted" style="font-size:11px">(口座 ' + (d.baseCurrency || '') + ' 総現金 ' + Number(d.totalCash).toLocaleString('ja-JP') + ')</span>';
+      })
+      .catch(function () {
+        el.innerHTML = '<strong>買付余力</strong> <span style="color:#c22;font-weight:600">⚠ 取得不可</span>';
+      });
+  })();
+  </script>`
+}
+
 function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
@@ -2205,7 +2243,7 @@ function overviewBody(data: OverviewData): string {
       '<p class="muted">表示パネルが選択されていません。<a href="/dashboard/config">設定</a>でパネルを有効化してください。</p>',
     )
   }
-  return sections.join('')
+  return buyingPowerBadge() + sections.join('')
 }
 
 /**
@@ -6877,7 +6915,9 @@ function symbolsListBody(args: {
   filter: SymbolsListFilter
 }): string {
   const { rows, inversePairs = {}, errorCode = null, errorSymbol = null, filter } = args
-  const errorBanner = renderSymbolErrorBanner(errorCode, errorSymbol)
+  // #415: 買付余力バッジをページ最上部に (全 return が ${errorBanner} を先頭に持つので
+  // ここに前置すると一覧・空・フィルタ 0 件の全ケースで表示される)。
+  const errorBanner = buyingPowerBadge() + renderSymbolErrorBanner(errorCode, errorSymbol)
   const filtered = applySymbolsListFilter(rows, filter)
   const activeCount = rows.filter((r) => r.active).length
   const inactiveCount = rows.length - activeCount
