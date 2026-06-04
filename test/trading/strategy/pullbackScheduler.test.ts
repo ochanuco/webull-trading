@@ -10,6 +10,10 @@ import type { Execution } from '../../../src/trading/execution/Execution'
 import type { PositionStore } from '../../../src/trading/state/PositionStore'
 import { emptySymbolState, type SymbolState } from '../../../src/trading/state/types'
 import { runPullbackScheduler } from '../../../src/trading/strategy/pullbackScheduler'
+import {
+  createBuyingPowerLedger,
+  createUnavailableBuyingPowerLedger,
+} from '../../../src/trading/strategy/buyingPower'
 import type { DailyBar } from '../../../src/trading/strategy/indicators'
 
 const now = new Date('2026-04-20T14:30:00.000Z')
@@ -1607,5 +1611,90 @@ describe('runPullbackScheduler budget-alloc basis fail-closed (#417 buying-power
     })
     expect(summary.buys).toBe(1)
     expect(execution.calls).toHaveLength(1)
+  })
+})
+
+describe('runPullbackScheduler buying-power pool gate (#415)', () => {
+  it('fail-closed: rejects BUY when the ledger is unavailable (fetch failed)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      buyingPower: createUnavailableBuyingPowerLedger('fetch failed'),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.reason).toMatch(/buying-power unavailable/)
+  })
+
+  it('places a BUY and decrements the ledger when buying power is sufficient', async () => {
+    const execution = mockExecution()
+    const ledger = createBuyingPowerLedger({ availableJpy: 1_000_000_000, asOf: null, bufferPct: 0 })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      fxJpyPerSymbolCcy: 150,
+      buyingPower: ledger,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(ledger.remainingJpy).toBeLessThan(1_000_000_000) // 約定分が減算された
+  })
+
+  it('rejects BUY (no execution) when notional exceeds remaining buying power', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      fxJpyPerSymbolCcy: 150,
+      buyingPower: createBuyingPowerLedger({ availableJpy: 1, asOf: null, bufferPct: 0 }),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.reason).toMatch(/insufficient buying power/)
+  })
+
+  it('shared pool covers only the first of two BUYs (sequential decrement)', async () => {
+    // budget mode + symbolCap で notional を 1 銘柄 ≈ ¥49,937 に固定 (fx=1)。
+    // pool ¥60,000 → 1 件目は通り、2 件目は残余力不足で reject。
+    const execution = mockExecution()
+    const ledger = createBuyingPowerLedger({ availableJpy: 60_000, asOf: null, bufferPct: 0 })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAA', 'BBB'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAA: 1, BBB: 1 },
+      symbolBudgetAllocPctMap: { AAA: 1, BBB: 1 },
+      symbolCapMap: { AAA: 50_000, BBB: 50_000 },
+      budgetBasisJpy: 1_000_000,
+      fxJpyPerSymbolCcy: 1,
+      buyingPower: ledger,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const rejected = summary.decisions.filter((d) => d.decision === 'REJECT')
+    expect(rejected.some((d) => /insufficient buying power/.test(d.reason ?? ''))).toBe(true)
   })
 })

@@ -6,6 +6,35 @@ export interface WebullAccountDto {
   status?: string
 }
 
+/**
+ * 口座資産・買付余力 (`/openapi/account/balance` v1 / `/openapi/assets/balance` v2、
+ * #415)。JP 本番 probe で確認した shape:
+ *   { total_asset_currency:'JPY', total_cash_balance:'100000',
+ *     account_currency_assets:[{currency:'JPY', cash_balance, buying_power, ...},
+ *                              {currency:'USD', ...}] }
+ * 数値は全て string-encoded (OpenAPI 共通)。buying_power は **通貨別** に
+ * `account_currency_assets[]` に入る。mapper/reader 側で数値化する。
+ */
+export interface WebullAccountCurrencyAssetDto {
+  currency?: string
+  cash_balance?: string
+  buying_power?: string
+  /** v2 (`/openapi/assets/balance`) のみ。v1 では欠落。 */
+  market_value?: string
+  unrealized_profit_loss?: string
+}
+
+export interface WebullAccountBalanceDto {
+  /** 口座基準通貨 (例 'JPY')。 */
+  total_asset_currency?: string
+  total_cash_balance?: string
+  /** v2 のみ。 */
+  total_market_value?: string
+  total_unrealized_profit_loss?: string
+  /** 通貨別の現金 / 買付余力。POC: JPY + USD。 */
+  account_currency_assets?: WebullAccountCurrencyAssetDto[]
+}
+
 export interface WebullSubscriptionDto {
   subscription_id?: string
   user_id?: string

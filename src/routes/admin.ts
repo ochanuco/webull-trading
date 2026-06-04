@@ -737,6 +737,9 @@ export const admin = new Hono<AppBindings>()
       positionsNew,
       orderHistoryOld,
       orderHistoryNew,
+      balanceAccountV1,
+      balanceAssetsV2,
+      balanceAssetsAccountV2,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -791,6 +794,28 @@ export const admin = new Hono<AppBindings>()
         query: { account_id: accountId, page_size: '10' },
         version: 'v2',
       }),
+      // #415 buying-power: Account Balance endpoint の path/version/レスポンス項目を
+      // 確定するための probe (doc: /api-doc/trade/account/account-balance)。positions が
+      // account/*(v1)→assets/*(v2) で drift した実績を踏まえ候補を並列で叩く。どれが
+      // 200 + buying-power フィールドを返すかで本実装の path/version/DTO を決める。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/account/balance',
+        query: { account_id: accountId },
+        version: 'v1',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/assets/balance',
+        query: { account_id: accountId },
+        version: 'v2',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/assets/account-balance',
+        query: { account_id: accountId },
+        version: 'v2',
+      }),
     ])
 
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
@@ -826,6 +851,11 @@ export const admin = new Hono<AppBindings>()
       positionsNew,
       orderHistoryOld,
       orderHistoryNew,
+      // #415 buying-power: Account Balance endpoint 候補の probe 結果。どれが 200 +
+      // buying-power フィールドを返すかで本実装の path/version/DTO を確定する。
+      balanceAccountV1,
+      balanceAssetsV2,
+      balanceAssetsAccountV2,
       // Yahoo Finance 経由の同 symbol snapshot (#21 follow-up)。Webull の data-api
       // が応答しない状況での代替経路の生死を可視化する。
       quoteYahoo: quoteYahooResult,

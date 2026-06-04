@@ -1,6 +1,7 @@
 import type { OrderIntent } from '../../trading/domain/OrderIntent'
 import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import type {
+  WebullAccountBalanceDto,
   WebullAccountDto,
   WebullOrderDetailDto,
   WebullOrderHistoryWrapperDto,
@@ -54,6 +55,8 @@ export interface WebullClientEnv {
   WEBULL_PATH_POSITIONS?: string
   WEBULL_PATH_ORDERS_HISTORY?: string
   WEBULL_PATH_ORDERS_PLACE?: string
+  /** #415: Account Balance path override。default `/openapi/account/balance` (v1)。 */
+  WEBULL_PATH_ACCOUNT_BALANCE?: string
   /**
    * #258: trade/account routes に送る x-version ヘッダ値。default 'v1'
    * (= 現行挙動)、'v2' に opt-in 可能。新 docs では v2 推奨だが旧/新 path
@@ -89,6 +92,12 @@ interface WebullHttpClientOptions {
   ordersHistoryPath?: string
   ordersPlacePath?: string
   /**
+   * #415: Account Balance endpoint path。default は v1 `/openapi/account/balance`
+   * (JP probe で 200 確認)。`tradeVersion='v2'` 運用なら `/openapi/assets/balance`
+   * を env で指定する (同 shape を返す)。
+   */
+  accountBalancePath?: string
+  /**
    * #258: trade/account routes に送る x-version ヘッダ値。default 'v1' (= 現行
    * 挙動)、env で 'v2' に opt-in 可能。新 OpenAPI docs では v2 必須化の方向だが
    * v1 でも alias 受理されてるので staging で env 切替えて検証する。
@@ -105,6 +114,7 @@ interface WebullHttpClientOptions {
 const DEFAULT_POSITIONS_PATH = '/openapi/account/positions'
 const DEFAULT_ORDERS_HISTORY_PATH = '/openapi/account/orders/history'
 const DEFAULT_ORDERS_PLACE_PATH = '/openapi/account/orders/place'
+const DEFAULT_ACCOUNT_BALANCE_PATH = '/openapi/account/balance'
 const DEFAULT_TRADE_VERSION = 'v1'
 const DEFAULT_PLACE_ORDER_SCHEMA: PlaceOrderSchemaVersion = 'v1'
 /**
@@ -125,6 +135,7 @@ export class WebullHttpClient {
   private readonly positionsPath: string
   private readonly ordersHistoryPath: string
   private readonly ordersPlacePath: string
+  private readonly accountBalancePath: string
   private readonly tradeVersion: string
   private readonly placeOrderSchema: PlaceOrderSchemaVersion
 
@@ -145,6 +156,7 @@ export class WebullHttpClient {
     this.positionsPath = options.positionsPath ?? DEFAULT_POSITIONS_PATH
     this.ordersHistoryPath = options.ordersHistoryPath ?? DEFAULT_ORDERS_HISTORY_PATH
     this.ordersPlacePath = options.ordersPlacePath ?? DEFAULT_ORDERS_PLACE_PATH
+    this.accountBalancePath = options.accountBalancePath ?? DEFAULT_ACCOUNT_BALANCE_PATH
     this.tradeVersion = options.tradeVersion ?? DEFAULT_TRADE_VERSION
     this.placeOrderSchema = options.placeOrderSchema ?? DEFAULT_PLACE_ORDER_SCHEMA
   }
@@ -155,6 +167,16 @@ export class WebullHttpClient {
 
   async getAccount(): Promise<WebullAccountDto> {
     return this.request<WebullAccountDto>('GET', '/account/profile', {
+      query: { account_id: this.requireAccountId() },
+    })
+  }
+
+  /**
+   * 口座の現金残高・買付余力を取得 (#415)。`account_currency_assets[]` に通貨別
+   * `buying_power` が入る。発注前の共有プール pre-trade ゲートで使う。
+   */
+  async getAccountBalance(): Promise<WebullAccountBalanceDto> {
+    return this.request<WebullAccountBalanceDto>('GET', this.accountBalancePath, {
       query: { account_id: this.requireAccountId() },
     })
   }
@@ -509,6 +531,7 @@ export function createWebullHttpClient(
     positionsPath: trim(env.WEBULL_PATH_POSITIONS),
     ordersHistoryPath: trim(env.WEBULL_PATH_ORDERS_HISTORY),
     ordersPlacePath: trim(env.WEBULL_PATH_ORDERS_PLACE),
+    accountBalancePath: trim(env.WEBULL_PATH_ACCOUNT_BALANCE),
     tradeVersion: validateVersion(env.WEBULL_TRADE_VERSION),
     placeOrderSchema: validateOrderSchema(env.WEBULL_PLACE_ORDER_SCHEMA),
   })

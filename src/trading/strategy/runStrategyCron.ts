@@ -1,6 +1,13 @@
 import type { Env } from '../../config/env'
 import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
 import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
+import type { WebullAccountBalanceDto } from '../../infrastructure/webull/dto'
+import {
+  buyingPowerJpyFromBalance,
+  createBuyingPowerLedger,
+  createUnavailableBuyingPowerLedger,
+  type BuyingPowerLedger,
+} from './buyingPower'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
@@ -551,9 +558,18 @@ export async function runStrategyCron(
   const usdHasBudgetSymbol = byCurrency.USD.some(
     (s) => universe.symbolBudgetAllocPct[s.toUpperCase()] !== undefined,
   )
-  const usdJpyRate = usdHasBudgetSymbol
-    ? await loadUsdJpyRate({ requestId: options.requestId })
-    : null
+  // USD/JPY は budget 換算に加え、live 時は買付余力 (USD 建て) の JPY 換算にも要る
+  // ので、live ならば取得する (#415)。
+  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null
+  const usdJpyRate = needUsdJpy ? await loadUsdJpyRate({ requestId: options.requestId }) : null
+
+  // #415: 発注前の共有プール pre-trade ゲート。live 時のみ Webull の買付余力を取得し
+  // JPY 基準の ledger を作る (runs=USD/JPY をまたいで共有)。取得失敗/異常値は
+  // unavailable 台帳 → 当 tick の BUY 全 fail-closed (誤余力で過大発注しない)。
+  // DryRun (liveReadClient=null) では undefined のまま = scheduler の pool ゲート無効。
+  const buyingPower: BuyingPowerLedger | undefined = liveReadClient
+    ? await resolveBuyingPowerLedger(liveReadClient, usdJpyRate, options.requestId)
+    : undefined
 
   for (const run of runs) {
     analysis.runs.push({
@@ -575,6 +591,7 @@ export async function runStrategyCron(
       symbolBudgetAllocPctMap: universe.symbolBudgetAllocPct,
       budgetBasisJpy,
       fxJpyPerSymbolCcy,
+      buyingPower,
       defaultRule,
       rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,
@@ -669,6 +686,41 @@ function sanitizeEquity(value: number | null | undefined, fallback: number): num
   if (value === null || value === undefined) return fallback
   if (!Number.isFinite(value) || value <= 0) return fallback
   return value
+}
+
+/**
+ * Webull 買付余力を取得し JPY 基準の共有 ledger を作る (#415)。HTTP client が
+ * 内部で transient retry するので、ここでは 1 回呼んで成否を判定する。例外 / parse
+ * 不能 / 異常値 / FX 欠落は **unavailable 台帳** (= 当 tick の BUY 全 fail-closed)。
+ * 構造化ログ (requestId 付き) で取得結果を残す。
+ */
+async function resolveBuyingPowerLedger(
+  readClient: { getAccountBalance(): Promise<WebullAccountBalanceDto> },
+  usdJpyRate: number | null,
+  requestId: string | undefined,
+): Promise<BuyingPowerLedger> {
+  try {
+    const balance = await readClient.getAccountBalance()
+    const bp = buyingPowerJpyFromBalance(balance, usdJpyRate)
+    if (bp === null) {
+      console.warn(
+        JSON.stringify({
+          event: 'buying_power_unavailable',
+          reason: 'balance parse failed / anomaly / missing FX',
+          requestId,
+        }),
+      )
+      return createUnavailableBuyingPowerLedger('balance parse failed / anomaly / missing FX')
+    }
+    console.warn(
+      JSON.stringify({ event: 'buying_power_fetched', jpy: bp.jpy, byCurrency: bp.byCurrency, requestId }),
+    )
+    return createBuyingPowerLedger({ availableJpy: bp.jpy, asOf: new Date().toISOString() })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    console.warn(JSON.stringify({ event: 'buying_power_unavailable', reason, requestId }))
+    return createUnavailableBuyingPowerLedger(reason)
+  }
 }
 
 /**
