@@ -157,3 +157,65 @@ describe('computePullbackSizing', () => {
     expect(() => computePullbackSizing(baseInput({ kAtr: Number.NaN }))).toThrow(/kAtr/)
   })
 })
+
+describe('computePullbackSizing — fixed-% budget allocation (#budget-alloc)', () => {
+  it('sizes by notional = equity * budgetAllocPct (bypasses risk-% / ATR floor)', () => {
+    // 総資本 100k の 40% = 40,000 を price 35,000 で → floor(40000/35000) = 1 株。
+    const result = computePullbackSizing(
+      baseInput({ equity: 100_000, entryPrice: 35_000, budgetAllocPct: 0.4, atr20: 5000, baselineAtr20: 1000 }),
+    )
+    expect(result.quantity).toBe(1)
+    expect(result.notional).toBe(35_000)
+    // risk-% なら floor(400 / stop) = 0 株のはず。budget-alloc で 1 株建つ。
+    expect(result.capped).toBe(false)
+  })
+
+  it('clamps to symbolCap when budget*pct exceeds it (min semantics)', () => {
+    // 40% = 40,000 だが symbolCap 30,000 → min。floor(30000/10000)=3。
+    const result = computePullbackSizing(
+      baseInput({ equity: 100_000, entryPrice: 10_000, budgetAllocPct: 0.4, symbolCap: 30_000 }),
+    )
+    expect(result.quantity).toBe(3)
+    expect(result.notional).toBe(30_000)
+    expect(result.capReason).toBe('symbol-cap')
+  })
+
+  it('uses budget pct even when below symbolCap (% wins, abs is only a ceiling)', () => {
+    // 20% = 20,000 < symbolCap 50,000 → 予算% を採用。floor(20000/10000)=2。
+    const result = computePullbackSizing(
+      baseInput({ equity: 100_000, entryPrice: 10_000, budgetAllocPct: 0.2, symbolCap: 50_000 }),
+    )
+    expect(result.quantity).toBe(2)
+    expect(result.notional).toBe(20_000)
+  })
+
+  it('respects lot size in budget-alloc mode', () => {
+    // 40% = 40,000、price 100、lot 100 → floor(400/100)*100 = 400。
+    const result = computePullbackSizing(
+      baseInput({ equity: 100_000, entryPrice: 100, budgetAllocPct: 0.4, lotSize: 100 }),
+    )
+    expect(result.quantity).toBe(400)
+  })
+
+  it('rejects (qty 0) when budget*pct is too small for one share', () => {
+    // 1% = 1,000 だが price 35,000 → floor(1000/35000)=0。
+    const result = computePullbackSizing(
+      baseInput({ equity: 100_000, entryPrice: 35_000, budgetAllocPct: 0.01 }),
+    )
+    expect(result.quantity).toBe(0)
+  })
+
+  it('falls back to risk-% sizing when budgetAllocPct is undefined', () => {
+    const result = computePullbackSizing(baseInput())
+    expect(result.quantity).toBe(100) // 従来通り
+  })
+
+  it('fail-closed (qty 0) on invalid budgetAllocPct instead of risk-% fallback (CodeRabbit #405)', () => {
+    // budgetAllocPct が指定済みだが範囲外 (>1) / NaN / <=0 → 0 qty で止める。
+    for (const bad of [1.5, 0, -0.1, Number.NaN]) {
+      const result = computePullbackSizing(baseInput({ budgetAllocPct: bad }))
+      expect(result.quantity).toBe(0)
+      expect(result.capped).toBe(true)
+    }
+  })
+})

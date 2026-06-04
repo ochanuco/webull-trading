@@ -153,6 +153,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
               notes: (v.notes as string | null) ?? null,
               timeStopDaysOverride: (v.timeStopDaysOverride as number | null) ?? null,
               kAtrOverride: (v.kAtrOverride as number | null) ?? null,
+              budgetAllocPct: (v.budgetAllocPct as number | null) ?? null,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -207,6 +208,7 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     notes: null,
     timeStopDaysOverride: null,
     kAtrOverride: null,
+    budgetAllocPct: null,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -865,6 +867,93 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
   })
 
+  it('POST persists budget_alloc_pct as a fraction (% input ÷ 100)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: '1570',
+      market: 'JP',
+      currency: 'JPY',
+      active: 'true',
+      budget_alloc_pct: '40', // 40% → 0.4
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
+    expect(inserted.values.budgetAllocPct).toBeCloseTo(0.4, 6)
+  })
+
+  it('edit form shows 予算配分 (%) field', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', budgetAllocPct: 0.4 })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/SOXL/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('name="budget_alloc_pct"')
+    // fraction 0.4 → 表示は 40 (%)
+    expect(body).toMatch(/name="budget_alloc_pct"[^>]*value="40"/)
+  })
+
+  it('list renders budget-allocation ladder slider + confirm button (tentative until 確定)', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', budgetAllocPct: 0.4 })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    // slider が form="symbol-budget-form" に紐づき、現在値 40 が反映
+    expect(body).toContain('name="pct_SOXL"')
+    expect(body).toContain('form="symbol-budget-form"')
+    expect(body).toMatch(/name="pct_SOXL"[^>]*value="40"/)
+    // 確定ボタン (即保存しない)
+    expect(body).toContain('確定して保存')
+    expect(body).toContain('action="/admin/symbol-config/budget-alloc"')
+  })
+
+  it('bulk budget-alloc POST converts % → fraction (÷100), 303', async () => {
+    let lastSetPct: number | null | undefined
+    // chain mock: from() は await で [] (loadInversePairs)、where().limit() で
+    // SOXL 行 (findSymbolConfig)、update().set().where() で set 値を捕捉。
+    const chain: Record<string, unknown> = {}
+    chain.from = () => chain
+    chain.where = () => chain
+    chain.limit = async () => [{ symbol: 'SOXL', budgetAllocPct: null }]
+    chain.then = (resolve: (v: unknown[]) => unknown) => Promise.resolve([]).then(resolve)
+    vi.mocked(createDb).mockReturnValue({
+      select: () => chain,
+      update: () => ({
+        set: (vals: { budgetAllocPct: number | null }) => ({
+          where: async () => {
+            lastSetPct = vals.budgetAllocPct
+          },
+        }),
+      }),
+      insert: () => ({ values: async () => undefined }),
+    } as never)
+    const app = createApp()
+    const form = new URLSearchParams({ pct_SOXL: '40' })
+    const res = await app.request(
+      '/admin/symbol-config/budget-alloc',
+      { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.toString() },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/dashboard/symbols')
+    expect(lastSetPct).toBeCloseTo(0.4, 6)
+  })
+
   it('new form inputs carry password-manager opt-out (data-1p-ignore)', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -925,7 +1014,47 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 })
 
-import { orderRowsByPair, assignPairColors, pairRoles } from '../../src/routes/dashboard'
+import { orderRowsByPair, assignPairColors, pairRoles, computeBudgetUsage } from '../../src/routes/dashboard'
+
+describe('#budget-alloc computeBudgetUsage (concurrent-position meter)', () => {
+  const rec = (symbol: string, currency: string, budgetAllocPct: number | null) => ({ symbol, currency, budgetAllocPct })
+
+  it('counts an inverse pair once via max (only one side held at a time)', () => {
+    // SOXL 40% / SOXS 40% (synced) → pair contributes 40, not 80.
+    const usage = computeBudgetUsage(
+      [rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.4)],
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+    )
+    expect(usage.USD).toBeCloseTo(40, 6)
+  })
+
+  it('uses max when the two sides differ', () => {
+    const usage = computeBudgetUsage(
+      [rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.2)],
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+    )
+    expect(usage.USD).toBeCloseTo(40, 6)
+  })
+
+  it('adds standalone symbols and separate pairs; groups by currency', () => {
+    const usage = computeBudgetUsage(
+      [
+        rec('SOXL', 'USD', 0.4), rec('SOXS', 'USD', 0.4), // pair → 40
+        rec('TQQQ', 'USD', 0.3), rec('SQQQ', 'USD', 0.3), // pair → 30
+        rec('AAPL', 'USD', 0.1), // standalone → 10
+        rec('1570', 'JPY', 0.5), rec('1357', 'JPY', 0.5), // JPY pair → 50
+      ],
+      { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ', '1570': '1357', '1357': '1570' },
+    )
+    expect(usage.USD).toBeCloseTo(80, 6) // 40+30+10
+    expect(usage.JPY).toBeCloseTo(50, 6)
+  })
+
+  it('ignores null / 0 allocations', () => {
+    const usage = computeBudgetUsage([rec('SOXL', 'USD', null), rec('AAPL', 'USD', 0)], {})
+    expect(usage.USD).toBeUndefined()
+  })
+})
 
 describe('#315 inverse-pair list grouping', () => {
   const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol })
