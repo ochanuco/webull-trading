@@ -537,7 +537,17 @@ export async function runStrategyCron(
   // #budget-jpy-base-fx: 予算配分は口座(円)単一プール基準。USD 銘柄を「円予算 → USD」
   // 換算するため USD/JPY を 1 回だけ取得 (USD 側に budget 銘柄がある時のみ)。取得失敗
   // /異常値は null → USD budget 銘柄は sizing 側で fail-closed (発注見送り)。
-  const budgetBasisJpy = sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY)
+  // 予算配分の基準額は実口座総額 (total_capital_jpy)。**null/未設定/非正は DEFAULT に
+  // 倒さず undefined** にする: 幻の資本 (¥1.5M default) で budget% sizing すると小口座で
+  // 過大発注になり Webull 余力不足 (417) を招くため、budget 銘柄を sizing 側で
+  // fail-closed (発注見送り) させる。total_capital_jpy を設定すれば即 sizing 再開
+  // (real-money safety / #417 buying-power)。risk-% sizing 経路の equity 既定は別管理。
+  const budgetBasisJpy =
+    global.totalCapitalJpy != null &&
+    Number.isFinite(global.totalCapitalJpy) &&
+    global.totalCapitalJpy > 0
+      ? global.totalCapitalJpy
+      : undefined
   const usdHasBudgetSymbol = byCurrency.USD.some(
     (s) => universe.symbolBudgetAllocPct[s.toUpperCase()] !== undefined,
   )
