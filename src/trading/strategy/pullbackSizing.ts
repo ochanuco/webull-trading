@@ -8,6 +8,13 @@ export interface PullbackSizingInput {
   baselineAtr20: number
   /** Optional symbol-specific absolute notional cap. */
   symbolCap?: number
+  /**
+   * Per-symbol budget allocation fraction of NAV (0..1)。指定されると **fixed-%
+   * 配分モード**になり risk-% / ATR floor を bypass して
+   * `notional = min(equity * budgetAllocPct, symbolCap)` で sizing する (#budget-alloc)。
+   * 小口座で risk-% sizing が 0 株になる高額レバ ETF 用。NULL は従来の risk sizing。
+   */
+  budgetAllocPct?: number
   /** Risk fraction of NAV per trade. Default 0.004 (0.4%). */
   riskPerTradePct?: number
   /** ATR floor ratio. If atr20 < baselineAtr20 * this, size is halved. Default 0.5. */
@@ -65,37 +72,73 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   if (!Number.isFinite(input.kAtr) || input.kAtr <= 0) {
     throw new Error(`computePullbackSizing: kAtr must be a positive finite number, got ${input.kAtr}`)
   }
-  const pctStop = Math.abs(input.entryPrice * input.stopPct)
-  // vol-adaptive: kAtr * atr20。atr20=0 (post-halt/gap) は pct stop が floor。
-  const atrStop = input.atr20 > 0 ? input.kAtr * input.atr20 : 0
-  const stopDistance = atrStop > pctStop ? atrStop : pctStop
-
-  if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
-    return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop', stopDistance }
-  }
-
-  const riskBudget = input.equity * riskPct
-  if (!Number.isFinite(riskBudget) || riskBudget <= 0) {
-    return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget', stopDistance, riskBudget }
-  }
-
-  let quantity = Math.floor(riskBudget / stopDistance)
+  let quantity: number
   let capped = false
   let capReason: PullbackSizingResult['capReason']
+  let stopDistance: number | undefined
+  let riskBudget: number | undefined
 
-  if (input.baselineAtr20 > 0 && input.atr20 < input.baselineAtr20 * atrFloor) {
-    quantity = Math.floor(quantity / 2)
-    capped = true
-    capReason = 'atr-floor'
+  if (input.budgetAllocPct !== undefined) {
+    // === fixed-% 予算配分モード (#budget-alloc) ===
+    // notional = min(equity * pct, symbolCap)。risk-% / ATR floor は使わない。
+    // 小口座で高額レバ ETF を「予算の N%」で建てるための path。
+    //
+    // budgetAllocPct が「指定済み」なら厳密検証して fail-closed。NaN / <=0 / >1 の
+    // 不正値で risk-% にフォールバックすると想定外サイジングになるため (CodeRabbit
+    // #405)、ここで 0 qty 返却して止める (loadSymbolConfig は 0<pct<=1 のみ通すが
+    // 二重防御)。
+    if (!Number.isFinite(input.budgetAllocPct) || input.budgetAllocPct <= 0 || input.budgetAllocPct > 1) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
+    }
+    if (!Number.isFinite(input.entryPrice) || input.entryPrice <= 0) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop' }
+    }
+    const rawNotional = input.equity * input.budgetAllocPct
+    if (!Number.isFinite(rawNotional) || rawNotional <= 0) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
+    }
+    let target = rawNotional
+    // %優先・絶対上限は安全弁: min(予算×%, symbolCap)。
+    if (input.symbolCap !== undefined && target > input.symbolCap) {
+      target = input.symbolCap
+      capped = true
+      capReason = 'symbol-cap'
+    }
+    quantity = Math.floor(target / input.entryPrice)
+  } else {
+    // === 従来の risk-% sizing ===
+    const pctStop = Math.abs(input.entryPrice * input.stopPct)
+    // vol-adaptive: kAtr * atr20。atr20=0 (post-halt/gap) は pct stop が floor。
+    const atrStop = input.atr20 > 0 ? input.kAtr * input.atr20 : 0
+    stopDistance = atrStop > pctStop ? atrStop : pctStop
+
+    if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop', stopDistance }
+    }
+
+    riskBudget = input.equity * riskPct
+    if (!Number.isFinite(riskBudget) || riskBudget <= 0) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget', stopDistance, riskBudget }
+    }
+
+    quantity = Math.floor(riskBudget / stopDistance)
+
+    if (input.baselineAtr20 > 0 && input.atr20 < input.baselineAtr20 * atrFloor) {
+      quantity = Math.floor(quantity / 2)
+      capped = true
+      capReason = 'atr-floor'
+    }
+
+    let notionalRisk = quantity * input.entryPrice
+    if (input.symbolCap !== undefined && notionalRisk > input.symbolCap) {
+      quantity = Math.floor(input.symbolCap / input.entryPrice)
+      notionalRisk = quantity * input.entryPrice
+      capped = true
+      capReason = 'symbol-cap'
+    }
   }
 
   let notional = quantity * input.entryPrice
-  if (input.symbolCap !== undefined && notional > input.symbolCap) {
-    quantity = Math.floor(input.symbolCap / input.entryPrice)
-    notional = quantity * input.entryPrice
-    capped = true
-    capReason = 'symbol-cap'
-  }
 
   // Exchange lot-size rounding (e.g. TSE 100-share lots). Must run AFTER all
   // other caps so we don't round up back over symbolCap. If the round-down

@@ -1,0 +1,1 @@
+ALTER TABLE `symbol_config` ADD `budget_alloc_pct` real;

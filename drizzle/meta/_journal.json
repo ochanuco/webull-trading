@@ -169,6 +169,13 @@
       "when": 1780572943376,
       "tag": "0023_drop_bucket_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1780576185111,
+      "tag": "0024_add_symbol_budget_alloc_pct",
+      "breakpoints": true
     }
   ]
 }

@@ -6888,6 +6888,15 @@ function symbolsListBody(args: {
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
+      // 予算配分 ladder slider (#budget-alloc): 5%刻み。確定するまで client 側で仮調整、
+      // form="symbol-budget-form" で一括 POST。inverse 相手は JS が同期する。
+      const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
+      const budgetCell = `<div style="display:flex;align-items:center;gap:6px;min-width:170px">
+          <input type="range" name="pct_${esc(r.symbol)}" form="symbol-budget-form" min="0" max="100" step="5" value="${allocPctNum}"
+            data-symbol="${esc(r.symbol)}" data-currency="${esc(r.currency)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
+            oninput="window.onBudgetSlide(this)" style="width:110px;vertical-align:middle">
+          <span id="budget-label-${esc(r.symbol)}" class="muted" style="font-size:12px;width:42px;text-align:right;font-variant-numeric:tabular-nums">${allocPctNum === 0 ? 'risk' : allocPctNum + '%'}</span>
+        </div>`
       // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
       // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
       // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
@@ -6912,6 +6921,7 @@ function symbolsListBody(args: {
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${maxNotionalCell}</td>
+        <td>${budgetCell}</td>
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
@@ -6932,12 +6942,143 @@ function symbolsListBody(args: {
       <th>銘柄名</th>
       <th>市場/通貨</th>
       <th>1注文上限</th>
+      <th>予算配分</th>
       <th>メモ</th>
       <th>更新日</th>
       <th>操作</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${budgetLadderControls()}
+  ${safeJsonScript(
+    '__budgetBaseline',
+    rows
+      .filter((r) => r.budgetAllocPct != null && r.budgetAllocPct > 0)
+      .map((r) => ({
+        s: r.symbol.toUpperCase(),
+        ccy: r.currency,
+        pct: Math.round((r.budgetAllocPct as number) * 1000) / 10,
+        inv: inversePairs[r.symbol.toUpperCase()] ?? null,
+      })),
+  )}
+  <script>${BUDGET_LADDER_JS}</script>`
+}
+
+// #budget-alloc ladder の client JS: slider 移動でラベル更新 + インバース相手の
+// slider を同値に同期 + 「未確定」バーを表示。保存は確定ボタン押下の form POST のみ
+// (即保存しない = 確定するまで仮)。
+const BUDGET_LADDER_JS = `
+  window.__budgetDirty = {};
+  window.__fmtBudget = function (v) { return Number(v) <= 0 ? 'risk' : v + '%'; };
+  window.__setBudgetSlider = function (sym, v) {
+    var sl = document.querySelector('input[name="pct_' + sym + '"]');
+    var lb = document.getElementById('budget-label-' + sym);
+    if (sl) sl.value = v;
+    if (lb) lb.textContent = window.__fmtBudget(v);
+  };
+  window.onBudgetSlide = function (el) {
+    var sym = el.getAttribute('data-symbol');
+    var inv = el.getAttribute('data-inverse');
+    var v = el.value;
+    var lb = document.getElementById('budget-label-' + sym);
+    if (lb) lb.textContent = window.__fmtBudget(v);
+    // インバース対は同値に同期 (#315 regime hedge)。相手 slider が一覧に在れば揃える。
+    if (inv) window.__setBudgetSlider(inv, v);
+    window.__budgetDirty[sym] = true;
+    if (inv) window.__budgetDirty[inv] = true;
+    var bar = document.getElementById('symbol-budget-bar');
+    var note = document.getElementById('symbol-budget-dirty');
+    if (bar) bar.style.display = 'flex';
+    if (note) note.textContent = Object.keys(window.__budgetDirty).length + ' 銘柄を変更中';
+    window.__recomputeBudgetMeter();
+  };
+  // 同時建玉ベースの予算使用率を全 slider から再計算してメーターを再描画。
+  // インバース対は max を 1 回だけ計上 (片側のみ建つため)。
+  window.__recomputeBudgetMeter = function () {
+    var barMeter = document.getElementById('symbol-budget-bar-meter');
+    if (!barMeter) return;
+    // 全銘柄の baseline 配分から開始し、表示中 slider の現在値で上書きする。
+    // filter で非表示の銘柄の配分が meter から欠落しないようにするため (CodeRabbit #405)。
+    var bySym = {};
+    (window.__budgetBaseline || []).forEach(function (b) {
+      if (b.pct > 0) bySym[b.s] = { ccy: b.ccy, pct: b.pct, inv: b.inv };
+    });
+    var sliders = document.querySelectorAll('input[name^="pct_"]');
+    sliders.forEach(function (s) {
+      var sym = s.getAttribute('data-symbol');
+      var v = Number(s.value);
+      if (v > 0) bySym[sym] = { ccy: s.getAttribute('data-currency'), pct: v, inv: s.getAttribute('data-inverse') };
+      else delete bySym[sym]; // 0 にした表示中銘柄は除外 (baseline 値で復活させない)
+    });
+    var usage = {};
+    var counted = {};
+    Object.keys(bySym).forEach(function (sym) {
+      var e = bySym[sym];
+      if (e.inv) {
+        var key = [sym, e.inv].sort().join('|');
+        if (counted[key]) return;
+        counted[key] = true;
+        var invPct = bySym[e.inv] ? bySym[e.inv].pct : 0;
+        usage[e.ccy] = (usage[e.ccy] || 0) + Math.max(e.pct, invPct);
+      } else {
+        usage[e.ccy] = (usage[e.ccy] || 0) + e.pct;
+      }
+    });
+    var ccys = ['USD', 'JPY'].filter(function (c) { return (usage[c] || 0) > 0; });
+    // sticky バー内のコンパクトゲージ (確定ボタン横、同時建玉ベース)。
+    barMeter.innerHTML = ccys.map(function (ccy) {
+      var u = usage[ccy] || 0;
+      var w = Math.min(100, u);
+      var col = u > 100 ? '#c22' : u > 80 ? '#b25000' : '#057a55';
+      return '<span title="同時建玉ベースの予算使用率 (インバース対は max を1回計上)" style="display:flex;align-items:center;gap:6px;font-size:12px;flex:1;min-width:0">'
+        + '<span class="muted" style="white-space:nowrap">' + ccy + '</span>'
+        + '<span class="bar-track" style="flex:1;min-width:40px;height:8px"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
+        + '<span style="font-variant-numeric:tabular-nums;color:' + col + ';white-space:nowrap">' + u.toFixed(0) + '%' + (u > 100 ? '⚠' : '') + '</span></span>';
+    }).join('');
+  };
+`
+
+/** 予算配分 ladder の確定 / 取消 バー。slider は form attr で此処の form に紐づく。 */
+function budgetLadderControls(): string {
+  return `<form id="symbol-budget-form" method="post" action="/admin/symbol-config/budget-alloc"></form>
+  <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,0.06)">
+    <strong style="font-size:13px">予算配分の変更（未確定）</strong>
+    <span id="symbol-budget-dirty" class="muted" style="font-size:12px;white-space:nowrap"></span>
+    <span id="symbol-budget-bar-meter" style="display:flex;gap:14px;align-items:center;flex:1"></span>
+    <a href="/dashboard/symbols" style="padding:5px 12px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">取消</a>
+    <button type="submit" form="symbol-budget-form" style="padding:5px 14px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">確定して保存</button>
+  </div>`
+}
+
+/**
+ * #budget-alloc: 同時建玉ベースの予算使用率 (per currency, %)。
+ * インバース対は同時に片方しか建たないので max(両側) で1回だけ計上、
+ * standalone と別ペアは加算。total_capital に対する「最大同時コミット率」。
+ */
+export function computeBudgetUsage(
+  rows: Array<{ symbol: string; currency: string; budgetAllocPct: number | null }>,
+  inversePairs: Record<string, string>,
+): Record<string, number> {
+  const pctBySym = new Map<string, { currency: string; pct: number }>()
+  for (const r of rows) {
+    const pct = r.budgetAllocPct != null && r.budgetAllocPct > 0 ? r.budgetAllocPct * 100 : 0
+    if (pct > 0) pctBySym.set(r.symbol.toUpperCase(), { currency: r.currency, pct })
+  }
+  const usage: Record<string, number> = {}
+  const countedPair = new Set<string>()
+  for (const [sym, { currency, pct }] of pctBySym) {
+    const inv = inversePairs[sym]
+    if (inv) {
+      const key = [sym, inv].sort().join('|')
+      if (countedPair.has(key)) continue
+      countedPair.add(key)
+      const invPct = pctBySym.get(inv)?.pct ?? 0
+      usage[currency] = (usage[currency] ?? 0) + Math.max(pct, invPct)
+    } else {
+      usage[currency] = (usage[currency] ?? 0) + pct
+    }
+  }
+  return usage
 }
 
 /**
@@ -7086,6 +7227,11 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const kAtrPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.kAtr}) を使用`
     : '空欄で global default を使用'
+  // 予算配分は DB に fraction (0..1) 保存、表示は % (×100)。
+  const budgetAllocPctValue =
+    row?.budgetAllocPct === null || row?.budgetAllocPct === undefined
+      ? ''
+      : String(Math.round(row.budgetAllocPct * 1000) / 10)
   const symbolField =
     mode === 'edit'
       ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
@@ -7167,6 +7313,12 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
       <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
+    </div>
+    <label>予算配分 <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で risk-% sizing" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% of 総資本</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">指定すると <strong>1 注文 = 総資本 (<code>total_capital</code>) × この%</strong> で sizing (risk-% sizing を bypass)。小口座で高額レバ ETF を建てる用。上限は <code>min(予算×%, 1注文上限)</code>。空欄なら従来の risk-% sizing。</p>
     </div>
     <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
     <div>

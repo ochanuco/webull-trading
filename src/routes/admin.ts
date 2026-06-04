@@ -33,7 +33,9 @@ import {
   findSymbolConfig,
   insertSymbolConfig,
   hardDeleteSymbol,
+  loadInversePairs,
   toggleSymbolActive,
+  updateBudgetAllocPct,
   updateSymbolConfig,
   type SymbolConfigWriteInput,
 } from '../infrastructure/db/symbolConfigRepo'
@@ -1509,6 +1511,62 @@ export const admin = new Hono<AppBindings>()
     return c.json({ symbol: symbolPath, deleted: true })
   })
   /**
+   * 予算配分% の一括更新 (#budget-alloc ラダー)。一覧の各 slider が
+   * `pct_<SYMBOL>` field を送り、「確定」押下で全銘柄まとめて更新する
+   * (確定するまでは client 側で仮調整)。値は % (0-100)、空 / 0 → NULL
+   * (= risk-% sizing)。インバース対は片側でも UI が同期するので両側送られる
+   * 想定だが、server 側でも相手を同値に揃える防御を入れる (JS off 耐性)。
+   */
+  .post('/symbol-config/budget-alloc', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const isForm = isFormContentType(c.req.header('content-type'))
+    const db = createDb(c.env.DB)
+    const now = new Date().toISOString()
+    const form = await c.req.formData()
+    const inverse = await loadInversePairs(db)
+    // pct_<SYMBOL> を集約 (大文字正規化、% → fraction、空/0 → null)。
+    const desired = new Map<string, number | null>()
+    for (const [key, raw] of form.entries()) {
+      if (!key.startsWith('pct_')) continue
+      const sym = normalizeSymbol(key.slice(4))
+      const s = String(raw).trim()
+      if (s === '') {
+        desired.set(sym, null)
+        continue
+      }
+      const pctNum = Number(s)
+      if (!Number.isFinite(pctNum) || pctNum < 0 || pctNum > 100) {
+        throw new ValidationError(`budget_alloc_pct for ${sym} must be 0..100`, { field: 'budget_alloc_pct' })
+      }
+      desired.set(sym, pctNum <= 0 ? null : pctNum / 100)
+    }
+    // インバース対の同値同期 (両側 desired にある場合は UI 値を尊重、片側のみなら相手も揃える)。
+    for (const [sym, pct] of [...desired.entries()]) {
+      const inv = inverse[sym]
+      if (inv && !desired.has(inv)) desired.set(inv, pct)
+    }
+    let updated = 0
+    for (const [sym, pct] of desired.entries()) {
+      const res = await updateBudgetAllocPct(db, sym, pct, now)
+      if (res === null) continue
+      const beforeFrac = res.before.budgetAllocPct ?? null
+      if (beforeFrac !== pct) {
+        updated += 1
+        await writeAuditLog(
+          c,
+          '/admin/symbol-config/budget-alloc',
+          `symbol=${sym}`,
+          { budgetAllocPct: beforeFrac },
+          { budgetAllocPct: pct },
+        )
+      }
+    }
+    if (isForm) return c.redirect('/dashboard/symbols', 303)
+    return c.json({ updated })
+  })
+  /**
    * symbol search (live autocomplete + form auto-fill 用)。
    *
    * Yahoo Finance の public search endpoint を proxy する。query (`?q=AA` 等) の
@@ -2053,6 +2111,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     timeStopDaysOverride?: unknown
     k_atr_override?: unknown
     kAtrOverride?: unknown
+    budget_alloc_pct?: unknown
+    budgetAllocPct?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2079,6 +2139,17 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     0.5,
     5.0,
   )
+  // 予算配分: form は **% (0.1<=pct<=100)** で送る。fraction (0.001<=pct<=1) に変換して
+  // 保存 (#budget-alloc)。空 / undefined → NULL (= 従来の risk-% sizing)。下限は UI の
+  // 表示丸め (0.1% 刻み) / slider (5% 刻み) と揃え、sub-0.1% の保持崩れを防ぐ
+  // (CodeRabbit #405)。範囲外は 400。
+  const budgetAllocPctRaw = parseOptionalNumberInRange(
+    raw.budget_alloc_pct ?? raw.budgetAllocPct,
+    'budgetAllocPct',
+    0.1,
+    100,
+  )
+  const budgetAllocPct = budgetAllocPctRaw === null ? null : budgetAllocPctRaw / 100
   return {
     symbol,
     name,
@@ -2089,6 +2160,7 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     notes,
     timeStopDaysOverride,
     kAtrOverride,
+    budgetAllocPct,
   }
 }
 
@@ -2291,6 +2363,7 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     notes: row.notes,
     timeStopDaysOverride: row.timeStopDaysOverride,
     kAtrOverride: row.kAtrOverride,
+    budgetAllocPct: row.budgetAllocPct,
     updatedAt: row.updatedAt,
   }
 }

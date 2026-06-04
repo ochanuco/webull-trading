@@ -51,6 +51,11 @@ export interface SymbolConfigSnapshot {
    * 高ボラ銘柄で ATR stop を緩めたい時に使う (#316)。
    */
   symbolKAtrOverride: Record<string, number>
+  /**
+   * symbol → budget_alloc_pct (fraction 0<pct<=1)。NULL は map に含めない
+   * (= 従来の risk-% sizing)。fixed-% 配分モードの sizing に使う (#budget-alloc)。
+   */
+  symbolBudgetAllocPct: Record<string, number>
 }
 
 /**
@@ -76,6 +81,7 @@ export async function loadSymbolConfig(
   const symbolNotes: Record<string, string> = {}
   const symbolTimeStopDaysOverride: Record<string, number> = {}
   const symbolKAtrOverride: Record<string, number> = {}
+  const symbolBudgetAllocPct: Record<string, number> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -115,6 +121,16 @@ export async function loadSymbolConfig(
     ) {
       symbolKAtrOverride[symbol] = row.kAtrOverride
     }
+    // budget_alloc_pct は 0<pct<=1 のみ採用 (範囲外 / NaN は無視 = risk sizing)。
+    if (
+      row.budgetAllocPct !== null &&
+      row.budgetAllocPct !== undefined &&
+      Number.isFinite(row.budgetAllocPct) &&
+      row.budgetAllocPct > 0 &&
+      row.budgetAllocPct <= 1
+    ) {
+      symbolBudgetAllocPct[symbol] = row.budgetAllocPct
+    }
   }
   return {
     allowedSymbols,
@@ -126,6 +142,7 @@ export async function loadSymbolConfig(
     symbolNotes,
     symbolTimeStopDaysOverride,
     symbolKAtrOverride,
+    symbolBudgetAllocPct,
   }
 }
 
@@ -159,6 +176,11 @@ export interface SymbolConfigWriteInput {
    * 高ボラ銘柄で ATR stop を緩める (#316)。
    */
   kAtrOverride: number | null
+  /**
+   * 予算配分 fraction (NULL = risk-% sizing、0<pct<=1)。fixed-% 配分モード
+   * (#budget-alloc)。
+   */
+  budgetAllocPct: number | null
 }
 
 /**
@@ -185,6 +207,7 @@ export async function insertSymbolConfig(
       notes: input.notes,
       timeStopDaysOverride: input.timeStopDaysOverride,
       kAtrOverride: input.kAtrOverride,
+      budgetAllocPct: input.budgetAllocPct,
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -228,6 +251,7 @@ export async function updateSymbolConfig(
       notes: input.notes,
       timeStopDaysOverride: input.timeStopDaysOverride,
       kAtrOverride: input.kAtrOverride,
+      budgetAllocPct: input.budgetAllocPct,
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))
@@ -256,6 +280,33 @@ export async function toggleSymbolActive(
   await db
     .update(symbolConfig)
     .set({ active: sql`NOT ${symbolConfig.active}`, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
+}
+
+/**
+ * budget_alloc_pct だけを更新する focused update (#budget-alloc ラダー調整用)。
+ * `pct` は fraction (0<pct<=1) or null (= risk-% sizing に戻す)。存在しなければ null。
+ * before/after を返し caller が audit / inverse 同期に使う。
+ */
+export async function updateBudgetAllocPct(
+  db: DrizzleD1Database,
+  symbol: string,
+  pct: number | null,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  // 同値なら UPDATE しない (updatedAt だけ無監査で進むのを防ぐ、CodeRabbit #405)。
+  if ((before.budgetAllocPct ?? null) === (pct ?? null)) {
+    return { before: beforeSnapshot, after: beforeSnapshot }
+  }
+  await db
+    .update(symbolConfig)
+    .set({ budgetAllocPct: pct, updatedAt: nowIso })
     .where(eq(symbolConfig.symbol, symbol))
   const after = await findSymbolConfig(db, symbol)
   if (after === null) return null
@@ -440,6 +491,8 @@ export async function createSymbolPair(
       notes: null,
       timeStopDaysOverride: null,
       kAtrOverride: null,
+      // regime hedge は片方ずつ建てるので counterpart も同じ予算配分%を継承。
+      budgetAllocPct: primary.budgetAllocPct,
       updatedAt: nowIso,
     })
     await db.batch([delLink, insCounterpart, insLink])

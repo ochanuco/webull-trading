@@ -59,6 +59,12 @@ export interface PullbackSchedulerOptions {
    */
   lotSize?: number
   /**
+   * symbol → budget_alloc_pct (0<pct<=1)。指定 symbol は fixed-% 配分 sizing
+   * (notional = min(equity * pct, symbolCap)) に切替わる (#budget-alloc)。
+   * 未指定 symbol は従来の risk-% sizing。
+   */
+  symbolBudgetAllocPctMap?: Record<string, number>
+  /**
    * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
    * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
    * 呼び出し側が失敗を throw しないのが前提 (logging failure isolation)。
@@ -443,6 +449,7 @@ export async function runPullbackScheduler(
         riskPerTradePct: options.riskPerTradePct,
         lotSize: options.lotSize,
         kAtr: rule.kAtr,
+        budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
       })
       if (sizing.quantity <= 0) {
         const reason = buildSizingRejectReason(sizing, {

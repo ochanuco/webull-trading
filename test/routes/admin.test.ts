@@ -1139,6 +1139,7 @@ describe('POST /admin/orders/sync-holdings', () => {
       symbolNotes: {},
       symbolTimeStopDaysOverride: {},
       symbolKAtrOverride: {},
+      symbolBudgetAllocPct: {},
       inversePairs: {},
       source: 'd1',
     })

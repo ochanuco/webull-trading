@@ -114,6 +114,13 @@ export const symbolConfig = sqliteTable(
      * 高ボラ銘柄で stop を緩めるケース用 (#316)。
      */
     kAtrOverride: real('k_atr_override'),
+    /**
+     * 予算配分 fraction (NULL = 従来の risk-% sizing、0<pct<=1)。指定されると
+     * fixed-% 配分モードで `notional = min(total_capital * pct, max_notional)` で
+     * sizing する (#budget-alloc)。小口座で高額レバ ETF を建てる用。range CHECK は
+     * SQLite ALTER 制約で付けず admin parse + 将来 rebuild で担保。
+     */
+    budgetAllocPct: real('budget_alloc_pct'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

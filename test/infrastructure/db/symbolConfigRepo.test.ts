@@ -134,8 +134,45 @@ import {
   setInversePair,
   deleteInversePairsForSymbol,
   createSymbolPair,
+  updateBudgetAllocPct,
   type SymbolConfigWriteInput,
 } from '../../../src/infrastructure/db/symbolConfigRepo'
+
+describe('updateBudgetAllocPct', () => {
+  // findSymbolConfig は select().from().where().limit()。update().set().where() の
+  // 呼び出し有無を記録する最小 mock。
+  function fakeDb2(current: number | null) {
+    let updates = 0
+    const sel = () => ({
+      from: () => sel(),
+      where: () => sel(),
+      limit: async () => [{ symbol: 'SOXL', budgetAllocPct: current }],
+    })
+    const db = {
+      select: () => sel(),
+      update: () => ({ set: () => ({ where: async () => { updates += 1 } }) }),
+    }
+    return { db: db as unknown as Parameters<typeof updateBudgetAllocPct>[0], updates: () => updates }
+  }
+
+  it('skips UPDATE when value is unchanged (no updatedAt bump, CodeRabbit #405)', async () => {
+    const f = fakeDb2(0.4)
+    await updateBudgetAllocPct(f.db, 'SOXL', 0.4, 't')
+    expect(f.updates()).toBe(0)
+  })
+
+  it('issues UPDATE when value changes', async () => {
+    const f = fakeDb2(0.4)
+    await updateBudgetAllocPct(f.db, 'SOXL', 0.5, 't')
+    expect(f.updates()).toBe(1)
+  })
+
+  it('null↔null is a no-op', async () => {
+    const f = fakeDb2(null)
+    await updateBudgetAllocPct(f.db, 'SOXL', null, 't')
+    expect(f.updates()).toBe(0)
+  })
+})
 
 // setInversePair / deleteInversePairsForSymbol / createSymbolPair 用の最小 mock。
 // insert().values() / delete().where() は即実行で Promise を返し、batch は待つだけ。
@@ -195,6 +232,7 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   notes: null,
   timeStopDaysOverride: null,
   kAtrOverride: null,
+  budgetAllocPct: null,
 })
 
 describe('setInversePair', () => {
