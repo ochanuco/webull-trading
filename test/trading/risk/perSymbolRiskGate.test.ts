@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   evaluatePerSymbolRisk,
   type PerSymbolRiskConfig,
@@ -199,6 +199,44 @@ describe('evaluatePerSymbolRisk — spread guard', () => {
     )
     expect(decision.approved).toBe(false)
     expect(decision.reasons[0]).toContain('bid/ask missing')
+  })
+
+  it('skips spread guard (approves) when source lacks bid/ask — Yahoo (#411 案A)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const state: SymbolState = {
+        ...emptySymbolState('TQQQ', () => now),
+        // Yahoo feed は bid/ask 無しで price のみ保存する。
+        lastQuote: quote(100, 1_000, { source: 'yahoo-snapshot', bid: undefined, ask: undefined }),
+      }
+      const decision = evaluatePerSymbolRisk(
+        { symbol: 'TQQQ', side: 'BUY', intentPrice: 100, intentNotional: 100, state, now },
+        baseConfig,
+      )
+      expect(decision.approved).toBe(true)
+      expect(decision.reasons).toEqual([])
+      // observability に skip を明示する構造化ログが出る。
+      const logged = warn.mock.calls.map((c) => JSON.parse(c[0] as string))
+      expect(logged).toContainEqual(
+        expect.objectContaining({ event: 'spread_guard_skipped_no_bidask', symbol: 'TQQQ', source: 'yahoo-snapshot' }),
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('still enforces spread limit when a bid/ask-less source DOES provide bid/ask', () => {
+    // Yahoo source でも bid/ask が来た場合は通常通り spread 判定する (skip は欠損時のみ)。
+    const state: SymbolState = {
+      ...emptySymbolState('TQQQ', () => now),
+      lastQuote: quote(100, 1_000, { source: 'yahoo-snapshot', bid: 99.0, ask: 101.0 }), // spread 2% >> 0.25%
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: 'TQQQ', side: 'BUY', intentPrice: 100, intentNotional: 100, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reasons[0]).toContain('spread')
   })
 
   it('approves SELL when spread is wide (exit priority)', () => {
