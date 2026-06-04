@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm'
+import { eq, or, sql } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import { inversePairs, symbolConfig, type SymbolConfigRow } from './schema'
 
@@ -323,4 +323,134 @@ export async function loadInversePairs(
     }
   }
   return result
+}
+
+/**
+ * inverse_pairs を 1:1 で張る (#315 regime hedge の対登録)。canonical 1 行のみ
+ * 保存し、`loadInversePairs` が双方向展開する。
+ *
+ * **1:1 強制**: a / b いずれかに触れる既存 pair 行を全削除してから 1 行 INSERT する。
+ * これで「SOXL↔SOXS と SOXL↔TQQQ」のような多対多事故を防ぐ (operator が対を
+ * 張り替えたら旧リンクは自動で消える)。self-pair (a===b) は throw。
+ *
+ * 戻り値の statements を呼び出し側が `db.batch` に渡し、symbol_config 作成と
+ * 同一トランザクションで原子的に適用できるようにする (createSymbolPair 用)。
+ * 単独で張りたい場合は `await runInversePairWrite(db, a, b, nowIso)` を使う。
+ */
+function buildInversePairWrite(
+  db: DrizzleD1Database,
+  a: string,
+  b: string,
+  nowIso: string,
+) {
+  const left = a.trim().toUpperCase()
+  const right = b.trim().toUpperCase()
+  if (left.length === 0 || right.length === 0) {
+    throw new Error('inverse pair requires two non-empty symbols')
+  }
+  if (left === right) {
+    throw new Error(`inverse pair cannot be self-referential: ${left}`)
+  }
+  return [
+    // a / b に触れる既存リンクを全削除 (どちらの向きで保存されていても消す)。
+    db
+      .delete(inversePairs)
+      .where(
+        or(
+          eq(inversePairs.symbol, left),
+          eq(inversePairs.inverse, left),
+          eq(inversePairs.symbol, right),
+          eq(inversePairs.inverse, right),
+        ),
+      ),
+    db.insert(inversePairs).values({ symbol: left, inverse: right, updatedAt: nowIso }),
+  ] as const
+}
+
+export async function setInversePair(
+  db: DrizzleD1Database,
+  a: string,
+  b: string,
+  nowIso: string,
+): Promise<void> {
+  const [del, ins] = buildInversePairWrite(db, a, b, nowIso)
+  await db.batch([del, ins])
+}
+
+/**
+ * symbol に触れる inverse_pairs 行を全削除 (cascade delete 用)。symbol_config の
+ * hardDelete と組で呼び、half-pair を残さない。相手の symbol_config 行は消さない。
+ */
+export async function deleteInversePairsForSymbol(
+  db: DrizzleD1Database,
+  symbol: string,
+): Promise<void> {
+  const s = symbol.trim().toUpperCase()
+  await db
+    .delete(inversePairs)
+    .where(or(eq(inversePairs.symbol, s), eq(inversePairs.inverse, s)))
+}
+
+export interface CreateSymbolPairResult {
+  /** primary が既存 (UNIQUE 衝突) なら 'duplicate'、新規作成成功なら 'created'。 */
+  primary: 'created' | 'duplicate'
+  /** counterpart を新規作成したか (既存ならそのまま、ON CONFLICT DO NOTHING)。 */
+  counterpartCreated: boolean
+}
+
+/**
+ * bull/bear を 1 フォームで対登録する (#315)。D1 batch で原子的に:
+ *   1. primary symbol_config INSERT (重複は 'duplicate' を返す)
+ *   2. counterpart symbol_config を INSERT ... ON CONFLICT DO NOTHING
+ *      (market/currency/bucket/maxNotional は primary 継承、name/override は空)
+ *   3. inverse_pairs リンク (1:1、既存リンクは buildInversePairWrite が掃除)
+ *
+ * primary が既存銘柄の場合は何も作らず 'duplicate' を返す (caller が 409/echo)。
+ */
+export async function createSymbolPair(
+  db: DrizzleD1Database,
+  primary: SymbolConfigWriteInput,
+  inverseSymbol: string,
+  nowIso: string,
+): Promise<CreateSymbolPairResult> {
+  const primarySym = primary.symbol.trim().toUpperCase()
+  const counterpartSym = inverseSymbol.trim().toUpperCase()
+  if (counterpartSym.length === 0) {
+    throw new Error('createSymbolPair requires a non-empty inverse symbol')
+  }
+  if (primarySym === counterpartSym) {
+    throw new Error(`inverse pair cannot be self-referential: ${primarySym}`)
+  }
+
+  // primary は重複検知のため先に単独 INSERT (UNIQUE 違反 = duplicate)。ここで
+  // 弾けば counterpart / link を作らずに早期 return できる。
+  const inserted = await insertSymbolConfig(db, { ...primary, symbol: primarySym }, nowIso)
+  if (inserted === null) {
+    return { primary: 'duplicate', counterpartCreated: false }
+  }
+
+  const counterpartBefore = await findSymbolConfig(db, counterpartSym)
+  const [delLink, insLink] = buildInversePairWrite(db, primarySym, counterpartSym, nowIso)
+
+  // counterpart を primary から継承して新規作成 (既存なら触らない)。
+  // name / override は空 (後で編集)。link 掃除 → counterpart 作成 → link 作成 の順。
+  if (counterpartBefore === null) {
+    const insCounterpart = db.insert(symbolConfig).values({
+      symbol: counterpartSym,
+      name: null,
+      market: primary.market,
+      currency: primary.currency,
+      active: true,
+      maxNotional: primary.maxNotional,
+      bucket: primary.bucket,
+      notes: null,
+      timeStopDaysOverride: null,
+      kAtrOverride: null,
+      updatedAt: nowIso,
+    })
+    await db.batch([delLink, insCounterpart, insLink])
+  } else {
+    await db.batch([delLink, insLink])
+  }
+  return { primary: 'created', counterpartCreated: counterpartBefore === null }
 }

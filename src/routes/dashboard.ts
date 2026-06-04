@@ -19,6 +19,7 @@ import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/g
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -646,7 +647,10 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable('DB not bound')))
     }
     try {
-      const rows = await loadAllSymbolConfigRows(c.env.DB)
+      const [rows, inversePairs] = await Promise.all([
+        loadAllSymbolConfigRows(c.env.DB),
+        loadInversePairs(createDb(c.env.DB)).catch(() => ({}) as Record<string, string>),
+      ])
       const errorCode = c.req.query('error') ?? null
       const errorSymbol = c.req.query('symbol') ?? null
       const filter: SymbolsListFilter = {
@@ -656,7 +660,7 @@ export const dashboard = new Hono<DashboardBindings>()
         q: c.req.query('q') ?? '',
       }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, errorCode, errorSymbol, filter })),
+        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, errorCode, errorSymbol, filter })),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
@@ -704,11 +708,15 @@ export const dashboard = new Hono<DashboardBindings>()
           kAtr: g.pullbackDefaultKAtr,
         }))
         .catch(() => null)
+      const inversePairs = await loadInversePairs(createDb(c.env.DB)).catch(
+        () => ({}) as Record<string, string>,
+      )
+      const currentInverse = inversePairs[symbol] ?? null
       return c.html(
         renderLayout(
           c,
           '銘柄管理 - 編集',
-          symbolFormBody({ mode: 'edit', row, error: null, knownPairs, globalDefaults }),
+          symbolFormBody({ mode: 'edit', row, error: null, knownPairs, globalDefaults, currentInverse }),
         ),
       )
     } catch (err) {
@@ -6859,11 +6867,12 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 
 function symbolsListBody(args: {
   rows: SymbolConfigRow[]
+  inversePairs?: Record<string, string>
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
 }): string {
-  const { rows, errorCode = null, errorSymbol = null, filter } = args
+  const { rows, inversePairs = {}, errorCode = null, errorSymbol = null, filter } = args
   const errorBanner = renderSymbolErrorBanner(errorCode, errorSymbol)
   const filtered = applySymbolsListFilter(rows, filter)
   const activeCount = rows.filter((r) => r.active).length
@@ -6911,10 +6920,19 @@ function symbolsListBody(args: {
   if (filtered.length === 0) {
     return `${errorBanner}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
-  const tbody = filtered
+  // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ↔バッジ。
+  const ordered = orderRowsByPair(filtered, inversePairs)
+  const pairColor = assignPairColors(ordered, inversePairs)
+  const tbody = ordered
     .map((r) => {
       const inactive = !r.active
-      const rowStyle = inactive ? ' style="opacity:0.5"' : ''
+      const sym = r.symbol.toUpperCase()
+      const inverse = inversePairs[sym] ?? null
+      const bg = pairColor.get(sym)
+      const rowStyleParts: string[] = []
+      if (inactive) rowStyleParts.push('opacity:0.5')
+      if (bg) rowStyleParts.push(`background:${bg}`)
+      const rowStyle = rowStyleParts.length ? ` style="${rowStyleParts.join(';')}"` : ''
       const symStyle = inactive ? ' style="text-decoration:line-through;color:#86868b"' : ''
       const toggleLabel = r.active ? '無効化' : '有効化'
       const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
@@ -6922,7 +6940,7 @@ function symbolsListBody(args: {
       const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
       const deleteForm = r.active
         ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
-        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去)。元に戻せません。よろしいですか？');">
+        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去、インバース対のリンクも解除)。元に戻せません。よろしいですか？');">
             <button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button>
           </form>`
       const maxNotionalCell = r.maxNotional === null
@@ -6931,9 +6949,13 @@ function symbolsListBody(args: {
       const bucketCell = r.bucket
         ? esc(r.bucket)
         : '<span class="muted" style="font-size:11px">—</span>'
+      const inverseCell = inverse
+        ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse)}/edit" title="インバース対 (相手に建玉がある間は BUY 見送り #315)" style="text-decoration:none;white-space:nowrap">↔ ${esc(inverse)}</a>`
+        : '<span class="muted" style="font-size:11px">—</span>'
       const dateOnly = (r.updatedAt || '').slice(0, 10)
       return `<tr${rowStyle}>
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
+        <td>${inverseCell}</td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${maxNotionalCell}</td>
@@ -6954,6 +6976,7 @@ function symbolsListBody(args: {
   <table>
     <thead><tr>
       <th>銘柄</th>
+      <th>インバース対</th>
       <th>銘柄名</th>
       <th>市場/通貨</th>
       <th>1注文上限</th>
@@ -6964,6 +6987,60 @@ function symbolsListBody(args: {
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
+}
+
+/**
+ * #315: インバース対が隣接するよう並べ替える。各 symbol を symbol ASC で走査し、
+ * 対の相手が未出力かつ filtered 内に在れば直後に続ける。対なし / 既出は単独。
+ */
+export function orderRowsByPair(
+  rows: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+): SymbolConfigRow[] {
+  const bySym = new Map(rows.map((r) => [r.symbol.toUpperCase(), r]))
+  const emitted = new Set<string>()
+  const out: SymbolConfigRow[] = []
+  for (const r of rows) {
+    const sym = r.symbol.toUpperCase()
+    if (emitted.has(sym)) continue
+    out.push(r)
+    emitted.add(sym)
+    const inv = inversePairs[sym]
+    if (inv && !emitted.has(inv) && bySym.has(inv)) {
+      out.push(bySym.get(inv)!)
+      emitted.add(inv)
+    }
+  }
+  return out
+}
+
+/**
+ * ペアごとに薄色背景を交互割り当て (両 symbol が表示中の対のみ着色)。
+ * 片側しか表示されていない対 / 対なしは無着色。
+ */
+export function assignPairColors(
+  ordered: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+): Map<string, string> {
+  const present = new Set(ordered.map((r) => r.symbol.toUpperCase()))
+  const colors = ['#eef4ff', '#fff4ec'] as const // 薄青 / 薄橙を交互
+  const color = new Map<string, string>()
+  const assignedPair = new Set<string>()
+  let idx = 0
+  for (const r of ordered) {
+    const sym = r.symbol.toUpperCase()
+    const inv = inversePairs[sym]
+    if (!inv || !present.has(inv)) continue
+    const key = [sym, inv].sort().join('|')
+    if (!assignedPair.has(key)) {
+      assignedPair.add(key)
+      const c = colors[idx % colors.length]!
+      idx++
+      color.set(sym, c)
+      color.set(inv, c)
+    }
+  }
+  return color
 }
 
 /**
@@ -6991,6 +7068,8 @@ function symbolErrorMessage(code: string, symbol: string | null): string {
         : 'symbol が有効化中のため削除できません。先に無効化してください。'
     case 'validation':
       return '入力値に誤りがあります。'
+    case 'inverse_self':
+      return 'インバース銘柄に主銘柄と同じ symbol は指定できません。'
     default:
       return `エラーが発生しました (code=${code}).`
   }
@@ -7008,10 +7087,13 @@ interface SymbolFormArgs {
    * なら N が適用される」と見せるために使う (#316)。読込失敗時 null。
    */
   globalDefaults: { timeStopDays: number; kAtr: number } | null
+  /** 編集対象が既に対を組んでいる相手 symbol (#315)。未ペア / new は null。 */
+  currentInverse?: string | null
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
   const { mode, row, error, knownPairs, globalDefaults } = args
+  const currentInverse = args.currentInverse ?? null
   const action =
     mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
   const symbolValue = row?.symbol ?? ''
@@ -7046,12 +7128,31 @@ function symbolFormBody(args: SymbolFormArgs): string {
            </div>
            <p class="muted" style="margin:4px 0 0;font-size:11px">2 文字以上入力で Yahoo Finance から候補を suggest。click で銘柄 / 銘柄名 / 市場 / 通貨を自動入力。JP 銘柄は 4 桁数字 (例: 7203)。</p>
          </div>`
+  // #315: インバース対の連動登録。new では入力欄 (任意)、edit では現在の対を表示。
+  const inverseField =
+    mode === 'edit'
+      ? `<label>インバース対 <span class="muted" style="font-size:11px">(inverse)</span></label>
+         <div>
+           ${
+             currentInverse
+               ? `<span>↔ <a href="/dashboard/symbols/${encodeURIComponent(currentInverse)}/edit"><strong>${esc(currentInverse)}</strong></a></span>
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に建玉がある間は BUY を見送ります (#315)。対の変更は一度削除して再登録してください。</p>`
+               : `<span class="muted">未設定 (対なし)</span>
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">対を組むには、相手銘柄の新規追加時に「インバース銘柄」を指定してください。</p>`
+           }
+         </div>`
+      : `<label>インバース銘柄 <span class="muted" style="font-size:11px">(inverse・任意)</span></label>
+         <div>
+           <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS (任意)" autocomplete="off" style="padding:6px;width:200px;text-transform:uppercase">
+           <p class="muted" style="margin:4px 0 0;font-size:11px">入力すると bull/bear が<strong>対で登録</strong>されます (相手の symbol_config も自動作成し、市場 / 通貨 / 相関グループ / 上限は主銘柄から継承)。相手に建玉がある間は BUY を見送ります (#315)。空欄なら単独登録。</p>
+         </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
   <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
     <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
+    ${inverseField}
     <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
     <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
     <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>

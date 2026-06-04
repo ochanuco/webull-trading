@@ -30,7 +30,7 @@ const baseEnv = {
 const authHeader = {}
 
 interface InsertCall {
-  table: 'symbol_config' | 'config_audit_log' | 'unknown'
+  table: 'symbol_config' | 'config_audit_log' | 'inverse_pairs' | 'unknown'
   values: Record<string, unknown>
 }
 interface UpdateCall {
@@ -62,10 +62,12 @@ function fakeDb(initial: SymbolConfigRow[]) {
       const v = (t as Record<symbol, unknown>)[sym]
       if (v === 'symbol_config') return 'symbol_config'
       if (v === 'config_audit_log') return 'config_audit_log'
+      if (v === 'inverse_pairs') return 'inverse_pairs'
     }
     const inner = (t as { _?: { name?: string } })?._?.name
     if (inner === 'symbol_config') return 'symbol_config'
     if (inner === 'config_audit_log') return 'config_audit_log'
+    if (inner === 'inverse_pairs') return 'inverse_pairs'
     return 'unknown'
   }
 
@@ -187,6 +189,10 @@ function fakeDb(initial: SymbolConfigRow[]) {
           },
         }),
       }),
+      // repo の setInversePair / createSymbolPair / deleteInversePairsForSymbol が使う。
+      // fake の insert().values() / delete().where() は呼び出し時に即実行され Promise を
+      // 返すので、batch は既に走った statement を待つだけで良い (#315)。
+      batch: (stmts: Promise<unknown>[]) => Promise.all(stmts),
     },
   }
 }
@@ -810,5 +816,140 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toMatch(/name="k_atr_override"[^>]*value="3"/)
     // placeholder に global default が表示される (makeGlobalConfigSnapshot の値)
     expect(body).toContain('global default')
+  })
+
+  // --- #315 inverse-pair linked registration ---
+  it('new form shows inverse_symbol input', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('name="inverse_symbol"')
+    expect(body).toContain('対で登録')
+  })
+
+  it('POST with inverse_symbol creates both symbols + inverse_pairs link, 303', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'soxl',
+      name: 'Direxion Semi 3X',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      max_notional: '500',
+      bucket: 'tech_3x',
+      inverse_symbol: 'soxs',
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/dashboard/symbols')
+    // primary + counterpart の symbol_config が両方作られる
+    expect(db.rows.map((r) => r.symbol).sort()).toEqual(['SOXL', 'SOXS'])
+    // counterpart は primary から market/currency/bucket を継承
+    const soxs = db.rows.find((r) => r.symbol === 'SOXS')!
+    expect(soxs.market).toBe('US')
+    expect(soxs.currency).toBe('USD')
+    expect(soxs.bucket).toBe('tech_3x')
+    // inverse_pairs リンクが書かれる
+    expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
+  })
+
+  it('POST with inverse_symbol equal to symbol → 303 error (inverse_self)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'soxl',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      inverse_symbol: 'SOXL',
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toContain('error=inverse_self')
+    expect(db.rows.length).toBe(0)
+  })
+
+  it('delete cascades inverse_pairs link removal', async () => {
+    const db = fakeDb([row({ symbol: 'SOXS', active: false })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config/SOXS/delete',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: '',
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    // symbol_config 削除 + inverse_pairs に対する delete が発行される
+    expect(db.deletes.some((d) => d.table === 'symbol_config')).toBe(true)
+    expect(db.deletes.some((d) => d.table === 'inverse_pairs')).toBe(true)
+  })
+})
+
+import { orderRowsByPair, assignPairColors } from '../../src/routes/dashboard'
+
+describe('#315 inverse-pair list grouping', () => {
+  const r = (symbol: string): SymbolConfigRow => row({ symbol, name: symbol, bucket: null })
+
+  it('orderRowsByPair places the counterpart right after its primary', () => {
+    const rows = [r('AAPL'), r('SOXL'), r('TQQQ'), r('SOXS'), r('SQQQ')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' }
+    const ordered = orderRowsByPair(rows, pairs).map((x) => x.symbol)
+    // AAPL(対なし) → SOXL+SOXS → TQQQ+SQQQ。primary の直後に相手が来る。
+    expect(ordered).toEqual(['AAPL', 'SOXL', 'SOXS', 'TQQQ', 'SQQQ'])
+  })
+
+  it('orderRowsByPair leaves unpaired and half-present pairs in place', () => {
+    const rows = [r('SOXL'), r('AAPL')] // SOXS は一覧に居ない
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const ordered = orderRowsByPair(rows, pairs).map((x) => x.symbol)
+    expect(ordered).toEqual(['SOXL', 'AAPL'])
+  })
+
+  it('assignPairColors colors both sides of a present pair with the same color, alternating per pair', () => {
+    const rows = [r('SOXL'), r('SOXS'), r('TQQQ'), r('SQQQ'), r('AAPL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' }
+    const ordered = orderRowsByPair(rows, pairs)
+    const color = assignPairColors(ordered, pairs)
+    // 同一ペアは同色、別ペアは別色、対なしは無着色。
+    expect(color.get('SOXL')).toBe(color.get('SOXS'))
+    expect(color.get('TQQQ')).toBe(color.get('SQQQ'))
+    expect(color.get('SOXL')).not.toBe(color.get('TQQQ'))
+    expect(color.has('AAPL')).toBe(false)
+  })
+
+  it('assignPairColors skips half-present pairs (counterpart not in list)', () => {
+    const rows = [r('SOXL')]
+    const pairs = { SOXL: 'SOXS', SOXS: 'SOXL' }
+    const color = assignPairColors(rows, pairs)
+    expect(color.has('SOXL')).toBe(false)
   })
 })
