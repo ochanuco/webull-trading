@@ -209,4 +209,13 @@ describe('computePullbackSizing — fixed-% budget allocation (#budget-alloc)', 
     const result = computePullbackSizing(baseInput())
     expect(result.quantity).toBe(100) // 従来通り
   })
+
+  it('fail-closed (qty 0) on invalid budgetAllocPct instead of risk-% fallback (CodeRabbit #405)', () => {
+    // budgetAllocPct が指定済みだが範囲外 (>1) / NaN / <=0 → 0 qty で止める。
+    for (const bad of [1.5, 0, -0.1, Number.NaN]) {
+      const result = computePullbackSizing(baseInput({ budgetAllocPct: bad }))
+      expect(result.quantity).toBe(0)
+      expect(result.capped).toBe(true)
+    }
+  })
 })

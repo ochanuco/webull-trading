@@ -300,6 +300,10 @@ export async function updateBudgetAllocPct(
   const before = await findSymbolConfig(db, symbol)
   if (before === null) return null
   const beforeSnapshot: SymbolConfigRow = { ...before }
+  // 同値なら UPDATE しない (updatedAt だけ無監査で進むのを防ぐ、CodeRabbit #405)。
+  if ((before.budgetAllocPct ?? null) === (pct ?? null)) {
+    return { before: beforeSnapshot, after: beforeSnapshot }
+  }
   await db
     .update(symbolConfig)
     .set({ budgetAllocPct: pct, updatedAt: nowIso })

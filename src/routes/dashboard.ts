@@ -6950,6 +6950,17 @@ function symbolsListBody(args: {
     <tbody>${tbody}</tbody>
   </table>
   ${budgetLadderControls()}
+  ${safeJsonScript(
+    '__budgetBaseline',
+    rows
+      .filter((r) => r.budgetAllocPct != null && r.budgetAllocPct > 0)
+      .map((r) => ({
+        s: r.symbol.toUpperCase(),
+        ccy: r.currency,
+        pct: Math.round((r.budgetAllocPct as number) * 1000) / 10,
+        inv: inversePairs[r.symbol.toUpperCase()] ?? null,
+      })),
+  )}
   <script>${BUDGET_LADDER_JS}</script>`
 }
 
@@ -6986,11 +6997,18 @@ const BUDGET_LADDER_JS = `
   window.__recomputeBudgetMeter = function () {
     var barMeter = document.getElementById('symbol-budget-bar-meter');
     if (!barMeter) return;
-    var sliders = document.querySelectorAll('input[name^="pct_"]');
+    // 全銘柄の baseline 配分から開始し、表示中 slider の現在値で上書きする。
+    // filter で非表示の銘柄の配分が meter から欠落しないようにするため (CodeRabbit #405)。
     var bySym = {};
+    (window.__budgetBaseline || []).forEach(function (b) {
+      if (b.pct > 0) bySym[b.s] = { ccy: b.ccy, pct: b.pct, inv: b.inv };
+    });
+    var sliders = document.querySelectorAll('input[name^="pct_"]');
     sliders.forEach(function (s) {
+      var sym = s.getAttribute('data-symbol');
       var v = Number(s.value);
-      if (v > 0) bySym[s.getAttribute('data-symbol')] = { ccy: s.getAttribute('data-currency'), pct: v, inv: s.getAttribute('data-inverse') };
+      if (v > 0) bySym[sym] = { ccy: s.getAttribute('data-currency'), pct: v, inv: s.getAttribute('data-inverse') };
+      else delete bySym[sym]; // 0 にした表示中銘柄は除外 (baseline 値で復活させない)
     });
     var usage = {};
     var counted = {};

@@ -78,10 +78,18 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   let stopDistance: number | undefined
   let riskBudget: number | undefined
 
-  if (input.budgetAllocPct !== undefined && input.budgetAllocPct > 0) {
+  if (input.budgetAllocPct !== undefined) {
     // === fixed-% 予算配分モード (#budget-alloc) ===
     // notional = min(equity * pct, symbolCap)。risk-% / ATR floor は使わない。
     // 小口座で高額レバ ETF を「予算の N%」で建てるための path。
+    //
+    // budgetAllocPct が「指定済み」なら厳密検証して fail-closed。NaN / <=0 / >1 の
+    // 不正値で risk-% にフォールバックすると想定外サイジングになるため (CodeRabbit
+    // #405)、ここで 0 qty 返却して止める (loadSymbolConfig は 0<pct<=1 のみ通すが
+    // 二重防御)。
+    if (!Number.isFinite(input.budgetAllocPct) || input.budgetAllocPct <= 0 || input.budgetAllocPct > 1) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
+    }
     if (!Number.isFinite(input.entryPrice) || input.entryPrice <= 0) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop' }
     }

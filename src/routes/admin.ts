@@ -2139,12 +2139,14 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     0.5,
     5.0,
   )
-  // 予算配分: form は **% (0<pct<=100)** で送る。fraction (0<pct<=1) に変換して保存
-  // (#budget-alloc)。空 / undefined → NULL (= 従来の risk-% sizing)。範囲外は 400。
+  // 予算配分: form は **% (0.1<=pct<=100)** で送る。fraction (0.001<=pct<=1) に変換して
+  // 保存 (#budget-alloc)。空 / undefined → NULL (= 従来の risk-% sizing)。下限は UI の
+  // 表示丸め (0.1% 刻み) / slider (5% 刻み) と揃え、sub-0.1% の保持崩れを防ぐ
+  // (CodeRabbit #405)。範囲外は 400。
   const budgetAllocPctRaw = parseOptionalNumberInRange(
     raw.budget_alloc_pct ?? raw.budgetAllocPct,
     'budgetAllocPct',
-    0.0001,
+    0.1,
     100,
   )
   const budgetAllocPct = budgetAllocPctRaw === null ? null : budgetAllocPctRaw / 100
