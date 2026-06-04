@@ -129,3 +129,123 @@ describe('loadInversePairs', () => {
     expect(await loadInversePairs(fakeDbAll(rows))).toEqual({ SOXL: 'SOXS', SOXS: 'SOXL' })
   })
 })
+
+import {
+  setInversePair,
+  deleteInversePairsForSymbol,
+  createSymbolPair,
+  type SymbolConfigWriteInput,
+} from '../../../src/infrastructure/db/symbolConfigRepo'
+
+// setInversePair / deleteInversePairsForSymbol / createSymbolPair 用の最小 mock。
+// insert().values() / delete().where() は即実行で Promise を返し、batch は待つだけ。
+// select は findSymbolConfig 用に「存在する symbol」集合でフィルタ返却する。
+function fakeWriteDb(existingSymbols: string[] = []) {
+  const present = new Set(existingSymbols.map((s) => s.toUpperCase()))
+  const ops: string[] = []
+  const extract = (cond: unknown): string | null => {
+    const seen = new WeakSet<object>()
+    const visit = (n: unknown): string | null => {
+      if (n === null || typeof n !== 'object') return null
+      if (seen.has(n)) return null
+      seen.add(n)
+      const o = n as Record<string, unknown>
+      if ('value' in o && typeof o.value === 'string' && ('encoder' in o || 'brand' in o)) return o.value
+      for (const k of Object.keys(o)) {
+        const c = visit(o[k])
+        if (c !== null) return c
+      }
+      return null
+    }
+    return visit(cond)
+  }
+  const selectChain = (sym: string | null) => ({
+    from: () => selectChain(sym),
+    where: (cond: unknown) => selectChain(extract(cond)),
+    limit: (_n: number) =>
+      Promise.resolve(sym !== null && present.has(sym.toUpperCase()) ? [{ symbol: sym }] : []),
+    then: (r: (v: unknown[]) => unknown) => Promise.resolve([]).then(r),
+  })
+  const db = {
+    select: () => selectChain(null),
+    insert: () => ({
+      values: async (v: Record<string, unknown>) => {
+        const sym = String(v.symbol ?? '')
+        if (v.inverse !== undefined) ops.push(`insert:pair:${sym}->${v.inverse}`)
+        else {
+          if (present.has(sym.toUpperCase())) throw new Error('UNIQUE constraint failed: symbol_config.symbol')
+          present.add(sym.toUpperCase())
+          ops.push(`insert:symbol:${sym}`)
+        }
+      },
+    }),
+    delete: () => ({ where: async () => void ops.push('delete:pairs') }),
+    batch: (stmts: Promise<unknown>[]) => Promise.all(stmts),
+  }
+  return { db: db as unknown as Parameters<typeof setInversePair>[0], ops }
+}
+
+const writeInput = (symbol: string): SymbolConfigWriteInput => ({
+  symbol,
+  name: null,
+  market: 'US',
+  currency: 'USD',
+  active: true,
+  maxNotional: 500,
+  notes: null,
+  timeStopDaysOverride: null,
+  kAtrOverride: null,
+})
+
+describe('setInversePair', () => {
+  it('throws on self-pair', async () => {
+    const { db } = fakeWriteDb()
+    await expect(setInversePair(db, 'SOXL', 'SOXL', 't')).rejects.toThrow(/self-referential/)
+  })
+  it('throws on empty symbol', async () => {
+    const { db } = fakeWriteDb()
+    await expect(setInversePair(db, 'SOXL', '', 't')).rejects.toThrow()
+  })
+  it('deletes touching links then inserts one canonical row', async () => {
+    const { db, ops } = fakeWriteDb()
+    await setInversePair(db, 'soxl', 'soxs', 't')
+    expect(ops).toEqual(['delete:pairs', 'insert:pair:SOXL->SOXS'])
+  })
+})
+
+describe('deleteInversePairsForSymbol', () => {
+  it('issues a delete for the symbol links', async () => {
+    const { db, ops } = fakeWriteDb()
+    await deleteInversePairsForSymbol(db, 'SOXL')
+    expect(ops).toEqual(['delete:pairs'])
+  })
+})
+
+describe('createSymbolPair', () => {
+  it('returns duplicate when primary already exists (no counterpart/link)', async () => {
+    const { db, ops } = fakeWriteDb(['SOXL'])
+    const res = await createSymbolPair(db, writeInput('SOXL'), 'SOXS', 't')
+    expect(res).toEqual({ primary: 'duplicate', counterpartCreated: false })
+    expect(ops.some((o) => o.startsWith('insert:pair'))).toBe(false)
+  })
+  it('creates counterpart when missing (counterpartCreated true)', async () => {
+    const { db, ops } = fakeWriteDb()
+    const res = await createSymbolPair(db, writeInput('SOXL'), 'SOXS', 't')
+    expect(res).toEqual({ primary: 'created', counterpartCreated: true })
+    expect(ops).toContain('insert:symbol:SOXL')
+    expect(ops).toContain('insert:symbol:SOXS')
+    expect(ops.some((o) => o === 'insert:pair:SOXL->SOXS')).toBe(true)
+  })
+  it('does not recreate an existing counterpart (counterpartCreated false)', async () => {
+    const { db, ops } = fakeWriteDb(['SOXS'])
+    const res = await createSymbolPair(db, writeInput('SOXL'), 'SOXS', 't')
+    expect(res).toEqual({ primary: 'created', counterpartCreated: false })
+    // counterpart SOXS は既存なので再作成しない
+    expect(ops).not.toContain('insert:symbol:SOXS')
+    expect(ops.some((o) => o === 'insert:pair:SOXL->SOXS')).toBe(true)
+  })
+  it('throws on self-pair', async () => {
+    const { db } = fakeWriteDb()
+    await expect(createSymbolPair(db, writeInput('SOXL'), 'SOXL', 't')).rejects.toThrow(/self-referential/)
+  })
+})

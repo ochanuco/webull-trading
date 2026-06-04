@@ -180,27 +180,6 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
     })
   })
 
-  describe('同グループ建玉上限 (bucket)', () => {
-    it('bucket cap projected over', () => {
-      expect(localizeReason('bucket cap: semi projected 500 > 300')).toBe(
-        '発注スキップ: 同グループ建玉上限超過 (semi 合計 500 > 上限 300)',
-      )
-    })
-
-    it('bucket cap invalid (non-finite / <=0)', () => {
-      // bucketExposureGate.ts の fail-closed reject 形式
-      expect(localizeReason('bucket cap: semi invalid cap 0')).toBe(
-        '発注スキップ: 同グループ建玉上限が無効 (semi の上限 0)',
-      )
-    })
-
-    it('bucket cap invalid addNotional', () => {
-      expect(localizeReason('bucket cap: semi invalid addNotional NaN')).toBe(
-        'データ不足: 同グループ発注金額が無効 (semi の金額 NaN)',
-      )
-    })
-  })
-
   it('does not touch unknown strings', () => {
     expect(localizeReason('totally unknown reason text')).toBe(
       'totally unknown reason text',

@@ -17,7 +17,6 @@ export interface SymbolUniverse {
   inactiveSymbols: string[]
   symbolMaxNotional: Record<string, number>
   symbolCurrency: Record<string, SymbolCurrency>
-  symbolBucket: Record<string, string>
   /** symbol → 'US' | 'JP'。dashboard が JP 銘柄表示を切り替えるのに使う。 */
   symbolMarket: Record<string, SymbolMarket>
   /** symbol → 人間可読 name (symbol_config.name、null は map に不在)。 */
@@ -62,7 +61,6 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     inactiveSymbols: config.inactiveSymbols,
     symbolMaxNotional: config.symbolMaxNotional,
     symbolCurrency: config.symbolCurrency,
-    symbolBucket: config.symbolBucket,
     symbolMarket: config.symbolMarket,
     symbolName: config.symbolName,
     symbolNotes: config.symbolNotes,

@@ -19,6 +19,7 @@ import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/g
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -646,17 +647,19 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable('DB not bound')))
     }
     try {
-      const rows = await loadAllSymbolConfigRows(c.env.DB)
+      const [rows, inversePairs] = await Promise.all([
+        loadAllSymbolConfigRows(c.env.DB),
+        loadInversePairs(createDb(c.env.DB)).catch(() => ({}) as Record<string, string>),
+      ])
       const errorCode = c.req.query('error') ?? null
       const errorSymbol = c.req.query('symbol') ?? null
       const filter: SymbolsListFilter = {
         status: ((c.req.query('status') ?? 'all') as 'all' | 'active' | 'inactive'),
         market: ((c.req.query('market') ?? 'all') as 'all' | 'US' | 'JP'),
-        bucket: c.req.query('bucket') ?? 'all',
         q: c.req.query('q') ?? '',
       }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, errorCode, errorSymbol, filter })),
+        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, errorCode, errorSymbol, filter })),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
@@ -666,7 +669,6 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
     }
-    const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
     // global default は placeholder 表示 (#316) — operator が「空欄なら何の値が
     // 適用されるか」を一目で把握できるようにする。読込失敗は fallback null で
     // placeholder 無表示にする (form 自体は出す)。
@@ -680,7 +682,7 @@ export const dashboard = new Hono<DashboardBindings>()
       renderLayout(
         c,
         '銘柄管理 - 新規追加',
-        symbolFormBody({ mode: 'new', row: null, error: null, knownPairs, globalDefaults }),
+        symbolFormBody({ mode: 'new', row: null, error: null, globalDefaults }),
       ),
     )
   })
@@ -697,18 +699,21 @@ export const dashboard = new Hono<DashboardBindings>()
       if (row === null) {
         return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(`symbol "${symbol}" not found`)))
       }
-      const knownPairs = await loadKnownSymbolBuckets(c.env.DB).catch(() => [])
       const globalDefaults = await loadGlobalConfigFrom(c.env, c.get('requestId'))
         .then((g) => ({
           timeStopDays: g.pullbackDefaultTimeStopDays,
           kAtr: g.pullbackDefaultKAtr,
         }))
         .catch(() => null)
+      const inversePairs = await loadInversePairs(createDb(c.env.DB)).catch(
+        () => ({}) as Record<string, string>,
+      )
+      const currentInverse = inversePairs[symbol] ?? null
       return c.html(
         renderLayout(
           c,
           '銘柄管理 - 編集',
-          symbolFormBody({ mode: 'edit', row, error: null, knownPairs, globalDefaults }),
+          symbolFormBody({ mode: 'edit', row, error: null, globalDefaults, currentInverse }),
         ),
       )
     } catch (err) {
@@ -2807,10 +2812,6 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     label: 'risk halt 閾値 (比率、負)',
     detail: '日次損失がこの率を超えたら 1 回のリスクを 0 に (新規 entry 停止)。-0.10 = -10%。drawdown_kill より前の緊急ブレーキ。',
   },
-  bucket_exposure_pct: {
-    label: '同グループ建玉上限率 (比率)',
-    detail: '同じグループ (例: 半導体 ETF) の合計をこの率まで保有可。0.30 = 総資本の 30%。大きくすると集中投資↑、小さいと分散↑。',
-  },
   vix_warning_threshold: {
     label: 'VIX 警戒閾値',
     detail: '恐怖指数 (VIX) がこの値を超えたら新規買いの数量を縮小。25 が標準。下げると早めに用心、上げると VIX 高でも普段通り。',
@@ -2999,24 +3000,6 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
   s = s.replace(/^broker submit error: /, '発注エラー: 証券会社側で拒否 — ')
 
-  // === Bucket cap (同グループ建玉上限) ===
-  // "建玉上限" は信用取引で広く使われる正統用語。bucket は運用者が任意に
-  // 付けるグループタグ (半導体 3x / JP 自動車 等) で、必ずしも業種ではない
-  // ので「同グループ」で表現。
-  s = s.replace(
-    /^bucket cap: (\S+) projected (\S+) > (\S+)$/,
-    '発注スキップ: 同グループ建玉上限超過 ($1 合計 $2 > 上限 $3)',
-  )
-  // bucketExposureGate.ts は `bucket cap: X invalid cap Y` / `... invalid addNotional Y`
-  // の 2 形で emit する (非有限 / ≤0 のとき fail-closed reject)。
-  s = s.replace(
-    /^bucket cap: (\S+) invalid cap (\S+)$/,
-    '発注スキップ: 同グループ建玉上限が無効 ($1 の上限 $2)',
-  )
-  s = s.replace(
-    /^bucket cap: (\S+) invalid addNotional (\S+)$/,
-    'データ不足: 同グループ発注金額が無効 ($1 の金額 $2)',
-  )
   return s
 }
 
@@ -6803,21 +6786,6 @@ async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[
   return await drizzle.select().from(symbolConfig).orderBy(asc(symbolConfig.symbol))
 }
 
-/**
- * 銘柄管理 form の bucket suggest 用データ。登録済み (symbol, bucket) ペアを
- * symbol ASC で返す。bucket が NULL/空 の行も含む (suggest で表示はするが
- * 選択しても bucket は空のまま — その銘柄が bucket 未分類だと operator に
- * 視認させる用途)。
- */
-interface SymbolBucketPair {
-  symbol: string
-  bucket: string | null
-}
-async function loadKnownSymbolBuckets(db: D1Database): Promise<SymbolBucketPair[]> {
-  const rows = await loadAllSymbolConfigRows(db)
-  return rows.map((r) => ({ symbol: r.symbol, bucket: r.bucket }))
-}
-
 async function findSymbolConfigForView(
   db: D1Database,
   symbol: string,
@@ -6834,7 +6802,6 @@ async function findSymbolConfigForView(
 interface SymbolsListFilter {
   status: 'all' | 'active' | 'inactive'
   market: 'all' | 'US' | 'JP'
-  bucket: string
   q: string
 }
 
@@ -6844,11 +6811,6 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
     if (f.status === 'active' && !r.active) return false
     if (f.status === 'inactive' && r.active) return false
     if (f.market !== 'all' && r.market !== f.market) return false
-    if (f.bucket !== 'all') {
-      if (f.bucket === '__null__') {
-        if (r.bucket && r.bucket.trim().length > 0) return false
-      } else if ((r.bucket ?? '') !== f.bucket) return false
-    }
     if (needle) {
       const hay = `${r.symbol} ${r.name ?? ''}`.toLowerCase()
       if (hay.indexOf(needle) === -1) return false
@@ -6859,24 +6821,16 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 
 function symbolsListBody(args: {
   rows: SymbolConfigRow[]
+  inversePairs?: Record<string, string>
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
 }): string {
-  const { rows, errorCode = null, errorSymbol = null, filter } = args
+  const { rows, inversePairs = {}, errorCode = null, errorSymbol = null, filter } = args
   const errorBanner = renderSymbolErrorBanner(errorCode, errorSymbol)
   const filtered = applySymbolsListFilter(rows, filter)
   const activeCount = rows.filter((r) => r.active).length
   const inactiveCount = rows.length - activeCount
-  // bucket dropdown 用: 全 distinct bucket (NULL 含む)
-  const bucketsSet = new Set<string>()
-  let hasNullBucket = false
-  for (const r of rows) {
-    const b = (r.bucket ?? '').trim()
-    if (b.length === 0) hasNullBucket = true
-    else bucketsSet.add(b)
-  }
-  const bucketOptions = [...bucketsSet].sort()
 
   const sel = (cur: string, val: string) => (cur === val ? ' selected' : '')
   const filterBar = `<form method="get" action="/dashboard/symbols" style="margin:0 0 12px;padding:8px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
@@ -6890,11 +6844,6 @@ function symbolsListBody(args: {
       <option value="all"${sel(filter.market, 'all')}>全市場</option>
       <option value="US"${sel(filter.market, 'US')}>US</option>
       <option value="JP"${sel(filter.market, 'JP')}>JP</option>
-    </select>
-    <select name="bucket" style="padding:4px 6px">
-      <option value="all"${sel(filter.bucket, 'all')}>全 bucket</option>
-      ${hasNullBucket ? `<option value="__null__"${sel(filter.bucket, '__null__')}>(未分類)</option>` : ''}
-      ${bucketOptions.map((b) => `<option value="${esc(b)}"${sel(filter.bucket, b)}>${esc(b)}</option>`).join('')}
     </select>
     <button type="submit" style="padding:4px 12px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">絞り込み</button>
     <a href="/dashboard/symbols" style="padding:4px 8px;text-decoration:none;font-size:12px;color:#86868b">リセット</a>
@@ -6911,10 +6860,21 @@ function symbolsListBody(args: {
   if (filtered.length === 0) {
     return `${errorBanner}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
-  const tbody = filtered
+  // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ツリー表記。
+  const ordered = orderRowsByPair(filtered, inversePairs)
+  const pairColor = assignPairColors(ordered, inversePairs)
+  const roles = pairRoles(ordered, inversePairs)
+  const tbody = ordered
     .map((r) => {
       const inactive = !r.active
-      const rowStyle = inactive ? ' style="opacity:0.5"' : ''
+      const sym = r.symbol.toUpperCase()
+      const inverse = inversePairs[sym] ?? null
+      const role = roles.get(sym) ?? null
+      const bg = pairColor.get(sym)
+      const rowStyleParts: string[] = []
+      if (inactive) rowStyleParts.push('opacity:0.5')
+      if (bg) rowStyleParts.push(`background:${bg}`)
+      const rowStyle = rowStyleParts.length ? ` style="${rowStyleParts.join(';')}"` : ''
       const symStyle = inactive ? ' style="text-decoration:line-through;color:#86868b"' : ''
       const toggleLabel = r.active ? '無効化' : '有効化'
       const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
@@ -6922,22 +6882,36 @@ function symbolsListBody(args: {
       const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
       const deleteForm = r.active
         ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
-        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去)。元に戻せません。よろしいですか？');">
+        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去、インバース対のリンクも解除)。元に戻せません。よろしいですか？');">
             <button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button>
           </form>`
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
-      const bucketCell = r.bucket
-        ? esc(r.bucket)
-        : '<span class="muted" style="font-size:11px">—</span>'
+      // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
+      // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
+      // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
+      const treeTitle = inverse
+        ? `インバース対: ${esc(inverse)} (相手に建玉がある間は BUY 見送り #315)`
+        : ''
+      const connBase =
+        'position:absolute;left:11px;width:9px;border-left:2px solid #06c;display:block'
+      const connStyle =
+        role === 'top'
+          ? `${connBase};top:50%;bottom:0;border-top:2px solid #06c;border-top-left-radius:6px`
+          : role === 'bottom'
+            ? `${connBase};top:0;bottom:50%;border-bottom:2px solid #06c;border-bottom-left-radius:6px`
+            : ''
+      const treeCell = connStyle
+        ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse!)}/edit" title="${treeTitle}" style="${connStyle}"></a>`
+        : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
       return `<tr${rowStyle}>
+        <td style="position:relative;width:28px;padding:0">${treeCell}</td>
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${maxNotionalCell}</td>
-        <td>${bucketCell}</td>
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
@@ -6953,17 +6927,93 @@ function symbolsListBody(args: {
   return `${errorBanner}${filterBar}${headerBar}
   <table>
     <thead><tr>
+      <th style="width:28px" title="インバース対のツリー表記"></th>
       <th>銘柄</th>
       <th>銘柄名</th>
       <th>市場/通貨</th>
       <th>1注文上限</th>
-      <th>相関グループ</th>
       <th>メモ</th>
       <th>更新日</th>
       <th>操作</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>`
+}
+
+/**
+ * #315: インバース対が隣接するよう並べ替える。各 symbol を symbol ASC で走査し、
+ * 対の相手が未出力かつ filtered 内に在れば直後に続ける。対なし / 既出は単独。
+ */
+export function orderRowsByPair(
+  rows: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+): SymbolConfigRow[] {
+  const bySym = new Map(rows.map((r) => [r.symbol.toUpperCase(), r]))
+  const emitted = new Set<string>()
+  const out: SymbolConfigRow[] = []
+  for (const r of rows) {
+    const sym = r.symbol.toUpperCase()
+    if (emitted.has(sym)) continue
+    out.push(r)
+    emitted.add(sym)
+    const inv = inversePairs[sym]
+    if (inv && !emitted.has(inv) && bySym.has(inv)) {
+      out.push(bySym.get(inv)!)
+      emitted.add(inv)
+    }
+  }
+  return out
+}
+
+/**
+ * ペアごとに薄色背景を交互割り当て (両 symbol が表示中の対のみ着色)。
+ * 片側しか表示されていない対 / 対なしは無着色。
+ */
+export function assignPairColors(
+  ordered: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+): Map<string, string> {
+  const present = new Set(ordered.map((r) => r.symbol.toUpperCase()))
+  const colors = ['#eef4ff', '#fff4ec'] as const // 薄青 / 薄橙を交互
+  const color = new Map<string, string>()
+  const assignedPair = new Set<string>()
+  let idx = 0
+  for (const r of ordered) {
+    const sym = r.symbol.toUpperCase()
+    const inv = inversePairs[sym]
+    if (!inv || !present.has(inv)) continue
+    const key = [sym, inv].sort().join('|')
+    if (!assignedPair.has(key)) {
+      assignedPair.add(key)
+      const c = colors[idx % colors.length]!
+      idx++
+      color.set(sym, c)
+      color.set(inv, c)
+    }
+  }
+  return color
+}
+
+/**
+ * ordered list 上で各 symbol のツリー位置を判定 (#315 ツリー表記)。
+ * 直後が自分の対 → 'top' (┌)、直前が自分の対 → 'bottom' (└)、対なし → null。
+ * orderRowsByPair で対は隣接済みなので前後 1 行で判定できる。
+ */
+export function pairRoles(
+  ordered: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+): Map<string, 'top' | 'bottom'> {
+  const roles = new Map<string, 'top' | 'bottom'>()
+  for (let i = 0; i < ordered.length; i++) {
+    const sym = ordered[i]!.symbol.toUpperCase()
+    const inv = inversePairs[sym]
+    if (!inv) continue
+    const next = ordered[i + 1]?.symbol.toUpperCase()
+    const prev = ordered[i - 1]?.symbol.toUpperCase()
+    if (next === inv) roles.set(sym, 'top')
+    else if (prev === inv) roles.set(sym, 'bottom')
+  }
+  return roles
 }
 
 /**
@@ -6991,6 +7041,8 @@ function symbolErrorMessage(code: string, symbol: string | null): string {
         : 'symbol が有効化中のため削除できません。先に無効化してください。'
     case 'validation':
       return '入力値に誤りがあります。'
+    case 'inverse_self':
+      return 'インバース銘柄に主銘柄と同じ symbol は指定できません。'
     default:
       return `エラーが発生しました (code=${code}).`
   }
@@ -7001,17 +7053,18 @@ interface SymbolFormArgs {
   row: SymbolConfigRow | null
   /** validation error message — POST handler が re-render する時に渡す。 */
   error: string | null
-  /** 既存 (symbol, bucket) ペア、bucket 入力の suggest 用。 */
-  knownPairs: SymbolBucketPair[]
   /**
    * Pullback rule の global default。override 入力欄の placeholder に「空欄
    * なら N が適用される」と見せるために使う (#316)。読込失敗時 null。
    */
   globalDefaults: { timeStopDays: number; kAtr: number } | null
+  /** 編集対象が既に対を組んでいる相手 symbol (#315)。未ペア / new は null。 */
+  currentInverse?: string | null
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
-  const { mode, row, error, knownPairs, globalDefaults } = args
+  const { mode, row, error, globalDefaults } = args
+  const currentInverse = args.currentInverse ?? null
   const action =
     mode === 'new' ? '/admin/symbol-config' : `/admin/symbol-config/${encodeURIComponent(row!.symbol)}/update`
   const symbolValue = row?.symbol ?? ''
@@ -7020,7 +7073,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const currencyValue = row?.currency ?? 'USD'
   const activeChecked = (row?.active ?? true) ? ' checked' : ''
   const maxNotionalValue = row?.maxNotional === null || row?.maxNotional === undefined ? '' : String(row.maxNotional)
-  const bucketValue = row?.bucket ?? ''
   const notesValue = row?.notes ?? ''
   const timeStopDaysOverrideValue =
     row?.timeStopDaysOverride === null || row?.timeStopDaysOverride === undefined
@@ -7041,17 +7093,55 @@ function symbolFormBody(args: SymbolFormArgs): string {
          <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
       : `<div>
            <div style="position:relative;display:inline-block">
-             <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px">
+             <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
              <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
-           <p class="muted" style="margin:4px 0 0;font-size:11px">2 文字以上入力で Yahoo Finance から候補を suggest。click で銘柄 / 銘柄名 / 市場 / 通貨を自動入力。JP 銘柄は 4 桁数字 (例: 7203)。</p>
+         </div>`
+  // #315: 登録モード選択 (単体 / インバース対)。new のみ。
+  const modeSelector =
+    mode === 'new'
+      ? `<div style="grid-column:1/-1;display:flex;gap:16px;align-items:center;padding:8px 10px;background:#f5f5f7;border-radius:6px">
+           <strong style="font-size:13px">登録モード:</strong>
+           <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+             <input type="radio" name="reg_mode" value="single" checked onchange="window.setSymbolRegMode('single')"> 単体登録
+           </label>
+           <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+             <input type="radio" name="reg_mode" value="inverse" onchange="window.setSymbolRegMode('inverse')"> インバース対で登録
+           </label>
+         </div>`
+      : ''
+  // #315: インバース対。new ではモード選択で表示切替する入力欄 (銘柄欄と同じ Yahoo
+  // autocomplete)、edit では現在の対を表示。
+  const inverseField =
+    mode === 'edit'
+      ? `<label>インバース対 <span class="muted" style="font-size:11px">(inverse)</span></label>
+         <div>
+           ${
+             currentInverse
+               ? `<span>↔ <a href="/dashboard/symbols/${encodeURIComponent(currentInverse)}/edit"><strong>${esc(currentInverse)}</strong></a></span>
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に建玉がある間は BUY を見送ります (#315)。対の変更は一度削除して再登録してください。</p>`
+               : `<span class="muted">未設定 (対なし)</span>
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">対を組むには、相手銘柄の新規追加時に「インバース対で登録」を選んでください。</p>`
+           }
+         </div>`
+      : `<label id="symbol-form-inverse-label" style="display:none">インバース銘柄 <span class="muted" style="font-size:11px">(inverse)</span></label>
+         <div id="symbol-form-inverse-row" style="display:none">
+           <div style="position:relative;display:inline-block">
+             <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
+             <ul id="symbol-form-inverse-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+             <input type="hidden" name="inverse_name" id="symbol-form-inverse-name" value="">
+             <input type="hidden" name="inverse_market" id="symbol-form-inverse-market" value="">
+             <input type="hidden" name="inverse_currency" id="symbol-form-inverse-currency" value="">
+           </div>
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
   <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
+    ${modeSelector}
     <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
+    ${inverseField}
     <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
     <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
     <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>
@@ -7077,14 +7167,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
       <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
-    </div>
-    <label style="align-self:start;padding-top:4px">相関グループ <span class="muted" style="font-size:11px">(bucket)</span></label>
-    <div>
-      <div style="position:relative;display:inline-block">
-        <input type="text" name="bucket" id="symbol-form-bucket-input" value="${esc(bucketValue)}" maxlength="256" autocomplete="off" placeholder="例: semi / us_large_cap / jp_auto (任意)" oninput="window.suggestSymbolFormBucket(this.value)" onfocus="window.suggestSymbolFormBucket(this.value)" onblur="setTimeout(window.hideSymbolFormBucketSuggest, 150)" style="padding:6px;width:280px">
-        <ul id="symbol-form-bucket-suggest" data-known='${esc(JSON.stringify(knownPairs))}' style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:320px;max-height:240px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
-      </div>
-      <p class="muted" style="margin:6px 0 0;font-size:11px">同 bucket の銘柄は portfolio 上で合計 notional 上限を共有する (\`global_config.bucket_exposure_pct\`)。2 文字以上入力で既存銘柄から suggest (click するとその銘柄の bucket が挿入される / 新規 bucket もそのまま入力で OK)。</p>
     </div>
     <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
     <div>
@@ -7119,97 +7201,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
       if (sel) sel.value = cur;
       window.syncSymbolFormCurrencyUnits(cur);
     };
-    window.hideSymbolFormBucketSuggest = function () {
-      var list = document.getElementById('symbol-form-bucket-suggest');
-      if (list) list.style.display = 'none';
-    };
-    window.suggestSymbolFormBucket = function (q) {
-      var list = document.getElementById('symbol-form-bucket-suggest');
-      var input = document.getElementById('symbol-form-bucket-input');
-      if (!list || !input) return;
-      var query = (q || '').toLowerCase().trim();
-      if (query.length < 2) {
-        list.style.display = 'none';
-        return;
-      }
-      var known = [];
-      try { known = JSON.parse(list.getAttribute('data-known') || '[]'); } catch (e) {}
-      // known は [{ symbol, bucket }] 配列。symbol または bucket の substring 一致を suggest。
-      var matches = known.filter(function (p) {
-        var s = (p.symbol || '').toLowerCase();
-        var b = (p.bucket || '').toLowerCase();
-        return s.indexOf(query) !== -1 || (b.length > 0 && b.indexOf(query) !== -1);
-      });
-      list.innerHTML = '';
-      if (matches.length === 0) {
-        var hint = document.createElement('li');
-        hint.style.cssText = 'padding:6px 10px;color:#86868b;font-size:11px;font-style:italic;cursor:default';
-        hint.textContent = known.length === 0
-          ? '登録済み銘柄がまだありません。"' + q + '" を新規 bucket として登録します。'
-          : '"' + q + '" に一致する既存銘柄/bucket 無し。新規 bucket として登録します。';
-        list.appendChild(hint);
-        list.style.display = 'block';
-        return;
-      }
-      // bucket を持っている銘柄を上、未分類を下 (= 探しやすい順)
-      matches.sort(function (a, b) {
-        var ab = a.bucket ? 0 : 1, bb = b.bucket ? 0 : 1;
-        if (ab !== bb) return ab - bb;
-        return a.symbol.localeCompare(b.symbol);
-      });
-      matches.forEach(function (p) {
-        var hasBucket = !!p.bucket;
-        // 未分類 銘柄 click 時は銘柄名を bucket 値として仮挿入する (operator が編集前提)
-        var insertValue = hasBucket ? p.bucket : p.symbol;
-        var li = document.createElement('li');
-        li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px';
-        var symEl = document.createElement('strong');
-        symEl.textContent = p.symbol;
-        var arrow = document.createElement('span');
-        arrow.style.color = '#86868b';
-        arrow.textContent = ' → ';
-        var bucketEl = document.createElement('span');
-        bucketEl.style.color = hasBucket ? '#06c' : '#86868b';
-        bucketEl.textContent = hasBucket ? p.bucket : '未分類';
-        li.appendChild(symEl);
-        li.appendChild(arrow);
-        li.appendChild(bucketEl);
-        if (!hasBucket) {
-          li.title = 'click で銘柄名 (' + p.symbol + ') を bucket に仮挿入。';
-        }
-        li.addEventListener('mousedown', function () {
-          window.pickSymbolFormBucket(insertValue);
-        });
-        li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
-        li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
-        list.appendChild(li);
-      });
-      list.style.display = 'block';
-    };
-    window.pickSymbolFormBucket = function (val) {
-      var input = document.getElementById('symbol-form-bucket-input');
-      if (input) input.value = val;
-      window.hideSymbolFormBucketSuggest();
-      if (input) input.focus();
-    };
-    window.hideSymbolSuggest = function () {
-      var list = document.getElementById('symbol-form-symbol-suggest');
-      if (list) list.style.display = 'none';
-    };
-    window._symbolSuggestTimer = null;
-    window._symbolSuggestSeq = 0;
-    window.searchSymbolSuggest = function (q) {
-      var list = document.getElementById('symbol-form-symbol-suggest');
+    // 汎用 Yahoo lookup suggest コア。listId の <ul> に候補を描画し、click で pick(m)。
+    window._symbolSuggestTimer = {};
+    window._symbolSuggestSeq = {};
+    window._renderSymbolSuggest = function (q, listId, pick) {
+      var list = document.getElementById(listId);
       if (!list) return;
       var query = (q || '').trim();
       if (query.length < 2) { list.style.display = 'none'; return; }
-      if (window._symbolSuggestTimer) clearTimeout(window._symbolSuggestTimer);
-      window._symbolSuggestTimer = setTimeout(function () {
-        var mySeq = ++window._symbolSuggestSeq;
+      if (window._symbolSuggestTimer[listId]) clearTimeout(window._symbolSuggestTimer[listId]);
+      window._symbolSuggestTimer[listId] = setTimeout(function () {
+        var mySeq = (window._symbolSuggestSeq[listId] = (window._symbolSuggestSeq[listId] || 0) + 1);
         fetch('/admin/symbol-config/lookup?q=' + encodeURIComponent(query), { credentials: 'same-origin' })
           .then(function (res) { return res.ok ? res.json() : { matches: [] }; })
           .then(function (data) {
-            if (mySeq !== window._symbolSuggestSeq) return; // 古い response は捨てる
+            if (mySeq !== window._symbolSuggestSeq[listId]) return; // 古い response は捨てる
             var matches = (data && data.matches) || [];
             list.innerHTML = '';
             if (matches.length === 0) {
@@ -7230,7 +7236,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
               nameSpan.textContent = (m.name || '?') + ' (' + m.market + '/' + m.currency + ')';
               li.appendChild(sym);
               li.appendChild(nameSpan);
-              li.addEventListener('mousedown', function () { window.pickSymbolSuggest(m); });
+              li.addEventListener('mousedown', function () { pick(m); });
               li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
               li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
               list.appendChild(li);
@@ -7239,6 +7245,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
           })
           .catch(function () { list.style.display = 'none'; });
       }, 250);
+    };
+    // 主銘柄欄: pick で銘柄 / 名前 / 市場 / 通貨を自動入力。
+    window.hideSymbolSuggest = function () {
+      var list = document.getElementById('symbol-form-symbol-suggest');
+      if (list) list.style.display = 'none';
+    };
+    window.searchSymbolSuggest = function (q) {
+      window._renderSymbolSuggest(q, 'symbol-form-symbol-suggest', window.pickSymbolSuggest);
     };
     window.pickSymbolSuggest = function (m) {
       var symInput = document.getElementById('symbol-form-symbol');
@@ -7252,6 +7266,41 @@ function symbolFormBody(args: SymbolFormArgs): string {
       if (m.currency) window.syncSymbolFormCurrencyUnits(m.currency);
       window.hideSymbolSuggest();
       if (symInput) symInput.focus();
+    };
+    // インバース銘柄欄: 同じ Yahoo suggest だが pick は inverse 入力だけを埋める
+    // (主銘柄の name/market/currency は上書きしない)。
+    window.hideInverseSuggest = function () {
+      var list = document.getElementById('symbol-form-inverse-suggest');
+      if (list) list.style.display = 'none';
+    };
+    window.searchInverseSuggest = function (q) {
+      window._renderSymbolSuggest(q, 'symbol-form-inverse-suggest', window.pickInverseSuggest);
+    };
+    window.pickInverseSuggest = function (m) {
+      var inv = document.getElementById('symbol-form-inverse');
+      if (inv) { inv.value = m.symbol; inv.focus(); }
+      // counterpart の銘柄名 / 市場 / 通貨を hidden field に焼く (#315: 一覧で
+      // インバース側の銘柄名を出すため。空 pick / 手動入力時は空のまま)。
+      var nm = document.getElementById('symbol-form-inverse-name');
+      var mk = document.getElementById('symbol-form-inverse-market');
+      var cur = document.getElementById('symbol-form-inverse-currency');
+      if (nm) nm.value = m.name || '';
+      if (mk) mk.value = m.market || '';
+      if (cur) cur.value = m.currency || '';
+      window.hideInverseSuggest();
+    };
+    // 登録モード切替: 単体 / インバース対。inverse 欄の表示と required を制御。
+    window.setSymbolRegMode = function (modeVal) {
+      var label = document.getElementById('symbol-form-inverse-label');
+      var rowEl = document.getElementById('symbol-form-inverse-row');
+      var inv = document.getElementById('symbol-form-inverse');
+      var show = modeVal === 'inverse';
+      if (label) label.style.display = show ? '' : 'none';
+      if (rowEl) rowEl.style.display = show ? '' : 'none';
+      if (inv) {
+        if (show) { inv.setAttribute('required', 'required'); }
+        else { inv.removeAttribute('required'); inv.value = ''; window.hideInverseSuggest(); }
+      }
     };
   </script>`
 }

@@ -100,7 +100,6 @@ describe('loadGlobalConfig — pre-0015 fallback', () => {
       riskBasePerTradePct: 0.006,
       riskDdHalfThreshold: -0.07,
       riskDdHaltThreshold: -0.15,
-      bucketExposurePct: 0.4,
     }
     const db = fakeDbThrowingThenLegacy(
       'no such column: vix_warning_threshold',
@@ -121,7 +120,6 @@ describe('loadGlobalConfig — pre-0015 fallback', () => {
     expect(result.drawdownKillThreshold).toBe(-0.05)
     expect(result.pullbackDefaultStopPct).toBe(-0.06)
     expect(result.pullbackDefaultRequireAboveSma50).toBe(false)
-    expect(result.bucketExposurePct).toBe(0.4)
 
     // VIX 3 項目だけは defaults で埋められること
     expect(result.vixWarningThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold)
@@ -291,7 +289,6 @@ describe('loadGlobalConfig — VIX validation (CHECK 制約 補完)', () => {
     riskBasePerTradePct: 0.004,
     riskDdHalfThreshold: -0.05,
     riskDdHaltThreshold: -0.1,
-    bucketExposurePct: 0.3,
   }
 
   it('passes through valid VIX values without warning', async () => {

@@ -103,13 +103,6 @@ export const symbolConfig = sqliteTable(
     currency: text('currency').notNull().default('USD'),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
     maxNotional: real('max_notional'),
-    /**
-     * 相関 bucket の粗タグ (例: 'semi' / 'us_large_cap' / 'jp_auto')。
-     * 同一 bucket の open position 合計 notional を
-     * `equity * global_config.bucket_exposure_pct` で clamp するために使う
-     * (#23 Lane 3)。NULL / 空文字 / 空白のみは bucket 未分類扱い (gate 素通り)。
-     */
-    bucket: text('bucket'),
     notes: text('notes'),
     /**
      * 個別銘柄 override (NULL = global_config の default を使う、整数 1-365)。
@@ -154,8 +147,7 @@ export type SymbolConfigInsert = typeof symbolConfig.$inferInsert
  * この table 経由で「inverse 相手に open position がある間は BUY 不可」を強制
  * する事で 1 銘柄 active な regime hedge として動作する。SOXL pullback で entry
  * → trend 続行で hold、regime 反転で SELL → クールダウン後に SOXS 側 entry、
- * の交互運用を想定。bucket cap (semi) は notional の上限を別に持つので、
- * 両方が同時に in-flight になる事も無い。
+ * の交互運用を想定。
  */
 export const inversePairs = sqliteTable('inverse_pairs', {
   symbol: text('symbol').primaryKey(),
@@ -238,11 +230,6 @@ export const globalConfig = sqliteTable(
     riskDdHalfThreshold: real('risk_dd_half_threshold').notNull().default(-0.05),
     /** drawdown がこの閾値 (負) 未満になると size を 0 に (halt)。-0.10 既定。 */
     riskDdHaltThreshold: real('risk_dd_halt_threshold').notNull().default(-0.10),
-    /**
-     * 同一 bucket (symbol_config.bucket) の open 合計 notional 上限を
-     * `equity * bucket_exposure_pct` で算出 (#23 Lane 3)。POC default 0.30。
-     */
-    bucketExposurePct: real('bucket_exposure_pct').notNull().default(0.30),
     /**
      * VIX regime filter (issue #196 3/3)。`^VIX` 最新値がこの閾値を超えたら
      * BUY size を `vix_warning_size_scale` 倍に縮小 (default 25 → x0.5)。
@@ -371,10 +358,6 @@ export const globalConfig = sqliteTable(
     riskDdThresholdOrder: check(
       'global_config_risk_dd_threshold_order',
       sql`${t.riskDdHaltThreshold} <= ${t.riskDdHalfThreshold}`,
-    ),
-    bucketExposurePctRange: check(
-      'global_config_bucket_exposure_pct_range',
-      sql`${t.bucketExposurePct} > 0 AND ${t.bucketExposurePct} <= 1`,
     ),
     // VIX 閾値は実数値 (10..100 程度の運用想定だが余裕を持って 0..200)。
     // 0 以下 / 上限超 / 順序逆 (warning > critical) を弾く。
