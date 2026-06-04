@@ -39,4 +39,26 @@ describe('loadUsdJpyRate', () => {
     }) as unknown as typeof fetch
     await expect(loadUsdJpyRate({ fetchFn })).resolves.toBeNull()
   })
+
+  it('includes requestId in every structured failure log (CodeRabbit #407)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // non-ok
+      await loadUsdJpyRate({ requestId: 'req-1', fetchFn: fakeFetch(chart(150), false, 429) })
+      // invalid rate
+      await loadUsdJpyRate({ requestId: 'req-2', fetchFn: fakeFetch(chart(0)) })
+      // fetch reject
+      const rejectFetch = vi.fn(async () => {
+        throw new Error('boom')
+      }) as unknown as typeof fetch
+      await loadUsdJpyRate({ requestId: 'req-3', fetchFn: rejectFetch })
+
+      const events = warn.mock.calls.map((c) => JSON.parse(c[0] as string))
+      expect(events.find((e) => e.event === 'usdjpy_fetch_non_ok')?.requestId).toBe('req-1')
+      expect(events.find((e) => e.event === 'usdjpy_rate_invalid')?.requestId).toBe('req-2')
+      expect(events.find((e) => e.event === 'usdjpy_fetch_failed')?.requestId).toBe('req-3')
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })

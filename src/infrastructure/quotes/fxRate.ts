@@ -20,6 +20,8 @@ export interface UsdJpyRateOptions {
   timeoutMs?: number
   fetchFn?: typeof fetch
   userAgent?: string
+  /** 構造化ログの追跡 ID (cron tick の requestId を伝搬)。 */
+  requestId?: string
 }
 
 interface YahooChartMetaResponse {
@@ -37,6 +39,7 @@ export async function loadUsdJpyRate(options: UsdJpyRateOptions = {}): Promise<n
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const fetchFn = options.fetchFn ?? fetch.bind(globalThis)
   const userAgent = options.userAgent ?? DEFAULT_USER_AGENT
+  const requestId = options.requestId
 
   const url = new URL(`/v8/finance/chart/${encodeURIComponent(FX_SYMBOL)}`, baseUrl)
   url.searchParams.set('interval', '1d')
@@ -51,13 +54,13 @@ export async function loadUsdJpyRate(options: UsdJpyRateOptions = {}): Promise<n
       signal: controller.signal,
     })
     if (!response.ok) {
-      console.warn(JSON.stringify({ event: 'usdjpy_fetch_non_ok', status: response.status }))
+      console.warn(JSON.stringify({ event: 'usdjpy_fetch_non_ok', status: response.status, requestId }))
       return null
     }
     const json = (await response.json()) as YahooChartMetaResponse
     const rate = json.chart?.result?.[0]?.meta?.regularMarketPrice
     if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < MIN_RATE || rate > MAX_RATE) {
-      console.warn(JSON.stringify({ event: 'usdjpy_rate_invalid', rate }))
+      console.warn(JSON.stringify({ event: 'usdjpy_rate_invalid', rate, requestId }))
       return null
     }
     return rate
@@ -66,6 +69,7 @@ export async function loadUsdJpyRate(options: UsdJpyRateOptions = {}): Promise<n
       JSON.stringify({
         event: 'usdjpy_fetch_failed',
         message: error instanceof Error ? error.message : String(error),
+        requestId,
       }),
     )
     return null

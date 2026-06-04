@@ -543,7 +543,9 @@ export async function runStrategyCron(
   const usdHasBudgetSymbol = byCurrency.USD.some(
     (s) => universe.symbolBudgetAllocPct[s.toUpperCase()] !== undefined,
   )
-  const usdJpyRate = usdHasBudgetSymbol ? await loadUsdJpyRate() : null
+  const usdJpyRate = usdHasBudgetSymbol
+    ? await loadUsdJpyRate({ requestId: options.requestId })
+    : null
 
   for (const run of runs) {
     analysis.runs.push({
