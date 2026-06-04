@@ -6934,8 +6934,7 @@ function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  const budgetMeter = renderBudgetMeter(computeBudgetUsage(rows, inversePairs))
-  return `${errorBanner}${filterBar}${headerBar}${budgetMeter}
+  return `${errorBanner}${filterBar}${headerBar}
   <table>
     <thead><tr>
       <th style="width:28px" title="インバース対のツリー表記"></th>
@@ -6985,8 +6984,8 @@ const BUDGET_LADDER_JS = `
   // 同時建玉ベースの予算使用率を全 slider から再計算してメーターを再描画。
   // インバース対は max を 1 回だけ計上 (片側のみ建つため)。
   window.__recomputeBudgetMeter = function () {
-    var box = document.getElementById('symbol-budget-meter');
-    if (!box) return;
+    var barMeter = document.getElementById('symbol-budget-bar-meter');
+    if (!barMeter) return;
     var sliders = document.querySelectorAll('input[name^="pct_"]');
     var bySym = {};
     sliders.forEach(function (s) {
@@ -7008,65 +7007,18 @@ const BUDGET_LADDER_JS = `
       }
     });
     var ccys = ['USD', 'JPY'].filter(function (c) { return (usage[c] || 0) > 0; });
-    // sticky バー内のコンパクトゲージ (確定ボタン横)。
-    var barMeter = document.getElementById('symbol-budget-bar-meter');
-    if (barMeter) {
-      barMeter.innerHTML = ccys.map(function (ccy) {
-        var u = usage[ccy] || 0;
-        var w = Math.min(100, u);
-        var col = u > 100 ? '#c22' : u > 80 ? '#b25000' : '#057a55';
-        return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px">'
-          + '<span class="muted">' + ccy + '</span>'
-          + '<span class="bar-track" style="display:inline-block;width:70px;height:8px;vertical-align:middle"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
-          + '<span style="font-variant-numeric:tabular-nums;color:' + col + '">' + u.toFixed(0) + '%' + (u > 100 ? '⚠' : '') + '</span></span>';
-      }).join('');
-    }
-    if (ccys.length === 0) { box.style.display = 'none'; box.innerHTML = ''; return; }
-    var html = '<div class="muted" style="font-size:11px;margin-bottom:4px">インバース対は片側のみ建つため max を 1 回計上。total_capital に対する最大同時コミット率。</div>';
-    ccys.forEach(function (ccy) {
-      var used = usage[ccy] || 0;
-      var w = Math.min(100, used);
-      var color = used > 100 ? '#c22' : used > 80 ? '#b25000' : '#057a55';
-      html += '<div data-ccy="' + ccy + '" style="margin:2px 0">'
-        + '<div style="display:flex;justify-content:space-between;font-size:12px"><span>' + ccy + ' 予算使用率 (同時建玉ベース)</span>'
-        + '<span style="font-variant-numeric:tabular-nums;color:' + color + '">' + used.toFixed(0) + '% / 100%' + (used > 100 ? ' ⚠超過' : '') + '</span></div>'
-        + '<div class="bar-track" style="height:8px"><div class="bar-fill" style="width:' + w.toFixed(0) + '%;background:' + color + '"></div></div></div>';
-    });
-    box.className = 'panel';
-    box.style.cssText = 'margin:0 0 12px;padding:10px 12px';
-    box.innerHTML = html;
-    box.style.display = 'block';
+    // sticky バー内のコンパクトゲージ (確定ボタン横、同時建玉ベース)。
+    barMeter.innerHTML = ccys.map(function (ccy) {
+      var u = usage[ccy] || 0;
+      var w = Math.min(100, u);
+      var col = u > 100 ? '#c22' : u > 80 ? '#b25000' : '#057a55';
+      return '<span title="同時建玉ベースの予算使用率 (インバース対は max を1回計上)" style="display:inline-flex;align-items:center;gap:5px;font-size:12px">'
+        + '<span class="muted">' + ccy + '</span>'
+        + '<span class="bar-track" style="display:inline-block;width:70px;height:8px;vertical-align:middle"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
+        + '<span style="font-variant-numeric:tabular-nums;color:' + col + '">' + u.toFixed(0) + '%' + (u > 100 ? '⚠' : '') + '</span></span>';
+    }).join('');
   };
 `
-
-/**
- * #budget-alloc: 同時建玉ベースの予算使用率メーター (per currency)。slider 変更で
- * JS が live 更新する (id 固定の bar / label を書き換え)。0 通貨は出さない。
- */
-function renderBudgetMeter(usage: Record<string, number>): string {
-  const currencies = ['USD', 'JPY'].filter((c) => (usage[c] ?? 0) > 0)
-  if (currencies.length === 0) {
-    // 何も配分が無くても JS が後で表示できるよう箱だけ用意 (初期 hidden)。
-    return `<div id="symbol-budget-meter" style="display:none;margin:0 0 12px"></div>`
-  }
-  const bar = (ccy: string) => {
-    const used = usage[ccy] ?? 0
-    const w = Math.min(100, used)
-    const over = used > 100
-    const color = over ? '#c22' : used > 80 ? '#b25000' : '#057a55'
-    return `<div data-ccy="${ccy}" style="margin:2px 0">
-        <div style="display:flex;justify-content:space-between;font-size:12px">
-          <span>${ccy} 予算使用率 (同時建玉ベース)</span>
-          <span class="budget-meter-val" style="font-variant-numeric:tabular-nums;color:${color}">${used.toFixed(0)}% / 100%${over ? ' ⚠超過' : ''}</span>
-        </div>
-        <div class="bar-track" style="height:8px"><div class="budget-meter-fill bar-fill" style="width:${w.toFixed(0)}%;background:${color}"></div></div>
-      </div>`
-  }
-  return `<div id="symbol-budget-meter" class="panel" style="margin:0 0 12px;padding:10px 12px">
-    <div class="muted" style="font-size:11px;margin-bottom:4px">インバース対は片側のみ建つため max を 1 回計上。total_capital に対する最大同時コミット率。</div>
-    ${currencies.map(bar).join('')}
-  </div>`
-}
 
 /** 予算配分 ladder の確定 / 取消 バー。slider は form attr で此処の form に紐づく。 */
 function budgetLadderControls(): string {
