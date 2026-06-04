@@ -153,3 +153,49 @@ jobs:
             title="$(TZ=Asia/Tokyo date '+🚀リリース%Y-%m-%d %H:%M:%S')"
             gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
           fi
+
+      # production は release マージ毎に merge commit を積んで main と分岐するため、
+      # production ルールセットの strict (branch up-to-date 必須) が release PR に
+      # 毎回 "Update branch" を要求する。ここで GitHub の update-branch API を自動で
+      # 叩いて branch を base 最新に揃え、operator が手で押す手間を無くす。
+      # マージ自体は承認ゲートとして手動のまま (本ステップは更新のみ、merge はしない)。
+      - name: Auto-update release PR branch (skip manual "Update branch")
+        if: steps.production_delta.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+        run: |
+          pr_number="$(gh pr list \
+            --base production \
+            --head release/production \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [ -z "$pr_number" ]; then
+            echo "::notice::no open release PR; nothing to update."
+            exit 0
+          fi
+
+          # mergeStateStatus が BEHIND の間だけ update-branch を叩く。GitHub の
+          # mergeability 計算は非同期なので UNKNOWN は数秒待って再評価。BEHIND 以外
+          # (CLEAN / BLOCKED=要レビュー 等) になったら最新化済みとみなして終了。
+          attempt=1
+          while [ "$attempt" -le 6 ]; do
+            state="$(gh pr view "$pr_number" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo UNKNOWN)"
+            case "$state" in
+              BEHIND)
+                echo "::notice::release PR #$pr_number is BEHIND; calling update-branch."
+                gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/update-branch" >/dev/null 2>&1 || true
+                sleep 5
+                ;;
+              UNKNOWN)
+                echo "mergeability still computing; waiting."
+                sleep 5
+                ;;
+              *)
+                echo "::notice::release PR #$pr_number not behind (state=$state); branch is up to date."
+                exit 0
+                ;;
+            esac
+            attempt=$((attempt + 1))
+          done
+          echo "::notice::update-branch not confirmed after retries; operator may need to click Update branch once."
