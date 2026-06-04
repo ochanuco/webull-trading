@@ -248,6 +248,21 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('有効 1 / 無効 1')
   })
 
+  it('list flags NULL / invalid lot_size as ⚠ 未設定 (matches runtime fail-closed, CodeRabbit #409)', async () => {
+    const db = fakeDb([
+      row({ symbol: 'AAA', lotSize: null }), // 未設定
+      row({ symbol: 'BBB', lotSize: 0 }), // 不正値 (実行系は fail-closed)
+      row({ symbol: 'CCC', lotSize: 100 }), // 正常
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    // NULL も 0 も警告。正常な 100 は数値表示。
+    expect((body.match(/⚠ 未設定/g) ?? []).length).toBe(2)
+    expect(body).toMatch(/100 <span class="muted"[^>]*>株<\/span>/)
+  })
+
   // --- POST add ---
   it('POST /admin/symbol-config inserts row + writes audit row, redirects 303', async () => {
     const db = fakeDb([])

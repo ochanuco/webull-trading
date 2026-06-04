@@ -6888,11 +6888,13 @@ function symbolsListBody(args: {
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
-      // 売買単位 (lot_size)。未設定は fail-closed (発注見送り) なので赤字警告で明示。
-      const lotSizeCell =
-        r.lotSize == null
-          ? '<span class="err" title="売買単位が未設定です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
-          : `${esc(String(r.lotSize))} <span class="muted" style="font-size:11px">${r.lotSize === 1 ? '株/口' : '株'}</span>`
+      // 売買単位 (lot_size)。未設定・不正値 (NULL/0/負/非整数) は cron sizing が
+      // fail-closed (発注見送り) するので、一覧でも同じ判定で赤字警告を出す
+      // (loadSymbolConfig の採用条件 = integer>=1 と揃える、CodeRabbit #409)。
+      const lotSizeValid = Number.isInteger(r.lotSize) && (r.lotSize as number) >= 1
+      const lotSizeCell = !lotSizeValid
+        ? '<span class="err" title="売買単位が未設定または不正です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
+        : `${esc(String(r.lotSize))} <span class="muted" style="font-size:11px">${r.lotSize === 1 ? '株/口' : '株'}</span>`
       // 予算配分 ladder slider (#budget-alloc): 5%刻み。確定するまで client 側で仮調整、
       // form="symbol-budget-form" で一括 POST。inverse 相手は JS が同期する。
       const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
