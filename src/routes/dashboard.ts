@@ -7008,6 +7008,19 @@ const BUDGET_LADDER_JS = `
       }
     });
     var ccys = ['USD', 'JPY'].filter(function (c) { return (usage[c] || 0) > 0; });
+    // sticky バー内のコンパクトゲージ (確定ボタン横)。
+    var barMeter = document.getElementById('symbol-budget-bar-meter');
+    if (barMeter) {
+      barMeter.innerHTML = ccys.map(function (ccy) {
+        var u = usage[ccy] || 0;
+        var w = Math.min(100, u);
+        var col = u > 100 ? '#c22' : u > 80 ? '#b25000' : '#057a55';
+        return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px">'
+          + '<span class="muted">' + ccy + '</span>'
+          + '<span class="bar-track" style="display:inline-block;width:70px;height:8px;vertical-align:middle"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
+          + '<span style="font-variant-numeric:tabular-nums;color:' + col + '">' + u.toFixed(0) + '%' + (u > 100 ? '⚠' : '') + '</span></span>';
+      }).join('');
+    }
     if (ccys.length === 0) { box.style.display = 'none'; box.innerHTML = ''; return; }
     var html = '<div class="muted" style="font-size:11px;margin-bottom:4px">インバース対は片側のみ建つため max を 1 回計上。total_capital に対する最大同時コミット率。</div>';
     ccys.forEach(function (ccy) {
@@ -7061,6 +7074,7 @@ function budgetLadderControls(): string {
   <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,0.06)">
     <strong style="font-size:13px">予算配分の変更（未確定）</strong>
     <span id="symbol-budget-dirty" class="muted" style="font-size:12px"></span>
+    <span id="symbol-budget-bar-meter" style="display:flex;gap:14px;align-items:center"></span>
     <span style="flex:1"></span>
     <a href="/dashboard/symbols" style="padding:5px 12px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">取消</a>
     <button type="submit" form="symbol-budget-form" style="padding:5px 14px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">確定して保存</button>
