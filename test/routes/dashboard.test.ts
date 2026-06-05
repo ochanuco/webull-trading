@@ -104,8 +104,8 @@ describe('dashboard', () => {
     expect(body).toContain('/dashboard/positions')
   })
 
-  // #276: kill-switch banner は全 page 共通の header として layout 内に
-  // prepend される。DB binding がある時のみ表示、effective=true なら「停止」、
+  // #276: kill-switch は全 page 共通でサイドバー下部に表示される (banner → sidebar
+  // へ配置変更)。DB binding がある時のみ表示、effective=true なら「停止」、
   // false なら「再開」(confirm 付き) ボタンが出る。
   it('renders kill-switch banner with 取引停止 button when tradingEnabled=true', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
