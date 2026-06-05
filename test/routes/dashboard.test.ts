@@ -415,6 +415,83 @@ describe('dashboard', () => {
     expect(body).not.toContain('run全体JSON')
   })
 
+  it('renders the decision-trace ladder when trace_json is present (#decision-trace)', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeCronDb([
+        {
+          id: 200,
+          timestamp: '2026-06-06T00:00:00.000Z',
+          requestId: 'req-tr',
+          symbol: 'TQQQ',
+          decision: 'REJECT',
+          reason: 'sizing rejected: lot-size-round',
+          price: 76,
+          indicatorsJson: '{"price":76}',
+          clientOrderId: null,
+          traceJson: JSON.stringify([
+            { label: 'guard.pending_order_absent', label_ja: '発注中でない', passed: true },
+            {
+              label: 'sizing.quantity_positive',
+              label_ja: '発注数量が1株/1単元以上ある',
+              passed: false,
+              actual: 0,
+              operator: '>',
+              threshold: 0,
+              message: 'lot-size-round',
+            },
+          ]),
+          filledPrice: null,
+          filledQty: null,
+          realizedPnl: null,
+          brokerStatus: null,
+        },
+      ]) as unknown as ReturnType<typeof createDb>,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+
+    expect(body).toContain('判定トレース')
+    expect(body).toContain('trace-ladder')
+    expect(body).toContain('発注中でない') // ✅ step
+    expect(body).toContain('発注数量が1株/1単元以上ある') // ❌ deciding step
+    expect(body).toContain('◀ 採用') // 採用された(最後の)ステップに矢印
+    expect(body).toContain('lot-size-round') // message
+    expect(body).toContain('tl-out-reject') // 出力ボックス (REJECT 色)
+    expect(body).toContain('出力: <strong>REJECT</strong>')
+  })
+
+  it('omits the ladder when trace_json is null (graceful, pre-migration rows)', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeCronDb([
+        {
+          id: 201,
+          timestamp: '2026-06-06T00:00:00.000Z',
+          requestId: 'req-old',
+          symbol: 'TQQQ',
+          decision: 'HOLD',
+          reason: 'holding',
+          price: 76,
+          indicatorsJson: null,
+          clientOrderId: null,
+          traceJson: null,
+          filledPrice: null,
+          filledQty: null,
+          realizedPnl: null,
+          brokerStatus: null,
+        },
+      ]) as unknown as ReturnType<typeof createDb>,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    expect(body).toContain('<details class="reason-details">')
+    // ラダー見出しは trace があるときだけ描画される (CSS class はスタイルに常駐するので
+    // 見出し文字列で判定する)。
+    expect(body).not.toContain('判定トレース')
+    expect(body).not.toContain('◀ 採用')
+  })
+
   it('exports a single cron decision JSON by decisionId', async () => {
     vi.mocked(createDb).mockReturnValue(
       fakeCronDb([

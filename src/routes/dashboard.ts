@@ -466,6 +466,7 @@ export const dashboard = new Hono<DashboardBindings>()
           price: strategyDecisionLog.price,
           indicatorsJson: strategyDecisionLog.indicatorsJson,
           clientOrderId: strategyDecisionLog.clientOrderId,
+          traceJson: strategyDecisionLog.traceJson,
           filledPrice: tradeJournal.filledPrice,
           filledQty: tradeJournal.filledQty,
           realizedPnl: tradeJournal.realizedPnl,
@@ -516,6 +517,7 @@ export const dashboard = new Hono<DashboardBindings>()
           price: strategyDecisionLog.price,
           indicatorsJson: strategyDecisionLog.indicatorsJson,
           clientOrderId: strategyDecisionLog.clientOrderId,
+          traceJson: strategyDecisionLog.traceJson,
           filledPrice: tradeJournal.filledPrice,
           filledQty: tradeJournal.filledQty,
           realizedPnl: tradeJournal.realizedPnl,
@@ -1416,6 +1418,21 @@ const STYLE = `
   .reason-panel div{margin:0 0 8px}
   .reason-panel div:last-child{margin-bottom:0}
   .reason-panel ul{margin:4px 0 10px;padding-left:20px}
+  .trace-ladder{margin:6px 0 0;font-size:12px}
+  .tl-step{display:flex;align-items:baseline;gap:8px;padding:4px 8px;border-left:3px solid transparent;border-radius:4px;flex-wrap:wrap}
+  .tl-step.tl-ok{background:#f1f8f4}
+  .tl-step.tl-fail{background:#fdf0f0}
+  .tl-step.tl-decisive{border-left-color:#06c;font-weight:600;box-shadow:0 0 0 1px #cfe0ff inset}
+  .tl-mark{flex:0 0 auto}
+  .tl-label{flex:1 1 auto;min-width:140px}
+  .tl-cmp{color:#555;font-variant-numeric:tabular-nums}
+  .tl-msg{color:#86868b;font-style:italic}
+  .tl-pick{color:#06c;font-weight:700;font-size:11px}
+  .tl-arrow{text-align:center;color:#86868b;line-height:1.1;margin:2px 0}
+  .tl-output{padding:6px 10px;border-radius:6px;background:#eef;border:1px solid #cfe0ff}
+  .tl-output.tl-out-buy{background:#eafaf0;border-color:#a8e0bf}
+  .tl-output.tl-out-sell{background:#fdeeee;border-color:#f0bcbc}
+  .tl-output.tl-out-reject,.tl-output.tl-out-error{background:#fdf2e8;border-color:#f0d2a8}
   .reason-panel code{white-space:pre-wrap;word-break:break-word}
   .reason-panel pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px}
   .symbol-disabled{opacity:0.5;font-style:italic;text-decoration:line-through}
@@ -3445,6 +3462,7 @@ function cronReasonCell(row: {
   price: number | null
   indicatorsJson?: string | null
   clientOrderId?: string | null
+  traceJson?: string | null
   filledPrice?: number | null
   filledQty?: number | null
   realizedPnl?: number | null
@@ -3454,10 +3472,12 @@ function cronReasonCell(row: {
   const rawReason = row.reason ?? '-'
   const decisionJson = JSON.stringify(cronDecisionJson(row), null, 2)
   const humanDetails = describeCronReason(row.reason)
+  const ladder = renderDecisionLadder(row.traceJson ?? null, row.decision, localized || rawReason)
 
   return `<details class="reason-details">
     <summary>${esc(localized || '-')}</summary>
     <div class="reason-panel">
+      ${ladder}
       <div><strong>読み方</strong>${humanDetails}</div>
       <div><strong>RUNID</strong><br><code>${esc(row.requestId ?? '-')}</code></div>
       <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
@@ -3465,6 +3485,66 @@ function cronReasonCell(row: {
       <div><strong>JSON</strong><br><pre>${esc(decisionJson)}</pre></div>
     </div>
   </details>`
+}
+
+/**
+ * 判定トレース (`DecisionTraceStep[]` JSON) を「入力→ロジック層→出力」のラダーに
+ * 描画する (#decision-trace)。各 gate を順に ✅/❌ + 比較式 (actual op threshold) で
+ * 並べ、最後のステップ(=分岐を確定させた層)に ◀ を付けて下の出力ボックスへ矢印で繋ぐ。
+ * trace 未保存 (migration 前 / 一部経路) は空文字 (既存表示のまま)。
+ */
+function renderDecisionLadder(
+  traceJson: string | null,
+  decision: string,
+  outputReason: string,
+): string {
+  if (!traceJson) return ''
+  let steps: Array<{
+    label?: string
+    label_ja?: string
+    passed?: boolean
+    actual?: unknown
+    operator?: string
+    threshold?: unknown
+    message?: string
+  }>
+  try {
+    const parsed = JSON.parse(traceJson)
+    if (!Array.isArray(parsed) || parsed.length === 0) return ''
+    steps = parsed
+  } catch {
+    return ''
+  }
+  const fmt = (v: unknown): string => {
+    if (v === null || v === undefined) return ''
+    if (Array.isArray(v)) return `[${v.map((x) => fmt(x)).join(', ')}]`
+    if (typeof v === 'number') return String(Math.round(v * 10000) / 10000)
+    return String(v)
+  }
+  const lastIdx = steps.length - 1
+  const rows = steps
+    .map((s, i) => {
+      const ok = s.passed === true
+      const mark = ok ? '✅' : '❌'
+      const label = esc(s.label_ja || s.label || '?')
+      const cmp =
+        s.actual !== undefined || s.threshold !== undefined
+          ? `<span class="tl-cmp">${esc(fmt(s.actual))}${s.operator ? ' ' + esc(s.operator) + ' ' : ' '}${esc(fmt(s.threshold))}</span>`
+          : ''
+      const msg = s.message ? `<span class="tl-msg">${esc(s.message)}</span>` : ''
+      const decisive = i === lastIdx ? ' tl-decisive' : ''
+      const arrow = i === lastIdx ? '<span class="tl-pick">◀ 採用</span>' : ''
+      return `<div class="tl-step ${ok ? 'tl-ok' : 'tl-fail'}${decisive}"><span class="tl-mark">${mark}</span><span class="tl-label">${label}</span>${cmp}${msg}${arrow}</div>`
+    })
+    .join('')
+  const decUpper = (decision || '').toUpperCase()
+  return `<div><strong>判定トレース</strong>
+    <div class="trace-ladder">
+      ${rows}
+      <div class="tl-arrow">▼</div>
+      <div class="tl-output tl-out-${esc(decUpper.toLowerCase())}">出力: <strong>${esc(decUpper)}</strong> — ${esc(outputReason)}</div>
+    </div>
+  </div>`
 }
 
 function cronDecisionJson(row: {
