@@ -1368,6 +1368,8 @@ const STYLE = `
   .sidebar .nav-link{color:#1d1d1f;text-decoration:none;padding:7px 10px;border-radius:7px;font-size:13px}
   .sidebar .nav-link:hover{background:#f0f0f3}
   .sidebar .nav-link.active{background:#06c;color:#fff;font-weight:600}
+  .sidebar-killswitch{margin-top:auto;padding-top:12px;border-top:1px solid #e5e5ea;font-size:13px}
+  .sidebar-killswitch .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
   .main{flex:1;min-width:0;padding:24px}
   .main .page-title{margin:0 0 16px;font-size:22px}
   @media(max-width:780px){
@@ -1431,8 +1433,8 @@ function renderLayout(
   title: string,
   body: string,
 ): string {
-  const banner = killSwitchBanner(c.var.killSwitchState)
-  return layout(title, banner + body, c.req.path)
+  const killSwitch = killSwitchSidebar(c.var.killSwitchState)
+  return layout(title, body, c.req.path, killSwitch)
 }
 
 /** Sidebar nav 定義 (mf-dashboard 風 shell)。active link は path 完全一致で強調。 */
@@ -1492,34 +1494,41 @@ function renderSidebarNav(activePath?: string): string {
   }).join('')
 }
 
-function killSwitchBanner(state: KillSwitchBannerState | null): string {
+/**
+ * 取引 ON/OFF (kill switch) をサイドバー下部に出すコンパクト版 (#276 → 配置変更)。
+ * status ラベル / env override 注記 / 停止・再開フォームは banner 版と同じ文言・
+ * action を維持 (テスト・運用の互換)。サイドバー幅に収まるよう縦並び・全幅入力にする。
+ */
+function killSwitchSidebar(state: KillSwitchBannerState | null): string {
   if (state === null) {
-    return '<div class="kill-switch kill-switch-unknown">取引状態: <span class="muted">取得不能 (D1 未接続)</span></div>'
+    return '<div class="sidebar-killswitch"><div class="ks-title">取引状態</div><span class="muted" style="font-size:12px">取得不能 (D1 未接続)</span></div>'
   }
   const statusLabel = state.effective
     ? '<span class="ok">取引 ON (有効)</span>'
     : '<span class="err">取引 OFF (停止中)</span>'
   const envNote = state.envOverrideActive
-    ? `<span class="warn" style="margin-left:8px">⚠ env TRADING_ENABLED で deploy-gate ON: DB を ${state.dbEnabled ? 'ON' : 'OFF'} にしても effective は OFF</span>`
+    ? `<div class="warn" style="font-size:10px;margin-top:4px;line-height:1.3">⚠ env TRADING_ENABLED で deploy-gate ON: DB を ${state.dbEnabled ? 'ON' : 'OFF'} にしても effective は OFF</div>`
     : ''
   const disabled = state.envOverrideActive ? 'disabled' : ''
   const buttonForm = state.effective
-    ? `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" style="display:inline-flex;gap:6px;align-items:center;margin-left:12px">
+    ? `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" style="display:flex;flex-direction:column;gap:5px;margin-top:6px">
         <input type="hidden" name="enabled" value="false"/>
-        <input type="text" name="reason" placeholder="停止理由 (必須)" required maxlength="256" style="padding:3px 6px;font-size:12px;width:200px"/>
-        <button type="submit" ${disabled} style="padding:4px 10px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">取引停止</button>
+        <input type="text" name="reason" placeholder="停止理由 (必須)" required maxlength="256" style="padding:4px 6px;font-size:12px;width:100%;box-sizing:border-box"/>
+        <button type="submit" ${disabled} style="padding:5px 10px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">取引停止</button>
        </form>`
-    : `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" onsubmit="return confirm('取引を再開します。本当によろしいですか？');" style="display:inline-flex;gap:6px;align-items:center;margin-left:12px">
+    : `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" onsubmit="return confirm('取引を再開します。本当によろしいですか？');" style="display:flex;flex-direction:column;gap:5px;margin-top:6px">
         <input type="hidden" name="enabled" value="true"/>
-        <input type="text" name="reason" placeholder="再開理由 (必須)" required maxlength="256" style="padding:3px 6px;font-size:12px;width:200px"/>
-        <button type="submit" ${disabled} style="padding:4px 10px;font-size:12px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">取引再開</button>
+        <input type="text" name="reason" placeholder="再開理由 (必須)" required maxlength="256" style="padding:4px 6px;font-size:12px;width:100%;box-sizing:border-box"/>
+        <button type="submit" ${disabled} style="padding:5px 10px;font-size:12px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">取引再開</button>
        </form>`
-  return `<div class="kill-switch" style="padding:8px 12px;margin-bottom:12px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;font-size:13px;display:flex;align-items:center;flex-wrap:wrap">
-    <strong>取引状態:</strong>&nbsp;${statusLabel}${envNote}${buttonForm}
+  return `<div class="sidebar-killswitch">
+    <div class="ks-title">取引状態: ${statusLabel}</div>
+    ${envNote}
+    ${buttonForm}
   </div>`
 }
 
-function layout(title: string, body: string, activePath?: string): string {
+function layout(title: string, body: string, activePath?: string, sidebarFooter = ''): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -1533,6 +1542,7 @@ function layout(title: string, body: string, activePath?: string): string {
   <aside class="sidebar">
     <div class="brand">Webull Trading</div>
     <nav>${renderSidebarNav(activePath)}</nav>
+    ${sidebarFooter}
   </aside>
   <main class="main">
     <h1 class="page-title">${esc(title)}</h1>
