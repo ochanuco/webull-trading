@@ -3,8 +3,32 @@ import {
   countTradingDaysBetween,
   inferTradingMarket,
   isTradingDay,
+  isWithinUsCloseWindow,
   nextTradingDay,
 } from '../../../src/trading/domain/tradingCalendar'
+
+describe('isWithinUsCloseWindow (#intraday-only)', () => {
+  // 2026-04-20 は月曜 (US 取引日)、EDT (UTC-4) → NYSE 引け 16:00 ET = 20:00 UTC。
+  it('true within the window before US close (EDT / summer)', () => {
+    expect(isWithinUsCloseWindow(new Date('2026-04-20T19:50:00.000Z'), 15)).toBe(true) // 15:50 ET
+    expect(isWithinUsCloseWindow(new Date('2026-04-20T19:55:00.000Z'), 15)).toBe(true) // 15:55 ET
+  })
+  it('false before the window opens / after close', () => {
+    expect(isWithinUsCloseWindow(new Date('2026-04-20T19:40:00.000Z'), 15)).toBe(false) // 15:40 ET (>15分前)
+    expect(isWithinUsCloseWindow(new Date('2026-04-20T20:05:00.000Z'), 15)).toBe(false) // 16:05 ET (引け後)
+    expect(isWithinUsCloseWindow(new Date('2026-04-20T14:30:00.000Z'), 15)).toBe(false) // 10:30 ET (日中)
+  })
+  it('DST-safe: EST (winter) uses 21:00 UTC close', () => {
+    // 2026-01-05 は月曜、EST (UTC-5) → 引け 16:00 ET = 21:00 UTC。
+    expect(isWithinUsCloseWindow(new Date('2026-01-05T20:50:00.000Z'), 15)).toBe(true) // 15:50 ET
+    expect(isWithinUsCloseWindow(new Date('2026-01-05T19:50:00.000Z'), 15)).toBe(false) // 14:50 ET (夏時間の窓は冬は外れる)
+  })
+  it('false on weekends / holidays / invalid window', () => {
+    expect(isWithinUsCloseWindow(new Date('2026-04-18T19:50:00.000Z'), 15)).toBe(false) // 土曜
+    expect(isWithinUsCloseWindow(new Date('2026-01-01T20:50:00.000Z'), 15)).toBe(false) // 元日 (US 祝日)
+    expect(isWithinUsCloseWindow(new Date('2026-04-20T19:50:00.000Z'), 0)).toBe(false) // window<=0
+  })
+})
 
 describe('isTradingDay', () => {
   it('returns false for weekends', () => {

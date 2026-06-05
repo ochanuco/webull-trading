@@ -50,6 +50,8 @@ export interface SymbolUniverse {
   symbolStopPctOverride: Record<string, number>
   /** symbol → take_profit_pct override (正 fraction)。NULL は不在 (= global default)。 */
   symbolTakeProfitPctOverride: Record<string, number>
+  /** intraday_only=true の symbol 集合 (#intraday-only)。false は不在。 */
+  symbolIntradayOnly: Record<string, boolean>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -84,6 +86,7 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolLotSize: config.symbolLotSize,
     symbolStopPctOverride: config.symbolStopPctOverride,
     symbolTakeProfitPctOverride: config.symbolTakeProfitPctOverride,
+    symbolIntradayOnly: config.symbolIntradayOnly,
     inversePairs: pairs,
     source: 'd1',
   }

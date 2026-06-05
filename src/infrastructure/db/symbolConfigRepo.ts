@@ -71,6 +71,11 @@ export interface SymbolConfigSnapshot {
    * symbol → take_profit_pct_override (正の fraction)。NULL は map に含めない。
    */
   symbolTakeProfitPctOverride: Record<string, number>
+  /**
+   * intraday_only = true の symbol 集合 (#intraday-only)。false は map に含めない。
+   * cron が US 引け前に強制クローズする対象。
+   */
+  symbolIntradayOnly: Record<string, boolean>
 }
 
 /**
@@ -100,6 +105,7 @@ export async function loadSymbolConfig(
   const symbolLotSize: Record<string, number> = {}
   const symbolStopPctOverride: Record<string, number> = {}
   const symbolTakeProfitPctOverride: Record<string, number> = {}
+  const symbolIntradayOnly: Record<string, boolean> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -175,6 +181,9 @@ export async function loadSymbolConfig(
     ) {
       symbolTakeProfitPctOverride[symbol] = row.takeProfitPctOverride
     }
+    if (row.intradayOnly === true) {
+      symbolIntradayOnly[symbol] = true
+    }
   }
   return {
     allowedSymbols,
@@ -190,6 +199,7 @@ export async function loadSymbolConfig(
     symbolLotSize,
     symbolStopPctOverride,
     symbolTakeProfitPctOverride,
+    symbolIntradayOnly,
   }
 }
 
@@ -238,6 +248,8 @@ export interface SymbolConfigWriteInput {
   stopPctOverride: number | null
   /** 利食い fraction override (正値、NULL = global default)。 */
   takeProfitPctOverride: number | null
+  /** intraday-only (US 引け前強制クローズ、default false、#intraday-only)。 */
+  intradayOnly: boolean
 }
 
 /**
@@ -268,6 +280,7 @@ export async function insertSymbolConfig(
       lotSize: input.lotSize,
       stopPctOverride: input.stopPctOverride,
       takeProfitPctOverride: input.takeProfitPctOverride,
+      intradayOnly: input.intradayOnly,
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -315,6 +328,7 @@ export async function updateSymbolConfig(
       lotSize: input.lotSize,
       stopPctOverride: input.stopPctOverride,
       takeProfitPctOverride: input.takeProfitPctOverride,
+      intradayOnly: input.intradayOnly,
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))
@@ -559,9 +573,10 @@ export async function createSymbolPair(
       // インバース対は同じ商品種別 (両方 3x ETF 等) なので売買単位も primary 継承。
       // 異なる場合は counterpart を個別編集で上書きする (#symbol-lot-size)。
       lotSize: primary.lotSize,
-      // 同じレバ特性なので stop/TP override も primary 継承。
+      // 同じレバ特性なので stop/TP override / intraday-only も primary 継承。
       stopPctOverride: primary.stopPctOverride,
       takeProfitPctOverride: primary.takeProfitPctOverride,
+      intradayOnly: primary.intradayOnly,
       updatedAt: nowIso,
     })
     await db.batch([delLink, insCounterpart, insLink])

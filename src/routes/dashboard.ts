@@ -7336,6 +7336,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
     row?.takeProfitPctOverride === null || row?.takeProfitPctOverride === undefined
       ? ''
       : String(Math.round(row.takeProfitPctOverride * 1000) / 10)
+  const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
   const timeStopPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
     : '空欄で global default を使用'
@@ -7466,6 +7467,11 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
       <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_take_profit_pct</code>。stop を広げる時は R:R が反転しないよう TP も併せて調整。</p>
     </div>
+    <label>持ち越し <span class="muted" style="font-size:11px">(intraday_only)</span></label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="intraday_only" value="false">
+      <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ(オーバーナイト持ち越さない)
+    </label>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>

@@ -598,6 +598,7 @@ export async function runStrategyCron(
       budgetBasisJpy,
       fxJpyPerSymbolCcy,
       buyingPower,
+      intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
       defaultRule,
       rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,
