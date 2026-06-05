@@ -166,18 +166,25 @@ export async function loadSymbolConfig(
     ) {
       symbolLotSize[symbol] = row.lotSize
     }
-    // stop/TP override は有限値のみ採用 (NULL/NaN は map に出さず = global default)。
+    // stop/TP override は **符号・レンジまで検証**して採用 (fail-closed、CodeRabbit #432)。
+    // 直接 DB を弄って stop=0 / 正値や TP=0 / 負値が入っても、無効値は map に出さず
+    // global default にフォールバックさせる (admin parse の二重防御)。
+    // stop は負 fraction [-1, 0)、TP は正 fraction (0, 1]。
     if (
       row.stopPctOverride !== null &&
       row.stopPctOverride !== undefined &&
-      Number.isFinite(row.stopPctOverride)
+      Number.isFinite(row.stopPctOverride) &&
+      row.stopPctOverride < 0 &&
+      row.stopPctOverride >= -1
     ) {
       symbolStopPctOverride[symbol] = row.stopPctOverride
     }
     if (
       row.takeProfitPctOverride !== null &&
       row.takeProfitPctOverride !== undefined &&
-      Number.isFinite(row.takeProfitPctOverride)
+      Number.isFinite(row.takeProfitPctOverride) &&
+      row.takeProfitPctOverride > 0 &&
+      row.takeProfitPctOverride <= 1
     ) {
       symbolTakeProfitPctOverride[symbol] = row.takeProfitPctOverride
     }

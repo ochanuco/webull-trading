@@ -103,6 +103,20 @@ describe('loadSymbolConfig', () => {
     expect(result.symbolMarket).toEqual({ SOXL: 'US', SOXS: 'US', '7203': 'JP', '9697': 'JP' })
   })
 
+  it('accepts only sign/range-valid stop/TP overrides, drops the rest (fail-closed, CodeRabbit #432)', async () => {
+    const rows = [
+      { symbol: 'OK', market: 'US', active: true, maxNotional: null, stopPctOverride: -0.1, takeProfitPctOverride: 0.06 },
+      { symbol: 'Z', market: 'US', active: true, maxNotional: null, stopPctOverride: 0, takeProfitPctOverride: null },
+      { symbol: 'P', market: 'US', active: true, maxNotional: null, stopPctOverride: 0.08, takeProfitPctOverride: null },
+      { symbol: 'LO', market: 'US', active: true, maxNotional: null, stopPctOverride: -1.5, takeProfitPctOverride: null },
+      { symbol: 'TPZ', market: 'US', active: true, maxNotional: null, stopPctOverride: null, takeProfitPctOverride: 0 },
+      { symbol: 'TPN', market: 'US', active: true, maxNotional: null, stopPctOverride: null, takeProfitPctOverride: -0.05 },
+    ]
+    const result = await loadSymbolConfig(fakeDb(rows))
+    expect(result.symbolStopPctOverride).toEqual({ OK: -0.1 })
+    expect(result.symbolTakeProfitPctOverride).toEqual({ OK: 0.06 })
+  })
+
   it('skips empty / whitespace-only notes (defensive)', async () => {
     const rows = [
       { symbol: 'A', name: null, market: 'US', active: false, maxNotional: null, notes: '' },
