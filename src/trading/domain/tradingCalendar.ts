@@ -164,3 +164,37 @@ export function countTradingDaysBetween(
 export function inferTradingMarket(symbol: string): TradingMarket {
   return /^\d{4}$/.test(symbol) ? 'JP' : 'US'
 }
+
+/** US NYSE レギュラー引け = 16:00 ET (分換算)。 */
+const US_REGULAR_CLOSE_ET_MINUTES = 16 * 60
+
+/**
+ * `now` が **US 取引日かつ NYSE 引け (16:00 ET) の `minutesBeforeClose` 分前〜引け**
+ * の窓内なら true (#intraday-only)。レバ ETF をオーバーナイト持ち越さず引け前に
+ * 強制クローズするのに使う。
+ *
+ * ET wall-clock は `Intl.DateTimeFormat('America/New_York')` で取得し DST 自動対応
+ * (macroEventGate と同手法)。引け窓は午後 ET なので UTC 日付 == ET 日付 (深夜跨ぎ
+ * 無し) → `isTradingDay(now,'US')` を UTC 基準で使って問題ない。
+ *
+ * 注意: early close (感謝祭翌日 13:00 ET 等) は POC 未対応 — その日は窓に当たらず
+ * 持ち越しうる (`tradingCalendar` 冒頭コメント参照)。
+ */
+export function isWithinUsCloseWindow(now: Date, minutesBeforeClose: number): boolean {
+  if (!Number.isFinite(minutesBeforeClose) || minutesBeforeClose <= 0) return false
+  if (!isTradingDay(now, 'US')) return false
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(now)
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value)
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value)
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false
+  const etMinutes = (hour % 24) * 60 + minute // hour12:false で稀に '24' を返す Intl quirk 対策
+  return (
+    etMinutes >= US_REGULAR_CLOSE_ET_MINUTES - minutesBeforeClose &&
+    etMinutes < US_REGULAR_CLOSE_ET_MINUTES
+  )
+}

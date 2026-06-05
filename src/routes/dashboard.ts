@@ -7327,6 +7327,16 @@ function symbolFormBody(args: SymbolFormArgs): string {
       : String(row.timeStopDaysOverride)
   const kAtrOverrideValue =
     row?.kAtrOverride === null || row?.kAtrOverride === undefined ? '' : String(row.kAtrOverride)
+  // stop/TP override は DB に fraction 保存、表示は % (×100、stop は符号付き)。
+  const stopPctOverrideValue =
+    row?.stopPctOverride === null || row?.stopPctOverride === undefined
+      ? ''
+      : String(Math.round(row.stopPctOverride * 1000) / 10)
+  const takeProfitPctOverrideValue =
+    row?.takeProfitPctOverride === null || row?.takeProfitPctOverride === undefined
+      ? ''
+      : String(Math.round(row.takeProfitPctOverride * 1000) / 10)
+  const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
   const timeStopPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
     : '空欄で global default を使用'
@@ -7443,8 +7453,25 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <div>
       <input type="number" name="k_atr_override" value="${esc(kAtrOverrideValue)}" step="0.1" min="0.5" max="5.0" placeholder="${esc(kAtrPlaceholder)}" style="padding:6px;width:160px">
       <span class="muted" style="font-size:12px;margin-left:6px">× ATR20</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_k_atr</code> を使用。高ボラ銘柄では緩めに (2.5-3.5)、低ボラは引き締めに (1.5-2.0)。0.5-5.0 の数値 (#316)。</p>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_k_atr</code> を使用。高ボラ銘柄では緩めに (2.5-3.5)、低ボラは引き締めに (1.5-2.0)。0.5-5.0 の数値 (#316)。exit stop は <code>max(pct, kAtr×ATR)</code> の広い方が効く (#exit-atr)。</p>
     </div>
+    <label>損切ライン override <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄で global default" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% (負値)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_stop_pct</code>。3x レバ ETF はボラ大なので広め (例 -8〜-10) が推奨。実際の exit は <code>max(この%, kAtr×ATR)</code> の広い方 (#exit-atr)。</p>
+    </div>
+    <label>利食ライン override <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で global default" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_take_profit_pct</code>。stop を広げる時は R:R が反転しないよう TP も併せて調整。</p>
+    </div>
+    <label>持ち越し <span class="muted" style="font-size:11px">(intraday_only)</span></label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="intraday_only" value="false">
+      <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ(オーバーナイト持ち越さない)
+    </label>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>

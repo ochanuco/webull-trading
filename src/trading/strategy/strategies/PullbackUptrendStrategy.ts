@@ -145,11 +145,28 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('exit.take_profit', false, pnlPct, '>=', rule.takeProfitPct))
 
-    if (pnlPct <= rule.stopPct) {
-      trace.push(step('exit.stop_loss', true, pnlPct, '<=', rule.stopPct))
-      return sell(input, position, `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${rule.stopPct}`, trace)
+    // ATR 連動 stop (#exit-atr): 固定 pct stop だけだと高ボラ銘柄 (3x レバ ETF 等) で
+    // 通常変動/寄りギャップに叩かれる。sizing と同式の距離ベースにして「pct stop か
+    // ATR stop の広い方」を採り、ボラに応じて stop 幅を自動で広げる (ノイズ stop-out
+    // 抑制)。atr20<=0/非有限は pct のみに fallback (defensive)。stopPct は最低 stop 幅の floor。
+    const pctStopDistance = Math.abs(position.avgPrice * rule.stopPct)
+    const atrStopDistance =
+      Number.isFinite(input.indicators.atr20) && input.indicators.atr20 > 0
+        ? rule.kAtr * input.indicators.atr20
+        : 0
+    const stopDistance = Math.max(pctStopDistance, atrStopDistance)
+    const effectiveStopPct = position.avgPrice > 0 ? -stopDistance / position.avgPrice : rule.stopPct
+    const stopDominant = atrStopDistance > pctStopDistance ? 'atr' : 'pct'
+    if (pnlPct <= effectiveStopPct) {
+      trace.push(step('exit.stop_loss', true, pnlPct, '<=', effectiveStopPct))
+      return sell(
+        input,
+        position,
+        `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${effectiveStopPct.toFixed(4)} (${stopDominant}, dist ${stopDistance.toFixed(2)} = max(pct ${pctStopDistance.toFixed(2)}, atr ${atrStopDistance.toFixed(2)}))`,
+        trace,
+      )
     }
-    trace.push(step('exit.stop_loss', false, pnlPct, '<=', rule.stopPct))
+    trace.push(step('exit.stop_loss', false, pnlPct, '<=', effectiveStopPct))
 
     if (input.holdBusinessDays >= rule.timeStopDays) {
       trace.push(step('exit.time_stop', true, input.holdBusinessDays, '>=', rule.timeStopDays))

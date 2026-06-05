@@ -4,7 +4,7 @@ import { classifyBrokerErrorCause } from '../../infrastructure/notification/brok
 import type { Notifier } from '../../infrastructure/notification/Notifier'
 import { isSellQtyExceedError } from '../../shared/errors'
 import type { DecisionTraceStep } from '../domain/Signal'
-import { inferTradingMarket } from '../domain/tradingCalendar'
+import { inferTradingMarket, isWithinUsCloseWindow } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
 import type { SymbolState } from '../state/types'
@@ -15,6 +15,12 @@ import {
 } from './indicators'
 import { computePullbackSizing } from './pullbackSizing'
 import type { BuyingPowerLedger } from './buyingPower'
+
+/**
+ * #intraday-only: US 引け何分前から強制クローズ window を開けるか。cron は 5 分間隔
+ * なので 15 分なら必ず 1 tick は窓内に入る (引け前 3 tick = 15/10/5 分前)。
+ */
+const INTRADAY_CLOSE_WINDOW_MIN = 15
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
 import {
@@ -89,6 +95,12 @@ export interface PullbackSchedulerOptions {
    * する想定。未指定 (DryRun / legacy / test) は pool ゲート無効。
    */
   buyingPower?: BuyingPowerLedger
+  /**
+   * intraday-only 銘柄の集合 (#intraday-only)。US 引け前 window 内で建玉があれば
+   * strategy 判定を上書きして **強制 SELL**(オーバーナイト持ち越し禁止)。レバ ETF の
+   * 寄りギャップ stop-out 回避。未指定/対象外は従来どおりスイング保有。
+   */
+  intradayOnlySymbols?: Set<string>
   /**
    * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
    * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
@@ -397,7 +409,7 @@ export async function runPullbackScheduler(
         ? computeHoldBusinessDays(state.position.openedAt, now(), market)
         : 0
 
-    const signal = strategy.decide({
+    let signal = strategy.decide({
       symbol: upper,
       indicators,
       position: state.position,
@@ -406,6 +418,30 @@ export async function runPullbackScheduler(
       holdBusinessDays,
       now: now(),
     })
+
+    // #intraday-only: レバ ETF 等は US 引け前 window で建玉があれば strategy 判定を
+    // 上書きして強制 SELL (オーバーナイト持ち越し禁止 = 寄りギャップ stop-out 回避)。
+    // 既存の SELL 経路 (全建玉クローズ) に流れる。US 銘柄のみ対象。
+    if (
+      options.intradayOnlySymbols?.has(upper) &&
+      market === 'US' &&
+      state.position !== null &&
+      Number.isFinite(state.position.qty) &&
+      state.position.qty > 0 &&
+      isWithinUsCloseWindow(now(), INTRADAY_CLOSE_WINDOW_MIN)
+    ) {
+      // symbol/quantity/price/generatedAtIso は元 signal を流用 (SELL 経路は
+      // state.position.qty / indicators.price で再計算するので値は不問)。
+      signal = {
+        ...signal,
+        action: 'SELL',
+        reason: 'intraday-only: force-close before US market close',
+        trace: appendTrace(
+          signal.trace,
+          traceStep('exit.intraday_close', true, undefined, undefined, undefined, 'force-close before US close'),
+        ),
+      }
+    }
 
     if (signal.action === 'HOLD') {
       summary.holds += 1
@@ -1208,6 +1244,7 @@ function labelJa(label: string): string {
 const TRACE_LABEL_JA: Record<string, string> = {
   'sizing.quantity_positive': '発注数量が1株/1単元以上ある',
   'sizing.lot_size_configured': '売買単位 (lot_size) が設定済み',
+  'exit.intraday_close': 'intraday-only 引け前強制クローズ',
   'scheduler.price_valid': '株価が有効',
   'scheduler.notional_valid': '発注金額が有効',
   'scheduler.sell_position_exists': '売却対象の建玉がある',

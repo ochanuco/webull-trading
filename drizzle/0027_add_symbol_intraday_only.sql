@@ -1,0 +1,1 @@
+ALTER TABLE `symbol_config` ADD `intraday_only` integer DEFAULT false NOT NULL;

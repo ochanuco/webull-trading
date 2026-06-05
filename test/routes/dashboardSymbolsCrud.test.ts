@@ -155,6 +155,9 @@ function fakeDb(initial: SymbolConfigRow[]) {
               kAtrOverride: (v.kAtrOverride as number | null) ?? null,
               budgetAllocPct: (v.budgetAllocPct as number | null) ?? null,
               lotSize: (v.lotSize as number | null) ?? null,
+              stopPctOverride: (v.stopPctOverride as number | null) ?? null,
+              takeProfitPctOverride: (v.takeProfitPctOverride as number | null) ?? null,
+              intradayOnly: v.intradayOnly === true || v.intradayOnly === 1,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -211,6 +214,9 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     kAtrOverride: null,
     budgetAllocPct: null,
     lotSize: 1,
+    stopPctOverride: null,
+    takeProfitPctOverride: null,
+    intradayOnly: false,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -957,6 +963,57 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(res.status).toBe(303)
     const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
     expect(inserted.values.budgetAllocPct).toBeCloseTo(0.4, 6)
+  })
+
+  it('POST persists stop/take-profit override as fractions (% input ÷ 100) (#exit-atr)', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'TQQQ',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      lot_size: '1',
+      stop_pct_override: '-8', // -8% → -0.08
+      take_profit_pct_override: '6', // +6% → 0.06
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
+    expect(inserted.values.stopPctOverride).toBeCloseTo(-0.08, 6)
+    expect(inserted.values.takeProfitPctOverride).toBeCloseTo(0.06, 6)
+  })
+
+  it('rejects a positive stop_pct_override (must be negative) with 400', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: new URLSearchParams({
+          symbol: 'TQQQ',
+          market: 'US',
+          currency: 'USD',
+          active: 'true',
+          lot_size: '1',
+          stop_pct_override: '8', // 正値は不正 (stop は負)
+        }).toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(400)
   })
 
   it('edit form shows 予算配分 (%) field', async () => {
