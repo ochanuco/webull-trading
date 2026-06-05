@@ -140,6 +140,11 @@ export const symbolConfig = sqliteTable(
      * 利食い fraction override (NULL = global default、正値)。R:R を銘柄別に調整する用。
      */
     takeProfitPctOverride: real('take_profit_pct_override'),
+    /**
+     * intraday-only (true = オーバーナイト持ち越さず US 引け前に強制クローズ)。
+     * default false。3x レバ ETF の寄りギャップ stop-out 回避用 (#intraday-only)。
+     */
+    intradayOnly: integer('intraday_only', { mode: 'boolean' }).notNull().default(false),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

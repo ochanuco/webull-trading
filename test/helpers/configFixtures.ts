@@ -60,6 +60,7 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolLotSize: { SOXL: 1, SOXS: 1 },
     symbolStopPctOverride: {},
     symbolTakeProfitPctOverride: {},
+    symbolIntradayOnly: {},
     inversePairs: {},
     source: 'd1',
     ...overrides,

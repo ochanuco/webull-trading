@@ -236,6 +236,7 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   lotSize: 1,
   stopPctOverride: null,
   takeProfitPctOverride: null,
+  intradayOnly: false,
 })
 
 describe('setInversePair', () => {

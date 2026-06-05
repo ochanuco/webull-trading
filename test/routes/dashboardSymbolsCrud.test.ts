@@ -157,6 +157,7 @@ function fakeDb(initial: SymbolConfigRow[]) {
               lotSize: (v.lotSize as number | null) ?? null,
               stopPctOverride: (v.stopPctOverride as number | null) ?? null,
               takeProfitPctOverride: (v.takeProfitPctOverride as number | null) ?? null,
+              intradayOnly: v.intradayOnly === true || v.intradayOnly === 1,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -215,6 +216,7 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     lotSize: 1,
     stopPctOverride: null,
     takeProfitPctOverride: null,
+    intradayOnly: false,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }

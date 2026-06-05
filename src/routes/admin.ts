@@ -2181,6 +2181,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     stopPctOverride?: unknown
     take_profit_pct_override?: unknown
     takeProfitPctOverride?: unknown
+    intraday_only?: unknown
+    intradayOnly?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2237,6 +2239,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     100,
   )
   const takeProfitPctOverride = takeProfitPctRaw === null ? null : takeProfitPctRaw / 100
+  // intraday-only (#intraday-only): checkbox 未送信は false。active と同じ form bool 解釈。
+  const intradayOnly = parseFormBool(raw.intraday_only ?? raw.intradayOnly, false)
   return {
     symbol,
     name,
@@ -2251,6 +2255,7 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     lotSize,
     stopPctOverride,
     takeProfitPctOverride,
+    intradayOnly,
   }
 }
 

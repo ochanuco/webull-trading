@@ -1754,3 +1754,62 @@ describe('runPullbackScheduler broker-error decision embeds order amount (#417)'
     expect(err?.reason).not.toContain('USD/JPY')
   })
 })
+
+describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () => {
+  // avgPrice 117 ≈ price 117.5 (uptrendBars last close) → pnl +0.4% → 通常は HOLD。
+  const heldState = (): SymbolState => ({
+    ...emptySymbolState('AAPL', () => now),
+    position: { qty: 3, avgPrice: 117, openedAt: '2026-04-19T00:00:00.000Z' },
+  })
+  // 2026-04-20 月曜、EDT → 引け 20:00 UTC。19:50 UTC = 15:50 ET = 引け 15分前 window 内。
+  const closeWindow = new Date('2026-04-20T19:50:00.000Z')
+
+  it('forces a SELL within the US-close window, overriding HOLD', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState() }),
+      execution,
+      intradayOnlySymbols: new Set(['AAPL']),
+      now: () => closeWindow,
+    })
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('SELL')
+    expect(aapl?.reason).toMatch(/intraday-only/)
+  })
+
+  it('does NOT force-close outside the window (normal HOLD)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState() }),
+      execution,
+      intradayOnlySymbols: new Set(['AAPL']),
+      now: () => now, // 14:30 UTC = 10:30 ET, 窓外
+    })
+    expect(summary.sells).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
+  })
+
+  it('does NOT force-close a symbol not flagged intraday-only', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState() }),
+      execution,
+      intradayOnlySymbols: new Set(['TQQQ']), // AAPL は対象外
+      now: () => closeWindow,
+    })
+    expect(summary.sells).toBe(0)
+    expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
+  })
+})
