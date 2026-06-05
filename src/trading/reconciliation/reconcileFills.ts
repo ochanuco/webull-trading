@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/sqlite-core'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
@@ -105,6 +105,21 @@ const MAX_REPAIR_ATTEMPTS = 5
  * (#139): callers that need to catch up from a longer pause can widen it.
  */
 const DEFAULT_LOOKBACK_MS = 48 * 3_600_000
+
+/**
+ * #drift: submit が例外 (BrokerAuthError 等で ack ロスト) になった post_submit 行は
+ * `submitted` が立たず通常 cohort から漏れる。だが「我々側のエラー = broker 不約定」
+ * とは限らない (auth blip で実は FILLED してることがある)。これを broker 注文履歴で
+ * 照合して state を heal するため、errored 行も短い window で reconcile 対象に含める。
+ *
+ * window を 48h ではなく **30 分**に絞る理由:
+ *   - reconcile cron は 5 分間隔なので、ack ロスト fill は数 tick (= 数分) で拾える。
+ *   - 古い履歴行を再処理しない (手動 sync 後に過去の SELL を再 apply して
+ *     "Cannot SELL without an open position" を誘発する事故を避ける)。
+ *   - pre-acceptance で本当に失敗した errored 行 (買付余力 / 空売り 417 等) は
+ *     notFound のまま 30 分で window から脱落 — broker 照合は bounded。
+ */
+const ERRORED_SUBMIT_LOOKBACK_MS = 30 * 60_000
 
 /**
  * Default cap on rows inspected per call. Keeps a single invocation bounded
@@ -231,6 +246,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   // cooldown window incorrectly.
   const runNow = now()
   const since = new Date(runNow.getTime() - (options.lookbackMs ?? DEFAULT_LOOKBACK_MS)).toISOString()
+  // #drift: ack ロストした errored submit 用の狭い window (default 30 分)。
+  const erroredSince = new Date(runNow.getTime() - ERRORED_SUBMIT_LOOKBACK_MS).toISOString()
   const limit = options.limit ?? DEFAULT_ROW_LIMIT
   // Deep-lookup sweep settings (#139). Default `historyMaxPages=1` preserves
   // the prior single-page behaviour, so cron callers see no change in broker
@@ -316,24 +333,38 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     .where(
       and(
         eq(tradeJournal.tradeEventType, 'post_submit'),
-        eq(tradeJournal.submitted, true),
-        // Lookback の適用は cohort 別に分かれる (#268):
-        //   - fresh poll cohort (broker_status NULL): broker への問合せが必要
-        //     なので、古い行を毎 tick 引っ張ると broker pressure になる
-        //     (default 48h cap)。
-        //   - repair cohort (broker_status='FILLED' AND state_applied_at NULL):
-        //     broker poll 不要 (broker_status 確認済)、DO RPC のみで軽量。
-        //     **lookback 無視で常に sweep** する。これにより長期保有 fill が
-        //     48h 経過後 aged-out で permanent split-brain になる事故を防ぐ。
-        //     行数爆発は SELECT LIMIT 50 で bounded、永続 fail 行は #228 の
-        //     auto-abandon (MAX_REPAIR_ATTEMPTS=5) で cohort から自動的に外れる。
-        //
-        // `retryStateApply` フラグは残してあるが #268 以降は no-op
-        // (互換性のため signature 維持、将来 admin 側で別 sweep モードに
-        // 再定義する余地)。
         or(
-          and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since)),
-          repairFilter,
+          // 通常 cohort: submit 成功 (submitted=true)。
+          // Lookback の適用は cohort 別に分かれる (#268):
+          //   - fresh poll cohort (broker_status NULL): broker への問合せが必要
+          //     なので、古い行を毎 tick 引っ張ると broker pressure になる
+          //     (default 48h cap)。
+          //   - repair cohort (broker_status='FILLED' AND state_applied_at NULL):
+          //     broker poll 不要 (broker_status 確認済)、DO RPC のみで軽量。
+          //     **lookback 無視で常に sweep** する。これにより長期保有 fill が
+          //     48h 経過後 aged-out で permanent split-brain になる事故を防ぐ。
+          //     行数爆発は SELECT LIMIT 50 で bounded、永続 fail 行は #228 の
+          //     auto-abandon (MAX_REPAIR_ATTEMPTS=5) で cohort から自動的に外れる。
+          //
+          // `retryStateApply` フラグは残してあるが #268 以降は no-op
+          // (互換性のため signature 維持、将来 admin 側で別 sweep モードに
+          // 再定義する余地)。
+          and(
+            eq(tradeJournal.submitted, true),
+            or(
+              and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since)),
+              repairFilter,
+            ),
+          ),
+          // #drift: ack ロストした errored submit (submitted が立たない / error_class
+          // 有り / broker_status 未確定) を **狭い window (30分)** で照合対象に。auth blip
+          // 等で実は FILLED してた注文を broker 履歴から拾って heal する。pre-acceptance
+          // 失敗 (買付余力/空売り 417 等) は notFound のまま window 経過で脱落。
+          and(
+            isNotNull(tradeJournal.errorClass),
+            isNull(tradeJournal.brokerStatus),
+            gte(tradeJournal.timestamp, erroredSince),
+          ),
         ),
       ),
     )
