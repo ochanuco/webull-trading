@@ -130,6 +130,21 @@ export const symbolConfig = sqliteTable(
      * admin parse + 将来 rebuild で担保 (budget_alloc_pct と同方針)。
      */
     lotSize: integer('lot_size'),
+    /**
+     * 損切り fraction override (NULL = global_config.pullback_default_stop_pct、負値)。
+     * 3x レバ ETF 等でボラに合わせ stop を広げる用 (#exit-atr)。range CHECK は SQLite
+     * ALTER 制約を避け admin parse で担保 (k_atr_override と同方針)。
+     */
+    stopPctOverride: real('stop_pct_override'),
+    /**
+     * 利食い fraction override (NULL = global default、正値)。R:R を銘柄別に調整する用。
+     */
+    takeProfitPctOverride: real('take_profit_pct_override'),
+    /**
+     * intraday-only (true = オーバーナイト持ち越さず US 引け前に強制クローズ)。
+     * default false。3x レバ ETF の寄りギャップ stop-out 回避用 (#intraday-only)。
+     */
+    intradayOnly: integer('intraday_only', { mode: 'boolean' }).notNull().default(false),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

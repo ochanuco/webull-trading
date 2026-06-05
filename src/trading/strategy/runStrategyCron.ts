@@ -250,6 +250,8 @@ export async function runStrategyCron(
   const overrideSymbols = new Set<string>([
     ...Object.keys(universe.symbolTimeStopDaysOverride),
     ...Object.keys(universe.symbolKAtrOverride),
+    ...Object.keys(universe.symbolStopPctOverride),
+    ...Object.keys(universe.symbolTakeProfitPctOverride),
   ])
   for (const sym of overrideSymbols) {
     rulesMap[sym] = {
@@ -257,6 +259,10 @@ export async function runStrategyCron(
       timeStopDays:
         universe.symbolTimeStopDaysOverride[sym] ?? defaultRule.timeStopDays,
       kAtr: universe.symbolKAtrOverride[sym] ?? defaultRule.kAtr,
+      // stop/TP override (#exit-atr)。NULL は defaultRule そのまま。
+      stopPct: universe.symbolStopPctOverride[sym] ?? defaultRule.stopPct,
+      takeProfitPct:
+        universe.symbolTakeProfitPctOverride[sym] ?? defaultRule.takeProfitPct,
     }
   }
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
@@ -592,6 +598,7 @@ export async function runStrategyCron(
       budgetBasisJpy,
       fxJpyPerSymbolCcy,
       buyingPower,
+      intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
       defaultRule,
       rulesMap,
       riskPerTradePct: scaledRiskPerTradePct,
