@@ -183,6 +183,13 @@
       "when": 1780582507641,
       "tag": "0025_add_symbol_lot_size",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1780679997727,
+      "tag": "0026_add_symbol_stop_tp_override",
+      "breakpoints": true
     }
   ]
 }

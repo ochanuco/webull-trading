@@ -184,6 +184,47 @@ describe('PullbackUptrendStrategy exit priority', () => {
   })
 })
 
+describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
+  // LEVERAGED_RULE: stopPct -0.03, kAtr 2.5, avgPrice 100 → pctStopDist=3 (=-3%)。
+  const strategy = new PullbackUptrendStrategy(LEVERAGED_RULE)
+  const buildExit = (price: number, atr20: number): PullbackInput => ({
+    symbol: 'TQQQ',
+    indicators: { price, sma50: 0, return50d: 0, high20d: 0, atr20, baselineAtr20: 1 },
+    position: openPosition, // avgPrice 100
+    pendingOrder: null,
+    cooldownUntil: null,
+    holdBusinessDays: 0,
+    now,
+  })
+
+  it('ATR widens the stop: -4% loss does NOT trigger when atr stop is -5%', () => {
+    // atr20=2, kAtr 2.5 → atrStopDist=5 (=-5%) > pctStopDist=3 → 実効 stop -5%。
+    // price 96 (pnl -4%) は -5% に届かず HOLD。固定 -3% pct stop なら誤発火していた。
+    const signal = strategy.decide(buildExit(96, 2))
+    expect(signal.action).toBe('HOLD')
+  })
+
+  it('ATR stop fires (and labels atr) once loss exceeds the ATR-widened distance', () => {
+    const signal = strategy.decide(buildExit(94, 2)) // pnl -6% <= -5%
+    expect(signal.action).toBe('SELL')
+    expect(signal.reason).toMatch(/stop-loss/)
+    expect(signal.reason).toMatch(/atr/)
+  })
+
+  it('pct floor applies when ATR is small: -4% triggers the -3% pct stop', () => {
+    // atr20=0.5 → atrStopDist=1.25 < pctStopDist=3 → 実効 stop は pct floor -3%。
+    const signal = strategy.decide(buildExit(96, 0.5)) // pnl -4% <= -3%
+    expect(signal.action).toBe('SELL')
+    expect(signal.reason).toMatch(/pct/)
+  })
+
+  it('falls back to pct stop when atr20 is 0 / invalid', () => {
+    const signal = strategy.decide(buildExit(96, 0)) // pnl -4% <= -3% pct
+    expect(signal.action).toBe('SELL')
+    expect(signal.reason).toMatch(/stop-loss/)
+  })
+})
+
 describe('PullbackUptrendStrategy per-symbol override', () => {
   const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE, { SOXL: LEVERAGED_RULE })
 

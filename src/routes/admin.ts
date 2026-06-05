@@ -2177,6 +2177,10 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     budgetAllocPct?: unknown
     lot_size?: unknown
     lotSize?: unknown
+    stop_pct_override?: unknown
+    stopPctOverride?: unknown
+    take_profit_pct_override?: unknown
+    takeProfitPctOverride?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2217,6 +2221,22 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   // 売買単位は **入力必須** (空欄/未指定はエラー)。fallback しない (#symbol-lot-size)。
   // 整数 1-100000 (JP 個別株=100 / ETF=1 / US=1 を想定、上限は防御的に広め)。
   const lotSize = parseRequiredIntegerInRange(raw.lot_size ?? raw.lotSize, 'lotSize', 1, 100_000)
+  // stop/TP override (#exit-atr): form は **% (符号付き)** で送る。fraction に変換して保存。
+  // 空 / undefined → NULL (= global default)。stop は負 (-99..-0.1%)、TP は正 (0.1..100%)。
+  const stopPctRaw = parseOptionalNumberInRange(
+    raw.stop_pct_override ?? raw.stopPctOverride,
+    'stopPctOverride',
+    -99,
+    -0.1,
+  )
+  const stopPctOverride = stopPctRaw === null ? null : stopPctRaw / 100
+  const takeProfitPctRaw = parseOptionalNumberInRange(
+    raw.take_profit_pct_override ?? raw.takeProfitPctOverride,
+    'takeProfitPctOverride',
+    0.1,
+    100,
+  )
+  const takeProfitPctOverride = takeProfitPctRaw === null ? null : takeProfitPctRaw / 100
   return {
     symbol,
     name,
@@ -2229,6 +2249,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     kAtrOverride,
     budgetAllocPct,
     lotSize,
+    stopPctOverride,
+    takeProfitPctOverride,
   }
 }
 

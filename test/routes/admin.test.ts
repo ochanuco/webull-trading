@@ -1141,6 +1141,8 @@ describe('POST /admin/orders/sync-holdings', () => {
       symbolKAtrOverride: {},
       symbolBudgetAllocPct: {},
       symbolLotSize: {},
+      symbolStopPctOverride: {},
+      symbolTakeProfitPctOverride: {},
       inversePairs: {},
       source: 'd1',
     })

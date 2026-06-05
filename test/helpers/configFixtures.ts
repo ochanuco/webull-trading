@@ -58,6 +58,8 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolKAtrOverride: {},
     symbolBudgetAllocPct: {},
     symbolLotSize: { SOXL: 1, SOXS: 1 },
+    symbolStopPctOverride: {},
+    symbolTakeProfitPctOverride: {},
     inversePairs: {},
     source: 'd1',
     ...overrides,
