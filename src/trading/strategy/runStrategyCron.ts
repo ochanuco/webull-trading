@@ -669,11 +669,13 @@ export async function runStrategyCron(
             },
           }
         : {}),
-      onDecision: (record) =>
+      onDecision: ({ trace, ...record }) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
           requestId: options.requestId,
           ...record,
+          // 判定トレースを JSON 保存しラダー可視化に使う (#decision-trace)。
+          traceJson: trace && trace.length > 0 ? JSON.stringify(trace) : null,
         }),
     })
     summary.evaluated += sub.evaluated

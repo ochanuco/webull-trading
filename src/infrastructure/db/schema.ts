@@ -441,6 +441,12 @@ export const strategyDecisionLog = sqliteTable(
      * して realized_pnl を引くためのキー (#143)。HOLD/REJECT/ERROR は null。
      */
     clientOrderId: text('client_order_id'),
+    /**
+     * 判定トレース JSON (`DecisionTraceStep[]`)。どのレイヤー(gate)を通り、
+     * どこで採用/却下されたかの順序付きログ。dashboard が「入力→ロジック層→出力」の
+     * ラダー可視化に使う (#decision-trace)。migration 前の行 / 一部経路は NULL。
+     */
+    traceJson: text('trace_json'),
   },
   (t) => ({
     // `/dashboard/cron?symbol=X` は WHERE symbol=? ORDER BY id DESC で読む。

@@ -1,0 +1,1 @@
+ALTER TABLE `strategy_decision_log` ADD `trace_json` text;
