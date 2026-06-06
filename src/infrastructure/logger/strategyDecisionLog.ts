@@ -12,6 +12,8 @@ export interface StrategyDecisionRecord {
   indicatorsJson?: string | null
   /** BUY/SELL 成立時のみ設定。dashboard が trade_journal と JOIN する key (#143)。 */
   clientOrderId?: string | null
+  /** 判定トレース JSON (`DecisionTraceStep[]`)。ラダー可視化用 (#decision-trace)。 */
+  traceJson?: string | null
 }
 
 /**
@@ -38,6 +40,7 @@ export async function logStrategyDecision(
       price: record.price ?? null,
       indicatorsJson: record.indicatorsJson ?? null,
       clientOrderId: record.clientOrderId ?? null,
+      traceJson: record.traceJson ?? null,
     })
   } catch (error) {
     console.error(
