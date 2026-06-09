@@ -1002,6 +1002,8 @@ const DEFAULT_PARAMS: StrategyParamsSnapshot = {
   minReturn50d: 0.08,
   requireAboveSma50: true,
   kAtr: 2.0,
+  maxSma50DeviationPct: 0.6,
+  maxAtrRatio: 1.5,
 }
 
 /** Count cells flagged as 変更済 (title attr ベースで識別、凡例 ⚠ と分離)。 */
@@ -1804,12 +1806,23 @@ describe('renderCurrentIndicatorsBadge', () => {
 })
 
 import {
+  renderBuyabilityPanel,
   renderChartDecisionTrace,
   renderDecisionPlotCaption,
   renderSymbolTab,
   type ChartsBodySymbol,
   type SymbolChartDecision,
 } from '../../src/routes/dashboard'
+import { buildBuyabilityView, type EvalIndicatorPoint } from '../../src/trading/strategy/entryDistance'
+import {
+  TEST_DEFAULT_RULE,
+  type PullbackIndicators,
+} from '../../src/trading/strategy/strategies/PullbackUptrendStrategy'
+
+// TEST_DEFAULT_RULE: band = high20d×[0.94, 0.97], sma50 floor。
+function indFor(overrides: Partial<PullbackIndicators>): PullbackIndicators {
+  return { price: 95, sma50: 90, return50d: 0.12, high20d: 100, atr20: 1, baselineAtr20: 1, ...overrides }
+}
 
 describe('renderChartDecisionTrace (チャート判定点クリック時のラダー HTML)', () => {
   it('trace があれば renderDecisionLadder のラダーを返す', () => {
@@ -1891,8 +1904,12 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10,
     pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
     requireAboveSma50: true, kAtr: 2,
+    maxSma50DeviationPct: 0.6, maxAtrRatio: 1.5,
   }
-  function symbolArgs(decisions: SymbolChartDecision[]): ChartsBodySymbol {
+  function symbolArgs(
+    decisions: SymbolChartDecision[],
+    buyability?: ChartsBodySymbol['buyability'],
+  ): ChartsBodySymbol {
     return {
       tab: 'symbol',
       focusSymbol: 'TQQQ',
@@ -1908,6 +1925,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
       availableSymbols: ['TQQQ'],
       strategyParams: baseParams,
       zoom: null,
+      buyability: buyability ?? null,
     }
   }
 
@@ -1938,6 +1956,68 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('"decisions":[]')
     // placeholder パネルは常に描画
     expect(html).toContain('decision-trace-panel')
+  })
+
+  it('buyability に entryPrice があれば payload の entryLine + 入場パネルを出す', () => {
+    // price 99 / high20d 100 → band 上端 97 まで下落が必要 (entryPrice 97)
+    const view = buildBuyabilityView(
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 99 }) }],
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderSymbolTab(symbolArgs([], view))
+    expect(html).toContain('"entryLine"')
+    expect(html).toContain('"price":97') // band 上端
+    expect(html).toContain('入場まで') // パネル headline
+  })
+
+  it('buyability が null なら entryLine も null', () => {
+    const html = renderSymbolTab(symbolArgs([], null))
+    expect(html).toContain('"entryLine":null')
+  })
+})
+
+describe('renderBuyabilityPanel (入場まで あとどれくらい / いつ頃)', () => {
+  function viewFromPrices(prices: number[]): ReturnType<typeof buildBuyabilityView> {
+    const evals: EvalIndicatorPoint[] = prices.map((price, i) => ({
+      timestamp: `2026-06-0${i + 1}T14:00:00.000Z`,
+      indicators: indFor({ price }),
+    }))
+    return buildBuyabilityView(evals, TEST_DEFAULT_RULE)
+  }
+
+  it('null / current 無しなら空文字', () => {
+    expect(renderBuyabilityPanel(null)).toBe('')
+  })
+
+  it('価格があと下落で入場 → 「入場まで あと 価格」+ 到達価格 + ゲート表', () => {
+    const html = renderBuyabilityPanel(viewFromPrices([99]))
+    expect(html).toContain('入場まで')
+    expect(html).toContain('あと 価格')
+    expect(html).toContain('97.00') // band 上端 = 到達価格
+    expect(html).toContain('入場ゲート')
+    expect(html).toContain('◀ ボトルネック') // 不成立ゲートを明示
+  })
+
+  it('全条件充足なら「入場条件を充足」', () => {
+    const html = renderBuyabilityPanel(viewFromPrices([95]))
+    expect(html).toContain('入場条件を充足')
+  })
+
+  it('価格非依存ブロック (トレンド不足) は「価格を動かすだけでは入場不可」', () => {
+    const view = buildBuyabilityView(
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ return50d: 0.02 }) }],
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderBuyabilityPanel(view)
+    expect(html).toContain('価格を動かすだけでは入場不可')
+    expect(html).toContain('トレンド')
+  })
+
+  it('距離が縮小していれば 縮小中 + 参考ETA (非予測注記つき)', () => {
+    const html = renderBuyabilityPanel(viewFromPrices([99.5, 99, 98.5, 98, 97.5]))
+    expect(html).toContain('縮小中')
+    expect(html).toContain('参考 ETA')
+    expect(html).toContain('予測ではない')
   })
 })
 

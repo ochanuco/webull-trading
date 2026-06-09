@@ -47,6 +47,16 @@ import {
 } from '../infrastructure/db/portfolioEquitySnapshotRepo'
 import type { PortfolioEquitySnapshotRow } from '../infrastructure/db/schema'
 import type { VixRegime } from '../trading/risk/vixRegimeFilter'
+import {
+  buildBuyabilityView,
+  type BuyabilityView,
+  type EntryGateStatus,
+  type EvalIndicatorPoint,
+} from '../trading/strategy/entryDistance'
+import type {
+  PullbackIndicators,
+  SymbolRule,
+} from '../trading/strategy/strategies/PullbackUptrendStrategy'
 import { and, asc, desc, eq, gte, lte } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
@@ -380,6 +390,8 @@ export const dashboard = new Hono<DashboardBindings>()
         minReturn50d: global.pullbackDefaultMinReturn50d,
         requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
         kAtr: global.pullbackDefaultKAtr,
+        maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
+        maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
       }
       const rules: SymbolChartRules = {
         pullbackMax: strategyParams.pullbackMax,
@@ -387,6 +399,22 @@ export const dashboard = new Hono<DashboardBindings>()
         stopPct: strategyParams.stopPct,
         takeProfitPct: strategyParams.takeProfitPct,
         timeStopDays: strategyParams.timeStopDays,
+      }
+      // 入場距離 (#entry-distance): entry ゲートの閾値は global default のみ
+      // (pullbackMax/Min・minReturn50d・過熱・ボラに per-symbol override は無い)。
+      // entryDistance は entry 系フィールドだけ使うが、SymbolRule は exit 系も
+      // 要求するので global から full rule を組む。
+      const entryRule: SymbolRule = {
+        stopPct: strategyParams.stopPct,
+        takeProfitPct: strategyParams.takeProfitPct,
+        timeStopDays: strategyParams.timeStopDays,
+        pullbackMax: strategyParams.pullbackMax,
+        pullbackMin: strategyParams.pullbackMin,
+        minReturn50d: strategyParams.minReturn50d,
+        requireAboveSma50: strategyParams.requireAboveSma50,
+        kAtr: strategyParams.kAtr,
+        maxSma50DeviationPct: strategyParams.maxSma50DeviationPct,
+        maxAtrRatio: strategyParams.maxAtrRatio,
       }
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
@@ -400,6 +428,9 @@ export const dashboard = new Hono<DashboardBindings>()
       // - 7 日は cron / 押し目 / 直近 fill 確認に最適な daily-trader の窓
       // - lastTimestamp 基準なので休場や POC 開始直後でも broken にならない
       const zoom = computeZoomRange(zoomFrom, zoomTo, symbolChart)
+      const buyability = symbolChart?.evalIndicators?.length
+        ? buildBuyabilityView(symbolChart.evalIndicators, entryRule)
+        : null
       return c.html(
         renderLayout(
           c,
@@ -412,6 +443,7 @@ export const dashboard = new Hono<DashboardBindings>()
             strategyParams,
             zoom,
             universe,
+            buyability,
           }),
         ),
       )
@@ -4059,6 +4091,12 @@ export interface SymbolChartData {
    * 省略され、レンダラ側は `|| []` で安全に扱う。
    */
   decisions?: SymbolChartDecision[]
+  /**
+   * 入場距離 (#entry-distance) 計算用の、直近 (日次ユニーク) 評価指標列。
+   * 各 cron 評価の完全な `PullbackIndicators` を時系列昇順で保持。route 側で
+   * full rule と合わせて `buildBuyabilityView` に渡す。additive で optional。
+   */
+  evalIndicators?: EvalIndicatorPoint[]
 }
 
 /**
@@ -4163,6 +4201,24 @@ export async function loadSymbolChart(
       ladderHtml: renderChartDecisionTrace(r.trace_json, r.decision ?? '', r.reason),
     }))
     .slice(-MAX_CHART_DECISIONS)
+
+  // 入場距離 (#entry-distance) 用: 完全な指標を JST 日ごと最後の評価で集約し
+  // 直近 MAX_EVAL_INDICATOR_DAYS 日を残す。日次集約は sma50/high20d/return50d が
+  // 日次指標であり、5 分 cron の intraday 重複を除いて「入場までの距離推移」を
+  // きれいに見せるため。Map は挿入順 (= 日の初出順 = 時系列) を保ち、同日キーは
+  // 後続 (= その日の最後の評価) で値が上書きされる。
+  const evalByDay = new Map<string, EvalIndicatorPoint>()
+  for (const r of logs) {
+    const indicators = parseFullIndicators(r.indicators_json)
+    if (!indicators) continue
+    const dayKey = jstDayKey(r.timestamp)
+    if (!dayKey) continue
+    evalByDay.set(dayKey, { timestamp: r.timestamp, indicators })
+  }
+  const evalIndicators: EvalIndicatorPoint[] = Array.from(evalByDay.values()).slice(
+    -MAX_EVAL_INDICATOR_DAYS,
+  )
+
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
     .filter((r) => r.filled_price !== null)
     .map((r) => ({
@@ -4259,6 +4315,7 @@ export async function loadSymbolChart(
     latestCronPrice,
     latestCronTimestamp,
     decisions,
+    evalIndicators,
   }
 }
 
@@ -4775,6 +4832,57 @@ function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
 }
 
 /**
+ * indicators_json から完全な `PullbackIndicators` を取り出す (#entry-distance)。
+ * 入場距離計算は price/sma50/return50d/high20d/atr20/baselineAtr20 の全部が要る。
+ * 1 つでも欠けて / 非有限なら null (= その評価日は距離計算に使わない)。
+ */
+function parseFullIndicators(indicatorsJson: string | null): PullbackIndicators | null {
+  if (!indicatorsJson) return null
+  let obj: Record<string, unknown>
+  try {
+    obj = JSON.parse(indicatorsJson) as Record<string, unknown>
+  } catch {
+    return null
+  }
+  const num = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : null
+  const price = num(obj.price)
+  const sma50 = num(obj.sma50)
+  const return50d = num(obj.return50d)
+  const high20d = num(obj.high20d)
+  const atr20 = num(obj.atr20)
+  const baselineAtr20 = num(obj.baselineAtr20)
+  if (
+    price === null ||
+    sma50 === null ||
+    return50d === null ||
+    high20d === null ||
+    atr20 === null ||
+    baselineAtr20 === null
+  ) {
+    return null
+  }
+  return { price, sma50, return50d, high20d, atr20, baselineAtr20 }
+}
+
+/** 入場距離計算に残す日次ユニーク評価の最大日数 (直近側)。 */
+const MAX_EVAL_INDICATOR_DAYS = 20
+
+const JST_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Tokyo',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
+
+/** ISO UTC timestamp を JST 日付キー ('YYYY-MM-DD') に。不正なら null。 */
+function jstDayKey(iso: string): string | null {
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return null
+  return JST_DAY_FMT.format(new Date(t))
+}
+
+/**
  * `<script>...</script>` 内に埋め込む JSON を XSS 安全にする。
  * ブラウザは `</script>` を「文字列の中でも」script 終端と解釈するので、
  * `<` を unicode escape して中和する。
@@ -4825,6 +4933,10 @@ export interface StrategyParamsSnapshot {
   minReturn50d: number
   requireAboveSma50: boolean
   kAtr: number
+  /** 過熱ガード閾値 `(price-sma50)/sma50` 上限 (#entry-distance / #overextension)。 */
+  maxSma50DeviationPct: number
+  /** ボラ過熱ガード閾値 `atr20/baselineAtr20` 上限。 */
+  maxAtrRatio: number
 }
 
 /**
@@ -4887,6 +4999,8 @@ export interface ChartsBodySymbol {
   zoom: { from: Date; to: Date } | null
   /** symbol picker / chart title を JP 銘柄向け 番号-会社名 形式に整形するための universe。 */
   universe?: SymbolUniverse | null
+  /** 入場距離ビュー (#entry-distance)。「入場まであと/いつ頃」の描画用。null = データ無し。 */
+  buyability?: BuyabilityView | null
 }
 
 /**
@@ -5496,6 +5610,26 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         }
       }
 
+      // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格を水平線で。
+      // 「あと価格がどこまで動けば入場か」をチャート上で直接見せる。価格非依存
+      // ゲートが塞ぐ局面は server 側で entryLine=null にしてあるので描かない。
+      var entryLineXY = null;
+      var entryLineLabel = '';
+      if (data.entryLine && data.entryLine.price != null && sc.points.length > 0) {
+        var elPrice = data.entryLine.price;
+        extraYValues.push(elPrice);
+        var elFromMs = new Date(sc.points[0].timestamp).getTime();
+        var elToMs = sc.latestCronTimestamp != null
+          ? new Date(sc.latestCronTimestamp).getTime()
+          : new Date(sc.points[sc.points.length - 1].timestamp).getTime();
+        if (Number.isFinite(elFromMs) && Number.isFinite(elToMs)) {
+          entryLineXY = toCategoryXY(densifyHorizontalLine(elPrice, elFromMs, elToMs, ohlcTimestamps));
+          var elMove = data.entryLine.priceMove;
+          var elPct = elMove == null ? '' : ' (' + (elMove >= 0 ? '+' : '') + (elMove * 100).toFixed(1) + '%)';
+          entryLineLabel = '入場ライン ' + elPrice.toFixed(2) + elPct;
+        }
+      }
+
       // ECharts の scale:true は markLine を yAxis range に含めないため、
       // TP / stop が data 範囲外だと枠の外で見えなくなる。data 全体 +
       // position lines + markers を考慮した explicit min/max + padding。
@@ -5821,6 +5955,16 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             },
             silent: true, emphasis: { disabled: true }, z: 7,
           }] : []),
+          // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格。cyan 実線 +
+          // endLabel で「入場ライン $Y (−X.X%)」。現価格との差がチャート上の縦の
+          // 隙間として直感的に読める。z:9 で価格線群より前面、判定点 (z:11) より背面。
+          ...(entryLineXY ? [{
+            name: entryLineLabel, type: 'line', data: entryLineXY,
+            lineStyle: { width: 1.6, color: '#0891b2', type: 'solid' }, symbol: 'none',
+            itemStyle: { color: '#0891b2' },
+            endLabel: { show: true, formatter: entryLineLabel, color: '#0891b2', fontSize: 11 },
+            silent: true, emphasis: { disabled: true }, z: 9,
+          }] : []),
           // 判定点 scatter: cron 判定イベントを価格チャートに重ねる。z を最前面に
           // 寄せて (candle z:5 / 線 z:6-8 より上) クリック可能にする。REJECT/ERROR
           // (= 弾かれた点) は少し大きくして「なぜ買えなかったか」を目立たせる。
@@ -5982,6 +6126,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           pushIfFinite(pVirtualAvg * (1 + sc.rules.stopPct));
           pushIfFinite(pVirtualAvg * (1 + sc.rules.takeProfitPct));
         }
+        // 入場ライン (#entry-distance) は chart 全幅に引くので常に visible。
+        // y 範囲に含めて、価格から離れていても枠外に消えないようにする。
+        if (data.entryLine && data.entryLine.price != null) pushIfFinite(data.entryLine.price);
         if (visibleY.length === 0) return;
         var rawMin = Math.min.apply(null, visibleY);
         var rawMax = Math.max.apply(null, visibleY);
@@ -6071,12 +6218,27 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   `
   // chart payload に displayName を注入。client 側の chart title / tooltip header
   // は `sc.displayName || sc.symbol` で読む (US 銘柄は displayName === symbol)。
+  // evalIndicators は buyability を server で算出済みなので client へは送らない
+  // (入場ライン価格だけ別途 entryLine で渡す)。
   const symbolChartPayload = args.symbolChart
-    ? { ...args.symbolChart, displayName: displaySymbol(args.symbolChart.symbol, args.universe) }
+    ? (({ evalIndicators: _omit, ...rest }) => ({
+        ...rest,
+        displayName: displaySymbol(args.symbolChart!.symbol, args.universe),
+      }))(args.symbolChart)
     : null
+  // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格。価格非依存ゲートが
+  // 塞いでいる時 (entryPrice null) は線を引かない (panel が理由を説明)。
+  const entryLine =
+    args.buyability?.current && args.buyability.current.entryPrice !== null
+      ? {
+          price: args.buyability.current.entryPrice,
+          priceMove: args.buyability.current.priceMove,
+        }
+      : null
   return `${renderSymbolPickerForTab(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${renderBuyabilityPanel(args.buyability ?? null)}
   ${renderDecisionPlotCaption(args.symbolChart)}
   ${renderZoomPresetButtons(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
@@ -6085,6 +6247,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
+    entryLine,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   })}
@@ -6187,9 +6350,12 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   // (`sc.displayName || sc.symbol`) で読まれる。
   const payload = {
     charts: args.charts.map((c) => {
-      // grid の mini chart は判定点を描かないので、ラダー HTML を持つ
-      // decisions は payload から落としてサイズを抑える (個別銘柄タブ専用)。
-      const lean = c.chart ? (({ decisions: _omit, ...rest }) => rest)(c.chart) : null
+      // grid の mini chart は判定点 / 入場距離を描かないので、ラダー HTML を持つ
+      // decisions と evalIndicators は payload から落としてサイズを抑える
+      // (どちらも個別銘柄タブ専用)。
+      const lean = c.chart
+        ? (({ decisions: _omitD, evalIndicators: _omitE, ...rest }) => rest)(c.chart)
+        : null
       return {
         symbol: c.symbol,
         chart: lean ? { ...lean, displayName: displaySymbol(c.chart!.symbol, args.universe) } : null,
@@ -6943,6 +7109,8 @@ const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
   minReturn50d: 0.08,
   requireAboveSma50: true,
   kAtr: 2.0,
+  maxSma50DeviationPct: 0.6,
+  maxAtrRatio: 1.5,
 }
 
 /**
@@ -7066,6 +7234,142 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
  * 撤去 (15m chart の y軸を引き伸ばさないため) した代替表示。最新の cron-eval
  * point から取得し、null は em-dash (—) で fallback。
  */
+const JST_MD_FMT = new Intl.DateTimeFormat('ja-JP', {
+  timeZone: 'Asia/Tokyo',
+  month: 'numeric',
+  day: 'numeric',
+})
+
+/** % 表示 (符号付き)。0.123 → "+12.3%"。 */
+function fmtPctSigned(v: number): string {
+  return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
+}
+
+/** 入場ゲートの「現在値 op 閾値」を人間可読に整形 (#entry-distance)。 */
+function fmtGateValue(g: EntryGateStatus): string {
+  const op = ` ${g.operator} `
+  switch (g.key) {
+    case 'trend':
+    case 'overextension':
+    case 'pullback_shallow':
+    case 'pullback_deep':
+      return `${fmtPctSigned(g.actual)}${op}${fmtPctSigned(g.threshold)}`
+    case 'above_sma50':
+      return `$${g.actual.toFixed(2)}${op}$${g.threshold.toFixed(2)} (SMA50)`
+    case 'volatility':
+      return `${g.actual.toFixed(2)}×${op}${g.threshold.toFixed(2)}×`
+    case 'high20d_valid':
+      return `$${g.actual.toFixed(2)}${op}0`
+  }
+}
+
+/**
+ * 「入場まで あとどれくらい / いつ頃」パネル (#entry-distance)。
+ * - 結論 (buyable / 価格であと X% / 価格では不可+ボトルネック)
+ * - 距離の推移 (mini bar、縮小/拡大トレンド)
+ * - 参考 ETA (外挿・非予測の注記つき)
+ * - 全ゲートの現在値 vs 閾値チェックリスト
+ * buyability / current が無ければ空文字。
+ */
+export function renderBuyabilityPanel(buyability: BuyabilityView | null): string {
+  if (!buyability || !buyability.current) return ''
+  const cur = buyability.current
+
+  // --- 結論 ---
+  let headline: string
+  let headColor: string
+  if (cur.buyable) {
+    headline =
+      '現在 入場条件を充足（cron 評価では BUY 候補。実発注は資金 / 単元など発注側ゲート次第）'
+    headColor = '#057a55'
+  } else if (cur.entryPrice !== null && cur.priceMove !== null) {
+    const dir = cur.priceMove < 0 ? '下落' : '上昇'
+    const binding = cur.bindingGate ? ` ／ ボトルネック: ${esc(cur.bindingGate.labelJa)}` : ''
+    headline = `入場まで: あと 価格 <strong>${fmtPctSigned(cur.priceMove)}</strong>（$${cur.entryPrice.toFixed(2)} 到達 = ${dir}）${binding}`
+    headColor = '#b25000'
+  } else {
+    const g = cur.bindingGate
+    const why = g
+      ? g.priceDependent
+        ? '押し目ゾーンと過熱上限が同時に成立しない局面です。'
+        : 'この指標が条件を満たすまでは、価格がどこでも入場しません。'
+      : ''
+    headline = g
+      ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（現在 ${esc(fmtGateValue(g))} 不成立）。${why}`
+      : '入場条件 評価不可'
+    headColor = '#c22'
+  }
+
+  // --- 距離の推移 (mini bars) ---
+  const movePts = buyability.series.filter(
+    (p): p is typeof p & { priceMove: number } => p.priceMove !== null,
+  )
+  const recent = movePts.slice(-8)
+  let trendBlock = ''
+  if (recent.length > 0) {
+    const maxGap = Math.max(...recent.map((p) => Math.abs(p.priceMove)), 1e-9)
+    const bars = recent
+      .map((p, i) => {
+        const gap = Math.abs(p.priceMove)
+        const w = Math.max(2, Math.round((gap / maxGap) * 90))
+        const last = i === recent.length - 1
+        const color = last ? headColor : '#c9c9cf'
+        const md = JST_MD_FMT.format(new Date(p.timestamp))
+        return `<div style="display:flex;align-items:center;gap:6px;font-size:11px;line-height:1.5">
+          <span style="width:34px;color:#86868b;text-align:right">${esc(md)}</span>
+          <span style="display:inline-block;height:8px;width:${w}px;background:${color};border-radius:2px"></span>
+          <span style="font-variant-numeric:tabular-nums">${fmtPctSigned(p.priceMove)}</span>
+        </div>`
+      })
+      .join('')
+    const trendLabel =
+      buyability.trend === 'closing'
+        ? '<span style="color:#057a55">縮小中（入場に近づいている）</span>'
+        : buyability.trend === 'widening'
+          ? '<span style="color:#b25000">拡大中（入場から遠ざかっている）</span>'
+          : buyability.trend === 'flat'
+            ? '<span class="muted">横ばい</span>'
+            : '<span class="muted">判定不能</span>'
+    trendBlock = `<div style="margin-top:8px"><strong>距離の推移</strong>(入場までの価格距離)：${trendLabel}
+      <div style="margin-top:4px">${bars}</div></div>`
+  } else {
+    trendBlock = `<div style="margin-top:8px" class="muted">距離の推移: 価格距離が算出できる評価日がありません（価格非依存ゲートが要因）。</div>`
+  }
+
+  // --- 参考 ETA ---
+  let etaBlock = ''
+  if (buyability.etaTradingDays !== null && buyability.trend === 'closing') {
+    const days = Math.max(1, Math.ceil(buyability.etaTradingDays))
+    etaBlock = `<div style="margin-top:8px"><strong>参考 ETA</strong>: このペースが続けば 約 ${days} 営業日
+      <div class="muted" style="font-size:11px">⚠ 外挿の参考値・予測ではない（相場が逆行すれば遠のく / 押し目バンドも日々動く）</div></div>`
+  }
+
+  // --- ゲートチェックリスト ---
+  const gateRows = cur.gates
+    .map((g) => {
+      const ok = g.passed
+      const binding = cur.bindingGate?.key === g.key
+      const mark = ok ? '✅' : '❌'
+      const bg = ok ? '#f1f8f4' : '#fdf0f0'
+      const border = binding ? 'border-left:3px solid #c22;' : 'border-left:3px solid transparent;'
+      const tag = binding ? ' <span style="color:#c22;font-weight:600">◀ ボトルネック</span>' : ''
+      return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 8px;background:${bg};${border}border-radius:4px;font-size:12px;flex-wrap:wrap">
+        <span>${mark}</span><span>${esc(g.labelJa)}</span>
+        <span style="color:#555;font-variant-numeric:tabular-nums">${esc(fmtGateValue(g))}</span>${tag}
+      </div>`
+    })
+    .join('')
+
+  return `<div class="reason-panel" style="margin-top:10px;max-width:720px">
+    <div style="font-size:13px;color:${headColor};margin-bottom:6px">${headline}</div>
+    ${trendBlock}
+    ${etaBlock}
+    <div style="margin-top:10px"><strong>入場ゲート</strong>(全条件。閾値は global 既定)
+      <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
+    </div>
+  </div>`
+}
+
 /**
  * 判定点プロットの凡例 + 件数キャプション (#decision-trace のグラフ同期)。
  * decisions が空なら空文字。最新 `MAX_CHART_DECISIONS` 件に達していれば
