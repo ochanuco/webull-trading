@@ -1958,21 +1958,22 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('decision-trace-panel')
   })
 
-  it('buyability に entryPrice があれば payload の entryLine + 入場パネルを出す', () => {
-    // price 99 / high20d 100 → band 上端 97 まで下落が必要 (entryPrice 97)
+  it('buyability があれば 入場パネル + 押し目ゾーン端の距離ラベルを配線する', () => {
     const view = buildBuyabilityView(
       [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 99 }) }],
       TEST_DEFAULT_RULE,
     )
     const html = renderSymbolTab(symbolArgs([], view))
-    expect(html).toContain('"entryLine"')
-    expect(html).toContain('"price":97') // band 上端
     expect(html).toContain('入場まで') // パネル headline
+    // 入場ライン独立線は廃止 → 押し目ゾーン端に距離ラベルを載せる
+    expect(html).toContain("bandEdgeLabel('押し目上端'")
+    expect(html).toContain("bandEdgeLabel('押し目下端'")
+    expect(html).not.toContain('"entryLine"') // 独立 entryLine payload は無い
   })
 
-  it('buyability が null なら entryLine も null', () => {
+  it('buyability が null なら projection も null', () => {
     const html = renderSymbolTab(symbolArgs([], null))
-    expect(html).toContain('"entryLine":null')
+    expect(html).toContain('"projection":null')
   })
 
   it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {

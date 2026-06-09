@@ -5357,6 +5357,18 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         pullbackUpperXY.some(function (xy) { return xy[1] != null; }) &&
         pullbackLowerXY.some(function (xy) { return xy[1] != null; });
 
+      // 押し目ゾーン端までの距離ラベル (#entry-distance): 「入場ライン」独立線は
+      // 廃止し、既存の上端/下端点線に「あと −X.X% ($Y)」を付与する。現価格は
+      // latestCronPrice (直近 strategy 評価値) 基準。過熱/トレンド等で実際に入場
+      // できない件は下の「入場まで」パネルが説明する (ここは純粋な価格距離)。
+      function bandEdgeLabel(name, edgeY) {
+        if (!Number.isFinite(edgeY) || sc.latestCronPrice == null || !(sc.latestCronPrice > 0)) return name;
+        var mv = (edgeY - sc.latestCronPrice) / sc.latestCronPrice;
+        return name + ' あと ' + (mv >= 0 ? '+' : '') + (mv * 100).toFixed(1) + '% ($' + edgeY.toFixed(2) + ')';
+      }
+      var pullbackUpperLabel = bandEdgeLabel('押し目上端', bandUpperY);
+      var pullbackLowerLabel = bandEdgeLabel('押し目下端', bandLowerY);
+
       // 価格トレンド線 (server-side で daily close の linear regression fit)。
       // 旧仕様の「上値抵抗線 / 下値支持線」上下 2 本は、ローソク足の上下を
       // flat に走り「価格の中心を辿る trend」という user 期待と乖離していた
@@ -5610,26 +5622,6 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         }
       }
 
-      // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格を水平線で。
-      // 「あと価格がどこまで動けば入場か」をチャート上で直接見せる。価格非依存
-      // ゲートが塞ぐ局面は server 側で entryLine=null にしてあるので描かない。
-      var entryLineXY = null;
-      var entryLineLabel = '';
-      if (data.entryLine && data.entryLine.price != null && sc.points.length > 0) {
-        var elPrice = data.entryLine.price;
-        extraYValues.push(elPrice);
-        var elFromMs = new Date(sc.points[0].timestamp).getTime();
-        var elToMs = sc.latestCronTimestamp != null
-          ? new Date(sc.latestCronTimestamp).getTime()
-          : new Date(sc.points[sc.points.length - 1].timestamp).getTime();
-        if (Number.isFinite(elFromMs) && Number.isFinite(elToMs)) {
-          entryLineXY = toCategoryXY(densifyHorizontalLine(elPrice, elFromMs, elToMs, ohlcTimestamps));
-          var elMove = data.entryLine.priceMove;
-          var elPct = elMove == null ? '' : ' (' + (elMove >= 0 ? '+' : '') + (elMove * 100).toFixed(1) + '%)';
-          entryLineLabel = '入場ライン ' + elPrice.toFixed(2) + elPct;
-        }
-      }
-
       // 参考 価格外挿線 (#entry-distance のグラフ表現): 直近ペースを未来へ延ばした
       // 点線。category 軸に未来スロットを足して描く。**予測ではなく外挿** なので
       // 点線 + "参考" 明記。entryPrice が無い (価格非依存ブロック) 局面は server 側で
@@ -5871,6 +5863,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
               lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
               itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
               symbol: 'none', z: 2,
+              // 入場まで距離を右端ラベルに (旧「入場ライン」線の代替)。
+              endLabel: { show: true, formatter: pullbackUpperLabel, color: '#b25000', fontSize: 10 },
             },
             {
               name: '押し目下端',
@@ -5879,6 +5873,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
               lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
               itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
               symbol: 'none', z: 2,
+              endLabel: { show: true, formatter: pullbackLowerLabel, color: '#b25000', fontSize: 10 },
             },
           ]),
           // 価格トレンド (linear regression, 直近 30 日 daily close fit)。
@@ -6011,13 +6006,6 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格。cyan 実線 +
           // endLabel で「入場ライン $Y (−X.X%)」。現価格との差がチャート上の縦の
           // 隙間として直感的に読める。z:9 で価格線群より前面、判定点 (z:11) より背面。
-          ...(entryLineXY ? [{
-            name: entryLineLabel, type: 'line', data: entryLineXY,
-            lineStyle: { width: 1.6, color: '#0891b2', type: 'solid' }, symbol: 'none',
-            itemStyle: { color: '#0891b2' },
-            endLabel: { show: true, formatter: entryLineLabel, color: '#0891b2', fontSize: 11 },
-            silent: true, emphasis: { disabled: true }, z: 9,
-          }] : []),
           // 参考 価格外挿線: 直近ペースの未来延長 (点線)。予測ではない (legend / 注記)。
           // 交差点 (= 入場ライン到達) には pin を立てる。
           ...(projLineXY ? [{
@@ -6195,9 +6183,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           pushIfFinite(pVirtualAvg * (1 + sc.rules.stopPct));
           pushIfFinite(pVirtualAvg * (1 + sc.rules.takeProfitPct));
         }
-        // 入場ライン (#entry-distance) は chart 全幅に引くので常に visible。
-        // y 範囲に含めて、価格から離れていても枠外に消えないようにする。
-        if (data.entryLine && data.entryLine.price != null) pushIfFinite(data.entryLine.price);
+        // 押し目ゾーン上端 (= 入場まで距離ラベルを載せた線) を y 範囲に含めて
+        // ラベルが枠外に切れないようにする。下端は広がりすぎ防止のため含めない。
+        if (Number.isFinite(bandUpperY)) pushIfFinite(bandUpperY);
         // 参考 価格外挿線の末尾価格も含める (未来スロットに描くので zoom 右端で visible)。
         if (projEndPrice != null) pushIfFinite(projEndPrice);
         if (visibleY.length === 0) return;
@@ -6290,22 +6278,13 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   // chart payload に displayName を注入。client 側の chart title / tooltip header
   // は `sc.displayName || sc.symbol` で読む (US 銘柄は displayName === symbol)。
   // evalIndicators は buyability を server で算出済みなので client へは送らない
-  // (入場ライン価格だけ別途 entryLine で渡す)。
+  // (入場までの距離は押し目ゾーン端ラベル / 外挿線で表現)。
   const symbolChartPayload = args.symbolChart
     ? (({ evalIndicators: _omit, ...rest }) => ({
         ...rest,
         displayName: displaySymbol(args.symbolChart!.symbol, args.universe),
       }))(args.symbolChart)
     : null
-  // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格。価格非依存ゲートが
-  // 塞いでいる時 (entryPrice null) は線を引かない (panel が理由を説明)。
-  const entryLine =
-    args.buyability?.current && args.buyability.current.entryPrice !== null
-      ? {
-          price: args.buyability.current.entryPrice,
-          priceMove: args.buyability.current.priceMove,
-        }
-      : null
   // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
   // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
   const projection = args.buyability?.projection ?? null
@@ -6321,7 +6300,6 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
-    entryLine,
     projection,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
