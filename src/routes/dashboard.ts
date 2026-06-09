@@ -5653,9 +5653,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         // 未来スロットの timestamp 間隔 (直近 bar の平均間隔)。
         var span = barsPerDay > 1 ? (lastBarMs - ohlcMs[ohlcMs.length - barsPerDay]) / (barsPerDay - 1) : 3600000;
         if (!Number.isFinite(span) || span <= 0) span = 3600000;
-        // 描く未来日数: 交差 (なければ horizon) を 1〜5 営業日に clamp し、履歴に
-        // 対して過大にならないようにする。
-        var rawDays = proj.crossingSteps != null ? proj.crossingSteps : proj.horizonSteps;
+        // 描く未来日数: 交差ありはその近辺まで、交差なし (向きだけ見せる) は短めに
+        // して未来の空白が過大にならないようにする。1〜5 営業日に clamp。
+        var rawDays = proj.crossingSteps != null ? proj.crossingSteps : Math.min(proj.horizonSteps, 3);
         var drawDays = Math.min(Math.max(Math.ceil(rawDays), 1), 5);
         var drawBars = Math.max(barsPerDay, Math.round(drawDays * barsPerDay));
         var startIdx = categories.length - 1;
