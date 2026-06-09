@@ -214,10 +214,92 @@ export interface BuyabilityView {
    * 参考値**。縮小傾向が無い / 点が足りない / 価格非依存ブロック時は null。
    */
   etaTradingDays: number | null
+  /**
+   * チャートに描く「参考の価格外挿線」(#entry-distance のグラフ表現)。直近価格の
+   * 線形フィットを未来へ延ばした傾き + 入場ライン到達 (交差) 情報。**予測ではなく
+   * 外挿**。entryPrice が無い (価格非依存ブロック) / 点が足りない時は null。
+   */
+  projection: EntryProjection | null
+}
+
+export interface EntryProjection {
+  /** 直近評価の価格 (外挿の起点)。 */
+  lastPrice: number
+  /** 1 評価ステップ (≈ 1 営業日) あたりの価格変化 (線形フィット傾き)。 */
+  slopePerStep: number
+  /** 入場ライン価格 (= EntryDistance.entryPrice)。交差判定の対象。 */
+  entryPrice: number
+  /** 外挿の向きが entryPrice に近づいているか。 */
+  approaching: boolean
+  /** 外挿価格が entryPrice に到達するまでの推定ステップ (営業日)。離反 / 横ばいは null。 */
+  crossingSteps: number | null
+  /** 外挿線を描く長さ (ステップ)。交差ありはその近辺まで、無ければ既定ホライズン。 */
+  horizonSteps: number
 }
 
 /** ETA / trend 判定に使う直近評価日数 (日次ユニーク)。 */
 const TREND_WINDOW = 5
+
+/** 外挿線を描く既定ホライズン (営業日)。交差が無くても向きを見せる長さ。 */
+const MAX_PROJECTION_STEPS = 10
+
+/**
+ * y 列の最小二乗傾き (x = 0,1,2,...)。点が 2 未満 / 退化なら null。
+ */
+function linregSlope(ys: number[]): number | null {
+  const n = ys.length
+  if (n < 2) return null
+  let sx = 0
+  let sy = 0
+  let sxx = 0
+  let sxy = 0
+  for (let i = 0; i < n; i += 1) {
+    sx += i
+    sy += ys[i]!
+    sxx += i * i
+    sxy += i * ys[i]!
+  }
+  const denom = n * sxx - sx * sx
+  if (denom === 0) return null
+  return (n * sxy - sx * sy) / denom
+}
+
+/**
+ * チャート用の「参考 価格外挿線」を組み立てる (#entry-distance のグラフ表現)。
+ * 直近 `TREND_WINDOW` 日の価格を線形フィットして傾きを取り、入場ライン
+ * (current.entryPrice) との交差ステップを出す。**予測ではなく外挿**。
+ * entryPrice が無い (価格非依存ブロック) / 価格点 < 2 なら null。
+ */
+export function buildEntryProjection(
+  evals: EvalIndicatorPoint[],
+  current: EntryDistance,
+): EntryProjection | null {
+  if (current.entryPrice === null) return null
+  const prices = evals
+    .slice(-TREND_WINDOW)
+    .map((e) => e.indicators.price)
+    .filter((p) => Number.isFinite(p))
+  if (prices.length < 2) return null
+  const slope = linregSlope(prices)
+  const lastPrice = prices[prices.length - 1]!
+  if (slope === null || !Number.isFinite(lastPrice)) return null
+  const entryPrice = current.entryPrice
+
+  let crossingSteps: number | null = null
+  let approaching = false
+  if (Math.abs(slope) > 1e-9) {
+    const k = (entryPrice - lastPrice) / slope
+    if (k > 0 && Number.isFinite(k)) {
+      crossingSteps = k
+      approaching = true
+    }
+  }
+  const horizonSteps =
+    crossingSteps !== null
+      ? Math.min(Math.max(Math.ceil(crossingSteps), 1), MAX_PROJECTION_STEPS)
+      : MAX_PROJECTION_STEPS
+  return { lastPrice, slopePerStep: slope, entryPrice, approaching, crossingSteps, horizonSteps }
+}
 
 export interface EvalIndicatorPoint {
   timestamp: string
@@ -230,7 +312,7 @@ export interface EvalIndicatorPoint {
  */
 export function buildBuyabilityView(evals: EvalIndicatorPoint[], rule: SymbolRule): BuyabilityView {
   if (evals.length === 0) {
-    return { current: null, series: [], trend: 'unknown', etaTradingDays: null }
+    return { current: null, series: [], trend: 'unknown', etaTradingDays: null, projection: null }
   }
   const series: BuyabilityDistancePoint[] = evals.map((e) => {
     const d = computeEntryDistance(e.indicators, rule)
@@ -243,8 +325,9 @@ export function buildBuyabilityView(evals: EvalIndicatorPoint[], rule: SymbolRul
   const recent = series.slice(-TREND_WINDOW).filter((p) => p.priceMove !== null)
   const gaps = recent.map((p) => Math.abs(p.priceMove as number))
   const { trend, etaTradingDays } = estimateTrendAndEta(gaps)
+  const projection = buildEntryProjection(evals, current)
 
-  return { current, series, trend, etaTradingDays }
+  return { current, series, trend, etaTradingDays, projection }
 }
 
 /**
@@ -254,22 +337,9 @@ export function buildBuyabilityView(evals: EvalIndicatorPoint[], rule: SymbolRul
  */
 function estimateTrendAndEta(gaps: number[]): { trend: BuyabilityTrend; etaTradingDays: number | null } {
   if (gaps.length < 2) return { trend: 'unknown', etaTradingDays: null }
-  const n = gaps.length
-  // x = 0..n-1, y = gaps
-  let sx = 0
-  let sy = 0
-  let sxx = 0
-  let sxy = 0
-  for (let i = 0; i < n; i += 1) {
-    sx += i
-    sy += gaps[i]!
-    sxx += i * i
-    sxy += i * gaps[i]!
-  }
-  const denom = n * sxx - sx * sx
-  if (denom === 0) return { trend: 'flat', etaTradingDays: null }
-  const slope = (n * sxy - sx * sy) / denom
-  const lastGap = gaps[n - 1]!
+  const slope = linregSlope(gaps)
+  if (slope === null) return { trend: 'flat', etaTradingDays: null }
+  const lastGap = gaps[gaps.length - 1]!
   // ほぼ横ばい (1 評価あたり 0.05% 未満の変化) は flat 扱い。
   const FLAT_EPS = 0.0005
   if (Math.abs(slope) < FLAT_EPS) return { trend: 'flat', etaTradingDays: null }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildBuyabilityView,
+  buildEntryProjection,
   computeEntryDistance,
   type EvalIndicatorPoint,
 } from '../../../src/trading/strategy/entryDistance'
@@ -136,5 +137,54 @@ describe('buildBuyabilityView', () => {
   it('最新が buyable なら current.buyable true', () => {
     const v = buildBuyabilityView(evalsFromPrices([99, 98, 97, 96, 95]), RULE)
     expect(v.current?.buyable).toBe(true)
+  })
+})
+
+describe('buildEntryProjection (参考 価格外挿線)', () => {
+  function evalsFromPrices(prices: number[]): EvalIndicatorPoint[] {
+    return prices.map((price, i) => ({
+      timestamp: `2026-06-0${i + 1}T14:00:00.000Z`,
+      indicators: ind({ price }),
+    }))
+  }
+
+  it('entryPrice が無い (トレンドブロック) なら null', () => {
+    const evals = [{ timestamp: 't', indicators: ind({ return50d: 0.02 }) }]
+    const current = computeEntryDistance(evals[0]!.indicators, RULE)
+    expect(buildEntryProjection(evals, current)).toBeNull()
+  })
+
+  it('価格点が 1 つだけなら null (傾き不能)', () => {
+    const evals = evalsFromPrices([99])
+    const current = computeEntryDistance(evals[0]!.indicators, RULE)
+    expect(buildEntryProjection(evals, current)).toBeNull()
+  })
+
+  it('入場ラインへ向かって下落中 → approaching true + crossingSteps 正値', () => {
+    const evals = evalsFromPrices([99, 98.5, 98, 97.5]) // band 上端 97 へ降下
+    const current = computeEntryDistance(evals[evals.length - 1]!.indicators, RULE)
+    const p = buildEntryProjection(evals, current)
+    expect(p).not.toBeNull()
+    expect(p!.entryPrice).toBeCloseTo(97, 6)
+    expect(p!.slopePerStep).toBeLessThan(0)
+    expect(p!.approaching).toBe(true)
+    expect(p!.crossingSteps).not.toBeNull()
+    expect(p!.crossingSteps!).toBeGreaterThan(0)
+  })
+
+  it('入場ラインから離れていく (上昇中) → approaching false + crossingSteps null', () => {
+    const evals = evalsFromPrices([97.5, 98, 98.5, 99]) // band 上端 97 から上へ
+    const current = computeEntryDistance(evals[evals.length - 1]!.indicators, RULE)
+    const p = buildEntryProjection(evals, current)
+    expect(p).not.toBeNull()
+    expect(p!.approaching).toBe(false)
+    expect(p!.crossingSteps).toBeNull()
+    expect(p!.horizonSteps).toBeGreaterThan(0)
+  })
+
+  it('buildBuyabilityView にも projection が乗る', () => {
+    const v = buildBuyabilityView(evalsFromPrices([99, 98.5, 98, 97.5]), RULE)
+    expect(v.projection).not.toBeNull()
+    expect(v.projection!.approaching).toBe(true)
   })
 })

@@ -1974,6 +1974,20 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     const html = renderSymbolTab(symbolArgs([], null))
     expect(html).toContain('"entryLine":null')
   })
+
+  it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {
+    const view = buildBuyabilityView(
+      [99.5, 99, 98.5, 98].map((price, i) => ({
+        timestamp: `2026-06-0${i + 1}T14:00:00.000Z`,
+        indicators: indFor({ price }),
+      })),
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderSymbolTab(symbolArgs([], view))
+    expect(html).toContain('"projection"')
+    expect(html).toContain('"slopePerStep"')
+    expect(html).toContain('参考 価格外挿') // 外挿線 series 名 (配線確認)
+  })
 })
 
 describe('renderBuyabilityPanel (入場まで あとどれくらい / いつ頃)', () => {

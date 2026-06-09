@@ -5630,6 +5630,53 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         }
       }
 
+      // 参考 価格外挿線 (#entry-distance のグラフ表現): 直近ペースを未来へ延ばした
+      // 点線。category 軸に未来スロットを足して描く。**予測ではなく外挿** なので
+      // 点線 + "参考" 明記。entryPrice が無い (価格非依存ブロック) 局面は server 側で
+      // projection=null になり描かれない。time 軸 fallback は POC では描画しない。
+      var projLineXY = null;
+      var projCrossPoint = null;
+      var projZoomEndIndex = null;
+      var projEndPrice = null;
+      (function () {
+        var proj = data.projection;
+        if (!proj || !Number.isFinite(proj.lastPrice) || !Number.isFinite(proj.slopePerStep)) return;
+        if (!useCategoryAxis || ohlcMs.length < 2) return;
+        var dayMs = 24 * 3600 * 1000;
+        var lastBarMs = ohlcMs[ohlcMs.length - 1];
+        // 1 営業日あたりの bar 本数を直近 1 日のスロット数で近似。
+        var barsPerDay = 0;
+        for (var bi = ohlcMs.length - 1; bi >= 0; bi -= 1) {
+          if (lastBarMs - ohlcMs[bi] <= dayMs) barsPerDay += 1; else break;
+        }
+        barsPerDay = Math.max(1, barsPerDay);
+        // 未来スロットの timestamp 間隔 (直近 bar の平均間隔)。
+        var span = barsPerDay > 1 ? (lastBarMs - ohlcMs[ohlcMs.length - barsPerDay]) / (barsPerDay - 1) : 3600000;
+        if (!Number.isFinite(span) || span <= 0) span = 3600000;
+        // 描く未来日数: 交差 (なければ horizon) を 1〜5 営業日に clamp し、履歴に
+        // 対して過大にならないようにする。
+        var rawDays = proj.crossingSteps != null ? proj.crossingSteps : proj.horizonSteps;
+        var drawDays = Math.min(Math.max(Math.ceil(rawDays), 1), 5);
+        var drawBars = Math.max(barsPerDay, Math.round(drawDays * barsPerDay));
+        var startIdx = categories.length - 1;
+        for (var k = 1; k <= drawBars; k += 1) {
+          categories.push(new Date(lastBarMs + k * span).toISOString());
+        }
+        var endIdx = startIdx + drawBars;
+        projEndPrice = proj.lastPrice + proj.slopePerStep * (drawBars / barsPerDay);
+        projLineXY = [[startIdx, proj.lastPrice], [endIdx, projEndPrice]];
+        extraYValues.push(proj.lastPrice, projEndPrice);
+        if (proj.entryPrice != null) extraYValues.push(proj.entryPrice);
+        // 交差点 marker (描画範囲内のときだけ pin を出す)。
+        if (proj.crossingSteps != null && proj.entryPrice != null) {
+          var crossBars = Math.round(proj.crossingSteps * barsPerDay);
+          if (crossBars >= 0 && crossBars <= drawBars) {
+            projCrossPoint = { coord: [startIdx + crossBars, proj.entryPrice], value: proj.entryPrice };
+          }
+        }
+        projZoomEndIndex = endIdx;
+      })();
+
       // ECharts の scale:true は markLine を yAxis range に含めないため、
       // TP / stop が data 範囲外だと枠の外で見えなくなる。data 全体 +
       // position lines + markers を考慮した explicit min/max + padding。
@@ -5679,6 +5726,12 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         }
         return { startValue: data.zoomFromMs, endValue: data.zoomToMs };
       })();
+      // 外挿線を初期表示に収める: category mode で右端 (endValue) を外挿末尾まで
+      // 広げる (未来スロットを足したぶん)。startValue は据え置きなので履歴 + 外挿が
+      // 同時に見える。
+      if (projZoomEndIndex != null && useCategoryAxis && dzInitial.endValue != null) {
+        dzInitial.endValue = Math.min(projZoomEndIndex, categories.length - 1);
+      }
       // dataZoom slider 両端ラベルも JST で表示 (default だと UTC date string)。
       // category mode では labelFormatter に category 値 (= ISO timestamp 文字列)
       // が渡されるので jstLabel に直接通せばよい (内部で Date(value) parse)。
@@ -5965,6 +6018,22 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             endLabel: { show: true, formatter: entryLineLabel, color: '#0891b2', fontSize: 11 },
             silent: true, emphasis: { disabled: true }, z: 9,
           }] : []),
+          // 参考 価格外挿線: 直近ペースの未来延長 (点線)。予測ではない (legend / 注記)。
+          // 交差点 (= 入場ライン到達) には pin を立てる。
+          ...(projLineXY ? [{
+            name: '参考 価格外挿 (予測ではない)', type: 'line', data: projLineXY,
+            lineStyle: { width: 1.4, color: '#0891b2', type: 'dotted', opacity: 0.85 }, symbol: 'none',
+            itemStyle: { color: '#0891b2' },
+            silent: true, emphasis: { disabled: true }, z: 8,
+            markPoint: projCrossPoint ? {
+              symbol: 'pin', symbolSize: 30,
+              data: [{
+                coord: projCrossPoint.coord, value: projCrossPoint.value,
+                itemStyle: { color: '#0891b2' },
+                label: { show: true, formatter: '参考\\n到達', color: '#fff', fontSize: 9, lineHeight: 11 },
+              }],
+            } : undefined,
+          }] : []),
           // 判定点 scatter: cron 判定イベントを価格チャートに重ねる。z を最前面に
           // 寄せて (candle z:5 / 線 z:6-8 より上) クリック可能にする。REJECT/ERROR
           // (= 弾かれた点) は少し大きくして「なぜ買えなかったか」を目立たせる。
@@ -6129,6 +6198,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         // 入場ライン (#entry-distance) は chart 全幅に引くので常に visible。
         // y 範囲に含めて、価格から離れていても枠外に消えないようにする。
         if (data.entryLine && data.entryLine.price != null) pushIfFinite(data.entryLine.price);
+        // 参考 価格外挿線の末尾価格も含める (未来スロットに描くので zoom 右端で visible)。
+        if (projEndPrice != null) pushIfFinite(projEndPrice);
         if (visibleY.length === 0) return;
         var rawMin = Math.min.apply(null, visibleY);
         var rawMax = Math.max.apply(null, visibleY);
@@ -6235,6 +6306,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           priceMove: args.buyability.current.priceMove,
         }
       : null
+  // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
+  // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
+  const projection = args.buyability?.projection ?? null
   return `${renderSymbolPickerForTab(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
@@ -6248,6 +6322,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
     entryLine,
+    projection,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   })}
