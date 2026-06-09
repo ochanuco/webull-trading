@@ -1803,6 +1803,144 @@ describe('renderCurrentIndicatorsBadge', () => {
   })
 })
 
+import {
+  renderChartDecisionTrace,
+  renderDecisionPlotCaption,
+  renderSymbolTab,
+  type ChartsBodySymbol,
+  type SymbolChartDecision,
+} from '../../src/routes/dashboard'
+
+describe('renderChartDecisionTrace (チャート判定点クリック時のラダー HTML)', () => {
+  it('trace があれば renderDecisionLadder のラダーを返す', () => {
+    const trace = JSON.stringify([
+      { label: 'guard.pending_order_absent', label_ja: '発注中でない', passed: true },
+      {
+        label: 'risk.overextension',
+        label_ja: '過熱していない',
+        passed: false,
+        actual: 0.4,
+        operator: '<=',
+        threshold: 0.2,
+      },
+    ])
+    const html = renderChartDecisionTrace(trace, 'REJECT', 'overextension guard')
+    expect(html).toContain('判定トレース')
+    expect(html).toContain('発注中でない')
+    expect(html).toContain('過熱していない')
+    expect(html).toContain('◀ 採用') // 最後のステップに採用矢印
+    expect(html).toContain('tl-out-reject') // 出力ボックス (REJECT 色)
+  })
+
+  it('trace 無し (旧ログ) は出力ボックスのみのフォールバック (◀ 採用 なし)', () => {
+    const html = renderChartDecisionTrace(null, 'REJECT', 'overextension guard')
+    expect(html).toContain('トレースが保存されていません')
+    expect(html).toContain('tl-out-reject')
+    expect(html).toContain('出力: <strong>REJECT</strong>')
+    expect(html).not.toContain('◀ 採用')
+  })
+
+  it('壊れた trace JSON もフォールバックに落ちる (throw しない)', () => {
+    const html = renderChartDecisionTrace('not-json', 'ERROR', 'boom')
+    expect(html).toContain('トレースが保存されていません')
+    expect(html).toContain('tl-out-error')
+  })
+})
+
+describe('renderDecisionPlotCaption (判定点プロットの凡例 + 件数)', () => {
+  function chartWith(decisions: SymbolChartDecision[]): SymbolChartData {
+    return {
+      symbol: 'TQQQ',
+      points: [{ timestamp: '2026-06-06T14:00:00.000Z', price: 80, sma50: null, high20d: null, low20d: null }],
+      markers: [], position: null,
+      rules: { pullbackMax: -0.03, pullbackMin: -0.15, stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10 },
+      trendLine: null, intradayBars: [],
+      latestCronPrice: null, latestCronTimestamp: null,
+      decisions,
+    }
+  }
+  const oneDecision: SymbolChartDecision = {
+    id: 1, timestamp: '2026-06-06T14:00:00.000Z', price: 80,
+    decision: 'REJECT', reason: 'overextension', ladderHtml: '<div>x</div>',
+  }
+
+  it('chart null / decisions 無し / 空配列なら空文字', () => {
+    expect(renderDecisionPlotCaption(null)).toBe('')
+    expect(renderDecisionPlotCaption(chartWith([]))).toBe('')
+  })
+
+  it('decisions があれば凡例 + HOLD 省略の説明を出す', () => {
+    const html = renderDecisionPlotCaption(chartWith([oneDecision]))
+    expect(html).toContain('買い (BUY)')
+    expect(html).toContain('売り (SELL)')
+    expect(html).toContain('見送り (REJECT)')
+    expect(html).toContain('エラー (ERROR)')
+    expect(html).toContain('HOLD')
+    expect(html).toContain('クリック')
+  })
+
+  it('上限 (250) に達したら truncation を明示 (silent cap を避ける)', () => {
+    const many = Array.from({ length: 250 }, (_, i) => ({ ...oneDecision, id: i + 1 }))
+    const html = renderDecisionPlotCaption(chartWith(many))
+    expect(html).toContain('直近 250 件まで表示')
+  })
+})
+
+describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () => {
+  const baseParams = {
+    stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10,
+    pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
+    requireAboveSma50: true, kAtr: 2,
+  }
+  function symbolArgs(decisions: SymbolChartDecision[]): ChartsBodySymbol {
+    return {
+      tab: 'symbol',
+      focusSymbol: 'TQQQ',
+      symbolChart: {
+        symbol: 'TQQQ',
+        points: [{ timestamp: '2026-06-06T14:00:00.000Z', price: 80, sma50: 70, high20d: 90, low20d: 60 }],
+        markers: [], position: null,
+        rules: { pullbackMax: -0.03, pullbackMin: -0.15, stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10 },
+        trendLine: null, intradayBars: [],
+        latestCronPrice: 80, latestCronTimestamp: '2026-06-06T14:00:00.000Z',
+        decisions,
+      },
+      availableSymbols: ['TQQQ'],
+      strategyParams: baseParams,
+      zoom: null,
+    }
+  }
+
+  it('decisions があれば scatter series + trace panel + 埋込ラダーを配線する', () => {
+    const html = renderSymbolTab(symbolArgs([
+      {
+        id: 1, timestamp: '2026-06-06T14:00:00.000Z', price: 80,
+        decision: 'REJECT', reason: 'overextension',
+        ladderHtml: '<div>LADDER_EMBED_MARKER</div>',
+      },
+    ]))
+    expect(html).toContain("type: 'scatter'")
+    expect(html).toContain("name: '判定'")
+    expect(html).toContain('decision-trace-panel')
+    expect(html).toContain('showDecisionTrace')
+    // 各点の ladderHtml が payload に埋め込まれている (safeJsonScript で < は
+    // < に escape されるが marker テキストは残る)
+    expect(html).toContain('LADDER_EMBED_MARKER')
+    // 凡例キャプションも出る
+    expect(html).toContain('見送り (REJECT)')
+  })
+
+  it('decisions が無ければ凡例は出ず payload も空 (scatter JS は静的に常駐 / runtime で 0 件描画)', () => {
+    const html = renderSymbolTab(symbolArgs([]))
+    // 凡例キャプションは decisions があるときだけ出す
+    expect(html).not.toContain('見送り (REJECT)')
+    // payload の decisions は空配列 (= runtime で scatter 0 点)
+    expect(html).toContain('"decisions":[]')
+    // placeholder パネルは常に描画
+    expect(html).toContain('decision-trace-panel')
+  })
+})
+
 import { renderZoomPresetButtons } from '../../src/routes/dashboard'
 
 describe('renderZoomPresetButtons', () => {

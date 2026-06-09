@@ -3547,6 +3547,30 @@ function renderDecisionLadder(
   </div>`
 }
 
+/**
+ * チャート判定点クリック時に脇パネルへ挿す HTML を作る (#decision-trace の
+ * グラフ同期)。trace があれば `renderDecisionLadder` をそのまま使い、無ければ
+ * (migration 前 / 一部経路) 出力ボックスだけの最小フォールバックを返す。
+ * チャート側 JS は単に innerHTML へ挿すだけにして、ラダー描画ロジックの
+ * 二重化 (JS 側複製) を避け、ラダー表現の真実源を server に一本化する。
+ */
+export function renderChartDecisionTrace(
+  traceJson: string | null,
+  decision: string,
+  reason: string | null,
+): string {
+  const outputReason = localizeReason(reason) || (reason ?? '-')
+  const ladder = renderDecisionLadder(traceJson, decision, outputReason)
+  if (ladder) return ladder
+  const decUpper = (decision || '').toUpperCase()
+  return `<div><strong>判定トレース</strong>
+    <div class="trace-ladder">
+      <p class="muted" style="margin:4px 0;font-size:12px">この判定にはトレースが保存されていません (旧ログ)。</p>
+      <div class="tl-output tl-out-${esc(decUpper.toLowerCase())}">出力: <strong>${esc(decUpper)}</strong> — ${esc(outputReason)}</div>
+    </div>
+  </div>`
+}
+
 function cronDecisionJson(row: {
   id: number
   timestamp: string
@@ -3892,6 +3916,33 @@ export interface SymbolChartMarker {
   realizedPnl: number | null
 }
 
+/**
+ * チャート上にプロットする「cron 判定イベント」1 件 (#decision-trace 連携)。
+ * 文字ログ (戦略判定テーブル) とグラフを 1 画面で同期させるための要素。
+ * eval 時刻 (`timestamp`) × eval 価格 (`price`) に色分けの点を打ち、点クリックで
+ * `ladderHtml` (= 既存 `renderDecisionLadder` の出力) を脇のパネルに表示する。
+ *
+ * HOLD (保有継続 / 様子見の定常状態) は省き、判定が動いた BUY/SELL/REJECT/ERROR
+ * のみを載せる。価格線・fill ピン・position/preview 線が HOLD 状態は既に表現済み。
+ */
+export interface SymbolChartDecision {
+  /** strategy_decision_log の行 id。点の一意キー兼デバッグ用。 */
+  id: number
+  timestamp: string // ISO UTC (eval 時刻)
+  /** eval 時の評価価格 (= strategy_decision_log.price)。y 位置に使う。 */
+  price: number
+  decision: 'BUY' | 'SELL' | 'REJECT' | 'ERROR'
+  /** 生 reason (英語)。tooltip では localize して表示。 */
+  reason: string | null
+  /**
+   * server-side で事前レンダリングした判定トレース・ラダー HTML
+   * (`renderDecisionLadder` 出力、trace 無し行は最小フォールバック)。
+   * client は click でこの文字列を innerHTML へ挿すだけ (JS 側にラダー描画
+   * ロジックを複製せず単一の真実源を保つ)。値はすべて `esc()` 済みの自前 markup。
+   */
+  ladderHtml: string
+}
+
 export interface SymbolChartPosition {
   /** 平均取得単価 (= 直近 BUY filled_price、partial fill / add は未対応 POC) */
   avgPrice: number
@@ -3929,6 +3980,16 @@ export function computeChartWindowDays(timeStopDays: number): number {
   const dynamic = Math.ceil(timeStopDays * 2 + 4)
   return Math.min(Math.max(dynamic, 14), MAX_WINDOW_DAYS)
 }
+
+/**
+ * チャートに重ねる判定点の上限 (最新側から採用)。payload サイズ (各点が
+ * 事前レンダリングのラダー HTML を持つ) と視認性のガード。HOLD を除いた
+ * BUY/SELL/REJECT/ERROR のみが対象なので通常はこの上限に届かない。
+ */
+const MAX_CHART_DECISIONS = 250
+
+/** チャート判定点として描画する decision 種別 (HOLD は定常状態なので除外)。 */
+const CHART_PLOTTED_DECISIONS: ReadonlySet<string> = new Set(['BUY', 'SELL', 'REJECT', 'ERROR'])
 
 export interface PivotPoint {
   /** ISO UTC timestamp of the daily bar */
@@ -3991,6 +4052,13 @@ export interface SymbolChartData {
   latestCronPrice: number | null
   /** `latestCronPrice` の timestamp (ISO Z)。preview line の to-end 用。null 時 preview 描画スキップ。 */
   latestCronTimestamp: string | null
+  /**
+   * チャートに重ねる cron 判定イベント (BUY/SELL/REJECT/ERROR、HOLD 除外)。
+   * 文字ログ↔グラフ同期用 (#decision-trace)。最新側 `MAX_CHART_DECISIONS` 件まで。
+   * 追加 (additive) フィールドなので optional: 古い fixture / grid payload では
+   * 省略され、レンダラ側は `|| []` で安全に扱う。
+   */
+  decisions?: SymbolChartDecision[]
 }
 
 /**
@@ -4016,14 +4084,22 @@ export async function loadSymbolChart(
       // 取りこぼさない。strftime で右辺を ISO UTC 形式 ("...T...:...Z") に
       // 揃える (default datetime() の空白区切りでは stored ISO と境界がぶれる)。
       .prepare(
-        `SELECT timestamp, price, indicators_json
+        `SELECT id, timestamp, price, decision, reason, indicators_json, trace_json
          FROM strategy_decision_log
          WHERE symbol = ?
            AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
          ORDER BY id ASC`,
       )
       .bind(symbol, `-${windowDays} days`)
-      .all<{ timestamp: string; price: number | null; indicators_json: string | null }>(),
+      .all<{
+        id: number
+        timestamp: string
+        price: number | null
+        decision: string | null
+        reason: string | null
+        indicators_json: string | null
+        trace_json: string | null
+      }>(),
     db
       // post_submit 行は side が null (writer は pre_submit にしか side を入れない)。
       // client_order_id で pre_submit と self-JOIN して side を引く。古い fill で
@@ -4067,6 +4143,26 @@ export async function loadSymbolChart(
         low20d: indicators.low20d,
       }
     })
+  // 判定点 (文字ログ↔グラフ同期 #decision-trace): HOLD を除く BUY/SELL/REJECT/
+  // ERROR を eval 時刻 × eval 価格でチャートに重ねる。各点はクリック時に出す
+  // ラダー HTML を server-side で事前レンダリング (renderDecisionLadder 流用)。
+  // 最新側 MAX_CHART_DECISIONS 件に cap (各点が HTML を持つため payload ガード)。
+  const decisions: SymbolChartDecision[] = logs
+    .filter(
+      (r) =>
+        r.price !== null &&
+        Number.isFinite(Number(r.price)) &&
+        CHART_PLOTTED_DECISIONS.has((r.decision ?? '').toUpperCase()),
+    )
+    .map((r) => ({
+      id: r.id,
+      timestamp: r.timestamp,
+      price: Number(r.price),
+      decision: (r.decision ?? '').toUpperCase() as SymbolChartDecision['decision'],
+      reason: r.reason,
+      ladderHtml: renderChartDecisionTrace(r.trace_json, r.decision ?? '', r.reason),
+    }))
+    .slice(-MAX_CHART_DECISIONS)
   const markers: SymbolChartMarker[] = (fillsResult.results ?? [])
     .filter((r) => r.filled_price !== null)
     .map((r) => ({
@@ -4162,6 +4258,7 @@ export async function loadSymbolChart(
     intradayBars: intradayBars,
     latestCronPrice,
     latestCronTimestamp,
+    decisions,
   }
 }
 
@@ -4780,7 +4877,7 @@ export function computeZoomRange(
   }
 }
 
-interface ChartsBodySymbol {
+export interface ChartsBodySymbol {
   tab: 'symbol'
   focusSymbol: string | null
   symbolChart: SymbolChartData | null
@@ -4958,7 +5055,7 @@ function renderQualityTab(args: ChartsBodyQuality): string {
   <script>${initScript}</script>`
 }
 
-function renderSymbolTab(args: ChartsBodySymbol): string {
+export function renderSymbolTab(args: ChartsBodySymbol): string {
   const noData =
     args.symbolChart === null ||
     args.symbolChart.points.length === 0
@@ -5271,6 +5368,27 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
           realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
           label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
           itemStyle: { color: '#c22' },
+        };
+      });
+
+      // 判定点 (#decision-trace のグラフ同期): cron の判定イベント (HOLD を除く
+      // BUY/SELL/REJECT/ERROR) を eval 時刻 × eval 価格に色分けでプロットする。
+      // 点クリックで脇パネルに判定トレース・ラダー (server 事前レンダリング HTML)
+      // を出し、文字ログとグラフを 1 画面で同期させる。category mode では eval
+      // 時刻を最近接 ohlc index に snap (markPoint と同じ手法、xForTimestamp 流用)。
+      // 色は取引品質タブの DECISION_COLORS と揃える。
+      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', REJECT: '#b25000', ERROR: '#c22' };
+      var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', REJECT: '見送り', ERROR: 'エラー' };
+      function escHtml(s) {
+        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+      var decisionList = sc.decisions || [];
+      var decisionPoints = decisionList.map(function (d) {
+        var color = DECISION_COLORS[d.decision] || '#888';
+        return {
+          value: [xForTimestamp(d.timestamp), d.price],
+          decision: d.decision, reason: d.reason, evalTs: d.timestamp, ladderHtml: d.ladderHtml,
+          itemStyle: { color: color, borderColor: '#fff', borderWidth: 1 },
         };
       });
 
@@ -5703,9 +5821,54 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
             },
             silent: true, emphasis: { disabled: true }, z: 7,
           }] : []),
+          // 判定点 scatter: cron 判定イベントを価格チャートに重ねる。z を最前面に
+          // 寄せて (candle z:5 / 線 z:6-8 より上) クリック可能にする。REJECT/ERROR
+          // (= 弾かれた点) は少し大きくして「なぜ買えなかったか」を目立たせる。
+          // tooltip は item trigger で decision + reason 要約 (詳細は click→ラダー)。
+          ...(decisionPoints.length > 0 ? [{
+            name: '判定', type: 'scatter', data: decisionPoints,
+            symbol: 'circle',
+            symbolSize: function (val, p) {
+              var dec = p && p.data ? p.data.decision : '';
+              return (dec === 'REJECT' || dec === 'ERROR') ? 13 : 9;
+            },
+            z: 11, emphasis: { scale: 1.6 }, cursor: 'pointer',
+            tooltip: {
+              trigger: 'item',
+              formatter: function (p) {
+                var d = p.data;
+                var ja = DECISION_LABEL_JA[d.decision] || d.decision;
+                var price = Array.isArray(d.value) ? Number(d.value[1]).toFixed(2) : '';
+                var rsn = d.reason ? '<div style="font-size:11px;max-width:280px;white-space:normal">' + escHtml(d.reason) + '</div>' : '';
+                return '<div style="font-weight:600">' + escHtml(ja) + ' (' + escHtml(d.decision) + ') @ ' + price + '</div>'
+                  + '<div style="font-size:11px">' + jstLabelSec(d.evalTs) + '</div>'
+                  + rsn
+                  + '<div style="font-size:10px;color:#888;margin-top:2px">クリックで判定トレース表示</div>';
+              },
+            },
+          }] : []),
         ],
       });
       window.addEventListener('resize', function () { symChart.resize(); });
+
+      // 判定点クリック → 脇パネルにその判定の判定トレース・ラダーを表示する
+      // (文字ログ↔グラフ同期の肝)。ladderHtml は server 側で renderDecisionLadder
+      // により事前レンダリング済み (全値 esc 済みの自前 markup) なので innerHTML
+      // へ挿すだけ。JS 側にラダー描画ロジックを複製しない。
+      var tracePanel = document.getElementById('decision-trace-panel');
+      function showDecisionTrace(d) {
+        if (!tracePanel || !d) return;
+        tracePanel.innerHTML = d.ladderHtml || '';
+      }
+      symChart.on('click', function (p) {
+        if (p && p.seriesName === '判定' && p.data && p.data.ladderHtml != null) {
+          showDecisionTrace(p.data);
+          if (tracePanel) tracePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      });
+      // 初期表示: 最新の判定点のトレースを開いておく。操作前から log↔graph が
+      // 結びついた状態 (= 直近に何が起きたか) を一目で見せる。
+      if (decisionPoints.length > 0) showDecisionTrace(decisionPoints[decisionPoints.length - 1]);
 
       // visible 範囲 (zoom 後の x 軸) 内の candle high/low / markers / position
       // 線を集めて y 軸 range を再計算。zoom out / preset 切替で「縦に空白が
@@ -5914,7 +6077,11 @@ function renderSymbolTab(args: ChartsBodySymbol): string {
   return `${renderSymbolPickerForTab(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${renderDecisionPlotCaption(args.symbolChart)}
   ${renderZoomPresetButtons(args.symbolChart)}
+  <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
+    <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
+  </div>
   ${renderStrategyParamsPanel(args.strategyParams)}
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
@@ -6019,14 +6186,17 @@ export function renderGridTab(args: ChartsBodyGrid): string {
   // "番号-会社名" を入れている (US は symbol そのまま) — tooltip header
   // (`sc.displayName || sc.symbol`) で読まれる。
   const payload = {
-    charts: args.charts.map((c) => ({
-      symbol: c.symbol,
-      chart: c.chart
-        ? { ...c.chart, displayName: displaySymbol(c.chart.symbol, args.universe) }
-        : null,
-      error: c.error,
-      displayName: displaySymbol(c.symbol, args.universe),
-    })),
+    charts: args.charts.map((c) => {
+      // grid の mini chart は判定点を描かないので、ラダー HTML を持つ
+      // decisions は payload から落としてサイズを抑える (個別銘柄タブ専用)。
+      const lean = c.chart ? (({ decisions: _omit, ...rest }) => rest)(c.chart) : null
+      return {
+        symbol: c.symbol,
+        chart: lean ? { ...lean, displayName: displaySymbol(c.chart!.symbol, args.universe) } : null,
+        error: c.error,
+        displayName: displaySymbol(c.symbol, args.universe),
+      }
+    }),
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   }
@@ -6896,6 +7066,29 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
  * 撤去 (15m chart の y軸を引き伸ばさないため) した代替表示。最新の cron-eval
  * point から取得し、null は em-dash (—) で fallback。
  */
+/**
+ * 判定点プロットの凡例 + 件数キャプション (#decision-trace のグラフ同期)。
+ * decisions が空なら空文字。最新 `MAX_CHART_DECISIONS` 件に達していれば
+ * truncation を明示する (silent cap を避ける)。色は chart 側 DECISION_COLORS
+ * および取引品質タブと揃える。
+ */
+export function renderDecisionPlotCaption(chart: SymbolChartData | null): string {
+  const decisions = chart?.decisions ?? []
+  if (decisions.length === 0) return ''
+  const dot = (color: string, label: string): string =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 1px #fff,0 0 0 2px ${color}"></span>${esc(label)}</span>`
+  const capped =
+    decisions.length >= MAX_CHART_DECISIONS
+      ? ` <span class="muted">(直近 ${MAX_CHART_DECISIONS} 件まで表示)</span>`
+      : ''
+  return `<p class="muted" style="font-size:12px;margin:6px 0 2px">
+    ● は cron の判定イベント。点をクリックすると下に判定トレースが出ます (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}
+  </p>
+  <div style="font-size:12px;margin:0 0 4px">
+    ${dot('#057a55', '買い (BUY)')}${dot('#1471a8', '売り (SELL)')}${dot('#b25000', '見送り (REJECT)')}${dot('#c22', 'エラー (ERROR)')}
+  </div>`
+}
+
 export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): string {
   if (!chart) return ''
   // 最新の indicator 付き point を末尾から探す (Yahoo filler は indicators null)
