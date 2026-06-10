@@ -26,6 +26,10 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     expect(body).toContain('id="probe-meta"')
     // 自動 probe は URL クエリがある時だけ (PR #250 方針) — script 内の分岐が残っている
     expect(body).toContain("qs.has('symbol') && qs.has('category')")
+    // CodeRabbit #462: XSS escape helper / 失敗時リセット / alt-category 候補
+    expect(body).toContain('function escHtml(')
+    expect(body).toContain('function resetProbeView(')
+    expect(body).toContain('instrumentQuotesHostAlt')
   })
 
   it('control の AAPL chip と再 probe ボタンがある', async () => {

@@ -533,6 +533,11 @@ export const admin = new Hono<AppBindings>()
   .get('/broker/probe', async (c) => {
     const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase()
     const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase()
+    // instrument 照会用の反対側 category (CodeRabbit #462)。UI のティッカー推定が
+    // ETF/STOCK を取り違えても判定が壊れないよう、両方を probe する。
+    const altCategory = category.endsWith('_ETF')
+      ? category.replace(/_ETF$/, '_STOCK')
+      : category.replace(/_STOCK$/, '_ETF')
     // 全 env var を trim、whitespace-only も "未設定" 扱い。silent な phase:'auth'
     // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
     // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
@@ -746,6 +751,8 @@ export const admin = new Hono<AppBindings>()
       balanceAssetsAccountV2,
       instrumentQuotesHost,
       instrumentTradeHost,
+      instrumentQuotesHostAlt,
+      instrumentTradeHostAlt,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -842,6 +849,22 @@ export const admin = new Hono<AppBindings>()
         query: { symbols: symbol, category },
         version: 'v1',
       }),
+      // category の ETF/STOCK は UI のティッカー推定で誤り得る (CodeRabbit #462:
+      // 既知 4 銘柄以外の ETF が *_STOCK で照会され「銘柄情報なし」に誤判定)。
+      // 反対側 category も probe して判定を category 非依存にする。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category: altCategory },
+        version: 'v1',
+        host: quotesBaseUrl,
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category: altCategory },
+        version: 'v1',
+      }),
     ])
 
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
@@ -889,6 +912,8 @@ export const admin = new Hono<AppBindings>()
       // 両 host 候補。UI は 200 が返った側を採用して判定カードを出す。
       instrumentQuotesHost,
       instrumentTradeHost,
+      instrumentQuotesHostAlt,
+      instrumentTradeHostAlt,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
