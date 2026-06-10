@@ -124,3 +124,16 @@ describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾
     expect(result.detail).toContain('estimated_cost: 292.55')
   })
 })
+
+describe('isTickerDenyCode (#466: prefix なし表記も deny 扱い)', () => {
+  it('bare TICKER_IS_DENY も denied になる', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: fetcherReturning([
+        { status: 417, body: { error_code: 'TICKER_IS_DENY' } },
+      ]),
+    })
+    expect(result.verdict).toBe('denied')
+  })
+})

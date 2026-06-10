@@ -2178,8 +2178,9 @@ function brokerProbeBody(args: {
     return null;
   }
 
-  // 直近 probe の Yahoo 価格 (preview の limit cap 用)。
-  var lastYahooPrice = null;
+  // 直近 probe の Yahoo 価格 (preview の limit cap 用)。銘柄が変わったら使わない
+  // — 前銘柄の価格で preview すると価格系エラーが deny 判定を潰す (CodeRabbit #466)。
+  var lastYahoo = { symbol: null, price: null };
 
   // quote カード: status pill + 価格らしきフィールドの要約。shape が読めなくても
   // pill と raw は必ず更新する (stale 表示を残さない、CodeRabbit #262 の方針)。
@@ -2316,7 +2317,7 @@ function brokerProbeBody(args: {
         var quoteYahooEl = document.getElementById('probe-quote-yahoo');
         if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
         renderQuoteCard('bp-yahoo-pill', 'bp-yahoo-body', body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);
-        lastYahooPrice = extractPrice(body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);
+        lastYahoo = { symbol: symbol, price: extractPrice(body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']) };
         renderInstrumentCard(body, symbol);
         renderPositionsList(body.positions || null);
         var positionsNewRaw = document.getElementById('probe-positions-new-raw');
@@ -2384,7 +2385,8 @@ function brokerProbeBody(args: {
       }
       submitBtn.disabled = true;
       var withPreview = !!(previewCheck && previewCheck.checked);
-      probe(selected.symbol, selected.category, withPreview ? { preview: true, price: lastYahooPrice } : {}).finally(function () {
+      var previewPrice = lastYahoo.symbol === selected.symbol ? lastYahoo.price : null;
+      probe(selected.symbol, selected.category, withPreview ? { preview: true, price: previewPrice } : {}).finally(function () {
         submitBtn.disabled = false;
       });
     });

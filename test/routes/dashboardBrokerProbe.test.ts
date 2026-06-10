@@ -31,7 +31,7 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
 
   it('選択 → 実行フロー: 実行ボタン / 発注前検証 checkbox / chip は選択のみ (#461)', async () => {
     const app = createApp()
-    const res = await app.request('/dashboard/broker-probe', {}, baseEnv as never)
+    const res = await app.request('/dashboard/broker-probe', {}, baseEnv)
     const body = await res.text()
     expect(body).toContain('id="probe-submit"')
     expect(body).toContain('id="probe-preview-check"')

@@ -904,7 +904,14 @@ export const admin = new Hono<AppBindings>()
     if (c.req.query('preview') === '1') {
       const priceRaw = Number(c.req.query('price'))
       const previewPrice = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 100
-      const market = (category.startsWith('JP') ? 'JP' : 'US') as 'US' | 'JP'
+      // category の typo を US に黙って丸めない (CodeRabbit #466) — preview は
+      // 表示と保存可否に直結するので許容値以外は 400。
+      if (!/^(US|JP)_(STOCK|ETF)$/.test(category)) {
+        throw new ValidationError(`unsupported category for preview: ${category}`, {
+          field: 'category',
+        })
+      }
+      const market = (category.startsWith('JP_') ? 'JP' : 'US') as 'US' | 'JP'
       // body shape 候補は form チェック (#461 tradabilityCheck) と共有。
       const variants = buildPreviewOrderVariants(symbol, market, previewPrice, accountId)
       const results = await Promise.all(
@@ -1762,7 +1769,11 @@ export const admin = new Hono<AppBindings>()
     if (!/^[A-Z0-9]{1,10}$/.test(symbolRaw)) {
       return c.json({ error: 'invalid symbol' }, 400)
     }
-    const market = (c.req.query('market') ?? 'US').trim().toUpperCase() === 'JP' ? 'JP' : 'US'
+    const marketRaw = (c.req.query('market') ?? '').trim().toUpperCase()
+    if (marketRaw !== 'US' && marketRaw !== 'JP') {
+      return c.json({ error: 'market must be US or JP' }, 400)
+    }
+    const market = marketRaw
     const priceRaw = Number(c.req.query('price'))
     const result = await checkTradability(c.env, {
       symbol: symbolRaw,

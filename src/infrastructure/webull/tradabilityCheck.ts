@@ -22,6 +22,14 @@ import { toWebullPlaceOrderRequest } from './mapper'
 
 export type TradabilityVerdict = 'tradable' | 'denied' | 'error' | 'unavailable'
 
+/**
+ * 銘柄単位の恒久拒否コード判定。Webull は `OAUTH_OPENAPI_` prefix 付き/なしの
+ * 両方の表記が観測されているため suffix で判定する (CodeRabbit #466)。
+ */
+export function isTickerDenyCode(errorCode: string | null): boolean {
+  return errorCode !== null && errorCode.endsWith('TICKER_IS_DENY')
+}
+
 export interface TradabilityVariantResult {
   label: string
   status: number | null
@@ -206,7 +214,7 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
 
   // deny 判定を 200 判定より先に — 200 body に埋まった deny を「取引可能」と
   // 誤読しない (status より error_code を信じる)。
-  if (results.some((r) => r.errorCode === 'OAUTH_OPENAPI_TICKER_IS_DENY')) {
+  if (results.some((r) => isTickerDenyCode(r.errorCode))) {
     return {
       verdict: 'denied',
       detail: 'Webull JP の OpenAPI では発注できない銘柄 (TICKER_IS_DENY)',
@@ -219,13 +227,6 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
     return {
       verdict: 'tradable',
       detail: `発注前検証 (Preview Order) 通過 — 取引可能${cost ? ` (estimated_cost: ${cost})` : ''}`,
-      variants: results,
-    }
-  }
-  if (results.some((r) => r.errorCode === 'OAUTH_OPENAPI_TICKER_IS_DENY')) {
-    return {
-      verdict: 'denied',
-      detail: 'Webull JP の OpenAPI では発注できない銘柄 (TICKER_IS_DENY)',
       variants: results,
     }
   }
