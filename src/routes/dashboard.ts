@@ -8398,9 +8398,9 @@ const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
   cash_parking: '待機資金ETF',
   core_trend: '非レバ・トレンド',
   leveraged_trend: 'レバETF・トレンド',
-  low_volatility: '低ボラ (entry 無効)',
-  sector_trend: 'セクター (entry 無効)',
-  inverse_hedge: 'インバース (entry 無効)',
+  low_volatility: '低ボラ',
+  sector_trend: 'セクター',
+  inverse_hedge: 'インバースヘッジ (短期)',
 }
 
 /** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
@@ -8408,9 +8408,9 @@ const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
   core_trend: 'core_trend — 非レバ・トレンド (QQQ / VOO 等)',
   leveraged_trend: 'leveraged_trend — レバ ETF (TQQQ / SOXL 等)',
-  low_volatility: 'low_volatility — 低ボラ (定義のみ・entry 無効)',
-  sector_trend: 'sector_trend — セクター (定義のみ・entry 無効)',
-  inverse_hedge: 'inverse_hedge — インバース (定義のみ・entry 無効)',
+  low_volatility: 'low_volatility — 低ボラ ETF (USMV / SPLV 等)',
+  sector_trend: 'sector_trend — 1x セクター ETF (SMH / SOXX 等)',
+  inverse_hedge: 'inverse_hedge — 3x インバース・短期 (SQQQ / SOXS。1x は override 必須)',
 }
 
 /** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
@@ -8651,7 +8651,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
         ).join('')}
       </select>
       ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-      <p class="muted" style="margin:4px 0 0;font-size:11px">銘柄の戦略ロール (#452)。<strong>core_trend</strong> は非レバ向けの緩い entry プリセット、<strong>leveraged_trend</strong> は従来どおり。<strong>cash_parking / low_volatility / sector_trend / inverse_hedge は現状 BUY を生成しません</strong> (entry 抑止、exit は通常どおり)。空欄 = 従来挙動。</p>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">銘柄の戦略ロール (#452 / #457)。role ごとの entry/exit プリセットが適用されます (個別 override が優先)。<strong>inverse_hedge は短期保有プリセット (time stop 5日)・3x インバース前提</strong>。<strong>cash_parking は BUY を生成しません</strong> (配分は条件連動配分が扱う)。空欄 = 従来挙動。</p>
     </div>
     <label>押し目バンド override <span class="muted" style="font-size:11px">(%)</span></label>
     <div>

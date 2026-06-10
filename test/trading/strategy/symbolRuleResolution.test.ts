@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildEntrySuppressedSymbols,
+  buildHalfEntrySymbols,
   buildSymbolRules,
   ROLE_RULE_PRESETS,
   type SymbolRuleOverrides,
@@ -109,8 +110,8 @@ describe('buildSymbolRules (#452)', () => {
   })
 })
 
-describe('buildEntrySuppressedSymbols (#452)', () => {
-  it('suppresses cash_parking / defined-only roles / unknown, keeps trend roles', () => {
+describe('buildEntrySuppressedSymbols (#452 / #457)', () => {
+  it('suppresses only cash_parking and unknown after #457 enabled the remaining roles', () => {
     const suppressed = buildEntrySuppressedSymbols({
       SGOV: 'cash_parking',
       QQQ: 'core_trend',
@@ -120,12 +121,86 @@ describe('buildEntrySuppressedSymbols (#452)', () => {
       SQQQ: 'inverse_hedge',
       WEIRD: 'unknown',
     })
-    expect(Object.keys(suppressed).sort()).toEqual(['SGOV', 'SMH', 'SQQQ', 'USMV', 'WEIRD'])
+    expect(Object.keys(suppressed).sort()).toEqual(['SGOV', 'WEIRD'])
     expect(suppressed.SGOV).toContain('cash_parking')
     expect(suppressed.WEIRD).toContain('unknown role')
   })
 
   it('returns an empty map when no symbol has a role (従来挙動)', () => {
     expect(buildEntrySuppressedSymbols({})).toEqual({})
+  })
+})
+
+describe('role presets for low_volatility / sector_trend / inverse_hedge (#457)', () => {
+  it('low_volatility rescales both entry and exit sides', () => {
+    const overrides = emptyOverrides()
+    overrides.symbolRole.USMV = 'low_volatility'
+    const rules = buildSymbolRules(TEST_DEFAULT_RULE, overrides)
+    expect(rules.USMV).toEqual({
+      ...TEST_DEFAULT_RULE,
+      minReturn50d: 0.015,
+      pullbackMax: -0.01,
+      pullbackMin: -0.03,
+      maxSma50DeviationPct: 0.1,
+      maxAtrRatio: 1.3,
+      stopPct: -0.015,
+      takeProfitPct: 0.025,
+      timeStopDays: 15,
+    })
+  })
+
+  it('sector_trend adjusts the entry side only — exits stay global (回帰保証)', () => {
+    const overrides = emptyOverrides()
+    overrides.symbolRole.SMH = 'sector_trend'
+    const rules = buildSymbolRules(TEST_DEFAULT_RULE, overrides)
+    expect(rules.SMH!.minReturn50d).toBe(0.04)
+    expect(rules.SMH!.pullbackMax).toBe(-0.02)
+    expect(rules.SMH!.pullbackMin).toBe(-0.05)
+    expect(rules.SMH!.maxSma50DeviationPct).toBe(0.3)
+    // exit 据え置き (issue #457: 変更点を entry 4 つに絞る)
+    expect(rules.SMH!.stopPct).toBe(TEST_DEFAULT_RULE.stopPct)
+    expect(rules.SMH!.takeProfitPct).toBe(TEST_DEFAULT_RULE.takeProfitPct)
+    expect(rules.SMH!.timeStopDays).toBe(TEST_DEFAULT_RULE.timeStopDays)
+    expect(rules.SMH!.kAtr).toBe(TEST_DEFAULT_RULE.kAtr)
+    expect(rules.SMH!.maxAtrRatio).toBe(TEST_DEFAULT_RULE.maxAtrRatio)
+  })
+
+  it('inverse_hedge demands a strong down-regime and holds short', () => {
+    const overrides = emptyOverrides()
+    overrides.symbolRole.SQQQ = 'inverse_hedge'
+    const rules = buildSymbolRules(TEST_DEFAULT_RULE, overrides)
+    expect(rules.SQQQ!.minReturn50d).toBe(0.15)
+    expect(rules.SQQQ!.maxSma50DeviationPct).toBe(0.4)
+    expect(rules.SQQQ!.timeStopDays).toBe(5)
+    expect(rules.SQQQ!.kAtr).toBe(1.5)
+    // 据え置き分 (同ボラクラス / fail-closed で緩めない)
+    expect(rules.SQQQ!.stopPct).toBe(TEST_DEFAULT_RULE.stopPct)
+    expect(rules.SQQQ!.takeProfitPct).toBe(TEST_DEFAULT_RULE.takeProfitPct)
+    expect(rules.SQQQ!.pullbackMax).toBe(TEST_DEFAULT_RULE.pullbackMax)
+    expect(rules.SQQQ!.pullbackMin).toBe(TEST_DEFAULT_RULE.pullbackMin)
+    expect(rules.SQQQ!.requireAboveSma50).toBe(true)
+    expect(rules.SQQQ!.maxAtrRatio).toBe(TEST_DEFAULT_RULE.maxAtrRatio)
+  })
+
+  it('per-symbol override still beats the new presets (PSQ 等 1x inverse の吸収経路)', () => {
+    const overrides = emptyOverrides()
+    overrides.symbolRole.PSQ = 'inverse_hedge'
+    overrides.symbolMinReturn50dOverride.PSQ = 0.05
+    overrides.symbolStopPctOverride.PSQ = -0.015
+    const rules = buildSymbolRules(TEST_DEFAULT_RULE, overrides)
+    expect(rules.PSQ!.minReturn50d).toBe(0.05)
+    expect(rules.PSQ!.stopPct).toBe(-0.015)
+    expect(rules.PSQ!.timeStopDays).toBe(5) // override しない field は preset
+  })
+
+  it('all three roles are half-entry enabled (#457)', () => {
+    const enabled = buildHalfEntrySymbols({
+      USMV: 'low_volatility',
+      SMH: 'sector_trend',
+      SQQQ: 'inverse_hedge',
+      SGOV: 'cash_parking',
+      WEIRD: 'unknown',
+    })
+    expect([...enabled].sort()).toEqual(['SMH', 'SQQQ', 'USMV'])
   })
 })
