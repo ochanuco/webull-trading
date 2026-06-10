@@ -49,7 +49,10 @@ interface UpdateCall {
  * `currentRows` を返す。`where` 時に渡される drizzle eq(...) は内部に値を
  * 保持するので JSON 化して symbol を取り出してフィルタする。
  */
-function fakeDb(initial: SymbolConfigRow[]) {
+function fakeDb(
+  initial: SymbolConfigRow[],
+  pairs: Array<{ symbol: string; inverse: string }> = [],
+) {
   const rows: SymbolConfigRow[] = [...initial]
   const inserts: InsertCall[] = []
   const updates: UpdateCall[] = []
@@ -102,7 +105,15 @@ function fakeDb(initial: SymbolConfigRow[]) {
 
   const selectChain = (filtered: () => SymbolConfigRow[]) => {
     const chain = {
-      from: (_tbl: unknown) => chain,
+      // inverse_pairs を select したら pair 行を返す (loadInversePairs 用)。
+      // それ以外 (symbol_config) は従来通り自身を返して rows を流す。
+      from: (tbl: unknown) =>
+        tableName(tbl) === 'inverse_pairs'
+          ? {
+              then: (resolve: (v: unknown[]) => unknown, reject?: (e: unknown) => unknown) =>
+                Promise.resolve(pairs).then(resolve, reject),
+            }
+          : chain,
       where: (cond: unknown) => {
         const sym = extractSymbolFromWhere(cond)
         return selectChain(() => filtered().filter((r) => sym === null || r.symbol === sym))
@@ -1044,6 +1055,53 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     // 確定ボタン (即保存しない)
     expect(body).toContain('確定して保存')
     expect(body).toContain('action="/admin/symbol-config/budget-alloc"')
+  })
+
+  it('inverse pair renders one shared budget slider (rowspan=2), not two', async () => {
+    const db = fakeDb(
+      [row({ symbol: 'SOXL', budgetAllocPct: 0.35 }), row({ symbol: 'SOXS', budgetAllocPct: 0.35 })],
+      [{ symbol: 'SOXL', inverse: 'SOXS' }],
+    )
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    // 上段 (SOXL) にだけ slider、下段 (SOXS) の予算セルは rowspan で消える
+    expect(body).toContain('name="pct_SOXL"')
+    expect(body).not.toContain('name="pct_SOXS"')
+    expect(body).toContain('rowspan="2"')
+    expect(body).toContain('ペア共通')
+  })
+
+  it('shared pair slider initializes to max of both sides when diverged', async () => {
+    const db = fakeDb(
+      [row({ symbol: 'SOXL', budgetAllocPct: 0.2 }), row({ symbol: 'SOXS', budgetAllocPct: 0.4 })],
+      [{ symbol: 'SOXL', inverse: 'SOXS' }],
+    )
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    // meter と同じ max 方式 (同時に建つのは片側のみ) — max(20, 40) = 40
+    expect(body).toMatch(/name="pct_SOXL"[^>]*value="40"/)
+  })
+
+  it('half-present pair (filtered) keeps its own slider without rowspan', async () => {
+    const db = fakeDb(
+      [row({ symbol: 'SOXL', budgetAllocPct: 0.35 }), row({ symbol: 'SOXS', budgetAllocPct: 0.35 })],
+      [{ symbol: 'SOXL', inverse: 'SOXS' }],
+    )
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols?q=SOXS',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('name="pct_SOXS"')
+    expect(body).not.toContain('name="pct_SOXL"')
+    expect(body).not.toContain('rowspan="2"')
   })
 
   it('bulk budget-alloc POST converts % → fraction (÷100), 303', async () => {
