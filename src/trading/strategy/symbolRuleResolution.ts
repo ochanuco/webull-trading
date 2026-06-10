@@ -12,10 +12,13 @@ import type { SymbolRule } from './strategies/PullbackUptrendStrategy'
  *   そもそもレバ ETF 向けに調整されてきた値のため)
  * - `core_trend`: 非レバ ETF (QQQ / VOO 等) 向けの緩いプリセット。レバ ETF の
  *   1/3 程度の値動きしかないので、押し目深度・トレンド閾値をスケールダウン
- *   しないと事実上 entry 不可能になる (#449 課題2)。**初期値であり backtest
- *   チューニングは #452 非スコープ (後続 issue)** — 個別銘柄で合わない場合は
- *   per-symbol override で吸収する。
- * - その他の role はプリセットなし (entry 自体が抑止される、下記)。
+ *   しないと事実上 entry 不可能になる (#449 課題2)。
+ * - `low_volatility` / `sector_trend` / `inverse_hedge`: #457 で有効化。設計根拠
+ *   (ボラスケーリング・守る失敗モード) は issue #457 参照。
+ *
+ * **全 preset の数値は backtest 未検証の初期推定** — 個別銘柄で合わない場合は
+ * per-symbol override で吸収し、チューニングは後続 issue。迷う値は一貫して
+ * 「トレードが減る側」(fail-closed) を採用している。
  */
 export const ROLE_RULE_PRESETS: Partial<Record<SymbolRole, Partial<SymbolRule>>> = {
   leveraged_trend: {},
@@ -30,21 +33,75 @@ export const ROLE_RULE_PRESETS: Partial<Record<SymbolRole, Partial<SymbolRule>>>
     // +20% に引き下げ (ガードとして機能する値にする)。
     maxSma50DeviationPct: 0.2,
   },
+  // USMV / SPLV (年率ボラ ~12%、日次 ~0.5%)。entry と exit の両方を約 1/3〜1/5
+  // にスケールダウン — レバ向け global では entry gate が永久に開かず (-3% の
+  // 押しが稀)、exit が永久に閉じない (-4% stop は 4-5σ、+7% TP は数ヶ月モノ)。
+  low_volatility: {
+    // 20d +1.5% ≈ 年率 ~20% ペース = 低ボラ ETF の「明確な上昇」下限。
+    minReturn50d: 0.015,
+    // 10d 高値から ~0.6σ の押し。-3% 超 (~2σ) はレジーム破綻疑いで買わない。
+    pullbackMax: -0.01,
+    pullbackMin: -0.03,
+    // +10% 乖離はほぼ起きない値 → ガードとして機能する水準に。
+    maxSma50DeviationPct: 0.1,
+    // ボラ圧縮プロダクトの前提 (ATR が baseline 近傍) が壊れた局面で entry しない。
+    maxAtrRatio: 1.3,
+    // exit 側: stop -1.5% ≈ 3 日分の通常変動、TP +2.5% ≈ 15 営業日の ~1.3σ
+    // (R:R ~1.67)。低ボラの mean-reversion は解決が遅いので time stop は 15 日
+    // (preset 中唯一「保有を増やす」側の変更)。
+    stopPct: -0.015,
+    takeProfitPct: 0.025,
+    timeStopDays: 15,
+  },
+  // SMH / SOXX / XLK (1x セクター、core_trend と global の中間ボラ ~1.5x QQQ)。
+  // entry 側のみ中間値にスケールし、**exit は global 据え置き** (stop -4% ≈ 日次
+  // 2-2.5σ で floor として妥当、変更点を entry 4 つに絞って overfit を避ける)。
+  // 注意: SMH/SOXX は SOXL と原資産がほぼ同一 — leveraged_trend と同時有効化
+  // するとセクター集中が起きる。rule preset では守れず配分側の責務 (#457)。
+  sector_trend: {
+    minReturn50d: 0.04,
+    pullbackMax: -0.02,
+    pullbackMin: -0.05,
+    // 強気相場の SMH は SMA50 +20% 超まで走る — 0.2 は切りすぎ、0.6 は効かない。
+    maxSma50DeviationPct: 0.3,
+  },
+  // SQQQ / SOXS (3x インバース)。市場下落レジームでの inverse 押し目買い。
+  // daily-rebalance のボラ drag が保有日数に複利で効くため **短期保有・早い退出**。
+  // trend filter (inverse 自身の 20d リターン) がレジーム判定を兼ねる。
+  // **PSQ 等 1x インバースにはこの preset は合わない** (minReturn50d 0.15 は
+  // 1x では発火不能) — 使う場合は per-symbol override で吸収する (#457)。
+  inverse_hedge: {
+    // SQQQ +15%/20d ≈ QQQ -5%。チョップ域 (drag で構造的に負ける) を弾く。
+    minReturn50d: 0.15,
+    // panic spike の頂点圏 (+40% 乖離超) で買わない — 次は bear rally の確率大。
+    maxSma50DeviationPct: 0.4,
+    // 1 週間で決着しなければ手仕舞い。レジーム継続なら trend gate が再 entry を
+    // 承認するので長く持つ必要がない。
+    timeStopDays: 5,
+    // bear rally (1 日 +5-10% の逆行が普通) を「通常変動」として耐えない。
+    kAtr: 1.5,
+  },
 }
 
 /**
- * Entry (BUY 生成) が有効な role。`undefined` (= role NULL、従来挙動) と
- * 初期有効化 3 role のうち pullback gate を通す 2 つ。
+ * Entry (BUY 生成) が有効な role。`undefined` (= role NULL、従来挙動) もこの
+ * 集合とは別に常に有効。
  *
  * - `cash_parking` は pullback 判定が無意味 (SMA50 / 押し目が成立しない) なので
  *   strategy 経由の BUY を抑止する。配分は #452 PR 3 の条件連動配分
  *   (`always_active`) が別経路で扱う。
- * - `low_volatility` / `sector_trend` / `inverse_hedge` は定義のみ (後続 issue)。
- *   特に inverse_hedge に long pullback ロジックをそのまま適用するのは誤りなので
- *   fail-closed で抑止する。
- * - repo が enum 外 DB 値を正規化した 'unknown' もここに含まれない (= 抑止)。
+ * - `low_volatility` / `sector_trend` / `inverse_hedge` は #457 で preset 付きで
+ *   有効化。inverse_hedge は inverse_pairs 排他 gate (両建て防止) が引き続き
+ *   下流で効く。
+ * - repo が enum 外 DB 値を正規化した 'unknown' はここに含まれない (= 抑止)。
  */
-const ENTRY_ENABLED_ROLES: ReadonlySet<SymbolRole> = new Set(['core_trend', 'leveraged_trend'])
+const ENTRY_ENABLED_ROLES: ReadonlySet<SymbolRole> = new Set([
+  'core_trend',
+  'leveraged_trend',
+  'low_volatility',
+  'sector_trend',
+  'inverse_hedge',
+])
 
 /**
  * 段階判定 HALF (0.5x entry) を有効にする symbol 集合を作る (#452 PR 2)。
