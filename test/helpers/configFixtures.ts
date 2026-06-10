@@ -40,6 +40,7 @@ export function makeGlobalConfigSnapshot(
     vixWarningThreshold: 25.0,
     vixCriticalThreshold: 30.0,
     vixWarningSizeScale: 0.5,
+    cashFallbackOrdersEnabled: false,
     source: 'd1',
     ...overrides,
   }
@@ -69,6 +70,9 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolMaxSma50DeviationPctOverride: {},
     symbolRequireAboveSma50Override: {},
     symbolAlternatives: {},
+    symbolEntryRequired: {},
+    symbolAlwaysActive: {},
+    symbolCashFallback: {},
     inversePairs: {},
     source: 'd1',
     ...overrides,

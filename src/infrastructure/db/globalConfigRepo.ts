@@ -51,6 +51,11 @@ export interface GlobalConfigSnapshot {
   vixCriticalThreshold: number
   /** warning 領域の size 倍率。default 0.5。 */
   vixWarningSizeScale: number
+  /**
+   * 条件連動配分の cash fallback 自動発注 (#452 Layer 3)。default false
+   * (fail-closed): off の間は判定・表示のみで退避先への自動 BUY は出さない。
+   */
+  cashFallbackOrdersEnabled: boolean
 }
 
 /**
@@ -89,6 +94,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   vixWarningThreshold: 25.0,
   vixCriticalThreshold: 30.0,
   vixWarningSizeScale: 0.5,
+  cashFallbackOrdersEnabled: false,
 })
 
 /**
@@ -319,6 +325,8 @@ export async function loadGlobalConfig(
             vixWarningThreshold: GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
             vixCriticalThreshold: GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
             vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
+            // 0030 追加列 (#452)。legacy path は default (false = 自動発注しない)。
+            cashFallbackOrdersEnabled: GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
           }, requestId)
         }
       } catch (legacyError) {
@@ -376,5 +384,9 @@ export async function loadGlobalConfig(
       row.vixCriticalThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
     vixWarningSizeScale:
       row.vixWarningSizeScale ?? GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
+    // 0030 で追加 (#452)。古い D1 では undefined になり得るため default (false =
+    // 自動発注しない) へ畳む — fail-closed 側なので安全。
+    cashFallbackOrdersEnabled:
+      row.cashFallbackOrdersEnabled ?? GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
   }, requestId)
 }

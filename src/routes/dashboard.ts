@@ -60,6 +60,10 @@ import {
   type EntryStatusResult,
 } from '../trading/strategy/entryStatus'
 import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
+import {
+  computeConditionalAllocation,
+  type SymbolAllocation,
+} from '../trading/strategy/conditionalAllocation'
 import type {
   PullbackIndicators,
   SymbolRule,
@@ -386,6 +390,22 @@ export const dashboard = new Hono<DashboardBindings>()
             gridRules[entry.symbol] ?? gridDefaultRule,
           ).status
         }
+        // 条件連動配分 (#452 Layer 3): target/active を並記する (「設定上 5% だが
+        // 現在は SGOV に退避中」の可視化)。cron と同じ pure 関数で計算する。
+        const heldSymbols = new Set(
+          charts.filter((entry) => entry.chart?.position != null).map((entry) => entry.symbol),
+        )
+        const allocationView = computeConditionalAllocation({
+          targetWeights: universe.symbolBudgetAllocPct,
+          policy: {
+            entryRequired: new Set(Object.keys(universe.symbolEntryRequired)),
+            alwaysActive: new Set(Object.keys(universe.symbolAlwaysActive)),
+            cashFallback: universe.symbolCashFallback,
+          },
+          entryStatuses,
+          heldSymbols,
+          symbolCurrency: universe.symbolCurrency,
+        })
         const sortedCharts = sortGridChartsByEntryPriority(charts, entryStatuses, universe)
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
         // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
@@ -402,6 +422,7 @@ export const dashboard = new Hono<DashboardBindings>()
               zoom,
               universe,
               entryStatuses,
+              allocations: allocationView.bySymbol,
             }),
             renderChartsSubnav(tab),
           ),
@@ -5165,6 +5186,8 @@ interface ChartsBodyGrid {
   universe?: SymbolUniverse | null
   /** symbol → 段階判定 (#452 PR 2)。評価データ無しの銘柄は不在。panel badge 用。 */
   entryStatuses?: Record<string, EntryStatus>
+  /** symbol → 条件連動配分 (#452 Layer 3)。target weight 関連銘柄のみ。 */
+  allocations?: Record<string, SymbolAllocation>
 }
 
 type ChartsBodyArgs =
@@ -6545,6 +6568,21 @@ export function sortGridChartsByEntryPriority<T extends { symbol: string }>(
     .map(({ entry }) => entry)
 }
 
+/**
+ * target / active weight の並記 (#452 Layer 3)。target を持つ (or 退避を受けた)
+ * 銘柄のみ 1 行出す。「設定上 5% だが現在は SGOV に退避中」を panel 上で見せる。
+ */
+export function renderAllocationLine(alloc: SymbolAllocation | undefined): string {
+  if (!alloc) return ''
+  const pct = (w: number) => `${Math.round(w * 1000) / 10}%`
+  const changed = Math.abs(alloc.activeWeight - alloc.targetWeight) > 1e-9
+  const color = alloc.activeWeight === 0 ? '#b25000' : changed ? '#057a55' : '#86868b'
+  const arrow = changed ? ` → <strong>${pct(alloc.activeWeight)}</strong>` : ''
+  const reroute = alloc.rerouteTo ? `（${esc(alloc.rerouteTo)} へ退避中）` : ''
+  const rerouted = alloc.reroutedInWeight > 0 ? `（+${pct(alloc.reroutedInWeight)} 退避受入）` : ''
+  return `<div style="font-size:11px;color:${color};margin-bottom:4px" title="${esc(alloc.reason)}">配分 target ${pct(alloc.targetWeight)}${arrow}${reroute}${rerouted}</div>`
+}
+
 export function renderGridTab(args: ChartsBodyGrid): string {
   if (args.charts.length === 0) {
     return `<p class="muted">ALLOWED_SYMBOLS が空です。<code>symbol_config</code> に少なくとも 1 銘柄登録してください。</p>`
@@ -6607,12 +6645,16 @@ export function renderGridTab(args: ChartsBodyGrid): string {
       // 段階判定 badge (#452 PR 2)。inactive 銘柄は cron 評価対象外なので出さない。
       const status = args.entryStatuses?.[entry.symbol]
       const statusBadge = status !== undefined && !inactive ? entryStatusBadgeHtml(status) : ''
+      const allocationLine = inactive
+        ? ''
+        : renderAllocationLine(args.allocations?.[entry.symbol])
       const rightSide = (inactive ? inactiveBadge : '') + statusBadge + positionBadge + badge
       return `<div class="${panelClass}"${dataAttrs} style="${baseStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
           ${headerLink}
           <div style="display:flex;gap:6px;align-items:center">${rightSide}</div>
         </div>
+        ${allocationLine}
         <div id="grid-chart-${idx}" style="width:100%;height:280px"></div>
       </div>`
     })
@@ -8351,6 +8393,10 @@ function symbolFormBody(args: SymbolFormArgs): string {
       ? ''
       : String(row.requireAboveSma50Override)
   const alternativesValue = (parseAlternativesJson(row?.alternatives ?? null, symbolValue) ?? []).join(', ')
+  // 条件連動配分 (#452 Layer 3)。
+  const entryRequiredChecked = row?.entryRequired ? ' checked' : ''
+  const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
+  const cashFallbackValue = row?.cashFallbackSymbol ?? ''
   const timeStopPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
     : '空欄で global default を使用'
@@ -8535,6 +8581,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <div>
       <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
       <p class="muted" style="margin:4px 0 0;font-size:11px">カンマ区切り (最大 8)。この銘柄が entry 不可のときダッシュボードに出す代替候補 (<strong>表示のみ</strong>、自動発注はしない、#452)。</p>
+    </div>
+    <label>配分の条件連動 <span class="muted" style="font-size:11px">(entry_required)</span></label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="entry_required" value="false">
+      <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効にする
+    </label>
+    <label>常時配分 <span class="muted" style="font-size:11px">(always_active)</span></label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="always_active" value="false">
+      <input type="checkbox" name="always_active" value="true"${alwaysActiveChecked}> 判定に関わらず常時 target = active (待機資金 ETF 用)
+    </label>
+    <label>退避先 <span class="muted" style="font-size:11px">(cash_fallback_symbol)</span></label>
+    <div>
+      <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
+      <p class="muted" style="margin:4px 0 0;font-size:11px">entry_required 銘柄が条件未通過の間、浮いた配分の退避先 (#452)。同一通貨のみ有効。<strong>退避先への自動発注は <code>cash_fallback_orders_enabled</code> (default off) を on にするまで行いません</strong> (判定・表示のみ)。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>

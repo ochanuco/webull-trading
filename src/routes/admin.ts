@@ -2201,6 +2201,12 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     require_above_sma50_override?: unknown
     requireAboveSma50Override?: unknown
     alternatives?: unknown
+    entry_required?: unknown
+    entryRequired?: unknown
+    always_active?: unknown
+    alwaysActive?: unknown
+    cash_fallback_symbol?: unknown
+    cashFallbackSymbol?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2318,6 +2324,14 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     'requireAboveSma50Override',
   )
   const alternatives = parseAlternativesInput(raw.alternatives, symbol)
+  // 条件連動配分 (#452 Layer 3): checkbox 未送信は false (= 従来挙動)。退避先は
+  // ticker 文法 + self 参照禁止。空 → NULL (= 退避しない)。
+  const entryRequired = parseFormBool(raw.entry_required ?? raw.entryRequired, false)
+  const alwaysActive = parseFormBool(raw.always_active ?? raw.alwaysActive, false)
+  const cashFallbackSymbol = parseCashFallbackSymbol(
+    raw.cash_fallback_symbol ?? raw.cashFallbackSymbol,
+    symbol,
+  )
   return {
     symbol,
     name,
@@ -2341,7 +2355,36 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     maxSma50DeviationPctOverride,
     requireAboveSma50Override,
     alternatives,
+    entryRequired,
+    alwaysActive,
+    cashFallbackSymbol,
   }
+}
+
+/**
+ * cash_fallback_symbol (#452): 空 / undefined → NULL。ticker 文法外・self 参照は
+ * 400 (誤った退避先へ積み増す事故の入口防御)。
+ */
+function parseCashFallbackSymbol(value: unknown, selfSymbol: string): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') {
+    throw new ValidationError('cashFallbackSymbol must be a symbol string', {
+      field: 'cashFallbackSymbol',
+    })
+  }
+  const sym = value.trim().toUpperCase()
+  if (sym === '') return null
+  if (!/^[A-Z0-9]{1,10}$/.test(sym)) {
+    throw new ValidationError(`cashFallbackSymbol is not a valid symbol: ${sym}`, {
+      field: 'cashFallbackSymbol',
+    })
+  }
+  if (sym === selfSymbol.toUpperCase()) {
+    throw new ValidationError('cashFallbackSymbol cannot reference itself', {
+      field: 'cashFallbackSymbol',
+    })
+  }
+  return sym
 }
 
 /**

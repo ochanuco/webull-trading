@@ -259,6 +259,9 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   maxSma50DeviationPctOverride: null,
   requireAboveSma50Override: null,
   alternatives: null,
+  entryRequired: false,
+  alwaysActive: false,
+  cashFallbackSymbol: null,
 })
 
 describe('setInversePair', () => {

@@ -38,7 +38,8 @@ import type { VixRegimeFilterDecision } from '../risk/vixRegimeFilter'
 import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
-import { deriveEntryStatusFromIndicators } from './entryStatus'
+import { deriveEntryStatusFromIndicators, type EntryStatus } from './entryStatus'
+import type { EntrySnapshot } from './conditionalAllocation'
 
 const DEFAULT_BAR_LOOKBACK = 60
 
@@ -191,6 +192,17 @@ export interface PullbackSchedulerOptions {
    */
   halfEntrySymbols?: Set<string>
   /**
+   * 条件連動配分の cash rebalance 数量 (#452 Layer 3)。runStrategyCron が
+   * pass 1 (通常評価) の entrySnapshots から allocation を計算し、退避先 /
+   * always_active 銘柄の不足分 BUY 数量を pass 2 でこの map に入れて呼ぶ。
+   * 指定 symbol は **pullback 戦略判定と sizing を bypass** して固定数量の
+   * BUY intent を作る — ただし下流の gate (lot fail-closed / per-symbol risk /
+   * buying-power / pending lock / execution の DRY_RUN) は全部通る。
+   * 未注入なら従来挙動。`cash_fallback_orders_enabled` (default false) が
+   * off の間は runStrategyCron がこの map を渡さない。
+   */
+  cashRebalanceQuantityMap?: Record<string, number>
+  /**
    * sanity_failed cooldown gate。直近 N 分以内に同 symbol で broker stub
    * fill (`resolveFilledPrice` が ratio guard で reject した) が観測されて
    * いた場合、新規 BUY を block する。9697 04/28 incident (30 min/6 fills 累積、
@@ -270,6 +282,12 @@ export interface PullbackRunSummary {
    */
   decisions: PullbackDecisionTrace[]
   /**
+   * 条件連動配分 (#452 Layer 3) 用の per-symbol 観測値。評価が成立した
+   * symbol のみ (bars 不足 / ERROR は不在 = 下流が fail-closed に扱う)。
+   * 段階判定 / 評価価格 / 建玉数量を runStrategyCron の allocation 計算に渡す。
+   */
+  entrySnapshots: Record<string, EntrySnapshot>
+  /**
    * VIX regime filter decision applied to this run (issue #196 3/3)。
    * `vixDecision` option を渡された時のみ set される (POC 後方互換)。
    * cron summary log / dashboard で「この run でどの regime で動いていたか」
@@ -321,6 +339,7 @@ export async function runPullbackScheduler(
     rejected: [],
     errors: [],
     decisions: [],
+    entrySnapshots: {},
     ...(options.vixDecision !== undefined ? { vix: options.vixDecision } : {}),
   }
 
@@ -425,6 +444,17 @@ export async function runPullbackScheduler(
         ? computeHoldBusinessDays(state.position.openedAt, now(), market)
         : 0
 
+    // 条件連動配分 (#452 Layer 3) 用の観測値。判定そのものには使わず、
+    // runStrategyCron が run 後に target/active weight を計算する材料。
+    summary.entrySnapshots[upper] = {
+      status: deriveEntryStatusFromIndicators(indicators, strategy.resolveRule(upper)).status,
+      price: indicators.price,
+      heldQty:
+        state.position !== null && Number.isFinite(state.position.qty) && state.position.qty > 0
+          ? state.position.qty
+          : 0,
+    }
+
     let signal = strategy.decide({
       symbol: upper,
       indicators,
@@ -434,6 +464,26 @@ export async function runPullbackScheduler(
       holdBusinessDays,
       now: now(),
     })
+
+    // cash rebalance (#452 Layer 3 pass 2): 指定数量の BUY に置き換える。
+    // pending order 中は strategy の HOLD (pending guard) をそのまま残す。
+    // 下流 gate (lot / per-symbol risk / buying-power / pending lock /
+    // execution の DRY_RUN) は通常 BUY と同様に全部通る。
+    const cashRebalanceQty = options.cashRebalanceQuantityMap?.[upper]
+    if (cashRebalanceQty !== undefined && state.pendingOrder === null) {
+      if (Number.isInteger(cashRebalanceQty) && cashRebalanceQty > 0) {
+        signal = {
+          ...signal,
+          action: 'BUY',
+          quantity: cashRebalanceQty,
+          reason: `cash allocation rebalance: buy ${cashRebalanceQty} toward active weight (#452)`,
+          trace: appendTrace(
+            signal.trace,
+            traceStep('entry.cash_rebalance', true, cashRebalanceQty, '>', 0, 'conditional allocation cash rebalance (#452)'),
+          ),
+        }
+      }
+    }
 
     // #intraday-only: レバ ETF 等は US 引け前 window で建玉があれば strategy 判定を
     // 上書きして強制 SELL (オーバーナイト持ち越し禁止 = 寄りギャップ stop-out 回避)。
@@ -605,20 +655,31 @@ export async function runPullbackScheduler(
         })
         continue
       }
-      const sizing = computePullbackSizing({
-        equity: options.equity,
-        entryPrice: indicators.price,
-        stopPct: rule.stopPct,
-        atr20: indicators.atr20,
-        baselineAtr20: indicators.baselineAtr20,
-        symbolCap: options.symbolCapMap?.[upper],
-        riskPerTradePct: options.riskPerTradePct,
-        lotSize: resolvedLotSize,
-        kAtr: rule.kAtr,
-        budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
-        budgetBasisJpy: options.budgetBasisJpy,
-        fxJpyPerSymbolCcy: options.fxJpyPerSymbolCcy,
-      })
+      // cash rebalance (#452): 数量は runStrategyCron が allocation 差分から
+      // 計算済み (cap / lot 適用済み)。pullback sizing は通さず、lot 整合だけ
+      // 再確認する (lot 倍数でなければ floor、0 になれば下の reject で見送り)。
+      const sizing =
+        cashRebalanceQty !== undefined
+          ? {
+              quantity: Math.floor(cashRebalanceQty / resolvedLotSize) * resolvedLotSize,
+              notional:
+                Math.floor(cashRebalanceQty / resolvedLotSize) * resolvedLotSize * indicators.price,
+              capped: false,
+            }
+          : computePullbackSizing({
+              equity: options.equity,
+              entryPrice: indicators.price,
+              stopPct: rule.stopPct,
+              atr20: indicators.atr20,
+              baselineAtr20: indicators.baselineAtr20,
+              symbolCap: options.symbolCapMap?.[upper],
+              riskPerTradePct: options.riskPerTradePct,
+              lotSize: resolvedLotSize,
+              kAtr: rule.kAtr,
+              budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
+              budgetBasisJpy: options.budgetBasisJpy,
+              fxJpyPerSymbolCcy: options.fxJpyPerSymbolCcy,
+            })
       if (sizing.quantity <= 0) {
         const reason = buildSizingRejectReason(sizing, {
           lotSize: resolvedLotSize,
@@ -1357,6 +1418,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.vix_regime': 'VIX レジーム判定',
   'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
   'entry.half_status': '段階判定 HALF (0.5x、#452)',
+  'entry.cash_rebalance': '条件連動配分 cash rebalance (#452)',
   'sizing.half_entry_quantity_positive': 'HALF 数量が1株/1単元以上ある',
   'risk.buying_power_pool': '口座買付余力プール (発注前)',
   'risk.sanity_failed_cooldown': 'sanity_failed cooldown (broker stub 疑い)',
