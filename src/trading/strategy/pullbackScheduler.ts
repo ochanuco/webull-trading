@@ -38,6 +38,7 @@ import type { VixRegimeFilterDecision } from '../risk/vixRegimeFilter'
 import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
+import { deriveEntryStatusFromIndicators } from './entryStatus'
 
 const DEFAULT_BAR_LOOKBACK = 60
 
@@ -181,6 +182,14 @@ export interface PullbackSchedulerOptions {
    * (`runStrategyCron`) は `buildEntrySuppressedSymbols` の結果を渡す。
    */
   entrySuppressedSymbols?: Record<string, string>
+  /**
+   * 段階判定 HALF (0.5x entry) を有効にする symbol 集合 (#452 PR 2)。role が
+   * entry 有効 (core_trend / leveraged_trend) な銘柄のみ。**未注入 / 集合外の
+   * 銘柄は従来の二値挙動 (HALF なし)** — role NULL の既存銘柄の挙動を変えない
+   * (#452 受け入れ条件)。production (`runStrategyCron`) は
+   * `buildHalfEntrySymbols` の結果を渡す。
+   */
+  halfEntrySymbols?: Set<string>
   /**
    * sanity_failed cooldown gate。直近 N 分以内に同 symbol で broker stub
    * fill (`resolveFilledPrice` が ratio guard で reject した) が観測されて
@@ -450,6 +459,45 @@ export async function runPullbackScheduler(
       }
     }
 
+    // 段階判定 HALF (#452 PR 2)。strategy は全 gate 通過でしか BUY を出さない
+    // (二値)。halfEntrySymbols の銘柄に限り、entry 系 HOLD を 4 段階判定に
+    // かけ直し、HALF (未通過 1 gate が「程度もの」で許容バンド内) なら 0.5x の
+    // BUY に昇格させる。position / pendingOrder / cooldown の guard 起因の HOLD
+    // は昇格対象外 (= 新規 entry の文脈のみ)。WATCH / NG は HOLD のまま。
+    let positionMultiplier = 1
+    if (
+      signal.action === 'HOLD' &&
+      options.halfEntrySymbols?.has(upper) &&
+      state.position === null &&
+      state.pendingOrder === null &&
+      !(state.cooldownUntil && new Date(state.cooldownUntil).getTime() > now().getTime())
+    ) {
+      const rule = strategy.resolveRule(upper)
+      const entryStatus = deriveEntryStatusFromIndicators(indicators, rule)
+      if (entryStatus.status === 'HALF' && entryStatus.halfGate !== null) {
+        const gate = entryStatus.halfGate
+        positionMultiplier = entryStatus.positionMultiplier
+        signal = {
+          ...signal,
+          action: 'BUY',
+          reason: `half entry (0.5x): ${gate.key} ${gate.actual.toFixed(4)} near threshold ${gate.threshold} (within tolerance band)`,
+          trace: appendTrace(
+            signal.trace,
+            traceStep(
+              'entry.half_status',
+              true,
+              gate.actual,
+              // EntryGateStatus.operator は人間可読 string だが、ここに来る
+              // degree gate は '<=' / '>=' のみ (DecisionTraceStep の union 内)。
+              gate.operator === '>=' ? '>=' : '<=',
+              gate.threshold,
+              'HALF: single degree-gate miss within tolerance → 0.5x sizing (#452)',
+            ),
+          ),
+        }
+      }
+    }
+
     if (signal.action === 'HOLD') {
       summary.holds += 1
       await emitDecision({
@@ -587,12 +635,36 @@ export async function runPullbackScheduler(
         })
         continue
       }
+      // 段階判定 HALF の 0.5x (#452 PR 2) — sizing 直後・VIX scale より前に適用。
+      // VIX warning と重なった場合は乗算で両方効く (より保守的な側に倒れる)。
+      // lot 丸めで 0 になったら reject (= 部分 entry すらできない小口は見送り)。
+      let scaledQuantity = sizing.quantity
+      if (positionMultiplier < 1) {
+        const lot = resolvedLotSize
+        const rawScaled = sizing.quantity * positionMultiplier
+        scaledQuantity = lot > 1 ? Math.floor(rawScaled / lot) * lot : Math.floor(rawScaled)
+        if (scaledQuantity <= 0) {
+          const reason = `sizing rejected: half-entry qty rounded to 0 (raw ${sizing.quantity} × ${positionMultiplier}, lot=${lot})`
+          summary.rejected.push({ symbol: upper, reason })
+          await emitDecision({
+            symbol: upper,
+            decision: 'REJECT',
+            reason,
+            price: indicators.price,
+            indicatorsJson: JSON.stringify(indicators),
+            trace: appendTrace(
+              signal.trace,
+              traceStep('sizing.half_entry_quantity_positive', false, scaledQuantity, '>', 0, reason),
+            ),
+          })
+          continue
+        }
+      }
       // VIX regime filter (issue #196 3/3) — sizing 直後に適用。
       //   - critical (sizeScale === 0): BUY 全 reject
       //   - warning (0 < sizeScale < 1): qty = floor(qty * sizeScale / lot) * lot
       //   - normal (sizeScale === 1): no-op
       // SELL は VIX 関係なく通すため、ここで scaling しても OK (BUY 経路だけ)。
-      let scaledQuantity = sizing.quantity
       if (options.vixDecision) {
         if (options.vixDecision.sizeScale === 0) {
           // critical: BUY 全 reject。decision.reason をそのまま乗せて操作者に
@@ -617,7 +689,8 @@ export async function runPullbackScheduler(
           // lot=1 の US 株は単純な floor、lot=100 の JP 株は単元未満で 0 になり得る。
           // 結果が 0 になった場合は次の `scaledQuantity <= 0` reject で拾う。
           const lot = resolvedLotSize
-          const rawScaled = sizing.quantity * options.vixDecision.sizeScale
+          // half-entry 適用後の qty を基数にする (#452: 0.5x と VIX scale は乗算)。
+          const rawScaled = scaledQuantity * options.vixDecision.sizeScale
           scaledQuantity = lot > 1
             ? Math.floor(rawScaled / lot) * lot
             : Math.floor(rawScaled)
@@ -1282,6 +1355,9 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
+  'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
+  'entry.half_status': '段階判定 HALF (0.5x、#452)',
+  'sizing.half_entry_quantity_positive': 'HALF 数量が1株/1単元以上ある',
   'risk.buying_power_pool': '口座買付余力プール (発注前)',
   'risk.sanity_failed_cooldown': 'sanity_failed cooldown (broker stub 疑い)',
   'broker.submit': '証券会社への発注送信',

@@ -53,6 +53,13 @@ import {
   type EntryGateStatus,
   type EvalIndicatorPoint,
 } from '../trading/strategy/entryDistance'
+import {
+  deriveEntryStatus,
+  deriveEntryStatusFromIndicators,
+  type EntryStatus,
+  type EntryStatusResult,
+} from '../trading/strategy/entryStatus'
+import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
 import type {
   PullbackIndicators,
   SymbolRule,
@@ -353,10 +360,37 @@ export const dashboard = new Hono<DashboardBindings>()
         // バッジ + grayed style) は `renderGridTab` 側で symbol 単位に付与する。
         const allGridSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
         const charts = await loadAllSymbolCharts(c.env, allGridSymbols, rules)
+        // 段階判定 (#452 PR 2): 各銘柄の最新 eval indicators を cron と同じ
+        // effective rule (global → role preset → override) で 4 段階判定し、
+        // panel badge + 表示優先度ソート (ENTRY > HALF > WATCH > NG >
+        // cash_parking、inactive / データ無しは末尾) に使う。
+        const gridDefaultRule: SymbolRule = {
+          stopPct: global.pullbackDefaultStopPct,
+          takeProfitPct: global.pullbackDefaultTakeProfitPct,
+          timeStopDays: global.pullbackDefaultTimeStopDays,
+          pullbackMax: global.pullbackDefaultPullbackMax,
+          pullbackMin: global.pullbackDefaultPullbackMin,
+          minReturn50d: global.pullbackDefaultMinReturn50d,
+          requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+          kAtr: global.pullbackDefaultKAtr,
+          maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
+          maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+        }
+        const gridRules = buildSymbolRules(gridDefaultRule, universe)
+        const entryStatuses: Record<string, EntryStatus> = {}
+        for (const entry of charts) {
+          const lastEval = entry.chart?.evalIndicators?.[entry.chart.evalIndicators.length - 1]
+          if (!lastEval) continue
+          entryStatuses[entry.symbol] = deriveEntryStatusFromIndicators(
+            lastEval.indicators,
+            gridRules[entry.symbol] ?? gridDefaultRule,
+          ).status
+        }
+        const sortedCharts = sortGridChartsByEntryPriority(charts, entryStatuses, universe)
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
         // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
         // 採用する。URL ?from / ?to があればそれを優先 (既存と同挙動)。
-        const referenceChart = charts.find((c) => c.chart !== null)?.chart ?? null
+        const referenceChart = sortedCharts.find((c) => c.chart !== null)?.chart ?? null
         const zoom = computeZoomRange(zoomFrom, zoomTo, referenceChart)
         return c.html(
           renderLayout(
@@ -364,9 +398,10 @@ export const dashboard = new Hono<DashboardBindings>()
             'チャート',
             chartsBody({
               tab,
-              charts,
+              charts: sortedCharts,
               zoom,
               universe,
+              entryStatuses,
             }),
             renderChartsSubnav(tab),
           ),
@@ -411,11 +446,11 @@ export const dashboard = new Hono<DashboardBindings>()
         takeProfitPct: strategyParams.takeProfitPct,
         timeStopDays: strategyParams.timeStopDays,
       }
-      // 入場距離 (#entry-distance): entry ゲートの閾値は global default のみ
-      // (pullbackMax/Min・minReturn50d・過熱・ボラに per-symbol override は無い)。
-      // entryDistance は entry 系フィールドだけ使うが、SymbolRule は exit 系も
-      // 要求するので global から full rule を組む。
-      const entryRule: SymbolRule = {
+      // 入場距離 (#entry-distance): cron と同じ effective rule で評価する —
+      // global default → role preset → per-symbol override (#452)。drift すると
+      // ダッシュボードの入場ラインが cron 判定とずれるので必ず buildSymbolRules
+      // を共用する。
+      const defaultEntryRule: SymbolRule = {
         stopPct: strategyParams.stopPct,
         takeProfitPct: strategyParams.takeProfitPct,
         timeStopDays: strategyParams.timeStopDays,
@@ -427,6 +462,9 @@ export const dashboard = new Hono<DashboardBindings>()
         maxSma50DeviationPct: strategyParams.maxSma50DeviationPct,
         maxAtrRatio: strategyParams.maxAtrRatio,
       }
+      const effectiveRules = buildSymbolRules(defaultEntryRule, universe)
+      const entryRule: SymbolRule =
+        (focusSymbol ? effectiveRules[focusSymbol] : undefined) ?? defaultEntryRule
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
       // 直近 BUY 単体しか拾えないので fallback 専用。
@@ -442,6 +480,9 @@ export const dashboard = new Hono<DashboardBindings>()
       const buyability = symbolChart?.evalIndicators?.length
         ? buildBuyabilityView(symbolChart.evalIndicators, entryRule)
         : null
+      // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
+      // WATCH/NG 時は alternatives (表示専用) を併記する。
+      const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
       return c.html(
         renderLayout(
           c,
@@ -455,6 +496,8 @@ export const dashboard = new Hono<DashboardBindings>()
             zoom,
             universe,
             buyability,
+            entryStatus,
+            alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
           }),
           renderChartsSubnav(tab, focusSymbol ?? undefined),
         ),
@@ -5091,6 +5134,10 @@ export interface ChartsBodySymbol {
   universe?: SymbolUniverse | null
   /** 入場距離ビュー (#entry-distance)。「入場まであと/いつ頃」の描画用。null = データ無し。 */
   buyability?: BuyabilityView | null
+  /** 段階判定 (#452 PR 2)。null = 評価データ無し。 */
+  entryStatus?: EntryStatusResult | null
+  /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時に併記する。 */
+  alternatives?: string[]
 }
 
 /**
@@ -5116,6 +5163,8 @@ interface ChartsBodyGrid {
   zoom: { from: Date; to: Date } | null
   /** panel header の銘柄表示を JP 銘柄向け 番号-会社名 形式にするための universe。 */
   universe?: SymbolUniverse | null
+  /** symbol → 段階判定 (#452 PR 2)。評価データ無しの銘柄は不在。panel badge 用。 */
+  entryStatuses?: Record<string, EntryStatus>
 }
 
 type ChartsBodyArgs =
@@ -6416,7 +6465,10 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
-  ${renderBuyabilityPanel(args.buyability ?? null)}
+  ${renderBuyabilityPanel(args.buyability ?? null, {
+    entryStatus: args.entryStatus ?? null,
+    alternatives: args.alternatives ?? [],
+  })}
   ${renderDecisionPlotCaption(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
@@ -6453,6 +6505,46 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
  * - BUY/SELL pin (markPoint, hover で qty / PnL / fill 時刻 tooltip)
  * - session divider (vertical lines)
  */
+/** 段階判定 badge の配色 (#452 PR 2)。 */
+const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
+  ENTRY: { label: 'ENTRY', bg: '#e6f6ec', fg: '#057a55' },
+  HALF: { label: 'HALF 0.5x', bg: '#fff4e6', fg: '#b25000' },
+  WATCH: { label: 'WATCH', bg: '#eef2f8', fg: '#46608a' },
+  NG: { label: 'NG', bg: '#fdecec', fg: '#c22' },
+}
+
+function entryStatusBadgeHtml(status: EntryStatus): string {
+  const b = ENTRY_STATUS_BADGE[status]
+  return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${b.bg};color:${b.fg};font-weight:700;font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
+}
+
+/**
+ * Grid panel の表示優先度ソート (#452 PR 2)。
+ * ENTRY > HALF > WATCH > NG > cash_parking > 判定不能 (データ無し) > inactive。
+ * 同順位内は元の並び (pair 隣接など) を保つ stable sort。
+ */
+export function sortGridChartsByEntryPriority<T extends { symbol: string }>(
+  charts: T[],
+  entryStatuses: Record<string, EntryStatus>,
+  universe: SymbolUniverse,
+): T[] {
+  const inactive = new Set(universe.inactiveSymbols)
+  const priority = (symbol: string): number => {
+    if (inactive.has(symbol)) return 6
+    if (universe.symbolRole[symbol] === 'cash_parking') return 4
+    const status = entryStatuses[symbol]
+    if (status === 'ENTRY') return 0
+    if (status === 'HALF') return 1
+    if (status === 'WATCH') return 2
+    if (status === 'NG') return 3
+    return 5 // 判定不能 (chart/eval データ無し)
+  }
+  return charts
+    .map((entry, idx) => ({ entry, idx }))
+    .sort((a, b) => priority(a.entry.symbol) - priority(b.entry.symbol) || a.idx - b.idx)
+    .map(({ entry }) => entry)
+}
+
 export function renderGridTab(args: ChartsBodyGrid): string {
   if (args.charts.length === 0) {
     return `<p class="muted">ALLOWED_SYMBOLS が空です。<code>symbol_config</code> に少なくとも 1 銘柄登録してください。</p>`
@@ -6512,7 +6604,10 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         </div>`
       }
       const badge = renderGridPanelBadge(entry.chart)
-      const rightSide = (inactive ? inactiveBadge : '') + positionBadge + badge
+      // 段階判定 badge (#452 PR 2)。inactive 銘柄は cron 評価対象外なので出さない。
+      const status = args.entryStatuses?.[entry.symbol]
+      const statusBadge = status !== undefined && !inactive ? entryStatusBadgeHtml(status) : ''
+      const rightSide = (inactive ? inactiveBadge : '') + statusBadge + positionBadge + badge
       return `<div class="${panelClass}"${dataAttrs} style="${baseStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
           ${headerLink}
@@ -7453,9 +7548,20 @@ function fmtGateValue(g: EntryGateStatus): string {
  * - 全ゲートの現在値 vs 閾値チェックリスト
  * buyability / current が無ければ空文字。
  */
-export function renderBuyabilityPanel(buyability: BuyabilityView | null): string {
+export interface BuyabilityPanelContext {
+  /** 段階判定 (#452 PR 2)。null = 出さない。 */
+  entryStatus?: EntryStatusResult | null
+  /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時のみ表示する。 */
+  alternatives?: string[]
+}
+
+export function renderBuyabilityPanel(
+  buyability: BuyabilityView | null,
+  ctx: BuyabilityPanelContext = {},
+): string {
   if (!buyability || !buyability.current) return ''
   const cur = buyability.current
+  const status = ctx.entryStatus ?? null
 
   // --- 結論 ---
   let headline: string
@@ -7542,13 +7648,32 @@ export function renderBuyabilityPanel(buyability: BuyabilityView | null): string
     })
     .join('')
 
+  // --- 段階判定 badge + HALF 説明 + 代替候補 (#452 PR 2) ---
+  const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
+  let halfNote = ''
+  if (status?.status === 'HALF' && status.halfGate) {
+    halfNote = `<div style="margin-top:6px;font-size:12px;color:#b25000">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
+  }
+  let altBlock = ''
+  if (status && (status.status === 'WATCH' || status.status === 'NG') && ctx.alternatives?.length) {
+    const links = ctx.alternatives
+      .map(
+        (s) =>
+          `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}" style="font-weight:600">${esc(s)}</a>`,
+      )
+      .join(' / ')
+    altBlock = `<div style="margin-top:8px"><strong>代替候補</strong>: ${links}
+      <div class="muted" style="font-size:11px">この銘柄が entry 不可の間の代替 ETF 候補 (表示のみ — 自動で発注先を切り替えることはしない、#452)。</div></div>`
+  }
+
   // 距離の推移 (+ETA) と 入場ゲート は 2 列 (narrow 画面は .panel-row の
   // media query で 1 列に落ちる)。
   return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
-    <div style="font-size:13px;color:${headColor};margin-bottom:6px">${headline}</div>
+    <div style="font-size:13px;color:${headColor};margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${statusBadge}<span>${headline}</span></div>
+    ${halfNote}
     <div class="panel-row" style="gap:8px 20px">
-      <div>${trendBlock}${etaBlock}</div>
-      <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定)
+      <div>${trendBlock}${etaBlock}${altBlock}</div>
+      <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定 + role preset + 銘柄 override、#452)
         <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
       </div>
     </div>

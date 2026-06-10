@@ -46,7 +46,11 @@ import {
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
-import { buildEntrySuppressedSymbols, buildSymbolRules } from './symbolRuleResolution'
+import {
+  buildEntrySuppressedSymbols,
+  buildHalfEntrySymbols,
+  buildSymbolRules,
+} from './symbolRuleResolution'
 
 const DEFAULT_EQUITY_USD = 10_000
 const DEFAULT_EQUITY_JPY = 1_500_000
@@ -249,6 +253,9 @@ export async function runStrategyCron(
   // Entry 抑止 role (#452): cash_parking / 定義のみの role / enum 外 'unknown' は
   // BUY を生成しない (SELL / HOLD の exit 経路は通す)。
   const entrySuppressedSymbols = buildEntrySuppressedSymbols(universe.symbolRole)
+  // 段階判定 HALF (#452 PR 2): entry 有効 role を明示した銘柄のみ 0.5x entry を
+  // 許可する。role NULL の既存銘柄は従来の二値挙動のまま。
+  const halfEntrySymbols = buildHalfEntrySymbols(universe.symbolRole)
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
@@ -586,6 +593,7 @@ export async function runStrategyCron(
       defaultRule,
       rulesMap,
       entrySuppressedSymbols,
+      halfEntrySymbols,
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,
