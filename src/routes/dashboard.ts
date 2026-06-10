@@ -2115,6 +2115,10 @@ function brokerProbeBody(args: {
     }
     var parsed = parseBody(section);
     var item = Array.isArray(parsed) ? parsed[0] : parsed;
+    // Yahoo chart API は価格が chart.result[0].meta に入る (#461 follow-up)。
+    if (item && item.chart && Array.isArray(item.chart.result) && item.chart.result[0] && item.chart.result[0].meta) {
+      item = item.chart.result[0].meta;
+    }
     var price = null;
     for (var i = 0; item && i < priceKeys.length; i++) {
       var v = item[priceKeys[i]];
