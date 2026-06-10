@@ -11,7 +11,10 @@ import {
   resolveAccessTokenWithSource,
 } from '../infrastructure/webull/resolveAccessToken'
 import { WebullAuth } from '../infrastructure/webull/WebullAuth'
-import { toWebullPlaceOrderRequest } from '../infrastructure/webull/mapper'
+import {
+  buildPreviewOrderVariants,
+  checkTradability,
+} from '../infrastructure/webull/tradabilityCheck'
 import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
 import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
 import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
@@ -901,67 +904,9 @@ export const admin = new Hono<AppBindings>()
     if (c.req.query('preview') === '1') {
       const priceRaw = Number(c.req.query('price'))
       const previewPrice = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 100
-      const market = category.startsWith('JP') ? 'JP' : 'US'
-      // 初回実測 (#461) で v1 mapper body は OPENAPI_PARAM_ERR — JP preview の
-      // docs は v2 系 (preview-order-v2) で field 集合が place v1 と違う可能性が
-      // 高い。どの shape が通るか確定するため variant を並列で試す (#415 方式)。
-      // どれも注文は作成しない (path は preview 固定)。
-      const baseEntry = {
-        symbol,
-        instrument_type: 'EQUITY',
-        market,
-        side: 'BUY',
-        quantity: '1',
-        time_in_force: 'DAY',
-        entrust_type: 'QTY',
-        account_tax_type: 'GENERAL',
-      }
-      const variants: Array<{ label: string; body: unknown }> = [
-        {
-          // production place (v1 mapper) と同形: client_order_id + MARKET +
-          // limit cap + session 'N'
-          label: 'v1-place-shape',
-          body: toWebullPlaceOrderRequest(
-            {
-              symbol,
-              side: 'BUY',
-              quantity: 1,
-              price: previewPrice,
-              notional: previewPrice,
-              clientOrderId: `probe-preview-${crypto.randomUUID()}`,
-            },
-            'v1',
-            accountId,
-          ),
-        },
-        {
-          // JP preview docs の field 集合 (client_order_id なし、v2 session enum)
-          label: 'v2-fields-market',
-          body: {
-            new_orders: [
-              {
-                ...baseEntry,
-                order_type: 'MARKET',
-                support_trading_session: 'CORE',
-                limit_price: previewPrice.toFixed(3),
-              },
-            ],
-          },
-        },
-        {
-          label: 'v2-fields-limit',
-          body: {
-            new_orders: [
-              {
-                ...baseEntry,
-                order_type: 'LIMIT',
-                support_trading_session: 'CORE',
-                limit_price: previewPrice.toFixed(3),
-              },
-            ],
-          },
-        },
-      ]
+      const market = (category.startsWith('JP') ? 'JP' : 'US') as 'US' | 'JP'
+      // body shape 候補は form チェック (#461 tradabilityCheck) と共有。
+      const variants = buildPreviewOrderVariants(symbol, market, previewPrice, accountId)
       const results = await Promise.all(
         variants.map((v) =>
           probeOnce({
@@ -1805,6 +1750,27 @@ export const admin = new Hono<AppBindings>()
    * Yahoo 障害時は `matches: []` を返して client は手動入力に fallback。
    * Access auth + ADMIN_WRITE rate-limit を通る。
    */
+  /**
+   * 銘柄の Webull JP 取扱チェック (#461)。登録フォームが symbol 選択時に呼ぶ。
+   * Preview Order (発注しない注文検証) で TICKER_IS_DENY を発注前に引く。
+   * 'denied' のみ登録ブロック対象 — 'error' / 'unavailable' は通す (check 不能で
+   * 全登録が止まるのは過剰 fail-closed。発注側には #460 の事後ガードがある)。
+   */
+  .get('/symbol-config/tradability-check', rateLimit('ADMIN_WRITE'), async (c) => {
+    c.header('Cache-Control', 'no-store')
+    const symbolRaw = (c.req.query('symbol') ?? '').trim().toUpperCase()
+    if (!/^[A-Z0-9]{1,10}$/.test(symbolRaw)) {
+      return c.json({ error: 'invalid symbol' }, 400)
+    }
+    const market = (c.req.query('market') ?? 'US').trim().toUpperCase() === 'JP' ? 'JP' : 'US'
+    const priceRaw = Number(c.req.query('price'))
+    const result = await checkTradability(c.env, {
+      symbol: symbolRaw,
+      market,
+      ...(Number.isFinite(priceRaw) && priceRaw > 0 ? { price: priceRaw } : {}),
+    })
+    return c.json(result)
+  })
   .get('/symbol-config/lookup', rateLimit('ADMIN_WRITE'), async (c) => {
     const queryRaw = c.req.query('q') ?? c.req.query('symbol') ?? ''
     const query = queryRaw.trim().toUpperCase()

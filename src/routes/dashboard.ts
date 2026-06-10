@@ -8757,6 +8757,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
              <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
              <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
+           <span id="symbol-tradability" style="margin-left:10px;font-size:13px"></span>
          </div>`
   // #315: 登録モード選択 (単体 / インバース対)。new のみ。
   const modeSelector =
@@ -8942,7 +8943,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>
     <div style="display:flex;gap:8px">
-      <button type="submit" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
+      <button type="submit" id="symbol-form-save" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
       <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
     </div>
   </form>
@@ -9025,7 +9026,68 @@ function symbolFormBody(args: SymbolFormArgs): string {
       window.suggestLotSizeFromMatch(m);
       window.hideSymbolSuggest();
       if (symInput) symInput.focus();
+      window.checkSymbolTradability();
     };
+    // 取扱チェック (#461): 銘柄確定時に Preview Order (発注なし) で Webull JP の
+    // 取引可否を照会。'denied' (TICKER_IS_DENY 確定) のみ保存をブロックする。
+    // 'error' / 'unavailable' はブロックしない — check 不能で登録が全部止まるのは
+    // 過剰 fail-closed (発注側には #460 の事後ガードがある)。
+    window._tradabilityDenied = false;
+    window._tradabilitySeq = 0;
+    window.checkSymbolTradability = function () {
+      var statusEl = document.getElementById('symbol-tradability');
+      var saveBtn = document.getElementById('symbol-form-save');
+      var symInput = document.getElementById('symbol-form-symbol');
+      var marketSel = document.getElementById('symbol-form-market');
+      if (!statusEl || !symInput) return;
+      var sym = (symInput.value || '').trim().toUpperCase();
+      window._tradabilityDenied = false;
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.style.opacity = ''; }
+      if (!/^[A-Z0-9]{1,10}$/.test(sym)) { statusEl.textContent = ''; return; }
+      var mySeq = ++window._tradabilitySeq;
+      statusEl.textContent = '⏳ 取扱確認中...';
+      statusEl.style.color = '#86868b';
+      var market = marketSel && marketSel.value === 'JP' ? 'JP' : 'US';
+      fetch('/admin/symbol-config/tradability-check?symbol=' + encodeURIComponent(sym) + '&market=' + market, { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (mySeq !== window._tradabilitySeq) return; // 古い応答は捨てる
+          if (res.verdict === 'tradable') {
+            statusEl.textContent = '✅ 取引可能';
+            statusEl.style.color = '#057a55';
+          } else if (res.verdict === 'denied') {
+            statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+            statusEl.style.color = '#c22';
+            window._tradabilityDenied = true;
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
+          } else {
+            statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
+            statusEl.style.color = '#86868b';
+          }
+        })
+        .catch(function () {
+          if (mySeq !== window._tradabilitySeq) return;
+          statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
+          statusEl.style.color = '#86868b';
+        });
+    };
+    // 手入力で symbol を変えた場合も blur で再チェック。submit は denied 時に阻止。
+    (function () {
+      var symInput = document.getElementById('symbol-form-symbol');
+      if (symInput && !symInput.readOnly) {
+        symInput.addEventListener('change', function () { window.checkSymbolTradability(); });
+        var form = symInput.closest('form');
+        if (form) {
+          form.addEventListener('submit', function (ev) {
+            if (window._tradabilityDenied) {
+              ev.preventDefault();
+              var statusEl = document.getElementById('symbol-tradability');
+              if (statusEl) statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+            }
+          });
+        }
+      }
+    })();
     // Yahoo quoteType + market から売買単位の推奨値を自動入力する。
     // ETF → 1 口、JP 個別株 (EQUITY) → 100 株、US 個別株 → 1 株。あくまで推奨で、
     // operator が手入力で上書き可能 (確定は手入力必須・fail-closed なので #symbol-lot-size)。
