@@ -1557,3 +1557,50 @@ describe('dashboard symbol_config 条件連動配分 (#452 Layer 3)', () => {
     expect(body).toMatch(/name="cash_fallback_symbol"[^>]*value="SGOV"/)
   })
 })
+
+describe('symbols list ロール列 (#452)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('一覧に role と条件連動配分の要約を表示する', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SGOV', role: 'cash_parking', alwaysActive: true }),
+      row({
+        symbol: 'QQQ',
+        role: 'core_trend',
+        entryRequired: true,
+        cashFallbackSymbol: 'SGOV',
+      }),
+      row({ symbol: 'SOXL' }), // role NULL = 従来挙動
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('<th>ロール</th>')
+    expect(body).toContain('cash_parking')
+    expect(body).toContain('常時配分')
+    expect(body).toContain('core_trend')
+    expect(body).toContain('条件連動')
+    expect(body).toContain('→SGOV')
+  })
+
+  it('不正な role 値は警告表示 (entry 抑止の旨)', async () => {
+    const db = fakeDb([row({ symbol: 'OOPS', role: 'cash_praking' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('⚠ cash_praking')
+  })
+})

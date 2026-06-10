@@ -7994,6 +7994,9 @@ function symbolsListBody(args: {
       // 売買単位 (lot_size)。未設定・不正値 (NULL/0/負/非整数) は cron sizing が
       // fail-closed (発注見送り) するので、一覧でも同じ判定で赤字警告を出す
       // (loadSymbolConfig の採用条件 = integer>=1 と揃える、CodeRabbit #409)。
+      // 戦略ロール + 条件連動配分の要約 (#452)。NULL は従来挙動なので「—」。
+      // entry 抑止 role (cash_parking / 定義のみ) は title で発注されない旨を明示。
+      const roleCell = renderSymbolRoleCell(r)
       const lotSizeValid = Number.isInteger(r.lotSize) && (r.lotSize as number) >= 1
       const lotSizeCell = !lotSizeValid
         ? '<span class="err" title="売買単位が未設定または不正です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
@@ -8042,6 +8045,7 @@ function symbolsListBody(args: {
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
+        <td>${roleCell}</td>
         <td>${lotSizeCell}</td>
         <td>${maxNotionalCell}</td>
         ${budgetTd}
@@ -8064,6 +8068,7 @@ function symbolsListBody(args: {
       <th>銘柄</th>
       <th>銘柄名</th>
       <th>市場/通貨</th>
+      <th>ロール</th>
       <th>売買単位</th>
       <th>1注文上限</th>
       <th>予算配分</th>
@@ -8334,6 +8339,30 @@ const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   low_volatility: 'low_volatility — 低ボラ (定義のみ・entry 無効)',
   sector_trend: 'sector_trend — セクター (定義のみ・entry 無効)',
   inverse_hedge: 'inverse_hedge — インバース (定義のみ・entry 無効)',
+}
+
+/** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
+export function renderSymbolRoleCell(row: SymbolConfigRow): string {
+  const role = row.role?.trim() || null
+  const known = role !== null && (SYMBOL_ROLES as readonly string[]).includes(role)
+  const roleBadge =
+    role === null
+      ? '<span class="muted" title="role 未設定 = 従来挙動">—</span>'
+      : known
+        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code>`
+        : `<span class="err" title="不正な role 値です。entry は抑止されます (fail-closed)。編集から正しい値を選んでください。">⚠ ${esc(role)}</span>`
+  const notes: string[] = []
+  if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
+  if (row.entryRequired) notes.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (row.cashFallbackSymbol) {
+    notes.push(
+      `<a href="/dashboard/symbols/${encodeURIComponent(row.cashFallbackSymbol)}/edit" title="条件未通過時の退避先">→${esc(row.cashFallbackSymbol)}</a>`,
+    )
+  }
+  const noteHtml = notes.length
+    ? `<div class="muted" style="font-size:11px;margin-top:2px">${notes.join(' / ')}</div>`
+    : ''
+  return `${roleBadge}${noteHtml}`
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
