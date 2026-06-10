@@ -2113,3 +2113,91 @@ describe('inverse_hedge role enabled but inverse-pair gate still wins (#457)', (
     expect(reject?.reason).toContain('inverse')
   })
 })
+
+describe('runPullbackScheduler TICKER_IS_DENY hook (#460)', () => {
+  const denyError = () =>
+    new BrokerClientError(
+      'Webull request failed permanently with status 417: {"message":"The current security is not available.","error_code":"OAUTH_OPENAPI_TICKER_IS_DENY"}',
+      'placeOrder',
+      { brokerStatus: 417 },
+    )
+
+  function throwingExecution(err: Error): Execution & { calls: unknown[] } {
+    const calls: unknown[] = []
+    return {
+      calls,
+      async execute(intent) {
+        calls.push(intent)
+        throw err
+      },
+    }
+  }
+
+  it('calls onTickerDeny when a BUY submit is denied per-ticker', async () => {
+    const hook = vi.fn(async () => undefined)
+    const summary = await runPullbackScheduler({
+      symbols: ['USMV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: throwingExecution(denyError()),
+      onTickerDeny: hook,
+      now: () => now,
+    })
+    expect(hook).toHaveBeenCalledWith('USMV')
+    expect(summary.errors).toHaveLength(1)
+    // 通常の ERROR decision / journal は従来どおり残る (hook は追加動作)
+    expect(summary.decisions.find((d) => d.decision === 'ERROR')?.reason).toContain('TICKER_IS_DENY')
+  })
+
+  it('does not call the hook for other broker errors', async () => {
+    const hook = vi.fn(async () => undefined)
+    await runPullbackScheduler({
+      symbols: ['USMV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: throwingExecution(new BrokerServerError('boom', 'placeOrder', { brokerStatus: 500 })),
+      onTickerDeny: hook,
+      now: () => now,
+    })
+    expect(hook).not.toHaveBeenCalled()
+  })
+
+  it('does not call the hook on the SELL path (建玉 orphan 化を避ける)', async () => {
+    // time stop で SELL が出る建玉を持たせ、SELL submit が deny で落ちても
+    // hook は呼ばれない (= 銘柄は評価対象に残り、exit は次 tick で再試行)。
+    const hook = vi.fn(async () => undefined)
+    const heldState: SymbolState = {
+      ...emptySymbolState('USMV', () => now),
+      position: {
+        qty: 5,
+        avgPrice: 80,
+        openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['USMV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ USMV: heldState }),
+      execution: throwingExecution(denyError()),
+      onTickerDeny: hook,
+      now: () => now,
+    })
+    expect(summary.errors).toHaveLength(1)
+    expect(hook).not.toHaveBeenCalled()
+  })
+
+  it('skips the hook when option is omitted (back-compat)', async () => {
+    const summary = await runPullbackScheduler({
+      symbols: ['USMV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: throwingExecution(denyError()),
+      now: () => now,
+    })
+    expect(summary.errors).toHaveLength(1)
+  })
+})

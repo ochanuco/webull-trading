@@ -596,6 +596,36 @@ export async function updateSymbolConfig(
  * 観測する可能性があるが、DB 上の state 自体は SQL NOT で atomic に
  * flip するので冪等性は壊れない。POC scope では許容。
  */
+/**
+ * Broker が銘柄単位で発注拒否 (TICKER_IS_DENY 等の恒久エラー) を返したとき、
+ * cron が該当銘柄を fail-closed で自動 entry 停止する (#460)。
+ *
+ * - `active = 0` + notes に理由を**追記** (既存メモは保持、256 chars に切詰め)
+ * - 既に inactive なら no-op (`null` 返却) — 同 tick 内の並走や再検知で
+ *   notes が重複追記されない冪等ガード
+ * - 解除 (再有効化) は operator の明示操作のみ。自動では戻さない
+ */
+export async function deactivateSymbolForBrokerDeny(
+  db: DrizzleD1Database,
+  symbol: string,
+  reasonNote: string,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const upper = symbol.trim().toUpperCase()
+  const before = await findSymbolConfig(db, upper)
+  if (before === null || !before.active) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  const existingNotes = before.notes?.trim() ?? ''
+  const mergedNotes = (existingNotes.length > 0 ? `${existingNotes} / ${reasonNote}` : reasonNote).slice(0, 256)
+  await db
+    .update(symbolConfig)
+    .set({ active: false, notes: mergedNotes, updatedAt: nowIso })
+    .where(eq(symbolConfig.symbol, upper))
+  const after = await findSymbolConfig(db, upper)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
+}
+
 export async function toggleSymbolActive(
   db: DrizzleD1Database,
   symbol: string,

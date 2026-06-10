@@ -51,6 +51,8 @@ import {
   buildHalfEntrySymbols,
   buildSymbolRules,
 } from './symbolRuleResolution'
+import { createTickerDenyGuard } from '../risk/tickerDenyGuard'
+import { createDb as createSymbolConfigDb } from '../../infrastructure/db/tradeJournalRepo'
 import {
   buildCashRebalancePlan,
   computeConditionalAllocation,
@@ -586,6 +588,17 @@ export async function runStrategyCron(
     ? await resolveBuyingPowerLedger(liveReadClient, usdJpyRate, options.requestId)
     : undefined
 
+  // TICKER_IS_DENY 自動停止ガード (#460)。env.DB がある時だけ有効化 — D1 が
+  // 無いと symbol_config を停止できないので skip (= 従来挙動)。
+  const onTickerDeny = env.DB
+    ? createTickerDenyGuard({
+        db: createSymbolConfigDb(env.DB),
+        rawDb: env.DB,
+        notifier,
+        requestId: options.requestId,
+      })
+    : undefined
+
   for (const run of runs) {
     analysis.runs.push({
       currency: run.currency,
@@ -612,6 +625,7 @@ export async function runStrategyCron(
       rulesMap,
       entrySuppressedSymbols,
       halfEntrySymbols,
+      ...(onTickerDeny ? { onTickerDeny } : {}),
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,
@@ -757,6 +771,7 @@ export async function runStrategyCron(
           execution,
           symbolCapMap: universe.symbolMaxNotional,
           cashRebalanceQuantityMap: Object.fromEntries(orders.map((o) => [o.symbol, o.quantity])),
+          ...(onTickerDeny ? { onTickerDeny } : {}),
           fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
           buyingPower,
           defaultRule,

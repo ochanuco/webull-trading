@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  deactivateSymbolForBrokerDeny,
   loadInversePairs,
   loadSymbolConfig,
 } from '../../../src/infrastructure/db/symbolConfigRepo'
@@ -385,5 +386,64 @@ describe('loadSymbolConfig role / entry overrides / alternatives (#452)', () => 
     const result = await loadSymbolConfig(fakeDb(rows))
     // self (SOXL) と重複は除去。不正 JSON / 不正 ticker / 空配列 / NULL は map 不在。
     expect(result.symbolAlternatives).toEqual({ SOXL: ['SOXX', 'SMH'] })
+  })
+})
+
+describe('deactivateSymbolForBrokerDeny (#460)', () => {
+  // select (findSymbolConfig) と update を備えた最小 fake。update の set 内容を
+  // in-memory rows に反映し、呼び出し回数も記録する。
+  function fakeRwDb(rows: Array<Record<string, unknown>>) {
+    const updates: Array<Record<string, unknown>> = []
+    const db = {
+      select() {
+        return {
+          from() {
+            return {
+              where: () => ({
+                limit: async () => rows,
+              }),
+            }
+          },
+        }
+      },
+      update() {
+        return {
+          set(values: Record<string, unknown>) {
+            return {
+              where: async () => {
+                updates.push(values)
+                Object.assign(rows[0]!, values)
+              },
+            }
+          },
+        }
+      },
+    }
+    return { db: db as unknown as Parameters<typeof deactivateSymbolForBrokerDeny>[0], updates }
+  }
+
+  it('deactivates and appends the reason to existing notes (既存メモ保持)', async () => {
+    const { db, updates } = fakeRwDb([
+      { symbol: 'USMV', active: true, notes: '手動メモ' },
+    ])
+    const result = await deactivateSymbolForBrokerDeny(db, 'usmv', 'TICKER_IS_DENY により自動停止', 't1')
+    expect(result?.before.active).toBe(true)
+    expect(updates[0]).toMatchObject({ active: false, updatedAt: 't1' })
+    expect(updates[0]!.notes).toBe('手動メモ / TICKER_IS_DENY により自動停止')
+  })
+
+  it('no-ops when the symbol is already inactive (冪等、notes 重複追記なし)', async () => {
+    const { db, updates } = fakeRwDb([
+      { symbol: 'USMV', active: false, notes: 'x' },
+    ])
+    const result = await deactivateSymbolForBrokerDeny(db, 'USMV', 'reason', 't1')
+    expect(result).toBeNull()
+    expect(updates).toHaveLength(0)
+  })
+
+  it('no-ops when the symbol does not exist', async () => {
+    const { db, updates } = fakeRwDb([])
+    expect(await deactivateSymbolForBrokerDeny(db, 'NOPE', 'reason', 't1')).toBeNull()
+    expect(updates).toHaveLength(0)
   })
 })
