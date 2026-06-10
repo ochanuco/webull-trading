@@ -11,11 +11,8 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     const res = await app.request('/dashboard/broker-probe', {}, baseEnv)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // instrument 照会の判定カード + 近似である旨の注記 (#460 への参照)
     expect(body).toContain('Webull 取扱')
     expect(body).toContain('id="bp-instrument-pill"')
-    expect(body).toContain('取扱有無の近似')
-    expect(body).toContain('#460')
     // quote / 買付余力カード
     expect(body).toContain('id="bp-quote-pill"')
     expect(body).toContain('id="bp-yahoo-pill"')
@@ -32,11 +29,16 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     expect(body).toContain('instrumentStockTrade')
   })
 
-  it('control の AAPL chip と再 probe ボタンがある', async () => {
+  it('選択 → 実行フロー: 実行ボタン / 発注前検証 checkbox / chip は選択のみ (#461)', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/broker-probe', {}, baseEnv)
     const body = await res.text()
+    expect(body).toContain('id="probe-submit"')
+    expect(body).toContain('id="probe-preview-check"')
+    expect(body).toContain('発注なし')
+    expect(body).toContain('previewVariants')
+    // chip クリックは選択のみ (setSelection)、通信は submit ボタンから
+    expect(body).toContain('function setSelection(')
     expect(body).toMatch(/data-symbol="AAPL" data-category="US_STOCK"/)
-    expect(body).toContain('id="probe-refresh"')
   })
 })

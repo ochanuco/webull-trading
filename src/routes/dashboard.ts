@@ -1862,6 +1862,14 @@ function brokerProbeBody(args: {
   // (Cloudflare Access cookie 流用、payload は no-store)。
   // 自動 probe は URL に symbol+category がある時だけ (PR #250 の方針を維持)。
   const universeLinks = renderUniverseLinks(args.universe)
+  // AAPL control chip は universe に AAPL が居る環境では重複するので出さない。
+  const hasAapl = [
+    ...(args.universe?.allowedSymbols ?? []),
+    ...(args.universe?.inactiveSymbols ?? []),
+  ].some((sym) => sym.toUpperCase() === 'AAPL')
+  const controlChip = hasAapl
+    ? ''
+    : `<div style="margin-bottom:10px"><button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button></div>`
   return `<style>
   .bp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:12px 0}
   .bp-card{background:#fff;border:1px solid #e3e3e8;border-radius:10px;padding:14px 16px}
@@ -1874,43 +1882,40 @@ function brokerProbeBody(args: {
   .bp-pill-wait{background:#f3f3f5;color:#86868b}
   .bp-chip{padding:4px 12px;font-size:12px;border:1px solid #d8d8de;border-radius:14px;cursor:pointer;background:#fff;margin:0 4px 6px 0}
   .bp-chip:hover{background:#eef4ff;border-color:#06c}
+  .bp-chip-selected{background:#06c !important;border-color:#06c !important;color:#fff !important}
+  .bp-chip-selected .muted{color:#cfe0ff !important}
   .bp-raw{background:#f6f6f8;border:1px solid #e3e3e8;border-radius:6px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px}
   .bp-num{font-variant-numeric:tabular-nums}
   </style>
 
   <div class="bp-card" style="margin-top:8px">
-    <h3>銘柄を選んで probe <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
+    <h3>銘柄を選んで診断 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
     <div class="bp-body">
       <div style="margin-bottom:6px">${universeLinks}</div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button>
-        <button type="button" id="probe-refresh" class="bp-chip" style="border-color:#06c;color:#06c">↻ 再 probe</button>
-        <span class="muted" id="probe-current" style="font-size:12px"></span>
+      ${controlChip}
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px;background:#f6f8fc;border-radius:8px">
+        <span style="font-size:13px">選択中: <strong id="probe-current">未選択</strong></span>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+          <input type="checkbox" id="probe-preview-check" checked> 発注前検証も実行 <span class="muted" style="font-size:11px">(発注なし)</span>
+        </label>
+        <button type="button" id="probe-submit" style="padding:7px 22px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">診断を実行</button>
       </div>
-      <p class="muted" style="margin:8px 0 0;font-size:11px">Webull broker (host: <code>WEBULL_TRADE_API_BASE</code> / <code>WEBULL_QUOTES_API_BASE</code>) へ直接照会して結果を表示します。任意 symbol は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>。</p>
     </div>
   </div>
 
   <div class="bp-grid">
     <div class="bp-card">
-      <h3>Webull 取扱 <span class="muted" style="font-size:11px;font-weight:normal">(instrument 照会 #461)</span><span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="bp-instrument-body" class="muted">銘柄をクリックすると Webull の instrument 照会で「銘柄として認識されているか」を確認します。</div>
-      <p class="muted" style="font-size:11px;margin:8px 0 0">⚠ 照会は<strong>取扱有無の近似</strong>。発注 allowlist (TICKER_IS_DENY) は別系統の可能性があり、確定的なガードは事後の自動停止 (#460) が担う。</p>
+      <h3>Webull 取扱 <span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div class="bp-body" id="bp-instrument-body" class="muted">—</div>
     </div>
     <div class="bp-card">
-      <h3>Webull quote <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="bp-quote-body" class="muted">—</div>
-      <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote" class="bp-raw">(未実行)</pre></details>
-    </div>
-    <div class="bp-card">
-      <h3>Yahoo quote <span class="muted" style="font-size:11px;font-weight:normal">(cron の default source)</span><span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <h3>Yahoo quote <span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="bp-yahoo-body" class="muted">—</div>
       <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote-yahoo" class="bp-raw">(未実行)</pre></details>
     </div>
     <div class="bp-card">
-      <h3>買付余力 <span class="muted" style="font-size:11px;font-weight:normal">#415</span><span id="bp-bp-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <h3>買付余力 <span id="bp-bp-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="probe-buying-power" class="muted">—</div>
-      <p class="muted" style="font-size:11px;margin:8px 0 0">取得失敗時は cron が当 tick の BUY を全見送り (fail-closed)。</p>
     </div>
   </div>
 
@@ -1933,6 +1938,9 @@ function brokerProbeBody(args: {
           <tr><td colspan="3" class="muted" style="padding:8px;text-align:center">(未実行)</td></tr>
         </tbody>
       </table>
+      <h3 style="margin-top:14px">Webull quote <span class="muted" style="font-size:11px;font-weight:normal">(data-api — 無応答が既知のため詳細に格下げ #461。稼働開始は疎通監視 #21 が通知)</span> <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div id="bp-quote-body" style="font-size:12px;margin:4px 0">—</div>
+      <pre id="probe-quote" class="bp-raw">(未実行)</pre>
       <h3 style="margin-top:14px">instrument 照会 raw (quotes host / trade host)</h3>
       <pre id="bp-instrument-raw" class="bp-raw">(未実行)</pre>
       <h3 style="margin-top:14px">positions / orderHistory raw (旧/新)</h3>
@@ -1948,7 +1956,6 @@ function brokerProbeBody(args: {
 <script>
 (function () {
   var statusEl = document.getElementById('probe-status');
-  var refreshBtn = document.getElementById('probe-refresh');
   var positionsListEl = document.getElementById('probe-positions-list');
   var quoteEl = document.getElementById('probe-quote');
   var metaEl = document.getElementById('probe-meta');
@@ -2049,12 +2056,56 @@ function brokerProbeBody(args: {
       { label: 'instrument/list (quotes host, 汎用 path)', section: body.instrumentQuotesHost },
       { label: 'instrument/list (trade host, 汎用 path)', section: body.instrumentTradeHost },
     ];
+    var rawList = candidates;
+    if (Array.isArray(body.previewVariants)) {
+      rawList = body.previewVariants.map(function (v) {
+        return { label: 'preview (' + v.label + ')', section: v.result };
+      }).concat(candidates);
+    }
     if (rawTarget) {
-      rawTarget.textContent = candidates.map(function (cnd) {
+      rawTarget.textContent = rawList.map(function (cnd) {
         return '--- ' + cnd.label + ' ---\\n' + prettify(cnd.section);
       }).join('\\n\\n');
     }
     if (!bodyEl) return;
+
+    // 発注前検証 (Preview Order) の結果が最優先 — 発注パイプラインそのものの
+    // 検証なので instrument 照会より確度が高い (#461)。body shape を複数試して
+    // どれか 1 つでも通れば取引可能、どれかが TICKER_IS_DENY なら取扱なし確定。
+    if (Array.isArray(body.previewVariants) && body.previewVariants.length > 0) {
+      var okVariant = null;
+      var denyVariant = null;
+      for (var pvi = 0; pvi < body.previewVariants.length; pvi++) {
+        var v = body.previewVariants[pvi];
+        if (v.result && v.result.phase === 'response' && v.result.status === 200) { okVariant = v; break; }
+        if (v.result && v.result.phase === 'response' && typeof v.result.bodyTruncated === 'string' &&
+            v.result.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) { denyVariant = v; }
+      }
+      if (okVariant) {
+        setPill('bp-instrument-pill', 'ok', '取引可能');
+        var okParsed = parseBody(okVariant.result);
+        var cost = okParsed && (okParsed.estimated_cost || (okParsed.data && okParsed.data.estimated_cost));
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は発注前検証 (Preview Order) を通過しました — 取引可能です。' +
+          '<span class="muted" style="font-size:12px"> (body shape: ' + escHtml(okVariant.label) + (cost ? ' / estimated_cost: ' + escHtml(cost) : '') + ')</span>';
+        return;
+      }
+      if (denyVariant) {
+        setPill('bp-instrument-pill', 'ng', '取扱なし (確定)');
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — 発注前検証が <code>TICKER_IS_DENY</code> を返しました。' +
+          '<span style="color:#c22">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>';
+        return;
+      }
+      setPill('bp-instrument-pill', 'unknown', '検証エラー');
+      var lines = body.previewVariants.map(function (v) {
+        var b = parseBody(v.result);
+        var detail = b && b.error_code ? b.error_code + (b.message ? ' — ' + b.message : '') : humanizeError(v.result);
+        return '<li><code>' + escHtml(v.label) + '</code>: ' + escHtml(detail) + '</li>';
+      }).join('');
+      bodyEl.innerHTML = '発注前検証がどの body shape でも通りませんでした:' +
+        '<ul style="margin:4px 0 0 16px;padding:0;font-size:12px">' + lines + '</ul>' +
+        '<span class="muted" style="font-size:11px">エラー内容から shape を調整します — raw を共有してください。</span>';
+      return;
+    }
     var responded = [];
     for (var i = 0; i < candidates.length; i++) {
       var sct = candidates[i].section;
@@ -2105,6 +2156,32 @@ function brokerProbeBody(args: {
     }
   }
 
+  // 価格抽出: parse → (Yahoo chart は meta へ) → 失敗時は truncate 済み body から
+  // regex fallback。quote カードと preview の limit cap の両方で使う。
+  function extractPrice(section, priceKeys) {
+    if (!section) return null;
+    var parsed = parseBody(section);
+    var item = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (item && item.chart && Array.isArray(item.chart.result) && item.chart.result[0] && item.chart.result[0].meta) {
+      item = item.chart.result[0].meta;
+    }
+    for (var i = 0; item && i < priceKeys.length; i++) {
+      var v = item[priceKeys[i]];
+      if (v != null && Number.isFinite(Number(v))) return Number(v);
+    }
+    if (typeof section.bodyTruncated === 'string') {
+      for (var r = 0; r < priceKeys.length; r++) {
+        var m = section.bodyTruncated.match(new RegExp('"' + priceKeys[r] + '"\\s*:\\s*(-?[0-9.]+)'));
+        if (m && Number.isFinite(Number(m[1]))) return Number(m[1]);
+      }
+    }
+    return null;
+  }
+
+  // 直近 probe の Yahoo 価格 (preview の limit cap 用)。銘柄が変わったら使わない
+  // — 前銘柄の価格で preview すると価格系エラーが deny 判定を潰す (CodeRabbit #466)。
+  var lastYahoo = { symbol: null, price: null };
+
   // quote カード: status pill + 価格らしきフィールドの要約。shape が読めなくても
   // pill と raw は必ず更新する (stale 表示を残さない、CodeRabbit #262 の方針)。
   function renderQuoteCard(pillId, bodyId, section, priceKeys) {
@@ -2116,25 +2193,7 @@ function brokerProbeBody(args: {
       bodyEl.innerHTML = '<span class="muted">' + escHtml(humanizeError(section)) + '</span>';
       return;
     }
-    var parsed = parseBody(section);
-    var item = Array.isArray(parsed) ? parsed[0] : parsed;
-    // Yahoo chart API は価格が chart.result[0].meta に入る (#461 follow-up)。
-    if (item && item.chart && Array.isArray(item.chart.result) && item.chart.result[0] && item.chart.result[0].meta) {
-      item = item.chart.result[0].meta;
-    }
-    var price = null;
-    for (var i = 0; item && i < priceKeys.length; i++) {
-      var v = item[priceKeys[i]];
-      if (v != null && Number.isFinite(Number(v))) { price = Number(v); break; }
-    }
-    // 大きい body は probe 側で truncate され JSON.parse が失敗する (Yahoo chart
-    // は 30KB 超)。価格 key を regex で直接拾う fallback。
-    if (price == null && typeof section.bodyTruncated === 'string') {
-      for (var r = 0; r < priceKeys.length; r++) {
-        var m = section.bodyTruncated.match(new RegExp('"' + priceKeys[r] + '"\\s*:\\s*(-?[0-9.]+)'));
-        if (m && Number.isFinite(Number(m[1]))) { price = Number(m[1]); break; }
-      }
-    }
+    var price = extractPrice(section, priceKeys);
     var ms = Number(section.msTaken) || 0;
     bodyEl.innerHTML = price != null
       ? '<span style="font-size:18px;font-weight:700" class="bp-num">' + escHtml(formatNumber(price)) + '</span> <span class="muted" style="font-size:11px">(' + ms + 'ms)</span>'
@@ -2231,13 +2290,17 @@ function brokerProbeBody(args: {
       row('instrument (quotes/trade host)', body.instrumentQuotesHost, body.instrumentTradeHost);
   }
 
-  function probe(symbol, category) {
-    refreshBtn.disabled = true;
-    statusEl.textContent = '実行中: ' + symbol + ' (' + category + ')';
+  function probe(symbol, category, opts) {
+    opts = opts || {};
+    statusEl.textContent = (opts.preview ? '診断 + 発注前検証 実行中: ' : '診断 実行中: ') + symbol + ' (' + category + ')';
     currentEl.textContent = '— ' + symbol + ' / ' + category;
     resetProbeView('実行中');
     var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
       '&category=' + encodeURIComponent(category);
+    if (opts.preview) {
+      url += '&preview=1';
+      if (Number.isFinite(opts.price) && opts.price > 0) url += '&price=' + encodeURIComponent(opts.price);
+    }
     try {
       var u = new URL(window.location.href);
       u.searchParams.set('symbol', symbol);
@@ -2254,6 +2317,7 @@ function brokerProbeBody(args: {
         var quoteYahooEl = document.getElementById('probe-quote-yahoo');
         if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
         renderQuoteCard('bp-yahoo-pill', 'bp-yahoo-body', body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);
+        lastYahoo = { symbol: symbol, price: extractPrice(body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']) };
         renderInstrumentCard(body, symbol);
         renderPositionsList(body.positions || null);
         var positionsNewRaw = document.getElementById('probe-positions-new-raw');
@@ -2279,35 +2343,62 @@ function brokerProbeBody(args: {
         // 失敗時も前回 probe の結果を残さない (stale 防止 #462)。
         resetProbeView('失敗');
       })
-      .finally(function () {
-        refreshBtn.disabled = false;
-      });
+  }
+
+  // 選択 → 実行の 2 段階フロー (操作要望): chip クリックは**選択のみ** (通信
+  // しない)。「診断を実行」で初めて probe + (checkbox ON なら) 発注前検証を走らせる。
+  var selected = { symbol: null, category: null };
+
+  function setSelection(sym, cat) {
+    selected.symbol = sym;
+    selected.category = cat;
+    if (currentEl) currentEl.textContent = sym + ' (' + cat + ')';
+    document.querySelectorAll('.probe-pickbtn').forEach(function (b) {
+      b.classList.toggle('bp-chip-selected', b.getAttribute('data-symbol') === sym);
+    });
+    try {
+      var u = new URL(window.location.href);
+      u.searchParams.set('symbol', sym);
+      u.searchParams.set('category', cat);
+      window.history.replaceState({}, '', u.toString());
+    } catch (_) {}
   }
 
   function onPickClick(ev) {
     var btn = ev.currentTarget;
     var sym = btn.getAttribute('data-symbol');
     var cat = btn.getAttribute('data-category');
-    if (sym && cat) probe(sym, cat);
+    if (sym && cat) setSelection(sym, cat);
   }
 
   document.querySelectorAll('.probe-pickbtn').forEach(function (btn) {
     btn.addEventListener('click', onPickClick);
   });
 
-  refreshBtn.addEventListener('click', function () {
-    var qs = new URLSearchParams(window.location.search);
-    var sym = qs.get('symbol') || 'AAPL';
-    var cat = qs.get('category') || 'US_STOCK';
-    probe(sym, cat);
-  });
+  var submitBtn = document.getElementById('probe-submit');
+  var previewCheck = document.getElementById('probe-preview-check');
+  if (submitBtn) {
+    submitBtn.addEventListener('click', function () {
+      if (!selected.symbol) {
+        statusEl.textContent = '銘柄を選択してください';
+        return;
+      }
+      submitBtn.disabled = true;
+      var withPreview = !!(previewCheck && previewCheck.checked);
+      var previewPrice = lastYahoo.symbol === selected.symbol ? lastYahoo.price : null;
+      probe(selected.symbol, selected.category, withPreview ? { preview: true, price: previewPrice } : {}).finally(function () {
+        submitBtn.disabled = false;
+      });
+    });
+  }
 
-  // 自動 probe は URL に symbol+category 両方ある時だけ (PR #250 の方針維持)。
+  // URL params は**プリ選択のみ** (自動実行しない — 選択 → 実行の流れを徹底)。
   var qs = new URLSearchParams(window.location.search);
   if (qs.has('symbol') && qs.has('category')) {
-    probe(qs.get('symbol'), qs.get('category'));
+    setSelection(qs.get('symbol'), qs.get('category'));
+    statusEl.textContent = '「診断を実行」で開始';
   } else {
-    statusEl.textContent = '銘柄ボタンをクリックして probe 開始';
+    statusEl.textContent = '銘柄を選択してください';
   }
 })();
 </script>`
@@ -8668,6 +8759,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
              <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
              <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
+           <span id="symbol-tradability" style="margin-left:10px;font-size:13px"></span>
          </div>`
   // #315: 登録モード選択 (単体 / インバース対)。new のみ。
   const modeSelector =
@@ -8853,7 +8945,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>
     <div style="display:flex;gap:8px">
-      <button type="submit" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
+      <button type="submit" id="symbol-form-save" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
       <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
     </div>
   </form>
@@ -8936,7 +9028,68 @@ function symbolFormBody(args: SymbolFormArgs): string {
       window.suggestLotSizeFromMatch(m);
       window.hideSymbolSuggest();
       if (symInput) symInput.focus();
+      window.checkSymbolTradability();
     };
+    // 取扱チェック (#461): 銘柄確定時に Preview Order (発注なし) で Webull JP の
+    // 取引可否を照会。'denied' (TICKER_IS_DENY 確定) のみ保存をブロックする。
+    // 'error' / 'unavailable' はブロックしない — check 不能で登録が全部止まるのは
+    // 過剰 fail-closed (発注側には #460 の事後ガードがある)。
+    window._tradabilityDenied = false;
+    window._tradabilitySeq = 0;
+    window.checkSymbolTradability = function () {
+      var statusEl = document.getElementById('symbol-tradability');
+      var saveBtn = document.getElementById('symbol-form-save');
+      var symInput = document.getElementById('symbol-form-symbol');
+      var marketSel = document.getElementById('symbol-form-market');
+      if (!statusEl || !symInput) return;
+      var sym = (symInput.value || '').trim().toUpperCase();
+      window._tradabilityDenied = false;
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.style.opacity = ''; }
+      if (!/^[A-Z0-9]{1,10}$/.test(sym)) { statusEl.textContent = ''; return; }
+      var mySeq = ++window._tradabilitySeq;
+      statusEl.textContent = '⏳ 取扱確認中...';
+      statusEl.style.color = '#86868b';
+      var market = marketSel && marketSel.value === 'JP' ? 'JP' : 'US';
+      fetch('/admin/symbol-config/tradability-check?symbol=' + encodeURIComponent(sym) + '&market=' + market, { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (mySeq !== window._tradabilitySeq) return; // 古い応答は捨てる
+          if (res.verdict === 'tradable') {
+            statusEl.textContent = '✅ 取引可能';
+            statusEl.style.color = '#057a55';
+          } else if (res.verdict === 'denied') {
+            statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+            statusEl.style.color = '#c22';
+            window._tradabilityDenied = true;
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
+          } else {
+            statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
+            statusEl.style.color = '#86868b';
+          }
+        })
+        .catch(function () {
+          if (mySeq !== window._tradabilitySeq) return;
+          statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
+          statusEl.style.color = '#86868b';
+        });
+    };
+    // 手入力で symbol を変えた場合も blur で再チェック。submit は denied 時に阻止。
+    (function () {
+      var symInput = document.getElementById('symbol-form-symbol');
+      if (symInput && !symInput.readOnly) {
+        symInput.addEventListener('change', function () { window.checkSymbolTradability(); });
+        var form = symInput.closest('form');
+        if (form) {
+          form.addEventListener('submit', function (ev) {
+            if (window._tradabilityDenied) {
+              ev.preventDefault();
+              var statusEl = document.getElementById('symbol-tradability');
+              if (statusEl) statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+            }
+          });
+        }
+      }
+    })();
     // Yahoo quoteType + market から売買単位の推奨値を自動入力する。
     // ETF → 1 口、JP 個別株 (EQUITY) → 100 株、US 個別株 → 1 株。あくまで推奨で、
     // operator が手入力で上書き可能 (確定は手入力必須・fail-closed なので #symbol-lot-size)。

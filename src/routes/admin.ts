@@ -11,6 +11,10 @@ import {
   resolveAccessTokenWithSource,
 } from '../infrastructure/webull/resolveAccessToken'
 import { WebullAuth } from '../infrastructure/webull/WebullAuth'
+import {
+  buildPreviewOrderVariants,
+  checkTradability,
+} from '../infrastructure/webull/tradabilityCheck'
 import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
 import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
 import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
@@ -609,6 +613,8 @@ export const admin = new Hono<AppBindings>()
       path: string
       query: Record<string, string>
       version?: string
+      /** POST body (JSON 文字列)。署名対象に含める (place/preview 系)。 */
+      body?: string
       /**
        * 既定は trade host (`WEBULL_TRADE_API_BASE`)。snapshot probe は quotes host
        * (`WEBULL_QUOTES_API_BASE`) を明示的に渡す — JP 本番では data-api 系に
@@ -625,6 +631,7 @@ export const admin = new Hono<AppBindings>()
           method: args.method,
           path: url.pathname,
           query: args.query,
+          body: args.body,
           host: url.host,
           appKey,
           appSecret,
@@ -650,7 +657,12 @@ export const admin = new Hono<AppBindings>()
       try {
         const response = await fetch(url.href, {
           method: args.method,
-          headers: { Accept: 'application/json', ...headers },
+          headers: {
+            Accept: 'application/json',
+            ...(args.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            ...headers,
+          },
+          ...(args.body !== undefined ? { body: args.body } : {}),
           signal: controller.signal,
         })
         const body = await response.text()
@@ -881,6 +893,41 @@ export const admin = new Hono<AppBindings>()
       }),
     ])
 
+    // #461 follow-up: **Preview Order = 発注しない注文検証** (JP docs 正式記載:
+    // POST /openapi/account/orders/preview)。発注パイプラインの検証 (取扱外
+    // 銘柄の TICKER_IS_DENY を含む) を、注文を作らずに引ける唯一の documented
+    // API。POST なので通常 probe では叩かず、UI の明示ボタン (query preview=1)
+    // でのみ実行する。body は production の place order と同じ mapper を使い
+    // (qty=1 の BUY、limit cap は Yahoo 価格 or 100)、**path は place ではなく
+    // preview に固定** — 注文は作成されない。
+    let previewVariants: Array<{ label: string; result: ProbeResult }> | null = null
+    if (c.req.query('preview') === '1') {
+      const priceRaw = Number(c.req.query('price'))
+      const previewPrice = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 100
+      // category の typo を US に黙って丸めない (CodeRabbit #466) — preview は
+      // 表示と保存可否に直結するので許容値以外は 400。
+      if (!/^(US|JP)_(STOCK|ETF)$/.test(category)) {
+        throw new ValidationError(`unsupported category for preview: ${category}`, {
+          field: 'category',
+        })
+      }
+      const market = (category.startsWith('JP_') ? 'JP' : 'US') as 'US' | 'JP'
+      // body shape 候補は form チェック (#461 tradabilityCheck) と共有。
+      const variants = buildPreviewOrderVariants(symbol, market, previewPrice, accountId)
+      const results = await Promise.all(
+        variants.map((v) =>
+          probeOnce({
+            method: 'POST',
+            path: '/openapi/account/orders/preview',
+            query: { account_id: accountId },
+            version: 'v1',
+            body: JSON.stringify(v.body),
+          }),
+        ),
+      )
+      previewVariants = variants.map((v, i) => ({ label: v.label, result: results[i]! }))
+    }
+
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
     // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
     c.header('Cache-Control', 'no-store')
@@ -930,6 +977,7 @@ export const admin = new Hono<AppBindings>()
       instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
+      previewVariants,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
@@ -1709,6 +1757,31 @@ export const admin = new Hono<AppBindings>()
    * Yahoo 障害時は `matches: []` を返して client は手動入力に fallback。
    * Access auth + ADMIN_WRITE rate-limit を通る。
    */
+  /**
+   * 銘柄の Webull JP 取扱チェック (#461)。登録フォームが symbol 選択時に呼ぶ。
+   * Preview Order (発注しない注文検証) で TICKER_IS_DENY を発注前に引く。
+   * 'denied' のみ登録ブロック対象 — 'error' / 'unavailable' は通す (check 不能で
+   * 全登録が止まるのは過剰 fail-closed。発注側には #460 の事後ガードがある)。
+   */
+  .get('/symbol-config/tradability-check', rateLimit('ADMIN_WRITE'), async (c) => {
+    c.header('Cache-Control', 'no-store')
+    const symbolRaw = (c.req.query('symbol') ?? '').trim().toUpperCase()
+    if (!/^[A-Z0-9]{1,10}$/.test(symbolRaw)) {
+      return c.json({ error: 'invalid symbol' }, 400)
+    }
+    const marketRaw = (c.req.query('market') ?? '').trim().toUpperCase()
+    if (marketRaw !== 'US' && marketRaw !== 'JP') {
+      return c.json({ error: 'market must be US or JP' }, 400)
+    }
+    const market = marketRaw
+    const priceRaw = Number(c.req.query('price'))
+    const result = await checkTradability(c.env, {
+      symbol: symbolRaw,
+      market,
+      ...(Number.isFinite(priceRaw) && priceRaw > 0 ? { price: priceRaw } : {}),
+    })
+    return c.json(result)
+  })
   .get('/symbol-config/lookup', rateLimit('ADMIN_WRITE'), async (c) => {
     const queryRaw = c.req.query('q') ?? c.req.query('symbol') ?? ''
     const query = queryRaw.trim().toUpperCase()

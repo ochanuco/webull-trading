@@ -1627,3 +1627,32 @@ describe('CodeRabbit #453 対応 (不正 role のフォーム防御)', () => {
     expect(body).not.toMatch(/<option value="" selected>未設定/)
   })
 })
+
+describe('新規登録フォームの取扱チェック (#461)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('new フォームに取扱チェック表示と denied 時の保存ブロックがある', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('id="symbol-tradability"')
+    expect(body).toContain('/admin/symbol-config/tradability-check')
+    expect(body).toContain('id="symbol-form-save"')
+    expect(body).toContain('_tradabilityDenied')
+    // denied のみブロック (error/unavailable は登録可能の文言)
+    expect(body).toContain('登録は可能')
+    // inline script が構文エラーなく parse できる (#465 の回帰ガードをこのページにも)
+    for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      expect(() => new Function(m[1]!)).not.toThrow()
+    }
+  })
+})
