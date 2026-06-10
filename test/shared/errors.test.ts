@@ -92,3 +92,35 @@ describe('isSellQtyExceedError', () => {
     expect(isSellQtyExceedError(undefined)).toBe(false)
   })
 })
+
+import { BrokerServerError as _BSE2 } from '../../src/shared/errors'
+import {
+  BrokerClientError as TickerDenyBCE,
+  isTickerDenyError,
+  WEBULL_TICKER_DENY_CODE,
+} from '../../src/shared/errors'
+
+describe('isTickerDenyError (#460)', () => {
+  const denyMessage = `Webull request failed permanently with status 417: {"message":"The current security is not available.","error_code":"${WEBULL_TICKER_DENY_CODE}"}`
+
+  it('matches a 417 BrokerClientError containing the deny code', () => {
+    const err = new TickerDenyBCE(denyMessage, 'placeOrder', { brokerStatus: 417 })
+    expect(isTickerDenyError(err)).toBe(true)
+  })
+
+  it('rejects other 417 business errors (e.g. SELL_QTY_EXCEED)', () => {
+    const err = new TickerDenyBCE(
+      'status 417: {"error_code":"OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY"}',
+      'placeOrder',
+      { brokerStatus: 417 },
+    )
+    expect(isTickerDenyError(err)).toBe(false)
+  })
+
+  it('rejects non-417 / non-BrokerClientError', () => {
+    expect(isTickerDenyError(new TickerDenyBCE(denyMessage, 'placeOrder', { brokerStatus: 400 }))).toBe(false)
+    expect(isTickerDenyError(new _BSE2(denyMessage, 'placeOrder', { brokerStatus: 500 }))).toBe(false)
+    expect(isTickerDenyError(new Error(denyMessage))).toBe(false)
+    expect(isTickerDenyError(null)).toBe(false)
+  })
+})

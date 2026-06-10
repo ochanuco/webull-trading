@@ -2,7 +2,7 @@ import type { BarClient } from '../../infrastructure/quotes/BarClient'
 import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
 import { classifyBrokerErrorCause } from '../../infrastructure/notification/brokerErrorSurge'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
-import { isSellQtyExceedError } from '../../shared/errors'
+import { isSellQtyExceedError, isTickerDenyError } from '../../shared/errors'
 import type { DecisionTraceStep } from '../domain/Signal'
 import { inferTradingMarket, isWithinUsCloseWindow } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
@@ -202,6 +202,16 @@ export interface PullbackSchedulerOptions {
    * off の間は runStrategyCron がこの map を渡さない。
    */
   cashRebalanceQuantityMap?: Record<string, number>
+  /**
+   * TICKER_IS_DENY 自動停止 hook (#460)。BUY submit が Webull の銘柄単位の
+   * 恒久拒否 (`OAUTH_OPENAPI_TICKER_IS_DENY`) で失敗したとき、該当 symbol を
+   * 引数に 1 回呼ばれる。production (`runStrategyCron`) は
+   * `createTickerDenyGuard` (symbol_config の自動 inactive 化 + audit + 通知)
+   * を注入する。未注入なら従来挙動 (毎 tick 再送)。hook 内の失敗は hook 側で
+   * 握りつぶす契約 (scheduler は await するだけ)。SELL では呼ばない — 万一
+   * exit 側で deny が出ても銘柄を評価対象から外すと建玉が orphan になるため。
+   */
+  onTickerDeny?: (symbol: string) => Promise<void>
   /**
    * sanity_failed cooldown gate。直近 N 分以内に同 symbol で broker stub
    * fill (`resolveFilledPrice` が ratio guard で reject した) が観測されて
@@ -1110,6 +1120,12 @@ export async function runPullbackScheduler(
           // error ではない) なら legacy の `'broker submit'` に戻す。
           cause: classifyBrokerErrorCause(error) ?? 'broker submit',
         })
+        // TICKER_IS_DENY 自動停止 (#460): 銘柄単位の恒久拒否は再送しても解消
+        // しないので、BUY のみ hook で fail-closed に停止する (SELL は対象外 —
+        // exit 経路と建玉の orphan 化を避ける)。
+        if (intent.side === 'BUY' && options.onTickerDeny && isTickerDenyError(error)) {
+          await options.onTickerDeny(upper)
+        }
         try {
           logPostSubmit({
             clientOrderId: intent.clientOrderId,

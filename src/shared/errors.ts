@@ -152,6 +152,21 @@ export function isSellQtyExceedError(error: unknown): error is BrokerClientError
   return error.message.includes(WEBULL_SELL_QTY_EXCEED_CODE)
 }
 
+/**
+ * Webull JP OpenAPI の銘柄単位の取扱拒否 (#460)。USMV で本番実証: 銘柄が
+ * OpenAPI の取引対象外だと place order が 417 + この error_code を返す。
+ * **恒久エラー** (リトライ・signing・token の問題ではない) なので、検知したら
+ * 該当銘柄を自動 entry 停止する (tickerDenyGuard)。
+ */
+export const WEBULL_TICKER_DENY_CODE = 'OAUTH_OPENAPI_TICKER_IS_DENY'
+
+/** True when Webull rejected the order because the ticker is not tradable via OpenAPI (#460). */
+export function isTickerDenyError(error: unknown): error is BrokerClientError {
+  if (!(error instanceof BrokerClientError)) return false
+  if (error.brokerStatus !== 417) return false
+  return error.message.includes(WEBULL_TICKER_DENY_CODE)
+}
+
 // Planned but deferred per issue #1 §13:
 // RiskRejectedError, BrokerResponseError, ConfigurationError,
 // TradeEventIngestError, BridgeConnectionError.
