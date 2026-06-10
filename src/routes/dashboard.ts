@@ -2037,59 +2037,24 @@ function brokerProbeBody(args: {
   function renderInstrumentCard(body, symbol) {
     var bodyEl = document.getElementById('bp-instrument-body');
     var rawTarget = document.getElementById('bp-instrument-raw');
-    // category は UI のティッカー推定なので ETF/STOCK を取り違え得る — server が
-    // 反対側 category も probe しており (CodeRabbit #462)、4 候補すべてを見る。
+    // JP の正しい path は /openapi/instrument/stock/list (JP docs Trading API >
+    // Get Stock Instrument、#461)。host 未確定のため trade / quotes 両方、かつ
+    // category 推定の取り違え対策 (CodeRabbit #462) で ETF/STOCK 両 category を
+    // 並べる。末尾 2 つは汎用 SDK path の drift 検証用 (#251 方式)。
     var candidates = [
-      { label: 'quotes host', section: body.instrumentQuotesHost },
-      { label: 'trade host', section: body.instrumentTradeHost },
-      { label: 'quotes host (alt category)', section: body.instrumentQuotesHostAlt },
-      { label: 'trade host (alt category)', section: body.instrumentTradeHostAlt },
-    ];
-    var tradeCandidates = [
-      { label: 'trade/security', section: body.tradeSecurity },
-      { label: 'trade/instrument/tradable/list', section: body.tradableList },
+      { label: 'stock/list (trade host)', section: body.instrumentStockTrade },
+      { label: 'stock/list (trade host, alt category)', section: body.instrumentStockTradeAlt },
+      { label: 'stock/list (quotes host)', section: body.instrumentStockQuotes },
+      { label: 'stock/list (quotes host, alt category)', section: body.instrumentStockQuotesAlt },
+      { label: 'instrument/list (quotes host, 汎用 path)', section: body.instrumentQuotesHost },
+      { label: 'instrument/list (trade host, 汎用 path)', section: body.instrumentTradeHost },
     ];
     if (rawTarget) {
-      rawTarget.textContent = tradeCandidates.concat(candidates).map(function (cnd) {
+      rawTarget.textContent = candidates.map(function (cnd) {
         return '--- ' + cnd.label + ' ---\\n' + prettify(cnd.section);
       }).join('\\n\\n');
     }
     if (!bodyEl) return;
-
-    // 本命: trade/security (#461 follow-up)。symbol 指定の取引可能銘柄照会で、
-    // 200 + 中身があれば「発注対象として取引可能」の直接の根拠になる。
-    var sec = body.tradeSecurity;
-    if (sec && sec.phase === 'response') {
-      var secBody = parseBody(sec);
-      if (sec.status === 200 && secBody != null) {
-        var secItems = Array.isArray(secBody) ? secBody : (Array.isArray(secBody.data) ? secBody.data : [secBody]);
-        var nonEmpty = secItems.length > 0 && secItems[0] && Object.keys(secItems[0]).length > 0;
-        if (nonEmpty) {
-          setPill('bp-instrument-pill', 'ok', '取引可能');
-          var first = secItems[0];
-          var secFields = [];
-          if (first.instrument_id) secFields.push('instrument_id: <code>' + escHtml(first.instrument_id) + '</code>');
-          if (first.instrument_type) secFields.push('type: <code>' + escHtml(first.instrument_type) + '</code>');
-          if (first.symbol) secFields.push('symbol: <code>' + escHtml(first.symbol) + '</code>');
-          bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は取引可能銘柄として照会できました (via trade/security)。<br>' +
-            '<span class="muted" style="font-size:12px">' + (secFields.join(' ・ ') || '(詳細は raw 参照)') + '</span>';
-          return;
-        }
-        setPill('bp-instrument-pill', 'ng', '取扱なし');
-        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は trade/security 照会で空応答 — ' +
-          '<span style="color:#c22">取引対象外の可能性が高い (発注すると TICKER_IS_DENY 見込み)。</span>';
-        return;
-      }
-      var secErrBody = secBody;
-      if (secErrBody && typeof secErrBody === 'object' && secErrBody.error_code) {
-        setPill('bp-instrument-pill', 'ng', '取扱なし');
-        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — trade/security が <code>' + escHtml(secErrBody.error_code) + '</code> を返しました。' +
-          '<span style="color:#c22">取引対象外の可能性が高い。</span> <span class="muted">(raw 参照)</span>';
-        return;
-      }
-      // 404 等 = endpoint 自体が未提供 → market-data 系候補へ fall through
-    }
-
     var responded = [];
     for (var i = 0; i < candidates.length; i++) {
       var sct = candidates[i].section;
@@ -2099,13 +2064,12 @@ function brokerProbeBody(args: {
       }
     }
     if (responded.length === 0) {
-      var statuses = candidates.slice(0, 2).map(function (cnd) {
+      var statuses = [candidates[0], candidates[2]].map(function (cnd) {
         return escHtml(cnd.label) + ': ' + escHtml(humanizeError(cnd.section));
       }).join(' ／ ');
       setPill('bp-instrument-pill', 'unknown', '判定不可');
-      bodyEl.innerHTML = 'instrument endpoint が 200 を返しませんでした (' + statuses + ')。' +
-        '<span class="muted">quotes host (data-api) の無応答は既知 (#21、quote は Yahoo 移行済み)。trade host の 404 は endpoint 未提供。' +
-        '判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
+      bodyEl.innerHTML = 'instrument/stock/list が 200 を返しませんでした (' + statuses + ')。' +
+        '<span class="muted">quotes host (data-api) の無応答は既知 (#21)。判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
       return;
     }
     // どれか 1 候補にでも symbol が出てくれば「銘柄情報あり」(category 非依存)。

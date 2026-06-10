@@ -29,7 +29,7 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     // CodeRabbit #462: XSS escape helper / 失敗時リセット / alt-category 候補
     expect(body).toContain('function escHtml(')
     expect(body).toContain('function resetProbeView(')
-    expect(body).toContain('instrumentQuotesHostAlt')
+    expect(body).toContain('instrumentStockTrade')
   })
 
   it('control の AAPL chip と再 probe ボタンがある', async () => {
