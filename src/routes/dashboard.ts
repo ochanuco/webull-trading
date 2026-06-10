@@ -1493,7 +1493,11 @@ const STYLE = `
   .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
   /* チャート個別銘柄タブの銘柄レール (左固定)。sticky top は topnav の高さ分逃がす */
   .symbol-layout{display:flex;gap:14px;align-items:flex-start}
-  .symbol-rail{flex:0 0 172px;position:sticky;top:92px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 108px);overflow-y:auto;box-sizing:border-box}
+  /* sticky の top は「自然位置と同じ高さ」に合わせる (--header-h は layout の
+     inline script が実測でセット)。top と自然位置がズレていると、スクロール開始
+     直後にズレ分だけ要素が動いてから張り付く微妙な jump が出る。
+     rail の自然位置 = header 実高 + main padding 24px。 */
+  .symbol-rail{flex:0 0 172px;position:sticky;top:calc(var(--header-h,86px) + 24px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - var(--header-h,86px) - 40px);overflow-y:auto;box-sizing:border-box}
   .symbol-rail .rail-head{font-size:11px;color:#86868b;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px 6px}
   .rail-item{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;text-decoration:none;color:#1d1d1f}
   .rail-item:hover{background:#f0f0f3}
@@ -1508,13 +1512,17 @@ const STYLE = `
      グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
      チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
      page 本文の assertion に使われる日本語 label をそのまま書かないこと。 */
-  .symbol-chart-pin{position:sticky;top:92px;z-index:50;background:#f5f5f7;padding-bottom:8px}
+  /* pin は margin-top:-24px + padding-top:24px で main padding を自前で吸収し、
+     自然位置 (= header 直下) と sticky top を一致させて jump をゼロにする。
+     吸収した 24px は pin の背景になるので、scroll 中に panel が透けて見える
+     隙間も出ない。 */
+  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:#f5f5f7;margin-top:-24px;padding-top:24px;padding-bottom:8px}
   @media(max-width:780px){
     .symbol-layout{flex-direction:column}
     .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
     .symbol-rail .rail-head{width:100%}
     /* 小画面では 460px のチャート固定が viewport を食い潰すため解除 */
-    .symbol-chart-pin{position:static}
+    .symbol-chart-pin{position:static;margin-top:0;padding-top:0}
   }
 `
 
@@ -1655,6 +1663,23 @@ function layout(
   </div>
   ${subnav ? `<nav class="subnav">${subnav}</nav>` : ''}
 </header>
+<script id="header-h-script">
+  // sticky 要素 (.symbol-rail / .symbol-chart-pin) の top に使う header 実高。
+  // nav の折り返しで高さが変わるため実測でセットする (CSS 固定値だと自然位置と
+  // ズレてスクロール開始時に jump する)。
+  // 注: XSS 回帰テストが「未エスケープ payload の生 script 開始タグ」を検出する
+  // ため、layout 由来の script tag には属性 (id) を付けて区別する。タグ文字列を
+  // この comment 内にもそのまま書かないこと。
+  (function () {
+    var h = document.querySelector('.header');
+    if (!h) return;
+    var set = function () {
+      document.documentElement.style.setProperty('--header-h', h.offsetHeight + 'px');
+    };
+    set();
+    window.addEventListener('resize', set);
+  })();
+</script>
 <main class="main">
   ${body}
   <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
