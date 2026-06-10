@@ -2076,3 +2076,40 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
     expect(summary.rejected[0]?.reason).toContain('missing-lot-size')
   })
 })
+
+describe('inverse_hedge role enabled but inverse-pair gate still wins (#457)', () => {
+  it('role 有効化後も相手保有中の BUY は inverse-pair gate で reject', async () => {
+    // #457 で inverse_hedge の entry 抑止は外れた (= buildEntrySuppressedSymbols
+    // が空を返す) が、両建て防止 (inverse_pairs) は下流で引き続き効くこと。
+    const { buildEntrySuppressedSymbols } = await import(
+      '../../../src/trading/strategy/symbolRuleResolution'
+    )
+    const suppressed = buildEntrySuppressedSymbols({ SQQQ: 'inverse_hedge' })
+    expect(suppressed).toEqual({})
+
+    const execution = mockExecution()
+    const counterpartHeld: SymbolState = {
+      ...emptySymbolState('TQQQ', () => now),
+      position: { qty: 2, avgPrice: 50, openedAt: now.toISOString() },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SQQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ TQQQ: counterpartHeld }),
+      execution,
+      entrySuppressedSymbols: suppressed,
+      perSymbolRisk: {
+        inversePairs: { SQQQ: 'TQQQ', TQQQ: 'SQQQ' },
+        spreadLimits: { US: 0.0025, JP: 0.006 },
+        staleQuoteMs: 900_000,
+        gapRejectPct: 0.03,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('inverse')
+  })
+})
