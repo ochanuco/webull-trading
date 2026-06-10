@@ -251,6 +251,17 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   stopPctOverride: null,
   takeProfitPctOverride: null,
   intradayOnly: false,
+  role: null,
+  pullbackMaxOverride: null,
+  pullbackMinOverride: null,
+  minReturn50dOverride: null,
+  maxAtrRatioOverride: null,
+  maxSma50DeviationPctOverride: null,
+  requireAboveSma50Override: null,
+  alternatives: null,
+  entryRequired: false,
+  alwaysActive: false,
+  cashFallbackSymbol: null,
 })
 
 describe('setInversePair', () => {
@@ -303,5 +314,76 @@ describe('createSymbolPair', () => {
   it('throws on self-pair', async () => {
     const { db } = fakeWriteDb()
     await expect(createSymbolPair(db, writeInput('SOXL'), 'SOXL', 't')).rejects.toThrow(/self-referential/)
+  })
+})
+
+describe('loadSymbolConfig role / entry overrides / alternatives (#452)', () => {
+  it('maps valid roles and normalizes unknown DB values to "unknown" (not NULL fallback)', async () => {
+    const rows = [
+      { symbol: 'sgov', market: 'US', active: true, maxNotional: null, role: 'cash_parking' },
+      { symbol: 'qqq', market: 'US', active: true, maxNotional: null, role: 'core_trend' },
+      { symbol: 'tqqq', market: 'US', active: true, maxNotional: null, role: 'leveraged_trend' },
+      // typo した role は 'unknown' に正規化 (= downstream が entry 抑止)。
+      // NULL 扱いに倒すと既定 gate で発注され得るため fail-closed 側に倒す。
+      { symbol: 'oops', market: 'US', active: true, maxNotional: null, role: 'cash_praking' },
+      { symbol: 'soxl', market: 'US', active: true, maxNotional: null, role: null },
+      { symbol: 'blank', market: 'US', active: true, maxNotional: null, role: '  ' },
+    ]
+    const result = await loadSymbolConfig(fakeDb(rows))
+    expect(result.symbolRole).toEqual({
+      SGOV: 'cash_parking',
+      QQQ: 'core_trend',
+      TQQQ: 'leveraged_trend',
+      OOPS: 'unknown',
+    })
+  })
+
+  it('validates entry override ranges and drops invalid values (fall-through to defaults)', async () => {
+    const rows = [
+      {
+        symbol: 'qqq',
+        market: 'US',
+        active: true,
+        maxNotional: null,
+        pullbackMaxOverride: -0.015,
+        pullbackMinOverride: -0.05,
+        minReturn50dOverride: 0.03,
+        maxAtrRatioOverride: 1.8,
+        maxSma50DeviationPctOverride: 0.2,
+        requireAboveSma50Override: false,
+      },
+      {
+        symbol: 'bad',
+        market: 'US',
+        active: true,
+        maxNotional: null,
+        pullbackMaxOverride: 0.5, // 正値は不正 (押し目は負 fraction)
+        pullbackMinOverride: -1.5, // 範囲外
+        minReturn50dOverride: Number.NaN,
+        maxAtrRatioOverride: 0, // > 0 必須
+        maxSma50DeviationPctOverride: -0.2, // > 0 必須
+        requireAboveSma50Override: null,
+      },
+    ]
+    const result = await loadSymbolConfig(fakeDb(rows))
+    expect(result.symbolPullbackMaxOverride).toEqual({ QQQ: -0.015 })
+    expect(result.symbolPullbackMinOverride).toEqual({ QQQ: -0.05 })
+    expect(result.symbolMinReturn50dOverride).toEqual({ QQQ: 0.03 })
+    expect(result.symbolMaxAtrRatioOverride).toEqual({ QQQ: 1.8 })
+    expect(result.symbolMaxSma50DeviationPctOverride).toEqual({ QQQ: 0.2 })
+    expect(result.symbolRequireAboveSma50Override).toEqual({ QQQ: false })
+  })
+
+  it('parses alternatives JSON, uppercases, dedupes, drops self-reference and bad JSON', async () => {
+    const rows = [
+      { symbol: 'soxl', market: 'US', active: true, maxNotional: null, alternatives: '["soxx","SMH","soxx","SOXL"]' },
+      { symbol: 'tqqq', market: 'US', active: true, maxNotional: null, alternatives: 'not-json' },
+      { symbol: 'qqq', market: 'US', active: true, maxNotional: null, alternatives: '["BAD SYMBOL!"]' },
+      { symbol: 'voo', market: 'US', active: true, maxNotional: null, alternatives: '[]' },
+      { symbol: 'spy', market: 'US', active: true, maxNotional: null, alternatives: null },
+    ]
+    const result = await loadSymbolConfig(fakeDb(rows))
+    // self (SOXL) と重複は除去。不正 JSON / 不正 ticker / 空配列 / NULL は map 不在。
+    expect(result.symbolAlternatives).toEqual({ SOXL: ['SOXX', 'SMH'] })
   })
 })

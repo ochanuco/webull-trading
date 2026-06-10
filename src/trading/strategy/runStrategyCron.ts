@@ -46,6 +46,18 @@ import {
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
+import {
+  buildEntrySuppressedSymbols,
+  buildHalfEntrySymbols,
+  buildSymbolRules,
+} from './symbolRuleResolution'
+import {
+  buildCashRebalancePlan,
+  computeConditionalAllocation,
+  type AllocationView,
+  type CashRebalanceSkip,
+  type EntrySnapshot,
+} from './conditionalAllocation'
 
 const DEFAULT_EQUITY_USD = 10_000
 const DEFAULT_EQUITY_JPY = 1_500_000
@@ -133,6 +145,16 @@ export interface StrategyCronAnalysis {
     symbols: string[]
   }>
   decisions: PullbackDecisionTrace[]
+  /**
+   * 条件連動配分 (#452 Layer 3)。target/active weight と退避の判定結果。
+   * `cash_fallback_orders_enabled` が off でも**計算は常に行い**ここに残す
+   * (判定・表示のみモード)。発注 plan は on の時のみ。
+   */
+  allocation?: {
+    view: AllocationView
+    ordersEnabled: boolean
+    rebalanceSkipped?: CashRebalanceSkip[]
+  }
 }
 
 /**
@@ -168,6 +190,7 @@ export async function runStrategyCron(
     rejected: [],
     errors: [],
     decisions: [],
+    entrySnapshots: {},
   })
 
   const [global, universe] = await Promise.all([
@@ -242,29 +265,15 @@ export async function runStrategyCron(
     maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
     maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
   }
-  // Per-symbol override map (#316)。symbol_config の time_stop_days_override /
-  // k_atr_override を defaultRule に重ね、3x leveraged ETF 等の銘柄固有事情
-  // (短い hold が望ましい / 高ボラで stop を緩めたい) を rule に注入する。
-  // override が NULL の symbol は rulesMap に含めない (= defaultRule そのまま)。
-  const rulesMap: Record<string, typeof defaultRule> = {}
-  const overrideSymbols = new Set<string>([
-    ...Object.keys(universe.symbolTimeStopDaysOverride),
-    ...Object.keys(universe.symbolKAtrOverride),
-    ...Object.keys(universe.symbolStopPctOverride),
-    ...Object.keys(universe.symbolTakeProfitPctOverride),
-  ])
-  for (const sym of overrideSymbols) {
-    rulesMap[sym] = {
-      ...defaultRule,
-      timeStopDays:
-        universe.symbolTimeStopDaysOverride[sym] ?? defaultRule.timeStopDays,
-      kAtr: universe.symbolKAtrOverride[sym] ?? defaultRule.kAtr,
-      // stop/TP override (#exit-atr)。NULL は defaultRule そのまま。
-      stopPct: universe.symbolStopPctOverride[sym] ?? defaultRule.stopPct,
-      takeProfitPct:
-        universe.symbolTakeProfitPctOverride[sym] ?? defaultRule.takeProfitPct,
-    }
-  }
+  // Per-symbol rule map (#316 / #exit-atr / #452)。global default → role preset
+  // → per-symbol override の順に重ねる。詳細と回帰保証は symbolRuleResolution.ts。
+  const rulesMap = buildSymbolRules(defaultRule, universe)
+  // Entry 抑止 role (#452): cash_parking / 定義のみの role / enum 外 'unknown' は
+  // BUY を生成しない (SELL / HOLD の exit 経路は通す)。
+  const entrySuppressedSymbols = buildEntrySuppressedSymbols(universe.symbolRole)
+  // 段階判定 HALF (#452 PR 2): entry 有効 role を明示した銘柄のみ 0.5x entry を
+  // 許可する。role NULL の既存銘柄は従来の二値挙動のまま。
+  const halfEntrySymbols = buildHalfEntrySymbols(universe.symbolRole)
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
@@ -601,6 +610,8 @@ export async function runStrategyCron(
       intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
       defaultRule,
       rulesMap,
+      entrySuppressedSymbols,
+      halfEntrySymbols,
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,
@@ -685,7 +696,99 @@ export async function runStrategyCron(
     summary.rejected.push(...sub.rejected)
     summary.errors.push(...sub.errors)
     summary.decisions.push(...sub.decisions)
+    Object.assign(summary.entrySnapshots, sub.entrySnapshots)
     analysis.decisions.push(...sub.decisions)
+  }
+
+  // ---- 条件連動配分 (#452 Layer 3) ----
+  // target/active weight の計算は flag に関わらず常に行い analysis に残す
+  // (判定・表示)。退避先への自動発注 (pass 2) は cash_fallback_orders_enabled
+  // (default false) が on で、かつ budget 基準額がある時だけ。
+  const allocationView = computeConditionalAllocation({
+    targetWeights: universe.symbolBudgetAllocPct,
+    policy: {
+      entryRequired: new Set(Object.keys(universe.symbolEntryRequired)),
+      alwaysActive: new Set(Object.keys(universe.symbolAlwaysActive)),
+      cashFallback: universe.symbolCashFallback,
+    },
+    entryStatuses: Object.fromEntries(
+      Object.entries(summary.entrySnapshots).map(([sym, snap]) => [sym, snap.status]),
+    ),
+    heldSymbols: new Set(
+      Object.entries(summary.entrySnapshots)
+        .filter(([, snap]) => snap.heldQty > 0)
+        .map(([sym]) => sym),
+    ),
+    symbolCurrency: universe.symbolCurrency,
+  })
+  analysis.allocation = { view: allocationView, ordersEnabled: global.cashFallbackOrdersEnabled }
+
+  if (global.cashFallbackOrdersEnabled && budgetBasisJpy !== undefined) {
+    const plan = buildCashRebalancePlan({
+      allocation: allocationView,
+      snapshots: summary.entrySnapshots,
+      budgetBasisJpy,
+      fxJpyPerCcy: (currency) => (currency === 'JPY' ? 1 : (usdJpyRate ?? undefined)),
+      symbolCurrency: universe.symbolCurrency,
+      symbolLotSize: universe.symbolLotSize,
+      symbolMaxNotional: universe.symbolMaxNotional,
+      maxOrderNotional: { USD: global.maxOrderNotionalUsd, JPY: global.maxOrderNotionalJpy },
+    })
+    analysis.allocation.rebalanceSkipped = plan.skipped
+    if (plan.orders.length > 0) {
+      // pass 2: cash 銘柄だけを cashRebalanceQuantityMap 付きで再実行する。
+      // entrySuppressedSymbols は渡さない (cash_parking の BUY を許可する唯一の
+      // 経路)。lot / per-symbol risk / buying-power / pending lock / DRY_RUN は
+      // 通常 BUY と同じ gate を通る。
+      const byCcy: Record<SymbolCurrency, typeof plan.orders> = { USD: [], JPY: [] }
+      for (const order of plan.orders) {
+        byCcy[universe.symbolCurrency[order.symbol] ?? 'USD'].push(order)
+      }
+      for (const run of runs) {
+        const orders = byCcy[run.currency]
+        if (orders.length === 0) continue
+        const decisionDb = strategyDecisionDbOrUndefined(env)
+        const sub = await runPullbackScheduler({
+          symbols: orders.map((o) => o.symbol),
+          equity: run.equity,
+          symbolLotSizeMap: universe.symbolLotSize,
+          barClient,
+          positionStore,
+          execution,
+          symbolCapMap: universe.symbolMaxNotional,
+          cashRebalanceQuantityMap: Object.fromEntries(orders.map((o) => [o.symbol, o.quantity])),
+          fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
+          buyingPower,
+          defaultRule,
+          rulesMap,
+          requestId: options.requestId,
+          notifier,
+          perSymbolRisk: {
+            inversePairs: universe.inversePairs,
+            spreadLimits: {
+              US: global.spreadLimitPctUs,
+              JP: global.spreadLimitPctJp,
+            },
+            staleQuoteMs: global.staleQuoteMs,
+            gapRejectPct: global.gapRejectPct,
+          },
+          vixDecision,
+          onDecision: ({ trace, ...record }) =>
+            logStrategyDecision(decisionDb, {
+              timestamp: new Date().toISOString(),
+              requestId: options.requestId,
+              ...record,
+              traceJson: trace && trace.length > 0 ? JSON.stringify(trace) : null,
+            }),
+        })
+        summary.evaluated += sub.evaluated
+        summary.buys += sub.buys
+        summary.rejected.push(...sub.rejected)
+        summary.errors.push(...sub.errors)
+        summary.decisions.push(...sub.decisions)
+        analysis.decisions.push(...sub.decisions)
+      }
+    }
   }
 
   return { summary, symbols: universe.allowedSymbols, analysis }

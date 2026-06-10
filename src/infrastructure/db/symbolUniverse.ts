@@ -4,6 +4,7 @@ import {
   loadSymbolConfig,
   type SymbolCurrency,
   type SymbolMarket,
+  type SymbolRoleValue,
 } from './symbolConfigRepo'
 
 export interface SymbolUniverse {
@@ -52,6 +53,26 @@ export interface SymbolUniverse {
   symbolTakeProfitPctOverride: Record<string, number>
   /** intraday_only=true の symbol 集合 (#intraday-only)。false は不在。 */
   symbolIntradayOnly: Record<string, boolean>
+  /**
+   * symbol → role (#452)。NULL は不在 (= 従来挙動)。enum 外の DB 直書きは
+   * 'unknown' (= entry 抑止、fail-closed)。
+   */
+  symbolRole: Record<string, SymbolRoleValue>
+  /** Entry gate override (#452 Layer 2a)。不在キーは role preset → global default。 */
+  symbolPullbackMaxOverride: Record<string, number>
+  symbolPullbackMinOverride: Record<string, number>
+  symbolMinReturn50dOverride: Record<string, number>
+  symbolMaxAtrRatioOverride: Record<string, number>
+  symbolMaxSma50DeviationPctOverride: Record<string, number>
+  symbolRequireAboveSma50Override: Record<string, boolean>
+  /** symbol → 代替銘柄候補 (#452、表示専用)。不在 = 候補なし。 */
+  symbolAlternatives: Record<string, string[]>
+  /** entry_required=true の集合 (#452 Layer 3)。false は不在。 */
+  symbolEntryRequired: Record<string, boolean>
+  /** always_active=true の集合 (#452、cash_parking 用)。false は不在。 */
+  symbolAlwaysActive: Record<string, boolean>
+  /** symbol → 退避先 symbol (#452)。不在 = 退避しない。 */
+  symbolCashFallback: Record<string, string>
   inversePairs: Record<string, string>
   source: 'd1'
 }
@@ -87,6 +108,17 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolStopPctOverride: config.symbolStopPctOverride,
     symbolTakeProfitPctOverride: config.symbolTakeProfitPctOverride,
     symbolIntradayOnly: config.symbolIntradayOnly,
+    symbolRole: config.symbolRole,
+    symbolPullbackMaxOverride: config.symbolPullbackMaxOverride,
+    symbolPullbackMinOverride: config.symbolPullbackMinOverride,
+    symbolMinReturn50dOverride: config.symbolMinReturn50dOverride,
+    symbolMaxAtrRatioOverride: config.symbolMaxAtrRatioOverride,
+    symbolMaxSma50DeviationPctOverride: config.symbolMaxSma50DeviationPctOverride,
+    symbolRequireAboveSma50Override: config.symbolRequireAboveSma50Override,
+    symbolAlternatives: config.symbolAlternatives,
+    symbolEntryRequired: config.symbolEntryRequired,
+    symbolAlwaysActive: config.symbolAlwaysActive,
+    symbolCashFallback: config.symbolCashFallback,
     inversePairs: pairs,
     source: 'd1',
   }
