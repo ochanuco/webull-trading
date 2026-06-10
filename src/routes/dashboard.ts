@@ -1862,6 +1862,14 @@ function brokerProbeBody(args: {
   // (Cloudflare Access cookie 流用、payload は no-store)。
   // 自動 probe は URL に symbol+category がある時だけ (PR #250 の方針を維持)。
   const universeLinks = renderUniverseLinks(args.universe)
+  // AAPL control chip は universe に AAPL が居る環境では重複するので出さない。
+  const hasAapl = [
+    ...(args.universe?.allowedSymbols ?? []),
+    ...(args.universe?.inactiveSymbols ?? []),
+  ].some((sym) => sym.toUpperCase() === 'AAPL')
+  const controlChip = hasAapl
+    ? ''
+    : `<div style="margin-bottom:10px"><button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button></div>`
   return `<style>
   .bp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:12px 0}
   .bp-card{background:#fff;border:1px solid #e3e3e8;border-radius:10px;padding:14px 16px}
@@ -1881,39 +1889,33 @@ function brokerProbeBody(args: {
   </style>
 
   <div class="bp-card" style="margin-top:8px">
-    <h3>1. 銘柄を選択 → 2. 診断を実行 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
+    <h3>銘柄を選んで診断 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
     <div class="bp-body">
       <div style="margin-bottom:6px">${universeLinks}</div>
-      <div style="margin-bottom:10px">
-        <button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button>
-      </div>
+      ${controlChip}
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px;background:#f6f8fc;border-radius:8px">
         <span style="font-size:13px">選択中: <strong id="probe-current">未選択</strong></span>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
-          <input type="checkbox" id="probe-preview-check" checked> 発注前検証 (Preview Order) も実行 <span class="muted" style="font-size:11px">— 注文は作成されません</span>
+          <input type="checkbox" id="probe-preview-check" checked> 発注前検証も実行 <span class="muted" style="font-size:11px">(発注なし)</span>
         </label>
         <button type="button" id="probe-submit" style="padding:7px 22px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">診断を実行</button>
       </div>
-      <p class="muted" style="margin:8px 0 0;font-size:11px">銘柄 chip をクリックして選択し、「診断を実行」で Webull broker へ照会します (選択だけでは通信しません)。任意 symbol は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>。</p>
     </div>
   </div>
 
   <div class="bp-grid">
     <div class="bp-card">
-      <h3>Webull 取扱 <span class="muted" style="font-size:11px;font-weight:normal">(instrument 照会 #461)</span><span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="bp-instrument-body" class="muted">銘柄をクリックすると Webull の instrument 照会で「銘柄として認識されているか」を確認します。</div>
-      <p class="muted" style="font-size:11px;margin:8px 0 0">⚠ 照会は<strong>取扱有無の近似</strong>。発注 allowlist (TICKER_IS_DENY) は別系統の可能性があり、確定的なガードは事後の自動停止 (#460) が担う。</p>
-      <p class="muted" style="font-size:11px;margin:4px 0 0">「発注前検証」は Webull の Preview Order API で発注パイプラインの検証だけを通すもの。取扱外銘柄は TICKER_IS_DENY が返り、<strong>発注せずに</strong>取引可否を確定できます (#461)。</p>
+      <h3>Webull 取扱 <span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div class="bp-body" id="bp-instrument-body" class="muted">—</div>
     </div>
     <div class="bp-card">
-      <h3>Yahoo quote <span class="muted" style="font-size:11px;font-weight:normal">(cron の default source)</span><span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <h3>Yahoo quote <span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="bp-yahoo-body" class="muted">—</div>
       <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote-yahoo" class="bp-raw">(未実行)</pre></details>
     </div>
     <div class="bp-card">
-      <h3>買付余力 <span class="muted" style="font-size:11px;font-weight:normal">#415</span><span id="bp-bp-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <h3>買付余力 <span id="bp-bp-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="probe-buying-power" class="muted">—</div>
-      <p class="muted" style="font-size:11px;margin:8px 0 0">取得失敗時は cron が当 tick の BUY を全見送り (fail-closed)。</p>
     </div>
   </div>
 

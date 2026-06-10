@@ -11,11 +11,8 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     const res = await app.request('/dashboard/broker-probe', {}, baseEnv)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // instrument 照会の判定カード + 近似である旨の注記 (#460 への参照)
     expect(body).toContain('Webull 取扱')
     expect(body).toContain('id="bp-instrument-pill"')
-    expect(body).toContain('取扱有無の近似')
-    expect(body).toContain('#460')
     // quote / 買付余力カード
     expect(body).toContain('id="bp-quote-pill"')
     expect(body).toContain('id="bp-yahoo-pill"')
@@ -38,7 +35,7 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     const body = await res.text()
     expect(body).toContain('id="probe-submit"')
     expect(body).toContain('id="probe-preview-check"')
-    expect(body).toContain('注文は作成されません')
+    expect(body).toContain('発注なし')
     expect(body).toContain('previewVariants')
     // chip クリックは選択のみ (setSelection)、通信は submit ボタンから
     expect(body).toContain('function setSelection(')
