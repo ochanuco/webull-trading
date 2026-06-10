@@ -1002,6 +1002,8 @@ const DEFAULT_PARAMS: StrategyParamsSnapshot = {
   minReturn50d: 0.08,
   requireAboveSma50: true,
   kAtr: 2.0,
+  maxSma50DeviationPct: 0.6,
+  maxAtrRatio: 1.5,
 }
 
 /** Count cells flagged as 変更済 (title attr ベースで識別、凡例 ⚠ と分離)。 */
@@ -1800,6 +1802,237 @@ describe('renderCurrentIndicatorsBadge', () => {
     expect(html).toContain('120.00')
     expect(html).toContain('60.00')
     expect(html).toContain('—') // high20d / low20d
+  })
+})
+
+import {
+  renderBuyabilityPanel,
+  renderChartDecisionTrace,
+  renderDecisionPlotCaption,
+  renderSymbolTab,
+  type ChartsBodySymbol,
+  type SymbolChartDecision,
+} from '../../src/routes/dashboard'
+import { buildBuyabilityView, type EvalIndicatorPoint } from '../../src/trading/strategy/entryDistance'
+import {
+  TEST_DEFAULT_RULE,
+  type PullbackIndicators,
+} from '../../src/trading/strategy/strategies/PullbackUptrendStrategy'
+
+// TEST_DEFAULT_RULE: band = high20d×[0.94, 0.97], sma50 floor。
+function indFor(overrides: Partial<PullbackIndicators>): PullbackIndicators {
+  return { price: 95, sma50: 90, return50d: 0.12, high20d: 100, atr20: 1, baselineAtr20: 1, ...overrides }
+}
+
+describe('renderChartDecisionTrace (チャート判定点クリック時のラダー HTML)', () => {
+  it('trace があれば renderDecisionLadder のラダーを返す', () => {
+    const trace = JSON.stringify([
+      { label: 'guard.pending_order_absent', label_ja: '発注中でない', passed: true },
+      {
+        label: 'risk.overextension',
+        label_ja: '過熱していない',
+        passed: false,
+        actual: 0.4,
+        operator: '<=',
+        threshold: 0.2,
+      },
+    ])
+    const html = renderChartDecisionTrace(trace, 'REJECT', 'overextension guard')
+    expect(html).toContain('判定トレース')
+    expect(html).toContain('発注中でない')
+    expect(html).toContain('過熱していない')
+    expect(html).toContain('◀ 採用') // 最後のステップに採用矢印
+    expect(html).toContain('tl-out-reject') // 出力ボックス (REJECT 色)
+  })
+
+  it('trace 無し (旧ログ) は出力ボックスのみのフォールバック (◀ 採用 なし)', () => {
+    const html = renderChartDecisionTrace(null, 'REJECT', 'overextension guard')
+    expect(html).toContain('トレースが保存されていません')
+    expect(html).toContain('tl-out-reject')
+    expect(html).toContain('出力: <strong>REJECT</strong>')
+    expect(html).not.toContain('◀ 採用')
+  })
+
+  it('壊れた trace JSON もフォールバックに落ちる (throw しない)', () => {
+    const html = renderChartDecisionTrace('not-json', 'ERROR', 'boom')
+    expect(html).toContain('トレースが保存されていません')
+    expect(html).toContain('tl-out-error')
+  })
+})
+
+describe('renderDecisionPlotCaption (判定点プロットの凡例 + 件数)', () => {
+  function chartWith(decisions: SymbolChartDecision[]): SymbolChartData {
+    return {
+      symbol: 'TQQQ',
+      points: [{ timestamp: '2026-06-06T14:00:00.000Z', price: 80, sma50: null, high20d: null, low20d: null }],
+      markers: [], position: null,
+      rules: { pullbackMax: -0.03, pullbackMin: -0.15, stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10 },
+      trendLine: null, intradayBars: [],
+      latestCronPrice: null, latestCronTimestamp: null,
+      decisions,
+    }
+  }
+  const oneDecision: SymbolChartDecision = {
+    id: 1, timestamp: '2026-06-06T14:00:00.000Z', price: 80,
+    decision: 'REJECT', reason: 'overextension', ladderHtml: '<div>x</div>',
+  }
+
+  it('chart null / decisions 無し / 空配列なら空文字', () => {
+    expect(renderDecisionPlotCaption(null)).toBe('')
+    expect(renderDecisionPlotCaption(chartWith([]))).toBe('')
+  })
+
+  it('decisions があれば凡例 + HOLD 省略の説明を出す', () => {
+    const html = renderDecisionPlotCaption(chartWith([oneDecision]))
+    expect(html).toContain('買い (BUY)')
+    expect(html).toContain('売り (SELL)')
+    expect(html).toContain('見送り (REJECT)')
+    expect(html).toContain('エラー (ERROR)')
+    expect(html).toContain('HOLD')
+    expect(html).toContain('クリック')
+  })
+
+  it('上限 (250) に達したら truncation を明示 (silent cap を避ける)', () => {
+    const many = Array.from({ length: 250 }, (_, i) => ({ ...oneDecision, id: i + 1 }))
+    const html = renderDecisionPlotCaption(chartWith(many))
+    expect(html).toContain('直近 250 件まで表示')
+  })
+})
+
+describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () => {
+  const baseParams = {
+    stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10,
+    pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
+    requireAboveSma50: true, kAtr: 2,
+    maxSma50DeviationPct: 0.6, maxAtrRatio: 1.5,
+  }
+  function symbolArgs(
+    decisions: SymbolChartDecision[],
+    buyability?: ChartsBodySymbol['buyability'],
+  ): ChartsBodySymbol {
+    return {
+      tab: 'symbol',
+      focusSymbol: 'TQQQ',
+      symbolChart: {
+        symbol: 'TQQQ',
+        points: [{ timestamp: '2026-06-06T14:00:00.000Z', price: 80, sma50: 70, high20d: 90, low20d: 60 }],
+        markers: [], position: null,
+        rules: { pullbackMax: -0.03, pullbackMin: -0.15, stopPct: -0.08, takeProfitPct: 0.07, timeStopDays: 10 },
+        trendLine: null, intradayBars: [],
+        latestCronPrice: 80, latestCronTimestamp: '2026-06-06T14:00:00.000Z',
+        decisions,
+      },
+      availableSymbols: ['TQQQ'],
+      strategyParams: baseParams,
+      zoom: null,
+      buyability: buyability ?? null,
+    }
+  }
+
+  it('decisions があれば scatter series + trace panel + 埋込ラダーを配線する', () => {
+    const html = renderSymbolTab(symbolArgs([
+      {
+        id: 1, timestamp: '2026-06-06T14:00:00.000Z', price: 80,
+        decision: 'REJECT', reason: 'overextension',
+        ladderHtml: '<div>LADDER_EMBED_MARKER</div>',
+      },
+    ]))
+    expect(html).toContain("type: 'scatter'")
+    expect(html).toContain("name: '判定'")
+    expect(html).toContain('decision-trace-panel')
+    expect(html).toContain('showDecisionTrace')
+    // 各点の ladderHtml が payload に埋め込まれている (safeJsonScript で < は
+    // < に escape されるが marker テキストは残る)
+    expect(html).toContain('LADDER_EMBED_MARKER')
+    // 凡例キャプションも出る
+    expect(html).toContain('見送り (REJECT)')
+  })
+
+  it('decisions が無ければ凡例は出ず payload も空 (scatter JS は静的に常駐 / runtime で 0 件描画)', () => {
+    const html = renderSymbolTab(symbolArgs([]))
+    // 凡例キャプションは decisions があるときだけ出す
+    expect(html).not.toContain('見送り (REJECT)')
+    // payload の decisions は空配列 (= runtime で scatter 0 点)
+    expect(html).toContain('"decisions":[]')
+    // placeholder パネルは常に描画
+    expect(html).toContain('decision-trace-panel')
+  })
+
+  it('buyability があれば 入場パネル + 押し目ゾーン端の距離ラベルを配線する', () => {
+    const view = buildBuyabilityView(
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 99 }) }],
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderSymbolTab(symbolArgs([], view))
+    expect(html).toContain('入場まで') // パネル headline
+    // 入場ライン独立線は廃止 → 押し目ゾーン端に距離ラベルを載せる
+    expect(html).toContain("bandEdgeLabel('押し目上端'")
+    expect(html).toContain("bandEdgeLabel('押し目下端'")
+    expect(html).not.toContain('"entryLine"') // 独立 entryLine payload は無い
+  })
+
+  it('buyability が null なら projection も null', () => {
+    const html = renderSymbolTab(symbolArgs([], null))
+    expect(html).toContain('"projection":null')
+  })
+
+  it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {
+    const view = buildBuyabilityView(
+      [99.5, 99, 98.5, 98].map((price, i) => ({
+        timestamp: `2026-06-0${i + 1}T14:00:00.000Z`,
+        indicators: indFor({ price }),
+      })),
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderSymbolTab(symbolArgs([], view))
+    expect(html).toContain('"projection"')
+    expect(html).toContain('"slopePerStep"')
+    expect(html).toContain('参考 価格外挿') // 外挿線 series 名 (配線確認)
+  })
+})
+
+describe('renderBuyabilityPanel (入場まで あとどれくらい / いつ頃)', () => {
+  function viewFromPrices(prices: number[]): ReturnType<typeof buildBuyabilityView> {
+    const evals: EvalIndicatorPoint[] = prices.map((price, i) => ({
+      timestamp: `2026-06-0${i + 1}T14:00:00.000Z`,
+      indicators: indFor({ price }),
+    }))
+    return buildBuyabilityView(evals, TEST_DEFAULT_RULE)
+  }
+
+  it('null / current 無しなら空文字', () => {
+    expect(renderBuyabilityPanel(null)).toBe('')
+  })
+
+  it('価格があと下落で入場 → 「入場まで あと 価格」+ 到達価格 + ゲート表', () => {
+    const html = renderBuyabilityPanel(viewFromPrices([99]))
+    expect(html).toContain('入場まで')
+    expect(html).toContain('あと 価格')
+    expect(html).toContain('97.00') // band 上端 = 到達価格
+    expect(html).toContain('入場ゲート')
+    expect(html).toContain('◀ ボトルネック') // 不成立ゲートを明示
+  })
+
+  it('全条件充足なら「入場条件を充足」', () => {
+    const html = renderBuyabilityPanel(viewFromPrices([95]))
+    expect(html).toContain('入場条件を充足')
+  })
+
+  it('価格非依存ブロック (トレンド不足) は「価格を動かすだけでは入場不可」', () => {
+    const view = buildBuyabilityView(
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ return50d: 0.02 }) }],
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderBuyabilityPanel(view)
+    expect(html).toContain('価格を動かすだけでは入場不可')
+    expect(html).toContain('トレンド')
+  })
+
+  it('距離が縮小していれば 縮小中 + 参考ETA (非予測注記つき)', () => {
+    const html = renderBuyabilityPanel(viewFromPrices([99.5, 99, 98.5, 98, 97.5]))
+    expect(html).toContain('縮小中')
+    expect(html).toContain('参考 ETA')
+    expect(html).toContain('予測ではない')
   })
 })
 
