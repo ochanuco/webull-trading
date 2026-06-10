@@ -32,20 +32,16 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     expect(body).toContain('instrumentStockTrade')
   })
 
-  it('発注前検証 (Preview Order) ボタンと注記がある (#461)', async () => {
+  it('選択 → 実行フロー: 実行ボタン / 発注前検証 checkbox / chip は選択のみ (#461)', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/broker-probe', {}, baseEnv as never)
     const body = await res.text()
-    expect(body).toContain('id="bp-preview-btn"')
+    expect(body).toContain('id="probe-submit"')
+    expect(body).toContain('id="probe-preview-check"')
     expect(body).toContain('注文は作成されません')
     expect(body).toContain('previewVariants')
-  })
-
-  it('control の AAPL chip と再 probe ボタンがある', async () => {
-    const app = createApp()
-    const res = await app.request('/dashboard/broker-probe', {}, baseEnv)
-    const body = await res.text()
+    // chip クリックは選択のみ (setSelection)、通信は submit ボタンから
+    expect(body).toContain('function setSelection(')
     expect(body).toMatch(/data-symbol="AAPL" data-category="US_STOCK"/)
-    expect(body).toContain('id="probe-refresh"')
   })
 })

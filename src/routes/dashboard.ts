@@ -1874,20 +1874,27 @@ function brokerProbeBody(args: {
   .bp-pill-wait{background:#f3f3f5;color:#86868b}
   .bp-chip{padding:4px 12px;font-size:12px;border:1px solid #d8d8de;border-radius:14px;cursor:pointer;background:#fff;margin:0 4px 6px 0}
   .bp-chip:hover{background:#eef4ff;border-color:#06c}
+  .bp-chip-selected{background:#06c !important;border-color:#06c !important;color:#fff !important}
+  .bp-chip-selected .muted{color:#cfe0ff !important}
   .bp-raw{background:#f6f6f8;border:1px solid #e3e3e8;border-radius:6px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px}
   .bp-num{font-variant-numeric:tabular-nums}
   </style>
 
   <div class="bp-card" style="margin-top:8px">
-    <h3>銘柄を選んで probe <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
+    <h3>1. 銘柄を選択 → 2. 診断を実行 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
     <div class="bp-body">
       <div style="margin-bottom:6px">${universeLinks}</div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <div style="margin-bottom:10px">
         <button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button>
-        <button type="button" id="probe-refresh" class="bp-chip" style="border-color:#06c;color:#06c">↻ 再 probe</button>
-        <span class="muted" id="probe-current" style="font-size:12px"></span>
       </div>
-      <p class="muted" style="margin:8px 0 0;font-size:11px">Webull broker (host: <code>WEBULL_TRADE_API_BASE</code> / <code>WEBULL_QUOTES_API_BASE</code>) へ直接照会して結果を表示します。任意 symbol は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>。</p>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px;background:#f6f8fc;border-radius:8px">
+        <span style="font-size:13px">選択中: <strong id="probe-current">未選択</strong></span>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+          <input type="checkbox" id="probe-preview-check" checked> 発注前検証 (Preview Order) も実行 <span class="muted" style="font-size:11px">— 注文は作成されません</span>
+        </label>
+        <button type="button" id="probe-submit" style="padding:7px 22px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">診断を実行</button>
+      </div>
+      <p class="muted" style="margin:8px 0 0;font-size:11px">銘柄 chip をクリックして選択し、「診断を実行」で Webull broker へ照会します (選択だけでは通信しません)。任意 symbol は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>。</p>
     </div>
   </div>
 
@@ -1896,8 +1903,7 @@ function brokerProbeBody(args: {
       <h3>Webull 取扱 <span class="muted" style="font-size:11px;font-weight:normal">(instrument 照会 #461)</span><span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="bp-instrument-body" class="muted">銘柄をクリックすると Webull の instrument 照会で「銘柄として認識されているか」を確認します。</div>
       <p class="muted" style="font-size:11px;margin:8px 0 0">⚠ 照会は<strong>取扱有無の近似</strong>。発注 allowlist (TICKER_IS_DENY) は別系統の可能性があり、確定的なガードは事後の自動停止 (#460) が担う。</p>
-      <button type="button" id="bp-preview-btn" class="bp-chip" style="margin-top:8px;border-color:#057a55;color:#057a55">✓ 発注前検証を実行 (Preview Order — 注文は作成されません)</button>
-      <p class="muted" style="font-size:11px;margin:4px 0 0">Webull の Preview Order API で発注パイプラインの検証だけを通します。取扱外銘柄はここで TICKER_IS_DENY が返り、<strong>発注せずに</strong>取引可否を確定できます (#461)。</p>
+      <p class="muted" style="font-size:11px;margin:4px 0 0">「発注前検証」は Webull の Preview Order API で発注パイプラインの検証だけを通すもの。取扱外銘柄は TICKER_IS_DENY が返り、<strong>発注せずに</strong>取引可否を確定できます (#461)。</p>
     </div>
     <div class="bp-card">
       <h3>Yahoo quote <span class="muted" style="font-size:11px;font-weight:normal">(cron の default source)</span><span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
@@ -1948,7 +1954,6 @@ function brokerProbeBody(args: {
 <script>
 (function () {
   var statusEl = document.getElementById('probe-status');
-  var refreshBtn = document.getElementById('probe-refresh');
   var positionsListEl = document.getElementById('probe-positions-list');
   var quoteEl = document.getElementById('probe-quote');
   var metaEl = document.getElementById('probe-meta');
@@ -2284,8 +2289,7 @@ function brokerProbeBody(args: {
 
   function probe(symbol, category, opts) {
     opts = opts || {};
-    refreshBtn.disabled = true;
-    statusEl.textContent = (opts.preview ? '発注前検証 実行中: ' : '実行中: ') + symbol + ' (' + category + ')';
+    statusEl.textContent = (opts.preview ? '診断 + 発注前検証 実行中: ' : '診断 実行中: ') + symbol + ' (' + category + ')';
     currentEl.textContent = '— ' + symbol + ' / ' + category;
     resetProbeView('実行中');
     var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
@@ -2336,47 +2340,61 @@ function brokerProbeBody(args: {
         // 失敗時も前回 probe の結果を残さない (stale 防止 #462)。
         resetProbeView('失敗');
       })
-      .finally(function () {
-        refreshBtn.disabled = false;
-      });
+  }
+
+  // 選択 → 実行の 2 段階フロー (操作要望): chip クリックは**選択のみ** (通信
+  // しない)。「診断を実行」で初めて probe + (checkbox ON なら) 発注前検証を走らせる。
+  var selected = { symbol: null, category: null };
+
+  function setSelection(sym, cat) {
+    selected.symbol = sym;
+    selected.category = cat;
+    if (currentEl) currentEl.textContent = sym + ' (' + cat + ')';
+    document.querySelectorAll('.probe-pickbtn').forEach(function (b) {
+      b.classList.toggle('bp-chip-selected', b.getAttribute('data-symbol') === sym);
+    });
+    try {
+      var u = new URL(window.location.href);
+      u.searchParams.set('symbol', sym);
+      u.searchParams.set('category', cat);
+      window.history.replaceState({}, '', u.toString());
+    } catch (_) {}
   }
 
   function onPickClick(ev) {
     var btn = ev.currentTarget;
     var sym = btn.getAttribute('data-symbol');
     var cat = btn.getAttribute('data-category');
-    if (sym && cat) probe(sym, cat);
+    if (sym && cat) setSelection(sym, cat);
   }
 
   document.querySelectorAll('.probe-pickbtn').forEach(function (btn) {
     btn.addEventListener('click', onPickClick);
   });
 
-  refreshBtn.addEventListener('click', function () {
-    var qs = new URLSearchParams(window.location.search);
-    var sym = qs.get('symbol') || 'AAPL';
-    var cat = qs.get('category') || 'US_STOCK';
-    probe(sym, cat);
-  });
-
-  // 発注前検証 (Preview Order) ボタン: 現在の symbol で preview=1 を付けて再
-  // probe。POST だが注文は作成されない (path は orders/preview 固定、#461)。
-  var previewBtn = document.getElementById('bp-preview-btn');
-  if (previewBtn) {
-    previewBtn.addEventListener('click', function () {
-      var qs = new URLSearchParams(window.location.search);
-      var sym = qs.get('symbol') || 'AAPL';
-      var cat = qs.get('category') || 'US_STOCK';
-      probe(sym, cat, { preview: true, price: lastYahooPrice });
+  var submitBtn = document.getElementById('probe-submit');
+  var previewCheck = document.getElementById('probe-preview-check');
+  if (submitBtn) {
+    submitBtn.addEventListener('click', function () {
+      if (!selected.symbol) {
+        statusEl.textContent = '銘柄を選択してください';
+        return;
+      }
+      submitBtn.disabled = true;
+      var withPreview = !!(previewCheck && previewCheck.checked);
+      probe(selected.symbol, selected.category, withPreview ? { preview: true, price: lastYahooPrice } : {}).finally(function () {
+        submitBtn.disabled = false;
+      });
     });
   }
 
-  // 自動 probe は URL に symbol+category 両方ある時だけ (PR #250 の方針維持)。
+  // URL params は**プリ選択のみ** (自動実行しない — 選択 → 実行の流れを徹底)。
   var qs = new URLSearchParams(window.location.search);
   if (qs.has('symbol') && qs.has('category')) {
-    probe(qs.get('symbol'), qs.get('category'));
+    setSelection(qs.get('symbol'), qs.get('category'));
+    statusEl.textContent = '「診断を実行」で開始';
   } else {
-    statusEl.textContent = '銘柄ボタンをクリックして probe 開始';
+    statusEl.textContent = '銘柄を選択してください';
   }
 })();
 </script>`
