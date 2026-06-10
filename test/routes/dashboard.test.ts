@@ -2043,6 +2043,15 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('銘柄: <strong>')
   })
 
+  // チャートは sticky 固定 (入場ゲート説明 / 判定トレースとグラフを同時に見るため)
+  it('チャートと指標バッジを sticky な symbol-chart-pin で包む', () => {
+    const html = renderSymbolTab(symbolArgs([]))
+    const pinIdx = html.indexOf('class="symbol-chart-pin"')
+    expect(pinIdx).toBeGreaterThanOrEqual(0)
+    // pin 内に chart container が入る (説明 panel 群は pin の外で下にスクロール)
+    expect(html.indexOf('id="symbol-chart"')).toBeGreaterThan(pinIdx)
+  })
+
   it('銘柄レールの link は zoom 範囲 (from/to) を URL で伝搬する', () => {
     const html = renderSymbolTab({
       ...symbolArgs([]),

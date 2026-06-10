@@ -1504,10 +1504,17 @@ const STYLE = `
   .rail-sym{font-weight:600;font-size:13px}
   .rail-name{font-size:11px;color:#86868b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .symbol-main{flex:1;min-width:0}
+  /* チャートを sticky 固定: 下の説明 panel 群 (入場ゲート / 判定 trace) を読む間も
+     グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
+     チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
+     page 本文の assertion に使われる日本語 label をそのまま書かないこと。 */
+  .symbol-chart-pin{position:sticky;top:92px;z-index:50;background:#f5f5f7;padding-bottom:8px}
   @media(max-width:780px){
     .symbol-layout{flex-direction:column}
     .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
     .symbol-rail .rail-head{width:100%}
+    /* 小画面では 460px のチャート固定が viewport を食い潰すため解除 */
+    .symbol-chart-pin{position:static}
   }
 `
 
@@ -6333,9 +6340,11 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
   // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
   const projection = args.buyability?.projection ?? null
-  const content = `${renderFocusSymbolHeader(args)}
+  const content = `<div class="symbol-chart-pin">
+  ${renderFocusSymbolHeader(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  </div>
   ${renderBuyabilityPanel(args.buyability ?? null)}
   ${renderDecisionPlotCaption(args.symbolChart)}
   ${renderZoomPresetButtons(args.symbolChart)}
