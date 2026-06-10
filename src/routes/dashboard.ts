@@ -8468,7 +8468,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
   const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
   // role / entry override / alternatives (#452)。pullback / trend / 過伸長は
   // DB に fraction 保存、表示は % (×100)。ATR 比は ratio 生値。
-  const roleValue = row?.role ?? ''
+  // 不正 role 値 (enum 外の DB 直書き) の fail-closed をフォームで弱めない
+  // (CodeRabbit #453): 一致 option が無いと先頭 '' が選択され、保存で意図せず
+  // 「未設定 = 従来挙動」へ silent に戻ってしまう。不正値はそのまま selected
+  // option として出し、保存時は admin parse の enum 検証が 400 で弾く —
+  // operator が明示的に正しい role を選び直すまで解除されない。
+  const rawRoleValue = row?.role?.trim() ?? ''
+  const roleIsKnown = rawRoleValue === '' || (SYMBOL_ROLES as readonly string[]).includes(rawRoleValue)
+  const roleValue = rawRoleValue
   const pullbackMaxOverrideValue =
     row?.pullbackMaxOverride === null || row?.pullbackMaxOverride === undefined
       ? ''
@@ -8636,12 +8643,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <label>ロール <span class="muted" style="font-size:11px">(role)</span></label>
     <div>
       <select name="role" style="padding:6px">
+        ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
         <option value=""${roleValue === '' ? ' selected' : ''}>未設定 (従来挙動)</option>
         ${SYMBOL_ROLES.map(
           (r) =>
             `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
         ).join('')}
       </select>
+      ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
       <p class="muted" style="margin:4px 0 0;font-size:11px">銘柄の戦略ロール (#452)。<strong>core_trend</strong> は非レバ向けの緩い entry プリセット、<strong>leveraged_trend</strong> は従来どおり。<strong>cash_parking / low_volatility / sector_trend / inverse_hedge は現状 BUY を生成しません</strong> (entry 抑止、exit は通常どおり)。空欄 = 従来挙動。</p>
     </div>
     <label>押し目バンド override <span class="muted" style="font-size:11px">(%)</span></label>

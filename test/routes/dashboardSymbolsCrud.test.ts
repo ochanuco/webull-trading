@@ -1604,3 +1604,26 @@ describe('symbols list ロール列 (#452)', () => {
     expect(body).toContain('⚠ cash_praking')
   })
 })
+
+describe('CodeRabbit #453 対応 (不正 role のフォーム防御)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('不正 role はフォームで selected のまま警告表示 (silent に未設定へ戻さない)', async () => {
+    const db = fakeDb([row({ symbol: 'OOPS', role: 'cash_praking' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/OOPS/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toMatch(/<option value="cash_praking" selected>⚠ 不正値/)
+    expect(body).toContain('entry は抑止中')
+    // role select の「未設定」が selected になっていない (他 select の '' とは区別)
+    expect(body).not.toMatch(/<option value="" selected>未設定/)
+  })
+})

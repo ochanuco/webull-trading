@@ -2694,6 +2694,20 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     timeStopDaysOverride: row.timeStopDaysOverride,
     kAtrOverride: row.kAtrOverride,
     budgetAllocPct: row.budgetAllocPct,
+    // audit before/after に全設定列を含める (CodeRabbit #453)。ここに列が
+    // 落ちていると admin API の row echo と監査差分から変更が見えなくなる。
+    lotSize: row.lotSize,
+    stopPctOverride: row.stopPctOverride,
+    takeProfitPctOverride: row.takeProfitPctOverride,
+    intradayOnly: row.intradayOnly,
+    role: row.role,
+    pullbackMaxOverride: row.pullbackMaxOverride,
+    pullbackMinOverride: row.pullbackMinOverride,
+    minReturn50dOverride: row.minReturn50dOverride,
+    maxAtrRatioOverride: row.maxAtrRatioOverride,
+    maxSma50DeviationPctOverride: row.maxSma50DeviationPctOverride,
+    requireAboveSma50Override: row.requireAboveSma50Override,
+    alternatives: row.alternatives,
     updatedAt: row.updatedAt,
   }
 }
