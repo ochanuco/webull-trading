@@ -5826,12 +5826,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       ];
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
-      // displayName は server 側で symbol_config.market='JP' なら "番号-会社名" を
-      // 入れている。US / fallback は symbol そのまま。chart 内 string concat 時の
-      // 安全フォールバックとして '|| sc.symbol' を残す。
-      var titleSymbol = sc.displayName || sc.symbol;
+      // chart title は出さない: 銘柄は左レールの強調で、表示要素は凡例で分かる。
       symChart.setOption({
-        title: { text: titleSymbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
@@ -7493,12 +7489,15 @@ export function renderBuyabilityPanel(buyability: BuyabilityView | null): string
     })
     .join('')
 
-  return `<div class="reason-panel" style="margin-top:10px;max-width:720px">
+  // 距離の推移 (+ETA) と 入場ゲート は 2 列 (narrow 画面は .panel-row の
+  // media query で 1 列に落ちる)。
+  return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
     <div style="font-size:13px;color:${headColor};margin-bottom:6px">${headline}</div>
-    ${trendBlock}
-    ${etaBlock}
-    <div style="margin-top:10px"><strong>入場ゲート</strong>(全条件。閾値は global 既定)
-      <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
+    <div class="panel-row" style="gap:8px 20px">
+      <div>${trendBlock}${etaBlock}</div>
+      <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定)
+        <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
+      </div>
     </div>
   </div>`
 }
@@ -7593,18 +7592,18 @@ function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
   return `<div class="symbol-layout">${rail}<div class="symbol-main">${content}</div></div>`
 }
 
-/** 表示中銘柄の見出し行。inactive 銘柄は注記 (cron 評価対象外) を添える。 */
+/**
+ * 表示中銘柄の見出し行。active 銘柄では出さない (左レールの強調表示で自明)。
+ * inactive 銘柄の時だけ、注記 (cron 評価対象外) 付きで出す。
+ */
 function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
-  const focusLabel = args.focusSymbol
-    ? displaySymbol(args.focusSymbol, args.universe)
-    : '—'
   const focusInactive = args.focusSymbol
     ? isSymbolInactive(args.focusSymbol, args.universe)
     : false
-  const focusBadge = focusInactive
-    ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(args.universe?.symbolNotes[args.focusSymbol!.toUpperCase()] ?? 'cron 評価対象外')})</span>`
-    : ''
-  return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong>${focusBadge}</p>`
+  if (!args.focusSymbol || !focusInactive) return ''
+  const focusLabel = displaySymbol(args.focusSymbol, args.universe)
+  const note = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
+  return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong> <span class="muted" style="font-size:11px">(inactive — ${esc(note)})</span></p>`
 }
 
 /**

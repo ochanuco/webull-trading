@@ -2039,8 +2039,24 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('INACTIVE: liquidity dropped')
     // 旧 inline picker の「| 切替:」は出ない
     expect(html).not.toContain('切替:')
-    // 本文側に focus 見出し
+    // active な focus はレールの強調で自明なので本文側の見出しは出さない
+    expect(html).not.toContain('銘柄: <strong>')
+  })
+
+  it('focus が inactive 銘柄の時だけ本文に注記付き見出しを出す', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['TQQQ'],
+      symbolNotes: { TQQQ: 'paused for review' },
+      symbolCurrency: { SOXL: 'USD', TQQQ: 'USD' },
+    })
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['SOXL', 'TQQQ'],
+      universe,
+    })
     expect(html).toContain('銘柄: <strong>')
+    expect(html).toContain('inactive — paused for review')
   })
 
   // チャートは sticky 固定 (入場ゲート説明 / 判定トレースとグラフを同時に見るため)
