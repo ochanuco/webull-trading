@@ -1813,3 +1813,77 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
     expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
   })
 })
+
+describe('runPullbackScheduler role entry suppression (#452)', () => {
+  it('rejects BUY for a suppressed symbol with the supplied reason', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      entrySuppressedSymbols: { SGOV: 'role: cash_parking entry is not enabled (#452)' },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.symbol).toBe('SGOV')
+    expect(reject?.reason).toContain('cash_parking')
+    expect(reject?.trace?.map((s) => s.label)).toContain('risk.role_entry_suppressed')
+  })
+
+  it('does not affect non-suppressed symbols in the same run', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV', 'AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      entrySuppressedSymbols: { SGOV: 'role: cash_parking entry is not enabled (#452)' },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect((execution.calls[0] as { symbol: string }).symbol).toBe('AAPL')
+  })
+
+  it('does not gate the SELL path (exit of a held position still runs)', async () => {
+    // role を後から cash_parking 等に変えた銘柄に建玉が残っていても
+    // stop / time-stop / TP の exit は従来どおり動く (fail-closed は entry 側のみ)。
+    const execution = mockExecution()
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: {
+        qty: 5,
+        avgPrice: 80,
+        openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      entrySuppressedSymbols: { AAPL: 'role: inverse_hedge entry is not enabled (#452)' },
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
+  })
+
+  it('skips the gate when option is omitted (back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+  })
+})

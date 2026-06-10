@@ -5,6 +5,38 @@ import { inversePairs, symbolConfig, type SymbolConfigRow } from './schema'
 export type SymbolCurrency = 'USD' | 'JPY'
 export type SymbolMarket = 'US' | 'JP'
 
+/**
+ * 銘柄ロール 6 分類 (#452 Layer 1、#451)。初期有効化は cash_parking /
+ * core_trend / leveraged_trend の 3 つ。low_volatility / sector_trend /
+ * inverse_hedge は定義のみ (後続 issue) で entry 抑止される。
+ */
+export const SYMBOL_ROLES = [
+  'cash_parking',
+  'core_trend',
+  'leveraged_trend',
+  'low_volatility',
+  'sector_trend',
+  'inverse_hedge',
+] as const
+export type SymbolRole = (typeof SYMBOL_ROLES)[number]
+
+/**
+ * Snapshot 上の role 値。DB に enum 外の文字列が直接書かれた場合は 'unknown' に
+ * 正規化する — NULL (= 従来挙動で取引可) に**倒さない**。typo した role の銘柄が
+ * 既定 gate で発注される事故を防ぐ fail-closed (downstream は 'unknown' を
+ * entry 抑止として扱う、#452)。
+ */
+export type SymbolRoleValue = SymbolRole | 'unknown'
+
+export function isSymbolRole(value: unknown): value is SymbolRole {
+  return typeof value === 'string' && (SYMBOL_ROLES as readonly string[]).includes(value)
+}
+
+/** alternatives の 1 ticker の文法 (admin parse / repo 検証で共用)。 */
+const ALTERNATIVE_SYMBOL_RE = /^[A-Z0-9]{1,10}$/
+/** alternatives の最大件数 (表示専用 list の防御的上限)。 */
+export const MAX_ALTERNATIVES = 8
+
 export interface SymbolConfigSnapshot {
   /** Uppercased symbols where `active = 1`. cron / risk gate はこの list だけを評価対象とする。 */
   allowedSymbols: string[]
@@ -76,6 +108,58 @@ export interface SymbolConfigSnapshot {
    * cron が US 引け前に強制クローズする対象。
    */
   symbolIntradayOnly: Record<string, boolean>
+  /**
+   * symbol → role (#452 Layer 1)。NULL は map に含めない (= 従来挙動)。
+   * enum 外の DB 直書き値は 'unknown' として**含める** — downstream が entry 抑止
+   * (fail-closed) で扱う。NULL fallback に倒さない。
+   */
+  symbolRole: Record<string, SymbolRoleValue>
+  /**
+   * Entry gate override (#452 Layer 2a)。NULL / 範囲外は map に含めない
+   * (= role preset → global default の fall-through)。
+   * pullback band: max は 0 側 / min は深い側、いずれも fraction [-1, 0]。
+   */
+  symbolPullbackMaxOverride: Record<string, number>
+  symbolPullbackMinOverride: Record<string, number>
+  /** トレンド条件 override (fraction [-1, 10])。 */
+  symbolMinReturn50dOverride: Record<string, number>
+  /** ボラ過熱ガード override (ratio (0, 10])。 */
+  symbolMaxAtrRatioOverride: Record<string, number>
+  /** 過伸長ガード override (fraction (0, 10])。 */
+  symbolMaxSma50DeviationPctOverride: Record<string, number>
+  /** SMA50 上抜け必須 override (true / false 両方 map に含める。NULL は不在)。 */
+  symbolRequireAboveSma50Override: Record<string, boolean>
+  /**
+   * symbol → 代替銘柄候補 (#452、表示専用)。NULL / 不正 JSON / 空配列は map に
+   * 含めない。要素は大文字 ticker、self 参照と重複は除去、上限 MAX_ALTERNATIVES。
+   */
+  symbolAlternatives: Record<string, string[]>
+}
+
+/**
+ * alternatives の JSON text を検証付きで配列に落とす。不正 (JSON でない /
+ * 配列でない / ticker 文法外要素) は **null** (= 候補なし扱い)。表示専用 data
+ * なので発注安全性には関与しないが、ゴミを下流に流さない。
+ */
+export function parseAlternativesJson(raw: string | null | undefined, selfSymbol: string): string[] | null {
+  if (raw === null || raw === undefined) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed)) return null
+  const out: string[] = []
+  for (const item of parsed) {
+    if (typeof item !== 'string') return null
+    const sym = item.trim().toUpperCase()
+    if (!ALTERNATIVE_SYMBOL_RE.test(sym)) return null
+    if (sym === selfSymbol.toUpperCase()) continue
+    if (!out.includes(sym)) out.push(sym)
+    if (out.length >= MAX_ALTERNATIVES) break
+  }
+  return out.length > 0 ? out : null
 }
 
 /**
@@ -106,6 +190,14 @@ export async function loadSymbolConfig(
   const symbolStopPctOverride: Record<string, number> = {}
   const symbolTakeProfitPctOverride: Record<string, number> = {}
   const symbolIntradayOnly: Record<string, boolean> = {}
+  const symbolRole: Record<string, SymbolRoleValue> = {}
+  const symbolPullbackMaxOverride: Record<string, number> = {}
+  const symbolPullbackMinOverride: Record<string, number> = {}
+  const symbolMinReturn50dOverride: Record<string, number> = {}
+  const symbolMaxAtrRatioOverride: Record<string, number> = {}
+  const symbolMaxSma50DeviationPctOverride: Record<string, number> = {}
+  const symbolRequireAboveSma50Override: Record<string, boolean> = {}
+  const symbolAlternatives: Record<string, string[]> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -191,6 +283,71 @@ export async function loadSymbolConfig(
     if (row.intradayOnly === true) {
       symbolIntradayOnly[symbol] = true
     }
+    // role (#452): NULL は不在 (= 従来挙動)。enum 外の DB 直書きは 'unknown' で
+    // 含める — NULL 扱いに倒すと typo した role が既定 gate で発注され得るため、
+    // downstream で entry 抑止される値に正規化する (fail-closed)。
+    if (row.role !== null && row.role !== undefined) {
+      const trimmedRole = row.role.trim()
+      if (trimmedRole.length > 0) {
+        symbolRole[symbol] = isSymbolRole(trimmedRole) ? trimmedRole : 'unknown'
+      }
+    }
+    // entry gate override (#452 Layer 2a)。stop/TP override と同じく符号・レンジ
+    // まで検証して採用し、無効値は map に出さず fall-through。pullback band の
+    // max < min 不整合はここでは弾かない — 「常に entry 不成立 = 発注なし」に
+    // しかならず fail-closed 側のため (admin parse 側で入力時に cross-check)。
+    if (
+      row.pullbackMaxOverride !== null &&
+      row.pullbackMaxOverride !== undefined &&
+      Number.isFinite(row.pullbackMaxOverride) &&
+      row.pullbackMaxOverride >= -1 &&
+      row.pullbackMaxOverride <= 0
+    ) {
+      symbolPullbackMaxOverride[symbol] = row.pullbackMaxOverride
+    }
+    if (
+      row.pullbackMinOverride !== null &&
+      row.pullbackMinOverride !== undefined &&
+      Number.isFinite(row.pullbackMinOverride) &&
+      row.pullbackMinOverride >= -1 &&
+      row.pullbackMinOverride <= 0
+    ) {
+      symbolPullbackMinOverride[symbol] = row.pullbackMinOverride
+    }
+    if (
+      row.minReturn50dOverride !== null &&
+      row.minReturn50dOverride !== undefined &&
+      Number.isFinite(row.minReturn50dOverride) &&
+      row.minReturn50dOverride >= -1 &&
+      row.minReturn50dOverride <= 10
+    ) {
+      symbolMinReturn50dOverride[symbol] = row.minReturn50dOverride
+    }
+    if (
+      row.maxAtrRatioOverride !== null &&
+      row.maxAtrRatioOverride !== undefined &&
+      Number.isFinite(row.maxAtrRatioOverride) &&
+      row.maxAtrRatioOverride > 0 &&
+      row.maxAtrRatioOverride <= 10
+    ) {
+      symbolMaxAtrRatioOverride[symbol] = row.maxAtrRatioOverride
+    }
+    if (
+      row.maxSma50DeviationPctOverride !== null &&
+      row.maxSma50DeviationPctOverride !== undefined &&
+      Number.isFinite(row.maxSma50DeviationPctOverride) &&
+      row.maxSma50DeviationPctOverride > 0 &&
+      row.maxSma50DeviationPctOverride <= 10
+    ) {
+      symbolMaxSma50DeviationPctOverride[symbol] = row.maxSma50DeviationPctOverride
+    }
+    if (row.requireAboveSma50Override === true || row.requireAboveSma50Override === false) {
+      symbolRequireAboveSma50Override[symbol] = row.requireAboveSma50Override
+    }
+    const alternatives = parseAlternativesJson(row.alternatives, symbol)
+    if (alternatives !== null) {
+      symbolAlternatives[symbol] = alternatives
+    }
   }
   return {
     allowedSymbols,
@@ -207,6 +364,14 @@ export async function loadSymbolConfig(
     symbolStopPctOverride,
     symbolTakeProfitPctOverride,
     symbolIntradayOnly,
+    symbolRole,
+    symbolPullbackMaxOverride,
+    symbolPullbackMinOverride,
+    symbolMinReturn50dOverride,
+    symbolMaxAtrRatioOverride,
+    symbolMaxSma50DeviationPctOverride,
+    symbolRequireAboveSma50Override,
+    symbolAlternatives,
   }
 }
 
@@ -257,6 +422,23 @@ export interface SymbolConfigWriteInput {
   takeProfitPctOverride: number | null
   /** intraday-only (US 引け前強制クローズ、default false、#intraday-only)。 */
   intradayOnly: boolean
+  /** 銘柄ロール (NULL = 従来挙動、#452 Layer 1)。admin parse が enum を強制する。 */
+  role: SymbolRole | null
+  /** Entry gate override (NULL = role preset → global default、#452 Layer 2a)。 */
+  pullbackMaxOverride: number | null
+  pullbackMinOverride: number | null
+  minReturn50dOverride: number | null
+  maxAtrRatioOverride: number | null
+  maxSma50DeviationPctOverride: number | null
+  requireAboveSma50Override: boolean | null
+  /** 代替銘柄候補 (表示専用、NULL = なし、#452)。DB には JSON text で保存。 */
+  alternatives: string[] | null
+}
+
+/** alternatives 配列 → DB 保存形式 (JSON text / NULL)。空配列は NULL に正規化。 */
+function alternativesToJson(alternatives: string[] | null): string | null {
+  if (alternatives === null || alternatives.length === 0) return null
+  return JSON.stringify(alternatives)
 }
 
 /**
@@ -288,6 +470,14 @@ export async function insertSymbolConfig(
       stopPctOverride: input.stopPctOverride,
       takeProfitPctOverride: input.takeProfitPctOverride,
       intradayOnly: input.intradayOnly,
+      role: input.role,
+      pullbackMaxOverride: input.pullbackMaxOverride,
+      pullbackMinOverride: input.pullbackMinOverride,
+      minReturn50dOverride: input.minReturn50dOverride,
+      maxAtrRatioOverride: input.maxAtrRatioOverride,
+      maxSma50DeviationPctOverride: input.maxSma50DeviationPctOverride,
+      requireAboveSma50Override: input.requireAboveSma50Override,
+      alternatives: alternativesToJson(input.alternatives),
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -336,6 +526,14 @@ export async function updateSymbolConfig(
       stopPctOverride: input.stopPctOverride,
       takeProfitPctOverride: input.takeProfitPctOverride,
       intradayOnly: input.intradayOnly,
+      role: input.role,
+      pullbackMaxOverride: input.pullbackMaxOverride,
+      pullbackMinOverride: input.pullbackMinOverride,
+      minReturn50dOverride: input.minReturn50dOverride,
+      maxAtrRatioOverride: input.maxAtrRatioOverride,
+      maxSma50DeviationPctOverride: input.maxSma50DeviationPctOverride,
+      requireAboveSma50Override: input.requireAboveSma50Override,
+      alternatives: alternativesToJson(input.alternatives),
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))
@@ -584,6 +782,17 @@ export async function createSymbolPair(
       stopPctOverride: primary.stopPctOverride,
       takeProfitPctOverride: primary.takeProfitPctOverride,
       intradayOnly: primary.intradayOnly,
+      // role / entry override / alternatives は **継承しない** (#452)。インバース
+      // 相手は方向が逆で entry 特性が異なる (bull 側の押し目閾値は bear 側に
+      // 適用できない)。NULL = 従来挙動で開始し、必要なら個別編集で設定する。
+      role: null,
+      pullbackMaxOverride: null,
+      pullbackMinOverride: null,
+      minReturn50dOverride: null,
+      maxAtrRatioOverride: null,
+      maxSma50DeviationPctOverride: null,
+      requireAboveSma50Override: null,
+      alternatives: null,
       updatedAt: nowIso,
     })
     await db.batch([delLink, insCounterpart, insLink])
