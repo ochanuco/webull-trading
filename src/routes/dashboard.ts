@@ -1896,6 +1896,8 @@ function brokerProbeBody(args: {
       <h3>Webull 取扱 <span class="muted" style="font-size:11px;font-weight:normal">(instrument 照会 #461)</span><span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="bp-instrument-body" class="muted">銘柄をクリックすると Webull の instrument 照会で「銘柄として認識されているか」を確認します。</div>
       <p class="muted" style="font-size:11px;margin:8px 0 0">⚠ 照会は<strong>取扱有無の近似</strong>。発注 allowlist (TICKER_IS_DENY) は別系統の可能性があり、確定的なガードは事後の自動停止 (#460) が担う。</p>
+      <button type="button" id="bp-preview-btn" class="bp-chip" style="margin-top:8px;border-color:#057a55;color:#057a55">✓ 発注前検証を実行 (Preview Order — 注文は作成されません)</button>
+      <p class="muted" style="font-size:11px;margin:4px 0 0">Webull の Preview Order API で発注パイプラインの検証だけを通します。取扱外銘柄はここで TICKER_IS_DENY が返り、<strong>発注せずに</strong>取引可否を確定できます (#461)。</p>
     </div>
     <div class="bp-card">
       <h3>Webull quote <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
@@ -2049,12 +2051,46 @@ function brokerProbeBody(args: {
       { label: 'instrument/list (quotes host, 汎用 path)', section: body.instrumentQuotesHost },
       { label: 'instrument/list (trade host, 汎用 path)', section: body.instrumentTradeHost },
     ];
+    var rawList = candidates;
+    if (body.previewOrder) {
+      rawList = [{ label: 'preview order (発注前検証)', section: body.previewOrder }].concat(candidates);
+    }
     if (rawTarget) {
-      rawTarget.textContent = candidates.map(function (cnd) {
+      rawTarget.textContent = rawList.map(function (cnd) {
         return '--- ' + cnd.label + ' ---\\n' + prettify(cnd.section);
       }).join('\\n\\n');
     }
     if (!bodyEl) return;
+
+    // 発注前検証 (Preview Order) の結果が最優先 — 発注パイプラインそのものの
+    // 検証なので instrument 照会より確度が高い (#461)。
+    if (body.previewOrder) {
+      var pv = body.previewOrder;
+      var pvBody = parseBody(pv);
+      if (pv.phase === 'response' && pv.status === 200) {
+        setPill('bp-instrument-pill', 'ok', '取引可能');
+        var cost = pvBody && (pvBody.estimated_cost || (pvBody.data && pvBody.data.estimated_cost));
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は発注前検証 (Preview Order) を通過しました — 取引可能です。' +
+          (cost ? '<br><span class="muted" style="font-size:12px">estimated_cost: ' + escHtml(cost) + '</span>' : '');
+        return;
+      }
+      if (pv.phase === 'response' && typeof pv.bodyTruncated === 'string' && pv.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) {
+        setPill('bp-instrument-pill', 'ng', '取扱なし (確定)');
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — 発注前検証が <code>TICKER_IS_DENY</code> を返しました。' +
+          '<span style="color:#c22">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>';
+        return;
+      }
+      if (pv.phase === 'response') {
+        var pvErr = pvBody && pvBody.error_code ? pvBody.error_code : 'status=' + pv.status;
+        setPill('bp-instrument-pill', 'unknown', '検証エラー');
+        bodyEl.innerHTML = '発注前検証がエラーを返しました: <code>' + escHtml(pvErr) + '</code>。' +
+          '<span class="muted">銘柄以外の要因 (価格・数量・口座) の可能性あり — raw を確認してください。</span>';
+        return;
+      }
+      setPill('bp-instrument-pill', 'unknown', '判定不可');
+      bodyEl.innerHTML = '発注前検証に到達できませんでした (' + escHtml(humanizeError(pv)) + ')。';
+      return;
+    }
     var responded = [];
     for (var i = 0; i < candidates.length; i++) {
       var sct = candidates[i].section;
@@ -2105,6 +2141,31 @@ function brokerProbeBody(args: {
     }
   }
 
+  // 価格抽出: parse → (Yahoo chart は meta へ) → 失敗時は truncate 済み body から
+  // regex fallback。quote カードと preview の limit cap の両方で使う。
+  function extractPrice(section, priceKeys) {
+    if (!section) return null;
+    var parsed = parseBody(section);
+    var item = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (item && item.chart && Array.isArray(item.chart.result) && item.chart.result[0] && item.chart.result[0].meta) {
+      item = item.chart.result[0].meta;
+    }
+    for (var i = 0; item && i < priceKeys.length; i++) {
+      var v = item[priceKeys[i]];
+      if (v != null && Number.isFinite(Number(v))) return Number(v);
+    }
+    if (typeof section.bodyTruncated === 'string') {
+      for (var r = 0; r < priceKeys.length; r++) {
+        var m = section.bodyTruncated.match(new RegExp('"' + priceKeys[r] + '"\\s*:\\s*(-?[0-9.]+)'));
+        if (m && Number.isFinite(Number(m[1]))) return Number(m[1]);
+      }
+    }
+    return null;
+  }
+
+  // 直近 probe の Yahoo 価格 (preview の limit cap 用)。
+  var lastYahooPrice = null;
+
   // quote カード: status pill + 価格らしきフィールドの要約。shape が読めなくても
   // pill と raw は必ず更新する (stale 表示を残さない、CodeRabbit #262 の方針)。
   function renderQuoteCard(pillId, bodyId, section, priceKeys) {
@@ -2116,25 +2177,7 @@ function brokerProbeBody(args: {
       bodyEl.innerHTML = '<span class="muted">' + escHtml(humanizeError(section)) + '</span>';
       return;
     }
-    var parsed = parseBody(section);
-    var item = Array.isArray(parsed) ? parsed[0] : parsed;
-    // Yahoo chart API は価格が chart.result[0].meta に入る (#461 follow-up)。
-    if (item && item.chart && Array.isArray(item.chart.result) && item.chart.result[0] && item.chart.result[0].meta) {
-      item = item.chart.result[0].meta;
-    }
-    var price = null;
-    for (var i = 0; item && i < priceKeys.length; i++) {
-      var v = item[priceKeys[i]];
-      if (v != null && Number.isFinite(Number(v))) { price = Number(v); break; }
-    }
-    // 大きい body は probe 側で truncate され JSON.parse が失敗する (Yahoo chart
-    // は 30KB 超)。価格 key を regex で直接拾う fallback。
-    if (price == null && typeof section.bodyTruncated === 'string') {
-      for (var r = 0; r < priceKeys.length; r++) {
-        var m = section.bodyTruncated.match(new RegExp('"' + priceKeys[r] + '"\\s*:\\s*(-?[0-9.]+)'));
-        if (m && Number.isFinite(Number(m[1]))) { price = Number(m[1]); break; }
-      }
-    }
+    var price = extractPrice(section, priceKeys);
     var ms = Number(section.msTaken) || 0;
     bodyEl.innerHTML = price != null
       ? '<span style="font-size:18px;font-weight:700" class="bp-num">' + escHtml(formatNumber(price)) + '</span> <span class="muted" style="font-size:11px">(' + ms + 'ms)</span>'
@@ -2231,13 +2274,18 @@ function brokerProbeBody(args: {
       row('instrument (quotes/trade host)', body.instrumentQuotesHost, body.instrumentTradeHost);
   }
 
-  function probe(symbol, category) {
+  function probe(symbol, category, opts) {
+    opts = opts || {};
     refreshBtn.disabled = true;
-    statusEl.textContent = '実行中: ' + symbol + ' (' + category + ')';
+    statusEl.textContent = (opts.preview ? '発注前検証 実行中: ' : '実行中: ') + symbol + ' (' + category + ')';
     currentEl.textContent = '— ' + symbol + ' / ' + category;
     resetProbeView('実行中');
     var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
       '&category=' + encodeURIComponent(category);
+    if (opts.preview) {
+      url += '&preview=1';
+      if (Number.isFinite(opts.price) && opts.price > 0) url += '&price=' + encodeURIComponent(opts.price);
+    }
     try {
       var u = new URL(window.location.href);
       u.searchParams.set('symbol', symbol);
@@ -2254,6 +2302,7 @@ function brokerProbeBody(args: {
         var quoteYahooEl = document.getElementById('probe-quote-yahoo');
         if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
         renderQuoteCard('bp-yahoo-pill', 'bp-yahoo-body', body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);
+        lastYahooPrice = extractPrice(body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);
         renderInstrumentCard(body, symbol);
         renderPositionsList(body.positions || null);
         var positionsNewRaw = document.getElementById('probe-positions-new-raw');
@@ -2301,6 +2350,18 @@ function brokerProbeBody(args: {
     var cat = qs.get('category') || 'US_STOCK';
     probe(sym, cat);
   });
+
+  // 発注前検証 (Preview Order) ボタン: 現在の symbol で preview=1 を付けて再
+  // probe。POST だが注文は作成されない (path は orders/preview 固定、#461)。
+  var previewBtn = document.getElementById('bp-preview-btn');
+  if (previewBtn) {
+    previewBtn.addEventListener('click', function () {
+      var qs = new URLSearchParams(window.location.search);
+      var sym = qs.get('symbol') || 'AAPL';
+      var cat = qs.get('category') || 'US_STOCK';
+      probe(sym, cat, { preview: true, price: lastYahooPrice });
+    });
+  }
 
   // 自動 probe は URL に symbol+category 両方ある時だけ (PR #250 の方針維持)。
   var qs = new URLSearchParams(window.location.search);

@@ -11,6 +11,7 @@ import {
   resolveAccessTokenWithSource,
 } from '../infrastructure/webull/resolveAccessToken'
 import { WebullAuth } from '../infrastructure/webull/WebullAuth'
+import { toWebullPlaceOrderRequest } from '../infrastructure/webull/mapper'
 import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
 import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
 import { buildSignedHeaders } from '../infrastructure/webull/WebullAuth'
@@ -609,6 +610,8 @@ export const admin = new Hono<AppBindings>()
       path: string
       query: Record<string, string>
       version?: string
+      /** POST body (JSON 文字列)。署名対象に含める (place/preview 系)。 */
+      body?: string
       /**
        * 既定は trade host (`WEBULL_TRADE_API_BASE`)。snapshot probe は quotes host
        * (`WEBULL_QUOTES_API_BASE`) を明示的に渡す — JP 本番では data-api 系に
@@ -625,6 +628,7 @@ export const admin = new Hono<AppBindings>()
           method: args.method,
           path: url.pathname,
           query: args.query,
+          body: args.body,
           host: url.host,
           appKey,
           appSecret,
@@ -650,7 +654,12 @@ export const admin = new Hono<AppBindings>()
       try {
         const response = await fetch(url.href, {
           method: args.method,
-          headers: { Accept: 'application/json', ...headers },
+          headers: {
+            Accept: 'application/json',
+            ...(args.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            ...headers,
+          },
+          ...(args.body !== undefined ? { body: args.body } : {}),
           signal: controller.signal,
         })
         const body = await response.text()
@@ -881,6 +890,39 @@ export const admin = new Hono<AppBindings>()
       }),
     ])
 
+    // #461 follow-up: **Preview Order = 発注しない注文検証** (JP docs 正式記載:
+    // POST /openapi/account/orders/preview)。発注パイプラインの検証 (取扱外
+    // 銘柄の TICKER_IS_DENY を含む) を、注文を作らずに引ける唯一の documented
+    // API。POST なので通常 probe では叩かず、UI の明示ボタン (query preview=1)
+    // でのみ実行する。body は production の place order と同じ mapper を使い
+    // (qty=1 の BUY、limit cap は Yahoo 価格 or 100)、**path は place ではなく
+    // preview に固定** — 注文は作成されない。
+    let previewOrder: ProbeResult | null = null
+    if (c.req.query('preview') === '1') {
+      const priceRaw = Number(c.req.query('price'))
+      const previewPrice = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 100
+      const schema = c.env.WEBULL_PLACE_ORDER_SCHEMA === 'v2' ? ('v2' as const) : ('v1' as const)
+      const previewBody = toWebullPlaceOrderRequest(
+        {
+          symbol,
+          side: 'BUY',
+          quantity: 1,
+          price: previewPrice,
+          notional: previewPrice,
+          clientOrderId: `probe-preview-${crypto.randomUUID()}`,
+        },
+        schema,
+        accountId,
+      )
+      previewOrder = await probeOnce({
+        method: 'POST',
+        path: schema === 'v2' ? '/openapi/trade/order/preview' : '/openapi/account/orders/preview',
+        query: schema === 'v2' ? {} : { account_id: accountId },
+        version: schema,
+        body: JSON.stringify(previewBody),
+      })
+    }
+
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
     // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
     c.header('Cache-Control', 'no-store')
@@ -930,6 +972,7 @@ export const admin = new Hono<AppBindings>()
       instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
+      previewOrder,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:

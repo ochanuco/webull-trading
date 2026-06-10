@@ -32,6 +32,15 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     expect(body).toContain('instrumentStockTrade')
   })
 
+  it('発注前検証 (Preview Order) ボタンと注記がある (#461)', async () => {
+    const app = createApp()
+    const res = await app.request('/dashboard/broker-probe', {}, baseEnv as never)
+    const body = await res.text()
+    expect(body).toContain('id="bp-preview-btn"')
+    expect(body).toContain('注文は作成されません')
+    expect(body).toContain('previewOrder')
+  })
+
   it('control の AAPL chip と再 probe ボタンがある', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/broker-probe', {}, baseEnv)
