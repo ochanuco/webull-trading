@@ -2560,3 +2560,71 @@ describe('renderAlertFilterPills', () => {
     )
   })
 })
+
+import { deriveEntryStatus } from '../../src/trading/strategy/entryStatus'
+import { sortGridChartsByEntryPriority } from '../../src/routes/dashboard'
+
+describe('段階判定の表示 (#452 PR 2)', () => {
+  function viewFor(price: number) {
+    return buildBuyabilityView(
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price }) }],
+      TEST_DEFAULT_RULE,
+    )
+  }
+
+  it('buyability panel に EntryStatus badge を出す (ENTRY)', () => {
+    const view = viewFor(95)
+    const status = deriveEntryStatus(view.current!)
+    expect(status.status).toBe('ENTRY')
+    const html = renderBuyabilityPanel(view, { entryStatus: status })
+    expect(html).toContain('>ENTRY<')
+  })
+
+  it('WATCH/NG で alternatives があれば代替候補リンクを出す (表示のみ)', () => {
+    const view = viewFor(99) // 押し目不足 → WATCH
+    const status = deriveEntryStatus(view.current!)
+    expect(status.positionMultiplier).toBe(0)
+    const html = renderBuyabilityPanel(view, {
+      entryStatus: status,
+      alternatives: ['SOXX', 'SMH'],
+    })
+    expect(html).toContain('代替候補')
+    expect(html).toContain('symbol=SOXX')
+    expect(html).toContain('自動で発注先を切り替えることはしない')
+  })
+
+  it('ENTRY では代替候補を出さない', () => {
+    const view = viewFor(95)
+    const status = deriveEntryStatus(view.current!)
+    const html = renderBuyabilityPanel(view, { entryStatus: status, alternatives: ['SOXX'] })
+    expect(html).not.toContain('代替候補')
+  })
+
+  it('grid を ENTRY > HALF > WATCH > NG > cash_parking > データ無し > inactive で並べる', () => {
+    const charts = ['SGOV', 'NODATA', 'NG1', 'WATCH1', 'HALF1', 'ENTRY1', 'OFF'].map((symbol) => ({
+      symbol,
+      chart: null,
+      error: null,
+    }))
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SGOV', 'NODATA', 'NG1', 'WATCH1', 'HALF1', 'ENTRY1'],
+      inactiveSymbols: ['OFF'],
+      symbolRole: { SGOV: 'cash_parking' },
+    })
+    const sorted = sortGridChartsByEntryPriority(
+      charts,
+      { ENTRY1: 'ENTRY', HALF1: 'HALF', WATCH1: 'WATCH', NG1: 'NG', SGOV: 'ENTRY' },
+      universe,
+    )
+    // SGOV は status より cash_parking が優先で末尾側、inactive (OFF) が最後。
+    expect(sorted.map((c) => c.symbol)).toEqual([
+      'ENTRY1',
+      'HALF1',
+      'WATCH1',
+      'NG1',
+      'SGOV',
+      'NODATA',
+      'OFF',
+    ])
+  })
+})

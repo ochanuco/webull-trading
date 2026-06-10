@@ -47,6 +47,21 @@ export const ROLE_RULE_PRESETS: Partial<Record<SymbolRole, Partial<SymbolRule>>>
 const ENTRY_ENABLED_ROLES: ReadonlySet<SymbolRole> = new Set(['core_trend', 'leveraged_trend'])
 
 /**
+ * 段階判定 HALF (0.5x entry) を有効にする symbol 集合を作る (#452 PR 2)。
+ * entry 有効 role (core_trend / leveraged_trend) を**明示的に**設定した銘柄のみ。
+ * role NULL の既存銘柄は含めない = 従来の二値挙動のまま (受け入れ条件の回帰保証)。
+ */
+export function buildHalfEntrySymbols(
+  symbolRole: Record<string, SymbolRoleValue>,
+): Set<string> {
+  const enabled = new Set<string>()
+  for (const [symbol, role] of Object.entries(symbolRole)) {
+    if (role !== 'unknown' && ENTRY_ENABLED_ROLES.has(role)) enabled.add(symbol)
+  }
+  return enabled
+}
+
+/**
  * strategy cron が BUY を生成してはいけない symbol → 抑止理由、の map を作る
  * (#452)。SELL / HOLD (exit 経路) は対象外 — role を後から変えた銘柄に建玉が
  * 残っていても stop / time-stop / TP は従来どおり動く。

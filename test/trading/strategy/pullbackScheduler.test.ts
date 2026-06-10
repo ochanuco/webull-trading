@@ -10,6 +10,7 @@ import type { Execution } from '../../../src/trading/execution/Execution'
 import type { PositionStore } from '../../../src/trading/state/PositionStore'
 import { emptySymbolState, type SymbolState } from '../../../src/trading/state/types'
 import { runPullbackScheduler } from '../../../src/trading/strategy/pullbackScheduler'
+import { TEST_DEFAULT_RULE } from '../../../src/trading/strategy/strategies/PullbackUptrendStrategy'
 import {
   createBuyingPowerLedger,
   createUnavailableBuyingPowerLedger,
@@ -1885,5 +1886,111 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
       now: () => now,
     })
     expect(summary.buys).toBe(1)
+  })
+})
+
+describe('runPullbackScheduler half entry (#452 段階判定)', () => {
+  // uptrendBars() の pullback は (117.5-122)/122 ≈ -3.69%。pullbackMin を
+  // -0.035 に絞ると pullback_deep だけが僅差で落ち (許容バンド -0.042 以内)、
+  // HALF 候補になる。-0.025 ならバンド外 → WATCH (発注なし)。
+  const HALF_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.035 }
+  const WATCH_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.025, pullbackMax: -0.03 }
+
+  it('upgrades a near-miss HOLD to BUY at 0.5x sizing for half-entry enabled symbols', async () => {
+    // 基準: 同条件で全 gate 通過なら full qty が出る。
+    const fullExecution = mockExecution()
+    await runPullbackScheduler({
+      symbols: ['QQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: fullExecution,
+      defaultRule: TEST_DEFAULT_RULE,
+      now: () => now,
+    })
+    const fullQty = (fullExecution.calls[0] as { quantity: number }).quantity
+    expect(fullQty).toBeGreaterThan(1)
+
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['QQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      defaultRule: HALF_RULE,
+      halfEntrySymbols: new Set(['QQQ']),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number; side: string }
+    expect(intent.side).toBe('BUY')
+    expect(intent.quantity).toBe(Math.floor(fullQty * 0.5))
+    const buy = summary.decisions.find((d) => d.decision === 'BUY')
+    expect(buy?.reason).toContain('half entry (0.5x)')
+    expect(buy?.trace?.map((s) => s.label)).toContain('entry.half_status')
+  })
+
+  it('keeps the legacy binary behavior when the symbol is not half-entry enabled (role NULL 回帰)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      defaultRule: HALF_RULE,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.holds).toBe(1)
+    expect(execution.calls).toHaveLength(0)
+  })
+
+  it('does not order on WATCH (single gate miss beyond the tolerance band)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['QQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      defaultRule: WATCH_RULE,
+      halfEntrySymbols: new Set(['QQQ']),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.holds).toBe(1)
+    expect(execution.calls).toHaveLength(0)
+  })
+
+  it('half entry still passes through downstream risk gates (inverse-pair exposure rejects)', async () => {
+    // HALF でも逆ポジ保有中は発注しない (#452 safety)。perSymbolRisk の
+    // inverse-pair gate が BUY intent を reject することを確認する。
+    const execution = mockExecution()
+    const inverseHeld: SymbolState = {
+      ...emptySymbolState('SQQQ', () => now),
+      position: { qty: 3, avgPrice: 20, openedAt: now.toISOString() },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['QQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SQQQ: inverseHeld }),
+      execution,
+      defaultRule: HALF_RULE,
+      halfEntrySymbols: new Set(['QQQ']),
+      perSymbolRisk: {
+        inversePairs: { QQQ: 'SQQQ', SQQQ: 'QQQ' },
+        spreadLimits: { US: 0.0025, JP: 0.006 },
+        staleQuoteMs: 900_000,
+        gapRejectPct: 0.03,
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    expect(reject?.reason).toContain('inverse')
   })
 })
