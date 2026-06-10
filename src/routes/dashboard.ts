@@ -7594,6 +7594,13 @@ function symbolsListBody(args: {
   const ordered = orderRowsByPair(filtered, inversePairs)
   const pairColor = assignPairColors(ordered, inversePairs)
   const roles = pairRoles(ordered, inversePairs)
+  // 共有 slider の初期値計算用 (対の max を採るため両側の % を引けるように)。
+  const pctOf = new Map(
+    ordered.map((r) => [
+      r.symbol.toUpperCase(),
+      r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0,
+    ]),
+  )
   const tbody = ordered
     .map((r) => {
       const inactive = !r.active
@@ -7626,14 +7633,26 @@ function symbolsListBody(args: {
         ? '<span class="err" title="売買単位が未設定または不正です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
         : `${esc(String(r.lotSize))} <span class="muted" style="font-size:11px">${r.lotSize === 1 ? '株/口' : '株'}</span>`
       // 予算配分 ladder slider (#budget-alloc): 5%刻み。確定するまで client 側で仮調整、
-      // form="symbol-budget-form" で一括 POST。inverse 相手は JS が同期する。
-      const allocPctNum = r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
-      const budgetCell = `<div style="display:flex;align-items:center;gap:6px;min-width:170px">
+      // form="symbol-budget-form" で一括 POST。両側表示中のインバース対は 1 本の共有
+      // slider (rowspan=2) に統合する — 同時に建つのは片側のみで予算消費は 1 回分
+      // なのに、2 本並ぶと倍取られているように見えるため。初期値は両側の max、
+      // POST に載らない相手側は server が同値同期する (admin #budget-alloc)。
+      const allocPctNum =
+        role === 'top'
+          ? Math.max(pctOf.get(sym) ?? 0, pctOf.get(inverse!.toUpperCase()) ?? 0)
+          : (pctOf.get(sym) ?? 0)
+      const sliderHtml = `<div style="display:flex;align-items:center;gap:6px;min-width:170px">
           <input type="range" name="pct_${esc(r.symbol)}" form="symbol-budget-form" min="0" max="100" step="5" value="${allocPctNum}"
             data-symbol="${esc(r.symbol)}"${inverse ? ` data-inverse="${esc(inverse)}"` : ''}
             oninput="window.onBudgetSlide(this)" style="width:110px;vertical-align:middle">
           <span id="budget-label-${esc(r.symbol)}" class="muted" style="font-size:12px;width:42px;text-align:right;font-variant-numeric:tabular-nums">${allocPctNum === 0 ? 'risk' : allocPctNum + '%'}</span>
         </div>`
+      const budgetTd =
+        role === 'bottom'
+          ? ''
+          : role === 'top'
+            ? `<td rowspan="2" style="vertical-align:middle">${sliderHtml}<div class="muted" style="font-size:11px;margin-top:2px">ペア共通 — 建玉は片側のみ、予算消費は1回分</div></td>`
+            : `<td>${sliderHtml}</td>`
       // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
       // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
       // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
@@ -7659,7 +7678,7 @@ function symbolsListBody(args: {
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${lotSizeCell}</td>
         <td>${maxNotionalCell}</td>
-        <td>${budgetCell}</td>
+        ${budgetTd}
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
@@ -7702,26 +7721,20 @@ function symbolsListBody(args: {
   <script>${BUDGET_LADDER_JS}</script>`
 }
 
-// #budget-alloc ladder の client JS: slider 移動でラベル更新 + インバース相手の
-// slider を同値に同期 + 「未確定」バーを表示。保存は確定ボタン押下の form POST のみ
-// (即保存しない = 確定するまで仮)。
+// #budget-alloc ladder の client JS: slider 移動でラベル更新 + 「未確定」バーを表示。
+// 保存は確定ボタン押下の form POST のみ (即保存しない = 確定するまで仮)。
+// インバース対は 1 本の共有 slider なので相手 slider の同期は不要 — POST に載らない
+// 相手側は server が同値同期する (#315 regime hedge)。
 const BUDGET_LADDER_JS = `
   window.__budgetDirty = {};
   window.__fmtBudget = function (v) { return Number(v) <= 0 ? 'risk' : v + '%'; };
-  window.__setBudgetSlider = function (sym, v) {
-    var sl = document.querySelector('input[name="pct_' + sym + '"]');
-    var lb = document.getElementById('budget-label-' + sym);
-    if (sl) sl.value = v;
-    if (lb) lb.textContent = window.__fmtBudget(v);
-  };
   window.onBudgetSlide = function (el) {
     var sym = el.getAttribute('data-symbol');
     var inv = el.getAttribute('data-inverse');
     var v = el.value;
     var lb = document.getElementById('budget-label-' + sym);
     if (lb) lb.textContent = window.__fmtBudget(v);
-    // インバース対は同値に同期 (#315 regime hedge)。相手 slider が一覧に在れば揃える。
-    if (inv) window.__setBudgetSlider(inv, v);
+    // 保存時に server 同期で相手側も変わるので、dirty 数には相手も数える。
     window.__budgetDirty[sym] = true;
     if (inv) window.__budgetDirty[inv] = true;
     var bar = document.getElementById('symbol-budget-bar');
@@ -7744,9 +7757,18 @@ const BUDGET_LADDER_JS = `
     var sliders = document.querySelectorAll('input[name^="pct_"]');
     sliders.forEach(function (s) {
       var sym = s.getAttribute('data-symbol');
+      var inv = s.getAttribute('data-inverse');
       var v = Number(s.value);
-      if (v > 0) bySym[sym] = { pct: v, inv: s.getAttribute('data-inverse') };
-      else delete bySym[sym]; // 0 にした表示中銘柄は除外 (baseline 値で復活させない)
+      // 対の共有 slider は両側を上書きする (相手の baseline が残ると max が
+      // 旧値に張り付き、下げた時にメーターが追従しない)。
+      if (v > 0) {
+        bySym[sym] = { pct: v, inv: inv };
+        if (inv) bySym[inv] = { pct: v, inv: sym };
+      } else {
+        // 0 にした表示中銘柄は除外 (baseline 値で復活させない)
+        delete bySym[sym];
+        if (inv) delete bySym[inv];
+      }
     });
     // 口座(円)単一プールに対する使用率を 1 本で合算。インバース対は max を1回計上。
     var used = 0;
