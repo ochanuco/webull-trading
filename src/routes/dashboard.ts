@@ -2037,18 +2037,22 @@ function brokerProbeBody(args: {
   function renderInstrumentCard(body, symbol) {
     var bodyEl = document.getElementById('bp-instrument-body');
     var rawTarget = document.getElementById('bp-instrument-raw');
-    // category は UI のティッカー推定なので ETF/STOCK を取り違え得る — server が
-    // 反対側 category も probe しており (CodeRabbit #462)、4 候補すべてを見る。
+    // JP の正しい path は /openapi/instrument/stock/list (JP docs Trading API >
+    // Get Stock Instrument、#461)。host 未確定のため trade / quotes 両方、かつ
+    // category 推定の取り違え対策 (CodeRabbit #462) で ETF/STOCK 両 category を
+    // 並べる。末尾 2 つは汎用 SDK path の drift 検証用 (#251 方式)。
     var candidates = [
-      { label: 'quotes host', section: body.instrumentQuotesHost },
-      { label: 'trade host', section: body.instrumentTradeHost },
-      { label: 'quotes host (alt category)', section: body.instrumentQuotesHostAlt },
-      { label: 'trade host (alt category)', section: body.instrumentTradeHostAlt },
+      { label: 'stock/list (trade host)', section: body.instrumentStockTrade },
+      { label: 'stock/list (trade host, alt category)', section: body.instrumentStockTradeAlt },
+      { label: 'stock/list (quotes host)', section: body.instrumentStockQuotes },
+      { label: 'stock/list (quotes host, alt category)', section: body.instrumentStockQuotesAlt },
+      { label: 'instrument/list (quotes host, 汎用 path)', section: body.instrumentQuotesHost },
+      { label: 'instrument/list (trade host, 汎用 path)', section: body.instrumentTradeHost },
     ];
     if (rawTarget) {
       rawTarget.textContent = candidates.map(function (cnd) {
-        return '--- ' + cnd.label + ' ---\n' + prettify(cnd.section);
-      }).join('\n\n');
+        return '--- ' + cnd.label + ' ---\\n' + prettify(cnd.section);
+      }).join('\\n\\n');
     }
     if (!bodyEl) return;
     var responded = [];
@@ -2060,13 +2064,12 @@ function brokerProbeBody(args: {
       }
     }
     if (responded.length === 0) {
-      var statuses = candidates.slice(0, 2).map(function (cnd) {
+      var statuses = [candidates[0], candidates[2]].map(function (cnd) {
         return escHtml(cnd.label) + ': ' + escHtml(humanizeError(cnd.section));
       }).join(' ／ ');
       setPill('bp-instrument-pill', 'unknown', '判定不可');
-      bodyEl.innerHTML = 'instrument endpoint が 200 を返しませんでした (' + statuses + ')。' +
-        '<span class="muted">quotes host (data-api) の無応答は既知 (#21、quote は Yahoo 移行済み)。trade host の 404 は endpoint 未提供。' +
-        '判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
+      bodyEl.innerHTML = 'instrument/stock/list が 200 を返しませんでした (' + statuses + ')。' +
+        '<span class="muted">quotes host (data-api) の無応答は既知 (#21)。判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
       return;
     }
     // どれか 1 候補にでも symbol が出てくれば「銘柄情報あり」(category 非依存)。
@@ -2115,10 +2118,22 @@ function brokerProbeBody(args: {
     }
     var parsed = parseBody(section);
     var item = Array.isArray(parsed) ? parsed[0] : parsed;
+    // Yahoo chart API は価格が chart.result[0].meta に入る (#461 follow-up)。
+    if (item && item.chart && Array.isArray(item.chart.result) && item.chart.result[0] && item.chart.result[0].meta) {
+      item = item.chart.result[0].meta;
+    }
     var price = null;
     for (var i = 0; item && i < priceKeys.length; i++) {
       var v = item[priceKeys[i]];
       if (v != null && Number.isFinite(Number(v))) { price = Number(v); break; }
+    }
+    // 大きい body は probe 側で truncate され JSON.parse が失敗する (Yahoo chart
+    // は 30KB 超)。価格 key を regex で直接拾う fallback。
+    if (price == null && typeof section.bodyTruncated === 'string') {
+      for (var r = 0; r < priceKeys.length; r++) {
+        var m = section.bodyTruncated.match(new RegExp('"' + priceKeys[r] + '"\\s*:\\s*(-?[0-9.]+)'));
+        if (m && Number.isFinite(Number(m[1]))) { price = Number(m[1]); break; }
+      }
     }
     var ms = Number(section.msTaken) || 0;
     bodyEl.innerHTML = price != null

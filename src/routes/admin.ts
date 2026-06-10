@@ -749,10 +749,12 @@ export const admin = new Hono<AppBindings>()
       balanceAccountV1,
       balanceAssetsV2,
       balanceAssetsAccountV2,
+      instrumentStockTrade,
+      instrumentStockTradeAlt,
+      instrumentStockQuotes,
+      instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
-      instrumentQuotesHostAlt,
-      instrumentTradeHostAlt,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -829,13 +831,41 @@ export const admin = new Hono<AppBindings>()
         query: { account_id: accountId },
         version: 'v2',
       }),
-      // #461: instrument 照会 (銘柄が Webull に登録されているか)。公式 SDK
-      // (webull-python-sdk-mdata) の `GET /instrument/list?symbols&category` (v1)
-      // 相当。JP の他 endpoint と同じく `/openapi` prefix を付け、host が
-      // quotes / trade どちら側かは JP docs 未確定のため両方 probe する
-      // (#415 balance path 確定と同じ手順)。**この照会は「Webull が銘柄を認識
-      // しているか」の近似で、発注 allowlist (TICKER_IS_DENY) とは別系統の
-      // 可能性がある** — 確定的な発注可否ガードは #460 が担う。
+      // #461: instrument 照会 (銘柄が Webull に登録されているか)。
+      // **JP の正しい path は `/openapi/instrument/stock/list`** (JP docs
+      // Trading API > Get Stock Instrument)。汎用 SDK の `/instrument/list` とは
+      // drift しており (#251 と同パターン)、HK 専用の `/trade/security` は JP に
+      // 存在しない。host (trade / quotes) は docs に明記が無いので両方 probe。
+      // category は UI のティッカー推定が ETF/STOCK を取り違え得るため
+      // (CodeRabbit #462) 反対側 category も probe する。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/stock/list',
+        query: { symbols: symbol, category },
+        version: 'v1',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/stock/list',
+        query: { symbols: symbol, category: altCategory },
+        version: 'v1',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/stock/list',
+        query: { symbols: symbol, category },
+        version: 'v1',
+        host: quotesBaseUrl,
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/stock/list',
+        query: { symbols: symbol, category: altCategory },
+        version: 'v1',
+        host: quotesBaseUrl,
+      }),
+      // 汎用 SDK path (`/instrument/list`) も比較用に残す — data-api が将来
+      // 稼働したときに JP がどちらの path を採るかの drift 検証 (#251 方式)。
       probeOnce({
         method: 'GET',
         path: '/openapi/instrument/list',
@@ -847,22 +877,6 @@ export const admin = new Hono<AppBindings>()
         method: 'GET',
         path: '/openapi/instrument/list',
         query: { symbols: symbol, category },
-        version: 'v1',
-      }),
-      // category の ETF/STOCK は UI のティッカー推定で誤り得る (CodeRabbit #462:
-      // 既知 4 銘柄以外の ETF が *_STOCK で照会され「銘柄情報なし」に誤判定)。
-      // 反対側 category も probe して判定を category 非依存にする。
-      probeOnce({
-        method: 'GET',
-        path: '/openapi/instrument/list',
-        query: { symbols: symbol, category: altCategory },
-        version: 'v1',
-        host: quotesBaseUrl,
-      }),
-      probeOnce({
-        method: 'GET',
-        path: '/openapi/instrument/list',
-        query: { symbols: symbol, category: altCategory },
         version: 'v1',
       }),
     ])
@@ -910,10 +924,12 @@ export const admin = new Hono<AppBindings>()
       quoteYahoo: quoteYahooResult,
       // #461: instrument 照会 (Webull 取扱の事前チェック近似)。quotes / trade の
       // 両 host 候補。UI は 200 が返った側を採用して判定カードを出す。
+      instrumentStockTrade,
+      instrumentStockTradeAlt,
+      instrumentStockQuotes,
+      instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
-      instrumentQuotesHostAlt,
-      instrumentTradeHostAlt,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
