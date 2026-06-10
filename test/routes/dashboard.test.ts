@@ -2676,6 +2676,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
       cashFallbackSymbol: 'SGOV',
     })
     expect(html).toContain('leveraged_trend')
+    expect(html).toContain('レバETF・トレンド')
     expect(html).toContain('配分 target 5%')
     expect(html).toContain('条件連動')
     expect(html).toContain('symbol=SGOV')

@@ -6625,7 +6625,7 @@ export function renderSymbolPolicyLine(
     const known = (SYMBOL_ROLES as readonly string[]).includes(policy.role)
     parts.push(
       known
-        ? `ロール: <code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[policy.role as SymbolRole])}">${esc(policy.role)}</code>`
+        ? `ロール: <code style="font-size:12px" title="${esc(SYMBOL_ROLE_LABELS[policy.role as SymbolRole])}">${esc(policy.role)}</code>: <strong>${esc(SYMBOL_ROLE_LABELS_SHORT[policy.role as SymbolRole])}</strong>`
         : `ロール: <span class="err" title="不正な role 値 — entry は抑止されます (fail-closed)">⚠ ${esc(policy.role)}</span>`,
     )
   }
@@ -6639,9 +6639,9 @@ export function renderSymbolPolicyLine(
       `退避先 <a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(policy.cashFallbackSymbol)}">${esc(policy.cashFallbackSymbol)}</a>`,
     )
   }
-  return `<div class="muted" style="margin-top:8px;font-size:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
     ${parts.join('<span style="color:#d0d0d5">｜</span>')}
-    <a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:11px">設定変更</a>
+    <a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:12px">設定変更</a>
   </div>`
 }
 
@@ -8393,6 +8393,16 @@ interface SymbolFormArgs {
   currentInverse?: string | null
 }
 
+/** role の短い日本語名 (#452)。一覧 / チャートタブのインライン表示用。 */
+const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
+  cash_parking: '待機資金ETF',
+  core_trend: '非レバ・トレンド',
+  leveraged_trend: 'レバETF・トレンド',
+  low_volatility: '低ボラ (entry 無効)',
+  sector_trend: 'セクター (entry 無効)',
+  inverse_hedge: 'インバース (entry 無効)',
+}
+
 /** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
 const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
@@ -8411,7 +8421,7 @@ export function renderSymbolRoleCell(row: SymbolConfigRow): string {
     role === null
       ? '<span class="muted" title="role 未設定 = 従来挙動">—</span>'
       : known
-        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code>`
+        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code><div class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</div>`
         : `<span class="err" title="不正な role 値です。entry は抑止されます (fail-closed)。編集から正しい値を選んでください。">⚠ ${esc(role)}</span>`
   const notes: string[] = []
   if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
