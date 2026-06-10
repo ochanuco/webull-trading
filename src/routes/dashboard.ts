@@ -5722,14 +5722,17 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         // 未来スロットの timestamp 間隔 (直近 bar の平均間隔)。
         var span = barsPerDay > 1 ? (lastBarMs - ohlcMs[ohlcMs.length - barsPerDay]) / (barsPerDay - 1) : 3600000;
         if (!Number.isFinite(span) || span <= 0) span = 3600000;
-        // 描く未来日数: 交差あり (= 入場時期の目安が見える) はその近辺まで、
+        // 描く未来 bar 数: 交差あり (= 入場時期の目安が見える) はその近辺まで
         // 1〜5 営業日に clamp。交差なしは向き (傾き) が読めれば十分なので
-        // 1 営業日だけ — 3 日でも未来の空白が axis を占有し、履歴側の candle
-        // が左に圧縮される + 押し目端の endLabel が空白に浮く (operator 指摘)。
-        var drawDays = proj.crossingSteps != null
-          ? Math.min(Math.max(Math.ceil(proj.crossingSteps), 1), 5)
-          : 1;
-        var drawBars = Math.max(barsPerDay, Math.round(drawDays * barsPerDay));
+        // 半営業日分の bar だけ — 未来スロットは axis を占有して履歴側の candle
+        // を左に圧縮するため、最小限に保つ (operator 指摘 ×2)。
+        var drawBars;
+        if (proj.crossingSteps != null) {
+          var drawDays = Math.min(Math.max(Math.ceil(proj.crossingSteps), 1), 5);
+          drawBars = Math.max(barsPerDay, Math.round(drawDays * barsPerDay));
+        } else {
+          drawBars = Math.max(2, Math.ceil(barsPerDay / 2));
+        }
         var startIdx = categories.length - 1;
         for (var k = 1; k <= drawBars; k += 1) {
           categories.push(new Date(lastBarMs + k * span).toISOString());
