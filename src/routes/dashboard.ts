@@ -6405,7 +6405,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   const content = `<div class="symbol-chart-pin">
   ${renderFocusSymbolHeader(args)}
   ${renderPriceHeader(args.symbolChart, args.universe)}
-  <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
+  <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
   ${renderBuyabilityPanel(args.buyability ?? null)}
