@@ -288,7 +288,14 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/charts', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, 'チャート', unavailable('DB not bound')))
+      return c.html(
+        renderLayout(
+          c,
+          'チャート',
+          unavailable('DB not bound'),
+          renderChartsSubnav(parseChartsTab(c.req.query('tab'))),
+        ),
+      )
     }
     try {
       const tab = parseChartsTab(c.req.query('tab'))
@@ -298,7 +305,9 @@ export const dashboard = new Hono<DashboardBindings>()
       // - symbol:   universe + symbolChart
       if (tab === 'overview') {
         const equity = await loadEquityCurve(c.env.DB)
-        return c.html(renderLayout(c, 'チャート', chartsBody({ tab, equity })))
+        return c.html(
+          renderLayout(c, 'チャート', chartsBody({ tab, equity }), renderChartsSubnav(tab)),
+        )
       }
       if (tab === 'quality') {
         const [decisions, pnls] = await Promise.all([
@@ -316,6 +325,7 @@ export const dashboard = new Hono<DashboardBindings>()
               stats: computeTradeStats(pnls),
               histogram: computePnlHistogram(pnls),
             }),
+            renderChartsSubnav(tab),
           ),
         )
       }
@@ -358,6 +368,7 @@ export const dashboard = new Hono<DashboardBindings>()
               zoom,
               universe,
             }),
+            renderChartsSubnav(tab),
           ),
         )
       }
@@ -445,6 +456,7 @@ export const dashboard = new Hono<DashboardBindings>()
             universe,
             buyability,
           }),
+          renderChartsSubnav(tab, focusSymbol ?? undefined),
         ),
       )
     } catch (err) {
@@ -1393,24 +1405,32 @@ function fmtJst(value: string | Date | null | undefined): string {
 const STYLE = `
   body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
-  /* mf-dashboard 風 shell: 左 sidebar + main */
-  .app{display:flex;min-height:100vh;align-items:stretch}
-  .sidebar{flex:0 0 216px;background:#fff;border-right:1px solid #d0d0d5;padding:16px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto}
-  .sidebar .brand{font-weight:700;font-size:15px;padding:4px 8px 12px;color:#1d1d1f}
-  .sidebar nav{display:flex;flex-direction:column;gap:2px}
-  .sidebar .nav-group{color:#86868b;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:12px 8px 4px}
-  .sidebar .nav-link{color:#1d1d1f;text-decoration:none;padding:7px 10px;border-radius:7px;font-size:13px}
-  .sidebar .nav-link:hover{background:#f0f0f3}
-  .sidebar .nav-link.active{background:#06c;color:#fff;font-weight:600}
-  .sidebar-killswitch{margin-top:auto;padding-top:12px;border-top:1px solid #e5e5ea;font-size:13px}
-  .sidebar-killswitch .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
-  .main{flex:1;min-width:0;padding:24px}
-  .main .page-title{margin:0 0 16px;font-size:22px}
+  /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
+     コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等)。
+     header は topnav (1段目) + ページ固有 subnav (2段目、例: チャートの
+     概要/取引品質/個別銘柄/銘柄グリッド) の最大2段で sticky。 */
+  .header{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5}
+  .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
+  .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
+  .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
+  .topnav .nav-sep{width:1px;height:18px;background:#d0d0d5;margin:0 8px;flex:0 0 auto}
+  .topnav .nav-link{color:#1d1d1f;text-decoration:none;padding:5px 9px;border-radius:7px;font-size:13px;white-space:nowrap}
+  .topnav .nav-link:hover{background:#f0f0f3}
+  .topnav .nav-link.active{background:#06c;color:#fff;font-weight:600}
+  /* kill switch: 上部バー右端の badge + ドロップダウン (details/summary) */
+  .topnav-killswitch{margin:0;margin-left:auto;position:relative;flex:0 0 auto}
+  .topnav-killswitch summary{list-style:none;cursor:pointer;padding:4px 10px;border:1px solid #d0d0d5;border-radius:7px;font-size:12px;font-weight:600;background:#fafafa;white-space:nowrap}
+  .topnav-killswitch summary::-webkit-details-marker{display:none}
+  .topnav-killswitch[open] summary{background:#f0f0f3}
+  .ks-pop{position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:10px 12px;width:240px;box-shadow:0 4px 16px rgba(0,0,0,0.12);z-index:110;font-size:13px}
+  .ks-pop .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
+  /* ページ固有 subnav (header 2段目)。topnav active より薄い装飾で階層差を出す */
+  .subnav{display:flex;align-items:center;gap:2px;padding:3px 16px 6px;flex-wrap:wrap;border-top:1px solid #f0f0f3}
+  .subnav-link{color:#1d1d1f;text-decoration:none;padding:3px 10px;border-radius:6px;font-size:12.5px;white-space:nowrap}
+  .subnav-link:hover{background:#f0f0f3}
+  .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
+  .main{min-width:0;padding:24px}
   @media(max-width:780px){
-    .app{flex-direction:column}
-    .sidebar{flex:none;width:auto;height:auto;position:static;border-right:none;border-bottom:1px solid #d0d0d5;flex-direction:row;flex-wrap:wrap;align-items:center}
-    .sidebar nav{flex-direction:row;flex-wrap:wrap}
-    .sidebar .nav-group{padding:4px 8px}
     .main{padding:16px}
   }
   /* KPI カード */
@@ -1471,6 +1491,43 @@ const STYLE = `
   tr.symbol-disabled-row{background:#fafafa}
   tr.symbol-disabled-row td{color:#86868b}
   .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
+  /* チャート個別銘柄タブの銘柄レール (左固定)。sticky top は topnav の高さ分逃がす */
+  .symbol-layout{display:flex;gap:14px;align-items:flex-start}
+  /* sticky の top は「自然位置と同じ高さ」に合わせる (--header-h は layout の
+     inline script が実測でセット)。top と自然位置がズレていると、スクロール開始
+     直後にズレ分だけ要素が動いてから張り付く微妙な jump が出る。
+     rail の自然位置 = header 実高 + main padding 24px。 */
+  .symbol-rail{flex:0 0 172px;position:sticky;top:calc(var(--header-h,86px) + 24px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - var(--header-h,86px) - 40px);overflow-y:auto;box-sizing:border-box}
+  .symbol-rail .rail-head{font-size:11px;color:#86868b;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px 6px}
+  .rail-item{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;text-decoration:none;color:#1d1d1f}
+  .rail-item:hover{background:#f0f0f3}
+  .rail-item.active{background:#06c;color:#fff}
+  .rail-item.active .rail-name{color:#dce8ff}
+  .rail-item.inactive{opacity:0.55}
+  .rail-item.inactive .rail-sym{text-decoration:line-through;font-style:italic}
+  .rail-sym{font-weight:600;font-size:13px}
+  .rail-name{font-size:11px;color:#86868b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .symbol-main{flex:1;min-width:0}
+  /* Google Finance 風 range ピル (チャート直下)。active はクリックで JS が付替 */
+  .zoom-preset{padding:4px 14px;font-size:12.5px;background:#fff;border:1px solid #dadce0;border-radius:16px;cursor:pointer;color:#3c4043;margin-right:6px}
+  .zoom-preset:hover{background:#f8f9fa}
+  .zoom-preset.active{background:#e8f0fe;border-color:#e8f0fe;color:#1967d2;font-weight:600}
+  /* チャートを sticky 固定: 下の説明 panel 群 (入場ゲート / 判定 trace) を読む間も
+     グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
+     チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
+     page 本文の assertion に使われる日本語 label をそのまま書かないこと。 */
+  /* pin は margin-top:-24px + padding-top:24px で main padding を自前で吸収し、
+     自然位置 (= header 直下) と sticky top を一致させて jump をゼロにする。
+     吸収した 24px は pin の背景になるので、scroll 中に panel が透けて見える
+     隙間も出ない。 */
+  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:#f5f5f7;margin-top:-24px;padding-top:24px;padding-bottom:8px}
+  @media(max-width:780px){
+    .symbol-layout{flex-direction:column}
+    .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
+    .symbol-rail .rail-head{width:100%}
+    /* 小画面では 460px のチャート固定が viewport を食い潰すため解除 */
+    .symbol-chart-pin{position:static;margin-top:0;padding-top:0}
+  }
 `
 
 function renderLayout(
@@ -1481,12 +1538,13 @@ function renderLayout(
   },
   title: string,
   body: string,
+  subnav = '',
 ): string {
-  const killSwitch = killSwitchSidebar(c.var.killSwitchState)
-  return layout(title, body, c.req.path, killSwitch)
+  const killSwitch = killSwitchTopnav(c.var.killSwitchState)
+  return layout(title, body, c.req.path, killSwitch, subnav)
 }
 
-/** Sidebar nav 定義 (mf-dashboard 風 shell)。active link は path 完全一致で強調。 */
+/** グローバル nav 定義 (上部バー)。active link は path 完全一致で強調。 */
 const NAV_GROUPS: ReadonlyArray<{
   label?: string
   links: ReadonlyArray<{ href: string; text: string; title?: string }>
@@ -1529,28 +1587,31 @@ const NAV_GROUPS: ReadonlyArray<{
   },
 ]
 
-function renderSidebarNav(activePath?: string): string {
+function renderTopNav(activePath?: string): string {
+  // 上部バーではグループ label を出さず縦罫線で区切る (横幅節約)。
+  // グループの意味は各 link の title (hint) で補う。
   return NAV_GROUPS.map((g) => {
-    const head = g.label ? `<div class="nav-group">${esc(g.label)}</div>` : ''
-    const links = g.links
+    return g.links
       .map((l) => {
         const active = activePath === l.href ? ' active' : ''
-        const t = l.title ? ` title="${esc(l.title)}"` : ''
+        const t = l.title ? ` title="${esc(l.title)}"` : g.label ? ` title="${esc(g.label)}"` : ''
         return `<a class="nav-link${active}" href="${l.href}"${t}>${esc(l.text)}</a>`
       })
       .join('')
-    return head + links
-  }).join('')
+  }).join('<span class="nav-sep"></span>')
 }
 
 /**
- * 取引 ON/OFF (kill switch) をサイドバー下部に出すコンパクト版 (#276 → 配置変更)。
- * status ラベル / env override 注記 / 停止・再開フォームは banner 版と同じ文言・
- * action を維持 (テスト・運用の互換)。サイドバー幅に収まるよう縦並び・全幅入力にする。
+ * 取引 ON/OFF (kill switch) を上部バー右端の badge + ドロップダウンで出す
+ * (#276 banner → sidebar → topnav と配置変更)。status ラベル / env override 注記 /
+ * 停止・再開フォームは従来と同じ文言・action を維持 (テスト・運用の互換)。
  */
-function killSwitchSidebar(state: KillSwitchBannerState | null): string {
+function killSwitchTopnav(state: KillSwitchBannerState | null): string {
   if (state === null) {
-    return '<div class="sidebar-killswitch"><div class="ks-title">取引状態</div><span class="muted" style="font-size:12px">取得不能 (D1 未接続)</span></div>'
+    return `<details class="topnav-killswitch">
+      <summary><span class="muted">取引状態: 取得不能</span></summary>
+      <div class="ks-pop"><div class="ks-title">取引状態</div><span class="muted" style="font-size:12px">取得不能 (D1 未接続)</span></div>
+    </details>`
   }
   const statusLabel = state.effective
     ? '<span class="ok">取引 ON (有効)</span>'
@@ -1570,14 +1631,25 @@ function killSwitchSidebar(state: KillSwitchBannerState | null): string {
         <input type="text" name="reason" placeholder="再開理由 (必須)" required maxlength="256" style="padding:4px 6px;font-size:12px;width:100%;box-sizing:border-box"/>
         <button type="submit" ${disabled} style="padding:5px 10px;font-size:12px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">取引再開</button>
        </form>`
-  return `<div class="sidebar-killswitch">
-    <div class="ks-title">取引状態: ${statusLabel}</div>
-    ${envNote}
-    ${buttonForm}
-  </div>`
+  return `<details class="topnav-killswitch">
+    <summary>${statusLabel}</summary>
+    <div class="ks-pop">
+      <div class="ks-title">取引状態: ${statusLabel}</div>
+      ${envNote}
+      ${buttonForm}
+    </div>
+  </details>`
 }
 
-function layout(title: string, body: string, activePath?: string, sidebarFooter = ''): string {
+// ページタイトル h1 は出さない (上部 nav の active 強調で現在地が分かるため
+// 冗長 — operator 要望)。title は <title> にのみ残す。
+function layout(
+  title: string,
+  body: string,
+  activePath?: string,
+  navRight = '',
+  subnav = '',
+): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -1587,18 +1659,35 @@ function layout(title: string, body: string, activePath?: string, sidebarFooter 
 <style>${STYLE}</style>
 </head>
 <body>
-<div class="app">
-  <aside class="sidebar">
+<header class="header">
+  <div class="topnav">
     <div class="brand">Webull Trading</div>
-    <nav>${renderSidebarNav(activePath)}</nav>
-    ${sidebarFooter}
-  </aside>
-  <main class="main">
-    <h1 class="page-title">${esc(title)}</h1>
-    ${body}
-    <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
-  </main>
-</div>
+    <nav>${renderTopNav(activePath)}</nav>
+    ${navRight}
+  </div>
+  ${subnav ? `<nav class="subnav">${subnav}</nav>` : ''}
+</header>
+<script id="header-h-script">
+  // sticky 要素 (.symbol-rail / .symbol-chart-pin) の top に使う header 実高。
+  // nav の折り返しで高さが変わるため実測でセットする (CSS 固定値だと自然位置と
+  // ズレてスクロール開始時に jump する)。
+  // 注: XSS 回帰テストが「未エスケープ payload の生 script 開始タグ」を検出する
+  // ため、layout 由来の script tag には属性 (id) を付けて区別する。タグ文字列を
+  // この comment 内にもそのまま書かないこと。
+  (function () {
+    var h = document.querySelector('.header');
+    if (!h) return;
+    var set = function () {
+      document.documentElement.style.setProperty('--header-h', h.offsetHeight + 'px');
+    };
+    set();
+    window.addEventListener('resize', set);
+  })();
+</script>
+<main class="main">
+  ${body}
+  <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
+</main>
 </body>
 </html>`
 }
@@ -4280,14 +4369,15 @@ export async function loadSymbolChart(
         lastTimestamp,
       )
     : null
-  // candlestick: 1 時間足 (intraday) を Yahoo から fetch。15m は overnight gap
-  // 後の clustering と barWidth 調整がシビアだったため、daily-trader 向けに
-  // 1h を default 採用 (Pullback Uptrend のような multi-day 戦略では十分な
-  // granularity)。Yahoo intraday range 制限 60d で chart 全期間カバー可能。
+  // candlestick: 15 分足 (intraday) を Yahoo から fetch。旧 1h 足は「1日 ≈ 7本」
+  // でスカスカだった (operator 指摘)。category 軸化で overnight gap は詰まる
+  // ようになり、barWidth も auto にしたため 15m の旧懸念 (gap 後の clustering)
+  // は解消済。Yahoo intraday range 制限 60d は 15m でもカバー可能。
+  // 戦略 cron は従来通り 60m を使う (pullbackScheduler 側、ここは表示専用)。
   // 失敗 (network 等) なら空配列で fallback (candle 自体スキップ)。
   let intradayBars: OhlcBar[] = []
   try {
-    const intraday = await new YahooBarClient().getIntradayBars(symbol, '60m')
+    const intraday = await new YahooBarClient().getIntradayBars(symbol, '15m')
     // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
     // を除外。lastTimestamp が無いときは全件採用。
     intradayBars = (cronLastTs == null
@@ -4643,7 +4733,7 @@ export function computeLinearRegressionLine(
  * trend line が描画されないケースが残った。
  *
  * 最も robust な解決策は line の data 自体を「常に zoom 範囲内に複数点が
- * 入る粒度」にすること。ここでは intradayBars (1h candle、60 日で ~720 点)
+ * 入る粒度」にすること。ここでは intradayBars (15m candle、60 日で ~1500 点)
  * の各 timestamp で trend line の y 値を線形補間して、`[[t, y], ...]` の
  * dense path に展開する。これで 5D (~120 点) や 1D zoom でも常に複数点が
  * visible になり filterMode 不問で確実に描画される。
@@ -5035,37 +5125,28 @@ type ChartsBodyArgs =
   | ChartsBodyGrid
 
 /**
- * Chart 上部に出す tab strip。現在 tab には active 装飾、他は通常リンク。
+ * チャートの view 切替 (概要 / 取引品質 / 個別銘柄 / 銘柄グリッド)。
+ * header 2段目の subnav として出す (ページ本文の tab strip からサブメニュー化)。
+ * 現在 tab には active 装飾、他は通常リンク。
  */
-function renderTabStrip(active: ChartsTab, focusSymbol?: string): string {
-  const tabs = CHART_TABS.map((t) => {
-    const style =
-      t.id === active
-        ? 'font-weight:600;text-decoration:underline;background:#fff;border-color:#06c;color:#06c'
-        : ''
-    const baseStyle = 'display:inline-block;padding:4px 12px;margin-right:6px;border:1px solid #d0d0d5;border-radius:6px;background:#fafafa;color:#1d1d1f;text-decoration:none;'
-
+function renderChartsSubnav(active: ChartsTab, focusSymbol?: string): string {
+  return CHART_TABS.map((t) => {
     if (t.id === active) {
-      return `<span title="${esc(t.hint)}" style="${baseStyle}${style}">${esc(t.label)}</span>`
+      return `<span class="subnav-link active" title="${esc(t.hint)}">${esc(t.label)}</span>`
     }
-
     let href = `/dashboard/charts?tab=${t.id}`
     if (t.id === 'symbol' && focusSymbol) {
       href += `&symbol=${encodeURIComponent(focusSymbol)}`
     }
-
-    return `<a href="${href}" title="${esc(t.hint)}" style="${baseStyle}${style}">${esc(t.label)}</a>`
+    return `<a class="subnav-link" href="${href}" title="${esc(t.hint)}">${esc(t.label)}</a>`
   }).join('')
-  return `<nav style="margin:0 0 12px 0">${tabs}</nav>`
 }
 
 function chartsBody(args: ChartsBodyArgs): string {
-  const focusSymbol = args.tab === 'symbol' ? args.focusSymbol ?? undefined : undefined
-  const tabStrip = renderTabStrip(args.tab, focusSymbol)
-  if (args.tab === 'overview') return tabStrip + renderOverviewTab(args)
-  if (args.tab === 'quality') return tabStrip + renderQualityTab(args)
-  if (args.tab === 'grid') return tabStrip + renderGridTab(args)
-  return tabStrip + renderSymbolTab(args)
+  if (args.tab === 'overview') return renderOverviewTab(args)
+  if (args.tab === 'quality') return renderQualityTab(args)
+  if (args.tab === 'grid') return renderGridTab(args)
+  return renderSymbolTab(args)
 }
 
 function renderOverviewTab(args: ChartsBodyOverview): string {
@@ -5174,10 +5255,11 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
     args.symbolChart === null ||
     args.symbolChart.points.length === 0
   if (noData) {
-    return (
-      renderSymbolPickerForTab(args) +
-      `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>` +
-      renderStrategyParamsPanel(args.strategyParams)
+    return wrapWithSymbolRail(
+      args,
+      renderFocusSymbolHeader(args) +
+        `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>` +
+        renderStrategyParamsPanel(args.strategyParams),
     )
   }
   const initScript = `
@@ -5203,9 +5285,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
 
       // セッション境界 (休場 → 開場) 検出:
       // category axis 化で休場 gap が詰まった結果 (#193)、視覚的に
-      // 「どこから新セッションか」が分かりにくくなった。1h interval なので
-      // 隣接 bar は通常 60 分差。週末 / 夜間 closed 後の最初の bar は数時間〜
-      // 数十時間ぶんの差が空く。閾値 90 分 (= 1.5h) で safe に検出し、後ろ側
+      // 「どこから新セッションか」が分かりにくくなった。15m interval なので
+      // 隣接 bar は通常 15 分差。週末 / 夜間 closed 後の最初の bar は数時間〜
+      // 数十時間ぶんの差が空く。閾値 90 分で safe に検出し、後ろ側
       // category index を「新セッションの開場点」として markLine 描画する。
       // useCategoryAxis === false (intradayBars 空) の場合は描画 skip。
       var sessionOpenIndices = [];
@@ -5383,7 +5465,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       // ユーザ環境で残ケースがあった。本質的に robust にするため、line の
       // data 自体を「常に zoom 範囲内に複数点が入る粒度」に展開する。
       //
-      // 具体的には intradayBars (1h candle、60 日で ~720 点) の各 timestamp
+      // 具体的には intradayBars (15m candle、60 日で ~1500 点) の各 timestamp
       // で trend line の y 値を線形補間し、[[t, y], ...] の dense path にす
       // る。これで 5D (~120 点) や 1D zoom でも複数点が必ず visible になり
       // filterMode 不問で線分が描画される。intradayBars が空 (Yahoo fetch
@@ -5473,7 +5555,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         ? sc.markers[sc.markers.length - 1].timestamp
         : null;
       // category mode では markPoint coord に [categoryIndex, price] を渡す。
-      // fill 時刻を最近接 ohlc bar (= 1h 粒度) の index に snap するため、同 1h
+      // fill 時刻を最近接 ohlc bar (= 15m 粒度) の index に snap するため、同 bar
       // 内の複数 fill は同じ index に重なる。pin label は側 (top/bottom) と色で
       // 区別するため重なっても 1 件は読める。fillTimestamp は秒精度を保持して
       // hover tooltip で full-precision 時刻として表示される (情報損失なし)。
@@ -5645,11 +5727,17 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         // 未来スロットの timestamp 間隔 (直近 bar の平均間隔)。
         var span = barsPerDay > 1 ? (lastBarMs - ohlcMs[ohlcMs.length - barsPerDay]) / (barsPerDay - 1) : 3600000;
         if (!Number.isFinite(span) || span <= 0) span = 3600000;
-        // 描く未来日数: 交差ありはその近辺まで、交差なし (向きだけ見せる) は短めに
-        // して未来の空白が過大にならないようにする。1〜5 営業日に clamp。
-        var rawDays = proj.crossingSteps != null ? proj.crossingSteps : Math.min(proj.horizonSteps, 3);
-        var drawDays = Math.min(Math.max(Math.ceil(rawDays), 1), 5);
-        var drawBars = Math.max(barsPerDay, Math.round(drawDays * barsPerDay));
+        // 描く未来 bar 数: 交差あり (= 入場時期の目安が見える) はその近辺まで
+        // 1〜5 営業日に clamp。交差なしは向き (傾き) が読めれば十分なので
+        // 半営業日分の bar だけ — 未来スロットは axis を占有して履歴側の candle
+        // を左に圧縮するため、最小限に保つ (operator 指摘 ×2)。
+        var drawBars;
+        if (proj.crossingSteps != null) {
+          var drawDays = Math.min(Math.max(Math.ceil(proj.crossingSteps), 1), 5);
+          drawBars = Math.max(barsPerDay, Math.round(drawDays * barsPerDay));
+        } else {
+          drawBars = Math.max(2, Math.ceil(barsPerDay / 2));
+        }
         var startIdx = categories.length - 1;
         for (var k = 1; k <= drawBars; k += 1) {
           categories.push(new Date(lastBarMs + k * span).toISOString());
@@ -5690,6 +5778,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       });
       sc.markers.forEach(function (m) { pushIfFinite(m.price); });
       extraYValues.forEach(function (v) { pushIfFinite(v); });
+      pushIfFinite(data.prevClose); // 前日終値 markLine が枠外に出ないように
       var yMin, yMax;
       if (allY.length > 0) {
         var rawMin = Math.min.apply(null, allY);
@@ -5738,23 +5827,21 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       // candle / line / scatter / markLine / markPoint / markArea すべてで
       // 「1 点が範囲外でも視覚的に切れて表示される」のが期待動作なので
       // wide chart (1 銘柄 / 数千点) でも問題ない。
-      var dzCommon = {
-        labelFormatter: function (value) { return jstLabelForX(value); },
-        filterMode: 'weakFilter',
-      };
-      var dzInside = { filterMode: 'weakFilter' };
+      // 下部 slider と wheel/pinch zoom は廃止 (Google Finance 風 — range 操作は
+      // 1日/5日/1か月/最大 のピルのみ。operator 要望)。inside dataZoom は
+      // ピルの dispatchAction / URL 同期の受け皿として残すが、マウス・タッチ
+      // 操作は全て無効化する (sticky チャート上で page scroll を奪わない効果も)。
       var dataZoomCfg = [
-        Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInside, dzInitial),
-        Object.assign({ type: 'slider', xAxisIndex: 0, height: 24, bottom: 8 }, dzCommon, dzInitial),
+        Object.assign({
+          type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter',
+          zoomOnMouseWheel: false, moveOnMouseMove: false, moveOnMouseWheel: false,
+          zoomLock: false,
+        }, dzInitial),
       ];
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
-      // displayName は server 側で symbol_config.market='JP' なら "番号-会社名" を
-      // 入れている。US / fallback は symbol そのまま。chart 内 string concat 時の
-      // 安全フォールバックとして '|| sc.symbol' を残す。
-      var titleSymbol = sc.displayName || sc.symbol;
+      // chart title は出さない: 銘柄は左レールの強調で、表示要素は凡例で分かる。
       symChart.setOption({
-        title: { text: titleSymbol + ' price + トレンドライン + 押し目ゾーン + entry/exit', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
@@ -5802,10 +5889,11 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         },
         legend: { top: 22, type: 'scroll' },
         // plot 面積最大化: grid 余白を絞り、splitLine 淡く、axisLine 非表示で
-        // candle が映える背景に (trader-strategist 助言)。bottom は slider 用 64px キープ。
+        // candle が映える背景に (trader-strategist 助言)。下部 slider 廃止に伴い
+        // bottom は x軸ラベル分 (28px) のみ。
         // right は stop/TP の endLabel ("stop X (preview)" 等) が見切れないよう
         // 80px 確保 (短い "stop X (-Y%)" でも余白として違和感ない範囲)。
-        grid: { left: 50, right: 120, top: 56, bottom: 64 },
+        grid: { left: 50, right: 120, top: 56, bottom: 28 },
         dataZoom: dataZoomCfg,
         // category mode: categories = intradayBars 各 bar の ISO timestamp。
         // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
@@ -5889,21 +5977,20 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             lineStyle: { width: 1.8, color: '#9333ea', type: 'solid' }, symbol: 'none',
             itemStyle: { color: '#9333ea' }, z: 7,
           }] : []),
-          // candlestick: 15 分足 OHLC を表示。Western 規約 (close >= open = 緑、
-          // candle: 主役。Western 規約 (close >= open = 緑、< = 赤)。
+          // candle: 主役。日本式配色 (Google Finance JA と同じ):
+          // 赤 = 陽線 (close >= open) / 緑 = 陰線 (close < open)。
           // markPoint / markLine もここに anchor。barWidth 明示で overnight
           // gap 後の細い candle を視認可能に。borderWidth 強めて
           // body と wick の対比を確保。
           ...(ohlcXY.length > 0 ? [{
-            name: 'price (1h OHLC)', type: 'candlestick', data: ohlcXY,
-            // 1h は 15m より時間軸の間隔が 4 倍広いので、barWidth も少し
-            // 広めに (相対的に gap 比率を一定に保つ)。
-            barWidth: 10,
+            name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
+            // barWidth は auto (slot 幅比例)。15m 化で本数が 4 倍になったため、
+            // 固定 px だと zoom out 時に candle が重なる。
             itemStyle: {
-              color: '#057a55',     // bullish (close >= open)
-              color0: '#c22',       // bearish (close < open)
-              borderColor: '#057a55',
-              borderColor0: '#c22',
+              color: '#d23f31',     // 陽線 (close >= open) — 日本式は赤
+              color0: '#1e8e3e',    // 陰線 (close < open) — 日本式は緑
+              borderColor: '#d23f31',
+              borderColor0: '#1e8e3e',
               borderWidth: 1.5,
             },
             z: 5,
@@ -5917,16 +6004,35 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             // 描画 path が trend line (slanted 2-point markLine) とは別系統。
             // 縦線方向は zoom 範囲外でも描画ロバスト (#193 follow-up)。
             // category 軸モード時のみ data を積む (time axis fallback では空)。
-            markLine: sessionOpenIndices.length > 0 ? {
-              symbol: 'none',
-              silent: true,
-              label: { show: false },
-              lineStyle: { color: '#bbb', width: 1, type: 'dashed' },
-              z: 1,
-              data: sessionOpenIndices.map(function (idx) {
+            markLine: (function () {
+              var mlData = sessionOpenIndices.map(function (idx) {
                 return { xAxis: idx };
-              }),
-            } : undefined,
+              });
+              // 前日終値の水平点線 + 右端ラベル (Google Finance 風)。candle series
+              // の markLine に同居させる (独立 series にすると legend を汚すため)。
+              if (data.prevClose != null && Number.isFinite(data.prevClose)) {
+                mlData.push({
+                  yAxis: data.prevClose,
+                  lineStyle: { color: '#9aa0a6', width: 1, type: 'dotted' },
+                  label: {
+                    show: true,
+                    position: 'insideEndTop',
+                    formatter: data.prevCloseLabel || '前日終値',
+                    color: '#5f6368',
+                    fontSize: 10,
+                  },
+                });
+              }
+              if (mlData.length === 0) return undefined;
+              return {
+                symbol: 'none',
+                silent: true,
+                label: { show: false },
+                lineStyle: { color: '#bbb', width: 1, type: 'dashed' },
+                z: 1,
+                data: mlData,
+              };
+            })(),
             markPoint: entries.length + exits.length > 0 ? {
               symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
               tooltip: {
@@ -6113,13 +6219,21 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         sc.markers.forEach(function (m) {
           if (inRangeMs(new Date(m.timestamp).getTime())) pushIfFinite(m.price);
         });
-        // visible 範囲内の SMA50 値も含める。SMA50 が candle と離れた水準
-        // (例: SOXL は 3x rally で SMA50=65 / 価格=128) の銘柄では candle が
-        // 縦方向に圧縮されるが、SMA50 line が常時可視になる方を優先する
-        // (#181 後の user request)。zoom out すれば candle にとって過剰な
-        // 引き伸ばしも緩和される。
+        // visible 範囲内の SMA50 は「candle range の近傍にある時だけ」含める。
+        // #181 では SMA50 常時可視を優先したが、乖離が大きい銘柄 (3x ETF rally
+        // 等: SMA50=125 / 価格=260) では軸が倍近く引き伸ばされ、candle の
+        // 高値-安値が読めなくなる (operator 指摘で方針転換)。近傍 = candle
+        // range を上下 25% 拡張した帯。帯の外の SMA50 線は clip されるが、値は
+        // 価格ヘッダーのサブ行 (SMA50: X) で常に確認できる。
+        var candleMin = visibleY.length ? Math.min.apply(null, visibleY) : null;
+        var candleMax = visibleY.length ? Math.max.apply(null, visibleY) : null;
         sc.points.forEach(function (p) {
-          if (inRangeMs(new Date(p.timestamp).getTime())) pushIfFinite(p.sma50);
+          if (!inRangeMs(new Date(p.timestamp).getTime())) return;
+          var v = p.sma50;
+          if (v == null || !Number.isFinite(v)) return;
+          if (candleMin == null) { visibleY.push(v); return; }
+          var nearBand = Math.max((candleMax - candleMin) * 0.25, 0.5);
+          if (v >= candleMin - nearBand && v <= candleMax + nearBand) visibleY.push(v);
         });
         // trend line: regression で fit した 1 本。pivots[0]→end の 2 点で
         // 直線が定義される。visible 範囲内に endpoint または時間軸の交点が
@@ -6268,9 +6382,11 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             sv = fromMs;
             eV = toMs;
           }
-          // inside / slider 両方を同期更新
+          // Google 風ピルの active 付替 (押した range を強調)
+          for (var pj = 0; pj < presetButtons.length; pj += 1) presetButtons[pj].classList.remove('active');
+          ev.currentTarget.classList.add('active');
+          // dataZoom は inside 1 つだけ (slider 廃止)
           symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: sv, endValue: eV });
-          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: sv, endValue: eV });
         });
       }
     });
@@ -6288,19 +6404,30 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
   // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
   const projection = args.buyability?.projection ?? null
-  return `${renderSymbolPickerForTab(args)}
-  ${renderCurrentIndicatorsBadge(args.symbolChart)}
-  <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  // 前日終値 (header の前日比とチャート点線の共通基準)。
+  const prevClose = prevDailyClose(args.symbolChart)
+  const prevCloseLabel =
+    prevClose !== null
+      ? `前日終値 ${fmtPriceCcy(prevClose, args.universe?.symbolCurrency[args.symbolChart!.symbol.toUpperCase()] ?? null)}`
+      : null
+  const content = `<div class="symbol-chart-pin">
+  ${renderFocusSymbolHeader(args)}
+  ${renderPriceHeader(args.symbolChart, args.universe)}
+  <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
+  ${renderZoomPresetButtons(args.symbolChart)}
+  </div>
   ${renderBuyabilityPanel(args.buyability ?? null)}
   ${renderDecisionPlotCaption(args.symbolChart)}
-  ${renderZoomPresetButtons(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
   </div>
-  ${renderStrategyParamsPanel(args.strategyParams)}
+  ${renderStrategyParamsPanel(args.strategyParams)}`
+  return `${wrapWithSymbolRail(args, content)}
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
     projection,
+    prevClose,
+    prevCloseLabel,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   })}
@@ -6317,7 +6444,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
  * に配信。
  *
  * mini chart の構成 (PR #239 で個別銘柄タブと表示要素パリティ):
- * - candle (1h OHLC)
+ * - candle (15m OHLC)
  * - 価格トレンド (linear regression)
  * - SMA50
  * - 押し目ゾーン markArea + sloped 上下端線 (未保有時のみ)
@@ -6811,10 +6938,11 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             }] : []),
             ...(ohlcXY.length > 0 ? [{
               name: 'price', type: 'candlestick', data: ohlcXY,
-              barWidth: 6,
+              // barWidth は auto (15m 化で本数 4 倍、固定 px だと mini panel で潰れる)
+              // 日本式配色: 赤=陽線 / 緑=陰線 (個別銘柄タブと揃える)
               itemStyle: {
-                color: '#057a55', color0: '#c22',
-                borderColor: '#057a55', borderColor0: '#c22', borderWidth: 1,
+                color: '#d23f31', color0: '#1e8e3e',
+                borderColor: '#d23f31', borderColor0: '#1e8e3e', borderWidth: 1,
               },
               z: 5,
               markLine: sessionOpenIndices.length > 0 ? {
@@ -7266,16 +7394,17 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
     return Number.isFinite(ms) ? ms : lastMs
   })()
   const day = 24 * 3600 * 1000
+  // ラベルは Google Finance JA 準拠 (1日 / 5日 / 1か月 / 最大)。
   const presets: Array<{ label: string; fromMs: number; toMs: number }> = [
-    { label: '1D', fromMs: lastMs - 1 * day, toMs: lastMs },
-    { label: '5D', fromMs: lastMs - 5 * day, toMs: lastMs },
-    { label: '1M', fromMs: lastMs - 30 * day, toMs: lastMs },
-    { label: 'All', fromMs: earliestMs, toMs: lastMs },
+    { label: '1日', fromMs: lastMs - 1 * day, toMs: lastMs },
+    { label: '5日', fromMs: lastMs - 5 * day, toMs: lastMs },
+    { label: '1か月', fromMs: lastMs - 30 * day, toMs: lastMs },
+    { label: '最大', fromMs: earliestMs, toMs: lastMs },
   ]
   const buttons = presets
     .map(
       (p) =>
-        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}" style="margin-right:6px;padding:3px 10px;font-size:12px;background:#fafafa;border:1px solid #d0d0d5;border-radius:4px;cursor:pointer;color:#1d1d1f">${esc(p.label)}</button>`,
+        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}">${esc(p.label)}</button>`,
     )
     .join('')
   return `<p style="margin:8px 0 0">${buttons}</p>`
@@ -7413,12 +7542,15 @@ export function renderBuyabilityPanel(buyability: BuyabilityView | null): string
     })
     .join('')
 
-  return `<div class="reason-panel" style="margin-top:10px;max-width:720px">
+  // 距離の推移 (+ETA) と 入場ゲート は 2 列 (narrow 画面は .panel-row の
+  // media query で 1 列に落ちる)。
+  return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
     <div style="font-size:13px;color:${headColor};margin-bottom:6px">${headline}</div>
-    ${trendBlock}
-    ${etaBlock}
-    <div style="margin-top:10px"><strong>入場ゲート</strong>(全条件。閾値は global 既定)
-      <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
+    <div class="panel-row" style="gap:8px 20px">
+      <div>${trendBlock}${etaBlock}</div>
+      <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定)
+        <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
+      </div>
     </div>
   </div>`
 }
@@ -7446,9 +7578,51 @@ export function renderDecisionPlotCaption(chart: SymbolChartData | null): string
   </div>`
 }
 
-export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): string {
-  if (!chart) return ''
-  // 最新の indicator 付き point を末尾から探す (Yahoo filler は indicators null)
+/** 通貨に応じた価格表示 (JPY は整数 + カンマ、他は小数 2 桁)。 */
+function fmtPriceCcy(v: number, currency: string | null): string {
+  const mark = currency === 'JPY' ? '¥' : '$'
+  const digits = currency === 'JPY' ? 0 : 2
+  return `${mark}${v.toLocaleString('ja-JP', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
+}
+
+/**
+ * 前日終値 (= 最終 daily point の 1 つ前の price)。比較・markLine 共用。
+ * points が 2 点未満 / 非有限なら null。
+ */
+export function prevDailyClose(chart: SymbolChartData | null): number | null {
+  const pts = chart?.points ?? []
+  if (pts.length < 2) return null
+  const v = pts[pts.length - 2]!.price
+  return Number.isFinite(v) ? v : null
+}
+
+/**
+ * Google Finance 風の価格ヘッダー: 大きい現在値 + 前日比 (%/絶対値)。
+ * 日本式配色 (上昇=赤 / 下落=緑)。下段に SMA50 / high20d / low20d の小バッジ。
+ * 現在値は latestCronPrice (直近 strategy 評価値)、無ければ最終 point の price。
+ */
+export function renderPriceHeader(
+  chart: SymbolChartData | null,
+  universe?: SymbolUniverse | null,
+): string {
+  if (!chart || chart.points.length === 0) return ''
+  const last = chart.points[chart.points.length - 1]!
+  const cur = chart.latestCronPrice ?? last.price
+  if (!Number.isFinite(cur)) return ''
+  const ccy = universe?.symbolCurrency[chart.symbol.toUpperCase()] ?? null
+  const prev = prevDailyClose(chart)
+  let changeHtml = ''
+  if (prev !== null && prev > 0) {
+    const diff = cur - prev
+    const pct = (diff / prev) * 100
+    const up = diff >= 0
+    // 日本式: 上昇=赤 / 下落=緑 (Google Finance JA と同じ)
+    const color = up ? '#d23f31' : '#188038'
+    const arrow = up ? '▲' : '▼'
+    const sign = up ? '+' : ''
+    changeHtml = ` <span style="font-size:14px;font-weight:600;color:${color};margin-left:6px">${arrow} ${sign}${pct.toFixed(2)}% (${sign}${diff.toFixed(2)}) 前日比</span>`
+  }
+  // 最新の indicator 付き point (Yahoo filler は indicators null)
   let latest: SymbolChartPoint | null = null
   for (let i = chart.points.length - 1; i >= 0; i -= 1) {
     const p = chart.points[i]!
@@ -7457,52 +7631,77 @@ export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): str
       break
     }
   }
-  if (!latest) return ''
   const fmt = (v: number | null): string => (v == null ? '—' : v.toFixed(2))
-  const items: Array<[string, string]> = [
-    ['price', fmt(latest.price)],
-    ['SMA50', fmt(latest.sma50)],
-    ['high20d', fmt(latest.high20d)],
-    ['low20d', fmt(latest.low20d)],
-  ]
-  const badges = items
+  const subItems: Array<[string, string]> = latest
+    ? [
+        ['SMA50', fmt(latest.sma50)],
+        ['high20d', fmt(latest.high20d)],
+        ['low20d', fmt(latest.low20d)],
+      ]
+    : []
+  const sub = subItems
     .map(
       ([k, v]) =>
         `<span style="display:inline-block;margin-right:10px;font-size:12px"><span class="muted">${esc(k)}:</span> <strong>${esc(v)}</strong></span>`,
     )
     .join('')
-  return `<p style="margin:6px 0 0">${badges}</p>`
+  return `<div style="margin:2px 0 0">
+    <span style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em">${esc(fmtPriceCcy(cur, ccy))}</span>${changeHtml}
+  </div>
+  ${sub ? `<p style="margin:2px 0 0">${sub}</p>` : ''}`
 }
 
-function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
+/**
+ * 個別銘柄タブの銘柄レール (左固定)。旧 inline picker (「切替: <長い名前の列挙>」)
+ * は full name の link が折り返して読みづらかったため、ticker + 小さい銘柄名の
+ * 縦リストに変更。zoom 範囲は従来通り URL で伝搬する。
+ */
+function renderSymbolRail(args: ChartsBodySymbol): string {
   if (args.availableSymbols.length === 0) return ''
-  // 銘柄切替時にズーム範囲を維持するため、現在の from/to を picker URL に伝搬
+  // 銘柄切替時にズーム範囲を維持するため、現在の from/to をレール URL に伝搬
   const zoomQs = args.zoom
     ? `&from=${encodeURIComponent(args.zoom.from.toISOString())}&to=${encodeURIComponent(args.zoom.to.toISOString())}`
     : ''
-  const opts = args.availableSymbols
+  const items = args.availableSymbols
     .map((s) => {
       const inactive = isSymbolInactive(s, args.universe)
       const isFocus = s === args.focusSymbol
-      const linkClass = inactive ? ' class="symbol-disabled"' : ''
-      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(s, args.universe))}"` : ''
-      return `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}"${linkClass}${titleAttr} style="margin-right:6px;${
-        isFocus ? 'font-weight:600;text-decoration:underline' : ''
-      }">${esc(displaySymbol(s, args.universe))}</a>`
+      const name = args.universe?.symbolName[s.toUpperCase()] ?? ''
+      const cls = ['rail-item', isFocus ? 'active' : '', inactive ? 'inactive' : '']
+        .filter(Boolean)
+        .join(' ')
+      const titleAttr = inactive
+        ? ` title="${esc(inactiveTooltip(s, args.universe))}"`
+        : name
+          ? ` title="${esc(name)}"`
+          : ''
+      return `<a class="${cls}" href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}"${titleAttr}>
+        <span class="rail-sym">${esc(s)}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
+      </a>`
     })
     .join('')
-  const focusLabel = args.focusSymbol
-    ? displaySymbol(args.focusSymbol, args.universe)
-    : '—'
+  return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${items}</aside>`
+}
+
+/** レール + 本文の 2 カラム。レールが空 (銘柄ゼロ) なら本文のみ。 */
+function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
+  const rail = renderSymbolRail(args)
+  if (!rail) return content
+  return `<div class="symbol-layout">${rail}<div class="symbol-main">${content}</div></div>`
+}
+
+/**
+ * 表示中銘柄の見出し行。active 銘柄では出さない (左レールの強調表示で自明)。
+ * inactive 銘柄の時だけ、注記 (cron 評価対象外) 付きで出す。
+ */
+function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   const focusInactive = args.focusSymbol
     ? isSymbolInactive(args.focusSymbol, args.universe)
     : false
-  const focusBadge = focusInactive
-    ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(args.universe?.symbolNotes[args.focusSymbol!.toUpperCase()] ?? 'cron 評価対象外')})</span>`
-    : ''
-  return `<p class="muted" style="font-size:12px">
-    銘柄: <strong>${esc(focusLabel)}</strong>${focusBadge} | 切替: ${opts}
-  </p>`
+  if (!args.focusSymbol || !focusInactive) return ''
+  const focusLabel = displaySymbol(args.focusSymbol, args.universe)
+  const note = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
+  return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong> <span class="muted" style="font-size:11px">(inactive — ${esc(note)})</span></p>`
 }
 
 /**

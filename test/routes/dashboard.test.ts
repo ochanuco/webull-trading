@@ -155,6 +155,45 @@ describe('dashboard', () => {
     expect(body).toMatch(/<button[^>]*disabled[^>]*>取引再開<\/button>/)
   })
 
+  // グローバルメニュー上部化: 全 page 共通 shell は上部バー (topnav)。
+  // kill switch は上部バー右端の badge + ドロップダウン (details) に入る。
+  it('renders global menu as top bar with kill-switch dropdown (no left sidebar)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).toContain('<header class="header">')
+    expect(body).toContain('class="topnav"')
+    expect(body).toContain('class="topnav-killswitch"')
+    // 旧左サイドバーは無い
+    expect(body).not.toContain('class="sidebar"')
+    // nav link は維持 (ホーム / 銘柄管理 など)
+    expect(body).toContain('href="/dashboard/symbols"')
+    // ページタイトル h1 は出さない (nav の active 強調で現在地が分かるため冗長)
+    expect(body).not.toContain('page-title')
+  })
+
+  // チャートの view 切替 (概要/取引品質/個別銘柄/銘柄グリッド) は本文 tab strip
+  // ではなく header 2段目の subnav に出す (サブメニュー化)。
+  it('charts page renders view switcher as header subnav with active state', async () => {
+    const app = createApp()
+    // DB 未バインドでも subnav は出る (本文は unavailable)
+    const res = await app.request(
+      '/dashboard/charts?tab=quality',
+      { headers: authHeader },
+      baseEnv,
+    )
+    const body = await res.text()
+    expect(body).toContain('<nav class="subnav">')
+    expect(body).toContain('class="subnav-link active"')
+    expect(body).toContain('>取引品質<')
+    expect(body).toContain('href="/dashboard/charts?tab=symbol"')
+    expect(body).toContain('href="/dashboard/charts?tab=grid"')
+  })
+
 
   it('renders positions page with DO state', async () => {
     const env = {
@@ -1749,59 +1788,83 @@ describe('anchorJstMidnight', () => {
   })
 })
 
-import { renderCurrentIndicatorsBadge } from '../../src/routes/dashboard'
+import { renderPriceHeader, prevDailyClose } from '../../src/routes/dashboard'
 
-describe('renderCurrentIndicatorsBadge', () => {
-  function fakeChartWith(points: SymbolChartPoint[]): SymbolChartData {
+describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
+  function fakeChartWith(
+    points: SymbolChartPoint[],
+    latestCronPrice: number | null = null,
+  ): SymbolChartData {
     return {
       symbol: 'X', points, markers: [], position: null,
       rules: { pullbackMax: 0, pullbackMin: 0, stopPct: 0, takeProfitPct: 0, timeStopDays: 10 },
       trendLine: null, intradayBars: [],
-      latestCronPrice: null, latestCronTimestamp: null,
+      latestCronPrice, latestCronTimestamp: null,
     }
   }
-
-  it('chart が null なら空文字', () => {
-    expect(renderCurrentIndicatorsBadge(null)).toBe('')
+  const pt = (price: number, ind = false): SymbolChartPoint => ({
+    timestamp: '2026-04-25T05:00:00.000Z',
+    price,
+    sma50: ind ? 60 : null,
+    high20d: ind ? 105 : null,
+    low20d: ind ? 90 : null,
   })
 
-  it('points 空なら空文字', () => {
-    expect(renderCurrentIndicatorsBadge(fakeChartWith([]))).toBe('')
+  it('chart null / points 空なら空文字', () => {
+    expect(renderPriceHeader(null)).toBe('')
+    expect(renderPriceHeader(fakeChartWith([]))).toBe('')
   })
 
-  it('全 indicator null の point しか無ければ空文字', () => {
-    const chart = fakeChartWith([
-      { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
-    ])
-    expect(renderCurrentIndicatorsBadge(chart)).toBe('')
+  it('現在値を大きく + 前日比 (上昇=赤 ▲、日本式)', () => {
+    const html = renderPriceHeader(fakeChartWith([pt(100), pt(102)]))
+    expect(html).toContain('$102.00')
+    expect(html).toContain('▲')
+    expect(html).toContain('+2.00%')
+    expect(html).toContain('(+2.00)')
+    expect(html).toContain('#d23f31') // 上昇 = 赤
+    expect(html).toContain('前日比')
   })
 
-  it('最新の indicator 付き point から price/SMA50/high20d/low20d を表示', () => {
-    const chart = fakeChartWith([
-      { timestamp: '2026-04-23T05:00:00.000Z', price: 100, sma50: 60, high20d: 105, low20d: 90 },
-      // Yahoo filler (indicators null) — skip
-      { timestamp: '2026-04-24T16:00:00.000Z', price: 110, sma50: null, high20d: null, low20d: null },
-      // 末尾から探して 04/23 の point を採用
-    ])
-    const html = renderCurrentIndicatorsBadge(chart)
-    expect(html).toContain('price')
-    expect(html).toContain('100.00')
+  it('下落は緑 ▼', () => {
+    const html = renderPriceHeader(fakeChartWith([pt(100), pt(97)]))
+    expect(html).toContain('▼')
+    expect(html).toContain('-3.00%')
+    expect(html).toContain('#188038') // 下落 = 緑
+  })
+
+  it('JPY 銘柄は ¥ + 整数表示', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['X'],
+      symbolCurrency: { X: 'JPY' },
+    })
+    const html = renderPriceHeader(fakeChartWith([pt(1535), pt(1549)]), universe)
+    expect(html).toContain('¥1,549')
+    expect(html).not.toContain('¥1,549.00')
+  })
+
+  it('latestCronPrice があれば現在値として優先', () => {
+    const html = renderPriceHeader(fakeChartWith([pt(100), pt(102)], 103.5))
+    expect(html).toContain('$103.50')
+  })
+
+  it('points 1 点 (前日なし) は前日比を出さず価格のみ', () => {
+    const html = renderPriceHeader(fakeChartWith([pt(120)]))
+    expect(html).toContain('$120.00')
+    expect(html).not.toContain('前日比')
+  })
+
+  it('サブ行に SMA50/high20d/low20d (最新の indicator 付き point から)', () => {
+    const html = renderPriceHeader(fakeChartWith([pt(100, true), pt(110)]))
     expect(html).toContain('SMA50')
     expect(html).toContain('60.00')
     expect(html).toContain('high20d')
     expect(html).toContain('105.00')
-    expect(html).toContain('low20d')
-    expect(html).toContain('90.00')
   })
 
-  it('一部 indicator が null でも em-dash で fallback', () => {
-    const chart = fakeChartWith([
-      { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: 60, high20d: null, low20d: null },
-    ])
-    const html = renderCurrentIndicatorsBadge(chart)
-    expect(html).toContain('120.00')
-    expect(html).toContain('60.00')
-    expect(html).toContain('—') // high20d / low20d
+  it('prevDailyClose は最終 point の 1 つ前の price (2 点未満は null)', () => {
+    expect(prevDailyClose(fakeChartWith([pt(100), pt(102)]))).toBe(100)
+    expect(prevDailyClose(fakeChartWith([pt(100)]))).toBeNull()
+    expect(prevDailyClose(null)).toBeNull()
   })
 })
 
@@ -1976,6 +2039,97 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('"projection":null')
   })
 
+  // 銘柄レール (左固定): 旧 inline picker (「切替: <full name の列挙>」) を置換。
+  it('銘柄レールを左に出し、focus は active / inactive は注記付きで識別する', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['TQQQ', 'SOXL'],
+      inactiveSymbols: ['1570'],
+      symbolName: { TQQQ: 'ProShares UltraPro QQQ', '1570': 'NF 日経レバ' },
+      symbolNotes: { '1570': 'liquidity dropped' },
+      symbolCurrency: { TQQQ: 'USD', SOXL: 'USD', '1570': 'JPY' },
+    })
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL', '1570'],
+      universe,
+    })
+    expect(html).toContain('class="symbol-rail"')
+    // focus (TQQQ) は active、ticker + 小さい銘柄名の縦リスト
+    expect(html).toContain('class="rail-item active"')
+    expect(html).toContain('<span class="rail-sym">TQQQ</span>')
+    expect(html).toContain('<span class="rail-name">ProShares UltraPro QQQ</span>')
+    // inactive (1570) は inactive class + tooltip 注記
+    expect(html).toContain('class="rail-item inactive"')
+    expect(html).toContain('INACTIVE: liquidity dropped')
+    // 旧 inline picker の「| 切替:」は出ない
+    expect(html).not.toContain('切替:')
+    // active な focus はレールの強調で自明なので本文側の見出しは出さない
+    expect(html).not.toContain('銘柄: <strong>')
+  })
+
+  it('focus が inactive 銘柄の時だけ本文に注記付き見出しを出す', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['TQQQ'],
+      symbolNotes: { TQQQ: 'paused for review' },
+      symbolCurrency: { SOXL: 'USD', TQQQ: 'USD' },
+    })
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['SOXL', 'TQQQ'],
+      universe,
+    })
+    expect(html).toContain('銘柄: <strong>')
+    expect(html).toContain('inactive — paused for review')
+  })
+
+  // Google Finance 風: 前日終値を payload に載せ (チャートの点線基準)、
+  // 価格ヘッダー (大きい現在値 + 前日比) を chart 上に出す。
+  it('前日終値を payload に載せ、価格ヘッダーと range ピルを描画する', () => {
+    const base = symbolArgs([])
+    const html = renderSymbolTab({
+      ...base,
+      symbolChart: {
+        ...base.symbolChart!,
+        points: [
+          { timestamp: '2026-06-05T14:00:00.000Z', price: 78, sma50: 70, high20d: 90, low20d: 60 },
+          { timestamp: '2026-06-06T14:00:00.000Z', price: 80, sma50: 70, high20d: 90, low20d: 60 },
+        ],
+      },
+    })
+    expect(html).toContain('"prevClose":78')
+    expect(html).toContain('前日終値 $78.00')
+    // 現在値 (latestCronPrice=80) を大きく + 前日比 (上昇=赤)
+    expect(html).toContain('$80.00')
+    expect(html).toContain('前日比')
+    // range ピルは chart container の直後 (chart-pin 内、チャート直下に出す)
+    const chartIdx = html.indexOf('id="symbol-chart"')
+    const pillIdx = html.indexOf('class="zoom-preset"')
+    const panelIdx = html.indexOf('入場まで')
+    expect(pillIdx).toBeGreaterThan(chartIdx)
+    if (panelIdx >= 0) expect(pillIdx).toBeLessThan(panelIdx)
+  })
+
+  // チャートは sticky 固定 (入場ゲート説明 / 判定トレースとグラフを同時に見るため)
+  it('チャートと指標バッジを sticky な symbol-chart-pin で包む', () => {
+    const html = renderSymbolTab(symbolArgs([]))
+    const pinIdx = html.indexOf('class="symbol-chart-pin"')
+    expect(pinIdx).toBeGreaterThanOrEqual(0)
+    // pin 内に chart container が入る (説明 panel 群は pin の外で下にスクロール)
+    expect(html.indexOf('id="symbol-chart"')).toBeGreaterThan(pinIdx)
+  })
+
+  it('銘柄レールの link は zoom 範囲 (from/to) を URL で伝搬する', () => {
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL'],
+      zoom: { from: new Date('2026-06-01T00:00:00.000Z'), to: new Date('2026-06-06T00:00:00.000Z') },
+    })
+    expect(html).toContain(
+      'href="/dashboard/charts?tab=symbol&symbol=SOXL&from=2026-06-01T00%3A00%3A00.000Z&to=2026-06-06T00%3A00%3A00.000Z"',
+    )
+  })
+
   it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {
     const view = buildBuyabilityView(
       [99.5, 99, 98.5, 98].map((price, i) => ({
@@ -2053,16 +2207,16 @@ describe('renderZoomPresetButtons', () => {
     expect(renderZoomPresetButtons(fakeChart([]))).toBe('')
   })
 
-  it('points あれば 1D / 5D / 1M / All の 4 ボタン', () => {
+  it('points あれば 1日 / 5日 / 1か月 / 最大 の 4 ピル (Google Finance JA 準拠)', () => {
     const chart = fakeChart([
       { timestamp: '2026-04-01T00:00:00.000Z', price: 100, sma50: null, high20d: null, low20d: null },
       { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
     ])
     const html = renderZoomPresetButtons(chart)
-    expect(html).toContain('>1D<')
-    expect(html).toContain('>5D<')
-    expect(html).toContain('>1M<')
-    expect(html).toContain('>All<')
+    expect(html).toContain('>1日<')
+    expect(html).toContain('>5日<')
+    expect(html).toContain('>1か月<')
+    expect(html).toContain('>最大<')
     expect(html.match(/class="zoom-preset"/g)?.length).toBe(4)
   })
 
