@@ -519,6 +519,15 @@ export const dashboard = new Hono<DashboardBindings>()
             buyability,
             entryStatus,
             alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
+            symbolPolicy: focusSymbol
+              ? {
+                  role: universe.symbolRole[focusSymbol] ?? null,
+                  targetWeight: universe.symbolBudgetAllocPct[focusSymbol] ?? null,
+                  entryRequired: universe.symbolEntryRequired[focusSymbol] === true,
+                  alwaysActive: universe.symbolAlwaysActive[focusSymbol] === true,
+                  cashFallbackSymbol: universe.symbolCashFallback[focusSymbol] ?? null,
+                }
+              : null,
           }),
           renderChartsSubnav(tab, focusSymbol ?? undefined),
         ),
@@ -5159,6 +5168,17 @@ export interface ChartsBodySymbol {
   entryStatus?: EntryStatusResult | null
   /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時に併記する。 */
   alternatives?: string[]
+  /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
+  symbolPolicy?: SymbolPolicySummary | null
+}
+
+export interface SymbolPolicySummary {
+  role: string | null
+  /** budget_alloc_pct (fraction)。未設定 (risk-% sizing) は null。 */
+  targetWeight: number | null
+  entryRequired: boolean
+  alwaysActive: boolean
+  cashFallbackSymbol: string | null
 }
 
 /**
@@ -6488,6 +6508,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
+  ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
     alternatives: args.alternatives ?? [],
@@ -6581,6 +6602,47 @@ export function renderAllocationLine(alloc: SymbolAllocation | undefined): strin
   const reroute = alloc.rerouteTo ? `（${esc(alloc.rerouteTo)} へ退避中）` : ''
   const rerouted = alloc.reroutedInWeight > 0 ? `（+${pct(alloc.reroutedInWeight)} 退避受入）` : ''
   return `<div style="font-size:11px;color:${color};margin-bottom:4px" title="${esc(alloc.reason)}">配分 target ${pct(alloc.targetWeight)}${arrow}${reroute}${rerouted}</div>`
+}
+
+/**
+ * 個別銘柄タブのロール / 配分ポリシー行 (#452)。role も配分も未設定なら出さない
+ * (従来挙動の銘柄でノイズにしない)。設定変更は編集フォームへのリンクで誘導。
+ */
+export function renderSymbolPolicyLine(
+  symbol: string | null,
+  policy: SymbolPolicySummary | null,
+): string {
+  if (!symbol || !policy) return ''
+  const hasAny =
+    policy.role !== null ||
+    policy.targetWeight !== null ||
+    policy.entryRequired ||
+    policy.alwaysActive ||
+    policy.cashFallbackSymbol !== null
+  if (!hasAny) return ''
+  const parts: string[] = []
+  if (policy.role !== null) {
+    const known = (SYMBOL_ROLES as readonly string[]).includes(policy.role)
+    parts.push(
+      known
+        ? `ロール: <code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[policy.role as SymbolRole])}">${esc(policy.role)}</code>`
+        : `ロール: <span class="err" title="不正な role 値 — entry は抑止されます (fail-closed)">⚠ ${esc(policy.role)}</span>`,
+    )
+  }
+  if (policy.targetWeight !== null) {
+    parts.push(`配分 target ${Math.round(policy.targetWeight * 1000) / 10}%`)
+  }
+  if (policy.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
+  if (policy.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (policy.cashFallbackSymbol !== null) {
+    parts.push(
+      `退避先 <a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(policy.cashFallbackSymbol)}">${esc(policy.cashFallbackSymbol)}</a>`,
+    )
+  }
+  return `<div class="muted" style="margin-top:8px;font-size:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    ${parts.join('<span style="color:#d0d0d5">｜</span>')}
+    <a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:11px">設定変更</a>
+  </div>`
 }
 
 export function renderGridTab(args: ChartsBodyGrid): string {

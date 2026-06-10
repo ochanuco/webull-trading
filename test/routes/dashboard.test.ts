@@ -2663,3 +2663,45 @@ describe('renderAllocationLine (#452 Layer 3 target/active 並記)', () => {
     expect(renderAllocationLine(undefined)).toBe('')
   })
 })
+
+import { renderSymbolPolicyLine } from '../../src/routes/dashboard'
+
+describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', () => {
+  it('role / target / 条件連動 / 退避先を 1 行に要約する', () => {
+    const html = renderSymbolPolicyLine('TQQQ', {
+      role: 'leveraged_trend',
+      targetWeight: 0.05,
+      entryRequired: true,
+      alwaysActive: false,
+      cashFallbackSymbol: 'SGOV',
+    })
+    expect(html).toContain('leveraged_trend')
+    expect(html).toContain('配分 target 5%')
+    expect(html).toContain('条件連動')
+    expect(html).toContain('symbol=SGOV')
+    expect(html).toContain('/dashboard/symbols/TQQQ/edit')
+  })
+
+  it('role も配分も未設定なら何も出さない (従来挙動の銘柄)', () => {
+    expect(
+      renderSymbolPolicyLine('SOXL', {
+        role: null,
+        targetWeight: null,
+        entryRequired: false,
+        alwaysActive: false,
+        cashFallbackSymbol: null,
+      }),
+    ).toBe('')
+  })
+
+  it('不正 role は警告表示', () => {
+    const html = renderSymbolPolicyLine('OOPS', {
+      role: 'unknown',
+      targetWeight: null,
+      entryRequired: false,
+      alwaysActive: false,
+      cashFallbackSymbol: null,
+    })
+    expect(html).toContain('⚠ unknown')
+  })
+})
