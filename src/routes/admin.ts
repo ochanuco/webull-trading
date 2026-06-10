@@ -897,30 +897,83 @@ export const admin = new Hono<AppBindings>()
     // でのみ実行する。body は production の place order と同じ mapper を使い
     // (qty=1 の BUY、limit cap は Yahoo 価格 or 100)、**path は place ではなく
     // preview に固定** — 注文は作成されない。
-    let previewOrder: ProbeResult | null = null
+    let previewVariants: Array<{ label: string; result: ProbeResult }> | null = null
     if (c.req.query('preview') === '1') {
       const priceRaw = Number(c.req.query('price'))
       const previewPrice = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 100
-      const schema = c.env.WEBULL_PLACE_ORDER_SCHEMA === 'v2' ? ('v2' as const) : ('v1' as const)
-      const previewBody = toWebullPlaceOrderRequest(
+      const market = category.startsWith('JP') ? 'JP' : 'US'
+      // 初回実測 (#461) で v1 mapper body は OPENAPI_PARAM_ERR — JP preview の
+      // docs は v2 系 (preview-order-v2) で field 集合が place v1 と違う可能性が
+      // 高い。どの shape が通るか確定するため variant を並列で試す (#415 方式)。
+      // どれも注文は作成しない (path は preview 固定)。
+      const baseEntry = {
+        symbol,
+        instrument_type: 'EQUITY',
+        market,
+        side: 'BUY',
+        quantity: '1',
+        time_in_force: 'DAY',
+        entrust_type: 'QTY',
+        account_tax_type: 'GENERAL',
+      }
+      const variants: Array<{ label: string; body: unknown }> = [
         {
-          symbol,
-          side: 'BUY',
-          quantity: 1,
-          price: previewPrice,
-          notional: previewPrice,
-          clientOrderId: `probe-preview-${crypto.randomUUID()}`,
+          // production place (v1 mapper) と同形: client_order_id + MARKET +
+          // limit cap + session 'N'
+          label: 'v1-place-shape',
+          body: toWebullPlaceOrderRequest(
+            {
+              symbol,
+              side: 'BUY',
+              quantity: 1,
+              price: previewPrice,
+              notional: previewPrice,
+              clientOrderId: `probe-preview-${crypto.randomUUID()}`,
+            },
+            'v1',
+            accountId,
+          ),
         },
-        schema,
-        accountId,
+        {
+          // JP preview docs の field 集合 (client_order_id なし、v2 session enum)
+          label: 'v2-fields-market',
+          body: {
+            new_orders: [
+              {
+                ...baseEntry,
+                order_type: 'MARKET',
+                support_trading_session: 'CORE',
+                limit_price: previewPrice.toFixed(3),
+              },
+            ],
+          },
+        },
+        {
+          label: 'v2-fields-limit',
+          body: {
+            new_orders: [
+              {
+                ...baseEntry,
+                order_type: 'LIMIT',
+                support_trading_session: 'CORE',
+                limit_price: previewPrice.toFixed(3),
+              },
+            ],
+          },
+        },
+      ]
+      const results = await Promise.all(
+        variants.map((v) =>
+          probeOnce({
+            method: 'POST',
+            path: '/openapi/account/orders/preview',
+            query: { account_id: accountId },
+            version: 'v1',
+            body: JSON.stringify(v.body),
+          }),
+        ),
       )
-      previewOrder = await probeOnce({
-        method: 'POST',
-        path: schema === 'v2' ? '/openapi/trade/order/preview' : '/openapi/account/orders/preview',
-        query: schema === 'v2' ? {} : { account_id: accountId },
-        version: schema,
-        body: JSON.stringify(previewBody),
-      })
+      previewVariants = variants.map((v, i) => ({ label: v.label, result: results[i]! }))
     }
 
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
@@ -972,7 +1025,7 @@ export const admin = new Hono<AppBindings>()
       instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
-      previewOrder,
+      previewVariants,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:

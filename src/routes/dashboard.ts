@@ -1900,11 +1900,6 @@ function brokerProbeBody(args: {
       <p class="muted" style="font-size:11px;margin:4px 0 0">Webull の Preview Order API で発注パイプラインの検証だけを通します。取扱外銘柄はここで TICKER_IS_DENY が返り、<strong>発注せずに</strong>取引可否を確定できます (#461)。</p>
     </div>
     <div class="bp-card">
-      <h3>Webull quote <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="bp-quote-body" class="muted">—</div>
-      <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote" class="bp-raw">(未実行)</pre></details>
-    </div>
-    <div class="bp-card">
       <h3>Yahoo quote <span class="muted" style="font-size:11px;font-weight:normal">(cron の default source)</span><span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
       <div class="bp-body" id="bp-yahoo-body" class="muted">—</div>
       <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote-yahoo" class="bp-raw">(未実行)</pre></details>
@@ -1935,6 +1930,9 @@ function brokerProbeBody(args: {
           <tr><td colspan="3" class="muted" style="padding:8px;text-align:center">(未実行)</td></tr>
         </tbody>
       </table>
+      <h3 style="margin-top:14px">Webull quote <span class="muted" style="font-size:11px;font-weight:normal">(data-api — 無応答が既知のため詳細に格下げ #461。稼働開始は疎通監視 #21 が通知)</span> <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div id="bp-quote-body" style="font-size:12px;margin:4px 0">—</div>
+      <pre id="probe-quote" class="bp-raw">(未実行)</pre>
       <h3 style="margin-top:14px">instrument 照会 raw (quotes host / trade host)</h3>
       <pre id="bp-instrument-raw" class="bp-raw">(未実行)</pre>
       <h3 style="margin-top:14px">positions / orderHistory raw (旧/新)</h3>
@@ -2052,8 +2050,10 @@ function brokerProbeBody(args: {
       { label: 'instrument/list (trade host, 汎用 path)', section: body.instrumentTradeHost },
     ];
     var rawList = candidates;
-    if (body.previewOrder) {
-      rawList = [{ label: 'preview order (発注前検証)', section: body.previewOrder }].concat(candidates);
+    if (Array.isArray(body.previewVariants)) {
+      rawList = body.previewVariants.map(function (v) {
+        return { label: 'preview (' + v.label + ')', section: v.result };
+      }).concat(candidates);
     }
     if (rawTarget) {
       rawTarget.textContent = rawList.map(function (cnd) {
@@ -2063,32 +2063,40 @@ function brokerProbeBody(args: {
     if (!bodyEl) return;
 
     // 発注前検証 (Preview Order) の結果が最優先 — 発注パイプラインそのものの
-    // 検証なので instrument 照会より確度が高い (#461)。
-    if (body.previewOrder) {
-      var pv = body.previewOrder;
-      var pvBody = parseBody(pv);
-      if (pv.phase === 'response' && pv.status === 200) {
+    // 検証なので instrument 照会より確度が高い (#461)。body shape を複数試して
+    // どれか 1 つでも通れば取引可能、どれかが TICKER_IS_DENY なら取扱なし確定。
+    if (Array.isArray(body.previewVariants) && body.previewVariants.length > 0) {
+      var okVariant = null;
+      var denyVariant = null;
+      for (var pvi = 0; pvi < body.previewVariants.length; pvi++) {
+        var v = body.previewVariants[pvi];
+        if (v.result && v.result.phase === 'response' && v.result.status === 200) { okVariant = v; break; }
+        if (v.result && v.result.phase === 'response' && typeof v.result.bodyTruncated === 'string' &&
+            v.result.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) { denyVariant = v; }
+      }
+      if (okVariant) {
         setPill('bp-instrument-pill', 'ok', '取引可能');
-        var cost = pvBody && (pvBody.estimated_cost || (pvBody.data && pvBody.data.estimated_cost));
+        var okParsed = parseBody(okVariant.result);
+        var cost = okParsed && (okParsed.estimated_cost || (okParsed.data && okParsed.data.estimated_cost));
         bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は発注前検証 (Preview Order) を通過しました — 取引可能です。' +
-          (cost ? '<br><span class="muted" style="font-size:12px">estimated_cost: ' + escHtml(cost) + '</span>' : '');
+          '<span class="muted" style="font-size:12px"> (body shape: ' + escHtml(okVariant.label) + (cost ? ' / estimated_cost: ' + escHtml(cost) : '') + ')</span>';
         return;
       }
-      if (pv.phase === 'response' && typeof pv.bodyTruncated === 'string' && pv.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) {
+      if (denyVariant) {
         setPill('bp-instrument-pill', 'ng', '取扱なし (確定)');
         bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — 発注前検証が <code>TICKER_IS_DENY</code> を返しました。' +
           '<span style="color:#c22">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>';
         return;
       }
-      if (pv.phase === 'response') {
-        var pvErr = pvBody && pvBody.error_code ? pvBody.error_code : 'status=' + pv.status;
-        setPill('bp-instrument-pill', 'unknown', '検証エラー');
-        bodyEl.innerHTML = '発注前検証がエラーを返しました: <code>' + escHtml(pvErr) + '</code>。' +
-          '<span class="muted">銘柄以外の要因 (価格・数量・口座) の可能性あり — raw を確認してください。</span>';
-        return;
-      }
-      setPill('bp-instrument-pill', 'unknown', '判定不可');
-      bodyEl.innerHTML = '発注前検証に到達できませんでした (' + escHtml(humanizeError(pv)) + ')。';
+      setPill('bp-instrument-pill', 'unknown', '検証エラー');
+      var lines = body.previewVariants.map(function (v) {
+        var b = parseBody(v.result);
+        var detail = b && b.error_code ? b.error_code + (b.message ? ' — ' + b.message : '') : humanizeError(v.result);
+        return '<li><code>' + escHtml(v.label) + '</code>: ' + escHtml(detail) + '</li>';
+      }).join('');
+      bodyEl.innerHTML = '発注前検証がどの body shape でも通りませんでした:' +
+        '<ul style="margin:4px 0 0 16px;padding:0;font-size:12px">' + lines + '</ul>' +
+        '<span class="muted" style="font-size:11px">エラー内容から shape を調整します — raw を共有してください。</span>';
       return;
     }
     var responded = [];
