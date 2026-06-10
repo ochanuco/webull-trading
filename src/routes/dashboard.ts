@@ -4369,14 +4369,15 @@ export async function loadSymbolChart(
         lastTimestamp,
       )
     : null
-  // candlestick: 1 時間足 (intraday) を Yahoo から fetch。15m は overnight gap
-  // 後の clustering と barWidth 調整がシビアだったため、daily-trader 向けに
-  // 1h を default 採用 (Pullback Uptrend のような multi-day 戦略では十分な
-  // granularity)。Yahoo intraday range 制限 60d で chart 全期間カバー可能。
+  // candlestick: 15 分足 (intraday) を Yahoo から fetch。旧 1h 足は「1日 ≈ 7本」
+  // でスカスカだった (operator 指摘)。category 軸化で overnight gap は詰まる
+  // ようになり、barWidth も auto にしたため 15m の旧懸念 (gap 後の clustering)
+  // は解消済。Yahoo intraday range 制限 60d は 15m でもカバー可能。
+  // 戦略 cron は従来通り 60m を使う (pullbackScheduler 側、ここは表示専用)。
   // 失敗 (network 等) なら空配列で fallback (candle 自体スキップ)。
   let intradayBars: OhlcBar[] = []
   try {
-    const intraday = await new YahooBarClient().getIntradayBars(symbol, '60m')
+    const intraday = await new YahooBarClient().getIntradayBars(symbol, '15m')
     // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
     // を除外。lastTimestamp が無いときは全件採用。
     intradayBars = (cronLastTs == null
@@ -4732,7 +4733,7 @@ export function computeLinearRegressionLine(
  * trend line が描画されないケースが残った。
  *
  * 最も robust な解決策は line の data 自体を「常に zoom 範囲内に複数点が
- * 入る粒度」にすること。ここでは intradayBars (1h candle、60 日で ~720 点)
+ * 入る粒度」にすること。ここでは intradayBars (15m candle、60 日で ~1500 点)
  * の各 timestamp で trend line の y 値を線形補間して、`[[t, y], ...]` の
  * dense path に展開する。これで 5D (~120 点) や 1D zoom でも常に複数点が
  * visible になり filterMode 不問で確実に描画される。
@@ -5284,9 +5285,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
 
       // セッション境界 (休場 → 開場) 検出:
       // category axis 化で休場 gap が詰まった結果 (#193)、視覚的に
-      // 「どこから新セッションか」が分かりにくくなった。1h interval なので
-      // 隣接 bar は通常 60 分差。週末 / 夜間 closed 後の最初の bar は数時間〜
-      // 数十時間ぶんの差が空く。閾値 90 分 (= 1.5h) で safe に検出し、後ろ側
+      // 「どこから新セッションか」が分かりにくくなった。15m interval なので
+      // 隣接 bar は通常 15 分差。週末 / 夜間 closed 後の最初の bar は数時間〜
+      // 数十時間ぶんの差が空く。閾値 90 分で safe に検出し、後ろ側
       // category index を「新セッションの開場点」として markLine 描画する。
       // useCategoryAxis === false (intradayBars 空) の場合は描画 skip。
       var sessionOpenIndices = [];
@@ -5464,7 +5465,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       // ユーザ環境で残ケースがあった。本質的に robust にするため、line の
       // data 自体を「常に zoom 範囲内に複数点が入る粒度」に展開する。
       //
-      // 具体的には intradayBars (1h candle、60 日で ~720 点) の各 timestamp
+      // 具体的には intradayBars (15m candle、60 日で ~1500 点) の各 timestamp
       // で trend line の y 値を線形補間し、[[t, y], ...] の dense path にす
       // る。これで 5D (~120 点) や 1D zoom でも複数点が必ず visible になり
       // filterMode 不問で線分が描画される。intradayBars が空 (Yahoo fetch
@@ -5554,7 +5555,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         ? sc.markers[sc.markers.length - 1].timestamp
         : null;
       // category mode では markPoint coord に [categoryIndex, price] を渡す。
-      // fill 時刻を最近接 ohlc bar (= 1h 粒度) の index に snap するため、同 1h
+      // fill 時刻を最近接 ohlc bar (= 15m 粒度) の index に snap するため、同 bar
       // 内の複数 fill は同じ index に重なる。pin label は側 (top/bottom) と色で
       // 区別するため重なっても 1 件は読める。fillTimestamp は秒精度を保持して
       // hover tooltip で full-precision 時刻として表示される (情報損失なし)。
@@ -5982,10 +5983,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           // gap 後の細い candle を視認可能に。borderWidth 強めて
           // body と wick の対比を確保。
           ...(ohlcXY.length > 0 ? [{
-            name: 'price (1h OHLC)', type: 'candlestick', data: ohlcXY,
-            // 1h は 15m より時間軸の間隔が 4 倍広いので、barWidth も少し
-            // 広めに (相対的に gap 比率を一定に保つ)。
-            barWidth: 10,
+            name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
+            // barWidth は auto (slot 幅比例)。15m 化で本数が 4 倍になったため、
+            // 固定 px だと zoom out 時に candle が重なる。
             itemStyle: {
               color: '#d23f31',     // 陽線 (close >= open) — 日本式は赤
               color0: '#1e8e3e',    // 陰線 (close < open) — 日本式は緑
@@ -6436,7 +6436,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
  * に配信。
  *
  * mini chart の構成 (PR #239 で個別銘柄タブと表示要素パリティ):
- * - candle (1h OHLC)
+ * - candle (15m OHLC)
  * - 価格トレンド (linear regression)
  * - SMA50
  * - 押し目ゾーン markArea + sloped 上下端線 (未保有時のみ)
@@ -6930,7 +6930,7 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             }] : []),
             ...(ohlcXY.length > 0 ? [{
               name: 'price', type: 'candlestick', data: ohlcXY,
-              barWidth: 6,
+              // barWidth は auto (15m 化で本数 4 倍、固定 px だと mini panel で潰れる)
               // 日本式配色: 赤=陽線 / 緑=陰線 (個別銘柄タブと揃える)
               itemStyle: {
                 color: '#d23f31', color0: '#1e8e3e',
