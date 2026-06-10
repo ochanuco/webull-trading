@@ -155,6 +155,45 @@ describe('dashboard', () => {
     expect(body).toMatch(/<button[^>]*disabled[^>]*>取引再開<\/button>/)
   })
 
+  // グローバルメニュー上部化: 全 page 共通 shell は上部バー (topnav)。
+  // kill switch は上部バー右端の badge + ドロップダウン (details) に入る。
+  it('renders global menu as top bar with kill-switch dropdown (no left sidebar)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).toContain('<header class="header">')
+    expect(body).toContain('class="topnav"')
+    expect(body).toContain('class="topnav-killswitch"')
+    // 旧左サイドバーは無い
+    expect(body).not.toContain('class="sidebar"')
+    // nav link は維持 (ホーム / 銘柄管理 など)
+    expect(body).toContain('href="/dashboard/symbols"')
+    // ページタイトル h1 は出さない (nav の active 強調で現在地が分かるため冗長)
+    expect(body).not.toContain('page-title')
+  })
+
+  // チャートの view 切替 (概要/取引品質/個別銘柄/銘柄グリッド) は本文 tab strip
+  // ではなく header 2段目の subnav に出す (サブメニュー化)。
+  it('charts page renders view switcher as header subnav with active state', async () => {
+    const app = createApp()
+    // DB 未バインドでも subnav は出る (本文は unavailable)
+    const res = await app.request(
+      '/dashboard/charts?tab=quality',
+      { headers: authHeader },
+      baseEnv,
+    )
+    const body = await res.text()
+    expect(body).toContain('<nav class="subnav">')
+    expect(body).toContain('class="subnav-link active"')
+    expect(body).toContain('>取引品質<')
+    expect(body).toContain('href="/dashboard/charts?tab=symbol"')
+    expect(body).toContain('href="/dashboard/charts?tab=grid"')
+  })
+
 
   it('renders positions page with DO state', async () => {
     const env = {
@@ -1974,6 +2013,70 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
   it('buyability が null なら projection も null', () => {
     const html = renderSymbolTab(symbolArgs([], null))
     expect(html).toContain('"projection":null')
+  })
+
+  // 銘柄レール (左固定): 旧 inline picker (「切替: <full name の列挙>」) を置換。
+  it('銘柄レールを左に出し、focus は active / inactive は注記付きで識別する', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['TQQQ', 'SOXL'],
+      inactiveSymbols: ['1570'],
+      symbolName: { TQQQ: 'ProShares UltraPro QQQ', '1570': 'NF 日経レバ' },
+      symbolNotes: { '1570': 'liquidity dropped' },
+      symbolCurrency: { TQQQ: 'USD', SOXL: 'USD', '1570': 'JPY' },
+    })
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL', '1570'],
+      universe,
+    })
+    expect(html).toContain('class="symbol-rail"')
+    // focus (TQQQ) は active、ticker + 小さい銘柄名の縦リスト
+    expect(html).toContain('class="rail-item active"')
+    expect(html).toContain('<span class="rail-sym">TQQQ</span>')
+    expect(html).toContain('<span class="rail-name">ProShares UltraPro QQQ</span>')
+    // inactive (1570) は inactive class + tooltip 注記
+    expect(html).toContain('class="rail-item inactive"')
+    expect(html).toContain('INACTIVE: liquidity dropped')
+    // 旧 inline picker の「| 切替:」は出ない
+    expect(html).not.toContain('切替:')
+    // active な focus はレールの強調で自明なので本文側の見出しは出さない
+    expect(html).not.toContain('銘柄: <strong>')
+  })
+
+  it('focus が inactive 銘柄の時だけ本文に注記付き見出しを出す', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['SOXL'],
+      inactiveSymbols: ['TQQQ'],
+      symbolNotes: { TQQQ: 'paused for review' },
+      symbolCurrency: { SOXL: 'USD', TQQQ: 'USD' },
+    })
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['SOXL', 'TQQQ'],
+      universe,
+    })
+    expect(html).toContain('銘柄: <strong>')
+    expect(html).toContain('inactive — paused for review')
+  })
+
+  // チャートは sticky 固定 (入場ゲート説明 / 判定トレースとグラフを同時に見るため)
+  it('チャートと指標バッジを sticky な symbol-chart-pin で包む', () => {
+    const html = renderSymbolTab(symbolArgs([]))
+    const pinIdx = html.indexOf('class="symbol-chart-pin"')
+    expect(pinIdx).toBeGreaterThanOrEqual(0)
+    // pin 内に chart container が入る (説明 panel 群は pin の外で下にスクロール)
+    expect(html.indexOf('id="symbol-chart"')).toBeGreaterThan(pinIdx)
+  })
+
+  it('銘柄レールの link は zoom 範囲 (from/to) を URL で伝搬する', () => {
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL'],
+      zoom: { from: new Date('2026-06-01T00:00:00.000Z'), to: new Date('2026-06-06T00:00:00.000Z') },
+    })
+    expect(html).toContain(
+      'href="/dashboard/charts?tab=symbol&symbol=SOXL&from=2026-06-01T00%3A00%3A00.000Z&to=2026-06-06T00%3A00%3A00.000Z"',
+    )
   })
 
   it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {
