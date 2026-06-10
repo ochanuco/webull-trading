@@ -5826,14 +5826,16 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       // candle / line / scatter / markLine / markPoint / markArea すべてで
       // 「1 点が範囲外でも視覚的に切れて表示される」のが期待動作なので
       // wide chart (1 銘柄 / 数千点) でも問題ない。
-      var dzCommon = {
-        labelFormatter: function (value) { return jstLabelForX(value); },
-        filterMode: 'weakFilter',
-      };
-      var dzInside = { filterMode: 'weakFilter' };
+      // 下部 slider と wheel/pinch zoom は廃止 (Google Finance 風 — range 操作は
+      // 1日/5日/1か月/最大 のピルのみ。operator 要望)。inside dataZoom は
+      // ピルの dispatchAction / URL 同期の受け皿として残すが、マウス・タッチ
+      // 操作は全て無効化する (sticky チャート上で page scroll を奪わない効果も)。
       var dataZoomCfg = [
-        Object.assign({ type: 'inside', xAxisIndex: 0 }, dzInside, dzInitial),
-        Object.assign({ type: 'slider', xAxisIndex: 0, height: 24, bottom: 8 }, dzCommon, dzInitial),
+        Object.assign({
+          type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter',
+          zoomOnMouseWheel: false, moveOnMouseMove: false, moveOnMouseWheel: false,
+          zoomLock: false,
+        }, dzInitial),
       ];
 
       var symChart = echarts.init(document.getElementById('symbol-chart'));
@@ -5886,10 +5888,11 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         },
         legend: { top: 22, type: 'scroll' },
         // plot 面積最大化: grid 余白を絞り、splitLine 淡く、axisLine 非表示で
-        // candle が映える背景に (trader-strategist 助言)。bottom は slider 用 64px キープ。
+        // candle が映える背景に (trader-strategist 助言)。下部 slider 廃止に伴い
+        // bottom は x軸ラベル分 (28px) のみ。
         // right は stop/TP の endLabel ("stop X (preview)" 等) が見切れないよう
         // 80px 確保 (短い "stop X (-Y%)" でも余白として違和感ない範囲)。
-        grid: { left: 50, right: 120, top: 56, bottom: 64 },
+        grid: { left: 50, right: 120, top: 56, bottom: 28 },
         dataZoom: dataZoomCfg,
         // category mode: categories = intradayBars 各 bar の ISO timestamp。
         // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
@@ -6374,9 +6377,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           // Google 風ピルの active 付替 (押した range を強調)
           for (var pj = 0; pj < presetButtons.length; pj += 1) presetButtons[pj].classList.remove('active');
           ev.currentTarget.classList.add('active');
-          // inside / slider 両方を同期更新
+          // dataZoom は inside 1 つだけ (slider 廃止)
           symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: sv, endValue: eV });
-          symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: sv, endValue: eV });
         });
       }
     });
