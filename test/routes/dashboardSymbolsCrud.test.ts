@@ -177,6 +177,9 @@ function fakeDb(
               maxSma50DeviationPctOverride: (v.maxSma50DeviationPctOverride as number | null) ?? null,
               requireAboveSma50Override: (v.requireAboveSma50Override as boolean | null) ?? null,
               alternatives: (v.alternatives as string | null) ?? null,
+              entryRequired: v.entryRequired === true || v.entryRequired === 1,
+              alwaysActive: v.alwaysActive === true || v.alwaysActive === 1,
+              cashFallbackSymbol: (v.cashFallbackSymbol as string | null) ?? null,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -244,6 +247,9 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     maxSma50DeviationPctOverride: null,
     requireAboveSma50Override: null,
     alternatives: null,
+    entryRequired: false,
+    alwaysActive: false,
+    cashFallbackSymbol: null,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -1476,7 +1482,130 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
   })
 })
 
-describe('CodeRabbit #453 対応 (audit snapshot / 不正 role のフォーム防御)', () => {
+describe('dashboard symbol_config 条件連動配分 (#452 Layer 3)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('POST persists entry_required / always_active / cash_fallback_symbol', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const form = new URLSearchParams({
+      symbol: 'QQQ',
+      market: 'US',
+      currency: 'USD',
+      active: 'true',
+      lot_size: '1',
+      entry_required: 'true',
+      always_active: 'false',
+      cash_fallback_symbol: 'sgov', // 小文字も大文字正規化
+    })
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: form.toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(303)
+    const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
+    expect(inserted.values.entryRequired).toBe(true)
+    expect(inserted.values.alwaysActive).toBe(false)
+    expect(inserted.values.cashFallbackSymbol).toBe('SGOV')
+  })
+
+  it('rejects a self-referential cash_fallback_symbol with 400', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/admin/symbol-config',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
+        body: new URLSearchParams({
+          symbol: 'SGOV',
+          market: 'US',
+          currency: 'USD',
+          active: 'true',
+          lot_size: '1',
+          cash_fallback_symbol: 'SGOV',
+        }).toString(),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('edit form shows 条件連動配分 fields with current values', async () => {
+    const db = fakeDb([
+      row({ symbol: 'QQQ', entryRequired: true, cashFallbackSymbol: 'SGOV' }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/QQQ/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toMatch(/name="entry_required" value="true" checked/)
+    expect(body).toMatch(/name="cash_fallback_symbol"[^>]*value="SGOV"/)
+  })
+})
+
+describe('symbols list ロール列 (#452)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('一覧に role と条件連動配分の要約を表示する', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SGOV', role: 'cash_parking', alwaysActive: true }),
+      row({
+        symbol: 'QQQ',
+        role: 'core_trend',
+        entryRequired: true,
+        cashFallbackSymbol: 'SGOV',
+      }),
+      row({ symbol: 'SOXL' }), // role NULL = 従来挙動
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('<th>ロール</th>')
+    expect(body).toContain('cash_parking')
+    expect(body).toContain('常時配分')
+    expect(body).toContain('core_trend')
+    expect(body).toContain('条件連動')
+    expect(body).toContain('→SGOV')
+  })
+
+  it('不正な role 値は警告表示 (entry 抑止の旨)', async () => {
+    const db = fakeDb([row({ symbol: 'OOPS', role: 'cash_praking' })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('⚠ cash_praking')
+  })
+})
+
+describe('CodeRabbit #453 対応 (不正 role のフォーム防御)', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
   })

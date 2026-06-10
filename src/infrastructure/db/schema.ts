@@ -180,6 +180,26 @@ export const symbolConfig = sqliteTable(
      * 使わない。NULL / 不正 JSON は「候補なし」扱い。
      */
     alternatives: text('alternatives'),
+    /**
+     * 条件連動配分 (#452 Layer 3 / #450)。true = entry gate (ENTRY/HALF) 通過を
+     * 実配分 (active weight) の必須条件にする。未通過の間は active=0 になり、
+     * 浮いた配分は `cash_fallback_symbol` へ退避される。false (default) =
+     * 従来どおり `budget_alloc_pct` の枠が常時有効。
+     */
+    entryRequired: integer('entry_required', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * cash_parking 用 (#452)。true = entry 判定に関わらず常時 target = active。
+     * pullback gate を通らない待機資金 ETF (SGOV 等) の配分先として使う。
+     */
+    alwaysActive: integer('always_active', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * entry_required 銘柄が条件未通過のときの退避先 symbol (例 'SGOV')。
+     * NULL = 退避しない (浮いた分は現金のまま)。同一通貨の銘柄のみ有効 —
+     * 通貨が異なる場合は配分計算時に退避を skip する (fail-closed、現金待機)。
+     * 退避先への**自動発注は global_config.cash_fallback_orders_enabled (default
+     * false) を on にするまで行わない** (判定・表示のみ)。
+     */
+    cashFallbackSymbol: text('cash_fallback_symbol'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
@@ -320,6 +340,16 @@ export const globalConfig = sqliteTable(
      * key: kpi / equity / composition / recent。default は全表示。
      */
     overviewPanels: text('overview_panels').notNull().default('kpi,equity,composition,recent'),
+    /**
+     * 条件連動配分の cash fallback 自動発注 (#452 Layer 3 / #450)。**default false
+     * (fail-closed)**: off の間は target/active の判定・表示のみ行い、退避先
+     * (SGOV 等) への自動 BUY は出さない。DRY_RUN + staging で検証してから
+     * `wrangler d1 execute "UPDATE global_config SET cash_fallback_orders_enabled=1"`
+     * で有効化する。on でも DRY_RUN / TRADING_ENABLED / risk gate は全部効く。
+     */
+    cashFallbackOrdersEnabled: integer('cash_fallback_orders_enabled', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

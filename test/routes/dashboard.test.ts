@@ -2628,3 +2628,81 @@ describe('段階判定の表示 (#452 PR 2)', () => {
     ])
   })
 })
+
+import { renderAllocationLine } from '../../src/routes/dashboard'
+import { computeConditionalAllocation } from '../../src/trading/strategy/conditionalAllocation'
+
+describe('renderAllocationLine (#452 Layer 3 target/active 並記)', () => {
+  const view = computeConditionalAllocation({
+    targetWeights: { SGOV: 0.7, TQQQ: 0.05 },
+    policy: {
+      entryRequired: new Set(['TQQQ']),
+      alwaysActive: new Set(['SGOV']),
+      cashFallback: { TQQQ: 'SGOV' },
+    },
+    entryStatuses: { TQQQ: 'NG' },
+    heldSymbols: new Set(),
+    symbolCurrency: { SGOV: 'USD', TQQQ: 'USD' },
+  })
+
+  it('退避された銘柄は target → 0% と退避先を表示', () => {
+    const html = renderAllocationLine(view.bySymbol.TQQQ)
+    expect(html).toContain('target 5%')
+    expect(html).toContain('<strong>0%</strong>')
+    expect(html).toContain('SGOV へ退避中')
+  })
+
+  it('退避先は受入分を表示 (70% + 5% = 75%)', () => {
+    const html = renderAllocationLine(view.bySymbol.SGOV)
+    expect(html).toContain('target 70%')
+    expect(html).toContain('<strong>75%</strong>')
+    expect(html).toContain('+5% 退避受入')
+  })
+
+  it('配分の無い銘柄は空文字', () => {
+    expect(renderAllocationLine(undefined)).toBe('')
+  })
+})
+
+import { renderSymbolPolicyLine } from '../../src/routes/dashboard'
+
+describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', () => {
+  it('role / target / 条件連動 / 退避先を 1 行に要約する', () => {
+    const html = renderSymbolPolicyLine('TQQQ', {
+      role: 'leveraged_trend',
+      targetWeight: 0.05,
+      entryRequired: true,
+      alwaysActive: false,
+      cashFallbackSymbol: 'SGOV',
+    })
+    expect(html).toContain('leveraged_trend')
+    expect(html).toContain('レバETF・トレンド')
+    expect(html).toContain('配分 target 5%')
+    expect(html).toContain('条件連動')
+    expect(html).toContain('symbol=SGOV')
+    expect(html).toContain('/dashboard/symbols/TQQQ/edit')
+  })
+
+  it('role も配分も未設定なら何も出さない (従来挙動の銘柄)', () => {
+    expect(
+      renderSymbolPolicyLine('SOXL', {
+        role: null,
+        targetWeight: null,
+        entryRequired: false,
+        alwaysActive: false,
+        cashFallbackSymbol: null,
+      }),
+    ).toBe('')
+  })
+
+  it('不正 role は警告表示', () => {
+    const html = renderSymbolPolicyLine('OOPS', {
+      role: 'unknown',
+      targetWeight: null,
+      entryRequired: false,
+      alwaysActive: false,
+      cashFallbackSymbol: null,
+    })
+    expect(html).toContain('⚠ unknown')
+  })
+})

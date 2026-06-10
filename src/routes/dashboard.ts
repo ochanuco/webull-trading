@@ -60,6 +60,10 @@ import {
   type EntryStatusResult,
 } from '../trading/strategy/entryStatus'
 import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
+import {
+  computeConditionalAllocation,
+  type SymbolAllocation,
+} from '../trading/strategy/conditionalAllocation'
 import type {
   PullbackIndicators,
   SymbolRule,
@@ -386,6 +390,22 @@ export const dashboard = new Hono<DashboardBindings>()
             gridRules[entry.symbol] ?? gridDefaultRule,
           ).status
         }
+        // 条件連動配分 (#452 Layer 3): target/active を並記する (「設定上 5% だが
+        // 現在は SGOV に退避中」の可視化)。cron と同じ pure 関数で計算する。
+        const heldSymbols = new Set(
+          charts.filter((entry) => entry.chart?.position != null).map((entry) => entry.symbol),
+        )
+        const allocationView = computeConditionalAllocation({
+          targetWeights: universe.symbolBudgetAllocPct,
+          policy: {
+            entryRequired: new Set(Object.keys(universe.symbolEntryRequired)),
+            alwaysActive: new Set(Object.keys(universe.symbolAlwaysActive)),
+            cashFallback: universe.symbolCashFallback,
+          },
+          entryStatuses,
+          heldSymbols,
+          symbolCurrency: universe.symbolCurrency,
+        })
         const sortedCharts = sortGridChartsByEntryPriority(charts, entryStatuses, universe)
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
         // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
@@ -402,6 +422,7 @@ export const dashboard = new Hono<DashboardBindings>()
               zoom,
               universe,
               entryStatuses,
+              allocations: allocationView.bySymbol,
             }),
             renderChartsSubnav(tab),
           ),
@@ -498,6 +519,15 @@ export const dashboard = new Hono<DashboardBindings>()
             buyability,
             entryStatus,
             alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
+            symbolPolicy: focusSymbol
+              ? {
+                  role: universe.symbolRole[focusSymbol] ?? null,
+                  targetWeight: universe.symbolBudgetAllocPct[focusSymbol] ?? null,
+                  entryRequired: universe.symbolEntryRequired[focusSymbol] === true,
+                  alwaysActive: universe.symbolAlwaysActive[focusSymbol] === true,
+                  cashFallbackSymbol: universe.symbolCashFallback[focusSymbol] ?? null,
+                }
+              : null,
           }),
           renderChartsSubnav(tab, focusSymbol ?? undefined),
         ),
@@ -5138,6 +5168,17 @@ export interface ChartsBodySymbol {
   entryStatus?: EntryStatusResult | null
   /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時に併記する。 */
   alternatives?: string[]
+  /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
+  symbolPolicy?: SymbolPolicySummary | null
+}
+
+export interface SymbolPolicySummary {
+  role: string | null
+  /** budget_alloc_pct (fraction)。未設定 (risk-% sizing) は null。 */
+  targetWeight: number | null
+  entryRequired: boolean
+  alwaysActive: boolean
+  cashFallbackSymbol: string | null
 }
 
 /**
@@ -5165,6 +5206,8 @@ interface ChartsBodyGrid {
   universe?: SymbolUniverse | null
   /** symbol → 段階判定 (#452 PR 2)。評価データ無しの銘柄は不在。panel badge 用。 */
   entryStatuses?: Record<string, EntryStatus>
+  /** symbol → 条件連動配分 (#452 Layer 3)。target weight 関連銘柄のみ。 */
+  allocations?: Record<string, SymbolAllocation>
 }
 
 type ChartsBodyArgs =
@@ -6465,6 +6508,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
+  ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
     alternatives: args.alternatives ?? [],
@@ -6545,6 +6589,62 @@ export function sortGridChartsByEntryPriority<T extends { symbol: string }>(
     .map(({ entry }) => entry)
 }
 
+/**
+ * target / active weight の並記 (#452 Layer 3)。target を持つ (or 退避を受けた)
+ * 銘柄のみ 1 行出す。「設定上 5% だが現在は SGOV に退避中」を panel 上で見せる。
+ */
+export function renderAllocationLine(alloc: SymbolAllocation | undefined): string {
+  if (!alloc) return ''
+  const pct = (w: number) => `${Math.round(w * 1000) / 10}%`
+  const changed = Math.abs(alloc.activeWeight - alloc.targetWeight) > 1e-9
+  const color = alloc.activeWeight === 0 ? '#b25000' : changed ? '#057a55' : '#86868b'
+  const arrow = changed ? ` → <strong>${pct(alloc.activeWeight)}</strong>` : ''
+  const reroute = alloc.rerouteTo ? `（${esc(alloc.rerouteTo)} へ退避中）` : ''
+  const rerouted = alloc.reroutedInWeight > 0 ? `（+${pct(alloc.reroutedInWeight)} 退避受入）` : ''
+  return `<div style="font-size:11px;color:${color};margin-bottom:4px" title="${esc(alloc.reason)}">配分 target ${pct(alloc.targetWeight)}${arrow}${reroute}${rerouted}</div>`
+}
+
+/**
+ * 個別銘柄タブのロール / 配分ポリシー行 (#452)。role も配分も未設定なら出さない
+ * (従来挙動の銘柄でノイズにしない)。設定変更は編集フォームへのリンクで誘導。
+ */
+export function renderSymbolPolicyLine(
+  symbol: string | null,
+  policy: SymbolPolicySummary | null,
+): string {
+  if (!symbol || !policy) return ''
+  const hasAny =
+    policy.role !== null ||
+    policy.targetWeight !== null ||
+    policy.entryRequired ||
+    policy.alwaysActive ||
+    policy.cashFallbackSymbol !== null
+  if (!hasAny) return ''
+  const parts: string[] = []
+  if (policy.role !== null) {
+    const known = (SYMBOL_ROLES as readonly string[]).includes(policy.role)
+    parts.push(
+      known
+        ? `ロール: <code style="font-size:12px" title="${esc(SYMBOL_ROLE_LABELS[policy.role as SymbolRole])}">${esc(policy.role)}</code>: <strong>${esc(SYMBOL_ROLE_LABELS_SHORT[policy.role as SymbolRole])}</strong>`
+        : `ロール: <span class="err" title="不正な role 値 — entry は抑止されます (fail-closed)">⚠ ${esc(policy.role)}</span>`,
+    )
+  }
+  if (policy.targetWeight !== null) {
+    parts.push(`配分 target ${Math.round(policy.targetWeight * 1000) / 10}%`)
+  }
+  if (policy.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
+  if (policy.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (policy.cashFallbackSymbol !== null) {
+    parts.push(
+      `退避先 <a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(policy.cashFallbackSymbol)}">${esc(policy.cashFallbackSymbol)}</a>`,
+    )
+  }
+  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    ${parts.join('<span style="color:#d0d0d5">｜</span>')}
+    <a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:12px">設定変更</a>
+  </div>`
+}
+
 export function renderGridTab(args: ChartsBodyGrid): string {
   if (args.charts.length === 0) {
     return `<p class="muted">ALLOWED_SYMBOLS が空です。<code>symbol_config</code> に少なくとも 1 銘柄登録してください。</p>`
@@ -6607,12 +6707,16 @@ export function renderGridTab(args: ChartsBodyGrid): string {
       // 段階判定 badge (#452 PR 2)。inactive 銘柄は cron 評価対象外なので出さない。
       const status = args.entryStatuses?.[entry.symbol]
       const statusBadge = status !== undefined && !inactive ? entryStatusBadgeHtml(status) : ''
+      const allocationLine = inactive
+        ? ''
+        : renderAllocationLine(args.allocations?.[entry.symbol])
       const rightSide = (inactive ? inactiveBadge : '') + statusBadge + positionBadge + badge
       return `<div class="${panelClass}"${dataAttrs} style="${baseStyle}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
           ${headerLink}
           <div style="display:flex;gap:6px;align-items:center">${rightSide}</div>
         </div>
+        ${allocationLine}
         <div id="grid-chart-${idx}" style="width:100%;height:280px"></div>
       </div>`
     })
@@ -7952,6 +8056,9 @@ function symbolsListBody(args: {
       // 売買単位 (lot_size)。未設定・不正値 (NULL/0/負/非整数) は cron sizing が
       // fail-closed (発注見送り) するので、一覧でも同じ判定で赤字警告を出す
       // (loadSymbolConfig の採用条件 = integer>=1 と揃える、CodeRabbit #409)。
+      // 戦略ロール + 条件連動配分の要約 (#452)。NULL は従来挙動なので「—」。
+      // entry 抑止 role (cash_parking / 定義のみ) は title で発注されない旨を明示。
+      const roleCell = renderSymbolRoleCell(r)
       const lotSizeValid = Number.isInteger(r.lotSize) && (r.lotSize as number) >= 1
       const lotSizeCell = !lotSizeValid
         ? '<span class="err" title="売買単位が未設定または不正です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
@@ -8000,6 +8107,7 @@ function symbolsListBody(args: {
         <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
+        <td>${roleCell}</td>
         <td>${lotSizeCell}</td>
         <td>${maxNotionalCell}</td>
         ${budgetTd}
@@ -8022,6 +8130,7 @@ function symbolsListBody(args: {
       <th>銘柄</th>
       <th>銘柄名</th>
       <th>市場/通貨</th>
+      <th>ロール</th>
       <th>売買単位</th>
       <th>1注文上限</th>
       <th>予算配分</th>
@@ -8284,6 +8393,16 @@ interface SymbolFormArgs {
   currentInverse?: string | null
 }
 
+/** role の短い日本語名 (#452)。一覧 / チャートタブのインライン表示用。 */
+const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
+  cash_parking: '待機資金ETF',
+  core_trend: '非レバ・トレンド',
+  leveraged_trend: 'レバETF・トレンド',
+  low_volatility: '低ボラ (entry 無効)',
+  sector_trend: 'セクター (entry 無効)',
+  inverse_hedge: 'インバース (entry 無効)',
+}
+
 /** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
 const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
@@ -8292,6 +8411,30 @@ const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   low_volatility: 'low_volatility — 低ボラ (定義のみ・entry 無効)',
   sector_trend: 'sector_trend — セクター (定義のみ・entry 無効)',
   inverse_hedge: 'inverse_hedge — インバース (定義のみ・entry 無効)',
+}
+
+/** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
+export function renderSymbolRoleCell(row: SymbolConfigRow): string {
+  const role = row.role?.trim() || null
+  const known = role !== null && (SYMBOL_ROLES as readonly string[]).includes(role)
+  const roleBadge =
+    role === null
+      ? '<span class="muted" title="role 未設定 = 従来挙動">—</span>'
+      : known
+        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code><div class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</div>`
+        : `<span class="err" title="不正な role 値です。entry は抑止されます (fail-closed)。編集から正しい値を選んでください。">⚠ ${esc(role)}</span>`
+  const notes: string[] = []
+  if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
+  if (row.entryRequired) notes.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (row.cashFallbackSymbol) {
+    notes.push(
+      `<a href="/dashboard/symbols/${encodeURIComponent(row.cashFallbackSymbol)}/edit" title="条件未通過時の退避先">→${esc(row.cashFallbackSymbol)}</a>`,
+    )
+  }
+  const noteHtml = notes.length
+    ? `<div class="muted" style="font-size:11px;margin-top:2px">${notes.join(' / ')}</div>`
+    : ''
+  return `${roleBadge}${noteHtml}`
 }
 
 function symbolFormBody(args: SymbolFormArgs): string {
@@ -8358,6 +8501,10 @@ function symbolFormBody(args: SymbolFormArgs): string {
       ? ''
       : String(row.requireAboveSma50Override)
   const alternativesValue = (parseAlternativesJson(row?.alternatives ?? null, symbolValue) ?? []).join(', ')
+  // 条件連動配分 (#452 Layer 3)。
+  const entryRequiredChecked = row?.entryRequired ? ' checked' : ''
+  const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
+  const cashFallbackValue = row?.cashFallbackSymbol ?? ''
   const timeStopPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
     : '空欄で global default を使用'
@@ -8544,6 +8691,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
     <div>
       <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
       <p class="muted" style="margin:4px 0 0;font-size:11px">カンマ区切り (最大 8)。この銘柄が entry 不可のときダッシュボードに出す代替候補 (<strong>表示のみ</strong>、自動発注はしない、#452)。</p>
+    </div>
+    <label>配分の条件連動 <span class="muted" style="font-size:11px">(entry_required)</span></label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="entry_required" value="false">
+      <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効にする
+    </label>
+    <label>常時配分 <span class="muted" style="font-size:11px">(always_active)</span></label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="hidden" name="always_active" value="false">
+      <input type="checkbox" name="always_active" value="true"${alwaysActiveChecked}> 判定に関わらず常時 target = active (待機資金 ETF 用)
+    </label>
+    <label>退避先 <span class="muted" style="font-size:11px">(cash_fallback_symbol)</span></label>
+    <div>
+      <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
+      <p class="muted" style="margin:4px 0 0;font-size:11px">entry_required 銘柄が条件未通過の間、浮いた配分の退避先 (#452)。同一通貨のみ有効。<strong>退避先への自動発注は <code>cash_fallback_orders_enabled</code> (default off) を on にするまで行いません</strong> (判定・表示のみ)。</p>
     </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>

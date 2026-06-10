@@ -134,6 +134,18 @@ export interface SymbolConfigSnapshot {
    * 含めない。要素は大文字 ticker、self 参照と重複は除去、上限 MAX_ALTERNATIVES。
    */
   symbolAlternatives: Record<string, string[]>
+  /**
+   * entry_required=true の symbol 集合 (#452 Layer 3)。gate 未通過の間
+   * active weight = 0 になり cash fallback へ退避される。false は不在。
+   */
+  symbolEntryRequired: Record<string, boolean>
+  /** always_active=true の symbol 集合 (#452、cash_parking 用)。false は不在。 */
+  symbolAlwaysActive: Record<string, boolean>
+  /**
+   * symbol → cash_fallback_symbol (#452)。NULL / 不正 ticker / self 参照は不在
+   * (= 退避しない、現金のまま)。
+   */
+  symbolCashFallback: Record<string, string>
 }
 
 /**
@@ -198,6 +210,9 @@ export async function loadSymbolConfig(
   const symbolMaxSma50DeviationPctOverride: Record<string, number> = {}
   const symbolRequireAboveSma50Override: Record<string, boolean> = {}
   const symbolAlternatives: Record<string, string[]> = {}
+  const symbolEntryRequired: Record<string, boolean> = {}
+  const symbolAlwaysActive: Record<string, boolean> = {}
+  const symbolCashFallback: Record<string, string> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -348,6 +363,21 @@ export async function loadSymbolConfig(
     if (alternatives !== null) {
       symbolAlternatives[symbol] = alternatives
     }
+    // 条件連動配分 (#452 Layer 3)。false は map に出さない (従来挙動 = 常時枠)。
+    if (row.entryRequired === true) {
+      symbolEntryRequired[symbol] = true
+    }
+    if (row.alwaysActive === true) {
+      symbolAlwaysActive[symbol] = true
+    }
+    // 退避先は ticker 文法 + self 参照禁止まで検証。無効値は不在 (= 退避なし、
+    // 現金のまま) — 誤った退避先に積み増すより安全側。
+    if (row.cashFallbackSymbol !== null && row.cashFallbackSymbol !== undefined) {
+      const fallback = row.cashFallbackSymbol.trim().toUpperCase()
+      if (/^[A-Z0-9]{1,10}$/.test(fallback) && fallback !== symbol) {
+        symbolCashFallback[symbol] = fallback
+      }
+    }
   }
   return {
     allowedSymbols,
@@ -372,6 +402,9 @@ export async function loadSymbolConfig(
     symbolMaxSma50DeviationPctOverride,
     symbolRequireAboveSma50Override,
     symbolAlternatives,
+    symbolEntryRequired,
+    symbolAlwaysActive,
+    symbolCashFallback,
   }
 }
 
@@ -433,6 +466,12 @@ export interface SymbolConfigWriteInput {
   requireAboveSma50Override: boolean | null
   /** 代替銘柄候補 (表示専用、NULL = なし、#452)。DB には JSON text で保存。 */
   alternatives: string[] | null
+  /** 条件連動配分 (#452 Layer 3): gate 通過を実配分の必須条件にする。default false。 */
+  entryRequired: boolean
+  /** 常時 target = active (cash_parking 用、#452)。default false。 */
+  alwaysActive: boolean
+  /** 条件未通過時の退避先 symbol (NULL = 退避しない、#452)。 */
+  cashFallbackSymbol: string | null
 }
 
 /** alternatives 配列 → DB 保存形式 (JSON text / NULL)。空配列は NULL に正規化。 */
@@ -478,6 +517,9 @@ export async function insertSymbolConfig(
       maxSma50DeviationPctOverride: input.maxSma50DeviationPctOverride,
       requireAboveSma50Override: input.requireAboveSma50Override,
       alternatives: alternativesToJson(input.alternatives),
+      entryRequired: input.entryRequired,
+      alwaysActive: input.alwaysActive,
+      cashFallbackSymbol: input.cashFallbackSymbol,
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -534,6 +576,9 @@ export async function updateSymbolConfig(
       maxSma50DeviationPctOverride: input.maxSma50DeviationPctOverride,
       requireAboveSma50Override: input.requireAboveSma50Override,
       alternatives: alternativesToJson(input.alternatives),
+      entryRequired: input.entryRequired,
+      alwaysActive: input.alwaysActive,
+      cashFallbackSymbol: input.cashFallbackSymbol,
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))
@@ -793,6 +838,11 @@ export async function createSymbolPair(
       maxSma50DeviationPctOverride: null,
       requireAboveSma50Override: null,
       alternatives: null,
+      // 条件連動配分も継承しない (#452): 方向が逆の相手に同じ配分条件は適用
+      // できない。default (false / NULL) = 従来挙動で開始。
+      entryRequired: false,
+      alwaysActive: false,
+      cashFallbackSymbol: null,
       updatedAt: nowIso,
     })
     await db.batch([delLink, insCounterpart, insLink])

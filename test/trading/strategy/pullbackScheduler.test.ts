@@ -1994,3 +1994,85 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     expect(reject?.reason).toContain('inverse')
   })
 })
+
+describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)', () => {
+  it('collects per-symbol entry snapshots (status / price / heldQty)', async () => {
+    const heldState: SymbolState = {
+      ...emptySymbolState('SOXS', () => now),
+      position: { qty: 7, avgPrice: 100, openedAt: now.toISOString() },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL', 'SOXS'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXS: heldState }),
+      execution: mockExecution(),
+      now: () => now,
+    })
+    expect(summary.entrySnapshots.AAPL).toEqual({ status: 'ENTRY', price: 117.5, heldQty: 0 })
+    expect(summary.entrySnapshots.SOXS?.heldQty).toBe(7)
+  })
+
+  it('cashRebalanceQuantityMap forces a fixed-quantity BUY bypassing pullback gates', async () => {
+    const execution = mockExecution()
+    // downtrend 相当でも (= 通常なら HOLD でも) cash 銘柄は指定数量で BUY する。
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      // 通常評価なら WATCH/NG になる厳しい rule でも rebalance は通る
+      defaultRule: { ...TEST_DEFAULT_RULE, minReturn50d: 5 },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { symbol: string; side: string; quantity: number }
+    expect(intent).toMatchObject({ symbol: 'SGOV', side: 'BUY', quantity: 80 })
+    const buy = summary.decisions.find((d) => d.decision === 'BUY')
+    expect(buy?.reason).toContain('cash allocation rebalance')
+    expect(buy?.trace?.map((s) => s.label)).toContain('entry.cash_rebalance')
+  })
+
+  it('cash rebalance respects pending-order lock (no double submit)', async () => {
+    const execution = mockExecution()
+    const pendingState: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      pendingOrder: {
+        clientOrderId: 'coid-1',
+        side: 'BUY',
+        submittedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: pendingState }),
+      execution,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+  })
+
+  it('cash rebalance still fails closed without lot_size when map mode is on', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      symbolLotSizeMap: {}, // lot 必須モード + SGOV 未設定
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    expect(summary.rejected[0]?.reason).toContain('missing-lot-size')
+  })
+})
