@@ -2045,12 +2045,51 @@ function brokerProbeBody(args: {
       { label: 'quotes host (alt category)', section: body.instrumentQuotesHostAlt },
       { label: 'trade host (alt category)', section: body.instrumentTradeHostAlt },
     ];
+    var tradeCandidates = [
+      { label: 'trade/security', section: body.tradeSecurity },
+      { label: 'trade/instrument/tradable/list', section: body.tradableList },
+    ];
     if (rawTarget) {
-      rawTarget.textContent = candidates.map(function (cnd) {
+      rawTarget.textContent = tradeCandidates.concat(candidates).map(function (cnd) {
         return '--- ' + cnd.label + ' ---\\n' + prettify(cnd.section);
       }).join('\\n\\n');
     }
     if (!bodyEl) return;
+
+    // 本命: trade/security (#461 follow-up)。symbol 指定の取引可能銘柄照会で、
+    // 200 + 中身があれば「発注対象として取引可能」の直接の根拠になる。
+    var sec = body.tradeSecurity;
+    if (sec && sec.phase === 'response') {
+      var secBody = parseBody(sec);
+      if (sec.status === 200 && secBody != null) {
+        var secItems = Array.isArray(secBody) ? secBody : (Array.isArray(secBody.data) ? secBody.data : [secBody]);
+        var nonEmpty = secItems.length > 0 && secItems[0] && Object.keys(secItems[0]).length > 0;
+        if (nonEmpty) {
+          setPill('bp-instrument-pill', 'ok', '取引可能');
+          var first = secItems[0];
+          var secFields = [];
+          if (first.instrument_id) secFields.push('instrument_id: <code>' + escHtml(first.instrument_id) + '</code>');
+          if (first.instrument_type) secFields.push('type: <code>' + escHtml(first.instrument_type) + '</code>');
+          if (first.symbol) secFields.push('symbol: <code>' + escHtml(first.symbol) + '</code>');
+          bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は取引可能銘柄として照会できました (via trade/security)。<br>' +
+            '<span class="muted" style="font-size:12px">' + (secFields.join(' ・ ') || '(詳細は raw 参照)') + '</span>';
+          return;
+        }
+        setPill('bp-instrument-pill', 'ng', '取扱なし');
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は trade/security 照会で空応答 — ' +
+          '<span style="color:#c22">取引対象外の可能性が高い (発注すると TICKER_IS_DENY 見込み)。</span>';
+        return;
+      }
+      var secErrBody = secBody;
+      if (secErrBody && typeof secErrBody === 'object' && secErrBody.error_code) {
+        setPill('bp-instrument-pill', 'ng', '取扱なし');
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — trade/security が <code>' + escHtml(secErrBody.error_code) + '</code> を返しました。' +
+          '<span style="color:#c22">取引対象外の可能性が高い。</span> <span class="muted">(raw 参照)</span>';
+        return;
+      }
+      // 404 等 = endpoint 自体が未提供 → market-data 系候補へ fall through
+    }
+
     var responded = [];
     for (var i = 0; i < candidates.length; i++) {
       var sct = candidates[i].section;

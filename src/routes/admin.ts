@@ -753,6 +753,8 @@ export const admin = new Hono<AppBindings>()
       instrumentTradeHost,
       instrumentQuotesHostAlt,
       instrumentTradeHostAlt,
+      tradeSecurity,
+      tradableList,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -865,6 +867,31 @@ export const admin = new Hono<AppBindings>()
         query: { symbols: symbol, category: altCategory },
         version: 'v1',
       }),
+      // #461 follow-up: **取引可否の本命候補** (trade host = JP で生きている側)。
+      // 公式 SDK trade モジュール準拠:
+      //   - /trade/security?symbol&market&instrument_super_type — symbol 指定の
+      //     取引可能銘柄照会 (TradeSecurityDetailRequest, v1)
+      //   - /trade/instrument/tradable/list — 口座で取引可能な銘柄の一覧
+      //     (TradeableInstrumentRequest, v1, ページング)
+      // market-data 系 instrument/list (上の 4 probe) が JP 未提供でも、こちらが
+      // 200 を返せば事前チェックが成立する。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/trade/security',
+        query: {
+          account_id: accountId,
+          symbol,
+          market: category.startsWith('JP') ? 'JP' : 'US',
+          instrument_super_type: 'EQUITY',
+        },
+        version: 'v1',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/trade/instrument/tradable/list',
+        query: { account_id: accountId, page_size: '100' },
+        version: 'v1',
+      }),
     ])
 
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
@@ -914,6 +941,8 @@ export const admin = new Hono<AppBindings>()
       instrumentTradeHost,
       instrumentQuotesHostAlt,
       instrumentTradeHostAlt,
+      tradeSecurity,
+      tradableList,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
