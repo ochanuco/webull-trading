@@ -1971,6 +1971,16 @@ function brokerProbeBody(args: {
     el.textContent = text;
   }
 
+  // fetch abort (10s timeout) は raw の英語のまま出すと分かりにくいので日本語化。
+  // data-api.webull.co.jp (JP market-data host) の無応答は既知 (#21、Yahoo 移行済み)。
+  function humanizeError(section) {
+    if (!section) return 'no data';
+    if (section.error && /aborted/i.test(section.error)) return '応答なし (10秒 timeout)';
+    if (section.error) return section.error;
+    if (section.status != null) return 'status=' + section.status;
+    return section.phase;
+  }
+
   function parseBody(section) {
     if (!section || typeof section.bodyTruncated !== 'string' || section.bodyTruncated.length === 0) return null;
     try { return JSON.parse(section.bodyTruncated); } catch (_) { return null; }
@@ -2017,12 +2027,12 @@ function brokerProbeBody(args: {
     }
     if (!hit) {
       var statuses = candidates.map(function (cnd) {
-        var sct = cnd.section;
-        return cnd.label + ': ' + (sct ? (sct.status != null ? 'status=' + sct.status : sct.phase + ' ' + (sct.error || '')) : 'no data');
-      }).join(' / ');
+        return cnd.label + ': ' + humanizeError(cnd.section);
+      }).join(' ／ ');
       setPill('bp-instrument-pill', 'unknown', '判定不可');
       bodyEl.innerHTML = 'instrument endpoint が 200 を返しませんでした (' + statuses + ')。' +
-        '<span class="muted">JP テナントで endpoint 未提供の可能性。判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
+        '<span class="muted">quotes host (data-api) の無応答は既知 (#21、quote は Yahoo 移行済み)。trade host の 404 は endpoint 未提供。' +
+        '判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
       return;
     }
     var items = Array.isArray(hit.data) ? hit.data : (Array.isArray(hit.data.data) ? hit.data.data : []);
@@ -2052,11 +2062,11 @@ function brokerProbeBody(args: {
   // pill と raw は必ず更新する (stale 表示を残さない、CodeRabbit #262 の方針)。
   function renderQuoteCard(pillId, bodyId, section, priceKeys) {
     var ok = section && section.phase === 'response' && section.status === 200;
-    setPill(pillId, ok ? 'ok' : (section ? 'ng' : 'unknown'), ok ? '200 OK' : (section ? (section.status != null ? 'status ' + section.status : section.phase) : 'no data'));
+    setPill(pillId, ok ? 'ok' : (section ? 'ng' : 'unknown'), ok ? '200 OK' : (section ? (section.status != null ? 'status ' + section.status : 'timeout') : 'no data'));
     var bodyEl = document.getElementById(bodyId);
     if (!bodyEl) return;
     if (!ok) {
-      bodyEl.innerHTML = '<span class="muted">' + (section && section.error ? section.error : '取得失敗 — raw を確認') + '</span>';
+      bodyEl.innerHTML = '<span class="muted">' + humanizeError(section) + '</span>';
       return;
     }
     var parsed = parseBody(section);
