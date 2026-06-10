@@ -1831,15 +1831,11 @@ function renderUniverseLinks(universe: SymbolUniverse | null): string {
   const renderBtn = (sym: string, cat: string): string => {
     const inactive = inactiveSet.has(sym.toUpperCase())
     const display = displaySymbol(sym, universe)
-    const baseStyle =
-      'padding:3px 10px;font-size:12px;border:1px solid #ddd;border-radius:14px;cursor:pointer;background:#fff'
-    const style = inactive
-      ? `${baseStyle};color:#999;background:#f3f3f3`
-      : baseStyle
+    const style = inactive ? 'color:#999;background:#f3f3f3' : ''
     const inactiveBadge = inactive
       ? ' <span style="font-size:10px;color:#999">(INACTIVE)</span>'
       : ''
-    return `<button type="button" class="probe-pickbtn" data-symbol="${esc(sym)}" data-category="${cat}" style="${style}" title="${esc(cat)}">${esc(display)}${inactiveBadge}</button>`
+    return `<button type="button" class="bp-chip probe-pickbtn" data-symbol="${esc(sym)}" data-category="${cat}"${style ? ` style="${style}"` : ''} title="${esc(cat)}">${esc(display)}${inactiveBadge}</button>`
   }
   const sections: string[] = []
   for (const cat of ['US_STOCK', 'US_ETF', 'JP_STOCK', 'JP_ETF']) {
@@ -1858,91 +1854,96 @@ function brokerProbeBody(args: {
   category: string
   universe: SymbolUniverse | null
 }): string {
-  // 旧版 (PR #245-#247) は form + datalist + chip、PR #248 で保有銘柄駆動に
-  // 切替えた。本 UI (PR #249) では symbol_config 登録銘柄全部 (active +
-  // inactive) を「登録銘柄」セクションでも click 可能にする (ユーザ要望:
-  // 「登録している銘柄は全部リンクにしてほしかった」)。これで保有してない
-  // 銘柄も Webull に直で確認できる。
-  //
-  // フロー:
-  //   1. ページ表示 → auto-probe (default: AAPL/US_STOCK)
-  //   2. positions JSON parse → 各 holding をボタンとして列挙 (= 保有 click)
-  //   3. universe.allowedSymbols + inactiveSymbols を server-side で render
-  //      (= 登録銘柄 click)
-  //   4. AAPL は JP UAT で唯一 200 が返る US 銘柄なので control として残す
-  //
-  // 任意 symbol で叩きたい場合は curl /admin/broker/probe を直接でも OK。
-
-  // server-side で universe をリンク chip に展開。category は client 側の
-  // inferCategory と同じロジックでサーバ側でも判定 (4 桁 = JP_STOCK or
-  // 1570=JP_ETF、US は SOXL/SOXS/SPY/QQQ=US_ETF それ以外=US_STOCK)。
+  // #461 で刷新: raw JSON の縦積み → カード型のサマリ UI。
+  //   - 上段: 銘柄選択 (登録銘柄 / 保有 / control) + status + 再 probe
+  //   - 判定カード: Webull 取扱 (instrument 照会) / Webull quote / Yahoo quote / 買付余力
+  //   - 下段 <details>: drift 比較・raw レスポンス・meta (情報は落とさず格納)
+  // データ取得は従来どおり同一 origin の `/admin/broker/probe` を client fetch
+  // (Cloudflare Access cookie 流用、payload は no-store)。
+  // 自動 probe は URL に symbol+category がある時だけ (PR #250 の方針を維持)。
   const universeLinks = renderUniverseLinks(args.universe)
-  return `<p class="muted" style="font-size:12px">
-  Webull broker (host は <code>WEBULL_TRADE_API_BASE</code> / <code>WEBULL_QUOTES_API_BASE</code> から決定、
-  未設定なら JP prod default) に <code>/openapi/market-data/stock/snapshot</code> +
-  <code>/openapi/account/positions</code> を直接 fetch して raw レスポンスを表示します。
-  click した銘柄について broker に quote を問合せて生応答 (status / error_code / request_id)
-  が見えます。実際に使われた host は meta セクションの <code>sandbox.trade</code> /
-  <code>sandbox.quotes</code> で確認可。任意の symbol / category で叩きたい場合は
-  <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code> を直接実行してください。
-</p>
-<div style="display:flex;gap:14px;align-items:center;margin-bottom:12px">
-  <span class="muted" id="probe-status" style="font-size:12px">読み込み中...</span>
-  <button type="button" id="probe-refresh" style="padding:4px 12px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">再 probe</button>
-</div>
+  return `<style>
+  .bp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:12px 0}
+  .bp-card{background:#fff;border:1px solid #e3e3e8;border-radius:10px;padding:14px 16px}
+  .bp-card h3{font-size:13px;margin:0 0 8px;display:flex;align-items:center;gap:8px;justify-content:space-between}
+  .bp-card .bp-body{font-size:13px;line-height:1.6}
+  .bp-pill{display:inline-block;padding:1px 10px;border-radius:10px;font-size:11px;font-weight:700;white-space:nowrap}
+  .bp-pill-ok{background:#e6f6ec;color:#057a55}
+  .bp-pill-ng{background:#fdecec;color:#c22}
+  .bp-pill-unknown{background:#eef2f8;color:#46608a}
+  .bp-pill-wait{background:#f3f3f5;color:#86868b}
+  .bp-chip{padding:4px 12px;font-size:12px;border:1px solid #d8d8de;border-radius:14px;cursor:pointer;background:#fff;margin:0 4px 6px 0}
+  .bp-chip:hover{background:#eef4ff;border-color:#06c}
+  .bp-raw{background:#f6f6f8;border:1px solid #e3e3e8;border-radius:6px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px}
+  .bp-num{font-variant-numeric:tabular-nums}
+  </style>
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">保有銘柄 (click で quote probe)</h2>
-<div id="probe-positions-list" style="margin-bottom:16px"></div>
+  <div class="bp-card" style="margin-top:8px">
+    <h3>銘柄を選んで probe <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
+    <div class="bp-body">
+      <div style="margin-bottom:6px">${universeLinks}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button>
+        <button type="button" id="probe-refresh" class="bp-chip" style="border-color:#06c;color:#06c">↻ 再 probe</button>
+        <span class="muted" id="probe-current" style="font-size:12px"></span>
+      </div>
+      <p class="muted" style="margin:8px 0 0;font-size:11px">Webull broker (host: <code>WEBULL_TRADE_API_BASE</code> / <code>WEBULL_QUOTES_API_BASE</code>) へ直接照会して結果を表示します。任意 symbol は <code>curl /admin/broker/probe?symbol=X&amp;category=Y</code>。</p>
+    </div>
+  </div>
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">登録銘柄 (symbol_config の active + inactive)</h2>
-<div style="margin-bottom:16px">${universeLinks}</div>
+  <div class="bp-grid">
+    <div class="bp-card">
+      <h3>Webull 取扱 <span class="muted" style="font-size:11px;font-weight:normal">(instrument 照会 #461)</span><span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div class="bp-body" id="bp-instrument-body" class="muted">銘柄をクリックすると Webull の instrument 照会で「銘柄として認識されているか」を確認します。</div>
+      <p class="muted" style="font-size:11px;margin:8px 0 0">⚠ 照会は<strong>取扱有無の近似</strong>。発注 allowlist (TICKER_IS_DENY) は別系統の可能性があり、確定的なガードは事後の自動停止 (#460) が担う。</p>
+    </div>
+    <div class="bp-card">
+      <h3>Webull quote <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div class="bp-body" id="bp-quote-body" class="muted">—</div>
+      <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote" class="bp-raw">(未実行)</pre></details>
+    </div>
+    <div class="bp-card">
+      <h3>Yahoo quote <span class="muted" style="font-size:11px;font-weight:normal">(cron の default source)</span><span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div class="bp-body" id="bp-yahoo-body" class="muted">—</div>
+      <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote-yahoo" class="bp-raw">(未実行)</pre></details>
+    </div>
+    <div class="bp-card">
+      <h3>買付余力 <span class="muted" style="font-size:11px;font-weight:normal">#415</span><span id="bp-bp-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
+      <div class="bp-body" id="probe-buying-power" class="muted">—</div>
+      <p class="muted" style="font-size:11px;margin:8px 0 0">取得失敗時は cron が当 tick の BUY を全見送り (fail-closed)。</p>
+    </div>
+  </div>
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">control (US は AAPL のみ allowlist 通過)</h2>
-<div style="margin-bottom:16px">
-  <button type="button" class="probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK" style="padding:4px 12px;font-size:12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">AAPL (US_STOCK)</button>
-</div>
+  <div class="bp-card">
+    <h3>保有銘柄 <span class="muted" style="font-size:11px;font-weight:normal">(click で probe)</span></h3>
+    <div class="bp-body" id="probe-positions-list" class="muted">未実行</div>
+  </div>
 
-<h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 (Webull) <span class="muted" id="probe-current" style="font-size:12px;font-weight:normal"></span></h2>
-<pre id="probe-quote" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">(まだ probe 未実行)</pre>
-
-<h2 style="font-size:14px;margin:16px 0 4px 0">quote 結果 (Yahoo Finance) <span class="muted" style="font-size:12px;font-weight:normal">— strategy cron が default で使う source</span></h2>
-<pre id="probe-quote-yahoo" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">(まだ probe 未実行)</pre>
-
-<h2 style="font-size:14px;margin:16px 0 4px 0">買付余力 (buying power) <span class="muted" style="font-size:11px">#415</span></h2>
-<p class="muted" style="font-size:11px;margin:0 0 4px 0">
-  発注前の共有プール pre-trade ゲートが使う口座買付余力。通貨別 <code>buying_power</code> を表示。取得失敗時は cron が当 tick の BUY を全見送り (fail-closed)。
-</p>
-<div id="probe-buying-power" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:13px">(まだ probe 未実行)</div>
-
-<h2 style="font-size:14px;margin:16px 0 4px 0">meta</h2>
-<pre id="probe-meta" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:12px">(まだ probe 未実行)</pre>
-
-<h2 style="font-size:14px;margin:16px 0 4px 0">drift 比較 (旧 path vs 新 path)</h2>
-<p class="muted" style="font-size:11px;margin:0 0 8px 0">
-  #251 で発覚した OpenAPI ドキュメント drift の検証。旧 (\`/openapi/account/*\` + v1) と新 (\`/openapi/assets/*\` or \`/openapi/trade/order/*\` + v2) を並列で叩いた結果。両方 200 なら alias、片方 404 なら drift 確定、shape 違いなら schema migration が必要。
-</p>
-<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px">
-  <thead><tr style="border-bottom:1px solid #ddd">
-    <th style="text-align:left;padding:4px 8px">endpoint</th>
-    <th style="text-align:left;padding:4px 8px">old</th>
-    <th style="text-align:left;padding:4px 8px">new</th>
-  </tr></thead>
-  <tbody id="probe-drift-table">
-    <tr><td colspan="3" class="muted" style="padding:8px;text-align:center">(probe 未実行)</td></tr>
-  </tbody>
-</table>
-
-<details style="margin-top:16px">
-  <summary class="muted" style="font-size:12px;cursor:pointer">positions / orderHistory raw responses (旧/新)</summary>
-  <h3 style="font-size:12px;margin:8px 0 4px 0">positions (旧 /openapi/account/positions, v1)</h3>
-  <pre id="probe-positions-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
-  <h3 style="font-size:12px;margin:8px 0 4px 0">positionsNew (新 /openapi/assets/positions, v2)</h3>
-  <pre id="probe-positions-new-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
-  <h3 style="font-size:12px;margin:8px 0 4px 0">orderHistoryOld (旧 /openapi/account/orders/history, v1)</h3>
-  <pre id="probe-order-old-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
-  <h3 style="font-size:12px;margin:8px 0 4px 0">orderHistoryNew (新 /openapi/trade/order/history, v2)</h3>
-  <pre id="probe-order-new-raw" style="background:#f6f6f6;border:1px solid #ddd;border-radius:4px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all"></pre>
-</details>
+  <details style="margin-top:12px">
+    <summary class="muted" style="font-size:12px;cursor:pointer">詳細 (drift 比較 / raw レスポンス / meta)</summary>
+    <div class="bp-card" style="margin-top:8px">
+      <h3>drift 比較 (旧 path vs 新 path) <span class="muted" style="font-size:11px;font-weight:normal">#251</span></h3>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="border-bottom:1px solid #e3e3e8">
+          <th style="text-align:left;padding:4px 8px">endpoint</th>
+          <th style="text-align:left;padding:4px 8px">old</th>
+          <th style="text-align:left;padding:4px 8px">new</th>
+        </tr></thead>
+        <tbody id="probe-drift-table">
+          <tr><td colspan="3" class="muted" style="padding:8px;text-align:center">(未実行)</td></tr>
+        </tbody>
+      </table>
+      <h3 style="margin-top:14px">instrument 照会 raw (quotes host / trade host)</h3>
+      <pre id="bp-instrument-raw" class="bp-raw">(未実行)</pre>
+      <h3 style="margin-top:14px">positions / orderHistory raw (旧/新)</h3>
+      <pre id="probe-positions-raw" class="bp-raw">(未実行)</pre>
+      <pre id="probe-positions-new-raw" class="bp-raw">(未実行)</pre>
+      <pre id="probe-order-old-raw" class="bp-raw">(未実行)</pre>
+      <pre id="probe-order-new-raw" class="bp-raw">(未実行)</pre>
+      <h3 style="margin-top:14px">meta</h3>
+      <pre id="probe-meta" class="bp-raw">(未実行)</pre>
+    </div>
+  </details>
 
 <script>
 (function () {
@@ -1954,8 +1955,6 @@ function brokerProbeBody(args: {
   var rawEl = document.getElementById('probe-positions-raw');
   var currentEl = document.getElementById('probe-current');
 
-  // JP は 4 桁数字 (TSE code)。1570 だけ既知 ETF、それ以外は STOCK 扱い。
-  // US は SOXL / SOXS / SPY / QQQ を ETF 扱い、それ以外は STOCK。
   var US_ETF_KNOWN = { SOXL: 1, SOXS: 1, SPY: 1, QQQ: 1 };
   var JP_ETF_KNOWN = { '1570': 1 };
   function inferCategory(symbol) {
@@ -1965,13 +1964,22 @@ function brokerProbeBody(args: {
     return US_ETF_KNOWN[symbol.toUpperCase()] ? 'US_ETF' : 'US_STOCK';
   }
 
+  function setPill(id, kind, text) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'bp-pill bp-pill-' + kind;
+    el.textContent = text;
+  }
+
+  function parseBody(section) {
+    if (!section || typeof section.bodyTruncated !== 'string' || section.bodyTruncated.length === 0) return null;
+    try { return JSON.parse(section.bodyTruncated); } catch (_) { return null; }
+  }
+
   function prettify(section) {
     if (!section) return '(no data)';
     var raw = section.bodyTruncated;
-    var parsed = null;
-    if (typeof raw === 'string' && raw.length > 0) {
-      try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
-    }
+    var parsed = parseBody(section);
     var header = '[' + section.phase + '] status=' + section.status + ' ok=' + section.ok +
       ' msTaken=' + section.msTaken + 'ms bodyLength=' + section.bodyLength;
     if (section.error) header += ' error=' + section.error;
@@ -1985,9 +1993,84 @@ function brokerProbeBody(args: {
     return n.toLocaleString('ja-JP', { maximumFractionDigits: 2 });
   }
 
-  // positions の bodyTruncated を parse して clickable button list を作る。
-  // parse 失敗 / 空配列なら "(なし)" 表示。各 button は data-symbol / data-category
-  // を持ち、共通 click handler で probe 起動。
+  // #461: instrument 照会の判定カード。quotes / trade 両 host 候補のうち最初に
+  // 200 + JSON parse 可能なものを採用する (#415 の balance 候補方式と同じ)。
+  function renderInstrumentCard(body, symbol) {
+    var bodyEl = document.getElementById('bp-instrument-body');
+    var rawTarget = document.getElementById('bp-instrument-raw');
+    if (rawTarget) {
+      rawTarget.textContent = '--- quotes host ---\\n' + prettify(body.instrumentQuotesHost) +
+        '\\n\\n--- trade host ---\\n' + prettify(body.instrumentTradeHost);
+    }
+    if (!bodyEl) return;
+    var candidates = [
+      { label: 'quotes host', section: body.instrumentQuotesHost },
+      { label: 'trade host', section: body.instrumentTradeHost },
+    ];
+    var hit = null;
+    for (var i = 0; i < candidates.length; i++) {
+      var sct = candidates[i].section;
+      if (sct && sct.phase === 'response' && sct.status === 200) {
+        var parsed = parseBody(sct);
+        if (parsed != null) { hit = { label: candidates[i].label, data: parsed }; break; }
+      }
+    }
+    if (!hit) {
+      var statuses = candidates.map(function (cnd) {
+        var sct = cnd.section;
+        return cnd.label + ': ' + (sct ? (sct.status != null ? 'status=' + sct.status : sct.phase + ' ' + (sct.error || '')) : 'no data');
+      }).join(' / ');
+      setPill('bp-instrument-pill', 'unknown', '判定不可');
+      bodyEl.innerHTML = 'instrument endpoint が 200 を返しませんでした (' + statuses + ')。' +
+        '<span class="muted">JP テナントで endpoint 未提供の可能性。判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
+      return;
+    }
+    var items = Array.isArray(hit.data) ? hit.data : (Array.isArray(hit.data.data) ? hit.data.data : []);
+    var match = null;
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j];
+      if (it && typeof it.symbol === 'string' && it.symbol.toUpperCase() === symbol.toUpperCase()) { match = it; break; }
+    }
+    if (!match && items.length === 1) match = items[0];
+    if (match) {
+      setPill('bp-instrument-pill', 'ok', '銘柄情報あり');
+      var fields = [];
+      if (match.instrument_id) fields.push('instrument_id: <code>' + match.instrument_id + '</code>');
+      if (match.instrument_type) fields.push('type: <code>' + match.instrument_type + '</code>');
+      if (match.exchange_code) fields.push('exchange: <code>' + match.exchange_code + '</code>');
+      if (match.currency) fields.push('currency: <code>' + match.currency + '</code>');
+      bodyEl.innerHTML = '<strong>' + symbol.toUpperCase() + '</strong> は Webull に銘柄として登録されています (via ' + hit.label + ')。<br>' +
+        '<span class="muted" style="font-size:12px">' + (fields.join(' ・ ') || '(詳細フィールドなし)') + '</span>';
+    } else {
+      setPill('bp-instrument-pill', 'ng', '銘柄情報なし');
+      bodyEl.innerHTML = '<strong>' + symbol.toUpperCase() + '</strong> は instrument 照会に出てきません (via ' + hit.label + ', ' + items.length + ' 件)。' +
+        '<span style="color:#c22">Webull JP の取扱対象外の可能性が高く、発注しても TICKER_IS_DENY で拒否される見込みです。</span>';
+    }
+  }
+
+  // quote カード: status pill + 価格らしきフィールドの要約。shape が読めなくても
+  // pill と raw は必ず更新する (stale 表示を残さない、CodeRabbit #262 の方針)。
+  function renderQuoteCard(pillId, bodyId, section, priceKeys) {
+    var ok = section && section.phase === 'response' && section.status === 200;
+    setPill(pillId, ok ? 'ok' : (section ? 'ng' : 'unknown'), ok ? '200 OK' : (section ? (section.status != null ? 'status ' + section.status : section.phase) : 'no data'));
+    var bodyEl = document.getElementById(bodyId);
+    if (!bodyEl) return;
+    if (!ok) {
+      bodyEl.innerHTML = '<span class="muted">' + (section && section.error ? section.error : '取得失敗 — raw を確認') + '</span>';
+      return;
+    }
+    var parsed = parseBody(section);
+    var item = Array.isArray(parsed) ? parsed[0] : parsed;
+    var price = null;
+    for (var i = 0; item && i < priceKeys.length; i++) {
+      var v = item[priceKeys[i]];
+      if (v != null && Number.isFinite(Number(v))) { price = Number(v); break; }
+    }
+    bodyEl.innerHTML = price != null
+      ? '<span style="font-size:18px;font-weight:700" class="bp-num">' + formatNumber(price) + '</span> <span class="muted" style="font-size:11px">(' + section.msTaken + 'ms)</span>'
+      : '<span class="muted">200 OK (' + section.msTaken + 'ms) — 価格フィールドは raw を確認</span>';
+  }
+
   function renderPositionsList(section) {
     if (!section || section.phase !== 'response' || !section.ok) {
       positionsListEl.innerHTML = '<span class="muted" style="font-size:12px">positions: ' +
@@ -1995,10 +2078,8 @@ function brokerProbeBody(args: {
       rawEl.textContent = section ? prettify(section) : '(no data)';
       return;
     }
-    var raw = section.bodyTruncated;
     rawEl.textContent = prettify(section);
-    var items = null;
-    try { items = JSON.parse(raw); } catch (_) { items = null; }
+    var items = parseBody(section);
     if (!Array.isArray(items) || items.length === 0) {
       positionsListEl.innerHTML = '<span class="muted" style="font-size:12px">保有銘柄なし</span>';
       return;
@@ -2011,72 +2092,18 @@ function brokerProbeBody(args: {
       var mv = formatNumber(item.market_value);
       var cost = formatNumber(item.cost_price);
       var cat = inferCategory(sym);
-      return '<button type="button" class="probe-pickbtn" data-symbol="' + sym + '" data-category="' + cat +
-        '" style="display:block;width:100%;text-align:left;padding:6px 10px;font-size:12px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;margin-bottom:4px">' +
+      return '<button type="button" class="bp-chip probe-pickbtn" data-symbol="' + sym + '" data-category="' + cat +
+        '" style="display:block;width:100%;text-align:left;margin:0 0 4px">' +
         '<strong>' + sym + '</strong> ' + (name ? '— ' + name + ' ' : '') +
         '<span class="muted">qty=' + qty + ' cost=' + cost + ' mv=' + cur + ' ' + mv + ' (' + cat + ')</span>' +
         '</button>';
     }).join('');
     positionsListEl.innerHTML = html;
-    // 動的に作られたボタンに click handler を接続
     positionsListEl.querySelectorAll('.probe-pickbtn').forEach(function (btn) {
       btn.addEventListener('click', onPickClick);
     });
   }
 
-  function probe(symbol, category) {
-    refreshBtn.disabled = true;
-    statusEl.textContent = '実行中: ' + symbol + ' (' + category + ')';
-    currentEl.textContent = '— ' + symbol + ' / ' + category;
-    quoteEl.textContent = '...';
-    var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
-      '&category=' + encodeURIComponent(category);
-    // URL 更新 (bookmark / リロード対応)
-    try {
-      var u = new URL(window.location.href);
-      u.searchParams.set('symbol', symbol);
-      u.searchParams.set('category', category);
-      window.history.replaceState({}, '', u.toString());
-    } catch (_) {}
-    return fetch(url, { credentials: 'same-origin' })
-      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
-      .then(function (res) {
-        var body = res.body;
-        statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
-        // CodeRabbit #262: body fields が欠けてても UI を必ず更新して stale を
-        // 残さない。quote / positions / 各 raw を **常に** 上書き。
-        quoteEl.textContent = body.quote ? prettify(body.quote) : '(no data)';
-        var quoteYahooEl = document.getElementById('probe-quote-yahoo');
-        if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
-        renderPositionsList(body.positions || null);
-        // drift 比較: 新 path 結果も raw + table へ。値が無くても "(no data)"
-        // を入れて stale 表示にしない。
-        var positionsNewRaw = document.getElementById('probe-positions-new-raw');
-        var orderOldRaw = document.getElementById('probe-order-old-raw');
-        var orderNewRaw = document.getElementById('probe-order-new-raw');
-        if (positionsNewRaw) positionsNewRaw.textContent = prettify(body.positionsNew);
-        if (orderOldRaw) orderOldRaw.textContent = prettify(body.orderHistoryOld);
-        if (orderNewRaw) orderNewRaw.textContent = prettify(body.orderHistoryNew);
-        renderBuyingPower(body);
-        renderDriftTable(body);
-        metaEl.textContent = JSON.stringify({
-          timestamp: body.timestamp,
-          sandbox: body.sandbox,
-          input: body.input,
-          adminStatus: res.status,
-        }, null, 2);
-      })
-      .catch(function (e) {
-        statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
-      })
-      .finally(function () {
-        refreshBtn.disabled = false;
-      });
-  }
-
-  // #415: 買付余力を描画。balance probe 候補 (account/balance v1, assets/balance v2)
-  // のうち最初に 200 を返したものを parse し、通貨別 buying_power を出す。
-  // どれも 200 でなければ ⚠ unavailable (= cron は当 tick の BUY を全見送り)。
   function renderBuyingPower(body) {
     var el = document.getElementById('probe-buying-power');
     if (!el) return;
@@ -2086,35 +2113,31 @@ function brokerProbeBody(args: {
     ];
     var hit = null;
     for (var i = 0; i < candidates.length; i++) {
-      var s = candidates[i].section;
-      if (s && s.phase === 'response' && s.status === 200 && typeof s.bodyTruncated === 'string') {
-        var parsed = null;
-        try { parsed = JSON.parse(s.bodyTruncated); } catch (_) { parsed = null; }
+      var sct = candidates[i].section;
+      if (sct && sct.phase === 'response' && sct.status === 200) {
+        var parsed = parseBody(sct);
         if (parsed) { hit = { label: candidates[i].label, body: parsed }; break; }
       }
     }
     if (!hit) {
-      el.innerHTML = '<span style="color:#c22;font-weight:600">⚠ 取得不可 (unavailable)</span> ' +
-        '<span class="muted" style="font-size:11px">— balance endpoint がどれも 200 を返さず。cron は当 tick の BUY を fail-closed で見送ります。</span>';
+      setPill('bp-bp-pill', 'ng', 'unavailable');
+      el.innerHTML = '<span class="muted">balance endpoint がどれも 200 を返しませんでした。</span>';
       return;
     }
+    setPill('bp-bp-pill', 'ok', '取得 OK');
     var b = hit.body;
     var assets = Array.isArray(b.account_currency_assets) ? b.account_currency_assets : [];
     var rows = assets.map(function (a) {
       return '<tr><td style="padding:2px 10px 2px 0"><code>' + (a.currency || '?') + '</code></td>' +
-        '<td style="padding:2px 10px;text-align:right;font-variant-numeric:tabular-nums">' + formatNumber(a.buying_power) + '</td>' +
-        '<td style="padding:2px 10px;text-align:right;font-variant-numeric:tabular-nums" class="muted">cash ' + formatNumber(a.cash_balance) + '</td></tr>';
+        '<td style="padding:2px 10px;text-align:right" class="bp-num">' + formatNumber(a.buying_power) + '</td>' +
+        '<td style="padding:2px 10px;text-align:right" class="muted bp-num">cash ' + formatNumber(a.cash_balance) + '</td></tr>';
     }).join('');
     el.innerHTML =
-      '<div style="margin-bottom:4px"><span style="color:#0a8a0a;font-weight:600">✅ 取得 OK</span> ' +
-      '<span class="muted" style="font-size:11px">via ' + hit.label + ' / 基準通貨 ' + (b.total_asset_currency || '?') +
-      ' / 総現金 ' + formatNumber(b.total_cash_balance) + '</span></div>' +
-      '<table style="font-size:12px;border-collapse:collapse"><thead><tr class="muted">' +
-      '<th style="text-align:left;padding:2px 10px 2px 0">通貨</th><th style="text-align:right;padding:2px 10px">買付余力</th><th></th></tr></thead>' +
-      '<tbody>' + (rows || '<tr><td colspan="3" class="muted">(通貨別資産なし)</td></tr>') + '</tbody></table>';
+      '<table style="font-size:12px;border-collapse:collapse"><tbody>' +
+      (rows || '<tr><td class="muted">(通貨別資産なし)</td></tr>') + '</tbody></table>' +
+      '<div class="muted" style="font-size:11px;margin-top:4px">via ' + hit.label + ' / 基準通貨 ' + (b.total_asset_currency || '?') + '</div>';
   }
 
-  // drift 比較テーブルを描画。各行は status / msTaken を旧/新 並列表示。
   function renderDriftTable(body) {
     var tableBody = document.getElementById('probe-drift-table');
     if (!tableBody) return;
@@ -2133,7 +2156,63 @@ function brokerProbeBody(args: {
     tableBody.innerHTML =
       row('positions', body.positions, body.positionsNew) +
       row('order history', body.orderHistoryOld, body.orderHistoryNew) +
-      row('account balance', body.balanceAccountV1, body.balanceAssetsV2);
+      row('account balance', body.balanceAccountV1, body.balanceAssetsV2) +
+      row('instrument (quotes/trade host)', body.instrumentQuotesHost, body.instrumentTradeHost);
+  }
+
+  function probe(symbol, category) {
+    refreshBtn.disabled = true;
+    statusEl.textContent = '実行中: ' + symbol + ' (' + category + ')';
+    currentEl.textContent = '— ' + symbol + ' / ' + category;
+    quoteEl.textContent = '...';
+    setPill('bp-instrument-pill', 'wait', '実行中');
+    setPill('bp-quote-pill', 'wait', '実行中');
+    setPill('bp-yahoo-pill', 'wait', '実行中');
+    setPill('bp-bp-pill', 'wait', '実行中');
+    var url = '/admin/broker/probe?symbol=' + encodeURIComponent(symbol) +
+      '&category=' + encodeURIComponent(category);
+    try {
+      var u = new URL(window.location.href);
+      u.searchParams.set('symbol', symbol);
+      u.searchParams.set('category', category);
+      window.history.replaceState({}, '', u.toString());
+    } catch (_) {}
+    return fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (res) {
+        var body = res.body;
+        statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
+        quoteEl.textContent = body.quote ? prettify(body.quote) : '(no data)';
+        renderQuoteCard('bp-quote-pill', 'bp-quote-body', body.quote || null, ['last_price', 'price', 'close', 'last']);
+        var quoteYahooEl = document.getElementById('probe-quote-yahoo');
+        if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
+        renderQuoteCard('bp-yahoo-pill', 'bp-yahoo-body', body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);
+        renderInstrumentCard(body, symbol);
+        renderPositionsList(body.positions || null);
+        var positionsNewRaw = document.getElementById('probe-positions-new-raw');
+        var orderOldRaw = document.getElementById('probe-order-old-raw');
+        var orderNewRaw = document.getElementById('probe-order-new-raw');
+        if (positionsNewRaw) positionsNewRaw.textContent = prettify(body.positionsNew);
+        if (orderOldRaw) orderOldRaw.textContent = prettify(body.orderHistoryOld);
+        if (orderNewRaw) orderNewRaw.textContent = prettify(body.orderHistoryNew);
+        renderBuyingPower(body);
+        renderDriftTable(body);
+        metaEl.textContent = JSON.stringify({
+          timestamp: body.timestamp,
+          sandbox: body.sandbox,
+          input: body.input,
+          accessToken: body.accessToken,
+          appKey: body.appKey,
+          readiness: body.readiness,
+          adminStatus: res.status,
+        }, null, 2);
+      })
+      .catch(function (e) {
+        statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
+      })
+      .finally(function () {
+        refreshBtn.disabled = false;
+      });
   }
 
   function onPickClick(ev) {
@@ -2143,12 +2222,10 @@ function brokerProbeBody(args: {
     if (sym && cat) probe(sym, cat);
   }
 
-  // 起動時の click 連携 (control buttons)
   document.querySelectorAll('.probe-pickbtn').forEach(function (btn) {
     btn.addEventListener('click', onPickClick);
   });
 
-  // 再 probe ボタン: 直近の symbol / category を再使用。URL から拾う。
   refreshBtn.addEventListener('click', function () {
     var qs = new URLSearchParams(window.location.search);
     var sym = qs.get('symbol') || 'AAPL';
@@ -2156,11 +2233,7 @@ function brokerProbeBody(args: {
     probe(sym, cat);
   });
 
-  // 起動時 auto-probe は **URL に symbol+category 両方** ある時だけ
-  // (= ボタンクリックで URL push された後の再読み込み / bookmark / 共有 link)。
-  // nav からのプレーン訪問 (?なし) で勝手に probe を投げない方針 (PR #250、
-  // ユーザ要望: 「Broker診断ボタンを押した直後は何も診断しないようにしてほし
-  // い」)。URL クエリ無し時は status を「click 待ち」で表示。
+  // 自動 probe は URL に symbol+category 両方ある時だけ (PR #250 の方針維持)。
   var qs = new URLSearchParams(window.location.search);
   if (qs.has('symbol') && qs.has('category')) {
     probe(qs.get('symbol'), qs.get('category'));

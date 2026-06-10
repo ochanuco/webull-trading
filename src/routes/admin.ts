@@ -744,6 +744,8 @@ export const admin = new Hono<AppBindings>()
       balanceAccountV1,
       balanceAssetsV2,
       balanceAssetsAccountV2,
+      instrumentQuotesHost,
+      instrumentTradeHost,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -820,6 +822,26 @@ export const admin = new Hono<AppBindings>()
         query: { account_id: accountId },
         version: 'v2',
       }),
+      // #461: instrument 照会 (銘柄が Webull に登録されているか)。公式 SDK
+      // (webull-python-sdk-mdata) の `GET /instrument/list?symbols&category` (v1)
+      // 相当。JP の他 endpoint と同じく `/openapi` prefix を付け、host が
+      // quotes / trade どちら側かは JP docs 未確定のため両方 probe する
+      // (#415 balance path 確定と同じ手順)。**この照会は「Webull が銘柄を認識
+      // しているか」の近似で、発注 allowlist (TICKER_IS_DENY) とは別系統の
+      // 可能性がある** — 確定的な発注可否ガードは #460 が担う。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category },
+        version: 'v1',
+        host: quotesBaseUrl,
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category },
+        version: 'v1',
+      }),
     ])
 
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
@@ -863,6 +885,10 @@ export const admin = new Hono<AppBindings>()
       // Yahoo Finance 経由の同 symbol snapshot (#21 follow-up)。Webull の data-api
       // が応答しない状況での代替経路の生死を可視化する。
       quoteYahoo: quoteYahooResult,
+      // #461: instrument 照会 (Webull 取扱の事前チェック近似)。quotes / trade の
+      // 両 host 候補。UI は 200 が返った側を採用して判定カードを出す。
+      instrumentQuotesHost,
+      instrumentTradeHost,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
