@@ -6219,13 +6219,21 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         sc.markers.forEach(function (m) {
           if (inRangeMs(new Date(m.timestamp).getTime())) pushIfFinite(m.price);
         });
-        // visible 範囲内の SMA50 値も含める。SMA50 が candle と離れた水準
-        // (例: SOXL は 3x rally で SMA50=65 / 価格=128) の銘柄では candle が
-        // 縦方向に圧縮されるが、SMA50 line が常時可視になる方を優先する
-        // (#181 後の user request)。zoom out すれば candle にとって過剰な
-        // 引き伸ばしも緩和される。
+        // visible 範囲内の SMA50 は「candle range の近傍にある時だけ」含める。
+        // #181 では SMA50 常時可視を優先したが、乖離が大きい銘柄 (3x ETF rally
+        // 等: SMA50=125 / 価格=260) では軸が倍近く引き伸ばされ、candle の
+        // 高値-安値が読めなくなる (operator 指摘で方針転換)。近傍 = candle
+        // range を上下 25% 拡張した帯。帯の外の SMA50 線は clip されるが、値は
+        // 価格ヘッダーのサブ行 (SMA50: X) で常に確認できる。
+        var candleMin = visibleY.length ? Math.min.apply(null, visibleY) : null;
+        var candleMax = visibleY.length ? Math.max.apply(null, visibleY) : null;
         sc.points.forEach(function (p) {
-          if (inRangeMs(new Date(p.timestamp).getTime())) pushIfFinite(p.sma50);
+          if (!inRangeMs(new Date(p.timestamp).getTime())) return;
+          var v = p.sma50;
+          if (v == null || !Number.isFinite(v)) return;
+          if (candleMin == null) { visibleY.push(v); return; }
+          var nearBand = Math.max((candleMax - candleMin) * 0.25, 0.5);
+          if (v >= candleMin - nearBand && v <= candleMax + nearBand) visibleY.push(v);
         });
         // trend line: regression で fit した 1 本。pivots[0]→end の 2 点で
         // 直線が定義される。visible 範囲内に endpoint または時間軸の交点が
