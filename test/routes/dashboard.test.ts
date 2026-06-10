@@ -165,12 +165,33 @@ describe('dashboard', () => {
     const app = createApp()
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     const body = await res.text()
-    expect(body).toContain('<header class="topnav">')
+    expect(body).toContain('<header class="header">')
+    expect(body).toContain('class="topnav"')
     expect(body).toContain('class="topnav-killswitch"')
     // 旧左サイドバーは無い
     expect(body).not.toContain('class="sidebar"')
     // nav link は維持 (ホーム / 銘柄管理 など)
     expect(body).toContain('href="/dashboard/symbols"')
+    // ページタイトル h1 は出さない (nav の active 強調で現在地が分かるため冗長)
+    expect(body).not.toContain('page-title')
+  })
+
+  // チャートの view 切替 (概要/取引品質/個別銘柄/銘柄グリッド) は本文 tab strip
+  // ではなく header 2段目の subnav に出す (サブメニュー化)。
+  it('charts page renders view switcher as header subnav with active state', async () => {
+    const app = createApp()
+    // DB 未バインドでも subnav は出る (本文は unavailable)
+    const res = await app.request(
+      '/dashboard/charts?tab=quality',
+      { headers: authHeader },
+      baseEnv,
+    )
+    const body = await res.text()
+    expect(body).toContain('<nav class="subnav">')
+    expect(body).toContain('class="subnav-link active"')
+    expect(body).toContain('>取引品質<')
+    expect(body).toContain('href="/dashboard/charts?tab=symbol"')
+    expect(body).toContain('href="/dashboard/charts?tab=grid"')
   })
 
 

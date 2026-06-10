@@ -288,7 +288,14 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/charts', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, 'チャート', unavailable('DB not bound')))
+      return c.html(
+        renderLayout(
+          c,
+          'チャート',
+          unavailable('DB not bound'),
+          renderChartsSubnav(parseChartsTab(c.req.query('tab'))),
+        ),
+      )
     }
     try {
       const tab = parseChartsTab(c.req.query('tab'))
@@ -298,7 +305,9 @@ export const dashboard = new Hono<DashboardBindings>()
       // - symbol:   universe + symbolChart
       if (tab === 'overview') {
         const equity = await loadEquityCurve(c.env.DB)
-        return c.html(renderLayout(c, 'チャート', chartsBody({ tab, equity })))
+        return c.html(
+          renderLayout(c, 'チャート', chartsBody({ tab, equity }), renderChartsSubnav(tab)),
+        )
       }
       if (tab === 'quality') {
         const [decisions, pnls] = await Promise.all([
@@ -316,6 +325,7 @@ export const dashboard = new Hono<DashboardBindings>()
               stats: computeTradeStats(pnls),
               histogram: computePnlHistogram(pnls),
             }),
+            renderChartsSubnav(tab),
           ),
         )
       }
@@ -358,6 +368,7 @@ export const dashboard = new Hono<DashboardBindings>()
               zoom,
               universe,
             }),
+            renderChartsSubnav(tab),
           ),
         )
       }
@@ -445,6 +456,7 @@ export const dashboard = new Hono<DashboardBindings>()
             universe,
             buyability,
           }),
+          renderChartsSubnav(tab, focusSymbol ?? undefined),
         ),
       )
     } catch (err) {
@@ -1394,8 +1406,11 @@ const STYLE = `
   body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
   /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
-     コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等) */
-  .topnav{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5;display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
+     コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等)。
+     header は topnav (1段目) + ページ固有 subnav (2段目、例: チャートの
+     概要/取引品質/個別銘柄/銘柄グリッド) の最大2段で sticky。 */
+  .header{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5}
+  .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
   .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
   .topnav .nav-sep{width:1px;height:18px;background:#d0d0d5;margin:0 8px;flex:0 0 auto}
@@ -1409,8 +1424,12 @@ const STYLE = `
   .topnav-killswitch[open] summary{background:#f0f0f3}
   .ks-pop{position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:10px 12px;width:240px;box-shadow:0 4px 16px rgba(0,0,0,0.12);z-index:110;font-size:13px}
   .ks-pop .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
+  /* ページ固有 subnav (header 2段目)。topnav active より薄い装飾で階層差を出す */
+  .subnav{display:flex;align-items:center;gap:2px;padding:3px 16px 6px;flex-wrap:wrap;border-top:1px solid #f0f0f3}
+  .subnav-link{color:#1d1d1f;text-decoration:none;padding:3px 10px;border-radius:6px;font-size:12.5px;white-space:nowrap}
+  .subnav-link:hover{background:#f0f0f3}
+  .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
   .main{min-width:0;padding:24px}
-  .main .page-title{margin:0 0 16px;font-size:22px}
   @media(max-width:780px){
     .main{padding:16px}
   }
@@ -1474,7 +1493,7 @@ const STYLE = `
   .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
   /* チャート個別銘柄タブの銘柄レール (左固定)。sticky top は topnav の高さ分逃がす */
   .symbol-layout{display:flex;gap:14px;align-items:flex-start}
-  .symbol-rail{flex:0 0 172px;position:sticky;top:54px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 70px);overflow-y:auto;box-sizing:border-box}
+  .symbol-rail{flex:0 0 172px;position:sticky;top:92px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 108px);overflow-y:auto;box-sizing:border-box}
   .symbol-rail .rail-head{font-size:11px;color:#86868b;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px 6px}
   .rail-item{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;text-decoration:none;color:#1d1d1f}
   .rail-item:hover{background:#f0f0f3}
@@ -1500,9 +1519,10 @@ function renderLayout(
   },
   title: string,
   body: string,
+  subnav = '',
 ): string {
   const killSwitch = killSwitchTopnav(c.var.killSwitchState)
-  return layout(title, body, c.req.path, killSwitch)
+  return layout(title, body, c.req.path, killSwitch, subnav)
 }
 
 /** グローバル nav 定義 (上部バー)。active link は path 完全一致で強調。 */
@@ -1602,7 +1622,15 @@ function killSwitchTopnav(state: KillSwitchBannerState | null): string {
   </details>`
 }
 
-function layout(title: string, body: string, activePath?: string, navRight = ''): string {
+// ページタイトル h1 は出さない (上部 nav の active 強調で現在地が分かるため
+// 冗長 — operator 要望)。title は <title> にのみ残す。
+function layout(
+  title: string,
+  body: string,
+  activePath?: string,
+  navRight = '',
+  subnav = '',
+): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -1612,13 +1640,15 @@ function layout(title: string, body: string, activePath?: string, navRight = '')
 <style>${STYLE}</style>
 </head>
 <body>
-<header class="topnav">
-  <div class="brand">Webull Trading</div>
-  <nav>${renderTopNav(activePath)}</nav>
-  ${navRight}
+<header class="header">
+  <div class="topnav">
+    <div class="brand">Webull Trading</div>
+    <nav>${renderTopNav(activePath)}</nav>
+    ${navRight}
+  </div>
+  ${subnav ? `<nav class="subnav">${subnav}</nav>` : ''}
 </header>
 <main class="main">
-  <h1 class="page-title">${esc(title)}</h1>
   ${body}
   <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
 </main>
@@ -5058,37 +5088,28 @@ type ChartsBodyArgs =
   | ChartsBodyGrid
 
 /**
- * Chart 上部に出す tab strip。現在 tab には active 装飾、他は通常リンク。
+ * チャートの view 切替 (概要 / 取引品質 / 個別銘柄 / 銘柄グリッド)。
+ * header 2段目の subnav として出す (ページ本文の tab strip からサブメニュー化)。
+ * 現在 tab には active 装飾、他は通常リンク。
  */
-function renderTabStrip(active: ChartsTab, focusSymbol?: string): string {
-  const tabs = CHART_TABS.map((t) => {
-    const style =
-      t.id === active
-        ? 'font-weight:600;text-decoration:underline;background:#fff;border-color:#06c;color:#06c'
-        : ''
-    const baseStyle = 'display:inline-block;padding:4px 12px;margin-right:6px;border:1px solid #d0d0d5;border-radius:6px;background:#fafafa;color:#1d1d1f;text-decoration:none;'
-
+function renderChartsSubnav(active: ChartsTab, focusSymbol?: string): string {
+  return CHART_TABS.map((t) => {
     if (t.id === active) {
-      return `<span title="${esc(t.hint)}" style="${baseStyle}${style}">${esc(t.label)}</span>`
+      return `<span class="subnav-link active" title="${esc(t.hint)}">${esc(t.label)}</span>`
     }
-
     let href = `/dashboard/charts?tab=${t.id}`
     if (t.id === 'symbol' && focusSymbol) {
       href += `&symbol=${encodeURIComponent(focusSymbol)}`
     }
-
-    return `<a href="${href}" title="${esc(t.hint)}" style="${baseStyle}${style}">${esc(t.label)}</a>`
+    return `<a class="subnav-link" href="${href}" title="${esc(t.hint)}">${esc(t.label)}</a>`
   }).join('')
-  return `<nav style="margin:0 0 12px 0">${tabs}</nav>`
 }
 
 function chartsBody(args: ChartsBodyArgs): string {
-  const focusSymbol = args.tab === 'symbol' ? args.focusSymbol ?? undefined : undefined
-  const tabStrip = renderTabStrip(args.tab, focusSymbol)
-  if (args.tab === 'overview') return tabStrip + renderOverviewTab(args)
-  if (args.tab === 'quality') return tabStrip + renderQualityTab(args)
-  if (args.tab === 'grid') return tabStrip + renderGridTab(args)
-  return tabStrip + renderSymbolTab(args)
+  if (args.tab === 'overview') return renderOverviewTab(args)
+  if (args.tab === 'quality') return renderQualityTab(args)
+  if (args.tab === 'grid') return renderGridTab(args)
+  return renderSymbolTab(args)
 }
 
 function renderOverviewTab(args: ChartsBodyOverview): string {
