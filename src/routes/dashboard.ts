@@ -1393,24 +1393,25 @@ function fmtJst(value: string | Date | null | undefined): string {
 const STYLE = `
   body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
-  /* mf-dashboard 風 shell: 左 sidebar + main */
-  .app{display:flex;min-height:100vh;align-items:stretch}
-  .sidebar{flex:0 0 216px;background:#fff;border-right:1px solid #d0d0d5;padding:16px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto}
-  .sidebar .brand{font-weight:700;font-size:15px;padding:4px 8px 12px;color:#1d1d1f}
-  .sidebar nav{display:flex;flex-direction:column;gap:2px}
-  .sidebar .nav-group{color:#86868b;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:12px 8px 4px}
-  .sidebar .nav-link{color:#1d1d1f;text-decoration:none;padding:7px 10px;border-radius:7px;font-size:13px}
-  .sidebar .nav-link:hover{background:#f0f0f3}
-  .sidebar .nav-link.active{background:#06c;color:#fff;font-weight:600}
-  .sidebar-killswitch{margin-top:auto;padding-top:12px;border-top:1px solid #e5e5ea;font-size:13px}
-  .sidebar-killswitch .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
-  .main{flex:1;min-width:0;padding:24px}
+  /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
+     コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等) */
+  .topnav{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5;display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
+  .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
+  .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
+  .topnav .nav-sep{width:1px;height:18px;background:#d0d0d5;margin:0 8px;flex:0 0 auto}
+  .topnav .nav-link{color:#1d1d1f;text-decoration:none;padding:5px 9px;border-radius:7px;font-size:13px;white-space:nowrap}
+  .topnav .nav-link:hover{background:#f0f0f3}
+  .topnav .nav-link.active{background:#06c;color:#fff;font-weight:600}
+  /* kill switch: 上部バー右端の badge + ドロップダウン (details/summary) */
+  .topnav-killswitch{margin:0;margin-left:auto;position:relative;flex:0 0 auto}
+  .topnav-killswitch summary{list-style:none;cursor:pointer;padding:4px 10px;border:1px solid #d0d0d5;border-radius:7px;font-size:12px;font-weight:600;background:#fafafa;white-space:nowrap}
+  .topnav-killswitch summary::-webkit-details-marker{display:none}
+  .topnav-killswitch[open] summary{background:#f0f0f3}
+  .ks-pop{position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:10px 12px;width:240px;box-shadow:0 4px 16px rgba(0,0,0,0.12);z-index:110;font-size:13px}
+  .ks-pop .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
+  .main{min-width:0;padding:24px}
   .main .page-title{margin:0 0 16px;font-size:22px}
   @media(max-width:780px){
-    .app{flex-direction:column}
-    .sidebar{flex:none;width:auto;height:auto;position:static;border-right:none;border-bottom:1px solid #d0d0d5;flex-direction:row;flex-wrap:wrap;align-items:center}
-    .sidebar nav{flex-direction:row;flex-wrap:wrap}
-    .sidebar .nav-group{padding:4px 8px}
     .main{padding:16px}
   }
   /* KPI カード */
@@ -1471,6 +1472,24 @@ const STYLE = `
   tr.symbol-disabled-row{background:#fafafa}
   tr.symbol-disabled-row td{color:#86868b}
   .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
+  /* チャート個別銘柄タブの銘柄レール (左固定)。sticky top は topnav の高さ分逃がす */
+  .symbol-layout{display:flex;gap:14px;align-items:flex-start}
+  .symbol-rail{flex:0 0 172px;position:sticky;top:54px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 70px);overflow-y:auto;box-sizing:border-box}
+  .symbol-rail .rail-head{font-size:11px;color:#86868b;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px 6px}
+  .rail-item{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;text-decoration:none;color:#1d1d1f}
+  .rail-item:hover{background:#f0f0f3}
+  .rail-item.active{background:#06c;color:#fff}
+  .rail-item.active .rail-name{color:#dce8ff}
+  .rail-item.inactive{opacity:0.55}
+  .rail-item.inactive .rail-sym{text-decoration:line-through;font-style:italic}
+  .rail-sym{font-weight:600;font-size:13px}
+  .rail-name{font-size:11px;color:#86868b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .symbol-main{flex:1;min-width:0}
+  @media(max-width:780px){
+    .symbol-layout{flex-direction:column}
+    .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
+    .symbol-rail .rail-head{width:100%}
+  }
 `
 
 function renderLayout(
@@ -1482,11 +1501,11 @@ function renderLayout(
   title: string,
   body: string,
 ): string {
-  const killSwitch = killSwitchSidebar(c.var.killSwitchState)
+  const killSwitch = killSwitchTopnav(c.var.killSwitchState)
   return layout(title, body, c.req.path, killSwitch)
 }
 
-/** Sidebar nav 定義 (mf-dashboard 風 shell)。active link は path 完全一致で強調。 */
+/** グローバル nav 定義 (上部バー)。active link は path 完全一致で強調。 */
 const NAV_GROUPS: ReadonlyArray<{
   label?: string
   links: ReadonlyArray<{ href: string; text: string; title?: string }>
@@ -1529,28 +1548,31 @@ const NAV_GROUPS: ReadonlyArray<{
   },
 ]
 
-function renderSidebarNav(activePath?: string): string {
+function renderTopNav(activePath?: string): string {
+  // 上部バーではグループ label を出さず縦罫線で区切る (横幅節約)。
+  // グループの意味は各 link の title (hint) で補う。
   return NAV_GROUPS.map((g) => {
-    const head = g.label ? `<div class="nav-group">${esc(g.label)}</div>` : ''
-    const links = g.links
+    return g.links
       .map((l) => {
         const active = activePath === l.href ? ' active' : ''
-        const t = l.title ? ` title="${esc(l.title)}"` : ''
+        const t = l.title ? ` title="${esc(l.title)}"` : g.label ? ` title="${esc(g.label)}"` : ''
         return `<a class="nav-link${active}" href="${l.href}"${t}>${esc(l.text)}</a>`
       })
       .join('')
-    return head + links
-  }).join('')
+  }).join('<span class="nav-sep"></span>')
 }
 
 /**
- * 取引 ON/OFF (kill switch) をサイドバー下部に出すコンパクト版 (#276 → 配置変更)。
- * status ラベル / env override 注記 / 停止・再開フォームは banner 版と同じ文言・
- * action を維持 (テスト・運用の互換)。サイドバー幅に収まるよう縦並び・全幅入力にする。
+ * 取引 ON/OFF (kill switch) を上部バー右端の badge + ドロップダウンで出す
+ * (#276 banner → sidebar → topnav と配置変更)。status ラベル / env override 注記 /
+ * 停止・再開フォームは従来と同じ文言・action を維持 (テスト・運用の互換)。
  */
-function killSwitchSidebar(state: KillSwitchBannerState | null): string {
+function killSwitchTopnav(state: KillSwitchBannerState | null): string {
   if (state === null) {
-    return '<div class="sidebar-killswitch"><div class="ks-title">取引状態</div><span class="muted" style="font-size:12px">取得不能 (D1 未接続)</span></div>'
+    return `<details class="topnav-killswitch">
+      <summary><span class="muted">取引状態: 取得不能</span></summary>
+      <div class="ks-pop"><div class="ks-title">取引状態</div><span class="muted" style="font-size:12px">取得不能 (D1 未接続)</span></div>
+    </details>`
   }
   const statusLabel = state.effective
     ? '<span class="ok">取引 ON (有効)</span>'
@@ -1570,14 +1592,17 @@ function killSwitchSidebar(state: KillSwitchBannerState | null): string {
         <input type="text" name="reason" placeholder="再開理由 (必須)" required maxlength="256" style="padding:4px 6px;font-size:12px;width:100%;box-sizing:border-box"/>
         <button type="submit" ${disabled} style="padding:5px 10px;font-size:12px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">取引再開</button>
        </form>`
-  return `<div class="sidebar-killswitch">
-    <div class="ks-title">取引状態: ${statusLabel}</div>
-    ${envNote}
-    ${buttonForm}
-  </div>`
+  return `<details class="topnav-killswitch">
+    <summary>${statusLabel}</summary>
+    <div class="ks-pop">
+      <div class="ks-title">取引状態: ${statusLabel}</div>
+      ${envNote}
+      ${buttonForm}
+    </div>
+  </details>`
 }
 
-function layout(title: string, body: string, activePath?: string, sidebarFooter = ''): string {
+function layout(title: string, body: string, activePath?: string, navRight = ''): string {
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -1587,18 +1612,16 @@ function layout(title: string, body: string, activePath?: string, sidebarFooter 
 <style>${STYLE}</style>
 </head>
 <body>
-<div class="app">
-  <aside class="sidebar">
-    <div class="brand">Webull Trading</div>
-    <nav>${renderSidebarNav(activePath)}</nav>
-    ${sidebarFooter}
-  </aside>
-  <main class="main">
-    <h1 class="page-title">${esc(title)}</h1>
-    ${body}
-    <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
-  </main>
-</div>
+<header class="topnav">
+  <div class="brand">Webull Trading</div>
+  <nav>${renderTopNav(activePath)}</nav>
+  ${navRight}
+</header>
+<main class="main">
+  <h1 class="page-title">${esc(title)}</h1>
+  ${body}
+  <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
+</main>
 </body>
 </html>`
 }
@@ -5174,10 +5197,11 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
     args.symbolChart === null ||
     args.symbolChart.points.length === 0
   if (noData) {
-    return (
-      renderSymbolPickerForTab(args) +
-      `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>` +
-      renderStrategyParamsPanel(args.strategyParams)
+    return wrapWithSymbolRail(
+      args,
+      renderFocusSymbolHeader(args) +
+        `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>` +
+        renderStrategyParamsPanel(args.strategyParams),
     )
   }
   const initScript = `
@@ -6288,7 +6312,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
   // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
   const projection = args.buyability?.projection ?? null
-  return `${renderSymbolPickerForTab(args)}
+  const content = `${renderFocusSymbolHeader(args)}
   ${renderCurrentIndicatorsBadge(args.symbolChart)}
   <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
   ${renderBuyabilityPanel(args.buyability ?? null)}
@@ -6297,7 +6321,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
   </div>
-  ${renderStrategyParamsPanel(args.strategyParams)}
+  ${renderStrategyParamsPanel(args.strategyParams)}`
+  return `${wrapWithSymbolRail(args, content)}
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
     projection,
@@ -7474,23 +7499,47 @@ export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): str
   return `<p style="margin:6px 0 0">${badges}</p>`
 }
 
-function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
+/**
+ * 個別銘柄タブの銘柄レール (左固定)。旧 inline picker (「切替: <長い名前の列挙>」)
+ * は full name の link が折り返して読みづらかったため、ticker + 小さい銘柄名の
+ * 縦リストに変更。zoom 範囲は従来通り URL で伝搬する。
+ */
+function renderSymbolRail(args: ChartsBodySymbol): string {
   if (args.availableSymbols.length === 0) return ''
-  // 銘柄切替時にズーム範囲を維持するため、現在の from/to を picker URL に伝搬
+  // 銘柄切替時にズーム範囲を維持するため、現在の from/to をレール URL に伝搬
   const zoomQs = args.zoom
     ? `&from=${encodeURIComponent(args.zoom.from.toISOString())}&to=${encodeURIComponent(args.zoom.to.toISOString())}`
     : ''
-  const opts = args.availableSymbols
+  const items = args.availableSymbols
     .map((s) => {
       const inactive = isSymbolInactive(s, args.universe)
       const isFocus = s === args.focusSymbol
-      const linkClass = inactive ? ' class="symbol-disabled"' : ''
-      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(s, args.universe))}"` : ''
-      return `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}"${linkClass}${titleAttr} style="margin-right:6px;${
-        isFocus ? 'font-weight:600;text-decoration:underline' : ''
-      }">${esc(displaySymbol(s, args.universe))}</a>`
+      const name = args.universe?.symbolName[s.toUpperCase()] ?? ''
+      const cls = ['rail-item', isFocus ? 'active' : '', inactive ? 'inactive' : '']
+        .filter(Boolean)
+        .join(' ')
+      const titleAttr = inactive
+        ? ` title="${esc(inactiveTooltip(s, args.universe))}"`
+        : name
+          ? ` title="${esc(name)}"`
+          : ''
+      return `<a class="${cls}" href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}"${titleAttr}>
+        <span class="rail-sym">${esc(s)}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
+      </a>`
     })
     .join('')
+  return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${items}</aside>`
+}
+
+/** レール + 本文の 2 カラム。レールが空 (銘柄ゼロ) なら本文のみ。 */
+function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
+  const rail = renderSymbolRail(args)
+  if (!rail) return content
+  return `<div class="symbol-layout">${rail}<div class="symbol-main">${content}</div></div>`
+}
+
+/** 表示中銘柄の見出し行。inactive 銘柄は注記 (cron 評価対象外) を添える。 */
+function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   const focusLabel = args.focusSymbol
     ? displaySymbol(args.focusSymbol, args.universe)
     : '—'
@@ -7500,9 +7549,7 @@ function renderSymbolPickerForTab(args: ChartsBodySymbol): string {
   const focusBadge = focusInactive
     ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(args.universe?.symbolNotes[args.focusSymbol!.toUpperCase()] ?? 'cron 評価対象外')})</span>`
     : ''
-  return `<p class="muted" style="font-size:12px">
-    銘柄: <strong>${esc(focusLabel)}</strong>${focusBadge} | 切替: ${opts}
-  </p>`
+  return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong>${focusBadge}</p>`
 }
 
 /**

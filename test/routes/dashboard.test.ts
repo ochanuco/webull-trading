@@ -155,6 +155,24 @@ describe('dashboard', () => {
     expect(body).toMatch(/<button[^>]*disabled[^>]*>取引再開<\/button>/)
   })
 
+  // グローバルメニュー上部化: 全 page 共通 shell は上部バー (topnav)。
+  // kill switch は上部バー右端の badge + ドロップダウン (details) に入る。
+  it('renders global menu as top bar with kill-switch dropdown (no left sidebar)', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    const env = { ...baseEnv, DB: {} as D1Database }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).toContain('<header class="topnav">')
+    expect(body).toContain('class="topnav-killswitch"')
+    // 旧左サイドバーは無い
+    expect(body).not.toContain('class="sidebar"')
+    // nav link は維持 (ホーム / 銘柄管理 など)
+    expect(body).toContain('href="/dashboard/symbols"')
+  })
+
 
   it('renders positions page with DO state', async () => {
     const env = {
@@ -1974,6 +1992,45 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
   it('buyability が null なら projection も null', () => {
     const html = renderSymbolTab(symbolArgs([], null))
     expect(html).toContain('"projection":null')
+  })
+
+  // 銘柄レール (左固定): 旧 inline picker (「切替: <full name の列挙>」) を置換。
+  it('銘柄レールを左に出し、focus は active / inactive は注記付きで識別する', () => {
+    const universe = makeSymbolUniverse({
+      allowedSymbols: ['TQQQ', 'SOXL'],
+      inactiveSymbols: ['1570'],
+      symbolName: { TQQQ: 'ProShares UltraPro QQQ', '1570': 'NF 日経レバ' },
+      symbolNotes: { '1570': 'liquidity dropped' },
+      symbolCurrency: { TQQQ: 'USD', SOXL: 'USD', '1570': 'JPY' },
+    })
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL', '1570'],
+      universe,
+    })
+    expect(html).toContain('class="symbol-rail"')
+    // focus (TQQQ) は active、ticker + 小さい銘柄名の縦リスト
+    expect(html).toContain('class="rail-item active"')
+    expect(html).toContain('<span class="rail-sym">TQQQ</span>')
+    expect(html).toContain('<span class="rail-name">ProShares UltraPro QQQ</span>')
+    // inactive (1570) は inactive class + tooltip 注記
+    expect(html).toContain('class="rail-item inactive"')
+    expect(html).toContain('INACTIVE: liquidity dropped')
+    // 旧 inline picker の「| 切替:」は出ない
+    expect(html).not.toContain('切替:')
+    // 本文側に focus 見出し
+    expect(html).toContain('銘柄: <strong>')
+  })
+
+  it('銘柄レールの link は zoom 範囲 (from/to) を URL で伝搬する', () => {
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL'],
+      zoom: { from: new Date('2026-06-01T00:00:00.000Z'), to: new Date('2026-06-06T00:00:00.000Z') },
+    })
+    expect(html).toContain(
+      'href="/dashboard/charts?tab=symbol&symbol=SOXL&from=2026-06-01T00%3A00%3A00.000Z&to=2026-06-06T00%3A00%3A00.000Z"',
+    )
   })
 
   it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {
