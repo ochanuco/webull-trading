@@ -1508,6 +1508,10 @@ const STYLE = `
   .rail-sym{font-weight:600;font-size:13px}
   .rail-name{font-size:11px;color:#86868b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .symbol-main{flex:1;min-width:0}
+  /* Google Finance 風 range ピル (チャート直下)。active はクリックで JS が付替 */
+  .zoom-preset{padding:4px 14px;font-size:12.5px;background:#fff;border:1px solid #dadce0;border-radius:16px;cursor:pointer;color:#3c4043;margin-right:6px}
+  .zoom-preset:hover{background:#f8f9fa}
+  .zoom-preset.active{background:#e8f0fe;border-color:#e8f0fe;color:#1967d2;font-weight:600}
   /* チャートを sticky 固定: 下の説明 panel 群 (入場ゲート / 判定 trace) を読む間も
      グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
      チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
@@ -5773,6 +5777,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       });
       sc.markers.forEach(function (m) { pushIfFinite(m.price); });
       extraYValues.forEach(function (v) { pushIfFinite(v); });
+      pushIfFinite(data.prevClose); // 前日終値 markLine が枠外に出ないように
       var yMin, yMax;
       if (allY.length > 0) {
         var rawMin = Math.min.apply(null, allY);
@@ -5968,8 +5973,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             lineStyle: { width: 1.8, color: '#9333ea', type: 'solid' }, symbol: 'none',
             itemStyle: { color: '#9333ea' }, z: 7,
           }] : []),
-          // candlestick: 15 分足 OHLC を表示。Western 規約 (close >= open = 緑、
-          // candle: 主役。Western 規約 (close >= open = 緑、< = 赤)。
+          // candle: 主役。日本式配色 (Google Finance JA と同じ):
+          // 赤 = 陽線 (close >= open) / 緑 = 陰線 (close < open)。
           // markPoint / markLine もここに anchor。barWidth 明示で overnight
           // gap 後の細い candle を視認可能に。borderWidth 強めて
           // body と wick の対比を確保。
@@ -5979,10 +5984,10 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             // 広めに (相対的に gap 比率を一定に保つ)。
             barWidth: 10,
             itemStyle: {
-              color: '#057a55',     // bullish (close >= open)
-              color0: '#c22',       // bearish (close < open)
-              borderColor: '#057a55',
-              borderColor0: '#c22',
+              color: '#d23f31',     // 陽線 (close >= open) — 日本式は赤
+              color0: '#1e8e3e',    // 陰線 (close < open) — 日本式は緑
+              borderColor: '#d23f31',
+              borderColor0: '#1e8e3e',
               borderWidth: 1.5,
             },
             z: 5,
@@ -5996,16 +6001,35 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             // 描画 path が trend line (slanted 2-point markLine) とは別系統。
             // 縦線方向は zoom 範囲外でも描画ロバスト (#193 follow-up)。
             // category 軸モード時のみ data を積む (time axis fallback では空)。
-            markLine: sessionOpenIndices.length > 0 ? {
-              symbol: 'none',
-              silent: true,
-              label: { show: false },
-              lineStyle: { color: '#bbb', width: 1, type: 'dashed' },
-              z: 1,
-              data: sessionOpenIndices.map(function (idx) {
+            markLine: (function () {
+              var mlData = sessionOpenIndices.map(function (idx) {
                 return { xAxis: idx };
-              }),
-            } : undefined,
+              });
+              // 前日終値の水平点線 + 右端ラベル (Google Finance 風)。candle series
+              // の markLine に同居させる (独立 series にすると legend を汚すため)。
+              if (data.prevClose != null && Number.isFinite(data.prevClose)) {
+                mlData.push({
+                  yAxis: data.prevClose,
+                  lineStyle: { color: '#9aa0a6', width: 1, type: 'dotted' },
+                  label: {
+                    show: true,
+                    position: 'insideEndTop',
+                    formatter: data.prevCloseLabel || '前日終値',
+                    color: '#5f6368',
+                    fontSize: 10,
+                  },
+                });
+              }
+              if (mlData.length === 0) return undefined;
+              return {
+                symbol: 'none',
+                silent: true,
+                label: { show: false },
+                lineStyle: { color: '#bbb', width: 1, type: 'dashed' },
+                z: 1,
+                data: mlData,
+              };
+            })(),
             markPoint: entries.length + exits.length > 0 ? {
               symbol: 'pin', symbolSize: 24, data: entries.concat(exits),
               tooltip: {
@@ -6347,6 +6371,9 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
             sv = fromMs;
             eV = toMs;
           }
+          // Google 風ピルの active 付替 (押した range を強調)
+          for (var pj = 0; pj < presetButtons.length; pj += 1) presetButtons[pj].classList.remove('active');
+          ev.currentTarget.classList.add('active');
           // inside / slider 両方を同期更新
           symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: sv, endValue: eV });
           symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: sv, endValue: eV });
@@ -6367,14 +6394,20 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
   // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
   const projection = args.buyability?.projection ?? null
+  // 前日終値 (header の前日比とチャート点線の共通基準)。
+  const prevClose = prevDailyClose(args.symbolChart)
+  const prevCloseLabel =
+    prevClose !== null
+      ? `前日終値 ${fmtPriceCcy(prevClose, args.universe?.symbolCurrency[args.symbolChart!.symbol.toUpperCase()] ?? null)}`
+      : null
   const content = `<div class="symbol-chart-pin">
   ${renderFocusSymbolHeader(args)}
-  ${renderCurrentIndicatorsBadge(args.symbolChart)}
-  <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  ${renderPriceHeader(args.symbolChart, args.universe)}
+  <div id="symbol-chart" style="width:100%;height:460px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
+  ${renderZoomPresetButtons(args.symbolChart)}
   </div>
   ${renderBuyabilityPanel(args.buyability ?? null)}
   ${renderDecisionPlotCaption(args.symbolChart)}
-  ${renderZoomPresetButtons(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
   </div>
@@ -6383,6 +6416,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
     projection,
+    prevClose,
+    prevCloseLabel,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   })}
@@ -6894,9 +6929,10 @@ export function renderGridTab(args: ChartsBodyGrid): string {
             ...(ohlcXY.length > 0 ? [{
               name: 'price', type: 'candlestick', data: ohlcXY,
               barWidth: 6,
+              // 日本式配色: 赤=陽線 / 緑=陰線 (個別銘柄タブと揃える)
               itemStyle: {
-                color: '#057a55', color0: '#c22',
-                borderColor: '#057a55', borderColor0: '#c22', borderWidth: 1,
+                color: '#d23f31', color0: '#1e8e3e',
+                borderColor: '#d23f31', borderColor0: '#1e8e3e', borderWidth: 1,
               },
               z: 5,
               markLine: sessionOpenIndices.length > 0 ? {
@@ -7348,16 +7384,17 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
     return Number.isFinite(ms) ? ms : lastMs
   })()
   const day = 24 * 3600 * 1000
+  // ラベルは Google Finance JA 準拠 (1日 / 5日 / 1か月 / 最大)。
   const presets: Array<{ label: string; fromMs: number; toMs: number }> = [
-    { label: '1D', fromMs: lastMs - 1 * day, toMs: lastMs },
-    { label: '5D', fromMs: lastMs - 5 * day, toMs: lastMs },
-    { label: '1M', fromMs: lastMs - 30 * day, toMs: lastMs },
-    { label: 'All', fromMs: earliestMs, toMs: lastMs },
+    { label: '1日', fromMs: lastMs - 1 * day, toMs: lastMs },
+    { label: '5日', fromMs: lastMs - 5 * day, toMs: lastMs },
+    { label: '1か月', fromMs: lastMs - 30 * day, toMs: lastMs },
+    { label: '最大', fromMs: earliestMs, toMs: lastMs },
   ]
   const buttons = presets
     .map(
       (p) =>
-        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}" style="margin-right:6px;padding:3px 10px;font-size:12px;background:#fafafa;border:1px solid #d0d0d5;border-radius:4px;cursor:pointer;color:#1d1d1f">${esc(p.label)}</button>`,
+        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}">${esc(p.label)}</button>`,
     )
     .join('')
   return `<p style="margin:8px 0 0">${buttons}</p>`
@@ -7531,9 +7568,51 @@ export function renderDecisionPlotCaption(chart: SymbolChartData | null): string
   </div>`
 }
 
-export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): string {
-  if (!chart) return ''
-  // 最新の indicator 付き point を末尾から探す (Yahoo filler は indicators null)
+/** 通貨に応じた価格表示 (JPY は整数 + カンマ、他は小数 2 桁)。 */
+function fmtPriceCcy(v: number, currency: string | null): string {
+  const mark = currency === 'JPY' ? '¥' : '$'
+  const digits = currency === 'JPY' ? 0 : 2
+  return `${mark}${v.toLocaleString('ja-JP', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
+}
+
+/**
+ * 前日終値 (= 最終 daily point の 1 つ前の price)。比較・markLine 共用。
+ * points が 2 点未満 / 非有限なら null。
+ */
+export function prevDailyClose(chart: SymbolChartData | null): number | null {
+  const pts = chart?.points ?? []
+  if (pts.length < 2) return null
+  const v = pts[pts.length - 2]!.price
+  return Number.isFinite(v) ? v : null
+}
+
+/**
+ * Google Finance 風の価格ヘッダー: 大きい現在値 + 前日比 (%/絶対値)。
+ * 日本式配色 (上昇=赤 / 下落=緑)。下段に SMA50 / high20d / low20d の小バッジ。
+ * 現在値は latestCronPrice (直近 strategy 評価値)、無ければ最終 point の price。
+ */
+export function renderPriceHeader(
+  chart: SymbolChartData | null,
+  universe?: SymbolUniverse | null,
+): string {
+  if (!chart || chart.points.length === 0) return ''
+  const last = chart.points[chart.points.length - 1]!
+  const cur = chart.latestCronPrice ?? last.price
+  if (!Number.isFinite(cur)) return ''
+  const ccy = universe?.symbolCurrency[chart.symbol.toUpperCase()] ?? null
+  const prev = prevDailyClose(chart)
+  let changeHtml = ''
+  if (prev !== null && prev > 0) {
+    const diff = cur - prev
+    const pct = (diff / prev) * 100
+    const up = diff >= 0
+    // 日本式: 上昇=赤 / 下落=緑 (Google Finance JA と同じ)
+    const color = up ? '#d23f31' : '#188038'
+    const arrow = up ? '▲' : '▼'
+    const sign = up ? '+' : ''
+    changeHtml = ` <span style="font-size:14px;font-weight:600;color:${color};margin-left:6px">${arrow} ${sign}${pct.toFixed(2)}% (${sign}${diff.toFixed(2)}) 前日比</span>`
+  }
+  // 最新の indicator 付き point (Yahoo filler は indicators null)
   let latest: SymbolChartPoint | null = null
   for (let i = chart.points.length - 1; i >= 0; i -= 1) {
     const p = chart.points[i]!
@@ -7542,21 +7621,24 @@ export function renderCurrentIndicatorsBadge(chart: SymbolChartData | null): str
       break
     }
   }
-  if (!latest) return ''
   const fmt = (v: number | null): string => (v == null ? '—' : v.toFixed(2))
-  const items: Array<[string, string]> = [
-    ['price', fmt(latest.price)],
-    ['SMA50', fmt(latest.sma50)],
-    ['high20d', fmt(latest.high20d)],
-    ['low20d', fmt(latest.low20d)],
-  ]
-  const badges = items
+  const subItems: Array<[string, string]> = latest
+    ? [
+        ['SMA50', fmt(latest.sma50)],
+        ['high20d', fmt(latest.high20d)],
+        ['low20d', fmt(latest.low20d)],
+      ]
+    : []
+  const sub = subItems
     .map(
       ([k, v]) =>
         `<span style="display:inline-block;margin-right:10px;font-size:12px"><span class="muted">${esc(k)}:</span> <strong>${esc(v)}</strong></span>`,
     )
     .join('')
-  return `<p style="margin:6px 0 0">${badges}</p>`
+  return `<div style="margin:2px 0 0">
+    <span style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em">${esc(fmtPriceCcy(cur, ccy))}</span>${changeHtml}
+  </div>
+  ${sub ? `<p style="margin:2px 0 0">${sub}</p>` : ''}`
 }
 
 /**
