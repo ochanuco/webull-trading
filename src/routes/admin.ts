@@ -533,6 +533,11 @@ export const admin = new Hono<AppBindings>()
   .get('/broker/probe', async (c) => {
     const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase()
     const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase()
+    // instrument 照会用の反対側 category (CodeRabbit #462)。UI のティッカー推定が
+    // ETF/STOCK を取り違えても判定が壊れないよう、両方を probe する。
+    const altCategory = category.endsWith('_ETF')
+      ? category.replace(/_ETF$/, '_STOCK')
+      : category.replace(/_STOCK$/, '_ETF')
     // 全 env var を trim、whitespace-only も "未設定" 扱い。silent な phase:'auth'
     // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
     // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
@@ -744,6 +749,10 @@ export const admin = new Hono<AppBindings>()
       balanceAccountV1,
       balanceAssetsV2,
       balanceAssetsAccountV2,
+      instrumentQuotesHost,
+      instrumentTradeHost,
+      instrumentQuotesHostAlt,
+      instrumentTradeHostAlt,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -820,6 +829,42 @@ export const admin = new Hono<AppBindings>()
         query: { account_id: accountId },
         version: 'v2',
       }),
+      // #461: instrument 照会 (銘柄が Webull に登録されているか)。公式 SDK
+      // (webull-python-sdk-mdata) の `GET /instrument/list?symbols&category` (v1)
+      // 相当。JP の他 endpoint と同じく `/openapi` prefix を付け、host が
+      // quotes / trade どちら側かは JP docs 未確定のため両方 probe する
+      // (#415 balance path 確定と同じ手順)。**この照会は「Webull が銘柄を認識
+      // しているか」の近似で、発注 allowlist (TICKER_IS_DENY) とは別系統の
+      // 可能性がある** — 確定的な発注可否ガードは #460 が担う。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category },
+        version: 'v1',
+        host: quotesBaseUrl,
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category },
+        version: 'v1',
+      }),
+      // category の ETF/STOCK は UI のティッカー推定で誤り得る (CodeRabbit #462:
+      // 既知 4 銘柄以外の ETF が *_STOCK で照会され「銘柄情報なし」に誤判定)。
+      // 反対側 category も probe して判定を category 非依存にする。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category: altCategory },
+        version: 'v1',
+        host: quotesBaseUrl,
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/list',
+        query: { symbols: symbol, category: altCategory },
+        version: 'v1',
+      }),
     ])
 
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
@@ -863,6 +908,12 @@ export const admin = new Hono<AppBindings>()
       // Yahoo Finance 経由の同 symbol snapshot (#21 follow-up)。Webull の data-api
       // が応答しない状況での代替経路の生死を可視化する。
       quoteYahoo: quoteYahooResult,
+      // #461: instrument 照会 (Webull 取扱の事前チェック近似)。quotes / trade の
+      // 両 host 候補。UI は 200 が返った側を採用して判定カードを出す。
+      instrumentQuotesHost,
+      instrumentTradeHost,
+      instrumentQuotesHostAlt,
+      instrumentTradeHostAlt,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
