@@ -46,6 +46,7 @@ import {
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
+import { buildEntrySuppressedSymbols, buildSymbolRules } from './symbolRuleResolution'
 
 const DEFAULT_EQUITY_USD = 10_000
 const DEFAULT_EQUITY_JPY = 1_500_000
@@ -242,29 +243,12 @@ export async function runStrategyCron(
     maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
     maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
   }
-  // Per-symbol override map (#316)。symbol_config の time_stop_days_override /
-  // k_atr_override を defaultRule に重ね、3x leveraged ETF 等の銘柄固有事情
-  // (短い hold が望ましい / 高ボラで stop を緩めたい) を rule に注入する。
-  // override が NULL の symbol は rulesMap に含めない (= defaultRule そのまま)。
-  const rulesMap: Record<string, typeof defaultRule> = {}
-  const overrideSymbols = new Set<string>([
-    ...Object.keys(universe.symbolTimeStopDaysOverride),
-    ...Object.keys(universe.symbolKAtrOverride),
-    ...Object.keys(universe.symbolStopPctOverride),
-    ...Object.keys(universe.symbolTakeProfitPctOverride),
-  ])
-  for (const sym of overrideSymbols) {
-    rulesMap[sym] = {
-      ...defaultRule,
-      timeStopDays:
-        universe.symbolTimeStopDaysOverride[sym] ?? defaultRule.timeStopDays,
-      kAtr: universe.symbolKAtrOverride[sym] ?? defaultRule.kAtr,
-      // stop/TP override (#exit-atr)。NULL は defaultRule そのまま。
-      stopPct: universe.symbolStopPctOverride[sym] ?? defaultRule.stopPct,
-      takeProfitPct:
-        universe.symbolTakeProfitPctOverride[sym] ?? defaultRule.takeProfitPct,
-    }
-  }
+  // Per-symbol rule map (#316 / #exit-atr / #452)。global default → role preset
+  // → per-symbol override の順に重ねる。詳細と回帰保証は symbolRuleResolution.ts。
+  const rulesMap = buildSymbolRules(defaultRule, universe)
+  // Entry 抑止 role (#452): cash_parking / 定義のみの role / enum 外 'unknown' は
+  // BUY を生成しない (SELL / HOLD の exit 経路は通す)。
+  const entrySuppressedSymbols = buildEntrySuppressedSymbols(universe.symbolRole)
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
@@ -601,6 +585,7 @@ export async function runStrategyCron(
       intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
       defaultRule,
       rulesMap,
+      entrySuppressedSymbols,
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,

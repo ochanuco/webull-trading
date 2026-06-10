@@ -145,6 +145,41 @@ export const symbolConfig = sqliteTable(
      * default false。3x レバ ETF の寄りギャップ stop-out 回避用 (#intraday-only)。
      */
     intradayOnly: integer('intraday_only', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * 銘柄ロール (#452 Layer 1)。'cash_parking' | 'core_trend' | 'leveraged_trend' |
+     * 'low_volatility' | 'sector_trend' | 'inverse_hedge'。NULL = 従来挙動
+     * (既存 4 銘柄の挙動変更ゼロを保証する fallback)。初期有効化は
+     * cash_parking / core_trend / leveraged_trend の 3 つで、それ以外の role と
+     * **enum 外の不正値は entry 抑止 (fail-closed、BUY を生成しない)**。
+     * enum CHECK は SQLite ALTER 制約を避け admin parse + repo 検証で担保。
+     */
+    role: text('role'),
+    /**
+     * Entry gate の per-symbol override (#452 Layer 2a、#449)。NULL = role preset →
+     * global_config の pullback_default_* の順で fall-through。レバ ETF 向け global
+     * 閾値が非レバ銘柄で歪むのを銘柄単位で吸収する。range CHECK は admin parse +
+     * repo 検証で担保 (budget_alloc_pct と同方針)。
+     *
+     * 押し目深度バンド: pullback_max は 0 に近い側 (例 -0.03)、pullback_min は
+     * 深い側 (例 -0.06)。max < min の不整合バンドは「常に entry 不成立」になる
+     * だけで発注は出ない (fail-closed)。
+     */
+    pullbackMaxOverride: real('pullback_max_override'),
+    pullbackMinOverride: real('pullback_min_override'),
+    /** トレンド条件 override (NULL = global default、fraction、#452)。 */
+    minReturn50dOverride: real('min_return_50d_override'),
+    /** ボラ過熱ガード override (NULL = global default、ratio > 0、#452)。 */
+    maxAtrRatioOverride: real('max_atr_ratio_override'),
+    /** 過伸長ガード override (NULL = global default、fraction > 0、#452)。 */
+    maxSma50DeviationPctOverride: real('max_sma50_deviation_pct_override'),
+    /** SMA50 上抜け必須条件 override (NULL = global default、boolean、#452)。 */
+    requireAboveSma50Override: integer('require_above_sma50_override', { mode: 'boolean' }),
+    /**
+     * 代替銘柄候補 (#452 / #449)。JSON 配列 text (例 `["SOXX","SMH"]`)。レバ ETF が
+     * NG/WATCH のときダッシュボードに代替候補を出す **表示専用** — 自動 routing には
+     * 使わない。NULL / 不正 JSON は「候補なし」扱い。
+     */
+    alternatives: text('alternatives'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

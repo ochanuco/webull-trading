@@ -175,6 +175,13 @@ export interface PullbackSchedulerOptions {
    */
   vixDecision?: VixRegimeFilterDecision
   /**
+   * Entry 抑止 symbol → 理由 (#452)。role が entry 無効 (cash_parking / 定義のみ
+   * の role / enum 外 'unknown') の銘柄の BUY を REJECT する。SELL / HOLD は
+   * 対象外 (exit 経路を妨げない)。未注入なら skip (POC 後方互換)。production
+   * (`runStrategyCron`) は `buildEntrySuppressedSymbols` の結果を渡す。
+   */
+  entrySuppressedSymbols?: Record<string, string>
+  /**
    * sanity_failed cooldown gate。直近 N 分以内に同 symbol で broker stub
    * fill (`resolveFilledPrice` が ratio guard で reject した) が観測されて
    * いた場合、新規 BUY を block する。9697 04/28 incident (30 min/6 fills 累積、
@@ -452,6 +459,26 @@ export async function runPullbackScheduler(
         price: indicators.price,
         indicatorsJson: JSON.stringify(indicators),
         trace: signal.trace,
+      })
+      continue
+    }
+
+    // Entry 抑止 role gate (#452)。cash_parking / 定義のみの role / enum 外の
+    // role 値の銘柄は BUY を生成しない (fail-closed)。SELL は対象外 — role を
+    // 後から変えた銘柄の建玉 exit (stop / time-stop / TP) を妨げない。
+    if (signal.action === 'BUY' && options.entrySuppressedSymbols?.[upper] !== undefined) {
+      const reason = options.entrySuppressedSymbols[upper]
+      summary.rejected.push({ symbol: upper, reason })
+      await emitDecision({
+        symbol: upper,
+        decision: 'REJECT',
+        reason,
+        price: indicators.price,
+        indicatorsJson: JSON.stringify(indicators),
+        trace: appendTrace(
+          signal.trace,
+          traceStep('risk.role_entry_suppressed', false, undefined, undefined, undefined, reason),
+        ),
       })
       continue
     }

@@ -37,7 +37,11 @@ import {
   toggleSymbolActive,
   updateBudgetAllocPct,
   updateSymbolConfig,
+  isSymbolRole,
+  MAX_ALTERNATIVES,
+  SYMBOL_ROLES,
   type SymbolConfigWriteInput,
+  type SymbolRole,
 } from '../infrastructure/db/symbolConfigRepo'
 import type { SymbolConfigRow } from '../infrastructure/db/schema'
 import {
@@ -2183,6 +2187,20 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     takeProfitPctOverride?: unknown
     intraday_only?: unknown
     intradayOnly?: unknown
+    role?: unknown
+    pullback_max_override?: unknown
+    pullbackMaxOverride?: unknown
+    pullback_min_override?: unknown
+    pullbackMinOverride?: unknown
+    min_return_50d_override?: unknown
+    minReturn50dOverride?: unknown
+    max_atr_ratio_override?: unknown
+    maxAtrRatioOverride?: unknown
+    max_sma50_deviation_pct_override?: unknown
+    maxSma50DeviationPctOverride?: unknown
+    require_above_sma50_override?: unknown
+    requireAboveSma50Override?: unknown
+    alternatives?: unknown
   }
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
@@ -2241,6 +2259,65 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   const takeProfitPctOverride = takeProfitPctRaw === null ? null : takeProfitPctRaw / 100
   // intraday-only (#intraday-only): checkbox 未送信は false。active と同じ form bool 解釈。
   const intradayOnly = parseFormBool(raw.intraday_only ?? raw.intradayOnly, false)
+  // role (#452 Layer 1): 空 / undefined → NULL (= 従来挙動)。enum 外は 400 —
+  // typo した role を黙って従来挙動に倒さない (fail-closed の入口防御)。
+  const role = parseSymbolRole(raw.role)
+  // entry gate override (#452 Layer 2a): form は押し目/トレンド/過伸長を **%**、
+  // ATR 比を ratio 生値で送る。fraction に変換して保存。空 / undefined → NULL
+  // (= role preset → global default の fall-through)。
+  const pullbackMaxRaw = parseOptionalNumberInRange(
+    raw.pullback_max_override ?? raw.pullbackMaxOverride,
+    'pullbackMaxOverride',
+    -100,
+    0,
+  )
+  const pullbackMaxOverride = pullbackMaxRaw === null ? null : pullbackMaxRaw / 100
+  const pullbackMinRaw = parseOptionalNumberInRange(
+    raw.pullback_min_override ?? raw.pullbackMinOverride,
+    'pullbackMinOverride',
+    -100,
+    0,
+  )
+  const pullbackMinOverride = pullbackMinRaw === null ? null : pullbackMinRaw / 100
+  // 押し目バンドの cross-check: max (0 側) が min (深い側) より深いと entry が
+  // 永久に成立しない。fail-closed 方向だが入力時点の typo はここで弾く。片側
+  // だけの指定は global / preset と組むので判定しない (repo 側コメント参照)。
+  if (
+    pullbackMaxOverride !== null &&
+    pullbackMinOverride !== null &&
+    pullbackMaxOverride < pullbackMinOverride
+  ) {
+    throw new ValidationError(
+      'pullbackMaxOverride (0 側) must be >= pullbackMinOverride (深い側)',
+      { field: 'pullbackMaxOverride' },
+    )
+  }
+  const minReturn50dRaw = parseOptionalNumberInRange(
+    raw.min_return_50d_override ?? raw.minReturn50dOverride,
+    'minReturn50dOverride',
+    -100,
+    1000,
+  )
+  const minReturn50dOverride = minReturn50dRaw === null ? null : minReturn50dRaw / 100
+  const maxAtrRatioOverride = parseOptionalNumberInRange(
+    raw.max_atr_ratio_override ?? raw.maxAtrRatioOverride,
+    'maxAtrRatioOverride',
+    0.1,
+    10,
+  )
+  const maxSma50DeviationPctRaw = parseOptionalNumberInRange(
+    raw.max_sma50_deviation_pct_override ?? raw.maxSma50DeviationPctOverride,
+    'maxSma50DeviationPctOverride',
+    0.1,
+    1000,
+  )
+  const maxSma50DeviationPctOverride =
+    maxSma50DeviationPctRaw === null ? null : maxSma50DeviationPctRaw / 100
+  const requireAboveSma50Override = parseOptionalTriStateBool(
+    raw.require_above_sma50_override ?? raw.requireAboveSma50Override,
+    'requireAboveSma50Override',
+  )
+  const alternatives = parseAlternativesInput(raw.alternatives, symbol)
   return {
     symbol,
     name,
@@ -2256,7 +2333,89 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     stopPctOverride,
     takeProfitPctOverride,
     intradayOnly,
+    role,
+    pullbackMaxOverride,
+    pullbackMinOverride,
+    minReturn50dOverride,
+    maxAtrRatioOverride,
+    maxSma50DeviationPctOverride,
+    requireAboveSma50Override,
+    alternatives,
   }
+}
+
+/**
+ * role (#452): 空文字 / undefined / null → null (= 従来挙動)。enum 外は 400。
+ */
+function parseSymbolRole(value: unknown): SymbolRole | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') {
+    throw new ValidationError(`role must be one of: ${SYMBOL_ROLES.join(', ')}`, { field: 'role' })
+  }
+  const trimmed = value.trim()
+  if (trimmed === '') return null
+  if (!isSymbolRole(trimmed)) {
+    throw new ValidationError(`role must be one of: ${SYMBOL_ROLES.join(', ')}`, { field: 'role' })
+  }
+  return trimmed
+}
+
+/**
+ * 3 値 boolean (#452 require_above_sma50_override)。form select は '' (= global
+ * default) / 'true' / 'false' を送る。それ以外は 400。
+ */
+function parseOptionalTriStateBool(value: unknown, field: string): boolean | null {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase()
+    if (trimmed === '') return null
+    if (trimmed === 'true') return true
+    if (trimmed === 'false') return false
+  }
+  throw new ValidationError(`${field} must be '', 'true' or 'false'`, { field })
+}
+
+/**
+ * alternatives (#452、表示専用): form はカンマ/空白区切り text、JSON はその文字列
+ * or 配列を送る。ticker 文法 ([A-Za-z0-9]{1,10}) 外の要素は 400。self 参照と
+ * 重複は除去、上限 MAX_ALTERNATIVES 超過は 400。空 → null。
+ */
+function parseAlternativesInput(value: unknown, selfSymbol: string): string[] | null {
+  if (value === undefined || value === null) return null
+  let tokens: string[]
+  if (Array.isArray(value)) {
+    tokens = value.map((v) => {
+      if (typeof v !== 'string') {
+        throw new ValidationError('alternatives must be symbols', { field: 'alternatives' })
+      }
+      return v
+    })
+  } else if (typeof value === 'string') {
+    tokens = value.split(/[\s,]+/)
+  } else {
+    throw new ValidationError('alternatives must be a string or array of symbols', {
+      field: 'alternatives',
+    })
+  }
+  const out: string[] = []
+  for (const token of tokens) {
+    const sym = token.trim().toUpperCase()
+    if (sym === '') continue
+    if (!/^[A-Z0-9]{1,10}$/.test(sym)) {
+      throw new ValidationError(`alternatives contains an invalid symbol: ${sym}`, {
+        field: 'alternatives',
+      })
+    }
+    if (sym === selfSymbol.toUpperCase()) continue
+    if (!out.includes(sym)) out.push(sym)
+  }
+  if (out.length > MAX_ALTERNATIVES) {
+    throw new ValidationError(`alternatives must have at most ${MAX_ALTERNATIVES} symbols`, {
+      field: 'alternatives',
+    })
+  }
+  return out.length > 0 ? out : null
 }
 
 /**

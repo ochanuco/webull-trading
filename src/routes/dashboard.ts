@@ -18,8 +18,8 @@ import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/globalConfigRepo'
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
-import type { SymbolCurrency } from '../infrastructure/db/symbolConfigRepo'
-import { loadInversePairs } from '../infrastructure/db/symbolConfigRepo'
+import type { SymbolCurrency, SymbolRole } from '../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs, parseAlternativesJson, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -8159,6 +8159,16 @@ interface SymbolFormArgs {
   currentInverse?: string | null
 }
 
+/** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
+const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
+  cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
+  core_trend: 'core_trend — 非レバ・トレンド (QQQ / VOO 等)',
+  leveraged_trend: 'leveraged_trend — レバ ETF (TQQQ / SOXL 等)',
+  low_volatility: 'low_volatility — 低ボラ (定義のみ・entry 無効)',
+  sector_trend: 'sector_trend — セクター (定義のみ・entry 無効)',
+  inverse_hedge: 'inverse_hedge — インバース (定義のみ・entry 無効)',
+}
+
 function symbolFormBody(args: SymbolFormArgs): string {
   const { mode, row, error, globalDefaults } = args
   const currentInverse = args.currentInverse ?? null
@@ -8188,6 +8198,34 @@ function symbolFormBody(args: SymbolFormArgs): string {
       ? ''
       : String(Math.round(row.takeProfitPctOverride * 1000) / 10)
   const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
+  // role / entry override / alternatives (#452)。pullback / trend / 過伸長は
+  // DB に fraction 保存、表示は % (×100)。ATR 比は ratio 生値。
+  const roleValue = row?.role ?? ''
+  const pullbackMaxOverrideValue =
+    row?.pullbackMaxOverride === null || row?.pullbackMaxOverride === undefined
+      ? ''
+      : String(Math.round(row.pullbackMaxOverride * 1000) / 10)
+  const pullbackMinOverrideValue =
+    row?.pullbackMinOverride === null || row?.pullbackMinOverride === undefined
+      ? ''
+      : String(Math.round(row.pullbackMinOverride * 1000) / 10)
+  const minReturn50dOverrideValue =
+    row?.minReturn50dOverride === null || row?.minReturn50dOverride === undefined
+      ? ''
+      : String(Math.round(row.minReturn50dOverride * 1000) / 10)
+  const maxAtrRatioOverrideValue =
+    row?.maxAtrRatioOverride === null || row?.maxAtrRatioOverride === undefined
+      ? ''
+      : String(row.maxAtrRatioOverride)
+  const maxSma50DeviationPctOverrideValue =
+    row?.maxSma50DeviationPctOverride === null || row?.maxSma50DeviationPctOverride === undefined
+      ? ''
+      : String(Math.round(row.maxSma50DeviationPctOverride * 1000) / 10)
+  const requireAboveSma50OverrideValue =
+    row?.requireAboveSma50Override === null || row?.requireAboveSma50Override === undefined
+      ? ''
+      : String(row.requireAboveSma50Override)
+  const alternativesValue = (parseAlternativesJson(row?.alternatives ?? null, symbolValue) ?? []).join(', ')
   const timeStopPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
     : '空欄で global default を使用'
@@ -8323,6 +8361,56 @@ function symbolFormBody(args: SymbolFormArgs): string {
       <input type="hidden" name="intraday_only" value="false">
       <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ(オーバーナイト持ち越さない)
     </label>
+    <label>ロール <span class="muted" style="font-size:11px">(role)</span></label>
+    <div>
+      <select name="role" style="padding:6px">
+        <option value=""${roleValue === '' ? ' selected' : ''}>未設定 (従来挙動)</option>
+        ${SYMBOL_ROLES.map(
+          (r) =>
+            `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
+        ).join('')}
+      </select>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">銘柄の戦略ロール (#452)。<strong>core_trend</strong> は非レバ向けの緩い entry プリセット、<strong>leveraged_trend</strong> は従来どおり。<strong>cash_parking / low_volatility / sector_trend / inverse_hedge は現状 BUY を生成しません</strong> (entry 抑止、exit は通常どおり)。空欄 = 従来挙動。</p>
+    </div>
+    <label>押し目バンド override <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
+      〜
+      <input type="number" name="pullback_min_override" value="${esc(pullbackMinOverrideValue)}" step="0.1" min="-100" max="0" placeholder="深い側 (例 -6)" style="padding:6px;width:130px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% (負値)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">10日高値からの押し目がこのバンド内のとき entry 候補。空欄 → role preset → global の <code>pullback_default_pullback_max/min</code>。浅い側 ≥ 深い側 (例 -3 ≥ -6)。</p>
+    </div>
+    <label>トレンド条件 override <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% (20日騰落率の下限)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → role preset → global の <code>pullback_default_min_return50d</code>。非レバ銘柄はレバ向け global 値 (+8%) だと厳しすぎるので低めに (#449)。</p>
+    </div>
+    <label>ボラ過熱 override <span class="muted" style="font-size:11px">(max_atr_ratio)</span></label>
+    <div>
+      <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">× baseline ATR</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">ATR20 / baseline がこの比率を超えると BUY 見送り。空欄 → global の <code>pullback_default_max_atr_ratio</code>。</p>
+    </div>
+    <label>過伸長 override <span class="muted" style="font-size:11px">(%)</span></label>
+    <div>
+      <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
+      <span class="muted" style="font-size:12px;margin-left:6px">% (SMA50 からの上方乖離上限)</span>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → role preset → global の <code>pullback_default_max_sma50_deviation_pct</code>。非レバは +60% に届かないので +20% 程度が目安。</p>
+    </div>
+    <label>SMA50 上抜け必須 <span class="muted" style="font-size:11px">(require_above_sma50)</span></label>
+    <div>
+      <select name="require_above_sma50_override" style="padding:6px">
+        <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>global default に従う</option>
+        <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
+        <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
+      </select>
+    </div>
+    <label>代替銘柄 <span class="muted" style="font-size:11px">(alternatives)</span></label>
+    <div>
+      <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
+      <p class="muted" style="margin:4px 0 0;font-size:11px">カンマ区切り (最大 8)。この銘柄が entry 不可のときダッシュボードに出す代替候補 (<strong>表示のみ</strong>、自動発注はしない、#452)。</p>
+    </div>
     <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
     <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     <span></span>
