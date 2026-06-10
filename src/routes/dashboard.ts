@@ -2127,6 +2127,14 @@ function brokerProbeBody(args: {
       var v = item[priceKeys[i]];
       if (v != null && Number.isFinite(Number(v))) { price = Number(v); break; }
     }
+    // 大きい body は probe 側で truncate され JSON.parse が失敗する (Yahoo chart
+    // は 30KB 超)。価格 key を regex で直接拾う fallback。
+    if (price == null && typeof section.bodyTruncated === 'string') {
+      for (var r = 0; r < priceKeys.length; r++) {
+        var m = section.bodyTruncated.match(new RegExp('"' + priceKeys[r] + '"\\s*:\\s*(-?[0-9.]+)'));
+        if (m && Number.isFinite(Number(m[1]))) { price = Number(m[1]); break; }
+      }
+    }
     var ms = Number(section.msTaken) || 0;
     bodyEl.innerHTML = price != null
       ? '<span style="font-size:18px;font-weight:700" class="bp-num">' + escHtml(formatNumber(price)) + '</span> <span class="muted" style="font-size:11px">(' + ms + 'ms)</span>'
