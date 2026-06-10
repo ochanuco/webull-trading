@@ -27,6 +27,8 @@ export interface TradabilityVariantResult {
   status: number | null
   errorCode: string | null
   message: string | null
+  /** 判定根拠の確認用 (200 偽陽性の調査 #461)。先頭 300 chars。 */
+  bodyExcerpt?: string
 }
 
 export interface TradabilityResult {
@@ -171,7 +173,23 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
           } catch {
             // 非 JSON 応答は status だけで判定
           }
-          return { label: variant.label, status: response.status, errorCode, message }
+          // HTTP 200 でも batch 系 API は per-order エラーを body に埋めることが
+          // ある (本番 place の deny と staging preview 200 の矛盾調査 #461)。
+          // top-level の error_code に加え body 全文も走査する。
+          if (errorCode === null && /TICKER_IS_DENY/.test(text)) {
+            errorCode = 'OAUTH_OPENAPI_TICKER_IS_DENY'
+          }
+          if (errorCode === null && response.status === 200 && /"error_code"/.test(text)) {
+            const m = text.match(/"error_code"\s*:\s*"([A-Z0-9_]+)"/)
+            if (m) errorCode = m[1]!
+          }
+          return {
+            label: variant.label,
+            status: response.status,
+            errorCode,
+            message,
+            bodyExcerpt: text.slice(0, 300),
+          }
         } finally {
           clearTimeout(timeoutId)
         }
@@ -186,8 +204,23 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
     }),
   )
 
-  if (results.some((r) => r.status === 200)) {
-    return { verdict: 'tradable', detail: '発注前検証 (Preview Order) 通過 — 取引可能', variants: results }
+  // deny 判定を 200 判定より先に — 200 body に埋まった deny を「取引可能」と
+  // 誤読しない (status より error_code を信じる)。
+  if (results.some((r) => r.errorCode === 'OAUTH_OPENAPI_TICKER_IS_DENY')) {
+    return {
+      verdict: 'denied',
+      detail: 'Webull JP の OpenAPI では発注できない銘柄 (TICKER_IS_DENY)',
+      variants: results,
+    }
+  }
+  const cleanOk = results.find((r) => r.status === 200 && r.errorCode === null)
+  if (cleanOk) {
+    const cost = cleanOk.bodyExcerpt?.match(/"estimated_cost"\s*:\s*"?([0-9.]+)"?/)?.[1]
+    return {
+      verdict: 'tradable',
+      detail: `発注前検証 (Preview Order) 通過 — 取引可能${cost ? ` (estimated_cost: ${cost})` : ''}`,
+      variants: results,
+    }
   }
   if (results.some((r) => r.errorCode === 'OAUTH_OPENAPI_TICKER_IS_DENY')) {
     return {

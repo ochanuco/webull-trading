@@ -84,3 +84,43 @@ describe('checkTradability (#461 Preview Order)', () => {
     }
   })
 })
+
+describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾調査)', () => {
+  it('HTTP 200 でも body に TICKER_IS_DENY が埋まっていれば denied', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: fetcherReturning([
+        {
+          status: 200,
+          body: { new_orders: [{ symbol: 'USMV', error_code: 'OAUTH_OPENAPI_TICKER_IS_DENY' }] },
+        },
+      ]),
+    })
+    expect(result.verdict).toBe('denied')
+  })
+
+  it('HTTP 200 でも body に別の error_code が埋まっていれば tradable にしない', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'AAPL',
+      market: 'US',
+      fetcher: fetcherReturning([
+        { status: 200, body: { new_orders: [{ error_code: 'SOME_EMBEDDED_ERR' }] } },
+      ]),
+    })
+    expect(result.verdict).toBe('error')
+  })
+
+  it('クリーンな 200 (estimated_cost) は根拠付きで tradable', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'AAPL',
+      market: 'US',
+      fetcher: fetcherReturning([
+        { status: 417, body: { error_code: 'OPENAPI_PARAM_ERR' } },
+        { status: 200, body: { estimated_cost: '292.55', estimated_transaction_fee: '0' } },
+      ]),
+    })
+    expect(result.verdict).toBe('tradable')
+    expect(result.detail).toContain('estimated_cost: 292.55')
+  })
+})
