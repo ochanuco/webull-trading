@@ -2047,8 +2047,8 @@ function brokerProbeBody(args: {
     ];
     if (rawTarget) {
       rawTarget.textContent = candidates.map(function (cnd) {
-        return '--- ' + cnd.label + ' ---\n' + prettify(cnd.section);
-      }).join('\n\n');
+        return '--- ' + cnd.label + ' ---\\n' + prettify(cnd.section);
+      }).join('\\n\\n');
     }
     if (!bodyEl) return;
     var responded = [];
