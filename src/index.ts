@@ -217,6 +217,10 @@ export default {
               persisted: summary.persisted,
               skipped: summary.skipped,
               errors: summary.errors,
+              // #475: QUOTE_SOURCE canary の観測用 — primary source と Yahoo
+              // fallback に回った銘柄をログで追えるようにする。
+              source: summary.source,
+              fallbackSymbols: summary.fallbackSymbols,
             }),
           )
           // Partial failure: getSnapshots() がカテゴリ単位で throw しても全体の
