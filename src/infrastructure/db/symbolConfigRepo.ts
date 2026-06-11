@@ -597,6 +597,40 @@ export async function toggleSymbolActive(
  * `pct` は fraction (0<pct<=1) or null (= risk-% sizing に戻す)。存在しなければ null。
  * before/after を返し caller が audit / inverse 同期に使う。
  */
+/**
+ * 退避先 (cash_fallback_symbol) の set / clear (#symbol-relation-map 編集
+ * キャンバス用)。set 時は entry_required も同時に ON する — 退避先だけ設定して
+ * 条件連動 OFF の「眠った設定」(operator が実際に踏んだ罠) を作らせない。
+ * clear は entry_required を触らない (条件連動自体の意図は別设定)。
+ * 同値なら UPDATE しない (updatedAt だけ無監査で進むのを防ぐ)。
+ */
+export async function updateCashFallback(
+  db: DrizzleD1Database,
+  symbol: string,
+  target: string | null,
+  nowIso: string,
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
+  const before = await findSymbolConfig(db, symbol)
+  if (before === null) return null
+  const beforeSnapshot: SymbolConfigRow = { ...before }
+  const sameTarget = (before.cashFallbackSymbol ?? null) === (target ?? null)
+  const needsEntryRequired = target !== null && before.entryRequired !== true
+  if (sameTarget && !needsEntryRequired) {
+    return { before: beforeSnapshot, after: beforeSnapshot }
+  }
+  await db
+    .update(symbolConfig)
+    .set({
+      cashFallbackSymbol: target,
+      ...(target !== null ? { entryRequired: true } : {}),
+      updatedAt: nowIso,
+    })
+    .where(eq(symbolConfig.symbol, symbol))
+  const after = await findSymbolConfig(db, symbol)
+  if (after === null) return null
+  return { before: beforeSnapshot, after }
+}
+
 export async function updateBudgetAllocPct(
   db: DrizzleD1Database,
   symbol: string,

@@ -2835,3 +2835,53 @@ describe('renderSymbolRelationMap (#symbol-relation-map 口座ツリー)', () =>
     }
   })
 })
+
+import { symbolMapEditorBody } from '../../src/routes/dashboard'
+
+describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス)', () => {
+  const edRow = (over: Partial<SymbolConfigRow>): SymbolConfigRow =>
+    ({
+      symbol: 'X',
+      active: true,
+      role: null,
+      currency: 'USD',
+      budgetAllocPct: null,
+      cashFallbackSymbol: null,
+      entryRequired: false,
+      ...over,
+    }) as SymbolConfigRow
+
+  it('銘柄カード payload (配分% / 状態 / 退避先 / インバース) を積む', () => {
+    const html = symbolMapEditorBody(
+      [
+        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbol: 'SGOV', entryRequired: true }),
+        edRow({ symbol: 'SGOV', role: 'cash_parking', budgetAllocPct: 0.1 }),
+        edRow({ symbol: 'GONE', active: false }),
+      ],
+      { SOXL: 'SOXS' },
+      { SGOV: { native: '$100', jpy: 15000 } },
+    )
+    const payload = JSON.parse(html.match(/__symbolMapEditor = ([\s\S]*?);<\/script>/)?.[1] ?? 'null')
+    expect(payload.nodes.map((n: { sym: string }) => n.sym)).toEqual(['SOXL', 'SGOV'])
+    const soxl = payload.nodes.find((n: { sym: string }) => n.sym === 'SOXL')
+    expect(soxl).toMatchObject({ pct: 50, fallback: 'SGOV', entryRequired: true, inverse: 'SOXS' })
+    const sgov = payload.nodes.find((n: { sym: string }) => n.sym === 'SGOV')
+    expect(sgov.held).toBe('$100')
+    // 編集 API への参照が script に含まれる
+    expect(html).toContain('/cash-fallback')
+    expect(html).toContain('/admin/symbol-config/budget-alloc')
+  })
+
+  it('inline script は構文エラーなく parse できる (#462 regression 防止)', () => {
+    const html = symbolMapEditorBody(
+      [edRow({ symbol: 'AAPL', budgetAllocPct: 0.2 })],
+      {},
+      {},
+    )
+    const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
+    expect(blocks.length).toBeGreaterThan(0)
+    for (const code of blocks) {
+      expect(() => new Function(code)).not.toThrow()
+    }
+  })
+})

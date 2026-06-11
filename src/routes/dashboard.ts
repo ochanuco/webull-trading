@@ -832,6 +832,43 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
     }
   })
+  /**
+   * 配分マップの編集キャンバス (#symbol-relation-map)。Drawflow で銘柄カードを
+   * 並べ、線を引く = 退避先を設定 (entry_required も ON)、線を消す = 解除、
+   * カード内の % input = 予算配分の更新。変更は都度 confirm → admin API →
+   * reload (canvas 状態と DB の drift を作らない最小実装)。
+   */
+  .get('/symbols/map', async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '配分マップ編集', unavailable('DB not bound')))
+    }
+    try {
+      const rows = await loadAllSymbolConfigRows(c.env.DB)
+      const inversePairs = await loadInversePairs(createDb(c.env.DB)).catch(
+        () => ({}) as Record<string, string>,
+      )
+      const mapAmounts: Record<string, { native: string; jpy: number }> = {}
+      if (c.env.SYMBOL_STATE) {
+        const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
+        await Promise.all(
+          rows.map(async (r) => {
+            const sym = r.symbol.toUpperCase()
+            const state = await stateClient.getState(sym).catch(() => null)
+            const pos = state?.position
+            if (!pos || pos.qty <= 0) return
+            const cost = pos.qty * pos.avgPrice
+            mapAmounts[sym] = {
+              native: r.currency === 'USD' ? `$${cost.toFixed(0)}` : `¥${Math.round(cost).toLocaleString('en-US')}`,
+              jpy: cost,
+            }
+          }),
+        )
+      }
+      return c.html(renderLayout(c, '配分マップ編集', symbolMapEditorBody(rows, inversePairs, mapAmounts)))
+    } catch (err) {
+      return c.html(renderLayout(c, '配分マップ編集', unavailable(messageOf(err))))
+    }
+  })
   .get('/symbols/new', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
@@ -8701,6 +8738,160 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 }
 
 /**
+ * 配分マップ編集キャンバス (#symbol-relation-map)。read-only マップと違い
+ * **設定を書く** UI なので、操作は 3 つに限定する:
+ *   - 線を引く (銘柄 → 銘柄) = 退避先を設定 (entry_required も ON)
+ *   - 線を消す = 退避先を解除
+ *   - カード内 % input = 予算配分の更新 (インバース対は server 側で同期)
+ * 各操作は confirm → admin API → location.reload() — canvas 上の見た目と DB の
+ * drift を作らない (楽観更新しない)。インバース対 / proxy はカード内に表示のみ。
+ */
+export function symbolMapEditorBody(
+  rows: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+  amounts: Record<string, { native: string; jpy: number }>,
+): string {
+  const active = rows.filter((r) => r.active)
+  const pctOf = (r: SymbolConfigRow): number =>
+    r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
+  const nodes = active.map((r, i) => {
+    const sym = r.symbol.toUpperCase()
+    return {
+      sym,
+      pct: pctOf(r),
+      role: r.role ?? null,
+      color: ROLE_NODE_COLORS[r.role ?? ''] ?? '#5f6368',
+      held: amounts[sym]?.native ?? null,
+      entryRequired: r.entryRequired === true,
+      fallback: r.cashFallbackSymbol?.toUpperCase() ?? null,
+      inverse: inversePairs[sym]?.toUpperCase() ?? null,
+      currency: r.currency,
+      y: 30 + i * 120,
+    }
+  })
+  if (nodes.length === 0) {
+    return `<p class="muted">有効な銘柄がありません。</p>`
+  }
+  const payload = { nodes }
+  return `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
+    <span class="muted" style="font-size:12px">
+      カードの出力 (右の点) から相手の入力 (左の点) へ<strong>線を引く = 退避先を設定</strong> (条件連動も ON になります) ・
+      線をクリックして Delete = 解除 ・ % 欄 = 予算配分。各操作は確認後に即保存されます。
+    </span>
+  </p>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css">
+  <style>
+  #symbol-map-editor{height:calc(100vh - 180px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
+  #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
+  #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
+  .sm-card{padding:8px 10px;font-size:12px}
+  .sm-card .sm-title{font-size:14px;font-weight:700}
+  .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
+  .sm-card .sm-status-pending{color:#b25000;font-size:11px}
+  .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
+  .sm-card input{width:64px;padding:2px 4px;font-size:12px}
+  </style>
+  <div id="symbol-map-editor"></div>
+  ${safeJsonScript('__symbolMapEditor', payload)}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
+  <script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var data = window.__symbolMapEditor;
+    var el = document.getElementById('symbol-map-editor');
+    if (!data || !el || typeof Drawflow === 'undefined') return;
+    var editor = new Drawflow(el);
+    editor.reroute = true;
+    editor.start();
+    var idOf = {};   // symbol -> drawflow node id
+    var symOf = {};  // node id -> symbol
+    data.nodes.forEach(function (n) {
+      var statusHtml = n.held
+        ? '<div class="sm-status-active">Active ・ ' + n.held + '</div>'
+        : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
+      var metaParts = [];
+      if (n.role) metaParts.push(n.role);
+      if (n.inverse) metaParts.push('⇄ ' + n.inverse);
+      metaParts.push(n.currency);
+      var html = '<div class="sm-card">' +
+        '<div class="sm-title" style="color:' + n.color + '">' + n.sym + '</div>' +
+        statusHtml +
+        '<div style="margin-top:4px">配分 <input type="number" min="0" max="100" step="1" value="' + n.pct + '" data-sym="' + n.sym + '" class="sm-pct"> %</div>' +
+        '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
+        '</div>';
+      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 80 : 480, n.y, 'sm-node', { sym: n.sym }, html);
+      idOf[n.sym] = id;
+      symOf[id] = n.sym;
+    });
+    // 既存の退避先を線として描く (プログラム描画中は connectionCreated を無視)。
+    var seeding = true;
+    data.nodes.forEach(function (n) {
+      if (n.fallback && idOf[n.fallback]) {
+        editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
+      }
+    });
+    seeding = false;
+
+    function apiFallback(sym, target) {
+      return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/cash-fallback', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: target }),
+      }).then(function (r) {
+        if (!r.ok) return r.json().then(function (b) { throw new Error(b.error || ('HTTP ' + r.status)); });
+      });
+    }
+    editor.on('connectionCreated', function (info) {
+      if (seeding) return;
+      var src = symOf[info.output_id];
+      var dst = symOf[info.input_id];
+      if (!src || !dst) return;
+      if (!confirm(src + ' の退避先を ' + dst + ' に設定します (条件連動も ON になります)。よろしいですか？')) {
+        location.reload();
+        return;
+      }
+      apiFallback(src, dst)
+        .then(function () { location.reload(); })
+        .catch(function (e) { alert('設定に失敗: ' + e.message); location.reload(); });
+    });
+    editor.on('connectionRemoved', function (info) {
+      if (seeding) return;
+      var src = symOf[info.output_id];
+      if (!src) return;
+      if (!confirm(src + ' の退避先を解除します (枠は現金待機になります)。よろしいですか？')) {
+        location.reload();
+        return;
+      }
+      apiFallback(src, null)
+        .then(function () { location.reload(); })
+        .catch(function (e) { alert('解除に失敗: ' + e.message); location.reload(); });
+    });
+    // 配分% の編集。blur 時に確認して保存 (budget-alloc はインバース対を server 側で同期)。
+    el.addEventListener('change', function (ev) {
+      var input = ev.target;
+      if (!input.classList || !input.classList.contains('sm-pct')) return;
+      var sym = input.getAttribute('data-sym');
+      var v = String(input.value).trim();
+      if (!confirm(sym + ' の予算配分を ' + (v === '' ? '未設定' : v + '%') + ' に変更します。よろしいですか？')) {
+        location.reload();
+        return;
+      }
+      var form = new FormData();
+      form.append('pct_' + sym, v);
+      fetch('/admin/symbol-config/budget-alloc', { method: 'POST', credentials: 'same-origin', body: form })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          location.reload();
+        })
+        .catch(function (e) { alert('保存に失敗: ' + e.message); location.reload(); });
+    });
+  });
+  </script>`
+}
+
+/**
  * 配分マップ (#symbol-relation-map)。「口座 (原資) から各銘柄へ何% 割り当て、
  * 参加できていない銘柄の枠はいまどこへ譲られているか」をノードツリーで示す
  * (operator 指定の絵: 口座 ─ SOXL ┈┈▶ TQQQ / ┗ TQQQ)。
@@ -8915,7 +9106,7 @@ export function renderSymbolRelationMap(
     : ''
   const payload = { nodes, edges }
   return `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 口座 → 銘柄 → 譲り先 (現在形・表示専用)</span></summary>
+    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 口座 → 銘柄 → 譲り先 (現在形・表示専用)</span> <a href="/dashboard/symbols/map" style="font-size:12px;font-weight:normal;margin-left:8px">✏️ 編集モード</a></summary>
     ${mapDiv}
     ${chipRow}
   </details>
