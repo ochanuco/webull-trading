@@ -1918,7 +1918,8 @@ function brokerProbeBody(args: {
   </style>
 
   <div class="bp-card" style="margin-top:8px">
-    <h3>銘柄を選んで診断 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span></h3>
+    <h3>銘柄を選んで診断 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span>
+      <button type="button" id="probe-copy-ai" hidden style="float:right;padding:4px 12px;background:#fff;color:#333;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:12px;font-weight:normal" title="probe 結果全文 (全 raw セクション + meta) をコピー">📋 AI 用コピー</button></h3>
     <div class="bp-body">
       <div style="margin-bottom:6px">${universeLinks}</div>
       ${controlChip}
@@ -2034,7 +2035,43 @@ function brokerProbeBody(args: {
     }
     var drift = document.getElementById('probe-drift-table');
     if (drift) drift.innerHTML = '<tr><td colspan="3" class="muted" style="padding:8px;text-align:center">...</td></tr>';
+    lastProbeResult = null;
+    if (copyAiBtn) copyAiBtn.hidden = true;
   }
+
+  // probe 結果の AI 用コピー (#alerts-trades-ui と同運用): UI で省略・整形した
+  // 情報ではなく admin endpoint のレスポンス全体 (全 raw セクション + meta) を
+  // 文脈ヘッダ付きで積む。スクリーンショット往復だとセクションが切れて
+  // どの probe の結果か特定できない問題への対策。
+  var lastProbeResult = null;
+  var copyAiBtn = document.getElementById('probe-copy-ai');
+  if (copyAiBtn) copyAiBtn.addEventListener('click', function () {
+    if (!lastProbeResult) return;
+    var text = '# webull-trading broker-probe / ' + lastProbeResult.symbol +
+      ' (' + lastProbeResult.category + ') / generated ' +
+      (lastProbeResult.body && lastProbeResult.body.timestamp ? lastProbeResult.body.timestamp : 'n/a') +
+      ' / admin status ' + lastProbeResult.status + '\\n' +
+      JSON.stringify(lastProbeResult.body, null, 1);
+    function done(ok) {
+      copyAiBtn.textContent = ok ? '✅' : '✗';
+      setTimeout(function () { copyAiBtn.textContent = '📋 AI 用コピー'; }, 1500);
+    }
+    function fallbackExecCommand() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      done(ok);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallbackExecCommand);
+    } else {
+      fallbackExecCommand();
+    }
+  });
 
   // fetch abort (10s timeout) は raw の英語のまま出すと分かりにくいので日本語化。
   // data-api.webull.co.jp (JP market-data host) の無応答は既知 (#21、Yahoo 移行済み)。
@@ -2383,6 +2420,8 @@ function brokerProbeBody(args: {
           readiness: body.readiness,
           adminStatus: res.status,
         }, null, 2);
+        lastProbeResult = { symbol: symbol, category: category, status: res.status, body: body };
+        if (copyAiBtn) copyAiBtn.hidden = false;
       })
       .catch(function (e) {
         statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
