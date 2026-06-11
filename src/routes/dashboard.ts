@@ -5874,10 +5874,11 @@ function renderQualityTab(args: ChartsBodyQuality): string {
 function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
   const rows = args.decisionRows ?? []
   if (rows.length === 0 || !args.focusSymbol) return ''
-  const cronHref = `/dashboard/cron?symbol=${encodeURIComponent(args.focusSymbol)}`
+  const symbolCronHref = `/dashboard/cron?symbol=${encodeURIComponent(args.focusSymbol)}`
   return `<div style="margin-top:14px">
     <h2 style="font-size:14px;margin:0 0 6px;display:flex;align-items:center;gap:10px">判定履歴 <span class="muted" style="font-size:11px;font-weight:normal">直近 ${rows.length} 件 — チャートの判定 pin と同じデータ</span>
-      <a href="${esc(cronHref)}" style="font-size:11px">全件・全銘柄 →</a>
+      <a href="${esc(symbolCronHref)}" style="font-size:11px">この銘柄の全件 →</a>
+      <a href="/dashboard/cron" style="font-size:11px">全銘柄 →</a>
     </h2>
     ${renderDecisionTable(rows, args.universe, {
       copyVarName: '__decisionCopy',
