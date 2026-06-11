@@ -2724,3 +2724,75 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
     expect(html).toContain('⚠ unknown')
   })
 })
+
+import { renderSymbolRelationMap } from '../../src/routes/dashboard'
+import type { SymbolConfigRow } from '../../src/infrastructure/db/symbolConfigRepo'
+
+describe('renderSymbolRelationMap (#symbol-relation-map)', () => {
+  const mapRow = (over: Partial<SymbolConfigRow>): SymbolConfigRow =>
+    ({
+      symbol: 'AAPL',
+      active: true,
+      role: null,
+      budgetAllocPct: null,
+      cashFallbackSymbol: null,
+      ...over,
+    }) as SymbolConfigRow
+
+  it('関係が 1 つも無ければ何も描画しない', () => {
+    expect(renderSymbolRelationMap([mapRow({})], {}, [])).toBe('')
+  })
+
+  it('インバース対 / regime proxy / 退避先の 3 種エッジと未登録 proxy ノードを payload に積む', () => {
+    const rows = [
+      mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.2 }),
+      mapRow({ symbol: 'SOXS', role: 'inverse_hedge' }),
+      mapRow({ symbol: 'VUG', role: 'core_trend', cashFallbackSymbol: 'SGOV' }),
+      mapRow({ symbol: 'SGOV', role: 'cash_parking', active: false }),
+    ]
+    const html = renderSymbolRelationMap(
+      rows,
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+      [{ bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null }],
+    )
+    expect(html).toContain('関係マップ')
+    expect(html).toContain('__symbolRelationMap')
+    // インバース対は片向きに dedup、proxy は bull/bear へ 2 本、退避先 1 本
+    const payload = JSON.parse(
+      html.match(/<script type="application\/json"[^>]*>([\s\S]*?)<\/script>/)?.[1] ??
+        html.match(/__symbolRelationMap\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/)?.[1] ??
+        'null',
+    )
+    expect(payload).not.toBeNull()
+    const kinds = payload.edges.map((e: { kind: string }) => e.kind).sort()
+    expect(kinds).toEqual(['fallback', 'inverse', 'proxy', 'proxy'])
+    // SOXX は未登録 proxy としてノード化される
+    const soxx = payload.nodes.find((n: { name: string }) => n.name === 'SOXX')
+    expect(soxx?.registered).toBe(false)
+    // 無効銘柄 (SGOV) はグレー
+    const sgov = payload.nodes.find((n: { name: string }) => n.name === 'SGOV')
+    expect(sgov?.color).toBe('#9aa0a6')
+  })
+
+  it('misconfig な regime pair は proxy エッジを張らない (fail-safe)', () => {
+    const html = renderSymbolRelationMap(
+      [mapRow({ symbol: 'SOXL' }), mapRow({ symbol: 'SOXS' })],
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+      [{ bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXL', invalidConfig: 'self-proxy' }],
+    )
+    expect(html).not.toContain('"kind":"proxy"')
+  })
+
+  it('inline script は構文エラーなく parse できる (#462 regression 防止)', () => {
+    const html = renderSymbolRelationMap(
+      [mapRow({ symbol: 'VUG', cashFallbackSymbol: 'SGOV' }), mapRow({ symbol: 'SGOV' })],
+      {},
+      [],
+    )
+    const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
+    expect(blocks.length).toBeGreaterThan(0)
+    for (const code of blocks) {
+      expect(() => new Function(code)).not.toThrow()
+    }
+  })
+})
