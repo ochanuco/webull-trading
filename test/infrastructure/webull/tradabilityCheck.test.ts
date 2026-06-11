@@ -154,7 +154,113 @@ describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾
     })
     expect(result.verdict).toBe('unknown')
     expect(result.reason).toBe('quote_ok')
-    expect(result.detail).toContain('事前検証不可')
+    expect(result.detail).toContain('発注時のみ検出')
+  })
+})
+
+describe('checkTradability × instrument 照会 (#475)', () => {
+  const okPreview = () =>
+    fetcherReturning([
+      { status: 200, body: { estimated_cost: '100.00', estimated_transaction_fee: '0' } },
+    ])
+  const instrumentOf = (status: string) =>
+    ({
+      outcome: 'found',
+      instrument: {
+        symbol: 'USMV',
+        name: 'iShares MSCI USA Min Vol Factor ETF',
+        status,
+        instrumentId: '913244629',
+        exchangeCode: 'BAT',
+        shortable: true,
+        fractionable: true,
+        marginable: true,
+        overnightTradingSupported: true,
+        easyToBorrow: false,
+        lotSize: 1,
+        etfLeveragedFactor: 0,
+        inverseEtf: null,
+      },
+    }) as const
+
+  it('not_found は preview 200 でも denied(not_listed) — 安全側に倒す', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'ZZZZ',
+      market: 'US',
+      fetcher: okPreview(),
+      instrument: { outcome: 'not_found' },
+    })
+    expect(result.verdict).toBe('denied')
+    expect(result.reason).toBe('not_listed')
+  })
+
+  it('status=NT は denied(instrument_status)', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: okPreview(),
+      instrument: instrumentOf('NT'),
+    })
+    expect(result.verdict).toBe('denied')
+    expect(result.reason).toBe('instrument_status')
+    expect(result.detail).toContain('NT')
+  })
+
+  it('status=CO (清算のみ) も新規エントリー不可なので denied', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: okPreview(),
+      instrument: instrumentOf('CO'),
+    })
+    expect(result.verdict).toBe('denied')
+    expect(result.reason).toBe('instrument_status')
+  })
+
+  it('status=OC + preview 200 は unknown のまま (USMV 前例: OC でも本番 deny) + instrument 同梱', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: okPreview(),
+      instrument: Promise.resolve(instrumentOf('OC')),
+    })
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('quote_ok')
+    expect(result.detail).toContain('OC')
+    expect(result.instrument?.overnightTradingSupported).toBe(true)
+  })
+
+  it('未知の status 値は deny しない (enum 拡張に fail-safe)', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: okPreview(),
+      instrument: instrumentOf('XX'),
+    })
+    expect(result.verdict).toBe('unknown')
+  })
+
+  it('lookup error は判定材料にしない (従来の preview 判定に従う)', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'AAPL',
+      market: 'US',
+      fetcher: okPreview(),
+      instrument: { outcome: 'error', status: 404, error: '404 Route Not Found' },
+    })
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('quote_ok')
+    expect(result.instrument).toBeNull()
+  })
+
+  it('preview の TICKER_IS_DENY は instrument=OC より優先される', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'USMV',
+      market: 'US',
+      fetcher: fetcherReturning([{ status: 417, body: { error_code: 'TICKER_IS_DENY' } }]),
+      instrument: instrumentOf('OC'),
+    })
+    expect(result.verdict).toBe('denied')
+    expect(result.reason).toBe('ticker_deny')
   })
 })
 

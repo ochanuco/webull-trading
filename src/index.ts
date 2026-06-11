@@ -3,7 +3,7 @@ import type { Env } from './config/env'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { createNotifier } from './infrastructure/notification/createNotifier'
-import { checkMarketDataReachability } from './infrastructure/webull/checkMarketDataReachability'
+import { checkMarketDataHealth } from './infrastructure/webull/checkMarketDataHealth'
 import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
@@ -111,43 +111,43 @@ export default {
         ),
       )
 
-      // #21 follow-up: Webull JP 本番 market-data API (`data-api.webull.co.jp`)
-      // が今は応答しない (DNS resolve するが TCP 443 沈黙)。launch されたら
-      // operator が気付けるよう daily で疎通 check → 応答返ったら notify。
-      // 失敗は silent (= 現状の期待値、毎日通知して spam にしない)。
+      // #475: Market Data API (trade host + x-version v2 で稼働中、PR #474 実測)
+      // の死活監視。旧実装は存在しない host (data-api) の launch を見張っていた
+      // が、向きを反転 — documented snapshot endpoint が **200 を返さなくなったら**
+      // warn 通知する (quote/bars の Webull 回帰の前提カナリア)。healthy は
+      // daily log のみ (spam 防止)。
       ctx.waitUntil(
-        checkMarketDataReachability().then(
+        checkMarketDataHealth(env).then(
           (result) => {
-            if (result.reachable) {
-              console.log(
-                JSON.stringify({
-                  event: 'webull_market_data_reachable',
-                  requestId,
-                  status: result.status,
-                  msTaken: result.msTaken,
-                }),
-              )
-              // info severity の初使用例。実発注に近づく state change じゃないので
-              // ERROR type だが severity=info で「青系 icon、運用判断ありき」の扱い。
+            console.log(
+              JSON.stringify({
+                event: 'webull_market_data_health',
+                requestId,
+                healthy: result.healthy,
+                status: result.status,
+                msTaken: result.msTaken,
+                error: result.error,
+              }),
+            )
+            if (!result.healthy) {
               ctx.waitUntil(
                 createNotifier(env, { requestId })
                   .notify({
                     type: 'ERROR',
-                    message: `Webull JP market-data API (data-api.webull.co.jp) is now responding (HTTP ${result.status}, ${result.msTaken}ms). Consider switching strategy cron back from Yahoo to WebullQuoteClient — see PR #334 for the switchover pattern.`,
-                    cause: 'webull_market_data_reachable',
-                    severity: 'info',
+                    message: `Webull JP Market Data API (snapshot v2 on trade host) is not healthy: ${result.error ?? 'unknown'} (HTTP ${result.status ?? 'n/a'}, ${result.msTaken}ms). Instrument lookup / tradability pre-check may be degraded — see issue #475.`,
+                    cause: 'webull_market_data_unhealthy',
+                    severity: 'warning',
                   })
                   .catch(() => undefined),
               )
             }
-            // unreachable: 現状の期待挙動、log すら出さない (cron tick 毎に noise)
           },
           (error) => {
             // 関数自体が throw するのは設計上ないが念のため
             const message = error instanceof Error ? error.message : String(error)
             console.error(
               JSON.stringify({
-                event: 'webull_market_data_reachability_check_error',
+                event: 'webull_market_data_health_check_error',
                 requestId,
                 message,
               }),
@@ -217,6 +217,10 @@ export default {
               persisted: summary.persisted,
               skipped: summary.skipped,
               errors: summary.errors,
+              // #475: QUOTE_SOURCE canary の観測用 — primary source と Yahoo
+              // fallback に回った銘柄をログで追えるようにする。
+              source: summary.source,
+              fallbackSymbols: summary.fallbackSymbols,
             }),
           )
           // Partial failure: getSnapshots() がカテゴリ単位で throw しても全体の
