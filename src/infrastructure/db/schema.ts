@@ -175,12 +175,6 @@ export const symbolConfig = sqliteTable(
     /** SMA50 上抜け必須条件 override (NULL = global default、boolean、#452)。 */
     requireAboveSma50Override: integer('require_above_sma50_override', { mode: 'boolean' }),
     /**
-     * 代替銘柄候補 (#452 / #449)。JSON 配列 text (例 `["SOXX","SMH"]`)。レバ ETF が
-     * NG/WATCH のときダッシュボードに代替候補を出す **表示専用** — 自動 routing には
-     * 使わない。NULL / 不正 JSON は「候補なし」扱い。
-     */
-    alternatives: text('alternatives'),
-    /**
      * 条件連動配分 (#452 Layer 3 / #450)。true = entry gate (ENTRY/HALF) 通過を
      * 実配分 (active weight) の必須条件にする。未通過の間は active=0 になり、
      * 浮いた配分は `cash_fallback_symbol` へ退避される。false (default) =

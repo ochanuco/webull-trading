@@ -32,10 +32,6 @@ export function isSymbolRole(value: unknown): value is SymbolRole {
   return typeof value === 'string' && (SYMBOL_ROLES as readonly string[]).includes(value)
 }
 
-/** alternatives の 1 ticker の文法 (admin parse / repo 検証で共用)。 */
-const ALTERNATIVE_SYMBOL_RE = /^[A-Z0-9]{1,10}$/
-/** alternatives の最大件数 (表示専用 list の防御的上限)。 */
-export const MAX_ALTERNATIVES = 8
 
 export interface SymbolConfigSnapshot {
   /** Uppercased symbols where `active = 1`. cron / risk gate はこの list だけを評価対象とする。 */
@@ -130,11 +126,6 @@ export interface SymbolConfigSnapshot {
   /** SMA50 上抜け必須 override (true / false 両方 map に含める。NULL は不在)。 */
   symbolRequireAboveSma50Override: Record<string, boolean>
   /**
-   * symbol → 代替銘柄候補 (#452、表示専用)。NULL / 不正 JSON / 空配列は map に
-   * 含めない。要素は大文字 ticker、self 参照と重複は除去、上限 MAX_ALTERNATIVES。
-   */
-  symbolAlternatives: Record<string, string[]>
-  /**
    * entry_required=true の symbol 集合 (#452 Layer 3)。gate 未通過の間
    * active weight = 0 になり cash fallback へ退避される。false は不在。
    */
@@ -146,32 +137,6 @@ export interface SymbolConfigSnapshot {
    * (= 退避しない、現金のまま)。
    */
   symbolCashFallback: Record<string, string>
-}
-
-/**
- * alternatives の JSON text を検証付きで配列に落とす。不正 (JSON でない /
- * 配列でない / ticker 文法外要素) は **null** (= 候補なし扱い)。表示専用 data
- * なので発注安全性には関与しないが、ゴミを下流に流さない。
- */
-export function parseAlternativesJson(raw: string | null | undefined, selfSymbol: string): string[] | null {
-  if (raw === null || raw === undefined) return null
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return null
-  }
-  if (!Array.isArray(parsed)) return null
-  const out: string[] = []
-  for (const item of parsed) {
-    if (typeof item !== 'string') return null
-    const sym = item.trim().toUpperCase()
-    if (!ALTERNATIVE_SYMBOL_RE.test(sym)) return null
-    if (sym === selfSymbol.toUpperCase()) continue
-    if (!out.includes(sym)) out.push(sym)
-    if (out.length >= MAX_ALTERNATIVES) break
-  }
-  return out.length > 0 ? out : null
 }
 
 /**
@@ -209,7 +174,6 @@ export async function loadSymbolConfig(
   const symbolMaxAtrRatioOverride: Record<string, number> = {}
   const symbolMaxSma50DeviationPctOverride: Record<string, number> = {}
   const symbolRequireAboveSma50Override: Record<string, boolean> = {}
-  const symbolAlternatives: Record<string, string[]> = {}
   const symbolEntryRequired: Record<string, boolean> = {}
   const symbolAlwaysActive: Record<string, boolean> = {}
   const symbolCashFallback: Record<string, string> = {}
@@ -359,10 +323,6 @@ export async function loadSymbolConfig(
     if (row.requireAboveSma50Override === true || row.requireAboveSma50Override === false) {
       symbolRequireAboveSma50Override[symbol] = row.requireAboveSma50Override
     }
-    const alternatives = parseAlternativesJson(row.alternatives, symbol)
-    if (alternatives !== null) {
-      symbolAlternatives[symbol] = alternatives
-    }
     // 条件連動配分 (#452 Layer 3)。false は map に出さない (従来挙動 = 常時枠)。
     if (row.entryRequired === true) {
       symbolEntryRequired[symbol] = true
@@ -401,7 +361,6 @@ export async function loadSymbolConfig(
     symbolMaxAtrRatioOverride,
     symbolMaxSma50DeviationPctOverride,
     symbolRequireAboveSma50Override,
-    symbolAlternatives,
     symbolEntryRequired,
     symbolAlwaysActive,
     symbolCashFallback,
@@ -464,20 +423,12 @@ export interface SymbolConfigWriteInput {
   maxAtrRatioOverride: number | null
   maxSma50DeviationPctOverride: number | null
   requireAboveSma50Override: boolean | null
-  /** 代替銘柄候補 (表示専用、NULL = なし、#452)。DB には JSON text で保存。 */
-  alternatives: string[] | null
   /** 条件連動配分 (#452 Layer 3): gate 通過を実配分の必須条件にする。default false。 */
   entryRequired: boolean
   /** 常時 target = active (cash_parking 用、#452)。default false。 */
   alwaysActive: boolean
   /** 条件未通過時の退避先 symbol (NULL = 退避しない、#452)。 */
   cashFallbackSymbol: string | null
-}
-
-/** alternatives 配列 → DB 保存形式 (JSON text / NULL)。空配列は NULL に正規化。 */
-function alternativesToJson(alternatives: string[] | null): string | null {
-  if (alternatives === null || alternatives.length === 0) return null
-  return JSON.stringify(alternatives)
 }
 
 /**
@@ -516,7 +467,6 @@ export async function insertSymbolConfig(
       maxAtrRatioOverride: input.maxAtrRatioOverride,
       maxSma50DeviationPctOverride: input.maxSma50DeviationPctOverride,
       requireAboveSma50Override: input.requireAboveSma50Override,
-      alternatives: alternativesToJson(input.alternatives),
       entryRequired: input.entryRequired,
       alwaysActive: input.alwaysActive,
       cashFallbackSymbol: input.cashFallbackSymbol,
@@ -575,7 +525,6 @@ export async function updateSymbolConfig(
       maxAtrRatioOverride: input.maxAtrRatioOverride,
       maxSma50DeviationPctOverride: input.maxSma50DeviationPctOverride,
       requireAboveSma50Override: input.requireAboveSma50Override,
-      alternatives: alternativesToJson(input.alternatives),
       entryRequired: input.entryRequired,
       alwaysActive: input.alwaysActive,
       cashFallbackSymbol: input.cashFallbackSymbol,
@@ -891,7 +840,7 @@ export async function createSymbolPair(
       stopPctOverride: primary.stopPctOverride,
       takeProfitPctOverride: primary.takeProfitPctOverride,
       intradayOnly: primary.intradayOnly,
-      // role / entry override / alternatives は **継承しない** (#452)。インバース
+      // role / entry override は **継承しない** (#452)。インバース
       // 相手は方向が逆で entry 特性が異なる (bull 側の押し目閾値は bear 側に
       // 適用できない)。NULL = 従来挙動で開始し、必要なら個別編集で設定する。
       role: null,
@@ -901,7 +850,6 @@ export async function createSymbolPair(
       maxAtrRatioOverride: null,
       maxSma50DeviationPctOverride: null,
       requireAboveSma50Override: null,
-      alternatives: null,
       // 条件連動配分も継承しない (#452): 方向が逆の相手に同じ配分条件は適用
       // できない。default (false / NULL) = 従来挙動で開始。
       entryRequired: false,

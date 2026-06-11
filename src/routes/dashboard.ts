@@ -19,7 +19,7 @@ import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/g
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency, SymbolRole } from '../infrastructure/db/symbolConfigRepo'
-import { loadInversePairs, loadPairRegimeConfigs, parseAlternativesJson, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs, loadPairRegimeConfigs, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -512,7 +512,6 @@ export const dashboard = new Hono<DashboardBindings>()
         ? buildBuyabilityView(symbolChart.evalIndicators, entryRule)
         : null
       // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
-      // WATCH/NG 時は alternatives (表示専用) を併記する。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
       // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
       // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
@@ -577,7 +576,6 @@ export const dashboard = new Hono<DashboardBindings>()
             entryStatus,
             decisionRows,
             pairRegime: pairRegimeView,
-            alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
             symbolPolicy: focusSymbol
               ? {
                   role: universe.symbolRole[focusSymbol] ?? null,
@@ -5836,8 +5834,6 @@ export interface ChartsBodySymbol {
   buyability?: BuyabilityView | null
   /** 段階判定 (#452 PR 2)。null = 評価データ無し。 */
   entryStatus?: EntryStatusResult | null
-  /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時に併記する。 */
-  alternatives?: string[]
   /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
   symbolPolicy?: SymbolPolicySummary | null
   /**
@@ -7233,7 +7229,6 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
-    alternatives: args.alternatives ?? [],
   })}
   ${renderDecisionPlotCaption(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
@@ -8398,8 +8393,6 @@ function fmtGateValue(g: EntryGateStatus): string {
 export interface BuyabilityPanelContext {
   /** 段階判定 (#452 PR 2)。null = 出さない。 */
   entryStatus?: EntryStatusResult | null
-  /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時のみ表示する。 */
-  alternatives?: string[]
 }
 
 export function renderBuyabilityPanel(
@@ -8495,22 +8488,11 @@ export function renderBuyabilityPanel(
     })
     .join('')
 
-  // --- 段階判定 badge + HALF 説明 + 代替候補 (#452 PR 2) ---
+  // --- 段階判定 badge + HALF 説明 (#452 PR 2) ---
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
     halfNote = `<div style="margin-top:6px;font-size:12px;color:#b25000">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
-  }
-  let altBlock = ''
-  if (status && (status.status === 'WATCH' || status.status === 'NG') && ctx.alternatives?.length) {
-    const links = ctx.alternatives
-      .map(
-        (s) =>
-          `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}" style="font-weight:600">${esc(s)}</a>`,
-      )
-      .join(' / ')
-    altBlock = `<div style="margin-top:8px"><strong>代替候補</strong>: ${links}
-      <div class="muted" style="font-size:11px">この銘柄が entry 不可の間の代替 ETF 候補 (表示のみ — 自動で発注先を切り替えることはしない、#452)。</div></div>`
   }
 
   // 距離の推移 (+ETA) と 入場ゲート は 2 列 (narrow 画面は .panel-row の
@@ -8519,7 +8501,7 @@ export function renderBuyabilityPanel(
     <div style="font-size:13px;color:${headColor};margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${statusBadge}<span>${headline}</span></div>
     ${halfNote}
     <div class="panel-row" style="gap:8px 20px">
-      <div>${trendBlock}${etaBlock}${altBlock}</div>
+      <div>${trendBlock}${etaBlock}</div>
       <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定 + role preset + 銘柄 override、#452)
         <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
       </div>
@@ -9426,7 +9408,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
   // 持ち越し設定は radio 2 択で両状態を明示する (「持ち越し」ラベル + 「持ち越さ
   // ない」checkbox の二重否定が ON/OFF どちらか読めない、という operator 指摘)。
   const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
-  // role / entry override / alternatives (#452)。pullback / trend / 過伸長は
+  // role / entry override (#452)。pullback / trend / 過伸長は
   // DB に fraction 保存、表示は % (×100)。ATR 比は ratio 生値。
   // 不正 role 値 (enum 外の DB 直書き) の fail-closed をフォームで弱めない
   // (CodeRabbit #453): 一致 option が無いと先頭 '' が選択され、保存で意図せず
@@ -9460,7 +9442,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
     row?.requireAboveSma50Override === null || row?.requireAboveSma50Override === undefined
       ? ''
       : String(row.requireAboveSma50Override)
-  const alternativesValue = (parseAlternativesJson(row?.alternatives ?? null, symbolValue) ?? []).join(', ')
   // 条件連動配分 (#452 Layer 3)。
   const entryRequiredChecked = row?.entryRequired ? ' checked' : ''
   const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
@@ -9536,8 +9517,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
     minReturn50dOverrideValue !== '' ||
     maxAtrRatioOverrideValue !== '' ||
     maxSma50DeviationPctOverrideValue !== '' ||
-    requireAboveSma50OverrideValue !== '' ||
-    alternativesValue !== ''
+    requireAboveSma50OverrideValue !== ''
   const hasExitValues =
     timeStopDaysOverrideValue !== '' ||
     kAtrOverrideValue !== '' ||
@@ -9656,11 +9636,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
           <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
         </select>
-        <label>代替銘柄</label>
-        <div>
-          <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
-          <span class="muted" style="font-size:12px;margin-left:6px">entry 不可時に表示する候補 (表示のみ・最大 8)</span>
-        </div>`,
+        `,
       hasStrategyValues,
     )}
 
