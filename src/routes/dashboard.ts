@@ -3092,6 +3092,66 @@ export function renderLastRolledCell(
   return `<span class="ok">${formatted} <small class="muted">(${esc(elapsedLabel)})</small></span>`
 }
 
+/**
+ * ログ行の「AI 用コピー」ボタン (#alerts-trades-ui)。raw 全 field の JSON +
+ * 文脈ヘッダ (ページ / フィルタ / 生成時刻) をクリップボードに積む — ログを
+ * そのまま AI に貼って相談する運用のため、表示で省略した情報も全部含める。
+ * `varName` は safeJsonScript で埋めた `{ meta, rows }` payload のグローバル名。
+ */
+function renderLogCopyScript(varName: string): string {
+  return `<script>
+(function () {
+  var payload = window.${varName};
+  if (!payload) return;
+  function copyText(text, btn) {
+    function done(ok) {
+      var prev = btn.textContent;
+      btn.textContent = ok ? '✅ コピーしました' : '✗ コピー失敗';
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      done(ok);
+    }
+  }
+  function header(count) {
+    return '# webull-trading ' + payload.meta.page + ' / ' + payload.meta.filter +
+      ' / generated ' + payload.meta.generatedAt + ' / ' + count + ' rows\\n';
+  }
+  document.querySelectorAll('.log-copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-id');
+      var row = null;
+      for (var i = 0; i < payload.rows.length; i++) {
+        if (String(payload.rows[i].id) === id) { row = payload.rows[i]; break; }
+      }
+      if (row) copyText(header(1) + JSON.stringify(row, null, 1), btn);
+    });
+  });
+  var all = document.getElementById('log-copy-all');
+  if (all) {
+    all.addEventListener('click', function () {
+      copyText(header(payload.rows.length) + JSON.stringify(payload.rows, null, 1), all);
+    });
+  }
+})();
+</script>`
+}
+
+const LOG_COPY_ALL_BTN =
+  '<button type="button" id="log-copy-all" style="padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;cursor:pointer">📋 表示中を AI 用にコピー</button>'
+
+const logCopyRowBtn = (id: number): string =>
+  `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 2px">📋</button>`
+
 /** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
 const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
   decision: { ja: '判定', color: '#86868b' },
@@ -3129,7 +3189,7 @@ function tradesBody(
 ): string {
   const viewPill = (label: string, v: string, active: boolean): string =>
     `<a href="/dashboard/trades?view=${v}&limit=${limit}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
-  const pills = `<nav style="margin-bottom:10px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin-left:8px">${rows.length} 件 (limit=${limit})</span></nav>`
+  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${LOG_COPY_ALL_BTN}</nav>`
   if (rows.length === 0) {
     return `${pills}<p class="muted">該当するレコードがありません。</p>`
   }
@@ -3189,6 +3249,7 @@ function tradesBody(
             ? `<span style="${pillStyle('#f3f3f5', '#86868b')}">DRY</span>`
             : '<span class="muted">—</span>'
       return `<tr style="font-size:13px">
+        <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
         <td style="white-space:nowrap">${eventCell}</td>
         <td>${symbolCell}</td>
@@ -3204,11 +3265,20 @@ function tradesBody(
   return `${pills}
   <table>
     <thead><tr style="font-size:12px">
-      <th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
       <th style="text-align:right">数量</th><th style="text-align:right">単価</th><th style="text-align:right">実現損益</th><th>状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__tradesCopy', {
+    meta: {
+      page: 'trade_journal (約定履歴)',
+      filter: `view=${view}, limit=${limit}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__tradesCopy')}`
 }
 
 function configBody(
@@ -3696,7 +3766,7 @@ const ALERT_MESSAGE_FOLD = 160
 function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe } = args
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
-  const countLine = `<span class="muted" style="font-size:12px">${rows.length} 件 (limit=${limit}, max 500)</span>`
+  const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${LOG_COPY_ALL_BTN}`
   if (rows.length === 0) {
     return `${filterPills}${countLine}<p class="muted">該当するアラートはありません。</p>`
   }
@@ -3722,6 +3792,7 @@ function alertsBody(args: AlertsBodyArgs): string {
         ? `<code style="font-size:11px">${esc(r.cause)}</code>`
         : '<span class="muted">—</span>'
       return `<tr style="font-size:13px;vertical-align:top">
+        <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
         <td>${sevCell}</td>
         <td>${eventCell}</td>
@@ -3735,10 +3806,22 @@ function alertsBody(args: AlertsBodyArgs): string {
   return `${filterPills}${countLine}
   <table>
     <thead><tr style="font-size:12px">
-      <th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
+      <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__alertsCopy', {
+    meta: {
+      page: 'notification_emit_log (アラート)',
+      filter:
+        severityFilter.length === 0 && eventTypeFilter === undefined
+          ? '全件'
+          : `severity=${severityFilter.join(',') || 'all'}, eventType=${eventTypeFilter ?? 'all'}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__alertsCopy')}`
 }
 
 /**

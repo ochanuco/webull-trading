@@ -106,6 +106,15 @@ describe('/dashboard/trades 新 UI (#alerts-trades-ui)', () => {
     // mode pill
     expect(body).toContain('実発注')
     expect(body).toContain('>DRY<')
+    // AI 用コピー: 全件ボタン + 行ボタン + raw payload (表示で省略した field も含む)
+    expect(body).toContain('id="log-copy-all"')
+    expect(body).toContain('class="log-copy-btn" data-id="3"')
+    expect(body).toContain('window.__tradesCopy')
+    expect(body).toContain('trade_journal (約定履歴)')
+    // inline script の構文回帰 (#465 ガードをこのページにも)
+    for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      expect(() => new Function(m[1]!)).not.toThrow()
+    }
   })
 
   it('view=errors はエラー行のみの絞り込みリンクとして機能する (route param)', async () => {
@@ -159,5 +168,11 @@ describe('/dashboard/alerts 新 UI (#alerts-trades-ui)', () => {
     expect(body).toContain(longMessage.slice(0, 100))
     // 短文はそのまま
     expect(body).toContain('dryRun true → false')
+    // AI 用コピー
+    expect(body).toContain('id="log-copy-all"')
+    expect(body).toContain('window.__alertsCopy')
+    for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      expect(() => new Function(m[1]!)).not.toThrow()
+    }
   })
 })
