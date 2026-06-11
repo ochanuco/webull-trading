@@ -9164,6 +9164,8 @@ function symbolFormBody(args: SymbolFormArgs): string {
     row?.takeProfitPctOverride === null || row?.takeProfitPctOverride === undefined
       ? ''
       : String(Math.round(row.takeProfitPctOverride * 1000) / 10)
+  // 持ち越し設定は radio 2 択で両状態を明示する (「持ち越し」ラベル + 「持ち越さ
+  // ない」checkbox の二重否定が ON/OFF どちらか読めない、という operator 指摘)。
   const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
   // role / entry override / alternatives (#452)。pullback / trend / 過伸長は
   // DB に fraction 保存、表示は % (×100)。ATR 比は ratio 生値。
@@ -9427,10 +9429,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
         </div>
         <label>持ち越し</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-          <input type="hidden" name="intraday_only" value="false">
-          <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ (持ち越さない)
-        </label>`,
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:13px">
+          <label style="display:flex;align-items:center;gap:6px">
+            <input type="radio" name="intraday_only" value="false"${intradayOnlyChecked === '' ? ' checked' : ''}> 持ち越す <span class="muted" style="font-size:12px">(スイング — 既定)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px">
+            <input type="radio" name="intraday_only" value="true"${intradayOnlyChecked}> 持ち越さない <span class="muted" style="font-size:12px">(デイトレ — US 引け前に強制クローズ)</span>
+          </label>
+        </div>`,
       hasExitValues,
     )}
 
