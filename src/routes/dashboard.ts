@@ -8738,13 +8738,18 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 }
 
 /**
- * 配分マップ編集キャンバス (#symbol-relation-map)。read-only マップと違い
- * **設定を書く** UI なので、操作は 3 つに限定する:
- *   - 線を引く (銘柄 → 銘柄) = 退避先を設定 (entry_required も ON)
- *   - 線を消す = 退避先を解除
- *   - カード内 % input = 予算配分の更新 (インバース対は server 側で同期)
- * 各操作は confirm → admin API → location.reload() — canvas 上の見た目と DB の
- * drift を作らない (楽観更新しない)。インバース対 / proxy はカード内に表示のみ。
+ * 配分マップ編集キャンバス (#symbol-relation-map)。**draft 編集モデル**:
+ * 線を引く / 消す / % を変えても即保存はせず、ローカル draft に積んで
+ * 変更箇所をハイライト + サマリ表示し、「適用」で一括保存 → reload する
+ * (operator 指定: つど confirm ではなく、編集中は視覚的フィードバック、最後に
+ * 適用ボタン)。リセット = reload で破棄。
+ *
+ * 操作の意味:
+ *   - 口座 → 銘柄の線: 配分 (引く = 配分対象に追加。% はカードの入力欄 / 消す = 配分解除)
+ *   - 銘柄 → 銘柄の線: 退避先 (引く = 設定 + 条件連動 ON / 消す = 解除)。1 銘柄 1 本
+ *   - カードの % 入力: 予算配分の変更 (インバース対は server 側で同期)
+ * 適用時は budget-alloc (一括) → cash-fallback (銘柄ごと) の順で POST する。
+ * インバース対 / proxy はカード内に表示のみ (不変条件があるためキャンバス編集不可)。
  */
 export function symbolMapEditorBody(
   rows: SymbolConfigRow[],
@@ -8772,19 +8777,43 @@ export function symbolMapEditorBody(
   if (nodes.length === 0) {
     return `<p class="muted">有効な銘柄がありません。</p>`
   }
-  const payload = { nodes }
+  // 口座カードの予算合計はインバース対の枠共有 (#315) を反映 (対は max)。
+  const counted = new Set<string>()
+  let totalPct = 0
+  for (const n of nodes) {
+    if (counted.has(n.sym)) continue
+    counted.add(n.sym)
+    const partnerNode = n.inverse ? nodes.find((x) => x.sym === n.inverse) : undefined
+    if (partnerNode) {
+      counted.add(n.inverse!)
+      totalPct += Math.max(n.pct, partnerNode.pct)
+    } else {
+      totalPct += n.pct
+    }
+  }
+  const payload = { nodes, accountTotalPct: Math.round(totalPct * 10) / 10 }
   return `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
     <span class="muted" style="font-size:12px">
-      カードの出力 (右の点) から相手の入力 (左の点) へ<strong>線を引く = 退避先を設定</strong> (条件連動も ON になります) ・
-      線をクリックして Delete = 解除 ・ % 欄 = 予算配分。各操作は確認後に即保存されます。
+      <strong>口座 → 銘柄の線</strong> = 配分 ・ <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON) ・ % 欄 = 配分変更。
+      変更は即保存されません — 下のサマリを確認して<strong>「適用」で一括保存</strong>します。
     </span>
   </p>
+  <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:#fff8e6;border:1px solid #e6c46a;border-radius:8px;margin-bottom:8px">
+    <div style="flex:1;min-width:0">
+      <strong style="font-size:12px">未適用の変更</strong>
+      <ul id="sm-changes-list" style="margin:4px 0 0 16px;padding:0;font-size:12px"></ul>
+    </div>
+    <button type="button" id="sm-apply" style="padding:6px 18px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">適用</button>
+    <button type="button" id="sm-reset" style="padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">リセット</button>
+  </div>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css">
   <style>
-  #symbol-map-editor{height:calc(100vh - 180px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
+  #symbol-map-editor{height:calc(100vh - 220px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
   #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
   #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
+  #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
+  #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
   .sm-card{padding:8px 10px;font-size:12px}
   .sm-card .sm-title{font-size:14px;font-weight:700}
   .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
@@ -8794,7 +8823,6 @@ export function symbolMapEditorBody(
   </style>
   <div id="symbol-map-editor"></div>
   ${safeJsonScript('__symbolMapEditor', payload)}
-  <script src="${ECHARTS_CDN}" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
   <script>
   document.addEventListener('DOMContentLoaded', function () {
@@ -8804,9 +8832,23 @@ export function symbolMapEditorBody(
     var editor = new Drawflow(el);
     editor.reroute = true;
     editor.start();
-    var idOf = {};   // symbol -> drawflow node id
-    var symOf = {};  // node id -> symbol
+    var idOf = {};
+    var symOf = {};
+    var baseline = {};   // sym -> { pct, fallback }
+    var draft = {};      // sym -> { pct, fallback } (編集中の値)
+    var programmatic = false;
+
+    var allocated = data.nodes.filter(function (n) { return n.pct > 0; });
+    var accountY = Math.max(30, 30 + ((allocated.length - 1) * 120) / 2);
+    var accountId = editor.addNode('口座', 0, 1, 40, accountY, 'sm-node sm-account',
+      { sym: '口座' },
+      '<div class="sm-card"><div class="sm-title" style="color:#46637f">口座</div>' +
+      '<div class="sm-meta">原資 ・ 予算 ' + data.accountTotalPct + '% (対は枠共有で max)</div></div>');
+    symOf[accountId] = '__account__';
+
     data.nodes.forEach(function (n) {
+      baseline[n.sym] = { pct: n.pct, fallback: n.fallback };
+      draft[n.sym] = { pct: n.pct, fallback: n.fallback };
       var statusHtml = n.held
         ? '<div class="sm-status-active">Active ・ ' + n.held + '</div>'
         : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
@@ -8820,72 +8862,138 @@ export function symbolMapEditorBody(
         '<div style="margin-top:4px">配分 <input type="number" min="0" max="100" step="1" value="' + n.pct + '" data-sym="' + n.sym + '" class="sm-pct"> %</div>' +
         '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
         '</div>';
-      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 80 : 480, n.y, 'sm-node', { sym: n.sym }, html);
+      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node', { sym: n.sym }, html);
       idOf[n.sym] = id;
       symOf[id] = n.sym;
     });
-    // 既存の退避先を線として描く (プログラム描画中は connectionCreated を無視)。
-    var seeding = true;
-    data.nodes.forEach(function (n) {
-      if (n.fallback && idOf[n.fallback]) {
-        editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
-      }
-    });
-    seeding = false;
 
-    function apiFallback(sym, target) {
-      return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/cash-fallback', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: target }),
-      }).then(function (r) {
-        if (!r.ok) return r.json().then(function (b) { throw new Error(b.error || ('HTTP ' + r.status)); });
-      });
+    programmatic = true;
+    data.nodes.forEach(function (n) {
+      if (n.pct > 0) editor.addConnection(accountId, idOf[n.sym], 'output_1', 'input_1');
+      if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
+    });
+    programmatic = false;
+
+    function markConnectionPending(srcId, dstId) {
+      var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);
+      if (conn) conn.classList.add('sm-pending');
     }
+    function setCardDirty(sym, dirty) {
+      var nodeEl = document.getElementById('node-' + idOf[sym]);
+      if (nodeEl) nodeEl.classList.toggle('sm-dirty', dirty);
+    }
+    function isDirty(sym) {
+      return draft[sym].pct !== baseline[sym].pct || (draft[sym].fallback || null) !== (baseline[sym].fallback || null);
+    }
+    function renderChanges() {
+      var bar = document.getElementById('sm-changes-bar');
+      var list = document.getElementById('sm-changes-list');
+      var items = [];
+      Object.keys(draft).forEach(function (sym) {
+        var b = baseline[sym];
+        var d = draft[sym];
+        if (d.pct !== b.pct) {
+          items.push(sym + ': 配分 ' + (b.pct || 'なし') + (b.pct ? '%' : '') + ' → ' + (d.pct ? d.pct + '%' : '解除'));
+        }
+        if ((d.fallback || null) !== (b.fallback || null)) {
+          if (d.fallback) items.push(sym + ': 退避先 → ' + d.fallback + ' (条件連動 ON)');
+          else items.push(sym + ': 退避先を解除');
+        }
+        setCardDirty(sym, isDirty(sym));
+      });
+      list.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
+      bar.hidden = items.length === 0;
+    }
+
     editor.on('connectionCreated', function (info) {
-      if (seeding) return;
+      if (programmatic) return;
+      var src = symOf[info.output_id];
+      var dst = symOf[info.input_id];
+      if (!src || !dst || dst === '__account__') {
+        programmatic = true;
+        editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+        programmatic = false;
+        return;
+      }
+      if (src === '__account__') {
+        // 配分対象に追加。% はカードの入力欄で指定する (0 のままなら適用対象外)。
+        if (draft[dst].pct === 0) {
+          draft[dst].pct = 5; // 仮の初期値。入力欄に反映して編集を促す。
+          var input = el.querySelector('input.sm-pct[data-sym="' + dst + '"]');
+          if (input) { input.value = '5'; input.focus(); }
+        }
+        markConnectionPending(info.output_id, info.input_id);
+        renderChanges();
+        return;
+      }
+      // 退避先は 1 銘柄 1 本 — 既存の出力接続を visual からも外す。
+      if (draft[src].fallback && idOf[draft[src].fallback]) {
+        programmatic = true;
+        editor.removeSingleConnection(idOf[src], idOf[draft[src].fallback], 'output_1', 'input_1');
+        programmatic = false;
+      }
+      draft[src].fallback = dst;
+      markConnectionPending(info.output_id, info.input_id);
+      renderChanges();
+    });
+
+    editor.on('connectionRemoved', function (info) {
+      if (programmatic) return;
       var src = symOf[info.output_id];
       var dst = symOf[info.input_id];
       if (!src || !dst) return;
-      if (!confirm(src + ' の退避先を ' + dst + ' に設定します (条件連動も ON になります)。よろしいですか？')) {
-        location.reload();
+      if (src === '__account__') {
+        draft[dst].pct = 0;
+        var input = el.querySelector('input.sm-pct[data-sym="' + dst + '"]');
+        if (input) input.value = '0';
+        renderChanges();
         return;
       }
-      apiFallback(src, dst)
-        .then(function () { location.reload(); })
-        .catch(function (e) { alert('設定に失敗: ' + e.message); location.reload(); });
+      if (draft[src].fallback === dst) draft[src].fallback = null;
+      renderChanges();
     });
-    editor.on('connectionRemoved', function (info) {
-      if (seeding) return;
-      var src = symOf[info.output_id];
-      if (!src) return;
-      if (!confirm(src + ' の退避先を解除します (枠は現金待機になります)。よろしいですか？')) {
-        location.reload();
-        return;
-      }
-      apiFallback(src, null)
-        .then(function () { location.reload(); })
-        .catch(function (e) { alert('解除に失敗: ' + e.message); location.reload(); });
-    });
-    // 配分% の編集。blur 時に確認して保存 (budget-alloc はインバース対を server 側で同期)。
+
     el.addEventListener('change', function (ev) {
       var input = ev.target;
       if (!input.classList || !input.classList.contains('sm-pct')) return;
       var sym = input.getAttribute('data-sym');
-      var v = String(input.value).trim();
-      if (!confirm(sym + ' の予算配分を ' + (v === '' ? '未設定' : v + '%') + ' に変更します。よろしいですか？')) {
-        location.reload();
-        return;
+      var v = Number(String(input.value).trim());
+      draft[sym].pct = Number.isFinite(v) && v > 0 ? v : 0;
+      renderChanges();
+    });
+
+    document.getElementById('sm-reset').addEventListener('click', function () { location.reload(); });
+    document.getElementById('sm-apply').addEventListener('click', function () {
+      var pctChanges = Object.keys(draft).filter(function (sym) { return draft[sym].pct !== baseline[sym].pct; });
+      var fbChanges = Object.keys(draft).filter(function (sym) { return (draft[sym].fallback || null) !== (baseline[sym].fallback || null); });
+      if (pctChanges.length === 0 && fbChanges.length === 0) return;
+      if (!confirm('表示中の変更をまとめて適用します。よろしいですか？')) return;
+      var steps = Promise.resolve();
+      if (pctChanges.length > 0) {
+        var form = new FormData();
+        pctChanges.forEach(function (sym) {
+          form.append('pct_' + sym, draft[sym].pct > 0 ? String(draft[sym].pct) : '');
+        });
+        steps = steps.then(function () {
+          return fetch('/admin/symbol-config/budget-alloc', { method: 'POST', credentials: 'same-origin', body: form })
+            .then(function (r) { if (!r.ok) throw new Error('配分の保存に失敗 (HTTP ' + r.status + ')'); });
+        });
       }
-      var form = new FormData();
-      form.append('pct_' + sym, v);
-      fetch('/admin/symbol-config/budget-alloc', { method: 'POST', credentials: 'same-origin', body: form })
-        .then(function (r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          location.reload();
-        })
-        .catch(function (e) { alert('保存に失敗: ' + e.message); location.reload(); });
+      fbChanges.forEach(function (sym) {
+        steps = steps.then(function () {
+          return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/cash-fallback', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target: draft[sym].fallback }),
+          }).then(function (r) {
+            if (!r.ok) return r.json().then(function (b) { throw new Error(sym + ' の退避先の保存に失敗: ' + (b.error || 'HTTP ' + r.status)); });
+          });
+        });
+      });
+      steps
+        .then(function () { location.reload(); })
+        .catch(function (e) { alert(e.message + ' — 再読込して状態を確認してください。'); location.reload(); });
     });
   });
   </script>`
