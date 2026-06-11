@@ -718,6 +718,40 @@ export async function loadInversePairs(
 }
 
 /**
+ * regime 有効化済みペアの設定を返す (#472)。`regime_enabled=1` の行のみ。
+ * proxy / bull の不備・bull がペア членでない等の misconfig は **skip せず**
+ * `invalidConfig` 付きで返す — 下流 (scheduler) が zone=unknown (両側 BUY
+ * block) に倒すため。「不正設定を黙って無効扱い」にしない (fail-closed)。
+ */
+export async function loadPairRegimeConfigs(
+  db: DrizzleD1Database,
+): Promise<import('../../trading/strategy/pairRegime').PairRegimeEntry[]> {
+  const rows = await db.select().from(inversePairs)
+  const entries: import('../../trading/strategy/pairRegime').PairRegimeEntry[] = []
+  for (const row of rows) {
+    if (!row.regimeEnabled) continue
+    const a = row.symbol.toUpperCase()
+    const b = row.inverse.toUpperCase()
+    const proxy = row.regimeProxySymbol?.trim().toUpperCase() ?? ''
+    const bull = row.regimeBullSymbol?.trim().toUpperCase() ?? ''
+    let invalidConfig: string | null = null
+    if (a === b) {
+      // 書き込み経路 (buildInversePairWrite) は self-pair を throw で弾くが、
+      // DB 直書きで入り得る。黙って有効扱いにせず unknown へ (CodeRabbit #473)。
+      invalidConfig = `inverse pair must contain two distinct symbols (got ${a}/${b})`
+    } else if (proxy.length === 0 || !/^[A-Z0-9]{1,10}$/.test(proxy)) {
+      invalidConfig = `regime_proxy_symbol is missing/invalid for pair ${a}/${b}`
+    } else if (bull !== a && bull !== b) {
+      invalidConfig = `regime_bull_symbol must be ${a} or ${b} (got '${bull}')`
+    }
+    const bullSymbol = bull === b ? b : a
+    const bearSymbol = bullSymbol === a ? b : a
+    entries.push({ bullSymbol, bearSymbol, proxySymbol: proxy || a, invalidConfig })
+  }
+  return entries
+}
+
+/**
  * inverse_pairs を 1:1 で張る (#315 regime hedge の対登録)。canonical 1 行のみ
  * 保存し、`loadInversePairs` が双方向展開する。
  *

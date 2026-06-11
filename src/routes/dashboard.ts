@@ -45,7 +45,7 @@ import {
   loadPortfolioEquitySnapshots,
   type LoadPortfolioEquitySnapshotOptions,
 } from '../infrastructure/db/portfolioEquitySnapshotRepo'
-import type { PortfolioEquitySnapshotRow } from '../infrastructure/db/schema'
+import type { PortfolioEquitySnapshotRow, TradeJournalRow } from '../infrastructure/db/schema'
 import type { VixRegime } from '../trading/risk/vixRegimeFilter'
 import {
   buildBuyabilityView,
@@ -61,6 +61,11 @@ import {
 } from '../trading/strategy/entryStatus'
 import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
 import {
+  evaluatePairRegime,
+  PAIR_REGIME_ZONE_LABELS,
+  type PairRegimeDecision,
+} from '../trading/strategy/pairRegime'
+import {
   computeConditionalAllocation,
   type SymbolAllocation,
 } from '../trading/strategy/conditionalAllocation'
@@ -68,7 +73,7 @@ import type {
   PullbackIndicators,
   SymbolRule,
 } from '../trading/strategy/strategies/PullbackUptrendStrategy'
-import { and, asc, desc, eq, gte, lte } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
@@ -246,14 +251,26 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
+    // view filter: 全イベント (default) / 約定・手仕舞いのみ / エラーのみ。
+    // ジャーナルは 1 注文で複数 lifecycle 行を持つため、operator の主目的
+    // (「何が約定した?」「何が失敗した?」) を 1 クリックで絞れるようにする。
+    const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(c.req.query('view'))
     const db = createDb(c.env.DB)
+    const baseQuery = db.select().from(tradeJournal)
+    const filtered =
+      view === 'fills'
+        ? baseQuery.where(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
+        : view === 'errors'
+          ? // errorMessage だけだと errorClass のみ埋まる失敗行が落ちる (CodeRabbit #469)
+            baseQuery.where(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass)))
+          : baseQuery
     // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
     // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
     const [rows, universe] = await Promise.all([
-      db.select().from(tradeJournal).orderBy(desc(tradeJournal.id)).limit(limit),
+      filtered.orderBy(desc(tradeJournal.id)).limit(limit),
       loadSymbolUniverse(c.env).catch(() => null),
     ])
-    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe)))
+    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe, view)))
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
@@ -504,6 +521,52 @@ export const dashboard = new Hono<DashboardBindings>()
       // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
       // WATCH/NG 時は alternatives (表示専用) を併記する。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
+      // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
+      // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
+      let pairRegimeView: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null = null
+      if (focusSymbol && global.pairRegimeMode !== 'off') {
+        const pair = universe.pairRegimes.find(
+          (pr) => pr.bullSymbol === focusSymbol || pr.bearSymbol === focusSymbol,
+        )
+        if (pair) {
+          const side = pair.bullSymbol === focusSymbol ? ('bull' as const) : ('bear' as const)
+          let decision: PairRegimeDecision
+          if (pair.invalidConfig !== null) {
+            decision = { zone: 'unknown', score: null, proxySymbol: pair.proxySymbol, asOfDate: null, reason: `misconfig: ${pair.invalidConfig}` }
+          } else {
+            decision = await new YahooBarClient()
+              .getDailyBars(pair.proxySymbol, 80)
+              .then((bars) =>
+                evaluatePairRegime(bars, {
+                  proxySymbol: pair.proxySymbol,
+                  thresholds: {
+                    bullEnter: global.pairRegimeThetaBullEnter,
+                    bullExit: global.pairRegimeThetaBullExit,
+                    bearEnter: global.pairRegimeThetaBearEnter,
+                    bearExit: global.pairRegimeThetaBearExit,
+                  },
+                  now: new Date(),
+                }),
+              )
+              .catch((err) => ({
+                zone: 'unknown' as const,
+                score: null,
+                proxySymbol: pair.proxySymbol,
+                asOfDate: null,
+                reason: `proxy bars fetch failed: ${messageOf(err)}`,
+              }))
+          }
+          pairRegimeView = { decision, side, mode: global.pairRegimeMode }
+        }
+      }
+      // 判定履歴 (#decisions-chart-unify): 戦略判定ページと同じ loader を共用。
+      // 失敗 (migration 未適用等) はチャート本体を巻き込まず空表示に落とす。
+      const decisionRows =
+        focusSymbol && c.env.DB
+          ? await loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(
+              () => [],
+            )
+          : []
       return c.html(
         renderLayout(
           c,
@@ -518,6 +581,8 @@ export const dashboard = new Hono<DashboardBindings>()
             universe,
             buyability,
             entryStatus,
+            decisionRows,
+            pairRegime: pairRegimeView,
             alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
             symbolPolicy: focusSymbol
               ? {
@@ -619,44 +684,8 @@ export const dashboard = new Hono<DashboardBindings>()
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     const db = createDb(c.env.DB)
     try {
-      // trade_journal の post_submit と LEFT JOIN して realized_pnl を引く
-      // (#143)。client_order_id が JOIN key — BUY/SELL 成立時のみ strategy
-      // 側に記録されているので HOLD/REJECT 行は realized_pnl が NULL に
-      // 落ちる (意図通り)。
-      const baseQuery = db
-        .select({
-          id: strategyDecisionLog.id,
-          timestamp: strategyDecisionLog.timestamp,
-          requestId: strategyDecisionLog.requestId,
-          symbol: strategyDecisionLog.symbol,
-          decision: strategyDecisionLog.decision,
-          reason: strategyDecisionLog.reason,
-          price: strategyDecisionLog.price,
-          indicatorsJson: strategyDecisionLog.indicatorsJson,
-          clientOrderId: strategyDecisionLog.clientOrderId,
-          traceJson: strategyDecisionLog.traceJson,
-          filledPrice: tradeJournal.filledPrice,
-          filledQty: tradeJournal.filledQty,
-          realizedPnl: tradeJournal.realizedPnl,
-          brokerStatus: tradeJournal.brokerStatus,
-        })
-        .from(strategyDecisionLog)
-        .leftJoin(
-          tradeJournal,
-          and(
-            eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
-            eq(tradeJournal.tradeEventType, 'post_submit'),
-          ),
-        )
       const [rows, universe] = await Promise.all([
-        symbolFilter
-          ? baseQuery
-              .where(eq(strategyDecisionLog.symbol, symbolFilter))
-              .orderBy(desc(strategyDecisionLog.id))
-              .limit(limit)
-          : baseQuery
-              .orderBy(desc(strategyDecisionLog.id))
-              .limit(limit),
+        loadDecisionRows(db, { symbol: symbolFilter, limit }),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
       return c.html(renderLayout(c, '戦略判定', cronBody(rows, limit, symbolFilter, universe)))
@@ -2081,12 +2110,26 @@ function brokerProbeBody(args: {
         if (v.result && v.result.phase === 'response' && typeof v.result.bodyTruncated === 'string' &&
             v.result.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) { denyVariant = v; }
       }
+      // 全 variant が「銘柄不正」PARAM_ERR → マスタに不存在 (ZZZZ 実測パターン)。
+      var respondingAll = body.previewVariants.filter(function (v) { return v.result && v.result.status !== null; });
+      var allInvalidSymbol = respondingAll.length > 0 && respondingAll.every(function (v) {
+        var b = parseBody(v.result);
+        return b && typeof b.error_code === 'string' && b.error_code.indexOf('PARAM_ERR') !== -1 &&
+          typeof b.message === 'string' && /invalid[^"]*symbol/i.test(b.message);
+      });
+      if (allInvalidSymbol) {
+        setPill('bp-instrument-pill', 'ng', '銘柄不正');
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は Webull の銘柄マスタに存在しません (symbol / market の組合せ不正)。';
+        return;
+      }
       if (okVariant) {
-        setPill('bp-instrument-pill', 'ok', '取引可能');
+        // preview 200 = 見積もり成功。発注 allowlist は検証されない (USMV 前例)
+        // ため「取引可能」とは表示しない。
+        setPill('bp-instrument-pill', 'unknown', '見積もり可');
         var okParsed = parseBody(okVariant.result);
         var cost = okParsed && (okParsed.estimated_cost || (okParsed.data && okParsed.data.estimated_cost));
-        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は発注前検証 (Preview Order) を通過しました — 取引可能です。' +
-          '<span class="muted" style="font-size:12px"> (body shape: ' + escHtml(okVariant.label) + (cost ? ' / estimated_cost: ' + escHtml(cost) : '') + ')</span>';
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は銘柄として存在し見積もり可' + (cost ? ' (estimated_cost: ' + escHtml(cost) + ')' : '') + '。' +
+          '<span class="muted">発注可否 (deny list) は事前検証不可 — 最終確認は Webull アプリで。</span>';
         return;
       }
       if (denyVariant) {
@@ -3081,70 +3124,200 @@ export function renderLastRolledCell(
   return `<span class="ok">${formatted} <small class="muted">(${esc(elapsedLabel)})</small></span>`
 }
 
+/**
+ * ログ行の「AI 用コピー」ボタン (#alerts-trades-ui)。raw 全 field の JSON +
+ * 文脈ヘッダ (ページ / フィルタ / 生成時刻) をクリップボードに積む — ログを
+ * そのまま AI に貼って相談する運用のため、表示で省略した情報も全部含める。
+ * `varName` は safeJsonScript で埋めた `{ meta, rows }` payload のグローバル名。
+ */
+function renderLogCopyScript(varName: string): string {
+  return `<script>
+(function () {
+  var payload = window.${varName};
+  if (!payload) return;
+  function copyText(text, btn) {
+    function done(ok) {
+      var prev = btn.textContent;
+      btn.textContent = ok ? '✅' : '✗';
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    }
+    function fallbackExecCommand() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      done(ok);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // permission 拒否などの reject 時も execCommand に落とす (CodeRabbit #469)。
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallbackExecCommand);
+    } else {
+      fallbackExecCommand();
+    }
+  }
+  function header(count) {
+    return '# webull-trading ' + payload.meta.page + ' / ' + payload.meta.filter +
+      ' / generated ' + payload.meta.generatedAt + ' / ' + count + ' rows\\n';
+  }
+  document.querySelectorAll('.log-copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-id');
+      // 行コピーは payload.full (trace 等の重い field 含む完全版) を優先。
+      var src = payload.full || payload.rows;
+      var row = null;
+      for (var i = 0; i < src.length; i++) {
+        if (String(src[i].id) === id) { row = src[i]; break; }
+      }
+      if (row) copyText(header(1) + JSON.stringify(row, null, 1), btn);
+    });
+  });
+  var all = document.getElementById('log-copy-all');
+  if (all) {
+    all.addEventListener('click', function () {
+      copyText(header(payload.rows.length) + JSON.stringify(payload.rows, null, 1), all);
+    });
+  }
+})();
+</script>`
+}
+
+const LOG_COPY_ALL_BTN =
+  '<button type="button" id="log-copy-all" style="padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;cursor:pointer">📋 表示中を AI 用にコピー</button>'
+
+const logCopyRowBtn = (id: number): string =>
+  `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 2px">📋</button>`
+
+/** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
+const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
+  decision: { ja: '判定', color: '#86868b' },
+  intent: { ja: '注文作成', color: '#46608a' },
+  pre_submit: { ja: '送信記録', color: '#46608a' },
+  post_submit: { ja: '送信応答', color: '#46608a' },
+  fill: { ja: '約定', color: '#057a55' },
+  exit: { ja: '手仕舞い', color: '#b25000' },
+}
+
+/** broker error_code → 短い日本語。未知コードは code をそのまま出す。 */
+const BROKER_ERROR_LABELS: Record<string, string> = {
+  OAUTH_OPENAPI_TICKER_IS_DENY: '銘柄取扱なし',
+  OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY: '売却数量超過',
+  OAUTH_OPENAPI_PARAM_ERR: 'パラメータ不正',
+  INVALID_TOKEN: 'トークン無効',
+}
+
+/** errorMessage から error_code らしき token を抜く (JSON / 平文の両対応)。 */
+function extractBrokerErrorCode(message: string): string | null {
+  const fromJson = message.match(/"error_code"\s*:\s*"([A-Z0-9_]+)"/)
+  if (fromJson) return fromJson[1]!
+  const bare = message.match(/\b([A-Z][A-Z0-9_]{6,})\b/)
+  return bare ? bare[1]! : null
+}
+
+const pillStyle = (bg: string, fg: string): string =>
+  `display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${bg};color:${fg};white-space:nowrap`
+
 function tradesBody(
-  rows: Array<{
-    id: number
-    timestamp: string
-    tradeEventType: string
-    symbol: string | null
-    side: string | null
-    quantity: number | null
-    limitPrice: number | null
-    filledQty: number | null
-    filledPrice: number | null
-    brokerStatus: string | null
-    mode: string | null
-    errorMessage: string | null
-  }>,
+  rows: TradeJournalRow[],
   limit: number,
   universe?: SymbolUniverse | null,
+  view: 'all' | 'fills' | 'errors' = 'all',
 ): string {
+  const viewPill = (label: string, v: string, active: boolean): string =>
+    `<a href="/dashboard/trades?view=${v}&limit=${limit}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}</nav>`
   if (rows.length === 0) {
-    return `<p class="muted">trade_journal にレコードがありません (limit=${limit})。</p>`
+    return `${pills}<p class="muted">該当するレコードがありません。</p>`
   }
   const tbody = rows
     .map((r) => {
-      const statusClass =
-        r.errorMessage
-          ? 'err'
-          : r.brokerStatus === 'FILLED'
-            ? 'ok'
-            : r.brokerStatus
-              ? 'warn'
-              : 'muted'
-      // status セルは enum 値 (FILLED/CANCELED 等) は英字のまま、error は
-      // "エラー: " を和訳 prefix。運用者が grep / broker API と突き合わせ
-      // しやすい粒度を保つ。
-      const statusText =
-        r.errorMessage ? `エラー: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
-      const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : '—'
+      const ev = TRADE_EVENT_LABELS[r.tradeEventType] ?? { ja: r.tradeEventType, color: '#86868b' }
+      const eventCell = `<span title="${esc(r.tradeEventType)}" style="color:${ev.color};font-weight:600">● ${esc(ev.ja)}</span>`
+      const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : null
       const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
-      const symbolCellInner = r.symbol && inactive
-        ? `<span class="symbol-disabled" title="${esc(inactiveTooltip(r.symbol, universe))}">${esc(symbolText)}</span>`
-        : esc(symbolText)
-      return `<tr>
-        <td>${r.id}</td>
-        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td>${esc(r.tradeEventType)}</td>
-        <td><strong>${symbolCellInner}</strong></td>
-        <td>${esc(r.side ?? '—')}</td>
-        <td>${r.quantity === null ? '—' : esc(r.quantity)}</td>
-        <td>${r.limitPrice === null ? '—' : fmtNumber(r.limitPrice, 2)}</td>
-        <td>${r.filledQty === null ? '—' : esc(r.filledQty)}</td>
-        <td>${r.filledPrice === null ? '—' : fmtNumber(r.filledPrice, 2)}</td>
-        <td class="${statusClass}">${esc(statusText)}</td>
-        <td>${esc(r.mode ?? '—')}</td>
+      const symbolCell = r.symbol
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(symbolText!)}</strong></a>`
+        : '<span class="muted">—</span>'
+      const sideCell =
+        r.side === 'BUY'
+          ? `<span class="ok" style="font-weight:700">買</span> <span class="muted" style="font-size:11px">BUY</span>`
+          : r.side === 'SELL'
+            ? `<span class="err" style="font-weight:700">売</span> <span class="muted" style="font-size:11px">SELL</span>`
+            : '<span class="muted">—</span>'
+      // 数量: 発注数量 → 約定数量。一致なら 1 つだけ、部分約定が見えるように。
+      const qtyCell =
+        r.filledQty !== null && r.quantity !== null && r.filledQty !== r.quantity
+          ? `${esc(r.quantity)} → <strong>${esc(r.filledQty)}</strong>`
+          : r.filledQty !== null
+            ? `${esc(r.filledQty)}`
+            : r.quantity !== null
+              ? `${esc(r.quantity)}`
+              : '—'
+      const priceCell =
+        r.filledPrice !== null
+          ? fmtNumber(r.filledPrice, 2)
+          : r.limitPrice !== null
+            ? `<span class="muted" title="指値 (未約定)">指 ${fmtNumber(r.limitPrice, 2)}</span>`
+            : '—'
+      const pnlCell =
+        r.realizedPnl !== null
+          ? `${formatRealizedPnl(r.realizedPnl)}${r.exitReason ? ` <span class="muted" style="font-size:11px">${esc(r.exitReason)}</span>` : ''}`
+          : '<span class="muted">—</span>'
+      // 状態: エラーは短い日本語 + code、全文は <details>。enum はそのまま残す
+      // (broker API と grep で突き合わせる運用のため title / details に保持)。
+      let statusCell: string
+      const errorText = r.errorMessage ?? r.errorClass
+      if (errorText) {
+        const code = extractBrokerErrorCode(errorText)
+        const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : (r.errorClass ?? 'エラー')
+        statusCell = `<span style="${pillStyle('#fdecec', '#c22')}">エラー: ${esc(short)}</span>
+          <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
+      } else if (r.brokerStatus === 'FILLED') {
+        statusCell = `<span style="${pillStyle('#e6f6ec', '#057a55')}">約定</span>`
+      } else if (r.brokerStatus) {
+        statusCell = `<span style="${pillStyle('#fff4e6', '#b25000')}" title="${esc(r.brokerStatus)}">${esc(r.brokerStatus)}</span>`
+      } else {
+        statusCell = '<span class="muted">—</span>'
+      }
+      const modeCell =
+        r.mode === 'LIVE'
+          ? `<span style="${pillStyle('#fdecec', '#c22')}">実発注</span>`
+          : r.mode === 'DRY_RUN'
+            ? `<span style="${pillStyle('#f3f3f5', '#86868b')}">DRY</span>`
+            : '<span class="muted">—</span>'
+      return `<tr style="font-size:13px">
+        <td>${logCopyRowBtn(r.id)}</td>
+        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
+        <td style="white-space:nowrap">${eventCell}</td>
+        <td>${symbolCell}</td>
+        <td style="white-space:nowrap">${sideCell}</td>
+        <td style="text-align:right" class="bp-num">${qtyCell}</td>
+        <td style="text-align:right" class="bp-num">${priceCell}</td>
+        <td style="text-align:right" class="bp-num">${pnlCell}</td>
+        <td>${statusCell}</td>
+        <td>${modeCell}</td>
       </tr>`
     })
     .join('')
-  return `<p class="muted">直近 ${rows.length} 件 (limit=${limit}、最大 200)。</p>
+  return `${pills}
   <table>
-    <thead><tr>
-      <th>ID</th><th>日時</th><th>イベント</th><th>銘柄</th><th>売買</th>
-      <th>数量</th><th>指値</th><th>約定数量</th><th>約定単価</th><th>状態</th><th>モード</th>
+    <thead><tr style="font-size:12px">
+      <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th style="text-align:right">数量</th><th style="text-align:right">単価</th><th style="text-align:right">実現損益</th><th>状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__tradesCopy', {
+    meta: {
+      page: 'trade_journal (約定履歴)',
+      filter: `view=${view}, limit=${limit}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__tradesCopy')}`
 }
 
 function configBody(
@@ -3612,52 +3785,83 @@ interface AlertsBodyArgs {
  *   - 表示は最新 100 件 (`?limit=N` で 1〜500)
  *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
  */
+/** severity → 日本語 pill (#alerts-trades-ui)。 */
+const ALERT_SEVERITY_PILLS: Record<string, { ja: string; bg: string; fg: string }> = {
+  critical: { ja: '重大', bg: '#fdecec', fg: '#c22' },
+  warning: { ja: '警告', bg: '#fff4e6', fg: '#b25000' },
+  info: { ja: '情報', bg: '#eef2f8', fg: '#46608a' },
+}
+
+/** event type → 日本語。 */
+const ALERT_EVENT_LABELS: Record<string, string> = {
+  ERROR: 'エラー',
+  TRADE: '売買',
+  STATE_CHANGE: '設定変更',
+}
+
+/** 長い message は先頭を出して残りを <details> に畳む閾値。 */
+const ALERT_MESSAGE_FOLD = 160
+
 function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe } = args
-  const filterDescription =
-    severityFilter.length === 0 && eventTypeFilter === undefined
-      ? '全件'
-      : [
-          severityFilter.length > 0 ? `severity=${severityFilter.join(',')}` : null,
-          eventTypeFilter ? `eventType=${eventTypeFilter}` : null,
-        ]
-          .filter((s): s is string => s !== null)
-          .join(' / ')
-  const header = `<p class="muted">直近 ${rows.length} 件のアラート (${esc(filterDescription)}, limit=${limit}, max 500)。Webhook が未設定でも D1 には記録されています。</p>`
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
+  const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
   if (rows.length === 0) {
-    return `${header}${filterPills}<p class="muted">該当するアラートは見つかりませんでした。</p>`
+    return `${filterPills}${countLine}<p class="muted">該当するアラートはありません。</p>`
   }
   const tbody = rows
     .map((r) => {
-      const cls =
-        r.severity === 'critical'
-          ? 'err'
-          : r.severity === 'warning'
-            ? 'warn'
-            : 'muted'
+      const sev = ALERT_SEVERITY_PILLS[r.severity] ?? { ja: r.severity, bg: '#f3f3f5', fg: '#86868b' }
+      const sevCell = `<span title="${esc(r.severity)}" style="${pillStyle(sev.bg, sev.fg)}">${esc(sev.ja)}</span>`
+      const eventCell = `<span title="${esc(r.eventType)}" style="font-size:12px">${esc(ALERT_EVENT_LABELS[r.eventType] ?? r.eventType)}</span>`
       const symbolInactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''}><span${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</span></a>`
-        : '<span class="muted">-</span>'
-      return `<tr>
-        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td class="${cls}"><strong>${esc(r.severity)}</strong></td>
-        <td>${esc(r.eventType)}</td>
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</strong></a>`
+        : '<span class="muted">—</span>'
+      // broker エラーは error_code を短い日本語にして先頭へ。message 全文は
+      // 長ければ畳む (enum / 原文は grep 突き合わせ用に details に保持)。
+      const code = r.eventType === 'ERROR' ? extractBrokerErrorCode(r.message) : null
+      const shortLabel = code ? (BROKER_ERROR_LABELS[code] ?? code) : null
+      const messageBody =
+        r.message.length > ALERT_MESSAGE_FOLD
+          ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
+          : esc(r.message)
+      // <details> (block) を含み得るので外側は div (CodeRabbit #469)。
+      const messageCell = `${shortLabel ? `<span style="${pillStyle('#fdecec', '#c22')}">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
+      const causeCell = r.cause
+        ? `<code style="font-size:11px">${esc(r.cause)}</code>`
+        : '<span class="muted">—</span>'
+      return `<tr style="font-size:13px;vertical-align:top">
+        <td>${logCopyRowBtn(r.id)}</td>
+        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
+        <td>${sevCell}</td>
+        <td>${eventCell}</td>
         <td>${symbolCell}</td>
-        <td>${esc(r.cause ?? '-')}</td>
-        <td><code style="white-space:pre-wrap">${esc(r.message)}</code></td>
-        <td class="muted"><code>${esc(r.requestId ?? '-')}</code></td>
+        <td>${causeCell}</td>
+        <td>${messageCell}</td>
+        <td class="muted"><code style="font-size:11px">${esc(r.requestId ?? '—')}</code></td>
       </tr>`
     })
     .join('')
-  return `${header}${filterPills}
+  return `${filterPills}${countLine}
   <table>
-    <thead><tr>
-      <th>timestamp (JST)</th><th>severity</th><th>event</th><th>symbol</th><th>cause / field</th><th>message</th><th>requestId</th>
+    <thead><tr style="font-size:12px">
+      <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__alertsCopy', {
+    meta: {
+      page: 'notification_emit_log (アラート)',
+      filter:
+        severityFilter.length === 0 && eventTypeFilter === undefined
+          ? '全件'
+          : `severity=${severityFilter.join(',') || 'all'}, eventType=${eventTypeFilter ?? 'all'}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__alertsCopy')}`
 }
 
 /**
@@ -3808,32 +4012,137 @@ function formatAuditJson(raw: string): string {
   }
 }
 
+/** 戦略判定 1 行 (decision log + journal post_submit JOIN、#143)。 */
+export interface DecisionRow {
+  id: number
+  timestamp: string
+  requestId: string | null
+  symbol: string
+  decision: string
+  reason: string | null
+  price: number | null
+  indicatorsJson: string | null
+  clientOrderId: string | null
+  traceJson: string | null
+  filledPrice: number | null
+  filledQty: number | null
+  realizedPnl: number | null
+  brokerStatus: string | null
+}
+
+/**
+ * strategy_decision_log を trade_journal の post_submit と LEFT JOIN して
+ * 実 fill / realized_pnl 付きで取る (#143)。戦略判定ページとチャート銘柄タブの
+ * 判定履歴 (#decisions-chart-unify) が共用する — 同じ判定が 2 画面で違う形に
+ * ならないよう、ローダーはここ 1 本に寄せる。
+ */
+async function loadDecisionRows(
+  db: ReturnType<typeof createDb>,
+  opts: { symbol?: string; limit: number },
+): Promise<DecisionRow[]> {
+  const baseQuery = db
+    .select({
+      id: strategyDecisionLog.id,
+      timestamp: strategyDecisionLog.timestamp,
+      requestId: strategyDecisionLog.requestId,
+      symbol: strategyDecisionLog.symbol,
+      decision: strategyDecisionLog.decision,
+      reason: strategyDecisionLog.reason,
+      price: strategyDecisionLog.price,
+      indicatorsJson: strategyDecisionLog.indicatorsJson,
+      clientOrderId: strategyDecisionLog.clientOrderId,
+      traceJson: strategyDecisionLog.traceJson,
+      filledPrice: tradeJournal.filledPrice,
+      filledQty: tradeJournal.filledQty,
+      realizedPnl: tradeJournal.realizedPnl,
+      brokerStatus: tradeJournal.brokerStatus,
+    })
+    .from(strategyDecisionLog)
+    .leftJoin(
+      tradeJournal,
+      and(
+        eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
+        eq(tradeJournal.tradeEventType, 'post_submit'),
+      ),
+    )
+  return opts.symbol
+    ? baseQuery
+        .where(eq(strategyDecisionLog.symbol, opts.symbol))
+        .orderBy(desc(strategyDecisionLog.id))
+        .limit(opts.limit)
+    : baseQuery.orderBy(desc(strategyDecisionLog.id)).limit(opts.limit)
+}
+
+/**
+ * 戦略判定ページの銘柄レール (#decisions-chart-unify)。チャート銘柄タブの
+ * レールと同じ見た目 (CSS 共用) で、先頭に「ALL (全銘柄)」を置く。
+ * limit は URL に伝搬する。
+ */
+function renderCronSymbolRail(
+  universe: SymbolUniverse | null | undefined,
+  activeSymbol: string | undefined,
+  limit: number,
+): string {
+  const symbols = universe ? [...universe.allowedSymbols, ...universe.inactiveSymbols] : []
+  if (symbols.length === 0) return ''
+  const limitQs = `&limit=${limit}`
+  const allItem = `<a class="rail-item${activeSymbol === undefined ? ' active' : ''}" href="/dashboard/cron?${limitQs.slice(1)}">
+    <span class="rail-sym">ALL</span><span class="rail-name">全銘柄</span>
+  </a>`
+  const items = symbols
+    .map((sym) => {
+      const inactive = isSymbolInactive(sym, universe)
+      const isFocus = sym === activeSymbol
+      const name = universe?.symbolName[sym.toUpperCase()] ?? ''
+      const cls = ['rail-item', isFocus ? 'active' : '', inactive ? 'inactive' : '']
+        .filter(Boolean)
+        .join(' ')
+      const titleAttr = inactive
+        ? ` title="${esc(inactiveTooltip(sym, universe))}"`
+        : name
+          ? ` title="${esc(name)}"`
+          : ''
+      return `<a class="${cls}" href="/dashboard/cron?symbol=${encodeURIComponent(sym)}${limitQs}"${titleAttr}>
+        <span class="rail-sym">${esc(sym)}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
+      </a>`
+    })
+    .join('')
+  return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${allItem}${items}</aside>`
+}
+
 function cronBody(
-  rows: Array<{
-    id: number
-    timestamp: string
-    requestId: string | null
-    symbol: string
-    decision: string
-    reason: string | null
-    price: number | null
-    indicatorsJson?: string | null
-    clientOrderId?: string | null
-    filledPrice?: number | null
-    filledQty?: number | null
-    realizedPnl?: number | null
-    brokerStatus?: string | null
-  }>,
+  rows: DecisionRow[],
   limit: number,
   symbolFilter: string | undefined,
   universe?: SymbolUniverse | null,
 ): string {
+  const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
-    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
-  if (rows.length === 0) {
-    return `${header}<p class="muted">判定ログがまだありません。</p>`
-  }
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+  const rail = renderCronSymbolRail(universe, symbolFilter, limit)
+  const main =
+    rows.length === 0
+      ? `${header}<p class="muted">判定ログがまだありません。</p>`
+      : `${header}
+  ${renderDecisionTable(rows, universe, {
+    copyVarName: '__cronCopy',
+    showSymbol: true,
+    filterLabel: `symbol=${symbolFilter ?? 'all'}, limit=${limit}`,
+  })}`
+  return rail ? `<div class="symbol-layout">${rail}<div class="symbol-main">${main}</div></div>` : main
+}
+
+/**
+ * 戦略判定テーブル (#decisions-chart-unify)。戦略判定ページ (全銘柄) と
+ * チャート銘柄タブの判定履歴が共用する。reason の判定ラダー・AI 用コピー
+ * (行 = trace 含む完全版 / 全件 = trace 省略) を内包する。
+ */
+function renderDecisionTable(
+  rows: DecisionRow[],
+  universe: SymbolUniverse | null | undefined,
+  opts: { copyVarName: string; showSymbol: boolean; filterLabel: string },
+): string {
   const tbody = rows
     .map((r) => {
       const cls =
@@ -3859,9 +4168,15 @@ function cronBody(
       const inactive = isSymbolInactive(r.symbol, universe)
       const symbolClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
+      // 銘柄リンクはチャート銘柄タブへ (判定 pin / ラダー / 入場距離と同じ文脈で
+      // 見られる)。cron 内絞り込みは ▼ で残す。
+      const symbolCell = opts.showSymbol
+        ? `<td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a> <a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の判定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a></td>`
+        : ''
       return `<tr>
+        <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a></td>
+        ${symbolCell}
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
@@ -3870,13 +4185,28 @@ function cronBody(
       </tr>`
     })
     .join('')
-  return `${header}
-  <table>
+  return `<table>
     <thead><tr>
-      <th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
+      <th></th><th>timestamp (JST)</th>${opts.showSymbol ? '<th>symbol</th>' : ''}<th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript(opts.copyVarName, {
+    meta: {
+      page: 'strategy_decision_log (戦略判定)',
+      filter: `${opts.filterLabel} (copy-all は trace 省略、行コピーは trace 含む)`,
+      generatedAt: new Date().toISOString(),
+    },
+    // copy-all 用は trace を省略 (200 行 × 判定ラダーで肥大するため)。
+    rows: rows.map((r) => ({ ...cronDecisionJson(r), requestId: r.requestId })),
+    // 行コピー用の完全版 (trace 含む) — AI への単発相談はこちらが本命。
+    full: rows.map((r) => ({
+      ...cronDecisionJson(r),
+      requestId: r.requestId,
+      trace: parseJsonObject(r.traceJson ?? null),
+    })),
+  })}
+  ${renderLogCopyScript(opts.copyVarName)}`
 }
 
 function cronReasonCell(row: {
@@ -5403,6 +5733,13 @@ export interface ChartsBodySymbol {
   alternatives?: string[]
   /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
   symbolPolicy?: SymbolPolicySummary | null
+  /**
+   * focus symbol の判定履歴 (#decisions-chart-unify)。戦略判定ページと同じ
+   * loader/renderer を共用 — チャートの判定 pin と同じデータを表でも読める。
+   */
+  decisionRows?: DecisionRow[]
+  /** ペアレジーム表示 (#472)。regime 有効ペアの一員 + mode != off のときのみ。 */
+  pairRegime?: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null
 }
 
 export interface SymbolPolicySummary {
@@ -5573,6 +5910,50 @@ function renderQualityTab(args: ChartsBodyQuality): string {
   ${safeJsonScript('__chartData', { decisions: args.decisions, histogram: args.histogram })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
+}
+
+/**
+ * チャート銘柄タブ内の判定履歴 (#decisions-chart-unify)。戦略判定ページと同じ
+ * renderer を共用し、チャート上の判定 pin と同じデータを表でも読めるようにする
+ * (pin はクリックで 1 件ずつ、表はラダー・実 fill・AI コピーまで一覧)。
+ */
+function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
+  const rows = args.decisionRows ?? []
+  if (rows.length === 0 || !args.focusSymbol) return ''
+  const symbolCronHref = `/dashboard/cron?symbol=${encodeURIComponent(args.focusSymbol)}`
+  return `<div style="margin-top:14px">
+    <h2 style="font-size:14px;margin:0 0 6px;display:flex;align-items:center;gap:10px">判定履歴 <span class="muted" style="font-size:11px;font-weight:normal">直近 ${rows.length} 件 — チャートの判定 pin と同じデータ</span>
+      <a href="${esc(symbolCronHref)}" style="font-size:11px">この銘柄の全件 →</a>
+      <a href="/dashboard/cron" style="font-size:11px">全銘柄 →</a>
+    </h2>
+    ${renderDecisionTable(rows, args.universe, {
+      copyVarName: '__decisionCopy',
+      showSymbol: false,
+      filterLabel: `symbol=${args.focusSymbol}, limit=30`,
+    })}
+  </div>`
+}
+
+/**
+ * ペアレジーム行 (#472)。zone を日本語で表示し、score / proxy / 判定日を併記。
+ * observe mode はその旨を明示 (gate していないことが分かるように)。
+ */
+export function renderPairRegimeLine(
+  view: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null,
+): string {
+  if (!view) return ''
+  const d = view.decision
+  const color =
+    d.zone === 'bull' ? '#057a55' : d.zone === 'bear' ? '#b25000' : d.zone === 'neutral' ? '#46608a' : '#c22'
+  const sideJa = view.side === 'bull' ? 'ブル側' : 'ベア側'
+  const allowed = (view.side === 'bull' && d.zone === 'bull') || (view.side === 'bear' && d.zone === 'bear')
+  const verdict = allowed ? 'entry 可' : 'entry 不可'
+  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    ペアレジーム: <strong style="color:${color}">${esc(PAIR_REGIME_ZONE_LABELS[d.zone])}</strong>
+    <span class="muted" style="font-size:12px">この銘柄は${sideJa} → ${verdict}${view.mode === 'observe' ? ' (observe: gate は未適用)' : ''}</span>
+    <span class="muted" style="font-size:12px">${d.score !== null ? `score ${(d.score * 100).toFixed(2)}%` : ''} proxy ${esc(d.proxySymbol)}${d.asOfDate ? ` / ${esc(d.asOfDate)} 時点` : ''}</span>
+    ${d.zone === 'unknown' ? `<span class="err" style="font-size:12px">${esc(d.reason)}</span>` : ''}
+  </div>`
 }
 
 export function renderSymbolTab(args: ChartsBodySymbol): string {
@@ -6742,6 +7123,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
   ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
+  ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
     alternatives: args.alternatives ?? [],
@@ -6750,6 +7132,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
   </div>
+  ${renderSymbolDecisionHistory(args)}
   ${renderStrategyParamsPanel(args.strategyParams)}`
   return `${wrapWithSymbolRail(args, content)}
   ${safeJsonScript('__chartData', {
@@ -8800,153 +9183,203 @@ function symbolFormBody(args: SymbolFormArgs): string {
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
+  // セクション開閉の初期状態: 値が入っている (= 編集で触った) セクションだけ開く。
+  // 不正 role の警告はユーザーが見るべきなので強制 open。
+  const hasSizingValues = maxNotionalValue !== '' || budgetAllocPctValue !== ''
+  const hasStrategyValues =
+    pullbackMaxOverrideValue !== '' ||
+    pullbackMinOverrideValue !== '' ||
+    minReturn50dOverrideValue !== '' ||
+    maxAtrRatioOverrideValue !== '' ||
+    maxSma50DeviationPctOverrideValue !== '' ||
+    requireAboveSma50OverrideValue !== '' ||
+    alternativesValue !== ''
+  const hasExitValues =
+    timeStopDaysOverrideValue !== '' ||
+    kAtrOverrideValue !== '' ||
+    stopPctOverrideValue !== '' ||
+    takeProfitPctOverrideValue !== '' ||
+    intradayOnlyChecked !== ''
+  const hasAllocValues =
+    entryRequiredChecked !== '' || alwaysActiveChecked !== '' || cashFallbackValue !== ''
+  // 必須バッジ。任意 field は無印 (バッジだらけにしない)。
+  const REQ =
+    '<span style="display:inline-block;padding:0 6px;border-radius:8px;background:#fdecec;color:#c22;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle">必須</span>'
+  const fieldGrid = 'display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center'
+  const optSection = (title: string, hint: string, inner: string, open: boolean): string =>
+    `<details${open ? ' open' : ''} style="border:1px solid #e3e3e8;border-radius:10px;background:#fff">
+      <summary style="cursor:pointer;padding:10px 14px;font-size:13px;font-weight:600">${title} <span class="muted" style="font-size:11px;font-weight:normal">— ${hint} (任意)</span></summary>
+      <div style="padding:2px 14px 14px;${fieldGrid}">${inner}</div>
+    </details>`
+
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
-  <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
+  <form method="post" action="${esc(action)}" style="max-width:680px;display:flex;flex-direction:column;gap:12px">
     ${modeSelector}
-    <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
-    ${inverseField}
-    <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
-    <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
-    <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>
-    <select name="market" id="symbol-form-market" required style="padding:6px" onchange="window.syncSymbolFormCurrencyFromMarket(this.value)">
-      <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
-      <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP (日本)</option>
-    </select>
-    <label>通貨 <span class="muted" style="font-size:11px">(currency)</span></label>
-    <div>
-      <select name="currency" id="symbol-form-currency" required style="padding:6px" onchange="window.syncSymbolFormCurrencyUnits(this.value)">
-        <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
-        <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
-      </select>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">通常は市場と一致 (US→USD / JP→JPY)。HKD ADR 等、市場と異なる決済通貨の銘柄を想定して別 select として残してある。</p>
+    <div style="border:1px solid #e3e3e8;border-radius:10px;background:#fff;padding:12px 14px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:2px">基本 <span class="muted" style="font-size:11px;font-weight:normal">— ${REQ} 以外は空欄で global 設定を使用</span></div>
+      <div style="${fieldGrid}">
+        <label>銘柄${REQ}</label>${symbolField}
+        ${inverseField}
+        <label>銘柄名</label>
+        <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="Yahoo 選択で自動入力" style="padding:6px">
+        <label>市場${REQ}</label>
+        <select name="market" id="symbol-form-market" required style="padding:6px" onchange="window.syncSymbolFormCurrencyFromMarket(this.value)">
+          <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
+          <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP (日本)</option>
+        </select>
+        <label>通貨${REQ}</label>
+        <select name="currency" id="symbol-form-currency" required style="padding:6px;max-width:200px" onchange="window.syncSymbolFormCurrencyUnits(this.value)">
+          <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
+          <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
+        </select>
+        <label>売買単位${REQ}</label>
+        <div>
+          <input type="number" name="lot_size" id="symbol-form-lot-size" value="${esc(lotSizeValue)}" required step="1" min="1" max="100000" placeholder="JP 個別株=100 / ETF・US=1" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">株/口</span>
+          <span id="symbol-form-lot-suggest" class="muted" style="font-size:11px;margin-left:6px"></span>
+          <div class="muted" style="font-size:11px;margin-top:2px">未設定の銘柄は発注されません (fail-closed)</div>
+        </div>
+        <label>ロール${REQ}</label>
+        <div>
+          <select name="role" required style="padding:6px">
+            ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
+            ${
+              mode === 'new'
+                ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
+                : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
+            }
+            ${SYMBOL_ROLES.map(
+              (r) =>
+                `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
+            ).join('')}
+          </select>
+          ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
+          <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        </div>
+        <label>状態</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="active" value="false">
+          <input type="checkbox" name="active" value="true"${activeChecked}> 取引対象として有効
+        </label>
+      </div>
     </div>
-    <label>状態 <span class="muted" style="font-size:11px">(active)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="active" value="false">
-      <input type="checkbox" name="active" value="true"${activeChecked}> 取引対象として有効
-    </label>
-    <label>売買単位 <span class="muted" style="font-size:11px">(lot_size)</span></label>
-    <div>
-      <input type="number" name="lot_size" id="symbol-form-lot-size" value="${esc(lotSizeValue)}" required step="1" min="1" max="100000" placeholder="必須: 1注文の最小単位" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">株/口 (1単元)</span>
-      <span id="symbol-form-lot-suggest" class="muted" style="font-size:11px;margin-left:6px"></span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px"><strong>入力必須</strong> (fallback しません)。1 注文の最小発注数 = 1単元の株数/口数。<strong>JP 個別株は通常 100、ETF (1570/1357 等) と US 株は 1</strong>。未設定の銘柄は cron が発注を見送ります (fail-closed)。Yahoo から銘柄を選ぶと種別 (ETF/個別株) に応じた推奨値を自動入力します (確定は手入力で上書き可)。</p>
+
+    ${optSection(
+      '発注サイズ',
+      '1 注文の上限と配分',
+      `<label>1注文上限</label>
+        <div>
+          <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄 = global 上限" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注 (global: <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code>)</span>
+        </div>
+        <label>予算配分</label>
+        <div>
+          <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄 = risk-% sizing" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% — 口座総額(円) × この % で発注</span>
+        </div>`,
+      hasSizingValues,
+    )}
+
+    ${optSection(
+      '戦略ロール・entry 条件',
+      'role プリセットと entry gate の銘柄別調整',
+      `<label>押し目バンド</label>
+        <div>
+          <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
+          〜
+          <input type="number" name="pullback_min_override" value="${esc(pullbackMinOverrideValue)}" step="0.1" min="-100" max="0" placeholder="深い側 (例 -6)" style="padding:6px;width:130px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (浅い側 ≥ 深い側)</span>
+        </div>
+        <label>トレンド条件</label>
+        <div>
+          <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (20日騰落率の下限)</span>
+        </div>
+        <label>ボラ過熱上限</label>
+        <div>
+          <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">× baseline ATR</span>
+        </div>
+        <label>過伸長上限</label>
+        <div>
+          <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (SMA50 上方乖離)</span>
+        </div>
+        <label>SMA50 上抜け</label>
+        <select name="require_above_sma50_override" style="padding:6px;max-width:240px">
+          <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>global default に従う</option>
+          <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
+          <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
+        </select>
+        <label>代替銘柄</label>
+        <div>
+          <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
+          <span class="muted" style="font-size:12px;margin-left:6px">entry 不可時に表示する候補 (表示のみ・最大 8)</span>
+        </div>`,
+      hasStrategyValues,
+    )}
+
+    ${optSection(
+      '損切・利食・保有',
+      'exit 系の銘柄別調整',
+      `<label>保有上限</label>
+        <div>
+          <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">営業日</span>
+        </div>
+        <label>ATR stop 倍率</label>
+        <div>
+          <input type="number" name="k_atr_override" value="${esc(kAtrOverrideValue)}" step="0.1" min="0.5" max="5.0" placeholder="${esc(kAtrPlaceholder)}" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">× ATR20</span>
+        </div>
+        <label>損切ライン</label>
+        <div>
+          <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄 = global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (負値)。exit は max(この%, kAtr×ATR) の広い方</span>
+        </div>
+        <label>利食ライン</label>
+        <div>
+          <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄 = global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
+        </div>
+        <label>持ち越し</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="intraday_only" value="false">
+          <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ (持ち越さない)
+        </label>`,
+      hasExitValues,
+    )}
+
+    ${optSection(
+      '配分の条件連動',
+      'entry 判定と予算配分の連動 (#452)',
+      `<label>条件連動</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="entry_required" value="false">
+          <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効化
+        </label>
+        <label>常時配分</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="always_active" value="false">
+          <input type="checkbox" name="always_active" value="true"${alwaysActiveChecked}> 判定に関わらず常時 target = active (待機資金 ETF 用)
+        </label>
+        <label>退避先</label>
+        <div>
+          <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
+          <span class="muted" style="font-size:12px;margin-left:6px">同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
+        </div>`,
+      hasAllocValues,
+    )}
+
+    <div style="border:1px solid #e3e3e8;border-radius:10px;background:#fff;padding:12px 14px;${fieldGrid}">
+      <label>メモ</label>
+      <textarea name="notes" maxlength="256" rows="2" placeholder="自由記述 (例: 一時停止理由)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     </div>
-    <label>1注文上限 <span class="muted" style="font-size:11px">(max_notional)</span></label>
-    <div>
-      <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
-    </div>
-    <label>予算配分 <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で risk-% sizing" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% of 口座(円)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">指定すると <strong>1 注文 = 口座総額 (<code>total_capital_jpy</code>) × この%</strong> で sizing (risk-% を bypass)。USD 銘柄は USD/JPY レートで自動換算 (レート取得失敗時は発注見送り = fail-closed)。上限は <code>min(予算×%, 1注文上限)</code>。空欄なら従来の risk-% sizing。</p>
-    </div>
-    <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
-    <div>
-      <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">日 (business days)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_time_stop_days</code> を使用。3x leveraged ETF (SOXL / 1570 等) は短い hold (5-7) が推奨 (#316)。1-365 の整数。</p>
-    </div>
-    <label>ATR stop 倍率 <span class="muted" style="font-size:11px">(k_atr)</span></label>
-    <div>
-      <input type="number" name="k_atr_override" value="${esc(kAtrOverrideValue)}" step="0.1" min="0.5" max="5.0" placeholder="${esc(kAtrPlaceholder)}" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">× ATR20</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_k_atr</code> を使用。高ボラ銘柄では緩めに (2.5-3.5)、低ボラは引き締めに (1.5-2.0)。0.5-5.0 の数値 (#316)。exit stop は <code>max(pct, kAtr×ATR)</code> の広い方が効く (#exit-atr)。</p>
-    </div>
-    <label>損切ライン override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄で global default" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (負値)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_stop_pct</code>。3x レバ ETF はボラ大なので広め (例 -8〜-10) が推奨。実際の exit は <code>max(この%, kAtr×ATR)</code> の広い方 (#exit-atr)。</p>
-    </div>
-    <label>利食ライン override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で global default" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_take_profit_pct</code>。stop を広げる時は R:R が反転しないよう TP も併せて調整。</p>
-    </div>
-    <label>持ち越し <span class="muted" style="font-size:11px">(intraday_only)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="intraday_only" value="false">
-      <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ(オーバーナイト持ち越さない)
-    </label>
-    <label>ロール <span class="muted" style="font-size:11px">(role)</span></label>
-    <div>
-      <select name="role" style="padding:6px">
-        ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
-        <option value=""${roleValue === '' ? ' selected' : ''}>未設定 (従来挙動)</option>
-        ${SYMBOL_ROLES.map(
-          (r) =>
-            `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
-        ).join('')}
-      </select>
-      ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-      <p class="muted" style="margin:4px 0 0;font-size:11px">銘柄の戦略ロール (#452 / #457)。role ごとの entry/exit プリセットが適用されます (個別 override が優先)。<strong>inverse_hedge は短期保有プリセット (time stop 5日)・3x インバース前提</strong>。<strong>cash_parking は BUY を生成しません</strong> (配分は条件連動配分が扱う)。空欄 = 従来挙動。</p>
-    </div>
-    <label>押し目バンド override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
-      〜
-      <input type="number" name="pullback_min_override" value="${esc(pullbackMinOverrideValue)}" step="0.1" min="-100" max="0" placeholder="深い側 (例 -6)" style="padding:6px;width:130px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (負値)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">10日高値からの押し目がこのバンド内のとき entry 候補。空欄 → role preset → global の <code>pullback_default_pullback_max/min</code>。浅い側 ≥ 深い側 (例 -3 ≥ -6)。</p>
-    </div>
-    <label>トレンド条件 override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (20日騰落率の下限)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → role preset → global の <code>pullback_default_min_return50d</code>。非レバ銘柄はレバ向け global 値 (+8%) だと厳しすぎるので低めに (#449)。</p>
-    </div>
-    <label>ボラ過熱 override <span class="muted" style="font-size:11px">(max_atr_ratio)</span></label>
-    <div>
-      <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">× baseline ATR</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">ATR20 / baseline がこの比率を超えると BUY 見送り。空欄 → global の <code>pullback_default_max_atr_ratio</code>。</p>
-    </div>
-    <label>過伸長 override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (SMA50 からの上方乖離上限)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → role preset → global の <code>pullback_default_max_sma50_deviation_pct</code>。非レバは +60% に届かないので +20% 程度が目安。</p>
-    </div>
-    <label>SMA50 上抜け必須 <span class="muted" style="font-size:11px">(require_above_sma50)</span></label>
-    <div>
-      <select name="require_above_sma50_override" style="padding:6px">
-        <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>global default に従う</option>
-        <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
-        <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
-      </select>
-    </div>
-    <label>代替銘柄 <span class="muted" style="font-size:11px">(alternatives)</span></label>
-    <div>
-      <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
-      <p class="muted" style="margin:4px 0 0;font-size:11px">カンマ区切り (最大 8)。この銘柄が entry 不可のときダッシュボードに出す代替候補 (<strong>表示のみ</strong>、自動発注はしない、#452)。</p>
-    </div>
-    <label>配分の条件連動 <span class="muted" style="font-size:11px">(entry_required)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="entry_required" value="false">
-      <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効にする
-    </label>
-    <label>常時配分 <span class="muted" style="font-size:11px">(always_active)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="always_active" value="false">
-      <input type="checkbox" name="always_active" value="true"${alwaysActiveChecked}> 判定に関わらず常時 target = active (待機資金 ETF 用)
-    </label>
-    <label>退避先 <span class="muted" style="font-size:11px">(cash_fallback_symbol)</span></label>
-    <div>
-      <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
-      <p class="muted" style="margin:4px 0 0;font-size:11px">entry_required 銘柄が条件未通過の間、浮いた配分の退避先 (#452)。同一通貨のみ有効。<strong>退避先への自動発注は <code>cash_fallback_orders_enabled</code> (default off) を on にするまで行いません</strong> (判定・表示のみ)。</p>
-    </div>
-    <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
-    <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
-    <span></span>
+
     <div style="display:flex;gap:8px">
-      <button type="submit" id="symbol-form-save" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
-      <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
+      <button type="submit" id="symbol-form-save" style="padding:8px 24px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">保存</button>
+      <a href="/dashboard/symbols" style="padding:8px 24px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">キャンセル</a>
     </div>
   </form>
   <script>
@@ -9054,16 +9487,20 @@ function symbolFormBody(args: SymbolFormArgs): string {
         .then(function (r) { return r.json(); })
         .then(function (res) {
           if (mySeq !== window._tradabilitySeq) return; // 古い応答は捨てる
-          if (res.verdict === 'tradable') {
-            statusEl.textContent = '✅ 取引可能';
-            statusEl.style.color = '#057a55';
-          } else if (res.verdict === 'denied') {
-            statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+          if (res.verdict === 'denied') {
+            var why = res.reason === 'known_deny' ? '過去に Webull が発注拒否'
+              : res.reason === 'invalid_symbol' ? 'Webull に存在しない銘柄'
+              : 'Webull JP 取扱なし';
+            statusEl.textContent = '❌ ' + why + ' — 登録できません';
             statusEl.style.color = '#c22';
             window._tradabilityDenied = true;
             if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
+          } else if (res.reason === 'quote_ok') {
+            // preview は発注 allowlist を検証しない (USMV 前例) ので ✅ は出さない
+            statusEl.textContent = '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
+            statusEl.style.color = '#b25000';
           } else {
-            statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
+            statusEl.textContent = '❓ 確認不可 (登録は可能)';
             statusEl.style.color = '#86868b';
           }
         })

@@ -2,6 +2,7 @@ import { and, asc, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/sqlite-core'
 import type { Env } from '../../config/env'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
+import type { PairRegimeEntry } from '../strategy/pairRegime'
 import { tradeJournal } from '../../infrastructure/db/schema'
 import { resolveAccessToken } from '../../infrastructure/webull/resolveAccessToken'
 import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
@@ -265,10 +266,14 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   // Loaded BEFORE the main `db` handle so `createDb` mock ordering in tests
   // remains stable (main SELECT uses the second mock return).
   let symbolCurrency: Record<string, SymbolCurrency> | undefined
+  // ペア switch cooldown (#472) 用。universe load に相乗りし、追加の DB 呼び出し
+  // はしない (load 失敗時は cooldown も best-effort で skip)。
+  let pairRegimes: PairRegimeEntry[] | undefined
   if (options.env.PORTFOLIO_STATE) {
     try {
       const universe = await loadSymbolUniverse(options.env)
       symbolCurrency = universe.symbolCurrency
+      pairRegimes = universe.pairRegimes
     } catch (error) {
       console.warn(
         JSON.stringify({
@@ -517,6 +522,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         runNow,
         nowIso: runNow.toISOString(),
         symbolCurrency,
+        pairRegimes,
       })
       if (ok) {
         summary.stateApplied += 1
@@ -822,6 +828,8 @@ async function tryApplyAndStamp(args: {
    * when the universe load failed — `applyFillToState` falls back to the
    * JP-numeric heuristic. */
   symbolCurrency?: Record<string, SymbolCurrency>
+  /** Pre-loaded regime 有効ペア (#472 pair switch cooldown 用、best-effort)。 */
+  pairRegimes?: PairRegimeEntry[]
 }): Promise<boolean> {
   const {
     env,
@@ -837,6 +845,7 @@ async function tryApplyAndStamp(args: {
     runNow,
     nowIso,
     symbolCurrency,
+    pairRegimes,
   } = args
 
   try {
@@ -851,6 +860,7 @@ async function tryApplyAndStamp(args: {
       realizedPnl,
       runNow,
       symbolCurrency,
+      pairRegimes,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -1043,6 +1053,8 @@ async function applyFillToState(args: {
   runNow: Date
   /** Pre-loaded symbol → currency map (#77 portfolio exposure tracking). */
   symbolCurrency?: Record<string, SymbolCurrency>
+  /** Pre-loaded regime 有効ペア (#472 pair switch cooldown 用、best-effort)。 */
+  pairRegimes?: PairRegimeEntry[]
 }): Promise<void> {
   const {
     env,
@@ -1055,6 +1067,7 @@ async function applyFillToState(args: {
     realizedPnl,
     runNow,
     symbolCurrency,
+    pairRegimes,
   } = args
   let symbolApplied = false
   let portfolioApplied = false
@@ -1136,6 +1149,51 @@ async function applyFillToState(args: {
       console.error(
         JSON.stringify({
           event: 'reconcile_cooldown_apply_error',
+          requestId,
+          clientOrderId,
+          symbol,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
+
+  // ペア switch cooldown (#472 §3c): regime 有効ペアの片側が exit したら、
+  // **理由問わず** (stop / TP / time-stop / regime_flip、損益符号も問わず)
+  // 反対 symbol にも翌営業日まで cooldown を張る — same-day ドテン (whipsaw の
+  // 最悪形) の禁止。regime_enabled=0 のペアには適用しない (既存挙動の回帰保証)。
+  // 失敗は non-fatal (上の自 symbol cooldown と同じ理由)。
+  if (
+    side === 'SELL' &&
+    env.SYMBOL_STATE &&
+    pairRegimes !== undefined &&
+    (symbolApplied || portfolioApplied)
+  ) {
+    try {
+      const upper = symbol.toUpperCase()
+      const pair = pairRegimes.find((p) => p.bullSymbol === upper || p.bearSymbol === upper)
+      if (pair) {
+        const partner = pair.bullSymbol === upper ? pair.bearSymbol : pair.bullSymbol
+        const market = inferTradingMarket(partner)
+        const until = nextTradingDay(runNow, market).toISOString()
+        await new SymbolStateClient(env.SYMBOL_STATE).setCooldown(partner, until)
+        console.warn(
+          JSON.stringify({
+            event: 'pair_exit_cooldown_applied',
+            requestId,
+            cooldown: {
+              sourceSymbol: upper,
+              targetSymbol: partner,
+              reason: 'pair_exit_cooldown',
+              until,
+            },
+          }),
+        )
+      }
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'pair_exit_cooldown_apply_error',
           requestId,
           clientOrderId,
           symbol,

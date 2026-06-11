@@ -218,6 +218,13 @@
       "when": 1781109056713,
       "tag": "0030_add_conditional_allocation",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1781174769487,
+      "tag": "0031_add_pair_regime",
+      "breakpoints": true
     }
   ]
 }

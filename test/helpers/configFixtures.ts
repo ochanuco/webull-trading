@@ -41,6 +41,11 @@ export function makeGlobalConfigSnapshot(
     vixCriticalThreshold: 30.0,
     vixWarningSizeScale: 0.5,
     cashFallbackOrdersEnabled: false,
+    pairRegimeMode: 'off',
+    pairRegimeThetaBullEnter: 0.03,
+    pairRegimeThetaBullExit: 0.01,
+    pairRegimeThetaBearEnter: -0.04,
+    pairRegimeThetaBearExit: -0.015,
     source: 'd1',
     ...overrides,
   }
@@ -74,6 +79,7 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolAlwaysActive: {},
     symbolCashFallback: {},
     inversePairs: {},
+    pairRegimes: [],
     source: 'd1',
     ...overrides,
   }

@@ -1648,11 +1648,71 @@ describe('新規登録フォームの取扱チェック (#461)', () => {
     expect(body).toContain('/admin/symbol-config/tradability-check')
     expect(body).toContain('id="symbol-form-save"')
     expect(body).toContain('_tradabilityDenied')
-    // denied のみブロック (error/unavailable は登録可能の文言)
+    // denied のみブロック。quote_ok は ✅ ではなく △ (発注可否は未保証)
     expect(body).toContain('登録は可能')
+    expect(body).toContain('発注可否は未保証')
     // inline script が構文エラーなく parse できる (#465 の回帰ガードをこのページにも)
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
       expect(() => new Function(m[1]!)).not.toThrow()
     }
+  })
+})
+
+describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('new フォーム: 必須バッジは 4 つ、任意セクションは折りたたみ', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // 必須バッジ: 凡例 1 + 銘柄 / 市場 / 通貨 / 売買単位 / ロール の計 6 箇所
+    expect((body.match(/>必須<\/span>/g) ?? []).length).toBe(6)
+    // ロールは基本カードで必須 select (新規はプレースホルダのみ、未設定は選べない)
+    expect(body).toMatch(/<select name="role" required/)
+    expect(body).toContain('<option value="" disabled selected>選択してください</option>')
+    // 任意セクションは details で、新規時は閉じている (open なし)
+    expect(body).toContain('発注サイズ')
+    expect(body).toContain('戦略ロール・entry 条件')
+    expect(body).toContain('損切・利食・保有')
+    expect(body).toContain('配分の条件連動')
+    expect(body).not.toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
+    // 売買単位の fail-closed 注意は 1 行だけ残す
+    expect(body).toContain('未設定の銘柄は発注されません (fail-closed)')
+  })
+
+  it('edit フォーム: 値が入っているセクションは開いた状態で表示', async () => {
+    const db = fakeDb([
+      row({
+        symbol: 'QQQ',
+        role: 'core_trend',
+        budgetAllocPct: 0.2,
+        stopPctOverride: -0.03,
+        minReturn50dOverride: 0.03,
+        entryRequired: true,
+        cashFallbackSymbol: 'SGOV',
+      }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/QQQ/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // 値のあるセクションは open
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>戦略ロール・entry 条件/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>損切・利食・保有/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>配分の条件連動/)
   })
 })

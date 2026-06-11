@@ -56,6 +56,16 @@ export interface GlobalConfigSnapshot {
    * (fail-closed): off の間は判定・表示のみで退避先への自動 BUY は出さない。
    */
   cashFallbackOrdersEnabled: boolean
+  /**
+   * ペアレジーム layer (#472)。'off' (default) / 'observe' (log のみ) /
+   * 'enforce'。enum 外の DB 値は 'off' に倒す (gate 無効 = 従来挙動が安全側)。
+   */
+  pairRegimeMode: 'off' | 'observe' | 'enforce'
+  /** Schmitt 閾値 (1x proxy 基準、#472)。順序検証は pairRegime 側 (破壊→unknown)。 */
+  pairRegimeThetaBullEnter: number
+  pairRegimeThetaBullExit: number
+  pairRegimeThetaBearEnter: number
+  pairRegimeThetaBearExit: number
 }
 
 /**
@@ -95,6 +105,11 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   vixCriticalThreshold: 30.0,
   vixWarningSizeScale: 0.5,
   cashFallbackOrdersEnabled: false,
+  pairRegimeMode: 'off',
+  pairRegimeThetaBullEnter: 0.03,
+  pairRegimeThetaBullExit: 0.01,
+  pairRegimeThetaBearEnter: -0.04,
+  pairRegimeThetaBearExit: -0.015,
 })
 
 /**
@@ -327,6 +342,12 @@ export async function loadGlobalConfig(
             vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
             // 0030 追加列 (#452)。legacy path は default (false = 自動発注しない)。
             cashFallbackOrdersEnabled: GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
+            // 0031 追加列 (#472)。legacy path は default ('off' = gate 無効)。
+            pairRegimeMode: GLOBAL_CONFIG_DEFAULTS.pairRegimeMode,
+            pairRegimeThetaBullEnter: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullEnter,
+            pairRegimeThetaBullExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullExit,
+            pairRegimeThetaBearEnter: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
+            pairRegimeThetaBearExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
           }, requestId)
         }
       } catch (legacyError) {
@@ -388,5 +409,18 @@ export async function loadGlobalConfig(
     // 自動発注しない) へ畳む — fail-closed 側なので安全。
     cashFallbackOrdersEnabled:
       row.cashFallbackOrdersEnabled ?? GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
+    // 0031 で追加 (#472)。mode は enum 検証して不正値は 'off' (gate 無効が安全側)。
+    pairRegimeMode:
+      row.pairRegimeMode === 'observe' || row.pairRegimeMode === 'enforce'
+        ? row.pairRegimeMode
+        : 'off',
+    pairRegimeThetaBullEnter:
+      row.pairRegimeThetaBullEnter ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullEnter,
+    pairRegimeThetaBullExit:
+      row.pairRegimeThetaBullExit ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullExit,
+    pairRegimeThetaBearEnter:
+      row.pairRegimeThetaBearEnter ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
+    pairRegimeThetaBearExit:
+      row.pairRegimeThetaBearExit ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
   }, requestId)
 }

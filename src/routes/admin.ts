@@ -1774,6 +1774,20 @@ export const admin = new Hono<AppBindings>()
       return c.json({ error: 'market must be US or JP' }, 400)
     }
     const market = marketRaw
+    // 確定 NG (registry): #460 ガード/手動対応が symbol_config.notes に残した
+    // deny マーカー。過去に実発注で拒否された銘柄は broker に聞くまでもなく ❌
+    // (preview は allowlist を検証しないため、これが唯一の事前 ❌ 根拠)。
+    if (c.env.DB) {
+      const row = await findSymbolConfig(createDb(c.env.DB), symbolRaw).catch(() => null)
+      if (row?.notes?.includes('TICKER_IS_DENY')) {
+        return c.json({
+          verdict: 'denied',
+          reason: 'known_deny',
+          detail: '過去に Webull が実発注を拒否した実績あり (symbol_config.notes に記録)',
+          variants: [],
+        })
+      }
+    }
     const priceRaw = Number(c.req.query('price'))
     const result = await checkTradability(c.env, {
       symbol: symbolRaw,
