@@ -117,3 +117,7 @@ WEBULL_ACCESS_TOKEN=
 # trade host + v2) に切替。JP 銘柄と Webull 障害時は Yahoo に自動 fallback。
 # 未設定 = yahoo (現行 default)。
 # QUOTE_SOURCE=webull
+
+# BAR_SOURCE (#475): 'webull' で daily/intraday bars を Webull Market Data API に
+# 切替。^VIX / JP 銘柄 / Webull 障害時は Yahoo に自動 fallback。未設定 = yahoo。
+# BAR_SOURCE=webull

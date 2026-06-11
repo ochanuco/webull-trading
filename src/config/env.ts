@@ -495,3 +495,12 @@ export interface Env {
 export interface Env {
   QUOTE_SOURCE?: string
 }
+
+
+// #475: bar source の切替 (quote の QUOTE_SOURCE と同じ規約、独立 canary 用)。
+// 'webull' で Market Data API bars (trade host + v2) を primary に、^VIX
+// (index) / JP 銘柄 / Webull 障害時は Yahoo に自動 fallback。未設定 / 他値は
+// 'yahoo' (現行) — fail-safe 側が既定。
+export interface Env {
+  BAR_SOURCE?: string
+}

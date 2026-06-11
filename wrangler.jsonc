@@ -116,7 +116,10 @@
         // #475: staging のみ Webull Market Data API を primary に (canary)。
         // production は未設定 = Yahoo のまま — staging で bid/ask / spread guard
         // の挙動を観察してから昇格する。
-        "QUOTE_SOURCE": "webull"
+        "QUOTE_SOURCE": "webull",
+        // #475③: bars も staging のみ Webull primary (canary)。^VIX / JP /
+        // 障害時は Yahoo に自動 fallback。
+        "BAR_SOURCE": "webull"
       },
       "routes": [
         { "pattern": "trading-staging.chanu.co", "custom_domain": true }
