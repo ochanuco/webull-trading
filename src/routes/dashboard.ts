@@ -4029,6 +4029,43 @@ async function loadDecisionRows(
     : baseQuery.orderBy(desc(strategyDecisionLog.id)).limit(opts.limit)
 }
 
+/**
+ * 戦略判定ページの銘柄レール (#decisions-chart-unify)。チャート銘柄タブの
+ * レールと同じ見た目 (CSS 共用) で、先頭に「ALL (全銘柄)」を置く。
+ * limit は URL に伝搬する。
+ */
+function renderCronSymbolRail(
+  universe: SymbolUniverse | null | undefined,
+  activeSymbol: string | undefined,
+  limit: number,
+): string {
+  const symbols = universe ? [...universe.allowedSymbols, ...universe.inactiveSymbols] : []
+  if (symbols.length === 0) return ''
+  const limitQs = `&limit=${limit}`
+  const allItem = `<a class="rail-item${activeSymbol === undefined ? ' active' : ''}" href="/dashboard/cron?${limitQs.slice(1)}">
+    <span class="rail-sym">ALL</span><span class="rail-name">全銘柄</span>
+  </a>`
+  const items = symbols
+    .map((sym) => {
+      const inactive = isSymbolInactive(sym, universe)
+      const isFocus = sym === activeSymbol
+      const name = universe?.symbolName[sym.toUpperCase()] ?? ''
+      const cls = ['rail-item', isFocus ? 'active' : '', inactive ? 'inactive' : '']
+        .filter(Boolean)
+        .join(' ')
+      const titleAttr = inactive
+        ? ` title="${esc(inactiveTooltip(sym, universe))}"`
+        : name
+          ? ` title="${esc(name)}"`
+          : ''
+      return `<a class="${cls}" href="/dashboard/cron?symbol=${encodeURIComponent(sym)}${limitQs}"${titleAttr}>
+        <span class="rail-sym">${esc(sym)}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
+      </a>`
+    })
+    .join('')
+  return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${allItem}${items}</aside>`
+}
+
 function cronBody(
   rows: DecisionRow[],
   limit: number,
@@ -4039,15 +4076,17 @@ function cronBody(
   const header = symbolFilter
     ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
     : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
-  if (rows.length === 0) {
-    return `${header}<p class="muted">判定ログがまだありません。</p>`
-  }
-  return `${header}
+  const rail = renderCronSymbolRail(universe, symbolFilter, limit)
+  const main =
+    rows.length === 0
+      ? `${header}<p class="muted">判定ログがまだありません。</p>`
+      : `${header}
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
     showSymbol: true,
     filterLabel: `symbol=${symbolFilter ?? 'all'}, limit=${limit}`,
   })}`
+  return rail ? `<div class="symbol-layout">${rail}<div class="symbol-main">${main}</div></div>` : main
 }
 
 /**

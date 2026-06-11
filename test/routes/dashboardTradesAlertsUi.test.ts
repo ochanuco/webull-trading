@@ -224,8 +224,47 @@ describe('/dashboard/cron AI 用コピー (#alerts-trades-ui)', () => {
     // #decisions-chart-unify: 銘柄リンクはチャート銘柄タブへ、cron 内絞り込みは ▼
     expect(body).toContain('href="/dashboard/charts?tab=symbol&symbol=USMV"')
     expect(body).toContain('この銘柄の判定だけに絞り込み')
+    // 銘柄レール: universe 不在 (このテストの mock) では出ない — レール無しでも本文は描画される
+    expect(body).not.toContain('<aside class="symbol-rail"')
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
       expect(() => new Function(m[1]!)).not.toThrow()
     }
+  })
+})
+
+describe('/dashboard/cron 銘柄レール (#decisions-chart-unify)', () => {
+  it('ALL + 銘柄リンクのレールを描画し、選択中をハイライトする', async () => {
+    const { loadSymbolUniverse } = await import('../../src/infrastructure/db/symbolUniverse')
+    const { makeSymbolUniverse } = await import('../helpers/configFixtures')
+    vi.mocked(loadSymbolUniverse).mockResolvedValueOnce(
+      makeSymbolUniverse({ allowedSymbols: ['SOXL', 'SOXS'], inactiveSymbols: ['SPY'] }),
+    )
+    vi.mocked(createDb).mockReturnValue(
+      {
+        select() {
+          return {
+            from() {
+              const chain = {
+                leftJoin: () => chain,
+                where: () => chain,
+                orderBy: () => chain,
+                limit: async () => [],
+              }
+              return chain
+            },
+          }
+        },
+      } as never,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/cron?symbol=SOXL', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    expect(body).toContain('<aside class="symbol-rail"')
+    // ALL は非選択、SOXL が active
+    expect(body).toContain('>ALL</span>')
+    expect(body).toMatch(/rail-item active" href="\/dashboard\/cron\?symbol=SOXL/)
+    expect(body).toContain('href="/dashboard/cron?symbol=SOXS')
+    // inactive 銘柄もレールに出る (grayed)
+    expect(body).toContain('href="/dashboard/cron?symbol=SPY')
   })
 })
