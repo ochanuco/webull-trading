@@ -1648,8 +1648,9 @@ describe('新規登録フォームの取扱チェック (#461)', () => {
     expect(body).toContain('/admin/symbol-config/tradability-check')
     expect(body).toContain('id="symbol-form-save"')
     expect(body).toContain('_tradabilityDenied')
-    // denied のみブロック (error/unavailable は登録可能の文言)
+    // denied のみブロック。quote_ok は ✅ ではなく △ (発注可否は未保証)
     expect(body).toContain('登録は可能')
+    expect(body).toContain('発注可否は未保証')
     // inline script が構文エラーなく parse できる (#465 の回帰ガードをこのページにも)
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
       expect(() => new Function(m[1]!)).not.toThrow()

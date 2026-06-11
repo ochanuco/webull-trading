@@ -4,23 +4,27 @@ import { resolveAccessToken } from './resolveAccessToken'
 import { toWebullPlaceOrderRequest } from './mapper'
 
 /**
- * 銘柄の Webull JP 取扱チェック (#461)。Preview Order
- * (`POST /openapi/account/orders/preview`) で発注パイプラインの検証だけを通す —
- * **注文は作成されない** (path は preview 固定)。取扱外銘柄は検証段階で
- * `TICKER_IS_DENY` が返るため、発注せずに取引可否を確定できる。
+ * 銘柄の Webull JP 取扱チェック (#461)。
  *
- * body shape は JP 実測で確定途中 (#461: v1 place 形は OPENAPI_PARAM_ERR) の
- * ため、候補 shape を並列で試す (#415 の path 確定と同じ方式)。判定は:
- *   - どれかが 200            → 'tradable'
- *   - どれかが TICKER_IS_DENY → 'denied' (確定)
- *   - 応答はあるが全部エラー   → 'error' (銘柄以外の要因の可能性)
- *   - 設定不足 / 全部不達      → 'unavailable'
+ * **実測で確定した Preview Order (`POST /openapi/account/orders/preview`) の性質
+ * (2026-06-11)**:
+ *   - 実在しない symbol (ZZZZ) は `OAUTH_OPENAPI_PARAM_ERR`
+ *     ("invalid market,symbol,instrument_type") で拒否 → **銘柄マスタの存在検証は
+ *     している**
+ *   - 一方、本番 place が TICKER_IS_DENY で拒否した USMV は preview 200 + 見積を
+ *     返した → **発注 allowlist (deny list) までは検証しない** (または deny list が
+ *     日次で変わる)。**preview 200 から「取引可能」は主張できない**
  *
- * 'denied' 以外で登録をブロックしない想定 (check 不能時に全登録が止まるのは
- * 過剰 fail-closed — 発注側には #460 の事後ガードが別途ある)。
+ * 出せる判定:
+ *   - 'denied'  : (a) 全 variant が銘柄不正 PARAM_ERR (= マスタに不存在 or
+ *                 market/type 不一致)、(b) preview が TICKER_IS_DENY を返した、
+ *                 (c) 呼び出し側 (admin endpoint) が過去の deny 実績
+ *                 (symbol_config.notes の #460 マーカー) を検出した場合
+ *   - 'unknown' : preview は通った/エラーだが確定情報なし。「見積もり可」でも
+ *                 発注可否は保証しない (USMV の前例)。登録はブロックしない
+ *   - 'unavailable': 設定不足 / broker 不達 (判定プロセス自体が走れず)
  */
-
-export type TradabilityVerdict = 'tradable' | 'denied' | 'error' | 'unavailable'
+export type TradabilityVerdict = 'denied' | 'unknown' | 'unavailable'
 
 /**
  * 銘柄単位の恒久拒否コード判定。Webull は `OAUTH_OPENAPI_` prefix 付き/なしの
@@ -28,6 +32,20 @@ export type TradabilityVerdict = 'tradable' | 'denied' | 'error' | 'unavailable'
  */
 export function isTickerDenyCode(errorCode: string | null): boolean {
   return errorCode !== null && errorCode.endsWith('TICKER_IS_DENY')
+}
+
+/**
+ * 「銘柄が不正」型の PARAM_ERR か (ZZZZ 実測: message が
+ * "Parameter error, invalid market,symbol,instrument_type, value: ..." の形)。
+ * 他フィールド起因の PARAM_ERR と区別するため 'symbol' を含むものに限定する。
+ */
+function isInvalidSymbolParamError(r: TradabilityVariantResult): boolean {
+  return (
+    r.errorCode !== null &&
+    r.errorCode.endsWith('PARAM_ERR') &&
+    typeof r.message === 'string' &&
+    /invalid[^"]*symbol/i.test(r.message)
+  )
 }
 
 export interface TradabilityVariantResult {
@@ -41,6 +59,13 @@ export interface TradabilityVariantResult {
 
 export interface TradabilityResult {
   verdict: TradabilityVerdict
+  /**
+   * UI 表示分岐用の判定根拠。
+   * known_deny: 過去の実発注 deny 実績 / ticker_deny: preview が deny を返却 /
+   * invalid_symbol: 銘柄マスタに不存在 / quote_ok: 見積もり成功 (保証なし) /
+   * preview_error: 判定材料にならないエラー / unreachable: 不達・設定不足
+   */
+  reason: 'known_deny' | 'ticker_deny' | 'invalid_symbol' | 'quote_ok' | 'preview_error' | 'unreachable'
   /** operator 向けの 1 行説明。 */
   detail: string
   variants: TradabilityVariantResult[]
@@ -134,6 +159,7 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
   if (appKey.length === 0 || appSecret.length === 0 || accountId.length === 0) {
     return {
       verdict: 'unavailable',
+      reason: 'unreachable',
       detail: 'Webull credentials 未設定のため検証不可',
       variants: [],
     }
@@ -212,31 +238,44 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
     }),
   )
 
-  // deny 判定を 200 判定より先に — 200 body に埋まった deny を「取引可能」と
-  // 誤読しない (status より error_code を信じる)。
+  // 確定 NG (1): preview が deny を返した場合。
   if (results.some((r) => isTickerDenyCode(r.errorCode))) {
     return {
       verdict: 'denied',
+      reason: 'ticker_deny',
       detail: 'Webull JP の OpenAPI では発注できない銘柄 (TICKER_IS_DENY)',
       variants: results,
     }
   }
-  const cleanOk = results.find((r) => r.status === 200 && r.errorCode === null)
-  if (cleanOk) {
-    const cost = cleanOk.bodyExcerpt?.match(/"estimated_cost"\s*:\s*"?([0-9.]+)"?/)?.[1]
+  const responding = results.filter((r) => r.status !== null)
+  // 確定 NG (2): 応答した全 variant が「銘柄不正」PARAM_ERR (= マスタに不存在
+  // or market/instrument_type の組合せ不正。ZZZZ 実測パターン)。
+  if (responding.length > 0 && responding.every((r) => isInvalidSymbolParamError(r))) {
     return {
-      verdict: 'tradable',
-      detail: `発注前検証 (Preview Order) 通過 — 取引可能${cost ? ` (estimated_cost: ${cost})` : ''}`,
+      verdict: 'denied',
+      reason: 'invalid_symbol',
+      detail: 'Webull の銘柄マスタに存在しない (symbol / market の組合せ不正)',
       variants: results,
     }
   }
-  if (results.some((r) => r.status !== null)) {
-    const codes = [...new Set(results.map((r) => r.errorCode).filter(Boolean))].join(', ')
+  // 200 = 見積もり成功。ただし発注 allowlist は検証されない (USMV の前例) ので
+  // 「取引可能」とは言わない。
+  if (results.some((r) => r.status === 200 && r.errorCode === null)) {
     return {
-      verdict: 'error',
-      detail: `検証エラー (${codes || 'unknown'}) — 銘柄以外の要因の可能性`,
+      verdict: 'unknown',
+      reason: 'quote_ok',
+      detail: '銘柄は存在し見積もり可。ただし発注可否 (deny list) は事前検証不可 — 最終確認は Webull アプリで',
       variants: results,
     }
   }
-  return { verdict: 'unavailable', detail: 'broker に到達できず判定不可', variants: results }
+  if (responding.length > 0) {
+    const codes = [...new Set(responding.map((r) => r.errorCode).filter(Boolean))].join(', ')
+    return {
+      verdict: 'unknown',
+      reason: 'preview_error',
+      detail: `判定材料が得られませんでした (${codes || 'unknown'})`,
+      variants: results,
+    }
+  }
+  return { verdict: 'unavailable', reason: 'unreachable', detail: 'broker に到達できず判定不可', variants: results }
 }
