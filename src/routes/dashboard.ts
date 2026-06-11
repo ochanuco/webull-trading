@@ -8246,7 +8246,9 @@ export function renderStrategyParamsPanel(
       flag: flag(p.pullbackMin, STRATEGY_DEFAULTS.pullbackMin),
     },
     {
-      label: '50日騰落率 閾値 (minReturn50d)',
+      // lookback の実体は 20 営業日 (#318)。field 名は global_config 列との互換で
+      // minReturn50d のまま、人間向け文言だけ 20 日に揃える。
+      label: '20日騰落率 閾値 (minReturn50d)',
       key: 'minReturn50d',
       current: pct(p.minReturn50d),
       def: pct(STRATEGY_DEFAULTS.minReturn50d),
