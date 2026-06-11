@@ -8797,7 +8797,7 @@ export function symbolMapEditorBody(
     <span class="muted" style="font-size:12px">
       <strong>口座 → 銘柄の線</strong> = 配分 ・ <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON) ・ % 欄 = 配分変更。
       変更は即保存されません — 下のサマリを確認して<strong>「適用」で一括保存</strong>します。
-      カードの塗り: <span style="background:#eef2f7;border:1px solid #46637f;padding:0 6px;border-radius:4px">口座</span>
+      カードの塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
       <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
       <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>
     </span>
@@ -8814,8 +8814,13 @@ export function symbolMapEditorBody(
   <style>
   #symbol-map-editor{height:calc(100vh - 220px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
   #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
-  /* 通貨で塗り分け: 口座 = 紺、JPY = 桜、USD = 薄青 (operator 要望) */
-  #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#eef2f7;border-color:#46637f}
+  /* 通貨で塗り分け: 口座 = 濃グレー、JPY = 桜、USD = 薄青 (operator 要望) */
+  #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#5f6368;border-color:#3c4043}
+  /* 接続ポートの◯もグレーに (default の白丸 + 黒枠は浮く) */
+  #symbol-map-editor .drawflow .drawflow-node .input,
+  #symbol-map-editor .drawflow .drawflow-node .output{background:#9aa0a6;border:2px solid #6e6e73;width:14px;height:14px}
+  #symbol-map-editor .drawflow .drawflow-node .input:hover,
+  #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
   #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:#fdf3f2;border-color:#d4a09a}
   #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:#f0f6ff;border-color:#9ab8dd}
   #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
@@ -8849,8 +8854,8 @@ export function symbolMapEditorBody(
     var accountY = Math.max(30, 30 + ((allocated.length - 1) * 120) / 2);
     var accountId = editor.addNode('口座', 0, 1, 40, accountY, 'sm-node sm-account',
       { sym: '口座' },
-      '<div class="sm-card"><div class="sm-title" style="color:#46637f">口座</div>' +
-      '<div class="sm-meta">原資 ・ 予算 ' + data.accountTotalPct + '% (対は枠共有で max)</div></div>');
+      '<div class="sm-card"><div class="sm-title" style="color:#fff">口座</div>' +
+      '<div class="sm-meta" style="color:#e8eaed">原資 ・ 予算 ' + data.accountTotalPct + '% (対は枠共有で max)</div></div>');
     symOf[accountId] = '__account__';
 
     data.nodes.forEach(function (n) {
@@ -9116,8 +9121,8 @@ export function renderSymbolRelationMap(
       name: '口座',
       title: `口座 (予算 ${Math.round(total * 10) / 10}%)`,
       sub: '原資',
-      color: '#46637f',
-      fill: '#eef2f7',
+      color: '#3c4043',
+      fill: '#5f6368',
       status: 'account',
       x: 90,
       y: centerY,
@@ -9219,7 +9224,7 @@ export function renderSymbolRelationMap(
   const mapDiv = edges.length > 0
     ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。塗り: 紺 = 口座 ・ 桜 = JPY 銘柄 ・ 薄青 = USD 銘柄。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
+      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。塗り: 濃グレー = 口座 ・ 桜 = JPY 銘柄 ・ 薄青 = USD 銘柄。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
       <strong>Pending</strong> = 様子見 (破線枠) で、点線矢印が「いま枠が行っている先」:
       <span style="color:#0e9f6e">緑 = 退避先へ代替割当 (条件連動 ON)</span> ・
       <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span> ・
@@ -9287,10 +9292,10 @@ export function renderSymbolRelationMap(
               show: true,
               formatter: '{t|' + n.title + '}\\n{s|' + n.sub + '}',
               rich: {
-                t: { fontSize: 13, fontWeight: 700, color: '#1d1d1f', lineHeight: 18 },
+                t: { fontSize: 13, fontWeight: 700, color: n.status === 'account' ? '#fff' : '#1d1d1f', lineHeight: 18 },
                 s: {
                   fontSize: 10,
-                  color: n.status === 'active' ? '#0e9f6e' : n.status === 'pending' ? '#b25000' : '#6e6e73',
+                  color: n.status === 'account' ? '#e8eaed' : n.status === 'active' ? '#0e9f6e' : n.status === 'pending' ? '#b25000' : '#6e6e73',
                   lineHeight: 14,
                 },
               },
