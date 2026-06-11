@@ -2822,7 +2822,7 @@ describe('renderSymbolRelationMap 軸 (横=ロール / 縦=投入金額)', () =>
       { SOXL: { native: '$300', jpy: 45000 }, SGOV: { native: '$100', jpy: 15000 } },
     )
     const payload = JSON.parse(
-      html.match(/<script type="application\/json"[^>]*>([\s\S]*?)<\/script>/)?.[1] ?? 'null',
+      html.match(/__symbolRelationMap = ([\s\S]*?);<\/script>/)?.[1] ?? 'null',
     )
     const byName = new Map(payload.nodes.map((n: { name: string }) => [n.name, n]))
     // ロール列の割当
