@@ -2749,7 +2749,7 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
   it('予算 → ロール → 銘柄 → 退避先のリンクを配分% で積み、投入額をラベルに併記', () => {
     const rows = [
       mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.2 }),
-      mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV' }),
+      mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV', entryRequired: true }),
       mapRow({ symbol: 'SGOV', role: 'cash_parking', budgetAllocPct: 0.1 }),
     ]
     const html = renderSymbolRelationMap(rows, {}, [], {
@@ -2769,6 +2769,19 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
     // 予算ノードは合計%
     const budget = payload.nodes.find((n: { name: string }) => n.name === '予算')
     expect(budget.label).toBe('予算 60%')
+  })
+
+  it('退避フローは条件連動 ON のみ。退避先未設定の連動銘柄は現金待機ノードへ', () => {
+    const rows = [
+      // 連動 OFF + 退避先あり → 流れない (設定だけでは退避は発生しない)
+      mapRow({ symbol: 'AAPL', role: 'core_trend', budgetAllocPct: 0.2, cashFallbackSymbol: 'SGOV' }),
+      // 連動 ON + 退避先なし → 現金待機へ
+      mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, entryRequired: true }),
+    ]
+    const payload = payloadOf(renderSymbolRelationMap(rows, {}, []))
+    const fallback = payload.links.filter((l: { kind: string }) => l.kind === 'fallback')
+    expect(fallback).toEqual([{ source: 'VUG', target: '現金待機', value: 30, kind: 'fallback' }])
+    expect(payload.nodes.some((n: { name: string }) => n.name === '現金待機')).toBe(true)
   })
 
   it('配分 0% / 無効銘柄は Sankey に出さない', () => {
@@ -2803,7 +2816,7 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
 
   it('inline script は構文エラーなく parse できる (#462 regression 防止)', () => {
     const html = renderSymbolRelationMap(
-      [mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV' })],
+      [mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV', entryRequired: true })],
       {},
       [],
     )

@@ -8813,18 +8813,24 @@ export function renderSymbolRelationMap(
         links.push({ source: roleName, target: sym, value: pctOf(r), kind: 'symbol' })
       }
     }
-    // 退避先 (#452 Layer 3): 条件連動銘柄の配分が entry 未通過時に流れる先。
+    // 退避先 (#452 Layer 3): **条件連動 ON** の銘柄の配分が entry 未通過時に
+    // 流れる先。退避先未設定は「現金のまま待機」なので現金待機ノードへ —
+    // 連動だけ ON にして退避先を入れていない設定 (VUG 等) もここで可視化される。
     for (const r of allocated) {
-      if (!r.cashFallbackSymbol) continue
+      if (r.entryRequired !== true) continue
       const sym = r.symbol.toUpperCase()
-      const target = r.cashFallbackSymbol.toUpperCase()
+      const target = r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
       if (sym === target) continue
-      const targetRow = rows.find((x) => x.symbol.toUpperCase() === target)
-      addNode({
-        name: target,
-        label: `${target}${amounts[target]?.native ? ` (${amounts[target]!.native})` : ''}`,
-        color: targetRow ? colorOf(roleOf(targetRow)) : '#9aa0a6',
-      })
+      if (target === '現金待機') {
+        addNode({ name: '現金待機', label: '現金待機 (退避先なし)', color: '#9aa0a6' })
+      } else {
+        const targetRow = rows.find((x) => x.symbol.toUpperCase() === target)
+        addNode({
+          name: target,
+          label: `${target}${amounts[target]?.native ? ` (${amounts[target]!.native})` : ''}`,
+          color: targetRow ? colorOf(roleOf(targetRow)) : '#9aa0a6',
+        })
+      }
       links.push({ source: sym, target, value: pctOf(r), kind: 'fallback' })
     }
   }
@@ -8854,7 +8860,7 @@ export function renderSymbolRelationMap(
     ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
       予算 → ロール → 銘柄 (配分% ・ 括弧内 = 現在の投入額)。
-      <span style="color:#0e9f6e">緑の流れ</span> = 退避先 (条件連動 ON の銘柄が entry 未通過の間、その配分が流れる先 — 受け皿側の太さは最悪ケースの合計)。
+      <span style="color:#0e9f6e">緑の流れ</span> = 退避 (条件連動 ON の銘柄が entry 未通過の間、その配分が流れる先 — 受け皿側の太さは最悪ケースの合計。退避先未設定は「現金待機」へ)。
     </p>`
     : ''
   const payload = { nodes, links }
