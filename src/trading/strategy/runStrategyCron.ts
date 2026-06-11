@@ -276,6 +276,21 @@ export async function runStrategyCron(
   // 段階判定 HALF (#452 PR 2): entry 有効 role を明示した銘柄のみ 0.5x entry を
   // 許可する。role NULL の既存銘柄は従来の二値挙動のまま。
   const halfEntrySymbols = buildHalfEntrySymbols(universe.symbolRole)
+  // ペアレジーム layer (#472)。mode='off' か対象ペアなしなら option ごと省略
+  // (= scheduler 側は完全に従来挙動)。
+  const pairRegimeOption =
+    global.pairRegimeMode !== 'off' && universe.pairRegimes.length > 0
+      ? {
+          mode: global.pairRegimeMode,
+          thresholds: {
+            bullEnter: global.pairRegimeThetaBullEnter,
+            bullExit: global.pairRegimeThetaBullExit,
+            bearEnter: global.pairRegimeThetaBearEnter,
+            bearExit: global.pairRegimeThetaBearExit,
+          },
+          pairs: universe.pairRegimes,
+        }
+      : undefined
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
@@ -626,6 +641,7 @@ export async function runStrategyCron(
       entrySuppressedSymbols,
       halfEntrySymbols,
       ...(onTickerDeny ? { onTickerDeny } : {}),
+      ...(pairRegimeOption ? { pairRegime: pairRegimeOption } : {}),
       riskPerTradePct: scaledRiskPerTradePct,
       requestId: options.requestId,
       notifier,

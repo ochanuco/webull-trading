@@ -39,6 +39,12 @@ import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earning
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
 import { deriveEntryStatusFromIndicators, type EntryStatus } from './entryStatus'
+import {
+  evaluatePairRegime,
+  type PairRegimeDecision,
+  type PairRegimeEntry,
+  type PairRegimeThresholds,
+} from './pairRegime'
 import type { EntrySnapshot } from './conditionalAllocation'
 
 const DEFAULT_BAR_LOOKBACK = 60
@@ -183,6 +189,17 @@ export interface PullbackSchedulerOptions {
    * (`runStrategyCron`) は `buildEntrySuppressedSymbols` の結果を渡す。
    */
   entrySuppressedSymbols?: Record<string, string>
+  /**
+   * ペアレジーム layer (#472)。mode='observe' は zone/score を trace に残すだけ
+   * (gate しない)、'enforce' は zone が許可しない側の BUY を REJECT し、保有と
+   * 反対 zone への flip で SELL (regime_flip) を出す。未注入 = 従来挙動。
+   * production (`runStrategyCron`) は global_config + inverse_pairs から組む。
+   */
+  pairRegime?: {
+    mode: 'observe' | 'enforce'
+    thresholds: PairRegimeThresholds
+    pairs: PairRegimeEntry[]
+  }
   /**
    * 段階判定 HALF (0.5x entry) を有効にする symbol 集合 (#452 PR 2)。role が
    * entry 有効 (core_trend / leveraged_trend) な銘柄のみ。**未注入 / 集合外の
@@ -414,6 +431,66 @@ export async function runPullbackScheduler(
     }
   }
 
+  // ペアレジーム評価 (#472): ペア単位で 1 回だけ proxy bars を独立 fetch して
+  // zone を決め、symbol → {decision, side} に展開する。fetch/評価の失敗は
+  // ペア単位で unknown に隔離 (= enforce では両側 BUY block) — cron は落とさない。
+  const regimeBySymbol = new Map<
+    string,
+    { decision: PairRegimeDecision; side: 'bull' | 'bear' }
+  >()
+  if (options.pairRegime) {
+    const runSymbols = new Set(options.symbols.map((s) => s.toUpperCase()))
+    const relevant = options.pairRegime.pairs.filter(
+      (p) => runSymbols.has(p.bullSymbol) || runSymbols.has(p.bearSymbol),
+    )
+    await Promise.all(
+      relevant.map(async (pair) => {
+        let decision: PairRegimeDecision
+        if (pair.invalidConfig !== null) {
+          decision = {
+            zone: 'unknown',
+            score: null,
+            proxySymbol: pair.proxySymbol,
+            asOfDate: null,
+            reason: `misconfig: ${pair.invalidConfig}`,
+          }
+        } else {
+          try {
+            const proxyBars = await options.barClient.getDailyBars(pair.proxySymbol, 80)
+            decision = evaluatePairRegime(proxyBars, {
+              proxySymbol: pair.proxySymbol,
+              thresholds: options.pairRegime!.thresholds,
+              now: now(),
+            })
+          } catch (err) {
+            decision = {
+              zone: 'unknown',
+              score: null,
+              proxySymbol: pair.proxySymbol,
+              asOfDate: null,
+              reason: `proxy bars fetch failed: ${messageOf(err)}`,
+            }
+          }
+        }
+        regimeBySymbol.set(pair.bullSymbol, { decision, side: 'bull' })
+        regimeBySymbol.set(pair.bearSymbol, { decision, side: 'bear' })
+        console.warn(
+          JSON.stringify({
+            event: 'pair_regime_evaluated',
+            requestId: options.requestId ?? null,
+            mode: options.pairRegime!.mode,
+            pair: `${pair.bullSymbol}/${pair.bearSymbol}`,
+            proxySymbol: decision.proxySymbol,
+            zone: decision.zone,
+            score: decision.score,
+            asOfDate: decision.asOfDate,
+            reason: decision.reason,
+          }),
+        )
+      }),
+    )
+  }
+
   for (const symbol of options.symbols) {
     summary.evaluated += 1
     const upper = symbol.toUpperCase()
@@ -519,6 +596,65 @@ export async function runPullbackScheduler(
       }
     }
 
+    // ペアレジーム (#472): zone/score を全評価の trace に残す (HOLD 含む —
+    // observe 期間の監査が目的なので BUY/REJECT 時だけでは足りない)。
+    const regime = regimeBySymbol.get(upper)
+    if (regime && options.pairRegime) {
+      const d = regime.decision
+      const allowed = (regime.side === 'bull' && d.zone === 'bull') || (regime.side === 'bear' && d.zone === 'bear')
+      const held =
+        state.position !== null && Number.isFinite(state.position.qty) && state.position.qty > 0
+      const observeNote =
+        options.pairRegime.mode === 'observe' && !allowed && signal.action === 'BUY'
+          ? ' [observe: enforce なら REJECT]'
+          : ''
+      const neutralHoldNote =
+        held && d.zone === 'neutral'
+          ? ' [hold_existing_position: neutral_does_not_force_exit]'
+          : ''
+      signal = {
+        ...signal,
+        trace: appendTrace(
+          signal.trace,
+          traceStep(
+            'regime.zone',
+            allowed,
+            d.score,
+            undefined,
+            undefined,
+            `${d.reason} side=${regime.side} mode=${options.pairRegime.mode}${observeNote}${neutralHoldNote}`,
+          ),
+        ),
+      }
+      // regime_flip exit (#472 §3a): 保有と**反対 zone** に flip したら全量 SELL。
+      // 既存 exit (stop/TP/time-stop) が先に SELL を出していればそれが優先 —
+      // その場合は副次理由として trace にだけ残す (効果測定用、review #4)。
+      // neutral では強制 exit しない (hysteresis 内の正常な押しで降ろさない)。
+      const flipped =
+        (regime.side === 'bull' && d.zone === 'bear') || (regime.side === 'bear' && d.zone === 'bull')
+      if (options.pairRegime.mode === 'enforce' && held && flipped) {
+        if (signal.action === 'SELL') {
+          signal = {
+            ...signal,
+            trace: appendTrace(
+              signal.trace,
+              traceStep('exit.regime_flip_secondary', true, undefined, undefined, undefined, `secondaryExitReasons: regime_flip (${d.reason})`),
+            ),
+          }
+        } else {
+          signal = {
+            ...signal,
+            action: 'SELL',
+            reason: `pair regime flip: zone=${d.zone} against held ${regime.side} side (${d.reason})`,
+            trace: appendTrace(
+              signal.trace,
+              traceStep('exit.regime_flip', true, d.score, undefined, undefined, d.reason),
+            ),
+          }
+        }
+      }
+    }
+
     // 段階判定 HALF (#452 PR 2)。strategy は全 gate 通過でしか BUY を出さない
     // (二値)。halfEntrySymbols の銘柄に限り、entry 系 HOLD を 4 段階判定に
     // かけ直し、HALF (未通過 1 gate が「程度もの」で許容バンド内) なら 0.5x の
@@ -569,6 +705,35 @@ export async function runPullbackScheduler(
         trace: signal.trace,
       })
       continue
+    }
+
+    // ペアレジーム BUY gate (#472、enforce のみ): zone が許可しない側の entry を
+    // REJECT。SELL / exit は一切妨げない。zone permits, gates decide — ここを
+    // 通っても以降の全 gate (role / sizing / risk / 余力) は従来どおり評価される。
+    if (options.pairRegime?.mode === 'enforce' && signal.action === 'BUY') {
+      const regimeGate = regimeBySymbol.get(upper)
+      if (regimeGate) {
+        const d = regimeGate.decision
+        const allowed =
+          (regimeGate.side === 'bull' && d.zone === 'bull') ||
+          (regimeGate.side === 'bear' && d.zone === 'bear')
+        if (!allowed) {
+          const reason = `pair_regime: zone=${d.zone} blocks ${regimeGate.side} entry (${d.reason})`
+          summary.rejected.push({ symbol: upper, reason })
+          await emitDecision({
+            symbol: upper,
+            decision: 'REJECT',
+            reason,
+            price: indicators.price,
+            indicatorsJson: JSON.stringify(indicators),
+            trace: appendTrace(
+              signal.trace,
+              traceStep('risk.pair_regime', false, d.score, undefined, undefined, reason),
+            ),
+          })
+          continue
+        }
+      }
     }
 
     // Entry 抑止 role gate (#452)。cash_parking / 定義のみの role / enum 外の
@@ -1435,6 +1600,10 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
   'entry.half_status': '段階判定 HALF (0.5x、#452)',
   'entry.cash_rebalance': '条件連動配分 cash rebalance (#452)',
+  'regime.zone': 'ペアレジーム判定 (#472)',
+  'risk.pair_regime': 'ペアレジーム gate (#472)',
+  'exit.regime_flip': 'レジーム反転 exit (#472)',
+  'exit.regime_flip_secondary': 'レジーム反転 (副次理由、#472)',
   'sizing.half_entry_quantity_positive': 'HALF 数量が1株/1単元以上ある',
   'risk.buying_power_pool': '口座買付余力プール (発注前)',
   'risk.sanity_failed_cooldown': 'sanity_failed cooldown (broker stub 疑い)',

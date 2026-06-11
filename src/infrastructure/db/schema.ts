@@ -238,6 +238,23 @@ export type SymbolConfigInsert = typeof symbolConfig.$inferInsert
 export const inversePairs = sqliteTable('inverse_pairs', {
   symbol: text('symbol').primaryKey(),
   inverse: text('inverse').notNull(),
+  /**
+   * ペアレジーム layer (#472) の per-pair opt-in。0 のペアは挙動完全不変。
+   * 1 にする場合は regime_proxy_symbol / regime_bull_symbol が必須 — repo 検証で
+   * 不備があれば該当ペアは zone=unknown (両側 BUY block) に倒す (fail-closed)。
+   */
+  regimeEnabled: integer('regime_enabled', { mode: 'boolean' }).notNull().default(false),
+  /**
+   * レジームスコアの計算対象 (#472 review: **非レバ原資産 ETF** を推奨。例:
+   * SOXL/SOXS → SOXX、TQQQ/SQQQ → QQQ)。universe 登録不要 — regime 評価は
+   * ペア単位で daily bars を独立 fetch する。
+   */
+  regimeProxySymbol: text('regime_proxy_symbol'),
+  /**
+   * ペアのどちらがブル側かの明示 (#472)。convention (symbol 列 = ブル) に
+   * 頼らない。symbol か inverse のどちらかと一致しなければ misconfig。
+   */
+  regimeBullSymbol: text('regime_bull_symbol'),
   updatedAt: text('updated_at').notNull(),
 })
 
@@ -333,6 +350,22 @@ export const globalConfig = sqliteTable(
      * default 0.5 (= 半分に縮小)。0..1 で運用想定。
      */
     vixWarningSizeScale: real('vix_warning_size_scale').notNull().default(0.5),
+    /**
+     * ペアレジーム layer (#472)。'off' (default) | 'observe' (log のみ、gate
+     * しない) | 'enforce'。enum 検証は loader 側 — 不正値は 'off' に倒す
+     * (= gate 無効が安全側)。
+     */
+    pairRegimeMode: text('pair_regime_mode').notNull().default('off'),
+    /**
+     * Schmitt trigger 閾値 (#472、1x 非レバ proxy 基準)。順序制約
+     * bear_enter < bear_exit < bull_exit < bull_enter は SQLite ALTER で
+     * table-level CHECK を足せないため admin parse + runtime 検証で担保
+     * (順序破壊を検出したら該当ペアは zone=unknown)。
+     */
+    pairRegimeThetaBullEnter: real('pair_regime_theta_bull_enter').notNull().default(0.03),
+    pairRegimeThetaBullExit: real('pair_regime_theta_bull_exit').notNull().default(0.01),
+    pairRegimeThetaBearEnter: real('pair_regime_theta_bear_enter').notNull().default(-0.04),
+    pairRegimeThetaBearExit: real('pair_regime_theta_bear_exit').notNull().default(-0.015),
     /**
      * Dashboard overview パネルの表示 ON/OFF (#dashboard-mf-layout)。有効パネル
      * key の CSV。表示専用設定なので trading config (`GlobalConfigSnapshot`) には

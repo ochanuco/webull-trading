@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   deactivateSymbolForBrokerDeny,
   loadInversePairs,
+  loadPairRegimeConfigs,
   loadSymbolConfig,
 } from '../../../src/infrastructure/db/symbolConfigRepo'
 
@@ -445,5 +446,29 @@ describe('deactivateSymbolForBrokerDeny (#460)', () => {
     const { db, updates } = fakeRwDb([])
     expect(await deactivateSymbolForBrokerDeny(db, 'NOPE', 'reason', 't1')).toBeNull()
     expect(updates).toHaveLength(0)
+  })
+})
+
+describe('loadPairRegimeConfigs (#472)', () => {
+  it('regime_enabled=1 の行だけを bull/bear/proxy に正規化して返す', async () => {
+    const rows = [
+      { symbol: 'soxl', inverse: 'soxs', regimeEnabled: true, regimeProxySymbol: 'soxx', regimeBullSymbol: 'soxl' },
+      { symbol: 'TQQQ', inverse: 'SQQQ', regimeEnabled: false, regimeProxySymbol: 'QQQ', regimeBullSymbol: 'TQQQ' },
+    ]
+    const result = await loadPairRegimeConfigs(fakeDbAll(rows) as never)
+    expect(result).toEqual([
+      { bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null },
+    ])
+  })
+
+  it('proxy 欠落 / bull がペア員でない misconfig は skip せず invalidConfig 付きで返す (fail-closed)', async () => {
+    const rows = [
+      { symbol: 'SOXL', inverse: 'SOXS', regimeEnabled: true, regimeProxySymbol: null, regimeBullSymbol: 'SOXL' },
+      { symbol: 'TQQQ', inverse: 'SQQQ', regimeEnabled: true, regimeProxySymbol: 'QQQ', regimeBullSymbol: 'SPXL' },
+    ]
+    const result = await loadPairRegimeConfigs(fakeDbAll(rows) as never)
+    expect(result).toHaveLength(2)
+    expect(result[0]!.invalidConfig).toContain('regime_proxy_symbol')
+    expect(result[1]!.invalidConfig).toContain('regime_bull_symbol')
   })
 })

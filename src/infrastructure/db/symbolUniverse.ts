@@ -1,11 +1,13 @@
 import { createDb } from './tradeJournalRepo'
 import {
   loadInversePairs,
+  loadPairRegimeConfigs,
   loadSymbolConfig,
   type SymbolCurrency,
   type SymbolMarket,
   type SymbolRoleValue,
 } from './symbolConfigRepo'
+import type { PairRegimeEntry } from '../../trading/strategy/pairRegime'
 
 export interface SymbolUniverse {
   /** active=1 のみ。cron / risk gate の評価対象。 */
@@ -74,6 +76,8 @@ export interface SymbolUniverse {
   /** symbol → 退避先 symbol (#452)。不在 = 退避しない。 */
   symbolCashFallback: Record<string, string>
   inversePairs: Record<string, string>
+  /** regime 有効化済みペア (#472)。misconfig は invalidConfig 付き (= unknown 扱い)。 */
+  pairRegimes: PairRegimeEntry[]
   source: 'd1'
 }
 
@@ -92,7 +96,11 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     throw new Error('loadSymbolUniverse: env.DB is not bound (D1 setup required)')
   }
   const db = createDb(env.DB)
-  const [config, pairs] = await Promise.all([loadSymbolConfig(db), loadInversePairs(db)])
+  const [config, pairs, pairRegimes] = await Promise.all([
+    loadSymbolConfig(db),
+    loadInversePairs(db),
+    loadPairRegimeConfigs(db),
+  ])
   return {
     allowedSymbols: config.allowedSymbols,
     inactiveSymbols: config.inactiveSymbols,
@@ -120,6 +128,7 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolAlwaysActive: config.symbolAlwaysActive,
     symbolCashFallback: config.symbolCashFallback,
     inversePairs: pairs,
+    pairRegimes,
     source: 'd1',
   }
 }

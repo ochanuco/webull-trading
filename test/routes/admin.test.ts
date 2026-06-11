@@ -1156,6 +1156,7 @@ describe('POST /admin/orders/sync-holdings', () => {
       symbolAlwaysActive: {},
       symbolCashFallback: {},
       inversePairs: {},
+      pairRegimes: [],
       source: 'd1',
     })
     const fakeWebull = {
