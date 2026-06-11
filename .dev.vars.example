@@ -112,3 +112,8 @@ ACCESS_DEV_BYPASS_USER=dev@local
 # テスト環境は 2FA 不要で auto-NORMAL、staging では未設定でも動くケース有り。
 # prod では設定漏れ → 401 で発覚させる方針 (= fail-closed ではなく throw しない)。
 WEBULL_ACCESS_TOKEN=
+
+# QUOTE_SOURCE (#475): 'webull' で quote を Webull Market Data API (bid/ask 付き、
+# trade host + v2) に切替。JP 銘柄と Webull 障害時は Yahoo に自動 fallback。
+# 未設定 = yahoo (現行 default)。
+# QUOTE_SOURCE=webull

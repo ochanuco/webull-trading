@@ -112,7 +112,11 @@
         // 1 user = 1 app の制約で staging/prod で API key 分離できないため、コード
         // 側で staging からの live order を絶対に止める。`WebullTradeClient` が
         // 'staging' を検知すると placeOrder で throw。
-        "ENVIRONMENT": "staging"
+        "ENVIRONMENT": "staging",
+        // #475: staging のみ Webull Market Data API を primary に (canary)。
+        // production は未設定 = Yahoo のまま — staging で bid/ask / spread guard
+        // の挙動を観察してから昇格する。
+        "QUOTE_SOURCE": "webull"
       },
       "routes": [
         { "pattern": "trading-staging.chanu.co", "custom_domain": true }
