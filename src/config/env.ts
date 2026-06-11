@@ -485,3 +485,13 @@ export interface Env {
   FIRST_LIVE_MAX_ORDER_NOTIONAL_JPY?: string
   ROLLBACK_REHEARSAL_MAX_AGE_HOURS?: string
 }
+
+
+// #475: quote source の切替。'webull' で Market Data API (trade host + v2、
+// PR #474 で稼働実証) を primary にし、bid/ask 付き snapshot で spread guard
+// (issue #411) を実数評価に戻す。JP 銘柄と Webull 障害時は Yahoo に自動
+// fallback。未設定 / 他値は 'yahoo' (PR #334 以来の現行動作) — fail-safe 側が
+// 既定で、切替は env の明示 opt-in のみ。
+export interface Env {
+  QUOTE_SOURCE?: string
+}

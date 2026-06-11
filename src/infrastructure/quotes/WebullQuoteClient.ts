@@ -24,10 +24,11 @@ export interface WebullQuoteClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
   /**
-   * Quotes host (#21)。JP 本番では trade とホストが分離 (`data-api.webull.co.jp`)。
-   * JP UAT (ALB) では trade と同じ URL を入れる。未設定 / 空 / whitespace なら
-   * JP prod default (`DEFAULT_QUOTES_API_BASE`) に fallback、env が explicit に
-   * セットされてれば override。
+   * Quotes host override。**JP 本番の Market Data API は trade host
+   * (`api.webull.co.jp`) + x-version v2 で稼働** (docs 明記 + PR #474 実測、
+   * #475)。「data-api.webull.co.jp に分離」は誤った前提だった。未設定 / 空 /
+   * whitespace なら trade host default に fallback。JP UAT (ALB 1 host 束ね)
+   * のみ explicit override を使う。
    */
   WEBULL_QUOTES_API_BASE?: string
   /** 2FA 発行 `x-access-token` (#21)。詳細は `WebullClientEnv.WEBULL_ACCESS_TOKEN`。 */
@@ -75,25 +76,30 @@ interface RawSnapshotEntry {
 //   (omitting them → 417 Expectation Failed; see probe trace in #84)
 const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
 /**
- * Webull JP **production** quotes host (#21)。SDK region=jp の公開値。
- * UAT (1 ホスト束ね) は `WEBULL_QUOTES_API_BASE` env で override する。
+ * Webull JP **production** の Market Data API host (#475)。docs (market-data-api/
+ * data-api) の明記どおり trade host と同一。旧値 `data-api.webull.co.jp` は
+ * SDK region=jp の公開値だが TCP 無応答で、そもそも market-data を serve して
+ * いなかった (2026-06-11 実測, PR #474)。UAT (1 ホスト束ね) は
+ * `WEBULL_QUOTES_API_BASE` env で override する。
  */
-const DEFAULT_QUOTES_API_BASE = 'https://data-api.webull.co.jp'
+const DEFAULT_QUOTES_API_BASE = 'https://api.webull.co.jp'
+
+/** QuoteSnapshot.source / spread guard の判定キー。 */
+export const WEBULL_QUOTE_SOURCE = 'webull-snapshot'
 
 /**
  * Minimal Webull market-data snapshot client. Signs requests with the same
- * HMAC-SHA1 canonical signing used by {@link WebullHttpClient}. Scope for #37-B
- * is read-only last-price + asOf so the cron handler can land a
+ * HMAC canonical signing used by {@link WebullHttpClient}. Read-only
+ * last-price + bid/ask + asOf so the cron handler can land a
  * {@link QuoteSnapshot} into each symbol's Durable Object.
  *
- * @deprecated since 2026-05-22 — JP 本番の market-data API がまだ稼働してない
- * (`data-api.webull.co.jp` の TCP 443 が応答せず、`api.webull.co.jp` 上の
- * `/openapi/market-data/*` は `404 Route Not Found`)。strategy cron は
- * {@link YahooQuoteClient} を default で使う構造に切替済 (PR #334)。本 class
- * は `/admin/broker/probe` で疎通監視用に残してあるのみ。Webull JP が
- * market-data API を運用開始したら deprecation 解除して default に戻す予定。
+ * 2026-05-22 に deprecated 化 (market-data 未稼働と誤認、PR #334 で Yahoo へ) →
+ * **2026-06-11 に解除** (#475): 正しい host (trade host + v2) で稼働確認済み。
+ * `QUOTE_SOURCE=webull` で primary に戻る。bid/ask が実データになるため
+ * spread guard (issue #411) が実数評価になる。
  */
 export class WebullQuoteClient {
+  readonly source = WEBULL_QUOTE_SOURCE
   private readonly baseUrl: string
   private readonly quotePath: string
   private readonly timeoutMs: number
@@ -187,10 +193,6 @@ export class WebullQuoteClient {
   }
 }
 
-/**
- * @deprecated since 2026-05-22 — see {@link WebullQuoteClient}。default では
- * {@link YahooQuoteClient} を使う設計に移行済。
- */
 export function createWebullQuoteClient(
   env: WebullQuoteClientEnv,
   options?: {
