@@ -43,7 +43,6 @@ import {
   updateBudgetAllocPct,
   updateSymbolConfig,
   isSymbolRole,
-  MAX_ALTERNATIVES,
   SYMBOL_ROLES,
   type SymbolConfigWriteInput,
   type SymbolRole,
@@ -2390,7 +2389,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     maxSma50DeviationPctOverride?: unknown
     require_above_sma50_override?: unknown
     requireAboveSma50Override?: unknown
-    alternatives?: unknown
     entry_required?: unknown
     entryRequired?: unknown
     always_active?: unknown
@@ -2513,7 +2511,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     raw.require_above_sma50_override ?? raw.requireAboveSma50Override,
     'requireAboveSma50Override',
   )
-  const alternatives = parseAlternativesInput(raw.alternatives, symbol)
   // 条件連動配分 (#452 Layer 3): checkbox 未送信は false (= 従来挙動)。退避先は
   // ticker 文法 + self 参照禁止。空 → NULL (= 退避しない)。
   const entryRequired = parseFormBool(raw.entry_required ?? raw.entryRequired, false)
@@ -2544,7 +2541,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     maxAtrRatioOverride,
     maxSma50DeviationPctOverride,
     requireAboveSma50Override,
-    alternatives,
     entryRequired,
     alwaysActive,
     cashFallbackSymbol,
@@ -2607,48 +2603,6 @@ function parseOptionalTriStateBool(value: unknown, field: string): boolean | nul
     if (trimmed === 'false') return false
   }
   throw new ValidationError(`${field} must be '', 'true' or 'false'`, { field })
-}
-
-/**
- * alternatives (#452、表示専用): form はカンマ/空白区切り text、JSON はその文字列
- * or 配列を送る。ticker 文法 ([A-Za-z0-9]{1,10}) 外の要素は 400。self 参照と
- * 重複は除去、上限 MAX_ALTERNATIVES 超過は 400。空 → null。
- */
-function parseAlternativesInput(value: unknown, selfSymbol: string): string[] | null {
-  if (value === undefined || value === null) return null
-  let tokens: string[]
-  if (Array.isArray(value)) {
-    tokens = value.map((v) => {
-      if (typeof v !== 'string') {
-        throw new ValidationError('alternatives must be symbols', { field: 'alternatives' })
-      }
-      return v
-    })
-  } else if (typeof value === 'string') {
-    tokens = value.split(/[\s,]+/)
-  } else {
-    throw new ValidationError('alternatives must be a string or array of symbols', {
-      field: 'alternatives',
-    })
-  }
-  const out: string[] = []
-  for (const token of tokens) {
-    const sym = token.trim().toUpperCase()
-    if (sym === '') continue
-    if (!/^[A-Z0-9]{1,10}$/.test(sym)) {
-      throw new ValidationError(`alternatives contains an invalid symbol: ${sym}`, {
-        field: 'alternatives',
-      })
-    }
-    if (sym === selfSymbol.toUpperCase()) continue
-    if (!out.includes(sym)) out.push(sym)
-  }
-  if (out.length > MAX_ALTERNATIVES) {
-    throw new ValidationError(`alternatives must have at most ${MAX_ALTERNATIVES} symbols`, {
-      field: 'alternatives',
-    })
-  }
-  return out.length > 0 ? out : null
 }
 
 /**
@@ -2897,7 +2851,6 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     maxAtrRatioOverride: row.maxAtrRatioOverride,
     maxSma50DeviationPctOverride: row.maxSma50DeviationPctOverride,
     requireAboveSma50Override: row.requireAboveSma50Override,
-    alternatives: row.alternatives,
     updatedAt: row.updatedAt,
   }
 }

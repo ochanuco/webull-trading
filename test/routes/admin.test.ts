@@ -1151,7 +1151,6 @@ describe('POST /admin/orders/sync-holdings', () => {
       symbolMaxAtrRatioOverride: {},
       symbolMaxSma50DeviationPctOverride: {},
       symbolRequireAboveSma50Override: {},
-      symbolAlternatives: {},
       symbolEntryRequired: {},
       symbolAlwaysActive: {},
       symbolCashFallback: {},
