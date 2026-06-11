@@ -8797,6 +8797,9 @@ export function symbolMapEditorBody(
     <span class="muted" style="font-size:12px">
       <strong>口座 → 銘柄の線</strong> = 配分 ・ <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON) ・ % 欄 = 配分変更。
       変更は即保存されません — 下のサマリを確認して<strong>「適用」で一括保存</strong>します。
+      カードの塗り: <span style="background:#eef2f7;border:1px solid #46637f;padding:0 6px;border-radius:4px">口座</span>
+      <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
+      <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>
     </span>
   </p>
   <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:#fff8e6;border:1px solid #e6c46a;border-radius:8px;margin-bottom:8px">
@@ -8811,6 +8814,10 @@ export function symbolMapEditorBody(
   <style>
   #symbol-map-editor{height:calc(100vh - 220px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
   #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
+  /* 通貨で塗り分け: 口座 = 紺、JPY = 桜、USD = 薄青 (operator 要望) */
+  #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#eef2f7;border-color:#46637f}
+  #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:#fdf3f2;border-color:#d4a09a}
+  #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:#f0f6ff;border-color:#9ab8dd}
   #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
   #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
   #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
@@ -8862,7 +8869,8 @@ export function symbolMapEditorBody(
         '<div style="margin-top:4px">配分 <input type="number" min="0" max="100" step="1" value="' + n.pct + '" data-sym="' + n.sym + '" class="sm-pct"> %</div>' +
         '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
         '</div>';
-      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node', { sym: n.sym }, html);
+      var ccyClass = n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd';
+      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node ' + ccyClass, { sym: n.sym }, html);
       idOf[n.sym] = id;
       symOf[id] = n.sym;
     });
@@ -9059,6 +9067,8 @@ export function renderSymbolRelationMap(
     /** カード 2 行目 (状態)。 */
     sub: string
     color: string
+    /** カードの塗り (通貨で分ける: 口座 = 紺系 / JPY = 桜 / USD = 薄青)。 */
+    fill: string
     status: 'account' | 'active' | 'pending' | 'cash'
     x: number
     y: number
@@ -9107,6 +9117,7 @@ export function renderSymbolRelationMap(
       title: `口座 (予算 ${Math.round(total * 10) / 10}%)`,
       sub: '原資',
       color: '#46637f',
+      fill: '#eef2f7',
       status: 'account',
       x: 90,
       y: centerY,
@@ -9121,6 +9132,7 @@ export function renderSymbolRelationMap(
         title: `${sym} ${pctOf(r)}%`,
         sub: held ? `Active ・ ${amounts[sym]!.native}` : 'Pending (様子見)',
         color: colorOf(roleOf(r)),
+        fill: r.currency === 'JPY' ? '#fdf3f2' : '#f0f6ff',
         status: held ? 'active' : 'pending',
         x: SYMBOL_X,
         y: 40 + i * ROW_H,
@@ -9160,6 +9172,7 @@ export function renderSymbolRelationMap(
         title: '現金待機',
         sub: '未参加分の置き場',
         color: '#9aa0a6',
+        fill: '#f5f5f7',
         status: 'cash',
         x: CASH_X,
         y: centerY,
@@ -9174,6 +9187,7 @@ export function renderSymbolRelationMap(
         title: e.target,
         sub: amounts[e.target] ? `Active ・ ${amounts[e.target]!.native}` : '受け皿',
         color: row ? colorOf(roleOf(row)) : '#9aa0a6',
+        fill: row ? (row.currency === 'JPY' ? '#fdf3f2' : '#f0f6ff') : '#f5f5f7',
         status: amounts[e.target] ? 'active' : 'pending',
         x: CASH_X,
         y: 40 + nodes.length * 8,
@@ -9205,7 +9219,7 @@ export function renderSymbolRelationMap(
   const mapDiv = edges.length > 0
     ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
+      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。塗り: 紺 = 口座 ・ 桜 = JPY 銘柄 ・ 薄青 = USD 銘柄。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
       <strong>Pending</strong> = 様子見 (破線枠) で、点線矢印が「いま枠が行っている先」:
       <span style="color:#0e9f6e">緑 = 退避先へ代替割当 (条件連動 ON)</span> ・
       <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span> ・
@@ -9261,7 +9275,7 @@ export function renderSymbolRelationMap(
             symbol: 'roundRect',
             symbolSize: [150, 46],
             itemStyle: {
-              color: '#fff',
+              color: n.fill || '#fff',
               borderColor: n.color,
               borderWidth: 2,
               borderType: isPending ? 'dashed' : 'solid',
