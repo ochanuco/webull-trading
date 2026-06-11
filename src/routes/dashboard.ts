@@ -8886,6 +8886,8 @@ export function symbolMapEditorBody(
       if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
     });
     programmatic = false;
+    // 初期表示でも合計を draft 基準で描く (server 計算値と同じはずだが一元化)。
+    setTimeout(function () { renderAccountTotal(); }, 0);
 
     function markConnectionPending(srcId, dstId) {
       var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);
@@ -8898,7 +8900,36 @@ export function symbolMapEditorBody(
     function isDirty(sym) {
       return draft[sym].pct !== baseline[sym].pct || (draft[sym].fallback || null) !== (baseline[sym].fallback || null);
     }
+    // draft 合計 (インバース対は枠共有 = max で集計) をリアルタイム表示。
+    // 100% 超過 = 早い者勝ちの取り合い (settled cash gate で実際は買えない) なので赤警告。
+    function draftTotalPct() {
+      var counted = {};
+      var total = 0;
+      data.nodes.forEach(function (n) {
+        if (counted[n.sym]) return;
+        counted[n.sym] = true;
+        var mine = draft[n.sym].pct || 0;
+        if (n.inverse && draft[n.inverse]) {
+          counted[n.inverse] = true;
+          total += Math.max(mine, draft[n.inverse].pct || 0);
+        } else {
+          total += mine;
+        }
+      });
+      return Math.round(total * 10) / 10;
+    }
+    function renderAccountTotal() {
+      var nodeEl = document.getElementById('node-' + accountId);
+      if (!nodeEl) return;
+      var meta = nodeEl.querySelector('.sm-meta');
+      if (!meta) return;
+      var total = draftTotalPct();
+      var over = total > 100;
+      meta.innerHTML = '原資 ・ 予算 <strong style="color:' + (over ? '#ff8a80' : '#e8eaed') + '">' + total + '%</strong>' +
+        (over ? ' ⚠ 100% 超過' : '') + ' (対は枠共有で max)';
+    }
     function renderChanges() {
+      renderAccountTotal();
       var bar = document.getElementById('sm-changes-bar');
       var list = document.getElementById('sm-changes-list');
       var items = [];
@@ -8980,7 +9011,11 @@ export function symbolMapEditorBody(
       var pctChanges = Object.keys(draft).filter(function (sym) { return draft[sym].pct !== baseline[sym].pct; });
       var fbChanges = Object.keys(draft).filter(function (sym) { return (draft[sym].fallback || null) !== (baseline[sym].fallback || null); });
       if (pctChanges.length === 0 && fbChanges.length === 0) return;
-      if (!confirm('表示中の変更をまとめて適用します。よろしいですか？')) return;
+      var total = draftTotalPct();
+      var warn = total > 100
+        ? '⚠ 配分合計が ' + total + '% で 100% を超えています。超過分は買付余力 (settled cash gate) により先着順でしか約定しません。このまま適用しますか？'
+        : '表示中の変更をまとめて適用します (配分合計 ' + total + '%)。よろしいですか？';
+      if (!confirm(warn)) return;
       var steps = Promise.resolve();
       if (pctChanges.length > 0) {
         var form = new FormData();
