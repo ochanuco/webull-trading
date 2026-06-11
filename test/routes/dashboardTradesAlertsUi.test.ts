@@ -1,0 +1,163 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp } from '../../src/app'
+import { loadRecentAlerts } from '../../src/infrastructure/notification/notificationEmitLog'
+import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
+
+vi.mock('../../src/infrastructure/notification/notificationEmitLog', async () => {
+  const actual = await vi.importActual<typeof import('../../src/infrastructure/notification/notificationEmitLog')>(
+    '../../src/infrastructure/notification/notificationEmitLog',
+  )
+  return { ...actual, loadRecentAlerts: vi.fn() }
+})
+vi.mock('../../src/infrastructure/db/tradeJournalRepo', async () => {
+  const actual = await vi.importActual<typeof import('../../src/infrastructure/db/tradeJournalRepo')>(
+    '../../src/infrastructure/db/tradeJournalRepo',
+  )
+  return { ...actual, createDb: vi.fn() }
+})
+vi.mock('../../src/infrastructure/db/symbolUniverse', () => ({
+  loadSymbolUniverse: vi.fn(async () => {
+    throw new Error('no universe in test')
+  }),
+}))
+
+const baseEnv = { ACCESS_DEV_BYPASS_USER: 'admin' }
+
+function journalRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 1,
+    timestamp: '2026-06-11T01:00:00.000Z',
+    tradeEventType: 'fill',
+    symbol: 'SOXL',
+    side: 'BUY',
+    quantity: 3,
+    limitPrice: 30.5,
+    filledQty: 3,
+    filledPrice: 30.4,
+    brokerStatus: 'FILLED',
+    mode: 'LIVE',
+    errorMessage: null,
+    realizedPnl: null,
+    exitReason: null,
+    ...over,
+  }
+}
+
+function fakeJournalDb(rows: Array<Record<string, unknown>>) {
+  return {
+    select() {
+      return {
+        from() {
+          const chain = {
+            where: () => chain,
+            orderBy: () => chain,
+            limit: async () => rows,
+          }
+          return chain
+        },
+      }
+    },
+  }
+}
+
+describe('/dashboard/trades 新 UI (#alerts-trades-ui)', () => {
+  it('日本語イベント・売買バッジ・状態 pill・実現損益列を描画する', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeJournalDb([
+        journalRow(),
+        journalRow({
+          id: 2,
+          tradeEventType: 'exit',
+          side: 'SELL',
+          realizedPnl: 12.34,
+          exitReason: 'take_profit',
+          brokerStatus: 'FILLED',
+        }),
+        journalRow({
+          id: 3,
+          tradeEventType: 'post_submit',
+          brokerStatus: null,
+          mode: 'DRY_RUN',
+          errorMessage:
+            'Webull request failed permanently with status 417: {"error_code":"OAUTH_OPENAPI_TICKER_IS_DENY"}',
+        }),
+      ]) as never,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/trades', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // view filter pills
+    expect(body).toContain('view=fills')
+    expect(body).toContain('約定・手仕舞い')
+    // イベント日本語 + raw は title に保持
+    expect(body).toContain('● 約定')
+    expect(body).toContain('● 手仕舞い')
+    expect(body).toContain('title="post_submit"')
+    // 売買バッジ
+    expect(body).toContain('>買</span>')
+    expect(body).toContain('>売</span>')
+    // 実現損益 + exit reason
+    expect(body).toContain('+12.34')
+    expect(body).toContain('take_profit')
+    // エラーは短い日本語 + 全文 details
+    expect(body).toContain('エラー: 銘柄取扱なし')
+    expect(body).toContain('OAUTH_OPENAPI_TICKER_IS_DENY')
+    // mode pill
+    expect(body).toContain('実発注')
+    expect(body).toContain('>DRY<')
+  })
+
+  it('view=errors はエラー行のみの絞り込みリンクとして機能する (route param)', async () => {
+    vi.mocked(createDb).mockReturnValue(fakeJournalDb([]) as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/trades?view=errors', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    expect(res.status).toBe(200)
+    expect(body).toContain('該当するレコードがありません')
+  })
+})
+
+describe('/dashboard/alerts 新 UI (#alerts-trades-ui)', () => {
+  beforeEach(() => {
+    vi.mocked(loadRecentAlerts).mockReset()
+  })
+
+  it('severity/種別を日本語 pill にし、長文 message は畳む', async () => {
+    const longMessage = 'Webull request failed permanently with status 417: ' + 'x'.repeat(200)
+    vi.mocked(loadRecentAlerts).mockResolvedValue([
+      {
+        id: 1,
+        timestamp: '2026-06-11T01:00:00.000Z',
+        requestId: 'req-9',
+        eventType: 'ERROR',
+        severity: 'critical',
+        symbol: 'USMV',
+        cause: 'broker_4xx',
+        message: longMessage,
+      },
+      {
+        id: 2,
+        timestamp: '2026-06-11T01:01:00.000Z',
+        requestId: null,
+        eventType: 'STATE_CHANGE',
+        severity: 'info',
+        symbol: null,
+        cause: 'dryRun',
+        message: 'state change: dryRun true → false',
+      },
+    ] as never)
+    const app = createApp()
+    const res = await app.request('/dashboard/alerts', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('>重大<')
+    expect(body).toContain('>情報<')
+    expect(body).toContain('設定変更')
+    // 長文は先頭 + 全文 details (原文は grep 用に保持)
+    expect(body).toContain('<summary class="muted" style="font-size:11px;cursor:pointer">全文</summary>')
+    expect(body).toContain(longMessage.slice(0, 100))
+    // 短文はそのまま
+    expect(body).toContain('dryRun true → false')
+  })
+})
