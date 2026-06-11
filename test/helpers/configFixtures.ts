@@ -74,7 +74,6 @@ export function makeSymbolUniverse(overrides: Partial<SymbolUniverse> = {}): Sym
     symbolMaxAtrRatioOverride: {},
     symbolMaxSma50DeviationPctOverride: {},
     symbolRequireAboveSma50Override: {},
-    symbolAlternatives: {},
     symbolEntryRequired: {},
     symbolAlwaysActive: {},
     symbolCashFallback: {},

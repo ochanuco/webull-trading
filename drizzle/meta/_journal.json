@@ -225,6 +225,13 @@
       "when": 1781174769487,
       "tag": "0031_add_pair_regime",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1781193221867,
+      "tag": "0032_drop_alternatives",
+      "breakpoints": true
     }
   ]
 }

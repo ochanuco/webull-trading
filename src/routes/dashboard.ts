@@ -19,7 +19,7 @@ import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/g
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency, SymbolRole } from '../infrastructure/db/symbolConfigRepo'
-import { loadInversePairs, parseAlternativesJson, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs, loadPairRegimeConfigs, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -64,6 +64,7 @@ import {
   evaluatePairRegime,
   PAIR_REGIME_ZONE_LABELS,
   type PairRegimeDecision,
+  type PairRegimeEntry,
 } from '../trading/strategy/pairRegime'
 import {
   computeConditionalAllocation,
@@ -76,6 +77,7 @@ import type {
 import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
+import { loadUsdJpyRate } from '../infrastructure/quotes/fxRate'
 import type { SymbolState } from '../trading/state/types'
 import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 // #293 calendar events management UI (earnings + macro)。dashboard 側に form
@@ -510,7 +512,6 @@ export const dashboard = new Hono<DashboardBindings>()
         ? buildBuyabilityView(symbolChart.evalIndicators, entryRule)
         : null
       // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
-      // WATCH/NG 時は alternatives (表示専用) を併記する。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
       // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
       // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
@@ -575,7 +576,6 @@ export const dashboard = new Hono<DashboardBindings>()
             entryStatus,
             decisionRows,
             pairRegime: pairRegimeView,
-            alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
             symbolPolicy: focusSymbol
               ? {
                   role: universe.symbolRole[focusSymbol] ?? null,
@@ -787,10 +787,37 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable('DB not bound')))
     }
     try {
-      const [rows, inversePairs] = await Promise.all([
+      const [rows, inversePairs, pairRegimes] = await Promise.all([
         loadAllSymbolConfigRows(c.env.DB),
         loadInversePairs(createDb(c.env.DB)).catch(() => ({}) as Record<string, string>),
+        // 関係マップ用 (#symbol-relation-map)。読めなくても一覧は出す。
+        loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => []),
       ])
+      // 関係マップの縦軸 = 投入金額 (DO position の qty × avgPrice、ground truth)。
+      // 取得失敗・position 無しは 0 (最下段)。fx は表示位置の換算のみに使う。
+      const mapAmounts: Record<string, { native: string; jpy: number }> = {}
+      if (c.env.SYMBOL_STATE) {
+        const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
+        const usdJpy = await loadUsdJpyRate().catch(() => null)
+        await Promise.all(
+          rows.map(async (r) => {
+            const sym = r.symbol.toUpperCase()
+            const state = await stateClient.getState(sym).catch(() => null)
+            const pos = state?.position
+            if (!pos || pos.qty <= 0) return
+            const cost = pos.qty * pos.avgPrice
+            if (r.currency === 'USD') {
+              // fx 不達時は概算 150 で位置決めだけ行う (表示専用、tooltip は native 額)。
+              mapAmounts[sym] = {
+                native: `$${cost.toFixed(0)}`,
+                jpy: cost * (usdJpy ?? 150),
+              }
+            } else {
+              mapAmounts[sym] = { native: `¥${Math.round(cost).toLocaleString('en-US')}`, jpy: cost }
+            }
+          }),
+        )
+      }
       const errorCode = c.req.query('error') ?? null
       const errorSymbol = c.req.query('symbol') ?? null
       const filter: SymbolsListFilter = {
@@ -799,10 +826,47 @@ export const dashboard = new Hono<DashboardBindings>()
         q: c.req.query('q') ?? '',
       }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, errorCode, errorSymbol, filter })),
+        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, pairRegimes, mapAmounts, errorCode, errorSymbol, filter })),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
+    }
+  })
+  /**
+   * 配分マップの編集キャンバス (#symbol-relation-map)。Drawflow で銘柄カードを
+   * 並べ、線を引く = 退避先を設定 (entry_required も ON)、線を消す = 解除、
+   * カード内の % input = 予算配分の更新。変更は都度 confirm → admin API →
+   * reload (canvas 状態と DB の drift を作らない最小実装)。
+   */
+  .get('/symbols/map', async (c) => {
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '配分マップ編集', unavailable('DB not bound')))
+    }
+    try {
+      const rows = await loadAllSymbolConfigRows(c.env.DB)
+      const inversePairs = await loadInversePairs(createDb(c.env.DB)).catch(
+        () => ({}) as Record<string, string>,
+      )
+      const mapAmounts: Record<string, { native: string; jpy: number }> = {}
+      if (c.env.SYMBOL_STATE) {
+        const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
+        await Promise.all(
+          rows.map(async (r) => {
+            const sym = r.symbol.toUpperCase()
+            const state = await stateClient.getState(sym).catch(() => null)
+            const pos = state?.position
+            if (!pos || pos.qty <= 0) return
+            const cost = pos.qty * pos.avgPrice
+            mapAmounts[sym] = {
+              native: r.currency === 'USD' ? `$${cost.toFixed(0)}` : `¥${Math.round(cost).toLocaleString('en-US')}`,
+              jpy: cost,
+            }
+          }),
+        )
+      }
+      return c.html(renderLayout(c, '配分マップ編集', symbolMapEditorBody(rows, inversePairs, mapAmounts)))
+    } catch (err) {
+      return c.html(renderLayout(c, '配分マップ編集', unavailable(messageOf(err))))
     }
   })
   .get('/symbols/new', async (c) => {
@@ -5807,8 +5871,6 @@ export interface ChartsBodySymbol {
   buyability?: BuyabilityView | null
   /** 段階判定 (#452 PR 2)。null = 評価データ無し。 */
   entryStatus?: EntryStatusResult | null
-  /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時に併記する。 */
-  alternatives?: string[]
   /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
   symbolPolicy?: SymbolPolicySummary | null
   /**
@@ -7204,7 +7266,6 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
-    alternatives: args.alternatives ?? [],
   })}
   ${renderDecisionPlotCaption(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
@@ -8369,8 +8430,6 @@ function fmtGateValue(g: EntryGateStatus): string {
 export interface BuyabilityPanelContext {
   /** 段階判定 (#452 PR 2)。null = 出さない。 */
   entryStatus?: EntryStatusResult | null
-  /** 代替銘柄候補 (#452、表示専用)。WATCH/NG 時のみ表示する。 */
-  alternatives?: string[]
 }
 
 export function renderBuyabilityPanel(
@@ -8466,22 +8525,11 @@ export function renderBuyabilityPanel(
     })
     .join('')
 
-  // --- 段階判定 badge + HALF 説明 + 代替候補 (#452 PR 2) ---
+  // --- 段階判定 badge + HALF 説明 (#452 PR 2) ---
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
     halfNote = `<div style="margin-top:6px;font-size:12px;color:#b25000">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
-  }
-  let altBlock = ''
-  if (status && (status.status === 'WATCH' || status.status === 'NG') && ctx.alternatives?.length) {
-    const links = ctx.alternatives
-      .map(
-        (s) =>
-          `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}" style="font-weight:600">${esc(s)}</a>`,
-      )
-      .join(' / ')
-    altBlock = `<div style="margin-top:8px"><strong>代替候補</strong>: ${links}
-      <div class="muted" style="font-size:11px">この銘柄が entry 不可の間の代替 ETF 候補 (表示のみ — 自動で発注先を切り替えることはしない、#452)。</div></div>`
   }
 
   // 距離の推移 (+ETA) と 入場ゲート は 2 列 (narrow 画面は .panel-row の
@@ -8490,7 +8538,7 @@ export function renderBuyabilityPanel(
     <div style="font-size:13px;color:${headColor};margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${statusBadge}<span>${headline}</span></div>
     ${halfNote}
     <div class="panel-row" style="gap:8px 20px">
-      <div>${trendBlock}${etaBlock}${altBlock}</div>
+      <div>${trendBlock}${etaBlock}</div>
       <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定 + role preset + 銘柄 override、#452)
         <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
       </div>
@@ -8689,14 +8737,695 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
   })
 }
 
+/**
+ * 配分マップ編集キャンバス (#symbol-relation-map)。**draft 編集 + 1/枝 配分**:
+ *
+ *   - 配分は % 入力ではなく**トポロジーから導出**する (operator 指定)。
+ *     口座に繋がっている枝数 N に対し各枝 = 100/N %。インバース対は両方
+ *     繋がっていても **1 枝** として数え、両側に同じ % を書く (枠共有 #315 と
+ *     同じ意味)。合計は構造的に常に 100% — % の手管理によるカオスを排除する。
+ *   - 線を引く / 消すは draft に積み、変更箇所をハイライト + サマリ表示して
+ *     「適用」で一括保存 → reload。DB / cron は従来どおり budget_alloc_pct
+ *     (fraction) を読む — 変換はこのエディタの適用時のみ。
+ *   - 銘柄 → 銘柄の線 = 退避先 (1 銘柄 1 本、設定時に条件連動も ON)
+ *   - 口座から切断 = 配分解除 (NULL = risk-% サイジングに戻る)
+ * インバース対 / proxy はカード内に表示のみ (不変条件があるためキャンバス編集不可)。
+ */
+export function symbolMapEditorBody(
+  rows: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+  amounts: Record<string, { native: string; jpy: number }>,
+): string {
+  const active = rows.filter((r) => r.active)
+  const pctOf = (r: SymbolConfigRow): number =>
+    r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
+  const nodes = active.map((r, i) => {
+    const sym = r.symbol.toUpperCase()
+    return {
+      sym,
+      pct: pctOf(r),
+      role: r.role ?? null,
+      color: ROLE_NODE_COLORS[r.role ?? ''] ?? '#5f6368',
+      held: amounts[sym]?.native ?? null,
+      entryRequired: r.entryRequired === true,
+      fallback: r.cashFallbackSymbol?.toUpperCase() ?? null,
+      inverse: inversePairs[sym]?.toUpperCase() ?? null,
+      currency: r.currency,
+      y: 0, // 後段で通貨グループ順に再計算する (JPY 群 → USD 群)
+      order: i,
+    }
+  })
+  // JPY 銘柄を上群、USD 銘柄を下群に並べ、それぞれの口座カードの近くに置く。
+  let yCursor = 30
+  for (const ccy of ['JPY', 'USD']) {
+    for (const n of nodes.filter((x) => x.currency === ccy)) {
+      n.y = yCursor
+      yCursor += 120
+    }
+  }
+  if (nodes.length === 0) {
+    return `<p class="muted">有効な銘柄がありません。</p>`
+  }
+  const payload = { nodes }
+  return `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
+    <span class="muted" style="font-size:12px">
+      <strong>口座 (日本/米国) → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い、予算プールは全体共通) で % は自動計算 ・
+      <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON)。
+      <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete。
+    </span>
+    <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
+    <span class="muted" style="font-size:12px">
+      変更は即保存されません — サマリを確認して<strong>「適用」で一括保存</strong>。
+      塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
+      <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
+      <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>
+    </span>
+  </p>
+  <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:#fff8e6;border:1px solid #e6c46a;border-radius:8px;margin-bottom:8px">
+    <div style="flex:1;min-width:0">
+      <strong style="font-size:12px">未適用の変更</strong>
+      <ul id="sm-changes-list" style="margin:4px 0 0 16px;padding:0;font-size:12px"></ul>
+    </div>
+    <button type="button" id="sm-apply" style="padding:6px 18px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">適用</button>
+    <button type="button" id="sm-reset" style="padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">リセット</button>
+  </div>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css">
+  <style>
+  #symbol-map-editor{height:calc(100vh - 220px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
+  #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
+  #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
+  #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
+  /* 通貨で塗り分け: 口座 = 濃グレー、JPY = 桜、USD = 薄青 (operator 要望) */
+  #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#5f6368;border-color:#3c4043}
+  #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:#fdf3f2;border-color:#d4a09a}
+  #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:#f0f6ff;border-color:#9ab8dd}
+  /* 接続ポートの◯もグレーに (default の白丸 + 黒枠は浮く) */
+  #symbol-map-editor .drawflow .drawflow-node .input,
+  #symbol-map-editor .drawflow .drawflow-node .output{background:#9aa0a6;border:2px solid #6e6e73;width:14px;height:14px}
+  #symbol-map-editor .drawflow .drawflow-node .input:hover,
+  #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
+  #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
+  .sm-card{padding:8px 10px;font-size:12px}
+  .sm-card .sm-title{font-size:14px;font-weight:700}
+  .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
+  .sm-card .sm-status-pending{color:#b25000;font-size:11px}
+  .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
+  .sm-card .sm-share{font-weight:600}
+  </style>
+  <div id="symbol-map-editor"></div>
+  ${safeJsonScript('__symbolMapEditor', payload)}
+  <script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
+  <script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var data = window.__symbolMapEditor;
+    var el = document.getElementById('symbol-map-editor');
+    if (!data || !el || typeof Drawflow === 'undefined') return;
+    var editor = new Drawflow(el);
+    editor.reroute = true;
+    editor.start();
+    var idOf = {};
+    var symOf = {};
+    var nodeBySym = {};
+    var baseline = {};   // sym -> { pct, fallback }
+    var draft = {};      // sym -> { connected, fallback }
+    var programmatic = false;
+
+    // 起点は通貨別の口座カード (operator 指定)。予算プール自体は単一 (JPY 換算
+    // ベース #budget-jpy-base-fx) なので 1/枝 は全体共通 — カードには通貨内訳を出す。
+    var currencies = [];
+    data.nodes.forEach(function (n) { if (currencies.indexOf(n.currency) === -1) currencies.push(n.currency); });
+    currencies.sort(); // JPY, USD の順
+    var accountIds = {};
+    var accountSymOf = {};
+    var nJpy = data.nodes.filter(function (n) { return n.currency === 'JPY'; }).length;
+    currencies.forEach(function (ccy, i) {
+      var label = ccy === 'JPY' ? '日本口座 (JPY)' : '米国口座 (USD)';
+      var y = ccy === 'JPY' ? 30 + ((Math.max(nJpy, 1) - 1) * 120) / 2 : 30 + nJpy * 120 + ((Math.max(data.nodes.length - nJpy, 1) - 1) * 120) / 2;
+      var id = editor.addNode('口座' + ccy, 0, 1, 40, y, 'sm-node sm-account',
+        { sym: '口座' + ccy },
+        '<div class="sm-card"><div class="sm-title" style="color:#fff">' + label + '</div>' +
+        '<div class="sm-meta" style="color:#e8eaed">—</div></div>');
+      accountIds[ccy] = id;
+      symOf[id] = '__account_' + ccy + '__';
+      accountSymOf['__account_' + ccy + '__'] = ccy;
+    });
+
+    data.nodes.forEach(function (n) {
+      nodeBySym[n.sym] = n;
+      baseline[n.sym] = { pct: n.pct, fallback: n.fallback };
+      draft[n.sym] = { connected: n.pct > 0, fallback: n.fallback };
+      var statusHtml = n.held
+        ? '<div class="sm-status-active">Active ・ ' + n.held + '</div>'
+        : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
+      var metaParts = [];
+      if (n.role) metaParts.push(n.role);
+      if (n.inverse) metaParts.push('⇄ ' + n.inverse);
+      metaParts.push(n.currency);
+      var html = '<div class="sm-card">' +
+        '<div class="sm-title" style="color:' + n.color + '">' + n.sym + '</div>' +
+        statusHtml +
+        '<div style="margin-top:4px">配分 <span class="sm-share" id="sm-share-' + n.sym + '">—</span></div>' +
+        '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
+        '</div>';
+      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node ' + (n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { sym: n.sym }, html);
+      idOf[n.sym] = id;
+      symOf[id] = n.sym;
+    });
+
+    programmatic = true;
+    data.nodes.forEach(function (n) {
+      if (n.pct > 0) editor.addConnection(accountIds[n.currency], idOf[n.sym], 'output_1', 'input_1');
+      if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
+    });
+    programmatic = false;
+
+    // 1/枝 の導出: 接続中の銘柄を対 (インバース) ごとに 1 枝として数え、
+    // 各枝 = round(100/N, 1dp)。接続中の銘柄は対の両側とも同じ % (枠共有)。
+    function deriveShares() {
+      var branches = 0;
+      var seen = {};
+      Object.keys(draft).forEach(function (sym) {
+        if (!draft[sym].connected || seen[sym]) return;
+        seen[sym] = true;
+        var inv = nodeBySym[sym].inverse;
+        if (inv && draft[inv] && draft[inv].connected) seen[inv] = true;
+        branches += 1;
+      });
+      var share = branches > 0 ? Math.round((100 / branches) * 10) / 10 : 0;
+      var shares = {};
+      Object.keys(draft).forEach(function (sym) {
+        shares[sym] = draft[sym].connected ? share : 0;
+      });
+      return { branches: branches, share: share, shares: shares };
+    }
+    function renderShares() {
+      var d = deriveShares();
+      Object.keys(draft).forEach(function (sym) {
+        var span = document.getElementById('sm-share-' + sym);
+        if (!span) return;
+        span.textContent = draft[sym].connected ? '1/' + d.branches + ' = ' + d.share + '%' : 'なし (risk-%)';
+      });
+      currencies.forEach(function (ccy) {
+        var accountEl = document.getElementById('node-' + accountIds[ccy]);
+        if (!accountEl) return;
+        var meta = accountEl.querySelector('.sm-meta');
+        if (!meta) return;
+        // 通貨内訳: この口座配下の枝数と小計% (対は 1 枝)。予算プールは全体共通。
+        var seenCcy = {};
+        var ccyBranches = 0;
+        Object.keys(draft).forEach(function (sym) {
+          if (!draft[sym].connected || nodeBySym[sym].currency !== ccy || seenCcy[sym]) return;
+          seenCcy[sym] = true;
+          var inv = nodeBySym[sym].inverse;
+          if (inv && draft[inv] && draft[inv].connected) seenCcy[inv] = true;
+          ccyBranches += 1;
+        });
+        var subtotal = Math.round(ccyBranches * d.share * 10) / 10;
+        meta.textContent = ccyBranches + ' 枝 ・ 小計 ' + subtotal + '% (全体 ' + d.branches + ' 枝 ・ 1 枝 = ' + (d.branches > 0 ? d.share + '%' : '—') + ')';
+      });
+      return d;
+    }
+
+    function markConnectionPending(srcId, dstId) {
+      var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);
+      if (conn) conn.classList.add('sm-pending');
+    }
+    function setCardDirty(sym, dirty) {
+      var nodeEl = document.getElementById('node-' + idOf[sym]);
+      if (nodeEl) nodeEl.classList.toggle('sm-dirty', dirty);
+    }
+    function renderChanges() {
+      var d = renderShares();
+      var bar = document.getElementById('sm-changes-bar');
+      var list = document.getElementById('sm-changes-list');
+      var items = [];
+      Object.keys(draft).forEach(function (sym) {
+        var b = baseline[sym];
+        var newPct = d.shares[sym];
+        var pctChanged = newPct !== b.pct;
+        var fbChanged = (draft[sym].fallback || null) !== (b.fallback || null);
+        if (pctChanged) {
+          items.push(sym + ': 配分 ' + (b.pct ? b.pct + '%' : 'なし') + ' → ' + (newPct ? '1/' + d.branches + ' = ' + newPct + '%' : '解除 (risk-%)'));
+        }
+        if (fbChanged) {
+          if (draft[sym].fallback) items.push(sym + ': 退避先 → ' + draft[sym].fallback + ' (条件連動 ON)');
+          else items.push(sym + ': 退避先を解除');
+        }
+        setCardDirty(sym, pctChanged || fbChanged);
+      });
+      list.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
+      bar.hidden = items.length === 0;
+      return d;
+    }
+    renderChanges();
+
+    editor.on('connectionCreated', function (info) {
+      if (programmatic) return;
+      var src = symOf[info.output_id];
+      var dst = symOf[info.input_id];
+      if (!src || !dst || accountSymOf[dst]) {
+        programmatic = true;
+        editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+        programmatic = false;
+        return;
+      }
+      if (accountSymOf[src]) {
+        // 通貨の合わない口座からの線は弾く (JPY 口座 → USD 銘柄等)。
+        if (nodeBySym[dst].currency !== accountSymOf[src]) {
+          programmatic = true;
+          editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+          programmatic = false;
+          alert(dst + ' は ' + nodeBySym[dst].currency + ' 銘柄です。' + accountSymOf[src] + ' 口座からは接続できません。');
+          return;
+        }
+        draft[dst].connected = true;
+        markConnectionPending(info.output_id, info.input_id);
+        renderChanges();
+        return;
+      }
+      // 異通貨の退避先は server 側 (cash-fallback API) で拒否される — 適用時に
+      // 落ちて部分保存になる前に、この場で理由付きで弾く (CodeRabbit #485)。
+      if (nodeBySym[src].currency !== nodeBySym[dst].currency) {
+        programmatic = true;
+        editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+        programmatic = false;
+        alert(src + ' は ' + nodeBySym[src].currency + '、' + dst + ' は ' + nodeBySym[dst].currency + ' です。異通貨の退避先は設定できません (同一通貨のみ)。');
+        return;
+      }
+      // 退避先は 1 銘柄 1 本 — 既存の出力接続を visual からも外す。
+      if (draft[src].fallback && idOf[draft[src].fallback]) {
+        programmatic = true;
+        editor.removeSingleConnection(idOf[src], idOf[draft[src].fallback], 'output_1', 'input_1');
+        programmatic = false;
+      }
+      draft[src].fallback = dst;
+      markConnectionPending(info.output_id, info.input_id);
+      renderChanges();
+    });
+
+    editor.on('connectionRemoved', function (info) {
+      if (programmatic) return;
+      var src = symOf[info.output_id];
+      var dst = symOf[info.input_id];
+      if (!src || !dst) return;
+      if (accountSymOf[src]) {
+        draft[dst].connected = false;
+        renderChanges();
+        return;
+      }
+      if (draft[src].fallback === dst) draft[src].fallback = null;
+      renderChanges();
+    });
+
+    // 線の削除を Mac でも自然に: Backspace 単体 (入力欄フォーカス時は除く) と
+    // 明示ボタンの両方をサポートする。Drawflow 素の対応は Delete / Cmd+Backspace のみ。
+    var deleteBtn = document.getElementById('sm-delete-conn');
+    function refreshDeleteBtn() {
+      var has = editor.connection_selected != null;
+      deleteBtn.disabled = !has;
+      deleteBtn.style.color = has ? '#c22' : '#999';
+      deleteBtn.style.borderColor = has ? '#c22' : '#ccc';
+    }
+    el.addEventListener('click', function () { setTimeout(refreshDeleteBtn, 0); });
+    deleteBtn.addEventListener('click', function () {
+      if (editor.connection_selected != null) editor.removeConnection();
+      refreshDeleteBtn();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Backspace') return;
+      var tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (editor.connection_selected != null) {
+        ev.preventDefault();
+        editor.removeConnection();
+        refreshDeleteBtn();
+      }
+    });
+
+    document.getElementById('sm-reset').addEventListener('click', function () { location.reload(); });
+    document.getElementById('sm-apply').addEventListener('click', function () {
+      var d = deriveShares();
+      var pctChanges = Object.keys(draft).filter(function (sym) { return d.shares[sym] !== baseline[sym].pct; });
+      var fbChanges = Object.keys(draft).filter(function (sym) { return (draft[sym].fallback || null) !== (baseline[sym].fallback || null); });
+      if (pctChanges.length === 0 && fbChanges.length === 0) return;
+      if (!confirm('表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%)。よろしいですか？')) return;
+      var steps = Promise.resolve();
+      if (pctChanges.length > 0) {
+        var form = new FormData();
+        pctChanges.forEach(function (sym) {
+          form.append('pct_' + sym, d.shares[sym] > 0 ? String(d.shares[sym]) : '');
+        });
+        steps = steps.then(function () {
+          return fetch('/admin/symbol-config/budget-alloc', { method: 'POST', credentials: 'same-origin', body: form })
+            .then(function (r) { if (!r.ok) throw new Error('配分の保存に失敗 (HTTP ' + r.status + ')'); });
+        });
+      }
+      fbChanges.forEach(function (sym) {
+        steps = steps.then(function () {
+          return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/cash-fallback', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target: draft[sym].fallback }),
+          }).then(function (r) {
+            if (!r.ok) return r.json().then(function (b) { throw new Error(sym + ' の退避先の保存に失敗: ' + (b.error || 'HTTP ' + r.status)); });
+          });
+        });
+      });
+      steps
+        .then(function () { location.reload(); })
+        .catch(function (e) { alert(e.message + ' — 再読込して状態を確認してください。'); location.reload(); });
+    });
+  });
+  </script>`
+}
+
+/**
+ * 配分マップ (#symbol-relation-map)。「口座 (原資) から各銘柄へ何% 割り当て、
+ * 参加できていない銘柄の枠はいまどこへ譲られているか」をノードツリーで示す
+ * (operator 指定の絵: 口座 ─ SOXL ┈┈▶ TQQQ / ┗ TQQQ)。
+ *
+ *   - 口座 → 銘柄: 実線 + 配分% (帯の太さも %)
+ *   - 銘柄カード: Active (建玉保有 = 参加中、実線枠 + 投入額) /
+ *     Pending (未保有 = 様子見、破線枠)
+ *   - Pending 銘柄 ┈┈▶ 譲り先: 点線矢印。条件連動 ON は退避先 (なければ現金待機)、
+ *     OFF は枠を銘柄に確保したまま現金待機 (グレー点線)
+ * インバース対 / regime proxy は量の流れではないので脚注チップ。
+ * 表示専用 — 判定・発注には一切関与しない。
+ */
+const ROLE_NODE_COLORS: Record<string, string> = {
+  cash_parking: '#5b8c5a',
+  core_trend: '#1a56db',
+  leveraged_trend: '#d97706',
+  low_volatility: '#7e3af2',
+  sector_trend: '#0e9f9f',
+  inverse_hedge: '#c22d2d',
+}
+
+/** 銘柄列の並び (リスク低 → 高で上から)。 */
+const MAP_ROLE_ORDER = [
+  'cash_parking',
+  'low_volatility',
+  'core_trend',
+  'sector_trend',
+  'leveraged_trend',
+  'inverse_hedge',
+  'none',
+] as const
+
+export function renderSymbolRelationMap(
+  rows: SymbolConfigRow[],
+  inversePairs: Record<string, string>,
+  pairRegimes: PairRegimeEntry[],
+  amounts: Record<string, { native: string; jpy: number }> = {},
+): string {
+  const pctOf = (r: SymbolConfigRow): number =>
+    r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
+  const roleOf = (r: SymbolConfigRow): string => r.role ?? 'none'
+  const colorOf = (role: string): string => ROLE_NODE_COLORS[role] ?? '#5f6368'
+
+  // 配分のある有効銘柄が対象 (0% は口座から線が引けない)。
+  const allocated = rows
+    .filter((r) => r.active && pctOf(r) > 0)
+    .sort(
+      (a, b) =>
+        MAP_ROLE_ORDER.indexOf(roleOf(a) as (typeof MAP_ROLE_ORDER)[number]) -
+          MAP_ROLE_ORDER.indexOf(roleOf(b) as (typeof MAP_ROLE_ORDER)[number]) || pctOf(b) - pctOf(a),
+    )
+
+  interface MapNode {
+    name: string
+    /** カード 1 行目。 */
+    title: string
+    /** カード 2 行目 (状態)。 */
+    sub: string
+    color: string
+    /** カードの塗り (通貨で分ける: 口座 = 紺系 / JPY = 桜 / USD = 薄青)。 */
+    fill: string
+    status: 'account' | 'active' | 'pending' | 'cash'
+    x: number
+    y: number
+  }
+  interface MapEdge {
+    source: string
+    target: string
+    /** inert = 退避先設定済みだが条件連動 OFF で不使用 (設定ミスの警告表示)。 */
+    kind: 'alloc' | 'yield' | 'idle' | 'inert'
+    label: string
+    width: number
+  }
+  const nodes: MapNode[] = []
+  const edges: MapEdge[] = []
+  const nodeNames = new Set<string>()
+  const addNode = (n: MapNode): void => {
+    if (nodeNames.has(n.name)) return
+    nodeNames.add(n.name)
+    nodes.push(n)
+  }
+
+  const ROW_H = 64
+  const SYMBOL_X = 360
+  const CASH_X = 640
+  if (allocated.length > 0) {
+    // 予算合計はインバース対の枠共有 (#315 の共有 slider と同じ) を反映して
+    // 「対は max、単独はそのまま」で数える — 単純合計だと 200% 等に見えて誤読する。
+    const counted = new Set<string>()
+    let total = 0
+    for (const r of allocated) {
+      const sym = r.symbol.toUpperCase()
+      if (counted.has(sym)) continue
+      counted.add(sym)
+      const partner = inversePairs[sym]?.toUpperCase()
+      const partnerRow = partner ? allocated.find((x) => x.symbol.toUpperCase() === partner) : undefined
+      if (partnerRow) {
+        counted.add(partner!)
+        total += Math.max(pctOf(r), pctOf(partnerRow))
+      } else {
+        total += pctOf(r)
+      }
+    }
+    const centerY = 40 + ((allocated.length - 1) * ROW_H) / 2
+    addNode({
+      name: '口座',
+      title: `口座 (予算 ${Math.round(total * 10) / 10}%)`,
+      sub: '原資',
+      color: '#3c4043',
+      fill: '#5f6368',
+      status: 'account',
+      x: 90,
+      y: centerY,
+    })
+    let needCash = false
+    allocated.forEach((r, i) => {
+      const sym = r.symbol.toUpperCase()
+      const held = amounts[sym] !== undefined
+      const conditional = r.entryRequired === true
+      addNode({
+        name: sym,
+        title: `${sym} ${pctOf(r)}%`,
+        sub: held ? `Active ・ ${amounts[sym]!.native}` : 'Pending (様子見)',
+        color: colorOf(roleOf(r)),
+        fill: r.currency === 'JPY' ? '#fdf3f2' : '#f0f6ff',
+        status: held ? 'active' : 'pending',
+        x: SYMBOL_X,
+        y: 40 + i * ROW_H,
+      })
+      edges.push({
+        source: '口座',
+        target: sym,
+        kind: 'alloc',
+        label: `${pctOf(r)}%`,
+        width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
+      })
+      // 未保有 (Pending) の枠の現在の行き先。
+      if (!held) {
+        const target = conditional && r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
+        if (target !== sym) {
+          if (target === '現金待機') needCash = true
+          // 退避先が設定されているのに条件連動 OFF = 設定が効いていない状態。
+          // 黙って無視せず inert (琥珀) で警告表示する (operator が SOXL で踏んだ罠)。
+          const inert = !conditional && r.cashFallbackSymbol !== null
+          edges.push({
+            source: sym,
+            target,
+            kind: conditional ? 'yield' : inert ? 'inert' : 'idle',
+            label: conditional
+              ? `代替 ${pctOf(r)}%`
+              : inert
+                ? `待機 ${pctOf(r)}% ⚠ 退避先${r.cashFallbackSymbol!.toUpperCase()}未使用`
+                : `待機 ${pctOf(r)}% (枠確保)`,
+            width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
+          })
+        }
+      }
+    })
+    if (needCash) {
+      addNode({
+        name: '現金待機',
+        title: '現金待機',
+        sub: '未参加分の置き場',
+        color: '#9aa0a6',
+        fill: '#f5f5f7',
+        status: 'cash',
+        x: CASH_X,
+        y: centerY,
+      })
+    }
+    // 譲り先が未登場の銘柄 (配分 0% の退避先等) は右列に補完する。
+    for (const e of edges) {
+      if (nodeNames.has(e.target)) continue
+      const row = rows.find((x) => x.symbol.toUpperCase() === e.target)
+      addNode({
+        name: e.target,
+        title: e.target,
+        sub: amounts[e.target] ? `Active ・ ${amounts[e.target]!.native}` : '受け皿',
+        color: row ? colorOf(roleOf(row)) : '#9aa0a6',
+        fill: row ? (row.currency === 'JPY' ? '#fdf3f2' : '#f0f6ff') : '#f5f5f7',
+        status: amounts[e.target] ? 'active' : 'pending',
+        x: CASH_X,
+        y: 40 + nodes.length * 8,
+      })
+    }
+  }
+
+  // 構造情報 (量ではない) は脚注チップで: インバース対 / regime proxy。
+  const chips: string[] = []
+  const seenPair = new Set<string>()
+  for (const [sym, inverse] of Object.entries(inversePairs)) {
+    const a = sym.toUpperCase()
+    const b = inverse.toUpperCase()
+    const key = [a, b].sort().join('/')
+    if (seenPair.has(key)) continue
+    seenPair.add(key)
+    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fdecec;color:#c22d2d;font-size:11px">インバース対 ${esc(a)} ⇄ ${esc(b)}</span>`)
+  }
+  for (const pair of pairRegimes) {
+    if (pair.invalidConfig !== null) continue
+    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
+  }
+
+  if (edges.length === 0 && chips.length === 0) return ''
+  const mapHeight = Math.max(220, allocated.length * ROW_H + 80)
+  const chipRow = chips.length > 0
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
+    : ''
+  const mapDiv = edges.length > 0
+    ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
+    <p class="muted" style="font-size:11px;margin:4px 0 0">
+      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。塗り: 濃グレー = 口座 ・ 桜 = JPY 銘柄 ・ 薄青 = USD 銘柄。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
+      <strong>Pending</strong> = 様子見 (破線枠) で、点線矢印が「いま枠が行っている先」:
+      <span style="color:#0e9f6e">緑 = 退避先へ代替割当 (条件連動 ON)</span> ・
+      <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span> ・
+      <span style="color:#b25000">琥珀 ⚠ = 退避先が設定済みなのに条件連動 OFF で不使用</span>。
+    </p>`
+    : ''
+  const payload = { nodes, edges }
+  return `<details open style="margin:0 0 12px">
+    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 口座 → 銘柄 → 譲り先 (現在形・表示専用)</span> <a href="/dashboard/symbols/map" style="font-size:12px;font-weight:normal;margin-left:8px">✏️ 編集モード</a></summary>
+    ${mapDiv}
+    ${chipRow}
+  </details>
+  <script src="${ECHARTS_CDN}" defer></script>
+  ${safeJsonScript('__symbolRelationMap', payload)}
+  <script>
+  document.addEventListener('DOMContentLoaded', function () {
+    if (typeof echarts === 'undefined') return;
+    var data = window.__symbolRelationMap;
+    var el = document.getElementById('symbol-relation-map');
+    if (!data || !el || data.edges.length === 0) return;
+    var EDGE_STYLE = {
+      alloc: { color: '#8a8f98', type: 'solid' },
+      yield: { color: '#0e9f6e', type: 'dotted' },
+      idle: { color: '#9aa0a6', type: 'dotted' },
+      inert: { color: '#b25000', type: 'dotted' },
+    };
+    var chart = echarts.init(el);
+    chart.setOption({
+      tooltip: {
+        formatter: function (p) {
+          if (p.dataType === 'edge') {
+            if (p.data.kind === 'yield') return p.data.source + ' は様子見のため ' + p.data.label.replace('代替 ', '') + ' を ' + p.data.target + ' に代替割当中';
+            if (p.data.kind === 'idle') return p.data.source + ' は様子見。枠は確保したまま現金待機';
+            if (p.data.kind === 'inert') return p.data.source + ' は退避先が設定されていますが<br><strong>条件連動が OFF のため使われていません</strong>。<br>銘柄編集で「条件連動」を ON にすると退避が有効になります。';
+            return '口座 → ' + p.data.target + ': 配分 ' + p.data.label;
+          }
+          var d = p.data;
+          return '<strong>' + d.title + '</strong><br>' + d.sub;
+        },
+      },
+      series: [{
+        type: 'graph',
+        layout: 'none',
+        roam: true,
+        data: data.nodes.map(function (n) {
+          var isPending = n.status === 'pending';
+          return {
+            name: n.name,
+            x: n.x,
+            y: n.y,
+            title: n.title,
+            sub: n.sub,
+            symbol: 'roundRect',
+            symbolSize: [150, 46],
+            itemStyle: {
+              color: n.fill || '#fff',
+              borderColor: n.color,
+              borderWidth: 2,
+              borderType: isPending ? 'dashed' : 'solid',
+              opacity: isPending ? 0.75 : 1,
+              shadowBlur: 4,
+              shadowColor: 'rgba(0,0,0,0.08)',
+            },
+            label: {
+              show: true,
+              formatter: '{t|' + n.title + '}\\n{s|' + n.sub + '}',
+              rich: {
+                t: { fontSize: 13, fontWeight: 700, color: n.status === 'account' ? '#fff' : '#1d1d1f', lineHeight: 18 },
+                s: {
+                  fontSize: 10,
+                  color: n.status === 'account' ? '#e8eaed' : n.status === 'active' ? '#0e9f6e' : n.status === 'pending' ? '#b25000' : '#6e6e73',
+                  lineHeight: 14,
+                },
+              },
+            },
+          };
+        }),
+        edges: data.edges.map(function (e) {
+          var st = EDGE_STYLE[e.kind];
+          return {
+            source: e.source,
+            target: e.target,
+            kind: e.kind,
+            label: e.label,
+            lineStyle: { color: st.color, type: st.type, width: e.width, curveness: 0.15 },
+            symbol: ['none', 'arrow'],
+            symbolSize: 8,
+            edgeLabel: {
+              show: e.kind !== 'alloc',
+              formatter: e.label,
+              fontSize: 10,
+              color: st.color,
+            },
+          };
+        }),
+      }],
+    });
+    window.addEventListener('resize', function () { chart.resize(); });
+  });
+  </script>`
+}
+
 function symbolsListBody(args: {
   rows: SymbolConfigRow[]
   inversePairs?: Record<string, string>
+  pairRegimes?: PairRegimeEntry[]
+  mapAmounts?: Record<string, { native: string; jpy: number }>
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
 }): string {
-  const { rows, inversePairs = {}, errorCode = null, errorSymbol = null, filter } = args
+  const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
   // #415: 買付余力バッジをページ最上部に (全 return が ${errorBanner} を先頭に持つので
   // ここに前置すると一覧・空・フィルタ 0 件の全ケースで表示される)。
   const errorBanner = buyingPowerBadge() + renderSymbolErrorBanner(errorCode, errorSymbol)
@@ -8725,6 +9454,8 @@ function symbolsListBody(args: {
     <a href="/dashboard/symbols/new" style="padding:6px 12px;background:#06c;color:#fff;border-radius:4px;text-decoration:none">+ 新規追加</a>
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
   </p>`
+
+  const relationMap = renderSymbolRelationMap(rows, inversePairs, pairRegimes, mapAmounts)
 
   if (rows.length === 0) {
     return `${errorBanner}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
@@ -8837,7 +9568,7 @@ function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  return `${errorBanner}${filterBar}${headerBar}
+  return `${errorBanner}${relationMap}${filterBar}${headerBar}
   <table>
     <thead><tr>
       <th style="width:28px" title="インバース対のツリー表記"></th>
@@ -9182,7 +9913,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
   // 持ち越し設定は radio 2 択で両状態を明示する (「持ち越し」ラベル + 「持ち越さ
   // ない」checkbox の二重否定が ON/OFF どちらか読めない、という operator 指摘)。
   const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
-  // role / entry override / alternatives (#452)。pullback / trend / 過伸長は
+  // role / entry override (#452)。pullback / trend / 過伸長は
   // DB に fraction 保存、表示は % (×100)。ATR 比は ratio 生値。
   // 不正 role 値 (enum 外の DB 直書き) の fail-closed をフォームで弱めない
   // (CodeRabbit #453): 一致 option が無いと先頭 '' が選択され、保存で意図せず
@@ -9216,7 +9947,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
     row?.requireAboveSma50Override === null || row?.requireAboveSma50Override === undefined
       ? ''
       : String(row.requireAboveSma50Override)
-  const alternativesValue = (parseAlternativesJson(row?.alternatives ?? null, symbolValue) ?? []).join(', ')
   // 条件連動配分 (#452 Layer 3)。
   const entryRequiredChecked = row?.entryRequired ? ' checked' : ''
   const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
@@ -9292,8 +10022,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
     minReturn50dOverrideValue !== '' ||
     maxAtrRatioOverrideValue !== '' ||
     maxSma50DeviationPctOverrideValue !== '' ||
-    requireAboveSma50OverrideValue !== '' ||
-    alternativesValue !== ''
+    requireAboveSma50OverrideValue !== ''
   const hasExitValues =
     timeStopDaysOverrideValue !== '' ||
     kAtrOverrideValue !== '' ||
@@ -9412,11 +10141,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
           <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
         </select>
-        <label>代替銘柄</label>
-        <div>
-          <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
-          <span class="muted" style="font-size:12px;margin-left:6px">entry 不可時に表示する候補 (表示のみ・最大 8)</span>
-        </div>`,
+        `,
       hasStrategyValues,
     )}
 
@@ -9471,7 +10196,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
         <label>退避先</label>
         <div>
           <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
-          <span class="muted" style="font-size:12px;margin-left:6px">同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
+          <span class="muted" style="font-size:12px;margin-left:6px"><strong>条件連動 ON のときのみ有効</strong>。同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
         </div>`,
       hasAllocValues,
     )}

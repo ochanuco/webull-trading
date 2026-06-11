@@ -67,8 +67,6 @@ export interface SymbolUniverse {
   symbolMaxAtrRatioOverride: Record<string, number>
   symbolMaxSma50DeviationPctOverride: Record<string, number>
   symbolRequireAboveSma50Override: Record<string, boolean>
-  /** symbol → 代替銘柄候補 (#452、表示専用)。不在 = 候補なし。 */
-  symbolAlternatives: Record<string, string[]>
   /** entry_required=true の集合 (#452 Layer 3)。false は不在。 */
   symbolEntryRequired: Record<string, boolean>
   /** always_active=true の集合 (#452、cash_parking 用)。false は不在。 */
@@ -123,7 +121,6 @@ export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniver
     symbolMaxAtrRatioOverride: config.symbolMaxAtrRatioOverride,
     symbolMaxSma50DeviationPctOverride: config.symbolMaxSma50DeviationPctOverride,
     symbolRequireAboveSma50Override: config.symbolRequireAboveSma50Override,
-    symbolAlternatives: config.symbolAlternatives,
     symbolEntryRequired: config.symbolEntryRequired,
     symbolAlwaysActive: config.symbolAlwaysActive,
     symbolCashFallback: config.symbolCashFallback,

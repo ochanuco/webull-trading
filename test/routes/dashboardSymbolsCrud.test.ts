@@ -176,7 +176,6 @@ function fakeDb(
               maxAtrRatioOverride: (v.maxAtrRatioOverride as number | null) ?? null,
               maxSma50DeviationPctOverride: (v.maxSma50DeviationPctOverride as number | null) ?? null,
               requireAboveSma50Override: (v.requireAboveSma50Override as boolean | null) ?? null,
-              alternatives: (v.alternatives as string | null) ?? null,
               entryRequired: v.entryRequired === true || v.entryRequired === 1,
               alwaysActive: v.alwaysActive === true || v.alwaysActive === 1,
               cashFallbackSymbol: (v.cashFallbackSymbol as string | null) ?? null,
@@ -246,7 +245,6 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     maxAtrRatioOverride: null,
     maxSma50DeviationPctOverride: null,
     requireAboveSma50Override: null,
-    alternatives: null,
     entryRequired: false,
     alwaysActive: false,
     cashFallbackSymbol: null,
@@ -1328,13 +1326,13 @@ describe('#315 inverse-pair list grouping', () => {
   })
 })
 
-describe('dashboard symbol_config role / entry override / alternatives (#452)', () => {
+describe('dashboard symbol_config role / entry override (#452)', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('POST persists role, entry overrides (% → fraction) and alternatives (JSON text)', async () => {
+  it('POST persists role and entry overrides (% → fraction)', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -1351,7 +1349,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
       max_atr_ratio_override: '1.8', // ratio 生値
       max_sma50_deviation_pct_override: '20', // +20% → 0.2
       require_above_sma50_override: 'false',
-      alternatives: 'voo, SPLG voo', // 区切り混在 + 重複
     })
     const res = await app.request(
       '/admin/symbol-config',
@@ -1371,7 +1368,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
     expect(inserted.values.maxAtrRatioOverride).toBeCloseTo(1.8, 6)
     expect(inserted.values.maxSma50DeviationPctOverride).toBeCloseTo(0.2, 6)
     expect(inserted.values.requireAboveSma50Override).toBe(false)
-    expect(inserted.values.alternatives).toBe('["VOO","SPLG"]')
   })
 
   it('POST with empty role / overrides persists NULLs (従来挙動)', async () => {
@@ -1386,7 +1382,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
       lot_size: '1',
       role: '',
       pullback_max_override: '',
-      alternatives: '',
     })
     const res = await app.request(
       '/admin/symbol-config',
@@ -1401,7 +1396,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
     const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
     expect(inserted.values.role).toBeNull()
     expect(inserted.values.pullbackMaxOverride).toBeNull()
-    expect(inserted.values.alternatives).toBeNull()
   })
 
   it('rejects an out-of-enum role with 400 (typo を従来挙動に黙って倒さない)', async () => {
@@ -1451,28 +1445,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
     expect(res.status).toBe(400)
   })
 
-  it('rejects alternatives containing an invalid ticker with 400', async () => {
-    const db = fakeDb([])
-    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
-    const app = createApp()
-    const res = await app.request(
-      '/admin/symbol-config',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeader },
-        body: new URLSearchParams({
-          symbol: 'SOXL',
-          market: 'US',
-          currency: 'USD',
-          active: 'true',
-          lot_size: '1',
-          alternatives: 'SOXX, BAD&SYM',
-        }).toString(),
-      },
-      { ...baseEnv, DB: {} as D1Database },
-    )
-    expect(res.status).toBe(400)
-  })
 
   it('edit form shows role select / entry override fields with current values', async () => {
     const db = fakeDb([
@@ -1482,7 +1454,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
         pullbackMaxOverride: -0.015,
         minReturn50dOverride: 0.03,
         requireAboveSma50Override: false,
-        alternatives: '["VOO","SPLG"]',
       }),
     ])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -1499,7 +1470,6 @@ describe('dashboard symbol_config role / entry override / alternatives (#452)', 
     expect(body).toMatch(/name="pullback_max_override"[^>]*value="-1\.5"/)
     expect(body).toMatch(/name="min_return_50d_override"[^>]*value="3"/)
     expect(body).toMatch(/name="require_above_sma50_override"/)
-    expect(body).toMatch(/name="alternatives"[^>]*value="VOO, SPLG"/)
   })
 })
 
@@ -1735,5 +1705,55 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>戦略ロール・entry 条件/)
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>損切・利食・保有/)
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>配分の条件連動/)
+  })
+})
+
+describe('POST /admin/symbol-config/:symbol/cash-fallback (#symbol-relation-map 編集)', () => {
+  const post = (app: ReturnType<typeof createApp>, symbol: string, body: unknown) =>
+    app.request(
+      `/admin/symbol-config/${symbol}/cash-fallback`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify(body),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+
+  it('set: 退避先を設定し entry_required も同時に ON、audit log を残す', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SOXL', currency: 'USD', entryRequired: false }),
+      row({ symbol: 'SGOV', currency: 'USD' }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const res = await post(createApp(), 'SOXL', { target: 'sgov' })
+    expect(res.status).toBe(200)
+    const updated = db.updates.find((u) => u.table === 'symbol_config')
+    expect(updated?.set).toMatchObject({ cashFallbackSymbol: 'SGOV', entryRequired: true })
+    expect(db.inserts.some((i) => i.table === 'config_audit_log')).toBe(true)
+  })
+
+  it('clear: target null で解除 (entry_required は触らない)', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SOXL', currency: 'USD', cashFallbackSymbol: 'SGOV', entryRequired: true }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const res = await post(createApp(), 'SOXL', { target: null })
+    expect(res.status).toBe(200)
+    const updated = db.updates.find((u) => u.table === 'symbol_config')
+    expect(updated?.set).toMatchObject({ cashFallbackSymbol: null })
+    expect(updated?.set).not.toHaveProperty('entryRequired')
+  })
+
+  it('検証: self 参照 / 未登録 target / 通貨不一致は 400', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SOXL', currency: 'USD' }),
+      row({ symbol: '1357', currency: 'JPY' }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    expect((await post(app, 'SOXL', { target: 'SOXL' })).status).toBe(400)
+    expect((await post(app, 'SOXL', { target: 'ZZZZ' })).status).toBe(400)
+    expect((await post(app, 'SOXL', { target: '1357' })).status).toBe(400)
   })
 })
