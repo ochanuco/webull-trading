@@ -2710,7 +2710,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
 import { renderSymbolRelationMap } from '../../src/routes/dashboard'
 import type { SymbolConfigRow } from '../../src/infrastructure/db/schema'
 
-describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
+describe('renderSymbolRelationMap (#symbol-relation-map 口座ツリー)', () => {
   const mapRow = (over: Partial<SymbolConfigRow>): SymbolConfigRow =>
     ({
       symbol: 'X',
@@ -2728,52 +2728,54 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
     expect(renderSymbolRelationMap([mapRow({})], {}, [])).toBe('')
   })
 
-  it('現在形フロー: 保有中は銘柄で止まり、未保有の条件連動 ON は退避先へ譲る', () => {
+  it('口座 → 銘柄の実線 + Pending 銘柄から譲り先への点線 (代替割当)', () => {
     const rows = [
-      mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.2 }),
-      mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV', entryRequired: true }),
-      mapRow({ symbol: 'SGOV', role: 'cash_parking', budgetAllocPct: 0.1 }),
+      mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbol: 'TQQQ', entryRequired: true }),
+      mapRow({ symbol: 'TQQQ', role: 'leveraged_trend', budgetAllocPct: 0.2 }),
     ]
     const html = renderSymbolRelationMap(rows, {}, [], {
-      SOXL: { native: '$300', jpy: 45000 },
-      SGOV: { native: '$100', jpy: 15000 },
+      TQQQ: { native: '$200', jpy: 30000 },
     })
     const payload = payloadOf(html)
-    const link = (kind: string) => payload.links.filter((l: { kind: string }) => l.kind === kind)
-    expect(link('role')).toHaveLength(3)
-    expect(link('symbol')).toHaveLength(3)
-    // 未保有 + 条件連動 ON の VUG だけが退避先へ譲る (保有中 SOXL/SGOV は流れない)
-    expect(link('fallback')).toEqual([
-      { source: 'VUG', target: 'SGOV', value: 30, kind: 'fallback' },
-    ])
-    expect(link('idle')).toHaveLength(0)
-    // 状態がラベルに出る
-    const soxl = payload.nodes.find((n: { name: string }) => n.name === 'SOXL')
-    expect(soxl.label).toBe('SOXL 20% ・ 使用中 $300')
-    const vug = payload.nodes.find((n: { name: string }) => n.name === 'VUG')
-    expect(vug.label).toBe('VUG 30% ・ 譲り中')
-    const budget = payload.nodes.find((n: { name: string }) => n.name === '予算')
-    expect(budget.label).toBe('予算 60%')
+    const byName = new Map(payload.nodes.map((n: { name: string }) => [n.name, n]))
+    // SOXL = Pending (様子見)、TQQQ = Active + 投入額
+    expect((byName.get('SOXL') as { status: string }).status).toBe('pending')
+    expect((byName.get('SOXL') as { sub: string }).sub).toBe('Pending (様子見)')
+    expect((byName.get('TQQQ') as { sub: string }).sub).toBe('Active ・ $200')
+    // 口座 → 両銘柄の実線 + SOXL ┈▶ TQQQ の代替点線 (50%)
+    const alloc = payload.edges.filter((e: { kind: string }) => e.kind === 'alloc')
+    expect(alloc.map((e: { target: string }) => e.target).sort()).toEqual(['SOXL', 'TQQQ'])
+    const yields = payload.edges.filter((e: { kind: string }) => e.kind === 'yield')
+    expect(yields).toHaveLength(1)
+    expect(yields[0]).toMatchObject({ source: 'SOXL', target: 'TQQQ', label: '代替 50%' })
+    // 口座ノードは合計%
+    expect((byName.get('口座') as { title: string }).title).toBe('口座 (予算 70%)')
   })
 
-  it('未保有 + 条件連動 OFF は枠確保のまま現金待機 (idle、グレー)', () => {
+  it('未保有 + 条件連動 OFF は枠確保のまま現金待機 (idle)、Active は流れない', () => {
     const rows = [
-      // 連動 OFF + 未保有 → idle で現金待機へ (退避先設定は無視 = 譲らない)
       mapRow({ symbol: 'AAPL', role: 'core_trend', budgetAllocPct: 0.2, cashFallbackSymbol: 'SGOV' }),
-      // 連動 ON + 退避先なし + 未保有 → fallback で現金待機へ
       mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, entryRequired: true }),
+      mapRow({ symbol: 'SGOV', role: 'cash_parking', budgetAllocPct: 0.1 }),
     ]
-    const payload = payloadOf(renderSymbolRelationMap(rows, {}, []))
-    const links = payload.links.filter((l: { kind: string }) => l.kind === 'fallback' || l.kind === 'idle')
-    expect(links).toEqual([
-      { source: 'AAPL', target: '現金待機', value: 20, kind: 'idle' },
-      { source: 'VUG', target: '現金待機', value: 30, kind: 'fallback' },
-    ])
-    const aapl = payload.nodes.find((n: { name: string }) => n.name === 'AAPL')
-    expect(aapl.label).toBe('AAPL 20% ・ 待機')
+    const payload = payloadOf(
+      renderSymbolRelationMap(rows, {}, [], { SGOV: { native: '$100', jpy: 15000 } }),
+    )
+    const flows = payload.edges.filter((e: { kind: string }) => e.kind !== 'alloc')
+    expect(flows).toHaveLength(2)
+    expect(flows.find((e: { source: string }) => e.source === 'AAPL')).toMatchObject({
+      target: '現金待機',
+      kind: 'idle',
+    })
+    expect(flows.find((e: { source: string }) => e.source === 'VUG')).toMatchObject({
+      target: '現金待機',
+      kind: 'yield',
+    })
+    // 保有中 SGOV は流れない + 現金待機ノードが存在
+    expect(payload.nodes.some((n: { name: string }) => n.name === '現金待機')).toBe(true)
   })
 
-  it('配分 0% / 無効銘柄は Sankey に出さない', () => {
+  it('配分 0% / 無効銘柄は口座から線を引かない', () => {
     const rows = [
       mapRow({ symbol: 'AAPL', role: 'core_trend', budgetAllocPct: 0.2 }),
       mapRow({ symbol: 'ZERO', role: 'core_trend' }),
@@ -2786,7 +2788,7 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
     expect(names).not.toContain('OFF')
   })
 
-  it('インバース対 / regime proxy は Sankey ではなく脚注チップに出す (misconfig pair は出さない)', () => {
+  it('インバース対 / regime proxy は脚注チップに出す (misconfig pair は出さない)', () => {
     const html = renderSymbolRelationMap(
       [
         mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.2 }),

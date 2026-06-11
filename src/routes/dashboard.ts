@@ -8701,16 +8701,16 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 }
 
 /**
- * 配分マップ (#symbol-relation-map)。予算がどのロール / 銘柄に流れ、条件未通過
- * 時にどこへ退避するかを Sankey で可視化する (operator 指定: 家計簿アプリの
- * キャッシュフロー図のイメージ)。
+ * 配分マップ (#symbol-relation-map)。「口座 (原資) から各銘柄へ何% 割り当て、
+ * 参加できていない銘柄の枠はいまどこへ譲られているか」をノードツリーで示す
+ * (operator 指定の絵: 口座 ─ SOXL ┈┈▶ TQQQ / ┗ TQQQ)。
  *
- *   予算 100% → ロール (リスク低→高で上から) → 銘柄 (配分% + 投入額) → 退避先
- *
- * 退避リンク (緑) は「条件連動 ON の銘柄が entry 未通過のときに流れる先」で、
- * 量は同銘柄の配分%。退避先ノードの太さは自前配分 + 退避受け皿の合計になる
- * (最悪ケースの受け入れ量)。インバース対 / regime proxy は量の流れではない
- * 構造情報なので Sankey に混ぜず脚注チップで出す。
+ *   - 口座 → 銘柄: 実線 + 配分% (帯の太さも %)
+ *   - 銘柄カード: Active (建玉保有 = 参加中、実線枠 + 投入額) /
+ *     Pending (未保有 = 様子見、破線枠)
+ *   - Pending 銘柄 ┈┈▶ 譲り先: 点線矢印。条件連動 ON は退避先 (なければ現金待機)、
+ *     OFF は枠を銘柄に確保したまま現金待機 (グレー点線)
+ * インバース対 / regime proxy は量の流れではないので脚注チップ。
  * 表示専用 — 判定・発注には一切関与しない。
  */
 const ROLE_NODE_COLORS: Record<string, string> = {
@@ -8722,7 +8722,7 @@ const ROLE_NODE_COLORS: Record<string, string> = {
   inverse_hedge: '#c22d2d',
 }
 
-/** Sankey のロール段の並び (リスク低 → 高で上から)。 */
+/** 銘柄列の並び (リスク低 → 高で上から)。 */
 const MAP_ROLE_ORDER = [
   'cash_parking',
   'low_volatility',
@@ -8742,84 +8742,119 @@ export function renderSymbolRelationMap(
   const pctOf = (r: SymbolConfigRow): number =>
     r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
   const roleOf = (r: SymbolConfigRow): string => r.role ?? 'none'
-  const roleLabel = (role: string): string =>
-    role === 'none' ? 'ロール未設定' : SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole] ?? role
   const colorOf = (role: string): string => ROLE_NODE_COLORS[role] ?? '#5f6368'
 
-  // Sankey は配分のある有効銘柄だけで構成する (0% は流量が無く描けない)。
-  const allocated = rows.filter((r) => r.active && pctOf(r) > 0)
-  interface SankeyNode {
+  // 配分のある有効銘柄が対象 (0% は口座から線が引けない)。
+  const allocated = rows
+    .filter((r) => r.active && pctOf(r) > 0)
+    .sort(
+      (a, b) =>
+        MAP_ROLE_ORDER.indexOf(roleOf(a) as (typeof MAP_ROLE_ORDER)[number]) -
+          MAP_ROLE_ORDER.indexOf(roleOf(b) as (typeof MAP_ROLE_ORDER)[number]) || pctOf(b) - pctOf(a),
+    )
+
+  interface MapNode {
     name: string
-    label: string
+    /** カード 1 行目。 */
+    title: string
+    /** カード 2 行目 (状態)。 */
+    sub: string
     color: string
-    depth?: number
+    status: 'account' | 'active' | 'pending' | 'cash'
+    x: number
+    y: number
   }
-  interface SankeyLink {
+  interface MapEdge {
     source: string
     target: string
-    value: number
-    kind: 'role' | 'symbol' | 'fallback' | 'idle'
+    kind: 'alloc' | 'yield' | 'idle'
+    label: string
+    width: number
   }
-  const nodes: SankeyNode[] = []
-  const links: SankeyLink[] = []
+  const nodes: MapNode[] = []
+  const edges: MapEdge[] = []
   const nodeNames = new Set<string>()
-  const addNode = (n: SankeyNode): void => {
+  const addNode = (n: MapNode): void => {
     if (nodeNames.has(n.name)) return
     nodeNames.add(n.name)
     nodes.push(n)
   }
+
+  const ROW_H = 64
+  const SYMBOL_X = 360
+  const CASH_X = 640
   if (allocated.length > 0) {
     const total = allocated.reduce((sum, r) => sum + pctOf(r), 0)
-    addNode({ name: '予算', label: `予算 ${Math.round(total * 10) / 10}%`, color: '#46637f', depth: 0 })
-    for (const role of MAP_ROLE_ORDER) {
-      const members = allocated.filter((r) => roleOf(r) === role)
-      if (members.length === 0) continue
-      const rolePct = members.reduce((sum, r) => sum + pctOf(r), 0)
-      const roleName = `role:${role}`
-      addNode({
-        name: roleName,
-        label: `${roleLabel(role)} ${Math.round(rolePct * 10) / 10}%`,
-        color: colorOf(role),
-        depth: 1,
-      })
-      links.push({ source: '予算', target: roleName, value: rolePct, kind: 'role' })
-      for (const r of members) {
-        const sym = r.symbol.toUpperCase()
-        const amount = amounts[sym]?.native
-        const status = amount !== undefined ? `使用中 ${amount}` : r.entryRequired === true ? '譲り中' : '待機'
-        addNode({
-          name: sym,
-          label: `${sym} ${pctOf(r)}% ・ ${status}`,
-          color: colorOf(role),
-          depth: 2,
-        })
-        links.push({ source: roleName, target: sym, value: pctOf(r), kind: 'symbol' })
-      }
-    }
-    // 現在形の資金フロー: 参加 (= 建玉保有) していない銘柄の枠は先へ流れる。
-    //   - 保有中: 帯は銘柄で止まる (使用中)
-    //   - 未保有 + 条件連動 ON (#452 Layer 3): 退避先 (なければ現金待機) へ譲る
-    //   - 未保有 + 条件連動 OFF: 枠はその銘柄に確保されたまま現金で待機
-    // 「参加」の基準は DO position (qty > 0) — 当日 ENTRY 判定で未約定の瞬間は
-    // 待機側に出るが、現金の所在としてはそれが事実。
-    for (const r of allocated) {
+    const centerY = 40 + ((allocated.length - 1) * ROW_H) / 2
+    addNode({
+      name: '口座',
+      title: `口座 (予算 ${Math.round(total * 10) / 10}%)`,
+      sub: '原資',
+      color: '#46637f',
+      status: 'account',
+      x: 90,
+      y: centerY,
+    })
+    let needCash = false
+    allocated.forEach((r, i) => {
       const sym = r.symbol.toUpperCase()
       const held = amounts[sym] !== undefined
-      if (held) continue
       const conditional = r.entryRequired === true
-      const target = conditional && r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
-      if (sym === target) continue
-      if (target === '現金待機') {
-        addNode({ name: '現金待機', label: '現金待機', color: '#9aa0a6' })
-      } else {
-        const targetRow = rows.find((x) => x.symbol.toUpperCase() === target)
-        addNode({
-          name: target,
-          label: `${target}${amounts[target]?.native ? ` (${amounts[target]!.native})` : ''}`,
-          color: targetRow ? colorOf(roleOf(targetRow)) : '#9aa0a6',
-        })
+      addNode({
+        name: sym,
+        title: `${sym} ${pctOf(r)}%`,
+        sub: held ? `Active ・ ${amounts[sym]!.native}` : 'Pending (様子見)',
+        color: colorOf(roleOf(r)),
+        status: held ? 'active' : 'pending',
+        x: SYMBOL_X,
+        y: 40 + i * ROW_H,
+      })
+      edges.push({
+        source: '口座',
+        target: sym,
+        kind: 'alloc',
+        label: `${pctOf(r)}%`,
+        width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
+      })
+      // 未保有 (Pending) の枠の現在の行き先。
+      if (!held) {
+        const target = conditional && r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
+        if (target !== sym) {
+          if (target === '現金待機') needCash = true
+          edges.push({
+            source: sym,
+            target,
+            kind: conditional ? 'yield' : 'idle',
+            label: conditional ? `代替 ${pctOf(r)}%` : `待機 ${pctOf(r)}% (枠確保)`,
+            width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
+          })
+        }
       }
-      links.push({ source: sym, target, value: pctOf(r), kind: conditional ? 'fallback' : 'idle' })
+    })
+    if (needCash) {
+      addNode({
+        name: '現金待機',
+        title: '現金待機',
+        sub: '未参加分の置き場',
+        color: '#9aa0a6',
+        status: 'cash',
+        x: CASH_X,
+        y: centerY,
+      })
+    }
+    // 譲り先が未登場の銘柄 (配分 0% の退避先等) は右列に補完する。
+    for (const e of edges) {
+      if (nodeNames.has(e.target)) continue
+      const row = rows.find((x) => x.symbol.toUpperCase() === e.target)
+      addNode({
+        name: e.target,
+        title: e.target,
+        sub: amounts[e.target] ? `Active ・ ${amounts[e.target]!.native}` : '受け皿',
+        color: row ? colorOf(roleOf(row)) : '#9aa0a6',
+        status: amounts[e.target] ? 'active' : 'pending',
+        x: CASH_X,
+        y: 40 + nodes.length * 8,
+      })
     }
   }
 
@@ -8839,23 +8874,24 @@ export function renderSymbolRelationMap(
     chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
   }
 
-  if (links.length === 0 && chips.length === 0) return ''
-  const mapHeight = Math.max(220, nodes.length * 34 + 60)
+  if (edges.length === 0 && chips.length === 0) return ''
+  const mapHeight = Math.max(220, allocated.length * ROW_H + 80)
   const chipRow = chips.length > 0
     ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
     : ''
-  const sankeyDiv = links.length > 0
+  const mapDiv = edges.length > 0
     ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      予算 → ロール → 銘柄 → (未保有なら) 譲り先、の<strong>現在形</strong>。「参加」の基準は建玉保有。
-      <span style="color:#0e9f6e">緑の流れ</span> = 条件連動 ON の枠を退避先 / 現金待機に譲り中 ・
-      <span style="color:#9aa0a6">グレーの流れ</span> = 枠は銘柄に確保したまま現金待機 (誰にも譲らない)。
+      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
+      <strong>Pending</strong> = 様子見 (破線枠) で、点線矢印が「いま枠が行っている先」:
+      <span style="color:#0e9f6e">緑 = 退避先へ代替割当 (条件連動 ON)</span> ・
+      <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span>。
     </p>`
     : ''
-  const payload = { nodes, links }
+  const payload = { nodes, edges }
   return `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 予算 → ロール → 銘柄 → 退避先 (表示専用)</span></summary>
-    ${sankeyDiv}
+    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 口座 → 銘柄 → 譲り先 (現在形・表示専用)</span></summary>
+    ${mapDiv}
     ${chipRow}
   </details>
   <script src="${ECHARTS_CDN}" defer></script>
@@ -8865,55 +8901,78 @@ export function renderSymbolRelationMap(
     if (typeof echarts === 'undefined') return;
     var data = window.__symbolRelationMap;
     var el = document.getElementById('symbol-relation-map');
-    if (!data || !el || data.links.length === 0) return;
-    var labelOf = {};
-    data.nodes.forEach(function (n) { labelOf[n.name] = n.label; });
+    if (!data || !el || data.edges.length === 0) return;
+    var EDGE_STYLE = {
+      alloc: { color: '#8a8f98', type: 'solid' },
+      yield: { color: '#0e9f6e', type: 'dotted' },
+      idle: { color: '#9aa0a6', type: 'dotted' },
+    };
     var chart = echarts.init(el);
     chart.setOption({
       tooltip: {
         formatter: function (p) {
           if (p.dataType === 'edge') {
-            var head = labelOf[p.data.source] + ' → ' + labelOf[p.data.target];
-            if (p.data.kind === 'fallback') {
-              return head + '<br>未保有のため ' + p.data.value + '% を譲り中 (条件連動 ON)';
-            }
-            if (p.data.kind === 'idle') {
-              return head + '<br>未保有。枠 ' + p.data.value + '% は銘柄に確保したまま現金待機';
-            }
-            return head + '<br>' + p.data.value + '%';
+            if (p.data.kind === 'yield') return p.data.source + ' は様子見のため ' + p.data.label.replace('代替 ', '') + ' を ' + p.data.target + ' に代替割当中';
+            if (p.data.kind === 'idle') return p.data.source + ' は様子見。枠は確保したまま現金待機';
+            return '口座 → ' + p.data.target + ': 配分 ' + p.data.label;
           }
-          return labelOf[p.name] || p.name;
+          var d = p.data;
+          return '<strong>' + d.title + '</strong><br>' + d.sub;
         },
       },
       series: [{
-        type: 'sankey',
-        left: 10,
-        right: 200,
-        top: 14,
-        bottom: 14,
-        nodeWidth: 14,
-        nodeGap: 14,
-        draggable: false,
-        emphasis: { focus: 'adjacency' },
+        type: 'graph',
+        layout: 'none',
+        roam: true,
         data: data.nodes.map(function (n) {
+          var isPending = n.status === 'pending';
           return {
             name: n.name,
-            depth: n.depth,
-            itemStyle: { color: n.color, borderRadius: 3 },
-            label: { formatter: n.label, fontSize: 12, color: '#1d1d1f' },
+            x: n.x,
+            y: n.y,
+            title: n.title,
+            sub: n.sub,
+            symbol: 'roundRect',
+            symbolSize: [150, 46],
+            itemStyle: {
+              color: '#fff',
+              borderColor: n.color,
+              borderWidth: 2,
+              borderType: isPending ? 'dashed' : 'solid',
+              opacity: isPending ? 0.75 : 1,
+              shadowBlur: 4,
+              shadowColor: 'rgba(0,0,0,0.08)',
+            },
+            label: {
+              show: true,
+              formatter: '{t|' + n.title + '}\\n{s|' + n.sub + '}',
+              rich: {
+                t: { fontSize: 13, fontWeight: 700, color: '#1d1d1f', lineHeight: 18 },
+                s: {
+                  fontSize: 10,
+                  color: n.status === 'active' ? '#0e9f6e' : n.status === 'pending' ? '#b25000' : '#6e6e73',
+                  lineHeight: 14,
+                },
+              },
+            },
           };
         }),
-        links: data.links.map(function (l) {
+        edges: data.edges.map(function (e) {
+          var st = EDGE_STYLE[e.kind];
           return {
-            source: l.source,
-            target: l.target,
-            value: l.value,
-            kind: l.kind,
-            lineStyle: l.kind === 'fallback'
-              ? { color: '#0e9f6e', opacity: 0.45, curveness: 0.5 }
-              : l.kind === 'idle'
-                ? { color: '#9aa0a6', opacity: 0.3, curveness: 0.5 }
-                : { color: 'gradient', opacity: 0.3, curveness: 0.5 },
+            source: e.source,
+            target: e.target,
+            kind: e.kind,
+            label: e.label,
+            lineStyle: { color: st.color, type: st.type, width: e.width, curveness: 0.15 },
+            symbol: ['none', 'arrow'],
+            symbolSize: 8,
+            edgeLabel: {
+              show: e.kind !== 'alloc',
+              formatter: e.label,
+              fontSize: 10,
+              color: st.color,
+            },
           };
         }),
       }],
