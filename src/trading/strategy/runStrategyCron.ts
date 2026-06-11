@@ -1,5 +1,5 @@
 import type { Env } from '../../config/env'
-import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
+import { selectBarClient, type BarClient } from '../../infrastructure/quotes/BarClient'
 import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
 import type { WebullAccountBalanceDto } from '../../infrastructure/webull/dto'
 import {
@@ -496,10 +496,10 @@ export async function runStrategyCron(
   // notifier は関数冒頭で組み立て済み (#141)。BUY/SELL emit / per-symbol
   // bar fetch error / broker submit error は scheduler 内で注入された
   // notifier を使う (#199 経路のまま)。
-  // Yahoo Finance /v8/finance/chart is free, no auth, covers US + JP (7267.T
-  // style) in one endpoint — chosen over Webull's JP-subscription-gated
-  // market-data API (see #84). Webull is still the order-execution path.
-  const barClient = new YahooBarClient()
+  // BAR_SOURCE env で選択 (#475): default は Yahoo (/v8/finance/chart — free,
+  // no auth, US + JP + ^VIX を 1 endpoint でカバー)。'webull' で Market Data
+  // API bars が primary になり、^VIX / JP / 障害時は Yahoo に自動 fallback。
+  const barClient = await selectBarClient(env)
 
   // Earnings calendar gate (issue #196 1/3): table 未 migrate な環境で
   // `fetchByRange()` が `no such table` を吐くと fail-closed で全 BUY が
@@ -1001,7 +1001,7 @@ async function isEarningsCalendarReady(db: D1Database): Promise<boolean> {
  * だけ吐いて続行。
  */
 async function loadVixDecision(
-  barClient: YahooBarClient,
+  barClient: BarClient,
   global: { vixWarningThreshold: number; vixCriticalThreshold: number; vixWarningSizeScale: number },
   requestId: string | undefined,
 ): Promise<VixRegimeFilterDecision> {

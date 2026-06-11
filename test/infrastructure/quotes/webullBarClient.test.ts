@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { WebullBarClient } from '../../../src/infrastructure/quotes/BarClient'
+import {
+  FallbackBarClient,
+  WebullBarClient,
+  selectBarClient,
+} from '../../../src/infrastructure/quotes/BarClient'
+import { YahooBarClient } from '../../../src/infrastructure/quotes/YahooBarClient'
 import { WebullAuth } from '../../../src/infrastructure/webull/WebullAuth'
+import type { Env } from '../../../src/config/env'
 
 const baseAuth = new WebullAuth({ appKey: 'ak', appSecret: 'sk' })
 const TEST_BASE_URL = 'https://test.example'
@@ -120,5 +126,94 @@ describe('WebullBarClient.getDailyBars', () => {
 
     expect(capturedPath).toBe('/market-data/candles')
     expect(capturedPath).not.toBe('/openapi/market-data/stock/bars')
+  })
+})
+
+describe('WebullBarClient.getIntradayBars (#475)', () => {
+  it('maps 60m → timespan=M60 and normalizes time to ISO UTC, oldest-first', async () => {
+    let capturedUrl = ''
+    const fetchFn = vi.fn(async (input: Request | string | URL) => {
+      capturedUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      return mockJsonResponse([
+        { time: '2026-06-11T14:30:00.000+0000', open: '100', high: '101', low: '99', close: '100.5' },
+        { time: '2026-06-11T13:30:00.000+0000', open: '99', high: '100', low: '98', close: '99.5' },
+      ])
+    }) as unknown as typeof fetch
+
+    const client = new WebullBarClient({ auth: baseAuth, baseUrl: TEST_BASE_URL, fetchFn })
+    const bars = await client.getIntradayBars('AAPL', '60m')
+
+    expect(capturedUrl).toContain('timespan=M60')
+    expect(bars).toHaveLength(2)
+    expect(bars[0]?.timestamp).toBe('2026-06-11T13:30:00.000Z')
+    expect(bars[1]?.close).toBeCloseTo(100.5)
+  })
+})
+
+describe('FallbackBarClient (#475 Webull primary + Yahoo fallback)', () => {
+  function stubClient(name: string, calls: string[], fail = false) {
+    return {
+      getDailyBars: async (symbol: string, lookback: number) => {
+        calls.push(`${name}:daily:${symbol}:${lookback}`)
+        if (fail) throw new Error(`${name} down`)
+        return [{ date: '2026-06-10', open: 1, high: 1, low: 1, close: 1 }]
+      },
+      getIntradayBars: async (symbol: string) => {
+        calls.push(`${name}:intraday:${symbol}`)
+        if (fail) throw new Error(`${name} down`)
+        return [{ timestamp: '2026-06-11T13:30:00.000Z', open: 1, high: 1, low: 1, close: 1 }]
+      },
+    }
+  }
+
+  it('US 銘柄は Webull primary、^VIX と JP 銘柄は Yahoo 直行', async () => {
+    const calls: string[] = []
+    const client = new FallbackBarClient(
+      stubClient('webull', calls) as unknown as WebullBarClient,
+      stubClient('yahoo', calls) as unknown as YahooBarClient,
+    )
+    await client.getDailyBars('AAPL', 60)
+    await client.getDailyBars('^VIX', 1)
+    await client.getDailyBars('1357', 60)
+    expect(calls).toEqual(['webull:daily:AAPL:60', 'yahoo:daily:^VIX:1', 'yahoo:daily:1357:60'])
+  })
+
+  it('Webull 失敗時は同じ呼び出しを Yahoo で再試行する (daily / intraday とも)', async () => {
+    const calls: string[] = []
+    const client = new FallbackBarClient(
+      stubClient('webull', calls, true) as unknown as WebullBarClient,
+      stubClient('yahoo', calls) as unknown as YahooBarClient,
+    )
+    const daily = await client.getDailyBars('AAPL', 60)
+    const intraday = await client.getIntradayBars('AAPL', '60m')
+    expect(daily).toHaveLength(1)
+    expect(intraday).toHaveLength(1)
+    expect(calls).toEqual([
+      'webull:daily:AAPL:60',
+      'yahoo:daily:AAPL:60',
+      'webull:intraday:AAPL',
+      'yahoo:intraday:AAPL',
+    ])
+  })
+})
+
+describe('selectBarClient (#475 BAR_SOURCE 切替)', () => {
+  it('未設定は Yahoo (現行 default、fail-safe)', async () => {
+    const client = await selectBarClient({} as unknown as Env)
+    expect(client).toBeInstanceOf(YahooBarClient)
+  })
+
+  it("BAR_SOURCE=webull で FallbackBarClient (Webull primary)", async () => {
+    const client = await selectBarClient({
+      BAR_SOURCE: 'webull',
+      WEBULL_APP_KEY: 'k'.repeat(32),
+      WEBULL_APP_SECRET: 's'.repeat(32),
+    } as unknown as Env)
+    expect(client).toBeInstanceOf(FallbackBarClient)
+  })
+
+  it('未知値は Yahoo に倒す', async () => {
+    const client = await selectBarClient({ BAR_SOURCE: 'alpaca' } as unknown as Env)
+    expect(client).toBeInstanceOf(YahooBarClient)
   })
 })
