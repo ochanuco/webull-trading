@@ -2765,7 +2765,7 @@ describe('renderSymbolRelationMap (#symbol-relation-map 口座ツリー)', () =>
     expect(flows).toHaveLength(2)
     expect(flows.find((e: { source: string }) => e.source === 'AAPL')).toMatchObject({
       target: '現金待機',
-      kind: 'idle',
+      kind: 'inert', // 退避先設定済みなのに条件連動 OFF → 警告表示
     })
     expect(flows.find((e: { source: string }) => e.source === 'VUG')).toMatchObject({
       target: '現金待機',
@@ -2773,6 +2773,23 @@ describe('renderSymbolRelationMap (#symbol-relation-map 口座ツリー)', () =>
     })
     // 保有中 SGOV は流れない + 現金待機ノードが存在
     expect(payload.nodes.some((n: { name: string }) => n.name === '現金待機')).toBe(true)
+  })
+
+  it('インバース対は枠共有 (#315) として予算合計に max で数える + inert 警告ラベル', () => {
+    const rows = [
+      mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbol: 'SGOV' }),
+      mapRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5 }),
+      mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3 }),
+    ]
+    const payload = payloadOf(
+      renderSymbolRelationMap(rows, { SOXL: 'SOXS', SOXS: 'SOXL' }, []),
+    )
+    const account = payload.nodes.find((n: { name: string }) => n.name === '口座')
+    // 単純合計 130% ではなく、対は max(50,50)=50 + VUG 30 = 80%
+    expect(account.title).toBe('口座 (予算 80%)')
+    const inert = payload.edges.find((e: { kind: string }) => e.kind === 'inert')
+    expect(inert).toMatchObject({ source: 'SOXL' })
+    expect(inert.label).toContain('退避先SGOV未使用')
   })
 
   it('配分 0% / 無効銘柄は口座から線を引かない', () => {

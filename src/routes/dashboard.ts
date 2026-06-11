@@ -8767,7 +8767,8 @@ export function renderSymbolRelationMap(
   interface MapEdge {
     source: string
     target: string
-    kind: 'alloc' | 'yield' | 'idle'
+    /** inert = 退避先設定済みだが条件連動 OFF で不使用 (設定ミスの警告表示)。 */
+    kind: 'alloc' | 'yield' | 'idle' | 'inert'
     label: string
     width: number
   }
@@ -8784,7 +8785,23 @@ export function renderSymbolRelationMap(
   const SYMBOL_X = 360
   const CASH_X = 640
   if (allocated.length > 0) {
-    const total = allocated.reduce((sum, r) => sum + pctOf(r), 0)
+    // 予算合計はインバース対の枠共有 (#315 の共有 slider と同じ) を反映して
+    // 「対は max、単独はそのまま」で数える — 単純合計だと 200% 等に見えて誤読する。
+    const counted = new Set<string>()
+    let total = 0
+    for (const r of allocated) {
+      const sym = r.symbol.toUpperCase()
+      if (counted.has(sym)) continue
+      counted.add(sym)
+      const partner = inversePairs[sym]?.toUpperCase()
+      const partnerRow = partner ? allocated.find((x) => x.symbol.toUpperCase() === partner) : undefined
+      if (partnerRow) {
+        counted.add(partner!)
+        total += Math.max(pctOf(r), pctOf(partnerRow))
+      } else {
+        total += pctOf(r)
+      }
+    }
     const centerY = 40 + ((allocated.length - 1) * ROW_H) / 2
     addNode({
       name: '口座',
@@ -8821,11 +8838,18 @@ export function renderSymbolRelationMap(
         const target = conditional && r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
         if (target !== sym) {
           if (target === '現金待機') needCash = true
+          // 退避先が設定されているのに条件連動 OFF = 設定が効いていない状態。
+          // 黙って無視せず inert (琥珀) で警告表示する (operator が SOXL で踏んだ罠)。
+          const inert = !conditional && r.cashFallbackSymbol !== null
           edges.push({
             source: sym,
             target,
-            kind: conditional ? 'yield' : 'idle',
-            label: conditional ? `代替 ${pctOf(r)}%` : `待機 ${pctOf(r)}% (枠確保)`,
+            kind: conditional ? 'yield' : inert ? 'inert' : 'idle',
+            label: conditional
+              ? `代替 ${pctOf(r)}%`
+              : inert
+                ? `待機 ${pctOf(r)}% ⚠ 退避先${r.cashFallbackSymbol!.toUpperCase()}未使用`
+                : `待機 ${pctOf(r)}% (枠確保)`,
             width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
           })
         }
@@ -8885,7 +8909,8 @@ export function renderSymbolRelationMap(
       口座 → 銘柄 = 配分% (実線、太さ ∝ %)。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
       <strong>Pending</strong> = 様子見 (破線枠) で、点線矢印が「いま枠が行っている先」:
       <span style="color:#0e9f6e">緑 = 退避先へ代替割当 (条件連動 ON)</span> ・
-      <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span>。
+      <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span> ・
+      <span style="color:#b25000">琥珀 ⚠ = 退避先が設定済みなのに条件連動 OFF で不使用</span>。
     </p>`
     : ''
   const payload = { nodes, edges }
@@ -8906,6 +8931,7 @@ export function renderSymbolRelationMap(
       alloc: { color: '#8a8f98', type: 'solid' },
       yield: { color: '#0e9f6e', type: 'dotted' },
       idle: { color: '#9aa0a6', type: 'dotted' },
+      inert: { color: '#b25000', type: 'dotted' },
     };
     var chart = echarts.init(el);
     chart.setOption({
@@ -8914,6 +8940,7 @@ export function renderSymbolRelationMap(
           if (p.dataType === 'edge') {
             if (p.data.kind === 'yield') return p.data.source + ' は様子見のため ' + p.data.label.replace('代替 ', '') + ' を ' + p.data.target + ' に代替割当中';
             if (p.data.kind === 'idle') return p.data.source + ' は様子見。枠は確保したまま現金待機';
+            if (p.data.kind === 'inert') return p.data.source + ' は退避先が設定されていますが<br><strong>条件連動が OFF のため使われていません</strong>。<br>銘柄編集で「条件連動」を ON にすると退避が有効になります。';
             return '口座 → ' + p.data.target + ': 配分 ' + p.data.label;
           }
           var d = p.data;
@@ -9762,7 +9789,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
         <label>退避先</label>
         <div>
           <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
-          <span class="muted" style="font-size:12px;margin-left:6px">同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
+          <span class="muted" style="font-size:12px;margin-left:6px"><strong>条件連動 ON のときのみ有効</strong>。同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
         </div>`,
       hasAllocValues,
     )}
