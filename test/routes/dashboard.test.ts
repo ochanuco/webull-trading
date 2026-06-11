@@ -1091,6 +1091,24 @@ describe('renderStrategyParamsPanel', () => {
     expect(html).toContain('PullbackUptrendStrategy')
     expect(html).toContain('default から変更されている')
   })
+
+  // 銘柄管理の override / role preset が効いている項目は global と異なる値に
+  // なる。以前は global 値しか表示されず「銘柄管理で設定した値が出ない」見た目
+  // バグがあった (operator 指摘) — effective 値 + 「銘柄別」タグの regression 防止。
+  it('global を渡すと effective 値が表示され、global と異なる項目に「銘柄別」タグが付く', () => {
+    const effective = { ...DEFAULT_PARAMS, stopPct: -0.05, takeProfitPct: 0.06 }
+    const html = renderStrategyParamsPanel(effective, { ...DEFAULT_PARAMS })
+    expect(html).toContain('-5.0%')
+    expect(html).toContain('+6.0%')
+    expect(html.match(/>銘柄別<\/span>/g)?.length).toBe(2) // stopPct / takeProfitPct の 2 行
+    expect(html).toContain('この銘柄に適用される値')
+  })
+
+  it('global と全一致なら「銘柄別」タグは出ない (脚注の説明文のみ)', () => {
+    const html = renderStrategyParamsPanel({ ...DEFAULT_PARAMS }, { ...DEFAULT_PARAMS })
+    expect(html).not.toMatch(/>銘柄別<\/span>/)
+    expect(html).toContain('「銘柄別」タグ')
+  })
 })
 
 import { computeChartWindowDays } from '../../src/routes/dashboard'

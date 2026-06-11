@@ -463,9 +463,8 @@ export const dashboard = new Hono<DashboardBindings>()
           : defaultSymbol && allowed.has(defaultSymbol)
             ? defaultSymbol
             : universe.allowedSymbols[0] ?? universe.inactiveSymbols[0] ?? null
-      // ルール閾値は global_config から。per-symbol override は POC で未対応
-      // (symbol_rules table が無い、env-var 経由なので動的反映困難)。
-      const strategyParams: StrategyParamsSnapshot = {
+      // global_config の pullback default (パネルの「銘柄別」タグの比較基準)。
+      const globalParams: StrategyParamsSnapshot = {
         stopPct: global.pullbackDefaultStopPct,
         takeProfitPct: global.pullbackDefaultTakeProfitPct,
         timeStopDays: global.pullbackDefaultTimeStopDays,
@@ -477,6 +476,17 @@ export const dashboard = new Hono<DashboardBindings>()
         maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
         maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
       }
+      // cron と同じ effective rule — global default → role preset → per-symbol
+      // override (#452)。drift するとダッシュボードの入場ライン / stop・TP
+      // preview / パラメータ表が cron 判定とずれるので必ず buildSymbolRules を
+      // 共用する。以前はパラメータ表とチャート overlay が global 値のままで、
+      // 銘柄管理の override が反映されない見た目バグがあった (operator 指摘)。
+      const defaultEntryRule: SymbolRule = { ...globalParams }
+      const effectiveRules = buildSymbolRules(defaultEntryRule, universe)
+      const entryRule: SymbolRule =
+        (focusSymbol ? effectiveRules[focusSymbol] : undefined) ?? defaultEntryRule
+      // パネル / チャート overlay は focus symbol の適用値で描く。
+      const strategyParams: StrategyParamsSnapshot = { ...entryRule }
       const rules: SymbolChartRules = {
         pullbackMax: strategyParams.pullbackMax,
         pullbackMin: strategyParams.pullbackMin,
@@ -484,25 +494,6 @@ export const dashboard = new Hono<DashboardBindings>()
         takeProfitPct: strategyParams.takeProfitPct,
         timeStopDays: strategyParams.timeStopDays,
       }
-      // 入場距離 (#entry-distance): cron と同じ effective rule で評価する —
-      // global default → role preset → per-symbol override (#452)。drift すると
-      // ダッシュボードの入場ラインが cron 判定とずれるので必ず buildSymbolRules
-      // を共用する。
-      const defaultEntryRule: SymbolRule = {
-        stopPct: strategyParams.stopPct,
-        takeProfitPct: strategyParams.takeProfitPct,
-        timeStopDays: strategyParams.timeStopDays,
-        pullbackMax: strategyParams.pullbackMax,
-        pullbackMin: strategyParams.pullbackMin,
-        minReturn50d: strategyParams.minReturn50d,
-        requireAboveSma50: strategyParams.requireAboveSma50,
-        kAtr: strategyParams.kAtr,
-        maxSma50DeviationPct: strategyParams.maxSma50DeviationPct,
-        maxAtrRatio: strategyParams.maxAtrRatio,
-      }
-      const effectiveRules = buildSymbolRules(defaultEntryRule, universe)
-      const entryRule: SymbolRule =
-        (focusSymbol ? effectiveRules[focusSymbol] : undefined) ?? defaultEntryRule
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
       // 直近 BUY 単体しか拾えないので fallback 専用。
@@ -577,6 +568,7 @@ export const dashboard = new Hono<DashboardBindings>()
             symbolChart,
             availableSymbols: allDisplaySymbols,
             strategyParams,
+            strategyParamsGlobal: globalParams,
             zoom,
             universe,
             buyability,
@@ -5803,7 +5795,10 @@ export interface ChartsBodySymbol {
   focusSymbol: string | null
   symbolChart: SymbolChartData | null
   availableSymbols: string[]
+  /** focus symbol に適用される effective 値 (global → role preset → override)。 */
   strategyParams: StrategyParamsSnapshot
+  /** global_config の値。effective と異なる項目に「銘柄別」タグを付ける比較基準。 */
+  strategyParamsGlobal?: StrategyParamsSnapshot
   /** dataZoom 初期範囲。null なら全期間 (full data) */
   zoom: { from: Date; to: Date } | null
   /** symbol picker / chart title を JP 銘柄向け 番号-会社名 形式に整形するための universe。 */
@@ -6048,7 +6043,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       args,
       renderFocusSymbolHeader(args) +
         `<p class="muted">この銘柄にはまだ判定ログ / fill がありません。</p>` +
-        renderStrategyParamsPanel(args.strategyParams),
+        renderStrategyParamsPanel(args.strategyParams, args.strategyParamsGlobal),
     )
   }
   const initScript = `
@@ -7216,7 +7211,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
   </div>
   ${renderSymbolDecisionHistory(args)}
-  ${renderStrategyParamsPanel(args.strategyParams)}`
+  ${renderStrategyParamsPanel(args.strategyParams, args.strategyParamsGlobal)}`
   return `${wrapWithSymbolRail(args, content)}
   ${safeJsonScript('__chartData', {
     symbolChart: symbolChartPayload,
@@ -8199,56 +8194,76 @@ const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
  * 「設定の意図しない残存」(例: pullback_max=0 のデバッグ残骸) に運用者が
  * 気づきやすくする。
  */
-export function renderStrategyParamsPanel(p: StrategyParamsSnapshot): string {
+export function renderStrategyParamsPanel(
+  p: StrategyParamsSnapshot,
+  globalParams?: StrategyParamsSnapshot,
+): string {
   const flag = (current: number | boolean, def: number | boolean): string =>
     current === def ? '' : ' <span class="warn" title="default 値から変更">⚠</span>'
+  // effective 値が global と異なる = role preset / 銘柄管理の override 由来。
+  // 「銘柄管理で設定した値ではなく global が出ている」と誤読されないよう、
+  // 出どころを行内で明示する (operator 指摘)。
+  const symbolTag = (key: keyof StrategyParamsSnapshot): string =>
+    globalParams !== undefined && p[key] !== globalParams[key]
+      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:#e8f0fe;color:#1a56db" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
+      : ''
   const pct = (n: number): string =>
     (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
-  const rows: Array<{ label: string; current: string; def: string; flag: string }> = [
+  const rows: Array<{ label: string; key: keyof StrategyParamsSnapshot; current: string; def: string; flag: string }> = [
     {
       label: '損切ライン (stopPct)',
+      key: 'stopPct',
       current: pct(p.stopPct),
       def: pct(STRATEGY_DEFAULTS.stopPct),
       flag: flag(p.stopPct, STRATEGY_DEFAULTS.stopPct),
     },
     {
       label: '利食ライン (takeProfitPct)',
+      key: 'takeProfitPct',
       current: pct(p.takeProfitPct),
       def: pct(STRATEGY_DEFAULTS.takeProfitPct),
       flag: flag(p.takeProfitPct, STRATEGY_DEFAULTS.takeProfitPct),
     },
     {
       label: '時間切れ (timeStopDays)',
+      key: 'timeStopDays',
       current: `${p.timeStopDays} 営業日`,
       def: `${STRATEGY_DEFAULTS.timeStopDays} 営業日`,
       flag: flag(p.timeStopDays, STRATEGY_DEFAULTS.timeStopDays),
     },
     {
       label: '押し目 上限 (pullbackMax)',
+      key: 'pullbackMax',
       current: pct(p.pullbackMax),
       def: pct(STRATEGY_DEFAULTS.pullbackMax),
       flag: flag(p.pullbackMax, STRATEGY_DEFAULTS.pullbackMax),
     },
     {
       label: '押し目 下限 (pullbackMin)',
+      key: 'pullbackMin',
       current: pct(p.pullbackMin),
       def: pct(STRATEGY_DEFAULTS.pullbackMin),
       flag: flag(p.pullbackMin, STRATEGY_DEFAULTS.pullbackMin),
     },
     {
-      label: '50日騰落率 閾値 (minReturn50d)',
+      // lookback の実体は 20 営業日 (#318)。field 名は global_config 列との互換で
+      // minReturn50d のまま、人間向け文言だけ 20 日に揃える。
+      label: '20日騰落率 閾値 (minReturn50d)',
+      key: 'minReturn50d',
       current: pct(p.minReturn50d),
       def: pct(STRATEGY_DEFAULTS.minReturn50d),
       flag: flag(p.minReturn50d, STRATEGY_DEFAULTS.minReturn50d),
     },
     {
       label: 'SMA50 上 必須 (requireAboveSma50)',
+      key: 'requireAboveSma50',
       current: p.requireAboveSma50 ? 'true' : 'false',
       def: STRATEGY_DEFAULTS.requireAboveSma50 ? 'true' : 'false',
       flag: flag(p.requireAboveSma50, STRATEGY_DEFAULTS.requireAboveSma50),
     },
     {
       label: 'ATR 倍率 (kAtr、サイジング用)',
+      key: 'kAtr',
       current: p.kAtr.toFixed(2),
       def: STRATEGY_DEFAULTS.kAtr.toFixed(2),
       flag: flag(p.kAtr, STRATEGY_DEFAULTS.kAtr),
@@ -8257,18 +8272,18 @@ export function renderStrategyParamsPanel(p: StrategyParamsSnapshot): string {
   const tbody = rows
     .map(
       (r) =>
-        `<tr><th>${esc(r.label)}</th><td>${esc(r.current)}${r.flag}</td><td class="muted">${esc(r.def)}</td></tr>`,
+        `<tr><th>${esc(r.label)}</th><td>${esc(r.current)}${r.flag}${symbolTag(r.key)}</td><td class="muted">${esc(r.def)}</td></tr>`,
     )
     .join('')
   return `<details open style="margin-top:12px">
-    <summary style="cursor:pointer;font-size:13px">戦略パラメータ (PullbackUptrendStrategy) — <span class="muted">⚠ は default から変更されている項目</span></summary>
+    <summary style="cursor:pointer;font-size:13px">戦略パラメータ (PullbackUptrendStrategy${globalParams !== undefined ? ' — この銘柄に適用される値' : ''}) — <span class="muted">⚠ は default から変更されている項目</span></summary>
     <table style="margin-top:8px">
       <thead><tr><th>項目</th><th>現在値</th><th>default</th></tr></thead>
       <tbody>${tbody}</tbody>
     </table>
     <p class="muted" style="font-size:11px;margin-top:6px">
-      設定変更は <code>UPDATE global_config SET pullback_default_* = ... WHERE id = 'default'</code> で。
-      per-symbol override は POC scope では未対応。
+      「銘柄別」タグは role preset / 銘柄管理の override 由来 (設定は 銘柄管理 → 編集)。
+      global の変更は 設定ページ (pullback_default_*)。
     </p>
   </details>`
 }
