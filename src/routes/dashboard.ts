@@ -8738,17 +8738,17 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 }
 
 /**
- * 配分マップ編集キャンバス (#symbol-relation-map)。**draft 編集モデル**:
- * 線を引く / 消す / % を変えても即保存はせず、ローカル draft に積んで
- * 変更箇所をハイライト + サマリ表示し、「適用」で一括保存 → reload する
- * (operator 指定: つど confirm ではなく、編集中は視覚的フィードバック、最後に
- * 適用ボタン)。リセット = reload で破棄。
+ * 配分マップ編集キャンバス (#symbol-relation-map)。**draft 編集 + 1/枝 配分**:
  *
- * 操作の意味:
- *   - 口座 → 銘柄の線: 配分 (引く = 配分対象に追加。% はカードの入力欄 / 消す = 配分解除)
- *   - 銘柄 → 銘柄の線: 退避先 (引く = 設定 + 条件連動 ON / 消す = 解除)。1 銘柄 1 本
- *   - カードの % 入力: 予算配分の変更 (インバース対は server 側で同期)
- * 適用時は budget-alloc (一括) → cash-fallback (銘柄ごと) の順で POST する。
+ *   - 配分は % 入力ではなく**トポロジーから導出**する (operator 指定)。
+ *     口座に繋がっている枝数 N に対し各枝 = 100/N %。インバース対は両方
+ *     繋がっていても **1 枝** として数え、両側に同じ % を書く (枠共有 #315 と
+ *     同じ意味)。合計は構造的に常に 100% — % の手管理によるカオスを排除する。
+ *   - 線を引く / 消すは draft に積み、変更箇所をハイライト + サマリ表示して
+ *     「適用」で一括保存 → reload。DB / cron は従来どおり budget_alloc_pct
+ *     (fraction) を読む — 変換はこのエディタの適用時のみ。
+ *   - 銘柄 → 銘柄の線 = 退避先 (1 銘柄 1 本、設定時に条件連動も ON)
+ *   - 口座から切断 = 配分解除 (NULL = risk-% サイジングに戻る)
  * インバース対 / proxy はカード内に表示のみ (不変条件があるためキャンバス編集不可)。
  */
 export function symbolMapEditorBody(
@@ -8777,31 +8777,18 @@ export function symbolMapEditorBody(
   if (nodes.length === 0) {
     return `<p class="muted">有効な銘柄がありません。</p>`
   }
-  // 口座カードの予算合計はインバース対の枠共有 (#315) を反映 (対は max)。
-  const counted = new Set<string>()
-  let totalPct = 0
-  for (const n of nodes) {
-    if (counted.has(n.sym)) continue
-    counted.add(n.sym)
-    const partnerNode = n.inverse ? nodes.find((x) => x.sym === n.inverse) : undefined
-    if (partnerNode) {
-      counted.add(n.inverse!)
-      totalPct += Math.max(n.pct, partnerNode.pct)
-    } else {
-      totalPct += n.pct
-    }
-  }
-  const payload = { nodes, accountTotalPct: Math.round(totalPct * 10) / 10 }
+  const payload = { nodes }
   return `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
     <span class="muted" style="font-size:12px">
-      <strong>口座 → 銘柄の線</strong> = 配分 ・ <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON) ・ % 欄 = 配分変更。
+      <strong>口座 → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い) で % は自動計算 ・
+      <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON)。
       <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete。
     </span>
     <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
     <span class="muted" style="font-size:12px">
-      変更は即保存されません — 下のサマリを確認して<strong>「適用」で一括保存</strong>します。
-      カードの塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
+      変更は即保存されません — サマリを確認して<strong>「適用」で一括保存</strong>。
+      塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
       <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
       <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>
     </span>
@@ -8818,6 +8805,8 @@ export function symbolMapEditorBody(
   <style>
   #symbol-map-editor{height:calc(100vh - 220px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
   #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
+  #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
+  #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
   /* 通貨で塗り分け: 口座 = 濃グレー、JPY = 桜、USD = 薄青 (operator 要望) */
   #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#5f6368;border-color:#3c4043}
   /* 接続ポートの◯もグレーに (default の白丸 + 黒枠は浮く) */
@@ -8825,17 +8814,13 @@ export function symbolMapEditorBody(
   #symbol-map-editor .drawflow .drawflow-node .output{background:#9aa0a6;border:2px solid #6e6e73;width:14px;height:14px}
   #symbol-map-editor .drawflow .drawflow-node .input:hover,
   #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
-  #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:#fdf3f2;border-color:#d4a09a}
-  #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:#f0f6ff;border-color:#9ab8dd}
-  #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
-  #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
   #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
   .sm-card{padding:8px 10px;font-size:12px}
   .sm-card .sm-title{font-size:14px;font-weight:700}
   .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
   .sm-card .sm-status-pending{color:#b25000;font-size:11px}
   .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
-  .sm-card input{width:64px;padding:2px 4px;font-size:12px}
+  .sm-card .sm-share{font-weight:600}
   </style>
   <div id="symbol-map-editor"></div>
   ${safeJsonScript('__symbolMapEditor', payload)}
@@ -8850,8 +8835,9 @@ export function symbolMapEditorBody(
     editor.start();
     var idOf = {};
     var symOf = {};
+    var nodeBySym = {};
     var baseline = {};   // sym -> { pct, fallback }
-    var draft = {};      // sym -> { pct, fallback } (編集中の値)
+    var draft = {};      // sym -> { connected, fallback }
     var programmatic = false;
 
     var allocated = data.nodes.filter(function (n) { return n.pct > 0; });
@@ -8859,12 +8845,13 @@ export function symbolMapEditorBody(
     var accountId = editor.addNode('口座', 0, 1, 40, accountY, 'sm-node sm-account',
       { sym: '口座' },
       '<div class="sm-card"><div class="sm-title" style="color:#fff">口座</div>' +
-      '<div class="sm-meta" style="color:#e8eaed">原資 ・ 予算 ' + data.accountTotalPct + '% (対は枠共有で max)</div></div>');
+      '<div class="sm-meta" style="color:#e8eaed">原資 ・ 予算 100% を枝数で均等割</div></div>');
     symOf[accountId] = '__account__';
 
     data.nodes.forEach(function (n) {
+      nodeBySym[n.sym] = n;
       baseline[n.sym] = { pct: n.pct, fallback: n.fallback };
-      draft[n.sym] = { pct: n.pct, fallback: n.fallback };
+      draft[n.sym] = { connected: n.pct > 0, fallback: n.fallback };
       var statusHtml = n.held
         ? '<div class="sm-status-active">Active ・ ' + n.held + '</div>'
         : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
@@ -8875,11 +8862,10 @@ export function symbolMapEditorBody(
       var html = '<div class="sm-card">' +
         '<div class="sm-title" style="color:' + n.color + '">' + n.sym + '</div>' +
         statusHtml +
-        '<div style="margin-top:4px">配分 <input type="number" min="0" max="100" step="1" value="' + n.pct + '" data-sym="' + n.sym + '" class="sm-pct"> %</div>' +
+        '<div style="margin-top:4px">配分 <span class="sm-share" id="sm-share-' + n.sym + '">—</span></div>' +
         '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
         '</div>';
-      var ccyClass = n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd';
-      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node ' + ccyClass, { sym: n.sym }, html);
+      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node ' + (n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { sym: n.sym }, html);
       idOf[n.sym] = id;
       symOf[id] = n.sym;
     });
@@ -8890,8 +8876,40 @@ export function symbolMapEditorBody(
       if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
     });
     programmatic = false;
-    // 初期表示でも合計を draft 基準で描く (server 計算値と同じはずだが一元化)。
-    setTimeout(function () { renderAccountTotal(); }, 0);
+
+    // 1/枝 の導出: 接続中の銘柄を対 (インバース) ごとに 1 枝として数え、
+    // 各枝 = round(100/N, 1dp)。接続中の銘柄は対の両側とも同じ % (枠共有)。
+    function deriveShares() {
+      var branches = 0;
+      var seen = {};
+      Object.keys(draft).forEach(function (sym) {
+        if (!draft[sym].connected || seen[sym]) return;
+        seen[sym] = true;
+        var inv = nodeBySym[sym].inverse;
+        if (inv && draft[inv] && draft[inv].connected) seen[inv] = true;
+        branches += 1;
+      });
+      var share = branches > 0 ? Math.round((100 / branches) * 10) / 10 : 0;
+      var shares = {};
+      Object.keys(draft).forEach(function (sym) {
+        shares[sym] = draft[sym].connected ? share : 0;
+      });
+      return { branches: branches, share: share, shares: shares };
+    }
+    function renderShares() {
+      var d = deriveShares();
+      Object.keys(draft).forEach(function (sym) {
+        var span = document.getElementById('sm-share-' + sym);
+        if (!span) return;
+        span.textContent = draft[sym].connected ? '1/' + d.branches + ' = ' + d.share + '%' : 'なし (risk-%)';
+      });
+      var accountEl = document.getElementById('node-' + accountId);
+      if (accountEl) {
+        var meta = accountEl.querySelector('.sm-meta');
+        if (meta) meta.textContent = '原資 ・ ' + d.branches + ' 枝 ・ 1 枝 = ' + (d.branches > 0 ? d.share + '%' : '—');
+      }
+      return d;
+    }
 
     function markConnectionPending(srcId, dstId) {
       var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);
@@ -8901,57 +8919,30 @@ export function symbolMapEditorBody(
       var nodeEl = document.getElementById('node-' + idOf[sym]);
       if (nodeEl) nodeEl.classList.toggle('sm-dirty', dirty);
     }
-    function isDirty(sym) {
-      return draft[sym].pct !== baseline[sym].pct || (draft[sym].fallback || null) !== (baseline[sym].fallback || null);
-    }
-    // draft 合計 (インバース対は枠共有 = max で集計) をリアルタイム表示。
-    // 100% 超過 = 早い者勝ちの取り合い (settled cash gate で実際は買えない) なので赤警告。
-    function draftTotalPct() {
-      var counted = {};
-      var total = 0;
-      data.nodes.forEach(function (n) {
-        if (counted[n.sym]) return;
-        counted[n.sym] = true;
-        var mine = draft[n.sym].pct || 0;
-        if (n.inverse && draft[n.inverse]) {
-          counted[n.inverse] = true;
-          total += Math.max(mine, draft[n.inverse].pct || 0);
-        } else {
-          total += mine;
-        }
-      });
-      return Math.round(total * 10) / 10;
-    }
-    function renderAccountTotal() {
-      var nodeEl = document.getElementById('node-' + accountId);
-      if (!nodeEl) return;
-      var meta = nodeEl.querySelector('.sm-meta');
-      if (!meta) return;
-      var total = draftTotalPct();
-      var over = total > 100;
-      meta.innerHTML = '原資 ・ 予算 <strong style="color:' + (over ? '#ff8a80' : '#e8eaed') + '">' + total + '%</strong>' +
-        (over ? ' ⚠ 100% 超過' : '') + ' (対は枠共有で max)';
-    }
     function renderChanges() {
-      renderAccountTotal();
+      var d = renderShares();
       var bar = document.getElementById('sm-changes-bar');
       var list = document.getElementById('sm-changes-list');
       var items = [];
       Object.keys(draft).forEach(function (sym) {
         var b = baseline[sym];
-        var d = draft[sym];
-        if (d.pct !== b.pct) {
-          items.push(sym + ': 配分 ' + (b.pct || 'なし') + (b.pct ? '%' : '') + ' → ' + (d.pct ? d.pct + '%' : '解除'));
+        var newPct = d.shares[sym];
+        var pctChanged = newPct !== b.pct;
+        var fbChanged = (draft[sym].fallback || null) !== (b.fallback || null);
+        if (pctChanged) {
+          items.push(sym + ': 配分 ' + (b.pct ? b.pct + '%' : 'なし') + ' → ' + (newPct ? '1/' + d.branches + ' = ' + newPct + '%' : '解除 (risk-%)'));
         }
-        if ((d.fallback || null) !== (b.fallback || null)) {
-          if (d.fallback) items.push(sym + ': 退避先 → ' + d.fallback + ' (条件連動 ON)');
+        if (fbChanged) {
+          if (draft[sym].fallback) items.push(sym + ': 退避先 → ' + draft[sym].fallback + ' (条件連動 ON)');
           else items.push(sym + ': 退避先を解除');
         }
-        setCardDirty(sym, isDirty(sym));
+        setCardDirty(sym, pctChanged || fbChanged);
       });
       list.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
       bar.hidden = items.length === 0;
+      return d;
     }
+    renderChanges();
 
     editor.on('connectionCreated', function (info) {
       if (programmatic) return;
@@ -8964,12 +8955,7 @@ export function symbolMapEditorBody(
         return;
       }
       if (src === '__account__') {
-        // 配分対象に追加。% はカードの入力欄で指定する (0 のままなら適用対象外)。
-        if (draft[dst].pct === 0) {
-          draft[dst].pct = 5; // 仮の初期値。入力欄に反映して編集を促す。
-          var input = el.querySelector('input.sm-pct[data-sym="' + dst + '"]');
-          if (input) { input.value = '5'; input.focus(); }
-        }
+        draft[dst].connected = true;
         markConnectionPending(info.output_id, info.input_id);
         renderChanges();
         return;
@@ -8991,22 +8977,11 @@ export function symbolMapEditorBody(
       var dst = symOf[info.input_id];
       if (!src || !dst) return;
       if (src === '__account__') {
-        draft[dst].pct = 0;
-        var input = el.querySelector('input.sm-pct[data-sym="' + dst + '"]');
-        if (input) input.value = '0';
+        draft[dst].connected = false;
         renderChanges();
         return;
       }
       if (draft[src].fallback === dst) draft[src].fallback = null;
-      renderChanges();
-    });
-
-    el.addEventListener('change', function (ev) {
-      var input = ev.target;
-      if (!input.classList || !input.classList.contains('sm-pct')) return;
-      var sym = input.getAttribute('data-sym');
-      var v = Number(String(input.value).trim());
-      draft[sym].pct = Number.isFinite(v) && v > 0 ? v : 0;
       renderChanges();
     });
 
@@ -9034,21 +9009,19 @@ export function symbolMapEditorBody(
         refreshDeleteBtn();
       }
     });
+
     document.getElementById('sm-reset').addEventListener('click', function () { location.reload(); });
     document.getElementById('sm-apply').addEventListener('click', function () {
-      var pctChanges = Object.keys(draft).filter(function (sym) { return draft[sym].pct !== baseline[sym].pct; });
+      var d = deriveShares();
+      var pctChanges = Object.keys(draft).filter(function (sym) { return d.shares[sym] !== baseline[sym].pct; });
       var fbChanges = Object.keys(draft).filter(function (sym) { return (draft[sym].fallback || null) !== (baseline[sym].fallback || null); });
       if (pctChanges.length === 0 && fbChanges.length === 0) return;
-      var total = draftTotalPct();
-      var warn = total > 100
-        ? '⚠ 配分合計が ' + total + '% で 100% を超えています。超過分は買付余力 (settled cash gate) により先着順でしか約定しません。このまま適用しますか？'
-        : '表示中の変更をまとめて適用します (配分合計 ' + total + '%)。よろしいですか？';
-      if (!confirm(warn)) return;
+      if (!confirm('表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%)。よろしいですか？')) return;
       var steps = Promise.resolve();
       if (pctChanges.length > 0) {
         var form = new FormData();
         pctChanges.forEach(function (sym) {
-          form.append('pct_' + sym, draft[sym].pct > 0 ? String(draft[sym].pct) : '');
+          form.append('pct_' + sym, d.shares[sym] > 0 ? String(d.shares[sym]) : '');
         });
         steps = steps.then(function () {
           return fetch('/admin/symbol-config/budget-alloc', { method: 'POST', credentials: 'same-origin', body: form })
