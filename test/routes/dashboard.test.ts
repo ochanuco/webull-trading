@@ -2598,25 +2598,7 @@ describe('段階判定の表示 (#452 PR 2)', () => {
     expect(html).toContain('>ENTRY<')
   })
 
-  it('WATCH/NG で alternatives があれば代替候補リンクを出す (表示のみ)', () => {
-    const view = viewFor(99) // 押し目不足 → WATCH
-    const status = deriveEntryStatus(view.current!)
-    expect(status.positionMultiplier).toBe(0)
-    const html = renderBuyabilityPanel(view, {
-      entryStatus: status,
-      alternatives: ['SOXX', 'SMH'],
-    })
-    expect(html).toContain('代替候補')
-    expect(html).toContain('symbol=SOXX')
-    expect(html).toContain('自動で発注先を切り替えることはしない')
-  })
 
-  it('ENTRY では代替候補を出さない', () => {
-    const view = viewFor(95)
-    const status = deriveEntryStatus(view.current!)
-    const html = renderBuyabilityPanel(view, { entryStatus: status, alternatives: ['SOXX'] })
-    expect(html).not.toContain('代替候補')
-  })
 
   it('grid を ENTRY > HALF > WATCH > NG > cash_parking > データ無し > inactive で並べる', () => {
     const charts = ['SGOV', 'NODATA', 'NG1', 'WATCH1', 'HALF1', 'ENTRY1', 'OFF'].map((symbol) => ({

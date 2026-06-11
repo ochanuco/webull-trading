@@ -260,7 +260,6 @@ const writeInput = (symbol: string): SymbolConfigWriteInput => ({
   maxAtrRatioOverride: null,
   maxSma50DeviationPctOverride: null,
   requireAboveSma50Override: null,
-  alternatives: null,
   entryRequired: false,
   alwaysActive: false,
   cashFallbackSymbol: null,
@@ -319,7 +318,7 @@ describe('createSymbolPair', () => {
   })
 })
 
-describe('loadSymbolConfig role / entry overrides / alternatives (#452)', () => {
+describe('loadSymbolConfig role / entry overrides (#452)', () => {
   it('maps valid roles and normalizes unknown DB values to "unknown" (not NULL fallback)', async () => {
     const rows = [
       { symbol: 'sgov', market: 'US', active: true, maxNotional: null, role: 'cash_parking' },
@@ -376,18 +375,6 @@ describe('loadSymbolConfig role / entry overrides / alternatives (#452)', () => 
     expect(result.symbolRequireAboveSma50Override).toEqual({ QQQ: false })
   })
 
-  it('parses alternatives JSON, uppercases, dedupes, drops self-reference and bad JSON', async () => {
-    const rows = [
-      { symbol: 'soxl', market: 'US', active: true, maxNotional: null, alternatives: '["soxx","SMH","soxx","SOXL"]' },
-      { symbol: 'tqqq', market: 'US', active: true, maxNotional: null, alternatives: 'not-json' },
-      { symbol: 'qqq', market: 'US', active: true, maxNotional: null, alternatives: '["BAD SYMBOL!"]' },
-      { symbol: 'voo', market: 'US', active: true, maxNotional: null, alternatives: '[]' },
-      { symbol: 'spy', market: 'US', active: true, maxNotional: null, alternatives: null },
-    ]
-    const result = await loadSymbolConfig(fakeDb(rows))
-    // self (SOXL) と重複は除去。不正 JSON / 不正 ticker / 空配列 / NULL は map 不在。
-    expect(result.symbolAlternatives).toEqual({ SOXL: ['SOXX', 'SMH'] })
-  })
 })
 
 describe('deactivateSymbolForBrokerDeny (#460)', () => {
