@@ -2078,6 +2078,7 @@ function brokerProbeBody(args: {
     // category 推定の取り違え対策 (CodeRabbit #462) で ETF/STOCK 両 category を
     // 並べる。末尾 2 つは汎用 SDK path の drift 検証用 (#251 方式)。
     var candidates = [
+      { label: 'stock/list (trade host, v2)', section: body.instrumentStockTradeV2 },
       { label: 'stock/list (trade host)', section: body.instrumentStockTrade },
       { label: 'stock/list (trade host, alt category)', section: body.instrumentStockTradeAlt },
       { label: 'stock/list (quotes host)', section: body.instrumentStockQuotes },
@@ -2355,8 +2356,10 @@ function brokerProbeBody(args: {
       .then(function (res) {
         var body = res.body;
         statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
-        quoteEl.textContent = body.quote ? prettify(body.quote) : '(no data)';
-        renderQuoteCard('bp-quote-pill', 'bp-quote-body', body.quote || null, ['last_price', 'price', 'close', 'last']);
+        quoteEl.textContent = '--- snapshot (trade host, v2) ---\\n' + prettify(body.snapshotTradeV2) + '\\n\\n--- snapshot (quotes host) ---\\n' + (body.quote ? prettify(body.quote) : '(no data)');
+        // trade host + v2 の snapshot (JP docs の production host) が 200 なら優先表示。
+        var webullQuote = (body.snapshotTradeV2 && body.snapshotTradeV2.status === 200) ? body.snapshotTradeV2 : (body.quote || null);
+        renderQuoteCard('bp-quote-pill', 'bp-quote-body', webullQuote, ['last_price', 'price', 'close', 'last']);
         var quoteYahooEl = document.getElementById('probe-quote-yahoo');
         if (quoteYahooEl) quoteYahooEl.textContent = body.quoteYahoo ? prettify(body.quoteYahoo) : '(no data)';
         renderQuoteCard('bp-yahoo-pill', 'bp-yahoo-body', body.quoteYahoo || null, ['regularMarketPrice', 'price', 'close']);

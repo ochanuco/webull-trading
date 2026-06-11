@@ -767,6 +767,8 @@ export const admin = new Hono<AppBindings>()
       instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
+      snapshotTradeV2,
+      instrumentStockTradeV2,
     ] = await Promise.all([
       // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
       // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
@@ -891,6 +893,28 @@ export const admin = new Hono<AppBindings>()
         query: { symbols: symbol, category },
         version: 'v1',
       }),
+      // JP docs (market-data-api/data-api) の再読で判明: **Market Data API の
+      // production host は api.webull.co.jp (trade host) + x-version v2
+      // (HMAC-SHA256)**。従来の probe は「market-data = data-api (別 host)」前提
+      // で trade host には v1 しか投げていなかった — trade host + v2 の組合せを
+      // ここで初めて検証する。
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/market-data/stock/snapshot',
+        query: {
+          symbols: symbol,
+          category,
+          extend_hour_required: 'false',
+          overnight_required: 'false',
+        },
+        version: 'v2',
+      }),
+      probeOnce({
+        method: 'GET',
+        path: '/openapi/instrument/stock/list',
+        query: { symbols: symbol, category },
+        version: 'v2',
+      }),
     ])
 
     // #461 follow-up: **Preview Order = 発注しない注文検証** (JP docs 正式記載:
@@ -977,6 +1001,8 @@ export const admin = new Hono<AppBindings>()
       instrumentStockQuotesAlt,
       instrumentQuotesHost,
       instrumentTradeHost,
+      snapshotTradeV2,
+      instrumentStockTradeV2,
       previewVariants,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
