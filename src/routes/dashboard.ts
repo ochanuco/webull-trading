@@ -8796,6 +8796,10 @@ export function symbolMapEditorBody(
     <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
     <span class="muted" style="font-size:12px">
       <strong>口座 → 銘柄の線</strong> = 配分 ・ <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON) ・ % 欄 = 配分変更。
+      <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete。
+    </span>
+    <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
+    <span class="muted" style="font-size:12px">
       変更は即保存されません — 下のサマリを確認して<strong>「適用」で一括保存</strong>します。
       カードの塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
       <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
@@ -9006,6 +9010,30 @@ export function symbolMapEditorBody(
       renderChanges();
     });
 
+    // 線の削除を Mac でも自然に: Backspace 単体 (入力欄フォーカス時は除く) と
+    // 明示ボタンの両方をサポートする。Drawflow 素の対応は Delete / Cmd+Backspace のみ。
+    var deleteBtn = document.getElementById('sm-delete-conn');
+    function refreshDeleteBtn() {
+      var has = editor.connection_selected != null;
+      deleteBtn.disabled = !has;
+      deleteBtn.style.color = has ? '#c22' : '#999';
+      deleteBtn.style.borderColor = has ? '#c22' : '#ccc';
+    }
+    el.addEventListener('click', function () { setTimeout(refreshDeleteBtn, 0); });
+    deleteBtn.addEventListener('click', function () {
+      if (editor.connection_selected != null) editor.removeConnection();
+      refreshDeleteBtn();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Backspace') return;
+      var tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (editor.connection_selected != null) {
+        ev.preventDefault();
+        editor.removeConnection();
+        refreshDeleteBtn();
+      }
+    });
     document.getElementById('sm-reset').addEventListener('click', function () { location.reload(); });
     document.getElementById('sm-apply').addEventListener('click', function () {
       var pctChanges = Object.keys(draft).filter(function (sym) { return draft[sym].pct !== baseline[sym].pct; });
