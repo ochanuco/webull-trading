@@ -221,6 +221,9 @@ describe('/dashboard/cron AI 用コピー (#alerts-trades-ui)', () => {
     expect(body).toContain('window.__cronCopy')
     // full 側には trace が入る
     expect(body).toContain('risk.role_entry_suppressed')
+    // #decisions-chart-unify: 銘柄リンクはチャート銘柄タブへ、cron 内絞り込みは ▼
+    expect(body).toContain('href="/dashboard/charts?tab=symbol&symbol=USMV"')
+    expect(body).toContain('この銘柄の判定だけに絞り込み')
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
       expect(() => new Function(m[1]!)).not.toThrow()
     }
