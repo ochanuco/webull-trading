@@ -8758,7 +8758,7 @@ export function renderSymbolRelationMap(
     source: string
     target: string
     value: number
-    kind: 'role' | 'symbol' | 'fallback'
+    kind: 'role' | 'symbol' | 'fallback' | 'idle'
   }
   const nodes: SankeyNode[] = []
   const links: SankeyLink[] = []
@@ -8786,25 +8786,31 @@ export function renderSymbolRelationMap(
       for (const r of members) {
         const sym = r.symbol.toUpperCase()
         const amount = amounts[sym]?.native
+        const status = amount !== undefined ? `使用中 ${amount}` : r.entryRequired === true ? '譲り中' : '待機'
         addNode({
           name: sym,
-          label: `${sym} ${pctOf(r)}%${amount ? ` (${amount})` : ''}`,
+          label: `${sym} ${pctOf(r)}% ・ ${status}`,
           color: colorOf(role),
           depth: 2,
         })
         links.push({ source: roleName, target: sym, value: pctOf(r), kind: 'symbol' })
       }
     }
-    // 退避先 (#452 Layer 3): **条件連動 ON** の銘柄の配分が entry 未通過時に
-    // 流れる先。退避先未設定は「現金のまま待機」なので現金待機ノードへ —
-    // 連動だけ ON にして退避先を入れていない設定 (VUG 等) もここで可視化される。
+    // 現在形の資金フロー: 参加 (= 建玉保有) していない銘柄の枠は先へ流れる。
+    //   - 保有中: 帯は銘柄で止まる (使用中)
+    //   - 未保有 + 条件連動 ON (#452 Layer 3): 退避先 (なければ現金待機) へ譲る
+    //   - 未保有 + 条件連動 OFF: 枠はその銘柄に確保されたまま現金で待機
+    // 「参加」の基準は DO position (qty > 0) — 当日 ENTRY 判定で未約定の瞬間は
+    // 待機側に出るが、現金の所在としてはそれが事実。
     for (const r of allocated) {
-      if (r.entryRequired !== true) continue
       const sym = r.symbol.toUpperCase()
-      const target = r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
+      const held = amounts[sym] !== undefined
+      if (held) continue
+      const conditional = r.entryRequired === true
+      const target = conditional && r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
       if (sym === target) continue
       if (target === '現金待機') {
-        addNode({ name: '現金待機', label: '現金待機 (退避先なし)', color: '#9aa0a6' })
+        addNode({ name: '現金待機', label: '現金待機', color: '#9aa0a6' })
       } else {
         const targetRow = rows.find((x) => x.symbol.toUpperCase() === target)
         addNode({
@@ -8813,7 +8819,7 @@ export function renderSymbolRelationMap(
           color: targetRow ? colorOf(roleOf(targetRow)) : '#9aa0a6',
         })
       }
-      links.push({ source: sym, target, value: pctOf(r), kind: 'fallback' })
+      links.push({ source: sym, target, value: pctOf(r), kind: conditional ? 'fallback' : 'idle' })
     }
   }
 
@@ -8841,8 +8847,9 @@ export function renderSymbolRelationMap(
   const sankeyDiv = links.length > 0
     ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      予算 → ロール → 銘柄 (配分% ・ 括弧内 = 現在の投入額)。
-      <span style="color:#0e9f6e">緑の流れ</span> = 退避 (条件連動 ON の銘柄が entry 未通過の間、その配分が流れる先 — 受け皿側の太さは最悪ケースの合計。退避先未設定は「現金待機」へ)。
+      予算 → ロール → 銘柄 → (未保有なら) 譲り先、の<strong>現在形</strong>。「参加」の基準は建玉保有。
+      <span style="color:#0e9f6e">緑の流れ</span> = 条件連動 ON の枠を退避先 / 現金待機に譲り中 ・
+      <span style="color:#9aa0a6">グレーの流れ</span> = 枠は銘柄に確保したまま現金待機 (誰にも譲らない)。
     </p>`
     : ''
   const payload = { nodes, links }
@@ -8868,7 +8875,10 @@ export function renderSymbolRelationMap(
           if (p.dataType === 'edge') {
             var head = labelOf[p.data.source] + ' → ' + labelOf[p.data.target];
             if (p.data.kind === 'fallback') {
-              return head + '<br>条件未通過時に ' + p.data.value + '% が退避';
+              return head + '<br>未保有のため ' + p.data.value + '% を譲り中 (条件連動 ON)';
+            }
+            if (p.data.kind === 'idle') {
+              return head + '<br>未保有。枠 ' + p.data.value + '% は銘柄に確保したまま現金待機';
             }
             return head + '<br>' + p.data.value + '%';
           }
@@ -8901,7 +8911,9 @@ export function renderSymbolRelationMap(
             kind: l.kind,
             lineStyle: l.kind === 'fallback'
               ? { color: '#0e9f6e', opacity: 0.45, curveness: 0.5 }
-              : { color: 'gradient', opacity: 0.3, curveness: 0.5 },
+              : l.kind === 'idle'
+                ? { color: '#9aa0a6', opacity: 0.3, curveness: 0.5 }
+                : { color: 'gradient', opacity: 0.3, curveness: 0.5 },
           };
         }),
       }],

@@ -2728,7 +2728,7 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
     expect(renderSymbolRelationMap([mapRow({})], {}, [])).toBe('')
   })
 
-  it('予算 → ロール → 銘柄 → 退避先のリンクを配分% で積み、投入額をラベルに併記', () => {
+  it('現在形フロー: 保有中は銘柄で止まり、未保有の条件連動 ON は退避先へ譲る', () => {
     const rows = [
       mapRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.2 }),
       mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV', entryRequired: true }),
@@ -2736,34 +2736,41 @@ describe('renderSymbolRelationMap (#symbol-relation-map Sankey)', () => {
     ]
     const html = renderSymbolRelationMap(rows, {}, [], {
       SOXL: { native: '$300', jpy: 45000 },
+      SGOV: { native: '$100', jpy: 15000 },
     })
     const payload = payloadOf(html)
     const link = (kind: string) => payload.links.filter((l: { kind: string }) => l.kind === kind)
-    // 予算 → ロール (3 role)、ロール → 銘柄 (3)、退避 (VUG → SGOV、量 = VUG の配分 30%)
     expect(link('role')).toHaveLength(3)
     expect(link('symbol')).toHaveLength(3)
+    // 未保有 + 条件連動 ON の VUG だけが退避先へ譲る (保有中 SOXL/SGOV は流れない)
     expect(link('fallback')).toEqual([
       { source: 'VUG', target: 'SGOV', value: 30, kind: 'fallback' },
     ])
-    // 投入額がラベルに併記される
+    expect(link('idle')).toHaveLength(0)
+    // 状態がラベルに出る
     const soxl = payload.nodes.find((n: { name: string }) => n.name === 'SOXL')
-    expect(soxl.label).toBe('SOXL 20% ($300)')
-    // 予算ノードは合計%
+    expect(soxl.label).toBe('SOXL 20% ・ 使用中 $300')
+    const vug = payload.nodes.find((n: { name: string }) => n.name === 'VUG')
+    expect(vug.label).toBe('VUG 30% ・ 譲り中')
     const budget = payload.nodes.find((n: { name: string }) => n.name === '予算')
     expect(budget.label).toBe('予算 60%')
   })
 
-  it('退避フローは条件連動 ON のみ。退避先未設定の連動銘柄は現金待機ノードへ', () => {
+  it('未保有 + 条件連動 OFF は枠確保のまま現金待機 (idle、グレー)', () => {
     const rows = [
-      // 連動 OFF + 退避先あり → 流れない (設定だけでは退避は発生しない)
+      // 連動 OFF + 未保有 → idle で現金待機へ (退避先設定は無視 = 譲らない)
       mapRow({ symbol: 'AAPL', role: 'core_trend', budgetAllocPct: 0.2, cashFallbackSymbol: 'SGOV' }),
-      // 連動 ON + 退避先なし → 現金待機へ
+      // 連動 ON + 退避先なし + 未保有 → fallback で現金待機へ
       mapRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, entryRequired: true }),
     ]
     const payload = payloadOf(renderSymbolRelationMap(rows, {}, []))
-    const fallback = payload.links.filter((l: { kind: string }) => l.kind === 'fallback')
-    expect(fallback).toEqual([{ source: 'VUG', target: '現金待機', value: 30, kind: 'fallback' }])
-    expect(payload.nodes.some((n: { name: string }) => n.name === '現金待機')).toBe(true)
+    const links = payload.links.filter((l: { kind: string }) => l.kind === 'fallback' || l.kind === 'idle')
+    expect(links).toEqual([
+      { source: 'AAPL', target: '現金待機', value: 20, kind: 'idle' },
+      { source: 'VUG', target: '現金待機', value: 30, kind: 'fallback' },
+    ])
+    const aapl = payload.nodes.find((n: { name: string }) => n.name === 'AAPL')
+    expect(aapl.label).toBe('AAPL 20% ・ 待機')
   })
 
   it('配分 0% / 無効銘柄は Sankey に出さない', () => {
