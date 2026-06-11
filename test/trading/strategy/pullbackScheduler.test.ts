@@ -2201,3 +2201,207 @@ describe('runPullbackScheduler TICKER_IS_DENY hook (#460)', () => {
     expect(summary.errors).toHaveLength(1)
   })
 })
+
+describe('runPullbackScheduler pair regime layer (#472)', () => {
+  const REGIME_PAIR = {
+    bullSymbol: 'SOXL',
+    bearSymbol: 'SOXS',
+    proxySymbol: 'SOXX',
+    invalidConfig: null,
+  }
+  const THRESHOLDS = { bullEnter: 0.03, bullExit: 0.01, bearEnter: -0.04, bearExit: -0.015 }
+
+  /** now (2026-04-20) の前日で終わる proxy bars。ratio 1.003 → bull / 1.0 → neutral。 */
+  function proxyBars(ratio: number): DailyBar[] {
+    const end = Date.parse('2026-04-19T00:00:00.000Z')
+    return Array.from({ length: 80 }, (_, i) => {
+      const close = 100 * ratio ** i
+      return {
+        date: new Date(end - (79 - i) * 86_400_000).toISOString().slice(0, 10),
+        open: close,
+        high: close * 1.005,
+        low: close * 0.995,
+        close,
+      }
+    })
+  }
+
+  /** symbol ごとに bars を返す barClient (proxy と取引銘柄で別系列)。 */
+  function mapBarClient(map: Record<string, DailyBar[]>): BarClient {
+    return {
+      getDailyBars: vi.fn(async (symbol: string) => {
+        const bars = map[symbol.toUpperCase()]
+        if (!bars) throw new Error(`no bars for ${symbol}`)
+        return bars
+      }),
+    }
+  }
+
+  it('enforce: zone=bull はブル側 BUY を通し、ベア側 BUY を REJECT する', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL', 'SOXS'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXL: uptrendBars(), SOXS: uptrendBars(), SOXX: proxyBars(1.003) }),
+      positionStore: makeStore({}),
+      execution,
+      pairRegime: { mode: 'enforce', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect((execution.calls[0] as { symbol: string }).symbol).toBe('SOXL')
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT' && d.symbol === 'SOXS')
+    expect(reject?.reason).toContain('pair_regime: zone=bull blocks bear entry')
+    expect(reject?.trace?.map((s) => s.label)).toContain('risk.pair_regime')
+  })
+
+  it('enforce: zone=neutral は両側 BUY を REJECT する (chop 帯の遮断)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL', 'SOXS'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXL: uptrendBars(), SOXS: uptrendBars(), SOXX: proxyBars(1.0) }),
+      positionStore: makeStore({}),
+      execution,
+      pairRegime: { mode: 'enforce', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    expect(summary.rejected.filter((r) => r.reason.includes('pair_regime'))).toHaveLength(2)
+  })
+
+  it('enforce: proxy fetch 失敗は unknown → 両側 BUY block (fail-closed)、exit は素通り', async () => {
+    const execution = mockExecution()
+    const heldState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      position: {
+        qty: 5,
+        avgPrice: 80, // +47% → take_profit SELL が出る
+        openedAt: new Date('2026-04-17T00:00:00.000Z').toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL', 'SOXS'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXL: uptrendBars(), SOXS: uptrendBars() }), // SOXX なし → throw
+      positionStore: makeStore({ SOXL: heldState }),
+      execution,
+      pairRegime: { mode: 'enforce', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
+      now: () => now,
+    })
+    // SOXL は保有中 → strategy の SELL (TP) がそのまま通る (unknown でも exit は妨げない)
+    expect(summary.sells).toBe(1)
+    // SOXS の BUY は unknown で block
+    const reject = summary.decisions.find((d) => d.decision === 'REJECT' && d.symbol === 'SOXS')
+    expect(reject?.reason).toContain('zone=unknown')
+  })
+
+  it('observe: gate せず trace に zone と「enforce なら REJECT」を残す', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXS'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXS: uptrendBars(), SOXX: proxyBars(1.003) }),
+      positionStore: makeStore({}),
+      execution,
+      pairRegime: { mode: 'observe', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1) // block しない
+    const buy = summary.decisions.find((d) => d.decision === 'BUY')
+    const regimeStep = buy?.trace?.find((s) => s.label === 'regime.zone')
+    expect(regimeStep).toBeDefined()
+    expect(JSON.stringify(regimeStep)).toContain('observe')
+  })
+
+  it('enforce: 保有と反対 zone への flip で regime_flip SELL を出す', async () => {
+    const execution = mockExecution()
+    const heldState: SymbolState = {
+      ...emptySymbolState('SOXS', () => now),
+      position: {
+        qty: 3,
+        avgPrice: 115, // +2.2% — TP/stop/time にかからない
+        openedAt: new Date('2026-04-17T00:00:00.000Z').toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXS'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXS: uptrendBars(), SOXX: proxyBars(1.003) }), // zone=bull vs ベア保有
+      positionStore: makeStore({ SOXS: heldState }),
+      execution,
+      pairRegime: { mode: 'enforce', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    const sell = summary.decisions.find((d) => d.decision === 'SELL')
+    expect(sell?.reason).toContain('pair regime flip')
+    expect(sell?.trace?.map((s) => s.label)).toContain('exit.regime_flip')
+  })
+
+  it('enforce: 既存 exit (TP) が先に出ていれば regime_flip は副次理由として trace に残る', async () => {
+    const execution = mockExecution()
+    const heldState: SymbolState = {
+      ...emptySymbolState('SOXS', () => now),
+      position: {
+        qty: 3,
+        avgPrice: 80, // +47% → take_profit SELL
+        openedAt: new Date('2026-04-17T00:00:00.000Z').toISOString(),
+      },
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXS'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXS: uptrendBars(), SOXX: proxyBars(1.003) }),
+      positionStore: makeStore({ SOXS: heldState }),
+      execution,
+      pairRegime: { mode: 'enforce', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
+      now: () => now,
+    })
+    const sell = summary.decisions.find((d) => d.decision === 'SELL')
+    expect(sell?.reason).not.toContain('pair regime flip') // 主理由は既存 exit のまま
+    expect(sell?.trace?.map((s) => s.label)).toContain('exit.regime_flip_secondary')
+  })
+
+  it('misconfig ペアは unknown 扱いで BUY block (黙って無効化しない)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXL: uptrendBars(), SOXX: proxyBars(1.003) }),
+      positionStore: makeStore({}),
+      execution,
+      pairRegime: {
+        mode: 'enforce',
+        thresholds: THRESHOLDS,
+        pairs: [{ ...REGIME_PAIR, invalidConfig: 'regime_bull_symbol must be SOXL or SOXS' }],
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.rejected[0]?.reason).toContain('zone=unknown')
+  })
+  it('重複ペア設定の symbol は unknown に倒れる (非決定性の排除、CodeRabbit #473)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXL: uptrendBars(), SOXX: proxyBars(1.003), QQQ: proxyBars(1.003) }),
+      positionStore: makeStore({}),
+      execution,
+      pairRegime: {
+        mode: 'enforce',
+        thresholds: THRESHOLDS,
+        pairs: [
+          REGIME_PAIR,
+          { bullSymbol: 'SOXL', bearSymbol: 'SQQQ', proxySymbol: 'QQQ', invalidConfig: null },
+        ],
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.rejected[0]?.reason).toContain('zone=unknown')
+    expect(summary.rejected[0]?.reason).toContain('duplicate pair config')
+  })
+})

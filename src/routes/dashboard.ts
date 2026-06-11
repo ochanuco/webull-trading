@@ -61,6 +61,11 @@ import {
 } from '../trading/strategy/entryStatus'
 import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
 import {
+  evaluatePairRegime,
+  PAIR_REGIME_ZONE_LABELS,
+  type PairRegimeDecision,
+} from '../trading/strategy/pairRegime'
+import {
   computeConditionalAllocation,
   type SymbolAllocation,
 } from '../trading/strategy/conditionalAllocation'
@@ -516,6 +521,44 @@ export const dashboard = new Hono<DashboardBindings>()
       // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
       // WATCH/NG 時は alternatives (表示専用) を併記する。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
+      // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
+      // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
+      let pairRegimeView: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null = null
+      if (focusSymbol && global.pairRegimeMode !== 'off') {
+        const pair = universe.pairRegimes.find(
+          (pr) => pr.bullSymbol === focusSymbol || pr.bearSymbol === focusSymbol,
+        )
+        if (pair) {
+          const side = pair.bullSymbol === focusSymbol ? ('bull' as const) : ('bear' as const)
+          let decision: PairRegimeDecision
+          if (pair.invalidConfig !== null) {
+            decision = { zone: 'unknown', score: null, proxySymbol: pair.proxySymbol, asOfDate: null, reason: `misconfig: ${pair.invalidConfig}` }
+          } else {
+            decision = await new YahooBarClient()
+              .getDailyBars(pair.proxySymbol, 80)
+              .then((bars) =>
+                evaluatePairRegime(bars, {
+                  proxySymbol: pair.proxySymbol,
+                  thresholds: {
+                    bullEnter: global.pairRegimeThetaBullEnter,
+                    bullExit: global.pairRegimeThetaBullExit,
+                    bearEnter: global.pairRegimeThetaBearEnter,
+                    bearExit: global.pairRegimeThetaBearExit,
+                  },
+                  now: new Date(),
+                }),
+              )
+              .catch((err) => ({
+                zone: 'unknown' as const,
+                score: null,
+                proxySymbol: pair.proxySymbol,
+                asOfDate: null,
+                reason: `proxy bars fetch failed: ${messageOf(err)}`,
+              }))
+          }
+          pairRegimeView = { decision, side, mode: global.pairRegimeMode }
+        }
+      }
       // 判定履歴 (#decisions-chart-unify): 戦略判定ページと同じ loader を共用。
       // 失敗 (migration 未適用等) はチャート本体を巻き込まず空表示に落とす。
       const decisionRows =
@@ -539,6 +582,7 @@ export const dashboard = new Hono<DashboardBindings>()
             buyability,
             entryStatus,
             decisionRows,
+            pairRegime: pairRegimeView,
             alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
             symbolPolicy: focusSymbol
               ? {
@@ -5694,6 +5738,8 @@ export interface ChartsBodySymbol {
    * loader/renderer を共用 — チャートの判定 pin と同じデータを表でも読める。
    */
   decisionRows?: DecisionRow[]
+  /** ペアレジーム表示 (#472)。regime 有効ペアの一員 + mode != off のときのみ。 */
+  pairRegime?: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null
 }
 
 export interface SymbolPolicySummary {
@@ -5885,6 +5931,28 @@ function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
       showSymbol: false,
       filterLabel: `symbol=${args.focusSymbol}, limit=30`,
     })}
+  </div>`
+}
+
+/**
+ * ペアレジーム行 (#472)。zone を日本語で表示し、score / proxy / 判定日を併記。
+ * observe mode はその旨を明示 (gate していないことが分かるように)。
+ */
+export function renderPairRegimeLine(
+  view: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null,
+): string {
+  if (!view) return ''
+  const d = view.decision
+  const color =
+    d.zone === 'bull' ? '#057a55' : d.zone === 'bear' ? '#b25000' : d.zone === 'neutral' ? '#46608a' : '#c22'
+  const sideJa = view.side === 'bull' ? 'ブル側' : 'ベア側'
+  const allowed = (view.side === 'bull' && d.zone === 'bull') || (view.side === 'bear' && d.zone === 'bear')
+  const verdict = allowed ? 'entry 可' : 'entry 不可'
+  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    ペアレジーム: <strong style="color:${color}">${esc(PAIR_REGIME_ZONE_LABELS[d.zone])}</strong>
+    <span class="muted" style="font-size:12px">この銘柄は${sideJa} → ${verdict}${view.mode === 'observe' ? ' (observe: gate は未適用)' : ''}</span>
+    <span class="muted" style="font-size:12px">${d.score !== null ? `score ${(d.score * 100).toFixed(2)}%` : ''} proxy ${esc(d.proxySymbol)}${d.asOfDate ? ` / ${esc(d.asOfDate)} 時点` : ''}</span>
+    ${d.zone === 'unknown' ? `<span class="err" style="font-size:12px">${esc(d.reason)}</span>` : ''}
   </div>`
 }
 
@@ -7055,6 +7123,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
   ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
+  ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
     alternatives: args.alternatives ?? [],
