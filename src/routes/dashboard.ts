@@ -9118,8 +9118,6 @@ function symbolFormBody(args: SymbolFormArgs): string {
   // 不正 role の警告はユーザーが見るべきなので強制 open。
   const hasSizingValues = maxNotionalValue !== '' || budgetAllocPctValue !== ''
   const hasStrategyValues =
-    roleValue !== '' ||
-    !roleIsKnown ||
     pullbackMaxOverrideValue !== '' ||
     pullbackMinOverrideValue !== '' ||
     minReturn50dOverrideValue !== '' ||
@@ -9173,6 +9171,23 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <span id="symbol-form-lot-suggest" class="muted" style="font-size:11px;margin-left:6px"></span>
           <div class="muted" style="font-size:11px;margin-top:2px">未設定の銘柄は発注されません (fail-closed)</div>
         </div>
+        <label>ロール${REQ}</label>
+        <div>
+          <select name="role" required style="padding:6px">
+            ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
+            ${
+              mode === 'new'
+                ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
+                : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
+            }
+            ${SYMBOL_ROLES.map(
+              (r) =>
+                `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
+            ).join('')}
+          </select>
+          ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
+          <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        </div>
         <label>状態</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px">
           <input type="hidden" name="active" value="false">
@@ -9200,20 +9215,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
     ${optSection(
       '戦略ロール・entry 条件',
       'role プリセットと entry gate の銘柄別調整',
-      `<label>ロール</label>
-        <div>
-          <select name="role" style="padding:6px">
-            ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
-            <option value=""${roleValue === '' ? ' selected' : ''}>未設定 (従来挙動)</option>
-            ${SYMBOL_ROLES.map(
-              (r) =>
-                `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
-            ).join('')}
-          </select>
-          ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-          <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
-        </div>
-        <label>押し目バンド</label>
+      `<label>押し目バンド</label>
         <div>
           <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
           〜

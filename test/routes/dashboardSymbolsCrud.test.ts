@@ -1674,8 +1674,11 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     const body = await res.text()
-    // 必須バッジ: 凡例 1 + 銘柄 / 市場 / 通貨 / 売買単位 の計 5 箇所
-    expect((body.match(/>必須<\/span>/g) ?? []).length).toBe(5)
+    // 必須バッジ: 凡例 1 + 銘柄 / 市場 / 通貨 / 売買単位 / ロール の計 6 箇所
+    expect((body.match(/>必須<\/span>/g) ?? []).length).toBe(6)
+    // ロールは基本カードで必須 select (新規はプレースホルダのみ、未設定は選べない)
+    expect(body).toMatch(/<select name="role" required/)
+    expect(body).toContain('<option value="" disabled selected>選択してください</option>')
     // 任意セクションは details で、新規時は閉じている (open なし)
     expect(body).toContain('発注サイズ')
     expect(body).toContain('戦略ロール・entry 条件')
@@ -1693,6 +1696,7 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
         role: 'core_trend',
         budgetAllocPct: 0.2,
         stopPctOverride: -0.03,
+        minReturn50dOverride: 0.03,
         entryRequired: true,
         cashFallbackSymbol: 'SGOV',
       }),
