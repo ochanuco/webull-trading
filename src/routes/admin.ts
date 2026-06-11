@@ -1728,16 +1728,19 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
     const symbol = normalizeSymbol(c.req.param('symbol'))
-    const body = (await c.req.json().catch(() => null)) as { target?: unknown } | null
-    if (body === null || !('target' in body)) {
+    const body = (await c.req.json().catch(() => null)) as unknown
+    // primitive / 配列 JSON で `'target' in body` が TypeError → 500 になるのを防ぐ
+    // (CodeRabbit #485): 先に object 判定して 400 に落とす。
+    if (body === null || typeof body !== 'object' || Array.isArray(body) || !('target' in body)) {
       throw new ValidationError("body must be JSON { target: string | null }", { field: 'target' })
     }
+    const payload = body as { target?: unknown }
     let target: string | null = null
-    if (body.target !== null) {
-      if (typeof body.target !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(body.target.trim())) {
+    if (payload.target !== null) {
+      if (typeof payload.target !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(payload.target.trim())) {
         throw new ValidationError('target must be a ticker or null', { field: 'target' })
       }
-      target = normalizeSymbol(body.target)
+      target = normalizeSymbol(payload.target)
       if (target === symbol) {
         throw new ValidationError('target must differ from the symbol itself', { field: 'target' })
       }

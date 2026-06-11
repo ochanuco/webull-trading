@@ -8818,6 +8818,8 @@ export function symbolMapEditorBody(
   #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
   /* 通貨で塗り分け: 口座 = 濃グレー、JPY = 桜、USD = 薄青 (operator 要望) */
   #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#5f6368;border-color:#3c4043}
+  #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:#fdf3f2;border-color:#d4a09a}
+  #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:#f0f6ff;border-color:#9ab8dd}
   /* 接続ポートの◯もグレーに (default の白丸 + 黒枠は浮く) */
   #symbol-map-editor .drawflow .drawflow-node .input,
   #symbol-map-editor .drawflow .drawflow-node .output{background:#9aa0a6;border:2px solid #6e6e73;width:14px;height:14px}
@@ -9000,6 +9002,15 @@ export function symbolMapEditorBody(
         draft[dst].connected = true;
         markConnectionPending(info.output_id, info.input_id);
         renderChanges();
+        return;
+      }
+      // 異通貨の退避先は server 側 (cash-fallback API) で拒否される — 適用時に
+      // 落ちて部分保存になる前に、この場で理由付きで弾く (CodeRabbit #485)。
+      if (nodeBySym[src].currency !== nodeBySym[dst].currency) {
+        programmatic = true;
+        editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+        programmatic = false;
+        alert(src + ' は ' + nodeBySym[src].currency + '、' + dst + ' は ' + nodeBySym[dst].currency + ' です。異通貨の退避先は設定できません (同一通貨のみ)。');
         return;
       }
       // 退避先は 1 銘柄 1 本 — 既存の出力接続を visual からも外す。
