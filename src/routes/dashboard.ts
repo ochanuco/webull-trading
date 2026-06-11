@@ -2136,6 +2136,43 @@ function brokerProbeBody(args: {
     }
     if (!bodyEl) return;
 
+    // instrument 照会 (#475): 候補の先頭 (trade host, v2 = 実測で稼働) を優先して
+    // symbol 一致行を探し、status (OC/CO/NT) とフラグを全分岐で添える。
+    var instMatch = null;
+    for (var ci = 0; ci < candidates.length && !instMatch; ci++) {
+      var csec = candidates[ci].section;
+      if (!csec || csec.phase !== 'response' || csec.status !== 200) continue;
+      var cparsed = parseBody(csec);
+      var citems = Array.isArray(cparsed) ? cparsed : (cparsed && Array.isArray(cparsed.data) ? cparsed.data : []);
+      for (var cj = 0; cj < citems.length; cj++) {
+        if (citems[cj] && typeof citems[cj].symbol === 'string' && citems[cj].symbol.toUpperCase() === symbol.toUpperCase()) {
+          instMatch = citems[cj];
+          break;
+        }
+      }
+    }
+    // 公式 MCP の enum: OC=Tradable / CO=Liquidate only / NT=Non-Tradable
+    var STATUS_JA = { OC: '取引可', CO: '清算のみ', NT: '取引不可' };
+    function instSummaryHtml(it) {
+      if (!it) return '';
+      var chips = [];
+      if (it.status) chips.push('status: ' + escHtml(it.status) + (STATUS_JA[it.status] ? ' (' + STATUS_JA[it.status] + ')' : ''));
+      if (it.overnight_trading_supported === true) chips.push('24h取引対応');
+      if (it.shortable === true) chips.push('空売り可');
+      var lev = Number(it.etf_leveraged_factor);
+      if (Number.isFinite(lev) && lev !== 0) chips.push('レバレッジ ' + (lev > 0 ? '+' : '') + lev + 'x' + (it.inverse_etf === true ? ' / インバース' : ''));
+      if (it.exchange_code) chips.push('exchange: ' + escHtml(it.exchange_code));
+      return '<div class="muted" style="font-size:12px;margin-top:3px">' + chips.join(' ・ ') + '</div>';
+    }
+
+    // instrument status が CO/NT なら preview の結果に関わらず NG (#475 server 側
+    // checkTradability と同じ判定)。
+    if (instMatch && (instMatch.status === 'CO' || instMatch.status === 'NT')) {
+      setPill('bp-instrument-pill', 'ng', STATUS_JA[instMatch.status]);
+      bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> の instrument status は <code>' + escHtml(instMatch.status) + '</code> (' + STATUS_JA[instMatch.status] + ') — 新規エントリー不可。' + instSummaryHtml(instMatch);
+      return;
+    }
+
     // 発注前検証 (Preview Order) の結果が最優先 — 発注パイプラインそのものの
     // 検証なので instrument 照会より確度が高い (#461)。body shape を複数試して
     // どれか 1 つでも通れば取引可能、どれかが TICKER_IS_DENY なら取扱なし確定。
@@ -2161,19 +2198,22 @@ function brokerProbeBody(args: {
         return;
       }
       if (okVariant) {
-        // preview 200 = 見積もり成功。発注 allowlist は検証されない (USMV 前例)
-        // ため「取引可能」とは表示しない。
-        setPill('bp-instrument-pill', 'unknown', '見積もり可');
+        // preview 200 = 見積もり成功。発注 allowlist は検証されない (USMV は
+        // status=OC のまま本番 place が deny された前例) ため「取引可能」とは
+        // 表示しない。
+        setPill('bp-instrument-pill', 'unknown', instMatch && instMatch.status === 'OC' ? 'OC + 見積もり可' : '見積もり可');
         var okParsed = parseBody(okVariant.result);
         var cost = okParsed && (okParsed.estimated_cost || (okParsed.data && okParsed.data.estimated_cost));
         bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は銘柄として存在し見積もり可' + (cost ? ' (estimated_cost: ' + escHtml(cost) + ')' : '') + '。' +
-          '<span class="muted">発注可否 (deny list) は事前検証不可 — 最終確認は Webull アプリで。</span>';
+          '<span class="muted">JP の取扱 deny は発注時のみ検出 — 最終確認は Webull アプリで。</span>' +
+          instSummaryHtml(instMatch);
         return;
       }
       if (denyVariant) {
         setPill('bp-instrument-pill', 'ng', '取扱なし (確定)');
         bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — 発注前検証が <code>TICKER_IS_DENY</code> を返しました。' +
-          '<span style="color:#c22">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>';
+          '<span style="color:#c22">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>' +
+          instSummaryHtml(instMatch);
         return;
       }
       setPill('bp-instrument-pill', 'unknown', '検証エラー');
@@ -2201,7 +2241,7 @@ function brokerProbeBody(args: {
       }).join(' ／ ');
       setPill('bp-instrument-pill', 'unknown', '判定不可');
       bodyEl.innerHTML = 'instrument/stock/list が 200 を返しませんでした (' + statuses + ')。' +
-        '<span class="muted">quotes host (data-api) の無応答は既知 (#21)。判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
+        '<span class="muted">判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
       return;
     }
     // どれか 1 候補にでも symbol が出てくれば「銘柄情報あり」(category 非依存)。
@@ -2229,7 +2269,8 @@ function brokerProbeBody(args: {
       if (match.exchange_code) fields.push('exchange: <code>' + escHtml(match.exchange_code) + '</code>');
       if (match.currency) fields.push('currency: <code>' + escHtml(match.currency) + '</code>');
       bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は Webull に銘柄として登録されています (via ' + escHtml(matchLabel) + ')。<br>' +
-        '<span class="muted" style="font-size:12px">' + (fields.join(' ・ ') || '(詳細フィールドなし)') + '</span>';
+        '<span class="muted" style="font-size:12px">' + (fields.join(' ・ ') || '(詳細フィールドなし)') + '</span>' +
+        instSummaryHtml(match);
     } else {
       setPill('bp-instrument-pill', 'ng', '銘柄情報なし');
       bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は instrument 照会 (ETF/STOCK 両 category) に出てきません。' +
@@ -9529,17 +9570,33 @@ function symbolFormBody(args: SymbolFormArgs): string {
         .then(function (r) { return r.json(); })
         .then(function (res) {
           if (mySeq !== window._tradabilitySeq) return; // 古い応答は捨てる
+          // instrument 照会 (#475) のフラグ要約。verdict 行の後ろに添える。
+          var instSuffix = '';
+          if (res.instrument) {
+            var chips = [];
+            if (res.instrument.overnightTradingSupported === true) chips.push('24h取引対応');
+            if (res.instrument.shortable === true) chips.push('空売り可');
+            var lev = Number(res.instrument.etfLeveragedFactor);
+            if (Number.isFinite(lev) && lev !== 0) chips.push('レバレッジ ' + (lev > 0 ? '+' : '') + lev + 'x' + (res.instrument.inverseEtf === true ? ' / インバース' : ''));
+            if (chips.length > 0) instSuffix = ' ｜ ' + chips.join(' ・ ');
+          }
           if (res.verdict === 'denied') {
             var why = res.reason === 'known_deny' ? '過去に Webull が発注拒否'
               : res.reason === 'invalid_symbol' ? 'Webull に存在しない銘柄'
+              : res.reason === 'not_listed' ? 'Webull の銘柄マスタに不存在'
+              : res.reason === 'instrument_status' ? '取引停止中の銘柄 (status CO/NT)'
               : 'Webull JP 取扱なし';
             statusEl.textContent = '❌ ' + why + ' — 登録できません';
             statusEl.style.color = '#c22';
             window._tradabilityDenied = true;
             if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
           } else if (res.reason === 'quote_ok') {
-            // preview は発注 allowlist を検証しない (USMV 前例) ので ✅ は出さない
-            statusEl.textContent = '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
+            // instrument status=OC でも発注 deny は事前検証不可 (USMV 前例) ので
+            // ✅ は出さない
+            var head = res.instrument && res.instrument.status === 'OC'
+              ? '△ status OC (取引可) + 見積もり可 — 発注 deny のみ未保証'
+              : '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
+            statusEl.textContent = head + instSuffix;
             statusEl.style.color = '#b25000';
           } else {
             statusEl.textContent = '❓ 確認不可 (登録は可能)';

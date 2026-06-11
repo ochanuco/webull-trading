@@ -11,6 +11,7 @@ import {
   resolveAccessTokenWithSource,
 } from '../infrastructure/webull/resolveAccessToken'
 import { WebullAuth } from '../infrastructure/webull/WebullAuth'
+import { lookupInstrument } from '../infrastructure/webull/instrumentLookup'
 import {
   buildPreviewOrderVariants,
   checkTradability,
@@ -1811,14 +1812,23 @@ export const admin = new Hono<AppBindings>()
           reason: 'known_deny',
           detail: '過去に Webull が実発注を拒否した実績あり (symbol_config.notes に記録)',
           variants: [],
+          instrument: null,
         })
       }
     }
     const priceRaw = Number(c.req.query('price'))
+    // instrument 照会 (#475) は US 銘柄のみ (API が US_STOCK / US_ETF 限定)。
+    // ETF を US_STOCK category で引いても返る実測 (USMV) があるので category は
+    // US_STOCK 固定でよい。Promise のまま渡して preview と並列に解決させる。
+    const instrumentPromise =
+      market === 'US'
+        ? lookupInstrument(c.env, { symbol: symbolRaw, category: 'US_STOCK' })
+        : undefined
     const result = await checkTradability(c.env, {
       symbol: symbolRaw,
       market,
       ...(Number.isFinite(priceRaw) && priceRaw > 0 ? { price: priceRaw } : {}),
+      ...(instrumentPromise !== undefined ? { instrument: instrumentPromise } : {}),
     })
     return c.json(result)
   })
