@@ -68,7 +68,7 @@ import type {
   PullbackIndicators,
   SymbolRule,
 } from '../trading/strategy/strategies/PullbackUptrendStrategy'
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
@@ -256,7 +256,8 @@ export const dashboard = new Hono<DashboardBindings>()
       view === 'fills'
         ? baseQuery.where(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
         : view === 'errors'
-          ? baseQuery.where(isNotNull(tradeJournal.errorMessage))
+          ? // errorMessage だけだと errorClass のみ埋まる失敗行が落ちる (CodeRabbit #469)
+            baseQuery.where(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass)))
           : baseQuery
     // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
     // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
@@ -3109,9 +3110,7 @@ function renderLogCopyScript(varName: string): string {
       btn.textContent = ok ? '✅' : '✗';
       setTimeout(function () { btn.textContent = prev; }, 1500);
     }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
-    } else {
+    function fallbackExecCommand() {
       var ta = document.createElement('textarea');
       ta.value = text;
       document.body.appendChild(ta);
@@ -3120,6 +3119,12 @@ function renderLogCopyScript(varName: string): string {
       try { ok = document.execCommand('copy'); } catch (_) {}
       document.body.removeChild(ta);
       done(ok);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // permission 拒否などの reject 時も execCommand に落とす (CodeRabbit #469)。
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallbackExecCommand);
+    } else {
+      fallbackExecCommand();
     }
   }
   function header(count) {
@@ -3191,7 +3196,7 @@ function tradesBody(
 ): string {
   const viewPill = (label: string, v: string, active: boolean): string =>
     `<a href="/dashboard/trades?view=${v}&limit=${limit}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
-  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${LOG_COPY_ALL_BTN}</nav>`
+  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}</nav>`
   if (rows.length === 0) {
     return `${pills}<p class="muted">該当するレコードがありません。</p>`
   }
@@ -3232,11 +3237,12 @@ function tradesBody(
       // 状態: エラーは短い日本語 + code、全文は <details>。enum はそのまま残す
       // (broker API と grep で突き合わせる運用のため title / details に保持)。
       let statusCell: string
-      if (r.errorMessage) {
-        const code = extractBrokerErrorCode(r.errorMessage)
-        const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : 'エラー'
+      const errorText = r.errorMessage ?? r.errorClass
+      if (errorText) {
+        const code = extractBrokerErrorCode(errorText)
+        const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : (r.errorClass ?? 'エラー')
         statusCell = `<span style="${pillStyle('#fdecec', '#c22')}">エラー: ${esc(short)}</span>
-          <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.errorMessage)}</code></details>`
+          <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
       } else if (r.brokerStatus === 'FILLED') {
         statusCell = `<span style="${pillStyle('#e6f6ec', '#057a55')}">約定</span>`
       } else if (r.brokerStatus) {
@@ -3768,7 +3774,7 @@ const ALERT_MESSAGE_FOLD = 160
 function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe } = args
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
-  const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${LOG_COPY_ALL_BTN}`
+  const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
   if (rows.length === 0) {
     return `${filterPills}${countLine}<p class="muted">該当するアラートはありません。</p>`
   }
@@ -3789,7 +3795,8 @@ function alertsBody(args: AlertsBodyArgs): string {
         r.message.length > ALERT_MESSAGE_FOLD
           ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
           : esc(r.message)
-      const messageCell = `${shortLabel ? `<span style="${pillStyle('#fdecec', '#c22')}">${esc(shortLabel)}</span><br>` : ''}<span style="font-size:12px">${messageBody}</span>`
+      // <details> (block) を含み得るので外側は div (CodeRabbit #469)。
+      const messageCell = `${shortLabel ? `<span style="${pillStyle('#fdecec', '#c22')}">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
       const causeCell = r.cause
         ? `<code style="font-size:11px">${esc(r.cause)}</code>`
         : '<span class="muted">—</span>'
@@ -3995,9 +4002,10 @@ function cronBody(
   symbolFilter: string | undefined,
   universe?: SymbolUniverse | null,
 ): string {
+  const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${LOG_COPY_ALL_BTN}</p>`
-    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${LOG_COPY_ALL_BTN}</p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
   if (rows.length === 0) {
     return `${header}<p class="muted">判定ログがまだありません。</p>`
   }
