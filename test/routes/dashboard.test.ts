@@ -2796,3 +2796,47 @@ describe('renderSymbolRelationMap (#symbol-relation-map)', () => {
     }
   })
 })
+
+describe('renderSymbolRelationMap 軸 (横=ロール / 縦=投入金額)', () => {
+  const mapRow2 = (over: Partial<SymbolConfigRow>): SymbolConfigRow =>
+    ({
+      symbol: 'X',
+      active: true,
+      role: null,
+      budgetAllocPct: null,
+      cashFallbackSymbol: null,
+      ...over,
+    }) as SymbolConfigRow
+
+  it('列 = ロール、縦位置 = 投入額 (大きいほど上 = y が小さい)', () => {
+    const rows = [
+      mapRow2({ symbol: 'SOXL', role: 'leveraged_trend' }),
+      mapRow2({ symbol: 'SOXS', role: 'inverse_hedge' }),
+      mapRow2({ symbol: 'SGOV', role: 'cash_parking' }),
+      mapRow2({ symbol: 'VUG', role: 'core_trend', cashFallbackSymbol: 'SGOV' }),
+    ]
+    const html = renderSymbolRelationMap(
+      rows,
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
+      [],
+      { SOXL: { native: '$300', jpy: 45000 }, SGOV: { native: '$100', jpy: 15000 } },
+    )
+    const payload = JSON.parse(
+      html.match(/<script type="application\/json"[^>]*>([\s\S]*?)<\/script>/)?.[1] ?? 'null',
+    )
+    const byName = new Map(payload.nodes.map((n: { name: string }) => [n.name, n]))
+    // ロール列の割当
+    expect((byName.get('SOXL') as { col: string }).col).toBe('leveraged_trend')
+    expect((byName.get('SGOV') as { col: string }).col).toBe('cash_parking')
+    // 投入額が大きい SOXL (max) は最上段、未保有 VUG は SGOV より下
+    const y = (sym: string) => (byName.get(sym) as { y: number }).y
+    expect(y('SOXL')).toBeLessThan(y('SGOV'))
+    expect(y('SGOV')).toBeLessThan(y('VUG'))
+    // 列ヘッダ payload (使用中ロールのみ)
+    const headers = payload.headers.map((h: { label: string }) => h.label)
+    expect(headers).toContain('待機資金ETF')
+    expect(headers).toContain('レバETF・トレンド')
+    // 投入額ラベルがカード payload に乗る
+    expect((byName.get('SOXL') as { amountLabel: string }).amountLabel).toBe('$300')
+  })
+})

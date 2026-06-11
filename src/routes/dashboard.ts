@@ -77,6 +77,7 @@ import type {
 import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
+import { loadUsdJpyRate } from '../infrastructure/quotes/fxRate'
 import type { SymbolState } from '../trading/state/types'
 import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
 // #293 calendar events management UI (earnings + macro)。dashboard 側に form
@@ -794,6 +795,31 @@ export const dashboard = new Hono<DashboardBindings>()
         // 関係マップ用 (#symbol-relation-map)。読めなくても一覧は出す。
         loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => []),
       ])
+      // 関係マップの縦軸 = 投入金額 (DO position の qty × avgPrice、ground truth)。
+      // 取得失敗・position 無しは 0 (最下段)。fx は表示位置の換算のみに使う。
+      const mapAmounts: Record<string, { native: string; jpy: number }> = {}
+      if (c.env.SYMBOL_STATE) {
+        const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
+        const usdJpy = await loadUsdJpyRate().catch(() => null)
+        await Promise.all(
+          rows.map(async (r) => {
+            const sym = r.symbol.toUpperCase()
+            const state = await stateClient.getState(sym).catch(() => null)
+            const pos = state?.position
+            if (!pos || pos.qty <= 0) return
+            const cost = pos.qty * pos.avgPrice
+            if (r.currency === 'USD') {
+              // fx 不達時は概算 150 で位置決めだけ行う (表示専用、tooltip は native 額)。
+              mapAmounts[sym] = {
+                native: `$${cost.toFixed(0)}`,
+                jpy: cost * (usdJpy ?? 150),
+              }
+            } else {
+              mapAmounts[sym] = { native: `¥${Math.round(cost).toLocaleString('en-US')}`, jpy: cost }
+            }
+          }),
+        )
+      }
       const errorCode = c.req.query('error') ?? null
       const errorSymbol = c.req.query('symbol') ?? null
       const filter: SymbolsListFilter = {
@@ -802,7 +828,7 @@ export const dashboard = new Hono<DashboardBindings>()
         q: c.req.query('q') ?? '',
       }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, pairRegimes, errorCode, errorSymbol, filter })),
+        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, pairRegimes, mapAmounts, errorCode, errorSymbol, filter })),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
@@ -8697,10 +8723,12 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
  * いう「銘柄同士の依存関係」が一覧テーブルではセル単位に散らばって読めない、
  * という operator 要望でグラフ可視化する。関係が 1 つも無ければ出さない。
  *
- * 表現は repree.net (React Flow 系) 準拠の operator 指定:
- *   - 1 カード = 1 銘柄 (symbol + ロール + 配分% をカード内に表示)
- *   - 左→右のレイヤー配置: regime proxy → 銘柄 → 退避先
- *   - 退避エッジには配分% をラベル表示 (条件未通過時にその枠が流れるため)
+ * 表現 (repree.net 系カード + operator 指定の軸):
+ *   - 1 カード = 1 銘柄 (symbol + 配分% + 投入額)
+ *   - **横軸 = ロール** (列。リスク低 → 高で左から)、**縦軸 = 投入金額**
+ *     (DO position の qty × avgPrice、円換算。上ほど大きい。0 = 最下段)
+ *   - エッジ: インバース対 (赤) / regime proxy (紫破線) / 退避先 (緑矢印、
+ *     ラベル % = 条件未通過時に流れる予算枠)
  * 表示専用 — 判定・発注には一切関与しない。
  */
 const ROLE_NODE_COLORS: Record<string, string> = {
@@ -8712,10 +8740,23 @@ const ROLE_NODE_COLORS: Record<string, string> = {
   inverse_hedge: '#c22d2d',
 }
 
+/** 関係マップの列順 (リスク低 → 高)。'none' = role 未設定、'ref' = 未登録 (proxy 参照のみ)。 */
+const MAP_ROLE_COLUMNS = [
+  'cash_parking',
+  'low_volatility',
+  'core_trend',
+  'sector_trend',
+  'leveraged_trend',
+  'inverse_hedge',
+  'none',
+  'ref',
+] as const
+
 export function renderSymbolRelationMap(
   rows: SymbolConfigRow[],
   inversePairs: Record<string, string>,
   pairRegimes: PairRegimeEntry[],
+  amounts: Record<string, { native: string; jpy: number }> = {},
 ): string {
   const known = new Map(rows.map((r) => [r.symbol.toUpperCase(), r]))
   interface MapNode {
@@ -8786,69 +8827,62 @@ export function renderSymbolRelationMap(
   }
   if (edges.length === 0) return ''
 
-  // レイヤー割当 (左→右): 0 = proxy 専用ノード、1 = 銘柄、2 = 退避先。
-  // 退避先かつ通常銘柄 (SGOV 等) は右列に置く。proxy かつ登録銘柄は中央。
-  const proxySyms = new Set(
-    pairRegimes.filter((p) => p.invalidConfig === null).map((p) => p.proxySymbol.toUpperCase()),
-  )
-  const fallbackTargets = new Set(
-    edges.filter((e) => e.kind === 'fallback').map((e) => e.target),
-  )
-  const layerOf = (n: MapNode): number => {
-    if (fallbackTargets.has(n.name)) return 2
-    if (proxySyms.has(n.name) && !n.registered) return 0
-    return 1
+  // 列割当: 横軸 = ロール。未登録 (proxy 参照のみ) は 'ref' 列。
+  const columnOf = (n: MapNode): string => {
+    if (!n.registered) return 'ref'
+    return n.role ?? 'none'
   }
-  // 中央列はインバース対が縦に隣接するよう並べる。
-  const layer1 = [...nodes.values()].filter((n) => layerOf(n) === 1).map((n) => n.name)
-  layer1.sort()
-  const orderedLayer1: string[] = []
-  for (const sym of layer1) {
-    if (orderedLayer1.includes(sym)) continue
-    orderedLayer1.push(sym)
-    const partner = inversePairs[sym]?.toUpperCase()
-    if (partner && layer1.includes(partner) && !orderedLayer1.includes(partner)) {
-      orderedLayer1.push(partner)
-    }
-  }
-  const layers: string[][] = [
-    [...nodes.values()].filter((n) => layerOf(n) === 0).map((n) => n.name).sort(),
-    orderedLayer1,
-    [...nodes.values()].filter((n) => layerOf(n) === 2).map((n) => n.name).sort(),
-  ]
-  const CARD_W = 132
-  const ROW_H = 78
+  const usedColumns = MAP_ROLE_COLUMNS.filter((col) =>
+    [...nodes.values()].some((n) => columnOf(n) === col),
+  )
+  const COL_W = 190
+  const PLOT_H = 300
+  const TOP_PAD = 56
+  const BOTTOM_Y = TOP_PAD + PLOT_H
+  const maxJpy = Math.max(1, ...[...nodes.values()].map((n) => amounts[n.name]?.jpy ?? 0))
   const positioned = new Map<string, { x: number; y: number }>()
-  const maxRows = Math.max(...layers.map((l) => l.length), 1)
-  layers.forEach((layer, li) => {
-    // 列内は縦中央寄せ。
-    const offset = ((maxRows - layer.length) * ROW_H) / 2
-    layer.forEach((sym, ri) => {
-      positioned.set(sym, { x: 90 + li * 300, y: 50 + offset + ri * ROW_H })
-    })
+  usedColumns.forEach((col, ci) => {
+    const colNodes = [...nodes.values()].filter((n) => columnOf(n) === col)
+    // 金額の大きい順に縦位置を計算し、近接 (カード高さ未満) は下へ押し出して重なり回避。
+    colNodes.sort((a, b) => (amounts[b.name]?.jpy ?? 0) - (amounts[a.name]?.jpy ?? 0))
+    let lastY = -Infinity
+    for (const n of colNodes) {
+      const jpy = amounts[n.name]?.jpy ?? 0
+      let y = TOP_PAD + (1 - jpy / maxJpy) * PLOT_H
+      if (y - lastY < 56) y = lastY + 56
+      lastY = y
+      positioned.set(n.name, { x: 110 + ci * COL_W, y })
+    }
   })
-  const mapHeight = Math.max(240, maxRows * ROW_H + 70)
+  const mapHeight = Math.max(
+    320,
+    Math.ceil(Math.max(...[...positioned.values()].map((p2) => p2.y), BOTTOM_Y) + 60),
+  )
+
+  const roleHeader = (col: string): string =>
+    col === 'ref' ? '参照のみ' : col === 'none' ? 'ロール未設定' : SYMBOL_ROLE_LABELS_SHORT[col as SymbolRole] ?? col
 
   const payload = {
-    cardW: CARD_W,
+    headers: usedColumns.map((col, ci) => ({ label: roleHeader(col), x: 110 + ci * COL_W })),
     nodes: [...nodes.values()].map((n) => ({
       name: n.name,
       pct: n.pct,
+      amountLabel: amounts[n.name]?.native ?? null,
       role: n.role,
-      roleShort: n.role !== null ? SYMBOL_ROLE_LABELS_SHORT[n.role as SymbolRole] ?? n.role : null,
+      col: columnOf(n),
       active: n.active,
       registered: n.registered,
       color: !n.active || !n.registered ? '#9aa0a6' : ROLE_NODE_COLORS[n.role ?? ''] ?? '#5f6368',
-      x: positioned.get(n.name)?.x ?? 90,
-      y: positioned.get(n.name)?.y ?? 50,
+      x: positioned.get(n.name)?.x ?? 110,
+      y: positioned.get(n.name)?.y ?? BOTTOM_Y,
     })),
     edges,
   }
   return `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">関係マップ <span class="muted" style="font-weight:normal">— regime proxy → 銘柄 → 退避先 (表示専用)</span></summary>
+    <summary style="cursor:pointer;font-size:13px;font-weight:600">関係マップ <span class="muted" style="font-weight:normal">— 横 = ロール ／ 縦 = 投入金額 (表示専用)</span></summary>
     <div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      1 カード = 1 銘柄 (ロール / 予算配分%。グレー = 無効 / 未登録)。
+      1 カード = 1 銘柄 (予算配分% ・ 投入額 = position の取得コスト。上ほど大きい / 未保有は最下段。グレー = 無効・未登録)。
       <span style="color:#c22d2d">赤実線</span> = インバース対 ・
       <span style="color:#7e3af2">紫破線</span> = regime proxy (判定材料) ・
       <span style="color:#0e9f6e">緑矢印</span> = 退避先 (ラベル % = 条件未通過時に流れる予算枠)。
@@ -8867,6 +8901,20 @@ export function renderSymbolRelationMap(
       proxy: { color: '#7e3af2', type: 'dashed', width: 1.5, symbol: ['none', 'arrow'] },
       fallback: { color: '#0e9f6e', type: 'solid', width: 1.8, symbol: ['none', 'arrow'] },
     };
+    // 列ヘッダはドラッグ/ズームに追従するよう「ラベルだけの不可視ノード」で表現する。
+    var headerNodes = data.headers.map(function (h, i) {
+      return {
+        name: '__header_' + i,
+        x: h.x,
+        y: 14,
+        symbol: 'rect',
+        symbolSize: [1, 1],
+        itemStyle: { color: 'rgba(0,0,0,0)' },
+        label: { show: true, formatter: h.label, fontSize: 11, fontWeight: 700, color: '#6e6e73' },
+        tooltip: { show: false },
+        silent: true,
+      };
+    });
     var chart = echarts.init(el);
     chart.setOption({
       tooltip: {
@@ -8879,8 +8927,8 @@ export function renderSymbolRelationMap(
           if (!d.registered) lines.push('未登録 (proxy 参照のみ)');
           else {
             lines.push(d.active ? '有効' : '無効');
-            if (d.roleShort) lines.push('ロール: ' + d.roleShort);
             lines.push('予算配分: ' + d.pct + '%');
+            lines.push('投入額: ' + (d.amountLabel || 'なし (未保有)'));
           }
           return lines.join('<br>');
         },
@@ -8891,19 +8939,19 @@ export function renderSymbolRelationMap(
         roam: true,
         data: data.nodes.map(function (n) {
           var sub = [];
-          if (n.registered && n.roleShort) sub.push(n.roleShort);
           if (n.registered && n.pct > 0) sub.push(n.pct + '%');
+          if (n.amountLabel) sub.push(n.amountLabel);
           if (!n.registered) sub.push('未登録 proxy');
           return {
             name: n.name,
             x: n.x,
             y: n.y,
             pct: n.pct,
-            roleShort: n.roleShort,
+            amountLabel: n.amountLabel,
             active: n.active,
             registered: n.registered,
             symbol: 'roundRect',
-            symbolSize: [data.cardW, 46],
+            symbolSize: [128, 46],
             itemStyle: {
               color: '#fff',
               borderColor: n.color,
@@ -8921,7 +8969,7 @@ export function renderSymbolRelationMap(
               },
             },
           };
-        }),
+        }).concat(headerNodes),
         edges: data.edges.map(function (e) {
           var st = EDGE_STYLE[e.kind];
           return {
@@ -8951,11 +8999,12 @@ function symbolsListBody(args: {
   rows: SymbolConfigRow[]
   inversePairs?: Record<string, string>
   pairRegimes?: PairRegimeEntry[]
+  mapAmounts?: Record<string, { native: string; jpy: number }>
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
 }): string {
-  const { rows, inversePairs = {}, pairRegimes = [], errorCode = null, errorSymbol = null, filter } = args
+  const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
   // #415: 買付余力バッジをページ最上部に (全 return が ${errorBanner} を先頭に持つので
   // ここに前置すると一覧・空・フィルタ 0 件の全ケースで表示される)。
   const errorBanner = buyingPowerBadge() + renderSymbolErrorBanner(errorCode, errorSymbol)
@@ -8985,7 +9034,7 @@ function symbolsListBody(args: {
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
   </p>`
 
-  const relationMap = renderSymbolRelationMap(rows, inversePairs, pairRegimes)
+  const relationMap = renderSymbolRelationMap(rows, inversePairs, pairRegimes, mapAmounts)
 
   if (rows.length === 0) {
     return `${errorBanner}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
