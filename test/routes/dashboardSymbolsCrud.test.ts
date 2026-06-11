@@ -909,6 +909,27 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('global default')
   })
 
+  // 持ち越し設定は radio 2 択で両状態を明示 (「持ち越し」+「持ち越さない」
+  // checkbox の二重否定が読めない、という operator 指摘の regression 防止)。
+  it('持ち越し setting renders as two explicit radios and reflects intradayOnly', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', intradayOnly: true })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/SOXL/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('持ち越す')
+    expect(body).toContain('持ち越さない')
+    // intradayOnly=true の行は radio value="true" 側が checked
+    expect(body).toMatch(/type="radio" name="intraday_only" value="true" checked/)
+    expect(body).not.toMatch(/type="radio" name="intraday_only" value="false" checked/)
+    // 旧 hidden+checkbox パターンが残っていない
+    expect(body).not.toContain('type="checkbox" name="intraday_only"')
+  })
+
   // --- #315 inverse-pair linked registration ---
   it('new form shows inverse_symbol input', async () => {
     const db = fakeDb([])
