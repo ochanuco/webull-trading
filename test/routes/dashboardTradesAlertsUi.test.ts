@@ -176,3 +176,53 @@ describe('/dashboard/alerts 新 UI (#alerts-trades-ui)', () => {
     }
   })
 })
+
+describe('/dashboard/cron AI 用コピー (#alerts-trades-ui)', () => {
+  it('行コピー (trace 含む full) と全件コピー (trace 省略) の payload を埋める', async () => {
+    const decisionRow = {
+      id: 2963,
+      timestamp: '2026-06-10T17:45:45.592Z',
+      requestId: 'run-1',
+      symbol: 'USMV',
+      decision: 'REJECT',
+      reason: 'role: low_volatility entry is not enabled (#452)',
+      price: 95.46,
+      indicatorsJson: '{"price":95.46}',
+      clientOrderId: null,
+      traceJson: '[{"label":"risk.role_entry_suppressed","passed":false}]',
+      filledPrice: null,
+      filledQty: null,
+      realizedPnl: null,
+      brokerStatus: null,
+    }
+    vi.mocked(createDb).mockReturnValue(
+      {
+        select() {
+          return {
+            from() {
+              const chain = {
+                leftJoin: () => chain,
+                where: () => chain,
+                orderBy: () => chain,
+                limit: async () => [decisionRow],
+              }
+              return chain
+            },
+          }
+        },
+      } as never,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('id="log-copy-all"')
+    expect(body).toContain('class="log-copy-btn" data-id="2963"')
+    expect(body).toContain('window.__cronCopy')
+    // full 側には trace が入る
+    expect(body).toContain('risk.role_entry_suppressed')
+    for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      expect(() => new Function(m[1]!)).not.toThrow()
+    }
+  })
+})

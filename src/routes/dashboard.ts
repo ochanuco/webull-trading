@@ -3129,9 +3129,11 @@ function renderLogCopyScript(varName: string): string {
   document.querySelectorAll('.log-copy-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var id = btn.getAttribute('data-id');
+      // 行コピーは payload.full (trace 等の重い field 含む完全版) を優先。
+      var src = payload.full || payload.rows;
       var row = null;
-      for (var i = 0; i < payload.rows.length; i++) {
-        if (String(payload.rows[i].id) === id) { row = payload.rows[i]; break; }
+      for (var i = 0; i < src.length; i++) {
+        if (String(src[i].id) === id) { row = src[i]; break; }
       }
       if (row) copyText(header(1) + JSON.stringify(row, null, 1), btn);
     });
@@ -3983,6 +3985,7 @@ function cronBody(
     price: number | null
     indicatorsJson?: string | null
     clientOrderId?: string | null
+    traceJson?: string | null
     filledPrice?: number | null
     filledQty?: number | null
     realizedPnl?: number | null
@@ -3993,8 +3996,8 @@ function cronBody(
   universe?: SymbolUniverse | null,
 ): string {
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
-    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${LOG_COPY_ALL_BTN}</p>`
+    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${LOG_COPY_ALL_BTN}</p>`
   if (rows.length === 0) {
     return `${header}<p class="muted">判定ログがまだありません。</p>`
   }
@@ -4024,6 +4027,7 @@ function cronBody(
       const symbolClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
       return `<tr>
+        <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
@@ -4037,10 +4041,26 @@ function cronBody(
   return `${header}
   <table>
     <thead><tr>
-      <th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
+      <th></th><th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__cronCopy', {
+    meta: {
+      page: 'strategy_decision_log (戦略判定)',
+      filter: `symbol=${symbolFilter ?? 'all'}, limit=${limit} (copy-all は trace 省略、行コピーは trace 含む)`,
+      generatedAt: new Date().toISOString(),
+    },
+    // copy-all 用は trace を省略 (200 行 × 判定ラダーで肥大するため)。
+    rows: rows.map((r) => ({ ...cronDecisionJson(r), requestId: r.requestId })),
+    // 行コピー用の完全版 (trace 含む) — AI への単発相談はこちらが本命。
+    full: rows.map((r) => ({
+      ...cronDecisionJson(r),
+      requestId: r.requestId,
+      trace: parseJsonObject(r.traceJson ?? null),
+    })),
+  })}
+  ${renderLogCopyScript('__cronCopy')}`
 }
 
 function cronReasonCell(row: {
