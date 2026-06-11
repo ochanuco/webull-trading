@@ -8771,9 +8771,18 @@ export function symbolMapEditorBody(
       fallback: r.cashFallbackSymbol?.toUpperCase() ?? null,
       inverse: inversePairs[sym]?.toUpperCase() ?? null,
       currency: r.currency,
-      y: 30 + i * 120,
+      y: 0, // 後段で通貨グループ順に再計算する (JPY 群 → USD 群)
+      order: i,
     }
   })
+  // JPY 銘柄を上群、USD 銘柄を下群に並べ、それぞれの口座カードの近くに置く。
+  let yCursor = 30
+  for (const ccy of ['JPY', 'USD']) {
+    for (const n of nodes.filter((x) => x.currency === ccy)) {
+      n.y = yCursor
+      yCursor += 120
+    }
+  }
   if (nodes.length === 0) {
     return `<p class="muted">有効な銘柄がありません。</p>`
   }
@@ -8781,7 +8790,7 @@ export function symbolMapEditorBody(
   return `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
     <span class="muted" style="font-size:12px">
-      <strong>口座 → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い) で % は自動計算 ・
+      <strong>口座 (日本/米国) → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い、予算プールは全体共通) で % は自動計算 ・
       <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON)。
       <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete。
     </span>
@@ -8840,13 +8849,25 @@ export function symbolMapEditorBody(
     var draft = {};      // sym -> { connected, fallback }
     var programmatic = false;
 
-    var allocated = data.nodes.filter(function (n) { return n.pct > 0; });
-    var accountY = Math.max(30, 30 + ((allocated.length - 1) * 120) / 2);
-    var accountId = editor.addNode('口座', 0, 1, 40, accountY, 'sm-node sm-account',
-      { sym: '口座' },
-      '<div class="sm-card"><div class="sm-title" style="color:#fff">口座</div>' +
-      '<div class="sm-meta" style="color:#e8eaed">原資 ・ 予算 100% を枝数で均等割</div></div>');
-    symOf[accountId] = '__account__';
+    // 起点は通貨別の口座カード (operator 指定)。予算プール自体は単一 (JPY 換算
+    // ベース #budget-jpy-base-fx) なので 1/枝 は全体共通 — カードには通貨内訳を出す。
+    var currencies = [];
+    data.nodes.forEach(function (n) { if (currencies.indexOf(n.currency) === -1) currencies.push(n.currency); });
+    currencies.sort(); // JPY, USD の順
+    var accountIds = {};
+    var accountSymOf = {};
+    var nJpy = data.nodes.filter(function (n) { return n.currency === 'JPY'; }).length;
+    currencies.forEach(function (ccy, i) {
+      var label = ccy === 'JPY' ? '日本口座 (JPY)' : '米国口座 (USD)';
+      var y = ccy === 'JPY' ? 30 + ((Math.max(nJpy, 1) - 1) * 120) / 2 : 30 + nJpy * 120 + ((Math.max(data.nodes.length - nJpy, 1) - 1) * 120) / 2;
+      var id = editor.addNode('口座' + ccy, 0, 1, 40, y, 'sm-node sm-account',
+        { sym: '口座' + ccy },
+        '<div class="sm-card"><div class="sm-title" style="color:#fff">' + label + '</div>' +
+        '<div class="sm-meta" style="color:#e8eaed">—</div></div>');
+      accountIds[ccy] = id;
+      symOf[id] = '__account_' + ccy + '__';
+      accountSymOf['__account_' + ccy + '__'] = ccy;
+    });
 
     data.nodes.forEach(function (n) {
       nodeBySym[n.sym] = n;
@@ -8872,7 +8893,7 @@ export function symbolMapEditorBody(
 
     programmatic = true;
     data.nodes.forEach(function (n) {
-      if (n.pct > 0) editor.addConnection(accountId, idOf[n.sym], 'output_1', 'input_1');
+      if (n.pct > 0) editor.addConnection(accountIds[n.currency], idOf[n.sym], 'output_1', 'input_1');
       if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
     });
     programmatic = false;
@@ -8903,11 +8924,24 @@ export function symbolMapEditorBody(
         if (!span) return;
         span.textContent = draft[sym].connected ? '1/' + d.branches + ' = ' + d.share + '%' : 'なし (risk-%)';
       });
-      var accountEl = document.getElementById('node-' + accountId);
-      if (accountEl) {
+      currencies.forEach(function (ccy) {
+        var accountEl = document.getElementById('node-' + accountIds[ccy]);
+        if (!accountEl) return;
         var meta = accountEl.querySelector('.sm-meta');
-        if (meta) meta.textContent = '原資 ・ ' + d.branches + ' 枝 ・ 1 枝 = ' + (d.branches > 0 ? d.share + '%' : '—');
-      }
+        if (!meta) return;
+        // 通貨内訳: この口座配下の枝数と小計% (対は 1 枝)。予算プールは全体共通。
+        var seenCcy = {};
+        var ccyBranches = 0;
+        Object.keys(draft).forEach(function (sym) {
+          if (!draft[sym].connected || nodeBySym[sym].currency !== ccy || seenCcy[sym]) return;
+          seenCcy[sym] = true;
+          var inv = nodeBySym[sym].inverse;
+          if (inv && draft[inv] && draft[inv].connected) seenCcy[inv] = true;
+          ccyBranches += 1;
+        });
+        var subtotal = Math.round(ccyBranches * d.share * 10) / 10;
+        meta.textContent = ccyBranches + ' 枝 ・ 小計 ' + subtotal + '% (全体 ' + d.branches + ' 枝 ・ 1 枝 = ' + (d.branches > 0 ? d.share + '%' : '—') + ')';
+      });
       return d;
     }
 
@@ -8948,13 +8982,21 @@ export function symbolMapEditorBody(
       if (programmatic) return;
       var src = symOf[info.output_id];
       var dst = symOf[info.input_id];
-      if (!src || !dst || dst === '__account__') {
+      if (!src || !dst || accountSymOf[dst]) {
         programmatic = true;
         editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
         programmatic = false;
         return;
       }
-      if (src === '__account__') {
+      if (accountSymOf[src]) {
+        // 通貨の合わない口座からの線は弾く (JPY 口座 → USD 銘柄等)。
+        if (nodeBySym[dst].currency !== accountSymOf[src]) {
+          programmatic = true;
+          editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+          programmatic = false;
+          alert(dst + ' は ' + nodeBySym[dst].currency + ' 銘柄です。' + accountSymOf[src] + ' 口座からは接続できません。');
+          return;
+        }
         draft[dst].connected = true;
         markConnectionPending(info.output_id, info.input_id);
         renderChanges();
@@ -8976,7 +9018,7 @@ export function symbolMapEditorBody(
       var src = symOf[info.output_id];
       var dst = symOf[info.input_id];
       if (!src || !dst) return;
-      if (src === '__account__') {
+      if (accountSymOf[src]) {
         draft[dst].connected = false;
         renderChanges();
         return;
