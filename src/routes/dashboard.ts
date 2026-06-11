@@ -9114,153 +9114,203 @@ function symbolFormBody(args: SymbolFormArgs): string {
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
+  // セクション開閉の初期状態: 値が入っている (= 編集で触った) セクションだけ開く。
+  // 不正 role の警告はユーザーが見るべきなので強制 open。
+  const hasSizingValues = maxNotionalValue !== '' || budgetAllocPctValue !== ''
+  const hasStrategyValues =
+    pullbackMaxOverrideValue !== '' ||
+    pullbackMinOverrideValue !== '' ||
+    minReturn50dOverrideValue !== '' ||
+    maxAtrRatioOverrideValue !== '' ||
+    maxSma50DeviationPctOverrideValue !== '' ||
+    requireAboveSma50OverrideValue !== '' ||
+    alternativesValue !== ''
+  const hasExitValues =
+    timeStopDaysOverrideValue !== '' ||
+    kAtrOverrideValue !== '' ||
+    stopPctOverrideValue !== '' ||
+    takeProfitPctOverrideValue !== '' ||
+    intradayOnlyChecked !== ''
+  const hasAllocValues =
+    entryRequiredChecked !== '' || alwaysActiveChecked !== '' || cashFallbackValue !== ''
+  // 必須バッジ。任意 field は無印 (バッジだらけにしない)。
+  const REQ =
+    '<span style="display:inline-block;padding:0 6px;border-radius:8px;background:#fdecec;color:#c22;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle">必須</span>'
+  const fieldGrid = 'display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center'
+  const optSection = (title: string, hint: string, inner: string, open: boolean): string =>
+    `<details${open ? ' open' : ''} style="border:1px solid #e3e3e8;border-radius:10px;background:#fff">
+      <summary style="cursor:pointer;padding:10px 14px;font-size:13px;font-weight:600">${title} <span class="muted" style="font-size:11px;font-weight:normal">— ${hint} (任意)</span></summary>
+      <div style="padding:2px 14px 14px;${fieldGrid}">${inner}</div>
+    </details>`
+
   return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
-  <form method="post" action="${esc(action)}" style="display:grid;grid-template-columns:160px 1fr;gap:8px;max-width:600px;align-items:center">
+  <form method="post" action="${esc(action)}" style="max-width:680px;display:flex;flex-direction:column;gap:12px">
     ${modeSelector}
-    <label>銘柄 <span class="muted" style="font-size:11px">(symbol)</span></label>${symbolField}
-    ${inverseField}
-    <label>銘柄名 <span class="muted" style="font-size:11px">(name)</span></label>
-    <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="人間可読な銘柄名 (任意)" style="padding:6px">
-    <label>市場 <span class="muted" style="font-size:11px">(market)</span></label>
-    <select name="market" id="symbol-form-market" required style="padding:6px" onchange="window.syncSymbolFormCurrencyFromMarket(this.value)">
-      <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
-      <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP (日本)</option>
-    </select>
-    <label>通貨 <span class="muted" style="font-size:11px">(currency)</span></label>
-    <div>
-      <select name="currency" id="symbol-form-currency" required style="padding:6px" onchange="window.syncSymbolFormCurrencyUnits(this.value)">
-        <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
-        <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
-      </select>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">通常は市場と一致 (US→USD / JP→JPY)。HKD ADR 等、市場と異なる決済通貨の銘柄を想定して別 select として残してある。</p>
+    <div style="border:1px solid #e3e3e8;border-radius:10px;background:#fff;padding:12px 14px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:2px">基本 <span class="muted" style="font-size:11px;font-weight:normal">— ${REQ} 以外は空欄で global 設定を使用</span></div>
+      <div style="${fieldGrid}">
+        <label>銘柄${REQ}</label>${symbolField}
+        ${inverseField}
+        <label>銘柄名</label>
+        <input type="text" name="name" id="symbol-form-name" value="${esc(nameValue)}" maxlength="256" placeholder="Yahoo 選択で自動入力" style="padding:6px">
+        <label>市場${REQ}</label>
+        <select name="market" id="symbol-form-market" required style="padding:6px" onchange="window.syncSymbolFormCurrencyFromMarket(this.value)">
+          <option value="US"${marketValue === 'US' ? ' selected' : ''}>US (米国)</option>
+          <option value="JP"${marketValue === 'JP' ? ' selected' : ''}>JP (日本)</option>
+        </select>
+        <label>通貨${REQ}</label>
+        <select name="currency" id="symbol-form-currency" required style="padding:6px;max-width:200px" onchange="window.syncSymbolFormCurrencyUnits(this.value)">
+          <option value="USD"${currencyValue === 'USD' ? ' selected' : ''}>USD (米ドル)</option>
+          <option value="JPY"${currencyValue === 'JPY' ? ' selected' : ''}>JPY (日本円)</option>
+        </select>
+        <label>売買単位${REQ}</label>
+        <div>
+          <input type="number" name="lot_size" id="symbol-form-lot-size" value="${esc(lotSizeValue)}" required step="1" min="1" max="100000" placeholder="JP 個別株=100 / ETF・US=1" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">株/口</span>
+          <span id="symbol-form-lot-suggest" class="muted" style="font-size:11px;margin-left:6px"></span>
+          <div class="muted" style="font-size:11px;margin-top:2px">未設定の銘柄は発注されません (fail-closed)</div>
+        </div>
+        <label>ロール${REQ}</label>
+        <div>
+          <select name="role" required style="padding:6px">
+            ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
+            ${
+              mode === 'new'
+                ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
+                : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
+            }
+            ${SYMBOL_ROLES.map(
+              (r) =>
+                `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
+            ).join('')}
+          </select>
+          ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
+          <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        </div>
+        <label>状態</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="active" value="false">
+          <input type="checkbox" name="active" value="true"${activeChecked}> 取引対象として有効
+        </label>
+      </div>
     </div>
-    <label>状態 <span class="muted" style="font-size:11px">(active)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="active" value="false">
-      <input type="checkbox" name="active" value="true"${activeChecked}> 取引対象として有効
-    </label>
-    <label>売買単位 <span class="muted" style="font-size:11px">(lot_size)</span></label>
-    <div>
-      <input type="number" name="lot_size" id="symbol-form-lot-size" value="${esc(lotSizeValue)}" required step="1" min="1" max="100000" placeholder="必須: 1注文の最小単位" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">株/口 (1単元)</span>
-      <span id="symbol-form-lot-suggest" class="muted" style="font-size:11px;margin-left:6px"></span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px"><strong>入力必須</strong> (fallback しません)。1 注文の最小発注数 = 1単元の株数/口数。<strong>JP 個別株は通常 100、ETF (1570/1357 等) と US 株は 1</strong>。未設定の銘柄は cron が発注を見送ります (fail-closed)。Yahoo から銘柄を選ぶと種別 (ETF/個別株) に応じた推奨値を自動入力します (確定は手入力で上書き可)。</p>
+
+    ${optSection(
+      '発注サイズ',
+      '1 注文の上限と配分',
+      `<label>1注文上限</label>
+        <div>
+          <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄 = global 上限" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注 (global: <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code>)</span>
+        </div>
+        <label>予算配分</label>
+        <div>
+          <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄 = risk-% sizing" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% — 口座総額(円) × この % で発注</span>
+        </div>`,
+      hasSizingValues,
+    )}
+
+    ${optSection(
+      '戦略ロール・entry 条件',
+      'role プリセットと entry gate の銘柄別調整',
+      `<label>押し目バンド</label>
+        <div>
+          <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
+          〜
+          <input type="number" name="pullback_min_override" value="${esc(pullbackMinOverrideValue)}" step="0.1" min="-100" max="0" placeholder="深い側 (例 -6)" style="padding:6px;width:130px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (浅い側 ≥ 深い側)</span>
+        </div>
+        <label>トレンド条件</label>
+        <div>
+          <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (20日騰落率の下限)</span>
+        </div>
+        <label>ボラ過熱上限</label>
+        <div>
+          <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">× baseline ATR</span>
+        </div>
+        <label>過伸長上限</label>
+        <div>
+          <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (SMA50 上方乖離)</span>
+        </div>
+        <label>SMA50 上抜け</label>
+        <select name="require_above_sma50_override" style="padding:6px;max-width:240px">
+          <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>global default に従う</option>
+          <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
+          <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
+        </select>
+        <label>代替銘柄</label>
+        <div>
+          <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
+          <span class="muted" style="font-size:12px;margin-left:6px">entry 不可時に表示する候補 (表示のみ・最大 8)</span>
+        </div>`,
+      hasStrategyValues,
+    )}
+
+    ${optSection(
+      '損切・利食・保有',
+      'exit 系の銘柄別調整',
+      `<label>保有上限</label>
+        <div>
+          <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">営業日</span>
+        </div>
+        <label>ATR stop 倍率</label>
+        <div>
+          <input type="number" name="k_atr_override" value="${esc(kAtrOverrideValue)}" step="0.1" min="0.5" max="5.0" placeholder="${esc(kAtrPlaceholder)}" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">× ATR20</span>
+        </div>
+        <label>損切ライン</label>
+        <div>
+          <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄 = global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (負値)。exit は max(この%, kAtr×ATR) の広い方</span>
+        </div>
+        <label>利食ライン</label>
+        <div>
+          <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄 = global" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
+        </div>
+        <label>持ち越し</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="intraday_only" value="false">
+          <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ (持ち越さない)
+        </label>`,
+      hasExitValues,
+    )}
+
+    ${optSection(
+      '配分の条件連動',
+      'entry 判定と予算配分の連動 (#452)',
+      `<label>条件連動</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="entry_required" value="false">
+          <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効化
+        </label>
+        <label>常時配分</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="hidden" name="always_active" value="false">
+          <input type="checkbox" name="always_active" value="true"${alwaysActiveChecked}> 判定に関わらず常時 target = active (待機資金 ETF 用)
+        </label>
+        <label>退避先</label>
+        <div>
+          <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
+          <span class="muted" style="font-size:12px;margin-left:6px">同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
+        </div>`,
+      hasAllocValues,
+    )}
+
+    <div style="border:1px solid #e3e3e8;border-radius:10px;background:#fff;padding:12px 14px;${fieldGrid}">
+      <label>メモ</label>
+      <textarea name="notes" maxlength="256" rows="2" placeholder="自由記述 (例: 一時停止理由)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     </div>
-    <label>1注文上限 <span class="muted" style="font-size:11px">(max_notional)</span></label>
-    <div>
-      <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で global default を使用" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code> を使用。設定値は per-symbol cap として global より優先。</p>
-    </div>
-    <label>予算配分 <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で risk-% sizing" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% of 口座(円)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">指定すると <strong>1 注文 = 口座総額 (<code>total_capital_jpy</code>) × この%</strong> で sizing (risk-% を bypass)。USD 銘柄は USD/JPY レートで自動換算 (レート取得失敗時は発注見送り = fail-closed)。上限は <code>min(予算×%, 1注文上限)</code>。空欄なら従来の risk-% sizing。</p>
-    </div>
-    <label>保有上限 <span class="muted" style="font-size:11px">(time_stop_days)</span></label>
-    <div>
-      <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">日 (business days)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_time_stop_days</code> を使用。3x leveraged ETF (SOXL / 1570 等) は短い hold (5-7) が推奨 (#316)。1-365 の整数。</p>
-    </div>
-    <label>ATR stop 倍率 <span class="muted" style="font-size:11px">(k_atr)</span></label>
-    <div>
-      <input type="number" name="k_atr_override" value="${esc(kAtrOverrideValue)}" step="0.1" min="0.5" max="5.0" placeholder="${esc(kAtrPlaceholder)}" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">× ATR20</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_k_atr</code> を使用。高ボラ銘柄では緩めに (2.5-3.5)、低ボラは引き締めに (1.5-2.0)。0.5-5.0 の数値 (#316)。exit stop は <code>max(pct, kAtr×ATR)</code> の広い方が効く (#exit-atr)。</p>
-    </div>
-    <label>損切ライン override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄で global default" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (負値)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_stop_pct</code>。3x レバ ETF はボラ大なので広め (例 -8〜-10) が推奨。実際の exit は <code>max(この%, kAtr×ATR)</code> の広い方 (#exit-atr)。</p>
-    </div>
-    <label>利食ライン override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で global default" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → global の <code>pullback_default_take_profit_pct</code>。stop を広げる時は R:R が反転しないよう TP も併せて調整。</p>
-    </div>
-    <label>持ち越し <span class="muted" style="font-size:11px">(intraday_only)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="intraday_only" value="false">
-      <input type="checkbox" name="intraday_only" value="true"${intradayOnlyChecked}> US 引け前に強制クローズ(オーバーナイト持ち越さない)
-    </label>
-    <label>ロール <span class="muted" style="font-size:11px">(role)</span></label>
-    <div>
-      <select name="role" style="padding:6px">
-        ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
-        <option value=""${roleValue === '' ? ' selected' : ''}>未設定 (従来挙動)</option>
-        ${SYMBOL_ROLES.map(
-          (r) =>
-            `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
-        ).join('')}
-      </select>
-      ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-      <p class="muted" style="margin:4px 0 0;font-size:11px">銘柄の戦略ロール (#452 / #457)。role ごとの entry/exit プリセットが適用されます (個別 override が優先)。<strong>inverse_hedge は短期保有プリセット (time stop 5日)・3x インバース前提</strong>。<strong>cash_parking は BUY を生成しません</strong> (配分は条件連動配分が扱う)。空欄 = 従来挙動。</p>
-    </div>
-    <label>押し目バンド override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
-      〜
-      <input type="number" name="pullback_min_override" value="${esc(pullbackMinOverrideValue)}" step="0.1" min="-100" max="0" placeholder="深い側 (例 -6)" style="padding:6px;width:130px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (負値)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">10日高値からの押し目がこのバンド内のとき entry 候補。空欄 → role preset → global の <code>pullback_default_pullback_max/min</code>。浅い側 ≥ 深い側 (例 -3 ≥ -6)。</p>
-    </div>
-    <label>トレンド条件 override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (20日騰落率の下限)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → role preset → global の <code>pullback_default_min_return50d</code>。非レバ銘柄はレバ向け global 値 (+8%) だと厳しすぎるので低めに (#449)。</p>
-    </div>
-    <label>ボラ過熱 override <span class="muted" style="font-size:11px">(max_atr_ratio)</span></label>
-    <div>
-      <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">× baseline ATR</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">ATR20 / baseline がこの比率を超えると BUY 見送り。空欄 → global の <code>pullback_default_max_atr_ratio</code>。</p>
-    </div>
-    <label>過伸長 override <span class="muted" style="font-size:11px">(%)</span></label>
-    <div>
-      <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄で role preset / global" style="padding:6px;width:160px">
-      <span class="muted" style="font-size:12px;margin-left:6px">% (SMA50 からの上方乖離上限)</span>
-      <p class="muted" style="margin:4px 0 0;font-size:11px">空欄 → role preset → global の <code>pullback_default_max_sma50_deviation_pct</code>。非レバは +60% に届かないので +20% 程度が目安。</p>
-    </div>
-    <label>SMA50 上抜け必須 <span class="muted" style="font-size:11px">(require_above_sma50)</span></label>
-    <div>
-      <select name="require_above_sma50_override" style="padding:6px">
-        <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>global default に従う</option>
-        <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
-        <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
-      </select>
-    </div>
-    <label>代替銘柄 <span class="muted" style="font-size:11px">(alternatives)</span></label>
-    <div>
-      <input type="text" name="alternatives" value="${esc(alternativesValue)}" maxlength="120" placeholder="例: SOXX, SMH" style="padding:6px;width:240px">
-      <p class="muted" style="margin:4px 0 0;font-size:11px">カンマ区切り (最大 8)。この銘柄が entry 不可のときダッシュボードに出す代替候補 (<strong>表示のみ</strong>、自動発注はしない、#452)。</p>
-    </div>
-    <label>配分の条件連動 <span class="muted" style="font-size:11px">(entry_required)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="entry_required" value="false">
-      <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効にする
-    </label>
-    <label>常時配分 <span class="muted" style="font-size:11px">(always_active)</span></label>
-    <label style="display:flex;align-items:center;gap:6px">
-      <input type="hidden" name="always_active" value="false">
-      <input type="checkbox" name="always_active" value="true"${alwaysActiveChecked}> 判定に関わらず常時 target = active (待機資金 ETF 用)
-    </label>
-    <label>退避先 <span class="muted" style="font-size:11px">(cash_fallback_symbol)</span></label>
-    <div>
-      <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
-      <p class="muted" style="margin:4px 0 0;font-size:11px">entry_required 銘柄が条件未通過の間、浮いた配分の退避先 (#452)。同一通貨のみ有効。<strong>退避先への自動発注は <code>cash_fallback_orders_enabled</code> (default off) を on にするまで行いません</strong> (判定・表示のみ)。</p>
-    </div>
-    <label>メモ <span class="muted" style="font-size:11px">(notes)</span></label>
-    <textarea name="notes" maxlength="256" rows="3" placeholder="自由記述 (例: 一時停止理由 / 上限を絞ってる事情)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
-    <span></span>
+
     <div style="display:flex;gap:8px">
-      <button type="submit" id="symbol-form-save" style="padding:6px 16px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">保存</button>
-      <a href="/dashboard/symbols" style="padding:6px 16px;text-decoration:none;border:1px solid #d0d0d5;border-radius:4px">キャンセル</a>
+      <button type="submit" id="symbol-form-save" style="padding:8px 24px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">保存</button>
+      <a href="/dashboard/symbols" style="padding:8px 24px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">キャンセル</a>
     </div>
   </form>
   <script>
