@@ -516,6 +516,14 @@ export const dashboard = new Hono<DashboardBindings>()
       // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
       // WATCH/NG 時は alternatives (表示専用) を併記する。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
+      // 判定履歴 (#decisions-chart-unify): 戦略判定ページと同じ loader を共用。
+      // 失敗 (migration 未適用等) はチャート本体を巻き込まず空表示に落とす。
+      const decisionRows =
+        focusSymbol && c.env.DB
+          ? await loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(
+              () => [],
+            )
+          : []
       return c.html(
         renderLayout(
           c,
@@ -530,6 +538,7 @@ export const dashboard = new Hono<DashboardBindings>()
             universe,
             buyability,
             entryStatus,
+            decisionRows,
             alternatives: focusSymbol ? universe.symbolAlternatives[focusSymbol] ?? [] : [],
             symbolPolicy: focusSymbol
               ? {
@@ -631,44 +640,8 @@ export const dashboard = new Hono<DashboardBindings>()
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     const db = createDb(c.env.DB)
     try {
-      // trade_journal の post_submit と LEFT JOIN して realized_pnl を引く
-      // (#143)。client_order_id が JOIN key — BUY/SELL 成立時のみ strategy
-      // 側に記録されているので HOLD/REJECT 行は realized_pnl が NULL に
-      // 落ちる (意図通り)。
-      const baseQuery = db
-        .select({
-          id: strategyDecisionLog.id,
-          timestamp: strategyDecisionLog.timestamp,
-          requestId: strategyDecisionLog.requestId,
-          symbol: strategyDecisionLog.symbol,
-          decision: strategyDecisionLog.decision,
-          reason: strategyDecisionLog.reason,
-          price: strategyDecisionLog.price,
-          indicatorsJson: strategyDecisionLog.indicatorsJson,
-          clientOrderId: strategyDecisionLog.clientOrderId,
-          traceJson: strategyDecisionLog.traceJson,
-          filledPrice: tradeJournal.filledPrice,
-          filledQty: tradeJournal.filledQty,
-          realizedPnl: tradeJournal.realizedPnl,
-          brokerStatus: tradeJournal.brokerStatus,
-        })
-        .from(strategyDecisionLog)
-        .leftJoin(
-          tradeJournal,
-          and(
-            eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
-            eq(tradeJournal.tradeEventType, 'post_submit'),
-          ),
-        )
       const [rows, universe] = await Promise.all([
-        symbolFilter
-          ? baseQuery
-              .where(eq(strategyDecisionLog.symbol, symbolFilter))
-              .orderBy(desc(strategyDecisionLog.id))
-              .limit(limit)
-          : baseQuery
-              .orderBy(desc(strategyDecisionLog.id))
-              .limit(limit),
+        loadDecisionRows(db, { symbol: symbolFilter, limit }),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
       return c.html(renderLayout(c, '戦略判定', cronBody(rows, limit, symbolFilter, universe)))
@@ -3995,34 +3968,137 @@ function formatAuditJson(raw: string): string {
   }
 }
 
+/** 戦略判定 1 行 (decision log + journal post_submit JOIN、#143)。 */
+export interface DecisionRow {
+  id: number
+  timestamp: string
+  requestId: string | null
+  symbol: string
+  decision: string
+  reason: string | null
+  price: number | null
+  indicatorsJson: string | null
+  clientOrderId: string | null
+  traceJson: string | null
+  filledPrice: number | null
+  filledQty: number | null
+  realizedPnl: number | null
+  brokerStatus: string | null
+}
+
+/**
+ * strategy_decision_log を trade_journal の post_submit と LEFT JOIN して
+ * 実 fill / realized_pnl 付きで取る (#143)。戦略判定ページとチャート銘柄タブの
+ * 判定履歴 (#decisions-chart-unify) が共用する — 同じ判定が 2 画面で違う形に
+ * ならないよう、ローダーはここ 1 本に寄せる。
+ */
+async function loadDecisionRows(
+  db: ReturnType<typeof createDb>,
+  opts: { symbol?: string; limit: number },
+): Promise<DecisionRow[]> {
+  const baseQuery = db
+    .select({
+      id: strategyDecisionLog.id,
+      timestamp: strategyDecisionLog.timestamp,
+      requestId: strategyDecisionLog.requestId,
+      symbol: strategyDecisionLog.symbol,
+      decision: strategyDecisionLog.decision,
+      reason: strategyDecisionLog.reason,
+      price: strategyDecisionLog.price,
+      indicatorsJson: strategyDecisionLog.indicatorsJson,
+      clientOrderId: strategyDecisionLog.clientOrderId,
+      traceJson: strategyDecisionLog.traceJson,
+      filledPrice: tradeJournal.filledPrice,
+      filledQty: tradeJournal.filledQty,
+      realizedPnl: tradeJournal.realizedPnl,
+      brokerStatus: tradeJournal.brokerStatus,
+    })
+    .from(strategyDecisionLog)
+    .leftJoin(
+      tradeJournal,
+      and(
+        eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
+        eq(tradeJournal.tradeEventType, 'post_submit'),
+      ),
+    )
+  return opts.symbol
+    ? baseQuery
+        .where(eq(strategyDecisionLog.symbol, opts.symbol))
+        .orderBy(desc(strategyDecisionLog.id))
+        .limit(opts.limit)
+    : baseQuery.orderBy(desc(strategyDecisionLog.id)).limit(opts.limit)
+}
+
+/**
+ * 戦略判定ページの銘柄レール (#decisions-chart-unify)。チャート銘柄タブの
+ * レールと同じ見た目 (CSS 共用) で、先頭に「ALL (全銘柄)」を置く。
+ * limit は URL に伝搬する。
+ */
+function renderCronSymbolRail(
+  universe: SymbolUniverse | null | undefined,
+  activeSymbol: string | undefined,
+  limit: number,
+): string {
+  const symbols = universe ? [...universe.allowedSymbols, ...universe.inactiveSymbols] : []
+  if (symbols.length === 0) return ''
+  const limitQs = `&limit=${limit}`
+  const allItem = `<a class="rail-item${activeSymbol === undefined ? ' active' : ''}" href="/dashboard/cron?${limitQs.slice(1)}">
+    <span class="rail-sym">ALL</span><span class="rail-name">全銘柄</span>
+  </a>`
+  const items = symbols
+    .map((sym) => {
+      const inactive = isSymbolInactive(sym, universe)
+      const isFocus = sym === activeSymbol
+      const name = universe?.symbolName[sym.toUpperCase()] ?? ''
+      const cls = ['rail-item', isFocus ? 'active' : '', inactive ? 'inactive' : '']
+        .filter(Boolean)
+        .join(' ')
+      const titleAttr = inactive
+        ? ` title="${esc(inactiveTooltip(sym, universe))}"`
+        : name
+          ? ` title="${esc(name)}"`
+          : ''
+      return `<a class="${cls}" href="/dashboard/cron?symbol=${encodeURIComponent(sym)}${limitQs}"${titleAttr}>
+        <span class="rail-sym">${esc(sym)}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
+      </a>`
+    })
+    .join('')
+  return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${allItem}${items}</aside>`
+}
+
 function cronBody(
-  rows: Array<{
-    id: number
-    timestamp: string
-    requestId: string | null
-    symbol: string
-    decision: string
-    reason: string | null
-    price: number | null
-    indicatorsJson?: string | null
-    clientOrderId?: string | null
-    traceJson?: string | null
-    filledPrice?: number | null
-    filledQty?: number | null
-    realizedPnl?: number | null
-    brokerStatus?: string | null
-  }>,
+  rows: DecisionRow[],
   limit: number,
   symbolFilter: string | undefined,
   universe?: SymbolUniverse | null,
 ): string {
   const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
     : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
-  if (rows.length === 0) {
-    return `${header}<p class="muted">判定ログがまだありません。</p>`
-  }
+  const rail = renderCronSymbolRail(universe, symbolFilter, limit)
+  const main =
+    rows.length === 0
+      ? `${header}<p class="muted">判定ログがまだありません。</p>`
+      : `${header}
+  ${renderDecisionTable(rows, universe, {
+    copyVarName: '__cronCopy',
+    showSymbol: true,
+    filterLabel: `symbol=${symbolFilter ?? 'all'}, limit=${limit}`,
+  })}`
+  return rail ? `<div class="symbol-layout">${rail}<div class="symbol-main">${main}</div></div>` : main
+}
+
+/**
+ * 戦略判定テーブル (#decisions-chart-unify)。戦略判定ページ (全銘柄) と
+ * チャート銘柄タブの判定履歴が共用する。reason の判定ラダー・AI 用コピー
+ * (行 = trace 含む完全版 / 全件 = trace 省略) を内包する。
+ */
+function renderDecisionTable(
+  rows: DecisionRow[],
+  universe: SymbolUniverse | null | undefined,
+  opts: { copyVarName: string; showSymbol: boolean; filterLabel: string },
+): string {
   const tbody = rows
     .map((r) => {
       const cls =
@@ -4048,10 +4124,15 @@ function cronBody(
       const inactive = isSymbolInactive(r.symbol, universe)
       const symbolClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
+      // 銘柄リンクはチャート銘柄タブへ (判定 pin / ラダー / 入場距離と同じ文脈で
+      // 見られる)。cron 内絞り込みは ▼ で残す。
+      const symbolCell = opts.showSymbol
+        ? `<td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a> <a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の判定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a></td>`
+        : ''
       return `<tr>
         <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a></td>
+        ${symbolCell}
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
@@ -4060,17 +4141,16 @@ function cronBody(
       </tr>`
     })
     .join('')
-  return `${header}
-  <table>
+  return `<table>
     <thead><tr>
-      <th></th><th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
+      <th></th><th>timestamp (JST)</th>${opts.showSymbol ? '<th>symbol</th>' : ''}<th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
-  ${safeJsonScript('__cronCopy', {
+  ${safeJsonScript(opts.copyVarName, {
     meta: {
       page: 'strategy_decision_log (戦略判定)',
-      filter: `symbol=${symbolFilter ?? 'all'}, limit=${limit} (copy-all は trace 省略、行コピーは trace 含む)`,
+      filter: `${opts.filterLabel} (copy-all は trace 省略、行コピーは trace 含む)`,
       generatedAt: new Date().toISOString(),
     },
     // copy-all 用は trace を省略 (200 行 × 判定ラダーで肥大するため)。
@@ -4082,7 +4162,7 @@ function cronBody(
       trace: parseJsonObject(r.traceJson ?? null),
     })),
   })}
-  ${renderLogCopyScript('__cronCopy')}`
+  ${renderLogCopyScript(opts.copyVarName)}`
 }
 
 function cronReasonCell(row: {
@@ -5609,6 +5689,11 @@ export interface ChartsBodySymbol {
   alternatives?: string[]
   /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
   symbolPolicy?: SymbolPolicySummary | null
+  /**
+   * focus symbol の判定履歴 (#decisions-chart-unify)。戦略判定ページと同じ
+   * loader/renderer を共用 — チャートの判定 pin と同じデータを表でも読める。
+   */
+  decisionRows?: DecisionRow[]
 }
 
 export interface SymbolPolicySummary {
@@ -5779,6 +5864,28 @@ function renderQualityTab(args: ChartsBodyQuality): string {
   ${safeJsonScript('__chartData', { decisions: args.decisions, histogram: args.histogram })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
+}
+
+/**
+ * チャート銘柄タブ内の判定履歴 (#decisions-chart-unify)。戦略判定ページと同じ
+ * renderer を共用し、チャート上の判定 pin と同じデータを表でも読めるようにする
+ * (pin はクリックで 1 件ずつ、表はラダー・実 fill・AI コピーまで一覧)。
+ */
+function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
+  const rows = args.decisionRows ?? []
+  if (rows.length === 0 || !args.focusSymbol) return ''
+  const symbolCronHref = `/dashboard/cron?symbol=${encodeURIComponent(args.focusSymbol)}`
+  return `<div style="margin-top:14px">
+    <h2 style="font-size:14px;margin:0 0 6px;display:flex;align-items:center;gap:10px">判定履歴 <span class="muted" style="font-size:11px;font-weight:normal">直近 ${rows.length} 件 — チャートの判定 pin と同じデータ</span>
+      <a href="${esc(symbolCronHref)}" style="font-size:11px">この銘柄の全件 →</a>
+      <a href="/dashboard/cron" style="font-size:11px">全銘柄 →</a>
+    </h2>
+    ${renderDecisionTable(rows, args.universe, {
+      copyVarName: '__decisionCopy',
+      showSymbol: false,
+      filterLabel: `symbol=${args.focusSymbol}, limit=30`,
+    })}
+  </div>`
 }
 
 export function renderSymbolTab(args: ChartsBodySymbol): string {
@@ -6956,6 +7063,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
     <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
   </div>
+  ${renderSymbolDecisionHistory(args)}
   ${renderStrategyParamsPanel(args.strategyParams)}`
   return `${wrapWithSymbolRail(args, content)}
   ${safeJsonScript('__chartData', {
