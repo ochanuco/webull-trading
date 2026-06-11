@@ -8696,8 +8696,11 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
  * 銘柄関係マップ (#symbol-relation-map)。インバース対 / regime proxy / 退避先と
  * いう「銘柄同士の依存関係」が一覧テーブルではセル単位に散らばって読めない、
  * という operator 要望でグラフ可視化する。関係が 1 つも無ければ出さない。
- *   - ノード: 大きさ = 予算配分%、色 = ロール、無効銘柄はグレー
- *   - エッジ: インバース対 (赤・双方向) / regime proxy (紫・破線) / 退避先 (緑・矢印)
+ *
+ * 表現は repree.net (React Flow 系) 準拠の operator 指定:
+ *   - 1 カード = 1 銘柄 (symbol + ロール + 配分% をカード内に表示)
+ *   - 左→右のレイヤー配置: regime proxy → 銘柄 → 退避先
+ *   - 退避エッジには配分% をラベル表示 (条件未通過時にその枠が流れるため)
  * 表示専用 — 判定・発注には一切関与しない。
  */
 const ROLE_NODE_COLORS: Record<string, string> = {
@@ -8717,28 +8720,33 @@ export function renderSymbolRelationMap(
   const known = new Map(rows.map((r) => [r.symbol.toUpperCase(), r]))
   interface MapNode {
     name: string
-    value: number
+    pct: number
     role: string | null
     active: boolean
     registered: boolean
   }
   const nodes = new Map<string, MapNode>()
-  const ensureNode = (symRaw: string): void => {
+  const ensureNode = (symRaw: string): MapNode => {
     const sym = symRaw.toUpperCase()
-    if (nodes.has(sym)) return
+    const existing = nodes.get(sym)
+    if (existing) return existing
     const row = known.get(sym)
-    nodes.set(sym, {
+    const node: MapNode = {
       name: sym,
-      value: row?.budgetAllocPct != null ? Math.round(row.budgetAllocPct * 1000) / 10 : 0,
+      pct: row?.budgetAllocPct != null ? Math.round(row.budgetAllocPct * 1000) / 10 : 0,
       role: row?.role ?? null,
       active: row?.active ?? false,
       registered: row !== undefined,
-    })
+    }
+    nodes.set(sym, node)
+    return node
   }
   interface MapEdge {
     source: string
     target: string
     kind: 'inverse' | 'proxy' | 'fallback'
+    /** エッジラベル (退避 = 流れる配分%、他は関係名)。 */
+    label: string
   }
   const edges: MapEdge[] = []
   // インバース対 (両方向で格納されているので sym < inverse の片向きに dedup)。
@@ -8748,7 +8756,7 @@ export function renderSymbolRelationMap(
     if (a >= b) continue
     ensureNode(a)
     ensureNode(b)
-    edges.push({ source: a, target: b, kind: 'inverse' })
+    edges.push({ source: a, target: b, kind: 'inverse', label: 'インバース対' })
   }
   // regime proxy (#472): proxy → bull / bear。misconfig は proxy 不明のため skip。
   for (const pair of pairRegimes) {
@@ -8756,41 +8764,94 @@ export function renderSymbolRelationMap(
     ensureNode(pair.proxySymbol)
     for (const side of [pair.bullSymbol, pair.bearSymbol]) {
       ensureNode(side)
-      edges.push({ source: pair.proxySymbol.toUpperCase(), target: side.toUpperCase(), kind: 'proxy' })
+      edges.push({
+        source: pair.proxySymbol.toUpperCase(),
+        target: side.toUpperCase(),
+        kind: 'proxy',
+        label: 'regime proxy',
+      })
     }
   }
-  // 退避先 (#452 Layer 3): 条件未通過時に予算枠が流れる先。
+  // 退避先 (#452 Layer 3): 条件未通過時に予算枠が流れる先。流れる量 = 配分%。
   for (const r of rows) {
     if (!r.cashFallbackSymbol) continue
-    ensureNode(r.symbol)
+    const src = ensureNode(r.symbol)
     ensureNode(r.cashFallbackSymbol)
     edges.push({
       source: r.symbol.toUpperCase(),
       target: r.cashFallbackSymbol.toUpperCase(),
       kind: 'fallback',
+      label: src.pct > 0 ? `退避 ${src.pct}%` : '退避',
     })
   }
   if (edges.length === 0) return ''
 
+  // レイヤー割当 (左→右): 0 = proxy 専用ノード、1 = 銘柄、2 = 退避先。
+  // 退避先かつ通常銘柄 (SGOV 等) は右列に置く。proxy かつ登録銘柄は中央。
+  const proxySyms = new Set(
+    pairRegimes.filter((p) => p.invalidConfig === null).map((p) => p.proxySymbol.toUpperCase()),
+  )
+  const fallbackTargets = new Set(
+    edges.filter((e) => e.kind === 'fallback').map((e) => e.target),
+  )
+  const layerOf = (n: MapNode): number => {
+    if (fallbackTargets.has(n.name)) return 2
+    if (proxySyms.has(n.name) && !n.registered) return 0
+    return 1
+  }
+  // 中央列はインバース対が縦に隣接するよう並べる。
+  const layer1 = [...nodes.values()].filter((n) => layerOf(n) === 1).map((n) => n.name)
+  layer1.sort()
+  const orderedLayer1: string[] = []
+  for (const sym of layer1) {
+    if (orderedLayer1.includes(sym)) continue
+    orderedLayer1.push(sym)
+    const partner = inversePairs[sym]?.toUpperCase()
+    if (partner && layer1.includes(partner) && !orderedLayer1.includes(partner)) {
+      orderedLayer1.push(partner)
+    }
+  }
+  const layers: string[][] = [
+    [...nodes.values()].filter((n) => layerOf(n) === 0).map((n) => n.name).sort(),
+    orderedLayer1,
+    [...nodes.values()].filter((n) => layerOf(n) === 2).map((n) => n.name).sort(),
+  ]
+  const CARD_W = 132
+  const ROW_H = 78
+  const positioned = new Map<string, { x: number; y: number }>()
+  const maxRows = Math.max(...layers.map((l) => l.length), 1)
+  layers.forEach((layer, li) => {
+    // 列内は縦中央寄せ。
+    const offset = ((maxRows - layer.length) * ROW_H) / 2
+    layer.forEach((sym, ri) => {
+      positioned.set(sym, { x: 90 + li * 300, y: 50 + offset + ri * ROW_H })
+    })
+  })
+  const mapHeight = Math.max(240, maxRows * ROW_H + 70)
+
   const payload = {
+    cardW: CARD_W,
     nodes: [...nodes.values()].map((n) => ({
       name: n.name,
-      pct: n.value,
+      pct: n.pct,
       role: n.role,
+      roleShort: n.role !== null ? SYMBOL_ROLE_LABELS_SHORT[n.role as SymbolRole] ?? n.role : null,
       active: n.active,
       registered: n.registered,
       color: !n.active || !n.registered ? '#9aa0a6' : ROLE_NODE_COLORS[n.role ?? ''] ?? '#5f6368',
+      x: positioned.get(n.name)?.x ?? 90,
+      y: positioned.get(n.name)?.y ?? 50,
     })),
     edges,
   }
   return `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">関係マップ <span class="muted" style="font-weight:normal">— インバース対 / regime proxy / 退避先 (表示専用)</span></summary>
-    <div id="symbol-relation-map" style="height:300px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
+    <summary style="cursor:pointer;font-size:13px;font-weight:600">関係マップ <span class="muted" style="font-weight:normal">— regime proxy → 銘柄 → 退避先 (表示専用)</span></summary>
+    <div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      ノードの大きさ = 予算配分%、色 = ロール (グレー = 無効 / 未登録)。
+      1 カード = 1 銘柄 (ロール / 予算配分%。グレー = 無効 / 未登録)。
       <span style="color:#c22d2d">赤実線</span> = インバース対 ・
       <span style="color:#7e3af2">紫破線</span> = regime proxy (判定材料) ・
-      <span style="color:#0e9f6e">緑矢印</span> = 退避先 (条件未通過時に予算枠が流れる先)。
+      <span style="color:#0e9f6e">緑矢印</span> = 退避先 (ラベル % = 条件未通過時に流れる予算枠)。
     </p>
   </details>
   <script src="${ECHARTS_CDN}" defer></script>
@@ -8802,24 +8863,23 @@ export function renderSymbolRelationMap(
     var el = document.getElementById('symbol-relation-map');
     if (!data || !el) return;
     var EDGE_STYLE = {
-      inverse: { color: '#c22d2d', type: 'solid', width: 2, symbol: ['none', 'none'], label: 'インバース対' },
-      proxy: { color: '#7e3af2', type: 'dashed', width: 1.5, symbol: ['none', 'arrow'], label: 'regime proxy' },
-      fallback: { color: '#0e9f6e', type: 'solid', width: 1.5, symbol: ['none', 'arrow'], label: '退避先' },
+      inverse: { color: '#c22d2d', type: 'solid', width: 2, symbol: ['none', 'none'] },
+      proxy: { color: '#7e3af2', type: 'dashed', width: 1.5, symbol: ['none', 'arrow'] },
+      fallback: { color: '#0e9f6e', type: 'solid', width: 1.8, symbol: ['none', 'arrow'] },
     };
     var chart = echarts.init(el);
     chart.setOption({
       tooltip: {
         formatter: function (p) {
           if (p.dataType === 'edge') {
-            var st = EDGE_STYLE[p.data.kind];
-            return p.data.source + ' → ' + p.data.target + '<br>' + st.label;
+            return p.data.source + ' → ' + p.data.target + '<br>' + p.data.label;
           }
           var d = p.data;
           var lines = ['<strong>' + d.name + '</strong>'];
           if (!d.registered) lines.push('未登録 (proxy 参照のみ)');
           else {
             lines.push(d.active ? '有効' : '無効');
-            if (d.role) lines.push('ロール: ' + d.role);
+            if (d.roleShort) lines.push('ロール: ' + d.roleShort);
             lines.push('予算配分: ' + d.pct + '%');
           }
           return lines.join('<br>');
@@ -8827,19 +8887,39 @@ export function renderSymbolRelationMap(
       },
       series: [{
         type: 'graph',
-        layout: 'force',
+        layout: 'none',
         roam: true,
-        force: { repulsion: 320, edgeLength: 110, gravity: 0.12 },
-        label: { show: true, fontSize: 12, fontWeight: 600 },
         data: data.nodes.map(function (n) {
+          var sub = [];
+          if (n.registered && n.roleShort) sub.push(n.roleShort);
+          if (n.registered && n.pct > 0) sub.push(n.pct + '%');
+          if (!n.registered) sub.push('未登録 proxy');
           return {
             name: n.name,
+            x: n.x,
+            y: n.y,
             pct: n.pct,
-            role: n.role,
+            roleShort: n.roleShort,
             active: n.active,
             registered: n.registered,
-            symbolSize: Math.max(18, Math.min(60, 18 + n.pct * 1.4)),
-            itemStyle: { color: n.color, opacity: n.active ? 1 : 0.55 },
+            symbol: 'roundRect',
+            symbolSize: [data.cardW, 46],
+            itemStyle: {
+              color: '#fff',
+              borderColor: n.color,
+              borderWidth: 2,
+              opacity: n.active || !n.registered ? 1 : 0.55,
+              shadowBlur: 4,
+              shadowColor: 'rgba(0,0,0,0.08)',
+            },
+            label: {
+              show: true,
+              formatter: '{sym|' + n.name + '}' + (sub.length ? '\\n{sub|' + sub.join(' ・ ') + '}' : ''),
+              rich: {
+                sym: { fontSize: 13, fontWeight: 700, color: '#1d1d1f', lineHeight: 18 },
+                sub: { fontSize: 10, color: '#6e6e73', lineHeight: 14 },
+              },
+            },
           };
         }),
         edges: data.edges.map(function (e) {
@@ -8848,9 +8928,16 @@ export function renderSymbolRelationMap(
             source: e.source,
             target: e.target,
             kind: e.kind,
-            lineStyle: { color: st.color, type: st.type, width: st.width, curveness: 0.1 },
+            label: e.label,
+            lineStyle: { color: st.color, type: st.type, width: st.width, curveness: 0.12 },
             symbol: st.symbol,
-            symbolSize: 8,
+            symbolSize: 9,
+            edgeLabel: e.kind === 'fallback' ? {
+              show: true,
+              formatter: e.label,
+              fontSize: 10,
+              color: '#0e9f6e',
+            } : { show: false },
           };
         }),
       }],

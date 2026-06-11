@@ -2726,7 +2726,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
 })
 
 import { renderSymbolRelationMap } from '../../src/routes/dashboard'
-import type { SymbolConfigRow } from '../../src/infrastructure/db/symbolConfigRepo'
+import type { SymbolConfigRow } from '../../src/infrastructure/db/schema'
 
 describe('renderSymbolRelationMap (#symbol-relation-map)', () => {
   const mapRow = (over: Partial<SymbolConfigRow>): SymbolConfigRow =>
