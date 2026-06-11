@@ -41,6 +41,7 @@ import {
   loadInversePairs,
   toggleSymbolActive,
   updateBudgetAllocPct,
+  updateCashFallback,
   updateSymbolConfig,
   isSymbolRole,
   SYMBOL_ROLES,
@@ -1716,6 +1717,64 @@ export const admin = new Hono<AppBindings>()
     )
     if (isForm) return c.redirect('/dashboard/symbols', 303)
     return c.json({ symbol: symbolPath, deleted: true })
+  })
+  /**
+   * 退避先の set / clear (#symbol-relation-map 編集キャンバス)。
+   * body: { target: 'SGOV' } で設定 (entry_required も同時に ON)、
+   * { target: null } で解除。検証: 両銘柄が登録済み・同一通貨・self 禁止。
+   */
+  .post('/symbol-config/:symbol/cash-fallback', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const symbol = normalizeSymbol(c.req.param('symbol'))
+    const body = (await c.req.json().catch(() => null)) as unknown
+    // primitive / 配列 JSON で `'target' in body` が TypeError → 500 になるのを防ぐ
+    // (CodeRabbit #485): 先に object 判定して 400 に落とす。
+    if (body === null || typeof body !== 'object' || Array.isArray(body) || !('target' in body)) {
+      throw new ValidationError("body must be JSON { target: string | null }", { field: 'target' })
+    }
+    const payload = body as { target?: unknown }
+    let target: string | null = null
+    if (payload.target !== null) {
+      if (typeof payload.target !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(payload.target.trim())) {
+        throw new ValidationError('target must be a ticker or null', { field: 'target' })
+      }
+      target = normalizeSymbol(payload.target)
+      if (target === symbol) {
+        throw new ValidationError('target must differ from the symbol itself', { field: 'target' })
+      }
+    }
+    const db = createDb(c.env.DB)
+    const source = await findSymbolConfig(db, symbol)
+    if (source === null) return c.json({ error: 'symbol not found' }, 404)
+    if (target !== null) {
+      const targetRow = await findSymbolConfig(db, target)
+      if (targetRow === null) {
+        throw new ValidationError(`target ${target} is not a registered symbol`, { field: 'target' })
+      }
+      // 通貨跨ぎの退避は配分計算側で skip される (fail-closed) ため、入力時点で拒否する。
+      if (targetRow.currency !== source.currency) {
+        throw new ValidationError(
+          `target currency ${targetRow.currency} must match ${source.currency}`,
+          { field: 'target' },
+        )
+      }
+    }
+    const result = await updateCashFallback(db, symbol, target, new Date().toISOString())
+    if (result === null) return c.json({ error: 'symbol not found' }, 404)
+    await writeAuditLog(
+      c,
+      '/admin/symbol-config/cash-fallback',
+      `symbol=${symbol}`,
+      { cashFallbackSymbol: result.before.cashFallbackSymbol, entryRequired: result.before.entryRequired },
+      { cashFallbackSymbol: result.after.cashFallbackSymbol, entryRequired: result.after.entryRequired },
+    )
+    return c.json({
+      symbol,
+      cashFallbackSymbol: result.after.cashFallbackSymbol,
+      entryRequired: result.after.entryRequired,
+    })
   })
   /**
    * 予算配分% の一括更新 (#budget-alloc ラダー)。一覧の各 slider が

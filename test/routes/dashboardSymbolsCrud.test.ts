@@ -1707,3 +1707,53 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>配分の条件連動/)
   })
 })
+
+describe('POST /admin/symbol-config/:symbol/cash-fallback (#symbol-relation-map 編集)', () => {
+  const post = (app: ReturnType<typeof createApp>, symbol: string, body: unknown) =>
+    app.request(
+      `/admin/symbol-config/${symbol}/cash-fallback`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify(body),
+      },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+
+  it('set: 退避先を設定し entry_required も同時に ON、audit log を残す', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SOXL', currency: 'USD', entryRequired: false }),
+      row({ symbol: 'SGOV', currency: 'USD' }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const res = await post(createApp(), 'SOXL', { target: 'sgov' })
+    expect(res.status).toBe(200)
+    const updated = db.updates.find((u) => u.table === 'symbol_config')
+    expect(updated?.set).toMatchObject({ cashFallbackSymbol: 'SGOV', entryRequired: true })
+    expect(db.inserts.some((i) => i.table === 'config_audit_log')).toBe(true)
+  })
+
+  it('clear: target null で解除 (entry_required は触らない)', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SOXL', currency: 'USD', cashFallbackSymbol: 'SGOV', entryRequired: true }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const res = await post(createApp(), 'SOXL', { target: null })
+    expect(res.status).toBe(200)
+    const updated = db.updates.find((u) => u.table === 'symbol_config')
+    expect(updated?.set).toMatchObject({ cashFallbackSymbol: null })
+    expect(updated?.set).not.toHaveProperty('entryRequired')
+  })
+
+  it('検証: self 参照 / 未登録 target / 通貨不一致は 400', async () => {
+    const db = fakeDb([
+      row({ symbol: 'SOXL', currency: 'USD' }),
+      row({ symbol: '1357', currency: 'JPY' }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    expect((await post(app, 'SOXL', { target: 'SOXL' })).status).toBe(400)
+    expect((await post(app, 'SOXL', { target: 'ZZZZ' })).status).toBe(400)
+    expect((await post(app, 'SOXL', { target: '1357' })).status).toBe(400)
+  })
+})
