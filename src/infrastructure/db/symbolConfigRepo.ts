@@ -735,7 +735,11 @@ export async function loadPairRegimeConfigs(
     const proxy = row.regimeProxySymbol?.trim().toUpperCase() ?? ''
     const bull = row.regimeBullSymbol?.trim().toUpperCase() ?? ''
     let invalidConfig: string | null = null
-    if (proxy.length === 0 || !/^[A-Z0-9]{1,10}$/.test(proxy)) {
+    if (a === b) {
+      // 書き込み経路 (buildInversePairWrite) は self-pair を throw で弾くが、
+      // DB 直書きで入り得る。黙って有効扱いにせず unknown へ (CodeRabbit #473)。
+      invalidConfig = `inverse pair must contain two distinct symbols (got ${a}/${b})`
+    } else if (proxy.length === 0 || !/^[A-Z0-9]{1,10}$/.test(proxy)) {
       invalidConfig = `regime_proxy_symbol is missing/invalid for pair ${a}/${b}`
     } else if (bull !== a && bull !== b) {
       invalidConfig = `regime_bull_symbol must be ${a} or ${b} (got '${bull}')`

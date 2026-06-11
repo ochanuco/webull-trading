@@ -2382,4 +2382,26 @@ describe('runPullbackScheduler pair regime layer (#472)', () => {
     expect(summary.buys).toBe(0)
     expect(summary.rejected[0]?.reason).toContain('zone=unknown')
   })
+  it('重複ペア設定の symbol は unknown に倒れる (非決定性の排除、CodeRabbit #473)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mapBarClient({ SOXL: uptrendBars(), SOXX: proxyBars(1.003), QQQ: proxyBars(1.003) }),
+      positionStore: makeStore({}),
+      execution,
+      pairRegime: {
+        mode: 'enforce',
+        thresholds: THRESHOLDS,
+        pairs: [
+          REGIME_PAIR,
+          { bullSymbol: 'SOXL', bearSymbol: 'SQQQ', proxySymbol: 'QQQ', invalidConfig: null },
+        ],
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.rejected[0]?.reason).toContain('zone=unknown')
+    expect(summary.rejected[0]?.reason).toContain('duplicate pair config')
+  })
 })

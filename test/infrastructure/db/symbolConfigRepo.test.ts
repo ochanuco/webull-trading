@@ -472,3 +472,13 @@ describe('loadPairRegimeConfigs (#472)', () => {
     expect(result[1]!.invalidConfig).toContain('regime_bull_symbol')
   })
 })
+
+describe('loadPairRegimeConfigs self-pair (#473 review)', () => {
+  it('自己参照ペアは invalidConfig (黙って有効扱いしない)', async () => {
+    const rows = [
+      { symbol: 'SOXL', inverse: 'SOXL', regimeEnabled: true, regimeProxySymbol: 'SOXX', regimeBullSymbol: 'SOXL' },
+    ]
+    const result = await loadPairRegimeConfigs(fakeDbAll(rows) as never)
+    expect(result[0]!.invalidConfig).toContain('distinct symbols')
+  })
+})

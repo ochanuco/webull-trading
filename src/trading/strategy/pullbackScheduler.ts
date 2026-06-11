@@ -443,7 +443,9 @@ export async function runPullbackScheduler(
     const relevant = options.pairRegime.pairs.filter(
       (p) => runSymbols.has(p.bullSymbol) || runSymbols.has(p.bearSymbol),
     )
-    await Promise.all(
+    // 評価は並列、Map への反映は**評価完了後に設定順で決定的に**行う
+    // (CodeRabbit #473: async 完了順の set は重複 symbol で run ごとに揺れる)。
+    const evaluated = await Promise.all(
       relevant.map(async (pair) => {
         let decision: PairRegimeDecision
         if (pair.invalidConfig !== null) {
@@ -472,23 +474,42 @@ export async function runPullbackScheduler(
             }
           }
         }
-        regimeBySymbol.set(pair.bullSymbol, { decision, side: 'bull' })
-        regimeBySymbol.set(pair.bearSymbol, { decision, side: 'bear' })
-        console.warn(
-          JSON.stringify({
-            event: 'pair_regime_evaluated',
-            requestId: options.requestId ?? null,
-            mode: options.pairRegime!.mode,
-            pair: `${pair.bullSymbol}/${pair.bearSymbol}`,
-            proxySymbol: decision.proxySymbol,
-            zone: decision.zone,
-            score: decision.score,
-            asOfDate: decision.asOfDate,
-            reason: decision.reason,
-          }),
-        )
+        return { pair, decision }
       }),
     )
+    for (const { pair, decision } of evaluated) {
+      // 同一 symbol が複数ペアに現れる重複設定は判定不能 → unknown (fail-closed)。
+      const duplicate = [pair.bullSymbol, pair.bearSymbol].find((sym) => regimeBySymbol.has(sym))
+      if (duplicate !== undefined) {
+        const dup: PairRegimeDecision = {
+          zone: 'unknown',
+          score: null,
+          proxySymbol: pair.proxySymbol,
+          asOfDate: null,
+          reason: `duplicate pair config for ${duplicate} (fail-closed)`,
+        }
+        regimeBySymbol.set(pair.bullSymbol, { decision: dup, side: 'bull' })
+        regimeBySymbol.set(pair.bearSymbol, { decision: dup, side: 'bear' })
+        const prev = regimeBySymbol.get(duplicate)!
+        regimeBySymbol.set(duplicate, { decision: dup, side: prev.side })
+      } else {
+        regimeBySymbol.set(pair.bullSymbol, { decision, side: 'bull' })
+        regimeBySymbol.set(pair.bearSymbol, { decision, side: 'bear' })
+      }
+      console.warn(
+        JSON.stringify({
+          event: 'pair_regime_evaluated',
+          requestId: options.requestId ?? null,
+          mode: options.pairRegime!.mode,
+          pair: `${pair.bullSymbol}/${pair.bearSymbol}`,
+          proxySymbol: decision.proxySymbol,
+          zone: regimeBySymbol.get(pair.bullSymbol)!.decision.zone,
+          score: decision.score,
+          asOfDate: decision.asOfDate,
+          reason: regimeBySymbol.get(pair.bullSymbol)!.decision.reason,
+        }),
+      )
+    }
   }
 
   for (const symbol of options.symbols) {
