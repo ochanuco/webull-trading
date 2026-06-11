@@ -1657,3 +1657,58 @@ describe('新規登録フォームの取扱チェック (#461)', () => {
     }
   })
 })
+
+describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('new フォーム: 必須バッジは 4 つ、任意セクションは折りたたみ', async () => {
+    const db = fakeDb([])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/new',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // 必須バッジ: 凡例 1 + 銘柄 / 市場 / 通貨 / 売買単位 の計 5 箇所
+    expect((body.match(/>必須<\/span>/g) ?? []).length).toBe(5)
+    // 任意セクションは details で、新規時は閉じている (open なし)
+    expect(body).toContain('発注サイズ')
+    expect(body).toContain('戦略ロール・entry 条件')
+    expect(body).toContain('損切・利食・保有')
+    expect(body).toContain('配分の条件連動')
+    expect(body).not.toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
+    // 売買単位の fail-closed 注意は 1 行だけ残す
+    expect(body).toContain('未設定の銘柄は発注されません (fail-closed)')
+  })
+
+  it('edit フォーム: 値が入っているセクションは開いた状態で表示', async () => {
+    const db = fakeDb([
+      row({
+        symbol: 'QQQ',
+        role: 'core_trend',
+        budgetAllocPct: 0.2,
+        stopPctOverride: -0.03,
+        entryRequired: true,
+        cashFallbackSymbol: 'SGOV',
+      }),
+    ])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/symbols/QQQ/edit',
+      { headers: authHeader },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // 値のあるセクションは open
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>戦略ロール・entry 条件/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>損切・利食・保有/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>配分の条件連動/)
+  })
+})
