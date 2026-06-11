@@ -45,7 +45,7 @@ import {
   loadPortfolioEquitySnapshots,
   type LoadPortfolioEquitySnapshotOptions,
 } from '../infrastructure/db/portfolioEquitySnapshotRepo'
-import type { PortfolioEquitySnapshotRow } from '../infrastructure/db/schema'
+import type { PortfolioEquitySnapshotRow, TradeJournalRow } from '../infrastructure/db/schema'
 import type { VixRegime } from '../trading/risk/vixRegimeFilter'
 import {
   buildBuyabilityView,
@@ -68,7 +68,7 @@ import type {
   PullbackIndicators,
   SymbolRule,
 } from '../trading/strategy/strategies/PullbackUptrendStrategy'
-import { and, asc, desc, eq, gte, lte } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import type { SymbolState } from '../trading/state/types'
@@ -246,14 +246,26 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
+    // view filter: 全イベント (default) / 約定・手仕舞いのみ / エラーのみ。
+    // ジャーナルは 1 注文で複数 lifecycle 行を持つため、operator の主目的
+    // (「何が約定した?」「何が失敗した?」) を 1 クリックで絞れるようにする。
+    const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(c.req.query('view'))
     const db = createDb(c.env.DB)
+    const baseQuery = db.select().from(tradeJournal)
+    const filtered =
+      view === 'fills'
+        ? baseQuery.where(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
+        : view === 'errors'
+          ? // errorMessage だけだと errorClass のみ埋まる失敗行が落ちる (CodeRabbit #469)
+            baseQuery.where(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass)))
+          : baseQuery
     // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
     // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
     const [rows, universe] = await Promise.all([
-      db.select().from(tradeJournal).orderBy(desc(tradeJournal.id)).limit(limit),
+      filtered.orderBy(desc(tradeJournal.id)).limit(limit),
       loadSymbolUniverse(c.env).catch(() => null),
     ])
-    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe)))
+    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe, view)))
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
@@ -3095,70 +3107,200 @@ export function renderLastRolledCell(
   return `<span class="ok">${formatted} <small class="muted">(${esc(elapsedLabel)})</small></span>`
 }
 
+/**
+ * ログ行の「AI 用コピー」ボタン (#alerts-trades-ui)。raw 全 field の JSON +
+ * 文脈ヘッダ (ページ / フィルタ / 生成時刻) をクリップボードに積む — ログを
+ * そのまま AI に貼って相談する運用のため、表示で省略した情報も全部含める。
+ * `varName` は safeJsonScript で埋めた `{ meta, rows }` payload のグローバル名。
+ */
+function renderLogCopyScript(varName: string): string {
+  return `<script>
+(function () {
+  var payload = window.${varName};
+  if (!payload) return;
+  function copyText(text, btn) {
+    function done(ok) {
+      var prev = btn.textContent;
+      btn.textContent = ok ? '✅' : '✗';
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    }
+    function fallbackExecCommand() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      done(ok);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // permission 拒否などの reject 時も execCommand に落とす (CodeRabbit #469)。
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallbackExecCommand);
+    } else {
+      fallbackExecCommand();
+    }
+  }
+  function header(count) {
+    return '# webull-trading ' + payload.meta.page + ' / ' + payload.meta.filter +
+      ' / generated ' + payload.meta.generatedAt + ' / ' + count + ' rows\\n';
+  }
+  document.querySelectorAll('.log-copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-id');
+      // 行コピーは payload.full (trace 等の重い field 含む完全版) を優先。
+      var src = payload.full || payload.rows;
+      var row = null;
+      for (var i = 0; i < src.length; i++) {
+        if (String(src[i].id) === id) { row = src[i]; break; }
+      }
+      if (row) copyText(header(1) + JSON.stringify(row, null, 1), btn);
+    });
+  });
+  var all = document.getElementById('log-copy-all');
+  if (all) {
+    all.addEventListener('click', function () {
+      copyText(header(payload.rows.length) + JSON.stringify(payload.rows, null, 1), all);
+    });
+  }
+})();
+</script>`
+}
+
+const LOG_COPY_ALL_BTN =
+  '<button type="button" id="log-copy-all" style="padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;cursor:pointer">📋 表示中を AI 用にコピー</button>'
+
+const logCopyRowBtn = (id: number): string =>
+  `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 2px">📋</button>`
+
+/** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
+const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
+  decision: { ja: '判定', color: '#86868b' },
+  intent: { ja: '注文作成', color: '#46608a' },
+  pre_submit: { ja: '送信記録', color: '#46608a' },
+  post_submit: { ja: '送信応答', color: '#46608a' },
+  fill: { ja: '約定', color: '#057a55' },
+  exit: { ja: '手仕舞い', color: '#b25000' },
+}
+
+/** broker error_code → 短い日本語。未知コードは code をそのまま出す。 */
+const BROKER_ERROR_LABELS: Record<string, string> = {
+  OAUTH_OPENAPI_TICKER_IS_DENY: '銘柄取扱なし',
+  OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY: '売却数量超過',
+  OAUTH_OPENAPI_PARAM_ERR: 'パラメータ不正',
+  INVALID_TOKEN: 'トークン無効',
+}
+
+/** errorMessage から error_code らしき token を抜く (JSON / 平文の両対応)。 */
+function extractBrokerErrorCode(message: string): string | null {
+  const fromJson = message.match(/"error_code"\s*:\s*"([A-Z0-9_]+)"/)
+  if (fromJson) return fromJson[1]!
+  const bare = message.match(/\b([A-Z][A-Z0-9_]{6,})\b/)
+  return bare ? bare[1]! : null
+}
+
+const pillStyle = (bg: string, fg: string): string =>
+  `display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${bg};color:${fg};white-space:nowrap`
+
 function tradesBody(
-  rows: Array<{
-    id: number
-    timestamp: string
-    tradeEventType: string
-    symbol: string | null
-    side: string | null
-    quantity: number | null
-    limitPrice: number | null
-    filledQty: number | null
-    filledPrice: number | null
-    brokerStatus: string | null
-    mode: string | null
-    errorMessage: string | null
-  }>,
+  rows: TradeJournalRow[],
   limit: number,
   universe?: SymbolUniverse | null,
+  view: 'all' | 'fills' | 'errors' = 'all',
 ): string {
+  const viewPill = (label: string, v: string, active: boolean): string =>
+    `<a href="/dashboard/trades?view=${v}&limit=${limit}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}</nav>`
   if (rows.length === 0) {
-    return `<p class="muted">trade_journal にレコードがありません (limit=${limit})。</p>`
+    return `${pills}<p class="muted">該当するレコードがありません。</p>`
   }
   const tbody = rows
     .map((r) => {
-      const statusClass =
-        r.errorMessage
-          ? 'err'
-          : r.brokerStatus === 'FILLED'
-            ? 'ok'
-            : r.brokerStatus
-              ? 'warn'
-              : 'muted'
-      // status セルは enum 値 (FILLED/CANCELED 等) は英字のまま、error は
-      // "エラー: " を和訳 prefix。運用者が grep / broker API と突き合わせ
-      // しやすい粒度を保つ。
-      const statusText =
-        r.errorMessage ? `エラー: ${r.errorMessage}` : r.brokerStatus ?? r.tradeEventType
-      const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : '—'
+      const ev = TRADE_EVENT_LABELS[r.tradeEventType] ?? { ja: r.tradeEventType, color: '#86868b' }
+      const eventCell = `<span title="${esc(r.tradeEventType)}" style="color:${ev.color};font-weight:600">● ${esc(ev.ja)}</span>`
+      const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : null
       const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
-      const symbolCellInner = r.symbol && inactive
-        ? `<span class="symbol-disabled" title="${esc(inactiveTooltip(r.symbol, universe))}">${esc(symbolText)}</span>`
-        : esc(symbolText)
-      return `<tr>
-        <td>${r.id}</td>
-        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td>${esc(r.tradeEventType)}</td>
-        <td><strong>${symbolCellInner}</strong></td>
-        <td>${esc(r.side ?? '—')}</td>
-        <td>${r.quantity === null ? '—' : esc(r.quantity)}</td>
-        <td>${r.limitPrice === null ? '—' : fmtNumber(r.limitPrice, 2)}</td>
-        <td>${r.filledQty === null ? '—' : esc(r.filledQty)}</td>
-        <td>${r.filledPrice === null ? '—' : fmtNumber(r.filledPrice, 2)}</td>
-        <td class="${statusClass}">${esc(statusText)}</td>
-        <td>${esc(r.mode ?? '—')}</td>
+      const symbolCell = r.symbol
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(symbolText!)}</strong></a>`
+        : '<span class="muted">—</span>'
+      const sideCell =
+        r.side === 'BUY'
+          ? `<span class="ok" style="font-weight:700">買</span> <span class="muted" style="font-size:11px">BUY</span>`
+          : r.side === 'SELL'
+            ? `<span class="err" style="font-weight:700">売</span> <span class="muted" style="font-size:11px">SELL</span>`
+            : '<span class="muted">—</span>'
+      // 数量: 発注数量 → 約定数量。一致なら 1 つだけ、部分約定が見えるように。
+      const qtyCell =
+        r.filledQty !== null && r.quantity !== null && r.filledQty !== r.quantity
+          ? `${esc(r.quantity)} → <strong>${esc(r.filledQty)}</strong>`
+          : r.filledQty !== null
+            ? `${esc(r.filledQty)}`
+            : r.quantity !== null
+              ? `${esc(r.quantity)}`
+              : '—'
+      const priceCell =
+        r.filledPrice !== null
+          ? fmtNumber(r.filledPrice, 2)
+          : r.limitPrice !== null
+            ? `<span class="muted" title="指値 (未約定)">指 ${fmtNumber(r.limitPrice, 2)}</span>`
+            : '—'
+      const pnlCell =
+        r.realizedPnl !== null
+          ? `${formatRealizedPnl(r.realizedPnl)}${r.exitReason ? ` <span class="muted" style="font-size:11px">${esc(r.exitReason)}</span>` : ''}`
+          : '<span class="muted">—</span>'
+      // 状態: エラーは短い日本語 + code、全文は <details>。enum はそのまま残す
+      // (broker API と grep で突き合わせる運用のため title / details に保持)。
+      let statusCell: string
+      const errorText = r.errorMessage ?? r.errorClass
+      if (errorText) {
+        const code = extractBrokerErrorCode(errorText)
+        const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : (r.errorClass ?? 'エラー')
+        statusCell = `<span style="${pillStyle('#fdecec', '#c22')}">エラー: ${esc(short)}</span>
+          <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
+      } else if (r.brokerStatus === 'FILLED') {
+        statusCell = `<span style="${pillStyle('#e6f6ec', '#057a55')}">約定</span>`
+      } else if (r.brokerStatus) {
+        statusCell = `<span style="${pillStyle('#fff4e6', '#b25000')}" title="${esc(r.brokerStatus)}">${esc(r.brokerStatus)}</span>`
+      } else {
+        statusCell = '<span class="muted">—</span>'
+      }
+      const modeCell =
+        r.mode === 'LIVE'
+          ? `<span style="${pillStyle('#fdecec', '#c22')}">実発注</span>`
+          : r.mode === 'DRY_RUN'
+            ? `<span style="${pillStyle('#f3f3f5', '#86868b')}">DRY</span>`
+            : '<span class="muted">—</span>'
+      return `<tr style="font-size:13px">
+        <td>${logCopyRowBtn(r.id)}</td>
+        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
+        <td style="white-space:nowrap">${eventCell}</td>
+        <td>${symbolCell}</td>
+        <td style="white-space:nowrap">${sideCell}</td>
+        <td style="text-align:right" class="bp-num">${qtyCell}</td>
+        <td style="text-align:right" class="bp-num">${priceCell}</td>
+        <td style="text-align:right" class="bp-num">${pnlCell}</td>
+        <td>${statusCell}</td>
+        <td>${modeCell}</td>
       </tr>`
     })
     .join('')
-  return `<p class="muted">直近 ${rows.length} 件 (limit=${limit}、最大 200)。</p>
+  return `${pills}
   <table>
-    <thead><tr>
-      <th>ID</th><th>日時</th><th>イベント</th><th>銘柄</th><th>売買</th>
-      <th>数量</th><th>指値</th><th>約定数量</th><th>約定単価</th><th>状態</th><th>モード</th>
+    <thead><tr style="font-size:12px">
+      <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th style="text-align:right">数量</th><th style="text-align:right">単価</th><th style="text-align:right">実現損益</th><th>状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__tradesCopy', {
+    meta: {
+      page: 'trade_journal (約定履歴)',
+      filter: `view=${view}, limit=${limit}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__tradesCopy')}`
 }
 
 function configBody(
@@ -3626,52 +3768,83 @@ interface AlertsBodyArgs {
  *   - 表示は最新 100 件 (`?limit=N` で 1〜500)
  *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
  */
+/** severity → 日本語 pill (#alerts-trades-ui)。 */
+const ALERT_SEVERITY_PILLS: Record<string, { ja: string; bg: string; fg: string }> = {
+  critical: { ja: '重大', bg: '#fdecec', fg: '#c22' },
+  warning: { ja: '警告', bg: '#fff4e6', fg: '#b25000' },
+  info: { ja: '情報', bg: '#eef2f8', fg: '#46608a' },
+}
+
+/** event type → 日本語。 */
+const ALERT_EVENT_LABELS: Record<string, string> = {
+  ERROR: 'エラー',
+  TRADE: '売買',
+  STATE_CHANGE: '設定変更',
+}
+
+/** 長い message は先頭を出して残りを <details> に畳む閾値。 */
+const ALERT_MESSAGE_FOLD = 160
+
 function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe } = args
-  const filterDescription =
-    severityFilter.length === 0 && eventTypeFilter === undefined
-      ? '全件'
-      : [
-          severityFilter.length > 0 ? `severity=${severityFilter.join(',')}` : null,
-          eventTypeFilter ? `eventType=${eventTypeFilter}` : null,
-        ]
-          .filter((s): s is string => s !== null)
-          .join(' / ')
-  const header = `<p class="muted">直近 ${rows.length} 件のアラート (${esc(filterDescription)}, limit=${limit}, max 500)。Webhook が未設定でも D1 には記録されています。</p>`
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
+  const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
   if (rows.length === 0) {
-    return `${header}${filterPills}<p class="muted">該当するアラートは見つかりませんでした。</p>`
+    return `${filterPills}${countLine}<p class="muted">該当するアラートはありません。</p>`
   }
   const tbody = rows
     .map((r) => {
-      const cls =
-        r.severity === 'critical'
-          ? 'err'
-          : r.severity === 'warning'
-            ? 'warn'
-            : 'muted'
+      const sev = ALERT_SEVERITY_PILLS[r.severity] ?? { ja: r.severity, bg: '#f3f3f5', fg: '#86868b' }
+      const sevCell = `<span title="${esc(r.severity)}" style="${pillStyle(sev.bg, sev.fg)}">${esc(sev.ja)}</span>`
+      const eventCell = `<span title="${esc(r.eventType)}" style="font-size:12px">${esc(ALERT_EVENT_LABELS[r.eventType] ?? r.eventType)}</span>`
       const symbolInactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''}><span${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</span></a>`
-        : '<span class="muted">-</span>'
-      return `<tr>
-        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
-        <td class="${cls}"><strong>${esc(r.severity)}</strong></td>
-        <td>${esc(r.eventType)}</td>
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</strong></a>`
+        : '<span class="muted">—</span>'
+      // broker エラーは error_code を短い日本語にして先頭へ。message 全文は
+      // 長ければ畳む (enum / 原文は grep 突き合わせ用に details に保持)。
+      const code = r.eventType === 'ERROR' ? extractBrokerErrorCode(r.message) : null
+      const shortLabel = code ? (BROKER_ERROR_LABELS[code] ?? code) : null
+      const messageBody =
+        r.message.length > ALERT_MESSAGE_FOLD
+          ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
+          : esc(r.message)
+      // <details> (block) を含み得るので外側は div (CodeRabbit #469)。
+      const messageCell = `${shortLabel ? `<span style="${pillStyle('#fdecec', '#c22')}">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
+      const causeCell = r.cause
+        ? `<code style="font-size:11px">${esc(r.cause)}</code>`
+        : '<span class="muted">—</span>'
+      return `<tr style="font-size:13px;vertical-align:top">
+        <td>${logCopyRowBtn(r.id)}</td>
+        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
+        <td>${sevCell}</td>
+        <td>${eventCell}</td>
         <td>${symbolCell}</td>
-        <td>${esc(r.cause ?? '-')}</td>
-        <td><code style="white-space:pre-wrap">${esc(r.message)}</code></td>
-        <td class="muted"><code>${esc(r.requestId ?? '-')}</code></td>
+        <td>${causeCell}</td>
+        <td>${messageCell}</td>
+        <td class="muted"><code style="font-size:11px">${esc(r.requestId ?? '—')}</code></td>
       </tr>`
     })
     .join('')
-  return `${header}${filterPills}
+  return `${filterPills}${countLine}
   <table>
-    <thead><tr>
-      <th>timestamp (JST)</th><th>severity</th><th>event</th><th>symbol</th><th>cause / field</th><th>message</th><th>requestId</th>
+    <thead><tr style="font-size:12px">
+      <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__alertsCopy', {
+    meta: {
+      page: 'notification_emit_log (アラート)',
+      filter:
+        severityFilter.length === 0 && eventTypeFilter === undefined
+          ? '全件'
+          : `severity=${severityFilter.join(',') || 'all'}, eventType=${eventTypeFilter ?? 'all'}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__alertsCopy')}`
 }
 
 /**
@@ -3833,6 +4006,7 @@ function cronBody(
     price: number | null
     indicatorsJson?: string | null
     clientOrderId?: string | null
+    traceJson?: string | null
     filledPrice?: number | null
     filledQty?: number | null
     realizedPnl?: number | null
@@ -3842,9 +4016,10 @@ function cronBody(
   symbolFilter: string | undefined,
   universe?: SymbolUniverse | null,
 ): string {
+  const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
-    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a></p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
   if (rows.length === 0) {
     return `${header}<p class="muted">判定ログがまだありません。</p>`
   }
@@ -3874,6 +4049,7 @@ function cronBody(
       const symbolClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
       return `<tr>
+        <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted">${esc(fmtJst(r.timestamp))}</td>
         <td><a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a></td>
         <td class="${cls}">${esc(r.decision)}</td>
@@ -3887,10 +4063,26 @@ function cronBody(
   return `${header}
   <table>
     <thead><tr>
-      <th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
+      <th></th><th>timestamp (JST)</th><th>symbol</th><th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${safeJsonScript('__cronCopy', {
+    meta: {
+      page: 'strategy_decision_log (戦略判定)',
+      filter: `symbol=${symbolFilter ?? 'all'}, limit=${limit} (copy-all は trace 省略、行コピーは trace 含む)`,
+      generatedAt: new Date().toISOString(),
+    },
+    // copy-all 用は trace を省略 (200 行 × 判定ラダーで肥大するため)。
+    rows: rows.map((r) => ({ ...cronDecisionJson(r), requestId: r.requestId })),
+    // 行コピー用の完全版 (trace 含む) — AI への単発相談はこちらが本命。
+    full: rows.map((r) => ({
+      ...cronDecisionJson(r),
+      requestId: r.requestId,
+      trace: parseJsonObject(r.traceJson ?? null),
+    })),
+  })}
+  ${renderLogCopyScript('__cronCopy')}`
 }
 
 function cronReasonCell(row: {
