@@ -8719,16 +8719,16 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
 }
 
 /**
- * 銘柄関係マップ (#symbol-relation-map)。インバース対 / regime proxy / 退避先と
- * いう「銘柄同士の依存関係」が一覧テーブルではセル単位に散らばって読めない、
- * という operator 要望でグラフ可視化する。関係が 1 つも無ければ出さない。
+ * 配分マップ (#symbol-relation-map)。予算がどのロール / 銘柄に流れ、条件未通過
+ * 時にどこへ退避するかを Sankey で可視化する (operator 指定: 家計簿アプリの
+ * キャッシュフロー図のイメージ)。
  *
- * 表現 (repree.net 系カード + operator 指定の軸):
- *   - 1 カード = 1 銘柄 (symbol + 配分% + 投入額)
- *   - **横軸 = ロール** (列。リスク低 → 高で左から)、**縦軸 = 投入金額**
- *     (DO position の qty × avgPrice、円換算。上ほど大きい。0 = 最下段)
- *   - エッジ: インバース対 (赤) / regime proxy (紫破線) / 退避先 (緑矢印、
- *     ラベル % = 条件未通過時に流れる予算枠)
+ *   予算 100% → ロール (リスク低→高で上から) → 銘柄 (配分% + 投入額) → 退避先
+ *
+ * 退避リンク (緑) は「条件連動 ON の銘柄が entry 未通過のときに流れる先」で、
+ * 量は同銘柄の配分%。退避先ノードの太さは自前配分 + 退避受け皿の合計になる
+ * (最悪ケースの受け入れ量)。インバース対 / regime proxy は量の流れではない
+ * 構造情報なので Sankey に混ぜず脚注チップで出す。
  * 表示専用 — 判定・発注には一切関与しない。
  */
 const ROLE_NODE_COLORS: Record<string, string> = {
@@ -8740,8 +8740,8 @@ const ROLE_NODE_COLORS: Record<string, string> = {
   inverse_hedge: '#c22d2d',
 }
 
-/** 関係マップの列順 (リスク低 → 高)。'none' = role 未設定、'ref' = 未登録 (proxy 参照のみ)。 */
-const MAP_ROLE_COLUMNS = [
+/** Sankey のロール段の並び (リスク低 → 高で上から)。 */
+const MAP_ROLE_ORDER = [
   'cash_parking',
   'low_volatility',
   'core_trend',
@@ -8749,7 +8749,6 @@ const MAP_ROLE_COLUMNS = [
   'leveraged_trend',
   'inverse_hedge',
   'none',
-  'ref',
 ] as const
 
 export function renderSymbolRelationMap(
@@ -8758,135 +8757,111 @@ export function renderSymbolRelationMap(
   pairRegimes: PairRegimeEntry[],
   amounts: Record<string, { native: string; jpy: number }> = {},
 ): string {
-  const known = new Map(rows.map((r) => [r.symbol.toUpperCase(), r]))
-  interface MapNode {
+  const pctOf = (r: SymbolConfigRow): number =>
+    r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
+  const roleOf = (r: SymbolConfigRow): string => r.role ?? 'none'
+  const roleLabel = (role: string): string =>
+    role === 'none' ? 'ロール未設定' : SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole] ?? role
+  const colorOf = (role: string): string => ROLE_NODE_COLORS[role] ?? '#5f6368'
+
+  // Sankey は配分のある有効銘柄だけで構成する (0% は流量が無く描けない)。
+  const allocated = rows.filter((r) => r.active && pctOf(r) > 0)
+  interface SankeyNode {
     name: string
-    pct: number
-    role: string | null
-    active: boolean
-    registered: boolean
+    label: string
+    color: string
+    depth?: number
   }
-  const nodes = new Map<string, MapNode>()
-  const ensureNode = (symRaw: string): MapNode => {
-    const sym = symRaw.toUpperCase()
-    const existing = nodes.get(sym)
-    if (existing) return existing
-    const row = known.get(sym)
-    const node: MapNode = {
-      name: sym,
-      pct: row?.budgetAllocPct != null ? Math.round(row.budgetAllocPct * 1000) / 10 : 0,
-      role: row?.role ?? null,
-      active: row?.active ?? false,
-      registered: row !== undefined,
-    }
-    nodes.set(sym, node)
-    return node
-  }
-  interface MapEdge {
+  interface SankeyLink {
     source: string
     target: string
-    kind: 'inverse' | 'proxy' | 'fallback'
-    /** エッジラベル (退避 = 流れる配分%、他は関係名)。 */
-    label: string
+    value: number
+    kind: 'role' | 'symbol' | 'fallback'
   }
-  const edges: MapEdge[] = []
-  // インバース対 (両方向で格納されているので sym < inverse の片向きに dedup)。
+  const nodes: SankeyNode[] = []
+  const links: SankeyLink[] = []
+  const nodeNames = new Set<string>()
+  const addNode = (n: SankeyNode): void => {
+    if (nodeNames.has(n.name)) return
+    nodeNames.add(n.name)
+    nodes.push(n)
+  }
+  if (allocated.length > 0) {
+    const total = allocated.reduce((sum, r) => sum + pctOf(r), 0)
+    addNode({ name: '予算', label: `予算 ${Math.round(total * 10) / 10}%`, color: '#46637f', depth: 0 })
+    for (const role of MAP_ROLE_ORDER) {
+      const members = allocated.filter((r) => roleOf(r) === role)
+      if (members.length === 0) continue
+      const rolePct = members.reduce((sum, r) => sum + pctOf(r), 0)
+      const roleName = `role:${role}`
+      addNode({
+        name: roleName,
+        label: `${roleLabel(role)} ${Math.round(rolePct * 10) / 10}%`,
+        color: colorOf(role),
+        depth: 1,
+      })
+      links.push({ source: '予算', target: roleName, value: rolePct, kind: 'role' })
+      for (const r of members) {
+        const sym = r.symbol.toUpperCase()
+        const amount = amounts[sym]?.native
+        addNode({
+          name: sym,
+          label: `${sym} ${pctOf(r)}%${amount ? ` (${amount})` : ''}`,
+          color: colorOf(role),
+          depth: 2,
+        })
+        links.push({ source: roleName, target: sym, value: pctOf(r), kind: 'symbol' })
+      }
+    }
+    // 退避先 (#452 Layer 3): 条件連動銘柄の配分が entry 未通過時に流れる先。
+    for (const r of allocated) {
+      if (!r.cashFallbackSymbol) continue
+      const sym = r.symbol.toUpperCase()
+      const target = r.cashFallbackSymbol.toUpperCase()
+      if (sym === target) continue
+      const targetRow = rows.find((x) => x.symbol.toUpperCase() === target)
+      addNode({
+        name: target,
+        label: `${target}${amounts[target]?.native ? ` (${amounts[target]!.native})` : ''}`,
+        color: targetRow ? colorOf(roleOf(targetRow)) : '#9aa0a6',
+      })
+      links.push({ source: sym, target, value: pctOf(r), kind: 'fallback' })
+    }
+  }
+
+  // 構造情報 (量ではない) は脚注チップで: インバース対 / regime proxy。
+  const chips: string[] = []
+  const seenPair = new Set<string>()
   for (const [sym, inverse] of Object.entries(inversePairs)) {
     const a = sym.toUpperCase()
     const b = inverse.toUpperCase()
-    if (a >= b) continue
-    ensureNode(a)
-    ensureNode(b)
-    edges.push({ source: a, target: b, kind: 'inverse', label: 'インバース対' })
+    const key = [a, b].sort().join('/')
+    if (seenPair.has(key)) continue
+    seenPair.add(key)
+    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fdecec;color:#c22d2d;font-size:11px">インバース対 ${esc(a)} ⇄ ${esc(b)}</span>`)
   }
-  // regime proxy (#472): proxy → bull / bear。misconfig は proxy 不明のため skip。
   for (const pair of pairRegimes) {
     if (pair.invalidConfig !== null) continue
-    ensureNode(pair.proxySymbol)
-    for (const side of [pair.bullSymbol, pair.bearSymbol]) {
-      ensureNode(side)
-      edges.push({
-        source: pair.proxySymbol.toUpperCase(),
-        target: side.toUpperCase(),
-        kind: 'proxy',
-        label: 'regime proxy',
-      })
-    }
+    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
   }
-  // 退避先 (#452 Layer 3): 条件未通過時に予算枠が流れる先。流れる量 = 配分%。
-  for (const r of rows) {
-    if (!r.cashFallbackSymbol) continue
-    const src = ensureNode(r.symbol)
-    ensureNode(r.cashFallbackSymbol)
-    edges.push({
-      source: r.symbol.toUpperCase(),
-      target: r.cashFallbackSymbol.toUpperCase(),
-      kind: 'fallback',
-      label: src.pct > 0 ? `退避 ${src.pct}%` : '退避',
-    })
-  }
-  if (edges.length === 0) return ''
 
-  // 列割当: 横軸 = ロール。未登録 (proxy 参照のみ) は 'ref' 列。
-  const columnOf = (n: MapNode): string => {
-    if (!n.registered) return 'ref'
-    return n.role ?? 'none'
-  }
-  const usedColumns = MAP_ROLE_COLUMNS.filter((col) =>
-    [...nodes.values()].some((n) => columnOf(n) === col),
-  )
-  const COL_W = 190
-  const PLOT_H = 300
-  const TOP_PAD = 56
-  const BOTTOM_Y = TOP_PAD + PLOT_H
-  const maxJpy = Math.max(1, ...[...nodes.values()].map((n) => amounts[n.name]?.jpy ?? 0))
-  const positioned = new Map<string, { x: number; y: number }>()
-  usedColumns.forEach((col, ci) => {
-    const colNodes = [...nodes.values()].filter((n) => columnOf(n) === col)
-    // 金額の大きい順に縦位置を計算し、近接 (カード高さ未満) は下へ押し出して重なり回避。
-    colNodes.sort((a, b) => (amounts[b.name]?.jpy ?? 0) - (amounts[a.name]?.jpy ?? 0))
-    let lastY = -Infinity
-    for (const n of colNodes) {
-      const jpy = amounts[n.name]?.jpy ?? 0
-      let y = TOP_PAD + (1 - jpy / maxJpy) * PLOT_H
-      if (y - lastY < 56) y = lastY + 56
-      lastY = y
-      positioned.set(n.name, { x: 110 + ci * COL_W, y })
-    }
-  })
-  const mapHeight = Math.max(
-    320,
-    Math.ceil(Math.max(...[...positioned.values()].map((p2) => p2.y), BOTTOM_Y) + 60),
-  )
-
-  const roleHeader = (col: string): string =>
-    col === 'ref' ? '参照のみ' : col === 'none' ? 'ロール未設定' : SYMBOL_ROLE_LABELS_SHORT[col as SymbolRole] ?? col
-
-  const payload = {
-    headers: usedColumns.map((col, ci) => ({ label: roleHeader(col), x: 110 + ci * COL_W })),
-    nodes: [...nodes.values()].map((n) => ({
-      name: n.name,
-      pct: n.pct,
-      amountLabel: amounts[n.name]?.native ?? null,
-      role: n.role,
-      col: columnOf(n),
-      active: n.active,
-      registered: n.registered,
-      color: !n.active || !n.registered ? '#9aa0a6' : ROLE_NODE_COLORS[n.role ?? ''] ?? '#5f6368',
-      x: positioned.get(n.name)?.x ?? 110,
-      y: positioned.get(n.name)?.y ?? BOTTOM_Y,
-    })),
-    edges,
-  }
-  return `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">関係マップ <span class="muted" style="font-weight:normal">— 横 = ロール ／ 縦 = 投入金額 (表示専用)</span></summary>
-    <div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
+  if (links.length === 0 && chips.length === 0) return ''
+  const mapHeight = Math.max(220, nodes.length * 34 + 60)
+  const chipRow = chips.length > 0
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
+    : ''
+  const sankeyDiv = links.length > 0
+    ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
     <p class="muted" style="font-size:11px;margin:4px 0 0">
-      1 カード = 1 銘柄 (予算配分% ・ 投入額 = position の取得コスト。上ほど大きい / 未保有は最下段。グレー = 無効・未登録)。
-      <span style="color:#c22d2d">赤実線</span> = インバース対 ・
-      <span style="color:#7e3af2">紫破線</span> = regime proxy (判定材料) ・
-      <span style="color:#0e9f6e">緑矢印</span> = 退避先 (ラベル % = 条件未通過時に流れる予算枠)。
-    </p>
+      予算 → ロール → 銘柄 (配分% ・ 括弧内 = 現在の投入額)。
+      <span style="color:#0e9f6e">緑の流れ</span> = 退避先 (条件連動 ON の銘柄が entry 未通過の間、その配分が流れる先 — 受け皿側の太さは最悪ケースの合計)。
+    </p>`
+    : ''
+  const payload = { nodes, links }
+  return `<details open style="margin:0 0 12px">
+    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 予算 → ロール → 銘柄 → 退避先 (表示専用)</span></summary>
+    ${sankeyDiv}
+    ${chipRow}
   </details>
   <script src="${ECHARTS_CDN}" defer></script>
   ${safeJsonScript('__symbolRelationMap', payload)}
@@ -8895,97 +8870,50 @@ export function renderSymbolRelationMap(
     if (typeof echarts === 'undefined') return;
     var data = window.__symbolRelationMap;
     var el = document.getElementById('symbol-relation-map');
-    if (!data || !el) return;
-    var EDGE_STYLE = {
-      inverse: { color: '#c22d2d', type: 'solid', width: 2, symbol: ['none', 'none'] },
-      proxy: { color: '#7e3af2', type: 'dashed', width: 1.5, symbol: ['none', 'arrow'] },
-      fallback: { color: '#0e9f6e', type: 'solid', width: 1.8, symbol: ['none', 'arrow'] },
-    };
-    // 列ヘッダはドラッグ/ズームに追従するよう「ラベルだけの不可視ノード」で表現する。
-    var headerNodes = data.headers.map(function (h, i) {
-      return {
-        name: '__header_' + i,
-        x: h.x,
-        y: 14,
-        symbol: 'rect',
-        symbolSize: [1, 1],
-        itemStyle: { color: 'rgba(0,0,0,0)' },
-        label: { show: true, formatter: h.label, fontSize: 11, fontWeight: 700, color: '#6e6e73' },
-        tooltip: { show: false },
-        silent: true,
-      };
-    });
+    if (!data || !el || data.links.length === 0) return;
+    var labelOf = {};
+    data.nodes.forEach(function (n) { labelOf[n.name] = n.label; });
     var chart = echarts.init(el);
     chart.setOption({
       tooltip: {
         formatter: function (p) {
           if (p.dataType === 'edge') {
-            return p.data.source + ' → ' + p.data.target + '<br>' + p.data.label;
+            var head = labelOf[p.data.source] + ' → ' + labelOf[p.data.target];
+            if (p.data.kind === 'fallback') {
+              return head + '<br>条件未通過時に ' + p.data.value + '% が退避';
+            }
+            return head + '<br>' + p.data.value + '%';
           }
-          var d = p.data;
-          var lines = ['<strong>' + d.name + '</strong>'];
-          if (!d.registered) lines.push('未登録 (proxy 参照のみ)');
-          else {
-            lines.push(d.active ? '有効' : '無効');
-            lines.push('予算配分: ' + d.pct + '%');
-            lines.push('投入額: ' + (d.amountLabel || 'なし (未保有)'));
-          }
-          return lines.join('<br>');
+          return labelOf[p.name] || p.name;
         },
       },
       series: [{
-        type: 'graph',
-        layout: 'none',
-        roam: true,
+        type: 'sankey',
+        left: 10,
+        right: 200,
+        top: 14,
+        bottom: 14,
+        nodeWidth: 14,
+        nodeGap: 14,
+        draggable: false,
+        emphasis: { focus: 'adjacency' },
         data: data.nodes.map(function (n) {
-          var sub = [];
-          if (n.registered && n.pct > 0) sub.push(n.pct + '%');
-          if (n.amountLabel) sub.push(n.amountLabel);
-          if (!n.registered) sub.push('未登録 proxy');
           return {
             name: n.name,
-            x: n.x,
-            y: n.y,
-            pct: n.pct,
-            amountLabel: n.amountLabel,
-            active: n.active,
-            registered: n.registered,
-            symbol: 'roundRect',
-            symbolSize: [128, 46],
-            itemStyle: {
-              color: '#fff',
-              borderColor: n.color,
-              borderWidth: 2,
-              opacity: n.active || !n.registered ? 1 : 0.55,
-              shadowBlur: 4,
-              shadowColor: 'rgba(0,0,0,0.08)',
-            },
-            label: {
-              show: true,
-              formatter: '{sym|' + n.name + '}' + (sub.length ? '\\n{sub|' + sub.join(' ・ ') + '}' : ''),
-              rich: {
-                sym: { fontSize: 13, fontWeight: 700, color: '#1d1d1f', lineHeight: 18 },
-                sub: { fontSize: 10, color: '#6e6e73', lineHeight: 14 },
-              },
-            },
+            depth: n.depth,
+            itemStyle: { color: n.color, borderRadius: 3 },
+            label: { formatter: n.label, fontSize: 12, color: '#1d1d1f' },
           };
-        }).concat(headerNodes),
-        edges: data.edges.map(function (e) {
-          var st = EDGE_STYLE[e.kind];
+        }),
+        links: data.links.map(function (l) {
           return {
-            source: e.source,
-            target: e.target,
-            kind: e.kind,
-            label: e.label,
-            lineStyle: { color: st.color, type: st.type, width: st.width, curveness: 0.12 },
-            symbol: st.symbol,
-            symbolSize: 9,
-            edgeLabel: e.kind === 'fallback' ? {
-              show: true,
-              formatter: e.label,
-              fontSize: 10,
-              color: '#0e9f6e',
-            } : { show: false },
+            source: l.source,
+            target: l.target,
+            value: l.value,
+            kind: l.kind,
+            lineStyle: l.kind === 'fallback'
+              ? { color: '#0e9f6e', opacity: 0.45, curveness: 0.5 }
+              : { color: 'gradient', opacity: 0.3, curveness: 0.5 },
           };
         }),
       }],
