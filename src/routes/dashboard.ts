@@ -3106,7 +3106,7 @@ function renderLogCopyScript(varName: string): string {
   function copyText(text, btn) {
     function done(ok) {
       var prev = btn.textContent;
-      btn.textContent = ok ? '✅ コピーしました' : '✗ コピー失敗';
+      btn.textContent = ok ? '✅' : '✗';
       setTimeout(function () { btn.textContent = prev; }, 1500);
     }
     if (navigator.clipboard && navigator.clipboard.writeText) {
