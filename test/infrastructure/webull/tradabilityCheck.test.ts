@@ -21,7 +21,7 @@ function fetcherReturning(bodies: Array<{ status: number; body: unknown }>): typ
 }
 
 describe('checkTradability (#461 Preview Order)', () => {
-  it('verdict=tradable when any variant returns 200', async () => {
+  it('verdict=unknown(quote_ok) when any variant returns 200 — 取引可能とは主張しない', async () => {
     const result = await checkTradability(env, {
       symbol: 'aapl',
       market: 'US',
@@ -31,7 +31,38 @@ describe('checkTradability (#461 Preview Order)', () => {
         { status: 417, body: { error_code: 'OPENAPI_PARAM_ERR' } },
       ]),
     })
-    expect(result.verdict).toBe('tradable')
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('quote_ok')
+  })
+
+  it('verdict=denied(invalid_symbol) when all variants reject the symbol (ZZZZ 実測)', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'ZZZZ',
+      market: 'US',
+      fetcher: fetcherReturning([
+        {
+          status: 417,
+          body: {
+            error_code: 'OAUTH_OPENAPI_PARAM_ERR',
+            message: 'Parameter error, invalid market,symbol,instrument_type, value: US,ZZZZ,EQUITY',
+          },
+        },
+      ]),
+    })
+    expect(result.verdict).toBe('denied')
+    expect(result.reason).toBe('invalid_symbol')
+  })
+
+  it('symbol を含まない PARAM_ERR は invalid_symbol にしない (他フィールド起因)', async () => {
+    const result = await checkTradability(env, {
+      symbol: 'AAPL',
+      market: 'US',
+      fetcher: fetcherReturning([
+        { status: 417, body: { error_code: 'OAUTH_OPENAPI_PARAM_ERR', message: 'Parameter error, invalid quantity' } },
+      ]),
+    })
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('preview_error')
   })
 
   it('verdict=denied when any variant returns TICKER_IS_DENY (確定 NG)', async () => {
@@ -46,14 +77,14 @@ describe('checkTradability (#461 Preview Order)', () => {
     expect(result.detail).toContain('TICKER_IS_DENY')
   })
 
-  it('verdict=error when broker responds but all variants fail with other codes', async () => {
+  it('message なしの PARAM_ERR 等は unknown(preview_error)', async () => {
     const result = await checkTradability(env, {
       symbol: 'AAPL',
       market: 'US',
       fetcher: fetcherReturning([{ status: 417, body: { error_code: 'OPENAPI_PARAM_ERR' } }]),
     })
-    expect(result.verdict).toBe('error')
-    expect(result.detail).toContain('OPENAPI_PARAM_ERR')
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('preview_error')
   })
 
   it('verdict=unavailable when credentials are missing (登録はブロックしない側)', async () => {
@@ -100,7 +131,7 @@ describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾
     expect(result.verdict).toBe('denied')
   })
 
-  it('HTTP 200 でも body に別の error_code が埋まっていれば tradable にしない', async () => {
+  it('HTTP 200 でも body に別の error_code が埋まっていれば quote_ok にしない', async () => {
     const result = await checkTradability(env, {
       symbol: 'AAPL',
       market: 'US',
@@ -108,10 +139,11 @@ describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾
         { status: 200, body: { new_orders: [{ error_code: 'SOME_EMBEDDED_ERR' }] } },
       ]),
     })
-    expect(result.verdict).toBe('error')
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('preview_error')
   })
 
-  it('クリーンな 200 (estimated_cost) は根拠付きで tradable', async () => {
+  it('クリーンな 200 は quote_ok (発注可否は未保証の文言)', async () => {
     const result = await checkTradability(env, {
       symbol: 'AAPL',
       market: 'US',
@@ -120,8 +152,9 @@ describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾
         { status: 200, body: { estimated_cost: '292.55', estimated_transaction_fee: '0' } },
       ]),
     })
-    expect(result.verdict).toBe('tradable')
-    expect(result.detail).toContain('estimated_cost: 292.55')
+    expect(result.verdict).toBe('unknown')
+    expect(result.reason).toBe('quote_ok')
+    expect(result.detail).toContain('事前検証不可')
   })
 })
 

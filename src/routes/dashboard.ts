@@ -2081,12 +2081,26 @@ function brokerProbeBody(args: {
         if (v.result && v.result.phase === 'response' && typeof v.result.bodyTruncated === 'string' &&
             v.result.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) { denyVariant = v; }
       }
+      // 全 variant が「銘柄不正」PARAM_ERR → マスタに不存在 (ZZZZ 実測パターン)。
+      var respondingAll = body.previewVariants.filter(function (v) { return v.result && v.result.status !== null; });
+      var allInvalidSymbol = respondingAll.length > 0 && respondingAll.every(function (v) {
+        var b = parseBody(v.result);
+        return b && typeof b.error_code === 'string' && b.error_code.indexOf('PARAM_ERR') !== -1 &&
+          typeof b.message === 'string' && /invalid[^"]*symbol/i.test(b.message);
+      });
+      if (allInvalidSymbol) {
+        setPill('bp-instrument-pill', 'ng', '銘柄不正');
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は Webull の銘柄マスタに存在しません (symbol / market の組合せ不正)。';
+        return;
+      }
       if (okVariant) {
-        setPill('bp-instrument-pill', 'ok', '取引可能');
+        // preview 200 = 見積もり成功。発注 allowlist は検証されない (USMV 前例)
+        // ため「取引可能」とは表示しない。
+        setPill('bp-instrument-pill', 'unknown', '見積もり可');
         var okParsed = parseBody(okVariant.result);
         var cost = okParsed && (okParsed.estimated_cost || (okParsed.data && okParsed.data.estimated_cost));
-        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は発注前検証 (Preview Order) を通過しました — 取引可能です。' +
-          '<span class="muted" style="font-size:12px"> (body shape: ' + escHtml(okVariant.label) + (cost ? ' / estimated_cost: ' + escHtml(cost) : '') + ')</span>';
+        bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は銘柄として存在し見積もり可' + (cost ? ' (estimated_cost: ' + escHtml(cost) + ')' : '') + '。' +
+          '<span class="muted">発注可否 (deny list) は事前検証不可 — 最終確認は Webull アプリで。</span>';
         return;
       }
       if (denyVariant) {
@@ -9054,16 +9068,20 @@ function symbolFormBody(args: SymbolFormArgs): string {
         .then(function (r) { return r.json(); })
         .then(function (res) {
           if (mySeq !== window._tradabilitySeq) return; // 古い応答は捨てる
-          if (res.verdict === 'tradable') {
-            statusEl.textContent = '✅ 取引可能';
-            statusEl.style.color = '#057a55';
-          } else if (res.verdict === 'denied') {
-            statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+          if (res.verdict === 'denied') {
+            var why = res.reason === 'known_deny' ? '過去に Webull が発注拒否'
+              : res.reason === 'invalid_symbol' ? 'Webull に存在しない銘柄'
+              : 'Webull JP 取扱なし';
+            statusEl.textContent = '❌ ' + why + ' — 登録できません';
             statusEl.style.color = '#c22';
             window._tradabilityDenied = true;
             if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
+          } else if (res.reason === 'quote_ok') {
+            // preview は発注 allowlist を検証しない (USMV 前例) ので ✅ は出さない
+            statusEl.textContent = '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
+            statusEl.style.color = '#b25000';
           } else {
-            statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
+            statusEl.textContent = '❓ 確認不可 (登録は可能)';
             statusEl.style.color = '#86868b';
           }
         })
