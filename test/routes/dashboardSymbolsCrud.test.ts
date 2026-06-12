@@ -1678,13 +1678,13 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).not.toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
     // 売買単位の fail-closed 注意は 1 行だけ残す
     expect(body).toContain('未設定の銘柄は発注されません (fail-closed)')
-    // #role-stats: ロール選択横に「虚のチャート + 入場ゲート」テンプレートが ship される。
-    expect(body).toContain('id="role-tpl-chart"')
-    expect(body).toContain('window.renderRoleTemplate(')
+    // #role-stats: ロール比較ギャラリー (6 ロールの虚チャート + ゲート閾値) が ship される。
+    expect(body).toContain('id="role-gallery"')
+    expect(body).toContain('window.pickRoleTpl(')
+    expect(body).toContain('ロール比較')
     // role 別 preset 解決値 (入場ゲート閾値・stop/TP) が含まれる。
     expect(body).toContain('leveraged_trend: { tr: 8, heat: 60')
     expect(body).toContain('inverse_hedge: { tr: 15, heat: 40')
-    expect(body).toContain('入場ゲート(閾値)')
   })
 
   it('edit フォーム: 値が入っているセクションは開いた状態で表示', async () => {

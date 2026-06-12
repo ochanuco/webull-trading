@@ -10619,7 +10619,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
         <label>ロール${REQ}</label>
         <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap">
           <div>
-            <select name="role" required id="symbol-form-role" style="padding:6px" onchange="window.renderRoleTemplate(this.value)">
+            <select name="role" required id="symbol-form-role" style="padding:6px" onchange="window.syncRolePick(this.value)">
               ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
               ${
                 mode === 'new'
@@ -10634,15 +10634,12 @@ function symbolFormBody(args: SymbolFormArgs): string {
             ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
             <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
           </div>
-          <!-- #role-stats: ロールの入場ゲート閾値と押し目/stop/TP を、ライブ銘柄
-               ではなく role preset から作った「虚のチャート + ゲート」で表示
-               (個別銘柄チャートタブの視覚言語を流用)。 -->
-          <div id="role-tpl-wrap" style="display:none;background:#fafafd;border:1px solid #ececf2;border-radius:8px;padding:8px 10px;max-width:360px">
-            <div style="font-size:10px;color:#86868b;margin-bottom:2px">ロード・テンプレート <span style="color:#aaa">(直近高値=0% 基準・preset 値の模式)</span></div>
-            <div style="display:flex;gap:10px;align-items:flex-start">
-              <svg id="role-tpl-chart" viewBox="0 0 150 178" width="150" height="178" style="overflow:visible;flex:0 0 auto"></svg>
-              <div id="role-tpl-gate" style="font-size:11px;line-height:1.55;flex:1 1 auto"></div>
-            </div>
+          <!-- #role-stats: 6 ロールの「虚のチャート + 入場ゲート」を横並びカードで
+               比較。クリックで select と同期・選択をハイライト (個別銘柄チャート
+               タブの視覚言語を流用)。 -->
+          <div id="role-tpl-wrap" style="display:none;flex:1 1 100%;margin-top:4px">
+            <div style="font-size:10px;color:#86868b;margin-bottom:4px">ロール比較 — 押し目ゾーン / stop / TP と入場ゲート閾値 (直近高値=0% 基準・preset 模式 / クリックで選択)</div>
+            <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
         </div>
         <script>
@@ -10651,68 +10648,78 @@ function symbolFormBody(args: SymbolFormArgs): string {
           var P = {
             leveraged_trend: { tr: 8, heat: 60, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
             core_trend: { tr: 3, heat: 20, atr: 1.5, pbMax: -1.5, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
-            low_volatility: { tr: 1.5, heat: 10, atr: 1.3, pbMax: -1, pbMin: -3, stop: -1.5, tp: 2.5, tstop: 15, katr: 2.0 },
             sector_trend: { tr: 4, heat: 30, atr: 1.5, pbMax: -2, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            low_volatility: { tr: 1.5, heat: 10, atr: 1.3, pbMax: -1, pbMin: -3, stop: -1.5, tp: 2.5, tstop: 15, katr: 2.0 },
             inverse_hedge: { tr: 15, heat: 40, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 5, katr: 1.5 }
           };
           var COLOR = {
-            core_trend: '#1a56db', leveraged_trend: '#d97706',
-            low_volatility: '#7e3af2', sector_trend: '#0e9f9f', inverse_hedge: '#c22d2d'
+            core_trend: '#1a56db', leveraged_trend: '#d97706', sector_trend: '#0e9f9f',
+            low_volatility: '#7e3af2', inverse_hedge: '#c22d2d', cash_parking: '#5b8c5a'
           };
-          // 価格軸: +4%(上) 〜 -11%(下) 固定。% あたり 10px。
-          function yOf(pct) { return 16 + (4 - pct) * 10; }
+          var LABEL = {
+            leveraged_trend: 'レバETF・トレンド', core_trend: '非レバ・トレンド',
+            sector_trend: 'セクター', low_volatility: '低ボラ',
+            inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金'
+          };
+          var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
+          // 価格軸: +4%(上) 〜 -11%(下) 固定。% あたり 7px。
+          function yOf(pct) { return 10 + (4 - pct) * 7; }
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
-          window.renderRoleTemplate = function (role) {
-            var wrap = document.getElementById('role-tpl-wrap');
-            if (!wrap) return;
-            var svg = document.getElementById('role-tpl-chart');
-            var gate = document.getElementById('role-tpl-gate');
+          function miniSvg(role) {
             if (role === 'cash_parking') {
-              wrap.style.display = '';
-              svg.innerHTML = '<text x="75" y="80" font-size="11" fill="#5b8c5a" text-anchor="middle">entry なし</text>';
-              gate.innerHTML = '<strong>cash_parking</strong><br>戦略 entry なし。条件連動の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定を行わない)。';
-              return;
+              return '<svg viewBox="0 0 140 116" width="140" height="116"><text x="70" y="54" font-size="10" fill="#5b8c5a" text-anchor="middle">entry なし</text><text x="70" y="70" font-size="8" fill="#80868b" text-anchor="middle">(常時配分・退避先)</text></svg>';
             }
-            var p = P[role];
-            if (!p) { wrap.style.display = 'none'; return; }
-            wrap.style.display = '';
-            var color = COLOR[role] || '#5f6368';
-            var entryMid = (p.pbMax + p.pbMin) / 2;
-            var tpLv = entryMid + p.tp;
-            var stopLv = entryMid + p.stop;
-            var X0 = 40, X1 = 110; // price bar の左右
-            var parts = [];
-            // 直近高値 基準線 (0%)
-            parts.push('<line x1="' + X0 + '" y1="' + yOf(0) + '" x2="' + X1 + '" y2="' + yOf(0) + '" stroke="#9aa0a6" stroke-width="1"/>');
-            parts.push('<text x="' + (X0 - 3) + '" y="' + yOf(0) + '" font-size="8" fill="#80868b" text-anchor="end" dominant-baseline="middle">高値</text>');
-            // 押し目ゾーン (entry 帯)
+            var p = P[role], color = COLOR[role];
+            var entryMid = (p.pbMax + p.pbMin) / 2, tpLv = entryMid + p.tp, stopLv = entryMid + p.stop;
+            var X0 = 16, X1 = 124, a = [];
+            a.push('<line x1="' + X0 + '" y1="' + yOf(0) + '" x2="' + X1 + '" y2="' + yOf(0) + '" stroke="#c4c8cd" stroke-width="1"/>');
+            a.push('<text x="' + X0 + '" y="' + (yOf(0) - 2) + '" font-size="7" fill="#9aa0a6">高値0%</text>');
             var zy = yOf(p.pbMax), zh = yOf(p.pbMin) - yOf(p.pbMax);
-            parts.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
-            parts.push('<text x="' + (X1 + 3) + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" text-anchor="start" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%</text>');
-            // entry marker
-            parts.push('<circle cx="' + ((X0 + X1) / 2) + '" cy="' + yOf(entryMid).toFixed(1) + '" r="3" fill="' + color + '"/>');
-            parts.push('<text x="' + ((X0 + X1) / 2) + '" y="' + (yOf(entryMid) - 5).toFixed(1) + '" font-size="8" fill="' + color + '" text-anchor="middle">entry</text>');
-            // stop (赤破線)
-            parts.push('<line x1="' + X0 + '" y1="' + yOf(stopLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(stopLv).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
-            parts.push('<text x="' + (X1 + 3) + '" y="' + yOf(stopLv).toFixed(1) + '" font-size="8" fill="#c22d2d" text-anchor="start" dominant-baseline="middle">stop ' + fmtPct(p.stop) + '</text>');
-            // TP (緑破線)
-            parts.push('<line x1="' + X0 + '" y1="' + yOf(tpLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(tpLv).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
-            parts.push('<text x="' + (X1 + 3) + '" y="' + yOf(tpLv).toFixed(1) + '" font-size="8" fill="#0e9f6e" text-anchor="start" dominant-baseline="middle">TP ' + fmtPct(p.tp) + '</text>');
-            svg.innerHTML = parts.join('');
-            // 入場ゲート(閾値) + 退場
-            var g = [];
-            g.push('<div style="font-weight:600;margin-bottom:2px">入場ゲート(閾値)</div>');
-            g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + '</div>');
-            g.push('<div>SMA50 上抜け必須</div>');
-            g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + '</div>');
-            g.push('<div>ボラ(ATR比) ≤ ' + p.atr + '×</div>');
-            g.push('<div>押し目 ' + p.pbMax + '% 〜 ' + p.pbMin + '%</div>');
-            g.push('<div style="font-weight:600;margin:4px 0 2px">退場</div>');
-            g.push('<div>損切 ' + fmtPct(p.stop) + ' / 利確 ' + fmtPct(p.tp) + '</div>');
-            g.push('<div>保有上限 ' + p.tstop + '日 (損切ATR ' + p.katr + '×)</div>');
-            gate.innerHTML = g.join('');
+            a.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
+            a.push('<circle cx="70" cy="' + yOf(entryMid).toFixed(1) + '" r="2.6" fill="' + color + '"/>');
+            a.push('<line x1="' + X0 + '" y1="' + yOf(stopLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(stopLv).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
+            a.push('<line x1="' + X0 + '" y1="' + yOf(tpLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(tpLv).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
+            return '<svg viewBox="0 0 140 116" width="140" height="116" style="overflow:visible">' + a.join('') + '</svg>';
+          }
+          function statLines(role) {
+            if (role === 'cash_parking') return '<div style="color:#5b8c5a">pullback 判定なし</div>';
+            var p = P[role];
+            return '<div>押し目 ' + p.pbMax + '〜' + p.pbMin + '%</div>' +
+              '<div><span style="color:#c22d2d">stop ' + fmtPct(p.stop) + '</span> / <span style="color:#0e9f6e">TP ' + fmtPct(p.tp) + '</span></div>' +
+              '<div>保有 ' + p.tstop + '日 ・ 勢い &gt;' + fmtPct(p.tr) + '</div>' +
+              '<div style="color:#86868b">過熱≤' + fmtPct(p.heat) + ' ・ ATR≤' + p.atr + '×</div>';
+          }
+          function cardHtml(role) {
+            var color = COLOR[role] || '#5f6368';
+            return '<div class="role-tpl-card" data-role="' + role + '" onclick="window.pickRoleTpl(\\'' + role + '\\')" ' +
+              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:6px 8px;background:#fff;width:158px">' +
+              '<div style="font-size:11px;font-weight:600;margin-bottom:2px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
+              miniSvg(role) +
+              '<div style="font-size:10px;line-height:1.5;margin-top:2px">' + statLines(role) + '</div>' +
+              '</div>';
+          }
+          window.pickRoleTpl = function (role) {
+            var sel = document.getElementById('symbol-form-role');
+            if (sel) sel.value = role;
+            window.syncRolePick(role);
           };
-          window.renderRoleTemplate(${JSON.stringify(roleValue)});
+          window.syncRolePick = function (role) {
+            var cards = document.querySelectorAll('.role-tpl-card');
+            for (var i = 0; i < cards.length; i++) {
+              var r = cards[i].getAttribute('data-role');
+              var on = r === role;
+              cards[i].style.border = on ? ('2px solid ' + (COLOR[r] || '#06c')) : '1px solid #e3e3e8';
+              cards[i].style.background = on ? '#fcfbf7' : '#fff';
+              cards[i].style.boxShadow = on ? '0 1px 4px rgba(0,0,0,0.08)' : 'none';
+            }
+          };
+          var wrap = document.getElementById('role-tpl-wrap');
+          var gallery = document.getElementById('role-gallery');
+          if (wrap && gallery) {
+            wrap.style.display = '';
+            gallery.innerHTML = ORDER.map(cardHtml).join('');
+            window.syncRolePick(${JSON.stringify(roleValue)});
+          }
         })();
         </script>
         <label>状態</label>
