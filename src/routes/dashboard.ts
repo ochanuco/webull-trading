@@ -826,7 +826,20 @@ export const dashboard = new Hono<DashboardBindings>()
         q: c.req.query('q') ?? '',
       }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, pairRegimes, mapAmounts, errorCode, errorSymbol, filter })),
+        renderLayout(
+          c,
+          '銘柄管理',
+          symbolsListBody({
+            rows,
+            inversePairs,
+            pairRegimes,
+            mapAmounts,
+            errorCode,
+            errorSymbol,
+            filter,
+            tab: c.req.query('tab') === 'workflow' ? 'workflow' : 'list',
+          }),
+        ),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
@@ -9156,8 +9169,16 @@ function symbolsListBody(args: {
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
+  /** 'list' = 表 (default)、'workflow' = 配分キャンバス。マップ埋め込みでページが
+   *  重くなったため tab 分離 (operator 要望)。Drawflow の読み込みも workflow 時のみ。 */
+  tab?: 'list' | 'workflow'
 }): string {
   const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
+  const tab = args.tab ?? 'list'
+  const tabBar = `<div style="display:flex;gap:4px;margin:0 0 12px;border-bottom:1px solid #e3e3e8">
+    <a href="/dashboard/symbols" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'list' ? '#06c' : 'transparent'};color:${tab === 'list' ? '#06c' : '#5f6368'};font-weight:${tab === 'list' ? '600' : 'normal'}">一覧</a>
+    <a href="/dashboard/symbols?tab=workflow" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'workflow' ? '#06c' : 'transparent'};color:${tab === 'workflow' ? '#06c' : '#5f6368'};font-weight:${tab === 'workflow' ? '600' : 'normal'}">ワークフロー</a>
+  </div>`
   // #415: 買付余力バッジをページ最上部に (全 return が ${errorBanner} を先頭に持つので
   // ここに前置すると一覧・空・フィルタ 0 件の全ケースで表示される)。
   const errorBanner = buyingPowerBadge() + renderSymbolErrorBanner(errorCode, errorSymbol)
@@ -9187,16 +9208,15 @@ function symbolsListBody(args: {
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
   </p>`
 
-  const relationMap = `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 口座 → 銘柄 → 退避先 (map と同一表示)</span></summary>
-    <div style="margin-top:6px">${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes })}</div>
-  </details>`
+  if (tab === 'workflow') {
+    return `${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes })}`
+  }
 
   if (rows.length === 0) {
-    return `${errorBanner}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
+    return `${errorBanner}${tabBar}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
   }
   if (filtered.length === 0) {
-    return `${errorBanner}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
+    return `${errorBanner}${tabBar}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
   // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ツリー表記。
   const ordered = orderRowsByPair(filtered, inversePairs)
@@ -9303,7 +9323,7 @@ function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  return `${errorBanner}${relationMap}${filterBar}${headerBar}
+  return `${errorBanner}${tabBar}${filterBar}${headerBar}
   <table>
     <thead><tr>
       <th style="width:28px" title="インバース対のツリー表記"></th>
