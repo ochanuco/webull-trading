@@ -1923,10 +1923,20 @@ export const admin = new Hono<AppBindings>()
       { cashFallbackSymbol: result.before.cashFallbackSymbol, entryRequired: result.before.entryRequired },
       { cashFallbackSymbol: result.after.cashFallbackSymbol, entryRequired: result.after.entryRequired },
     )
+    if (result.clearedPartner !== null) {
+      await writeAuditLog(
+        c,
+        '/admin/symbol-config/cash-fallback',
+        `symbol=${result.clearedPartner.symbol}`,
+        { cashFallbackSymbol: result.clearedPartner.previousFallback },
+        { cashFallbackSymbol: null, reason: 'pair-single-fallback rule' },
+      )
+    }
     return c.json({
       symbol,
       cashFallbackSymbol: result.after.cashFallbackSymbol,
       entryRequired: result.after.entryRequired,
+      clearedPartner: result.clearedPartner,
     })
   })
   /**
