@@ -9337,7 +9337,9 @@ export function symbolMapEditorBody(
         itemEl.addEventListener('click', function () {
           var sym = itemEl.getAttribute('data-sym');
           var item = null;
-          data.inactive.forEach(function (x) { if (x.sym === sym) item = x; });
+          // 在庫は DB-Inactive + 盤面から下ろした銘柄の合算 (candidates) から解決
+          // する — data.inactive だけ探すと再召喚が無反応になる。
+          candidates.forEach(function (x) { if (x.sym === sym) item = x; });
           var srcId = srcNodeId;
           hidePicker();
           if (item) spawnAndConnect(item, srcId, sx, sy);
