@@ -2746,8 +2746,11 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス)', () 
 
   it("view モード: 編集バー無し + editor_mode='view' + チップ表示 (銘柄管理の図 = map)", () => {
     const html = symbolMapEditorBody(
-      [edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 })],
-      { SOXL: 'SOXS' },
+      [
+        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 }),
+        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5 }),
+      ],
+      { SOXL: 'SOXS', SOXS: 'SOXL' },
       {},
       { mode: 'view', pairRegimes: [{ bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null }] },
     )
@@ -2758,6 +2761,28 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス)', () 
     expect(html).toContain('✏️ 編集モード')
     expect(html).toContain('regime proxy SOXX → SOXL/SOXS')
     expect(html).toContain('インバース対 SOXL ⇄ SOXS')
+  })
+
+  it('チップは盤面 (active) の銘柄に限定し、misconfig regime は警告チップで出す', () => {
+    const html = symbolMapEditorBody(
+      [edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 }),
+       edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5 }),
+       edRow({ symbol: '1357', currency: 'JPY', active: false })],
+      { SOXL: 'SOXS', SOXS: 'SOXL', '1357': '1570', '1570': '1357' },
+      {},
+      {
+        mode: 'view',
+        pairRegimes: [
+          { bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXL', invalidConfig: 'self-proxy' },
+          { bullSymbol: '1570', bearSymbol: '1357', proxySymbol: '1321', invalidConfig: null },
+        ],
+      },
+    )
+    // inactive (1357/1570) の対チップ・regime チップは出ない
+    expect(html).not.toContain('インバース対 1357')
+    expect(html).not.toContain('1321')
+    // misconfig は隠さず警告チップで出す (fail-closed の異常を可視化)
+    expect(html).toContain('regime misconfig SOXL/SOXS: self-proxy')
   })
 
   it('inline script は構文エラーなく parse できる (#462 regression 防止)', () => {

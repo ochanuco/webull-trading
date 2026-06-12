@@ -8823,6 +8823,10 @@ export function symbolMapEditorBody(
   const payload = { nodes, inactive, mode }
 
   // 脚注チップ: インバース対 / regime proxy (量の流れではない構造情報)。
+  // キャンバスに出ている (= active) 銘柄に関係するものだけ表示する — inactive
+  // 銘柄の対の注記が浮く問題 (CodeRabbit #487)。misconfig な regime は隠さず
+  // 警告チップで出す (fail-closed の異常を operator が認識できるように)。
+  const activeSyms = new Set(nodes.map((n) => n.sym))
   const chips: string[] = []
   const seenPair = new Set<string>()
   for (const [symA, inv] of Object.entries(inversePairs)) {
@@ -8831,10 +8835,16 @@ export function symbolMapEditorBody(
     const key = [a, b].sort().join('/')
     if (seenPair.has(key)) continue
     seenPair.add(key)
+    if (!activeSyms.has(a) || !activeSyms.has(b)) continue
     chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fdecec;color:#c22d2d;font-size:11px">インバース対 ${esc(a)} ⇄ ${esc(b)}</span>`)
   }
   for (const pair of pairRegimes) {
-    if (pair.invalidConfig !== null) continue
+    const members = [pair.proxySymbol, pair.bullSymbol, pair.bearSymbol].map((x) => x.toUpperCase())
+    if (!members.some((x) => activeSyms.has(x))) continue
+    if (pair.invalidConfig !== null) {
+      chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fff4e5;color:#9a5b00;font-size:11px">⚠ regime misconfig ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}: ${esc(pair.invalidConfig)} (zone=unknown で両側 BUY 停止中)</span>`)
+      continue
+    }
     chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
   }
   const chipRow = chips.length > 0
