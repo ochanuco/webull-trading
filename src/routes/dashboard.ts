@@ -8894,6 +8894,9 @@ export function symbolMapEditorBody(
   #symbol-map-editor .drawflow .drawflow-node .input:hover,
   #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
   #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
+  /* 対の共有側 (自分の線が 1 本も無い側) はポートを出さない — 線は常に代表側 1 本 */
+  #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .input,
+  #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .output{display:none}
   .sm-card{padding:8px 10px;font-size:12px}
   .sm-card .sm-title{font-size:14px;font-weight:700}
   .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
@@ -9253,6 +9256,20 @@ export function symbolMapEditorBody(
     editor.on('nodeRemoved', function () { setTimeout(updatePairLinks, 0); });
     setTimeout(updatePairLinks, 0);
 
+    // 対の共有側 (エッジ関与ゼロ) はポート (グレー点) を隠す。線を引き直して
+    // 主従が入れ替われば表示も追従する。エッジが 1 本でも絡む側は機能上必要な
+    // ので出したまま。
+    function updatePairPorts() {
+      Object.keys(idOf).forEach(function (sym) {
+        var nodeEl = document.getElementById('node-' + idOf[sym]);
+        if (!nodeEl || !draft[sym]) return;
+        var hasIncomingFallback = Object.keys(draft).some(function (x) { return draft[x].fallback === sym; });
+        var isSub = effConnected(sym) && !draft[sym].connected && !draft[sym].fallback && !hasIncomingFallback;
+        nodeEl.classList.toggle('sm-pair-sub', isSub);
+      });
+    }
+    setTimeout(updatePairPorts, 0);
+
     if (isView) {
       // 読み取り専用: 共有値の描画と simulate だけ。編集系ハンドラは付けない。
       renderShares();
@@ -9302,6 +9319,7 @@ export function symbolMapEditorBody(
     }
     function renderChanges() {
       updatePairLinks();
+      updatePairPorts();
       var d = renderShares();
       var bar = document.getElementById('sm-changes-bar');
       var list = document.getElementById('sm-changes-list');
