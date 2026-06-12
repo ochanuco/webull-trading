@@ -8992,20 +8992,27 @@ export function symbolMapEditorBody(
 
     // 1/枝 の導出: 接続中の銘柄を対 (インバース) ごとに 1 枝として数え、
     // 各枝 = round(100/N, 1dp)。接続中の銘柄は対の両側とも同じ % (枠共有)。
+    // 対 (インバース) は枠共有 = 1 枝なので、**線は片側 1 本で対全体が接続扱い**。
+    // 相方は自分の線が無くても同じ share を持つ (「対で共有」表示)。
+    function effConnected(sym) {
+      if (draft[sym].connected) return true;
+      var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+      return !!(inv && draft[inv] && draft[inv].connected);
+    }
     function deriveShares() {
       var branches = 0;
       var seen = {};
       Object.keys(draft).forEach(function (sym) {
-        if (!draft[sym].connected || seen[sym]) return;
+        if (!effConnected(sym) || seen[sym]) return;
         seen[sym] = true;
         var inv = nodeBySym[sym].inverse;
-        if (inv && draft[inv] && draft[inv].connected) seen[inv] = true;
+        if (inv && draft[inv]) seen[inv] = true;
         branches += 1;
       });
       var share = branches > 0 ? Math.round((100 / branches) * 10) / 10 : 0;
       var shares = {};
       Object.keys(draft).forEach(function (sym) {
-        shares[sym] = draft[sym].connected ? share : 0;
+        shares[sym] = effConnected(sym) ? share : 0;
       });
       return { branches: branches, share: share, shares: shares };
     }
@@ -9014,7 +9021,11 @@ export function symbolMapEditorBody(
       Object.keys(draft).forEach(function (sym) {
         var span = document.getElementById('sm-share-' + sym);
         if (!span) return;
-        span.textContent = draft[sym].connected ? '1/' + d.branches + ' = ' + d.share + '%' : 'なし (risk-%)';
+        span.textContent = draft[sym].connected
+          ? '1/' + d.branches + ' = ' + d.share + '%'
+          : effConnected(sym)
+            ? '1/' + d.branches + ' = ' + d.share + '% (対で共有)'
+            : 'なし (risk-%)';
       });
       currencies.forEach(function (ccy) {
         var accountEl = document.getElementById('node-' + accountIds[ccy]);
@@ -9024,10 +9035,10 @@ export function symbolMapEditorBody(
         var seenCcy = {};
         var ccyBranches = 0;
         Object.keys(draft).forEach(function (sym) {
-          if (!draft[sym].connected || nodeBySym[sym].currency !== ccy || seenCcy[sym]) return;
+          if (!effConnected(sym) || nodeBySym[sym].currency !== ccy || seenCcy[sym]) return;
           seenCcy[sym] = true;
           var inv = nodeBySym[sym].inverse;
-          if (inv && draft[inv] && draft[inv].connected) seenCcy[inv] = true;
+          if (inv && draft[inv]) seenCcy[inv] = true;
           ccyBranches += 1;
         });
         var subtotal = Math.round(ccyBranches * d.share * 10) / 10;
@@ -9158,7 +9169,7 @@ export function symbolMapEditorBody(
     // Active/Inactive を導出する (operator 指定: 紐づいていない銘柄は Inactive)。
     function reachableSet() {
       var seen = {};
-      var queue = Object.keys(draft).filter(function (sym) { return draft[sym].connected; });
+      var queue = Object.keys(draft).filter(function (sym) { return effConnected(sym); });
       while (queue.length > 0) {
         var sym = queue.pop();
         if (seen[sym]) continue;
