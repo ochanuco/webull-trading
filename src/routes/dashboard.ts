@@ -9276,6 +9276,54 @@ export function symbolMapEditorBody(
       return;
     }
 
+    // 対は一塊: 片方のカードをドラッグしたら相方も同じ移動量で追従させる
+    // (operator 要望)。Drawflow はドラッグ中イベントを出さないので、ドラッグ側の
+    // style 位置を mousemove で読んで delta を相方に適用し、mouseup で
+    // Drawflow 内部 data の座標も確定させる。delta は canvas 座標系なので
+    // ズーム非依存。
+    var pairDrag = null;
+    el.addEventListener('mousedown', function (ev) {
+      if (ev.target.closest && (ev.target.closest('.input') || ev.target.closest('.output'))) return;
+      var nodeEl = ev.target.closest ? ev.target.closest('.drawflow-node') : null;
+      if (!nodeEl) return;
+      var id = parseInt(nodeEl.id.replace('node-', ''), 10);
+      var sym = symOf[id];
+      if (!sym || accountSymOf[sym]) return;
+      var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+      if (!inv || !idOf[inv]) return;
+      var pEl = document.getElementById('node-' + idOf[inv]);
+      if (!pEl) return;
+      pairDrag = {
+        pid: idOf[inv],
+        nodeEl: nodeEl,
+        pEl: pEl,
+        startL: nodeEl.offsetLeft,
+        startT: nodeEl.offsetTop,
+        pStartL: pEl.offsetLeft,
+        pStartT: pEl.offsetTop,
+      };
+    });
+    document.addEventListener('mousemove', function () {
+      if (!pairDrag) return;
+      var dx = pairDrag.nodeEl.offsetLeft - pairDrag.startL;
+      var dy = pairDrag.nodeEl.offsetTop - pairDrag.startT;
+      if (dx === 0 && dy === 0) return;
+      pairDrag.pEl.style.left = pairDrag.pStartL + dx + 'px';
+      pairDrag.pEl.style.top = pairDrag.pStartT + dy + 'px';
+      editor.updateConnectionNodes('node-' + pairDrag.pid);
+      updatePairLinks();
+    });
+    document.addEventListener('mouseup', function () {
+      if (!pairDrag) return;
+      var d2 = editor.drawflow.drawflow[editor.module].data[pairDrag.pid];
+      if (d2) {
+        d2.pos_x = pairDrag.pEl.offsetLeft;
+        d2.pos_y = pairDrag.pEl.offsetTop;
+      }
+      pairDrag = null;
+      updatePairLinks();
+    });
+
     function markConnectionPending(srcId, dstId) {
       var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);
       if (conn) conn.classList.add('sm-pending');
