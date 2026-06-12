@@ -10511,10 +10511,13 @@ function symbolFormBody(args: SymbolFormArgs): string {
       : ''
   const symbolField =
     mode === 'edit'
-      ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
-         <span></span>
-         ${editAllowlistBadge}
-         <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
+      ? // 値セルは必ず 1 要素 (div) に包む。複数の裸要素を出すと 2 列グリッドが
+        // 1 セルずれて以降のラベル/値が全部崩れる (#layout)。
+        `<div>
+           <input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
+           ${editAllowlistBadge}
+           <p class="muted" style="margin:4px 0 0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>
+         </div>`
       : `<div>
            <div style="position:relative;display:inline-block">
              <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
