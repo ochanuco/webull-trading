@@ -9007,7 +9007,7 @@ export function symbolMapEditorBody(
     if (isView) el.classList.add('sm-view');
 
     // 盤面レイアウトの記憶 (#496 follow-up): ノード位置とパン/ズームを
-    // localStorage に保存する (origin 単位・管理画面のみなので銘柄名と座標が
+    // localStorage に保存する (origin 単位・管理画面のみなのでティッカーと座標が
     // 残る程度は許容、operator 合意)。view/edit でキーを共有して同じ配置に。
     var LAYOUT_KEY = 'webull-sm-map-layout-v1';
     var savedLayout = {};
