@@ -10622,23 +10622,25 @@ function symbolFormBody(args: SymbolFormArgs): string {
                選択 (hidden input に同期)、ホバーで画面右に大きいプレビュー (虚のチャート
                + 入場ゲート閾値、個別銘柄チャートタブの視覚言語を流用)。 -->
           <input type="hidden" name="role" id="symbol-form-role" value="${esc(roleValue)}">
-          <div style="font-size:12px;margin-bottom:5px">
-            選択中: <strong id="role-current" style="font-size:13px">—</strong>
-            <span class="muted" style="font-size:11px;margin-left:6px">カードをクリックで選択 / ホバーで右に詳細</span>
-          </div>
-          <!-- 2軸の案内: 入場アーキ(横) × 銘柄プロファイル(縦のカード)。現状は
-               全ロールが「押し目」アーキ。モメンタム/逆張りは別軸で設計中。 -->
-          <div style="font-size:11px;color:#5f6368;background:#f6f6f9;border-radius:6px;padding:6px 8px;margin-bottom:6px">
-            <strong>2軸</strong>: 入場アーキ × 銘柄プロファイル。
-            入場アーキ =
-            <span style="background:#e7f1ff;color:#06c;border-radius:4px;padding:0 5px">押し目 (有効)</span>
-            <span style="background:#eee;color:#999;border-radius:4px;padding:0 5px" title="設計中・未実装">モメンタム (設計中)</span>
-            <span style="background:#eee;color:#999;border-radius:4px;padding:0 5px" title="設計中・未実装">逆張り (設計中)</span>
-            <span class="muted">／ 下のカード = 銘柄プロファイル(現状すべて押し目アーキ)。ホバーで「入場アーキ/horizon/想定銘柄」の説明。</span>
-          </div>
+          <div style="font-size:12px;margin-bottom:6px">選択中: <strong id="role-current" style="font-size:13px">—</strong></div>
           ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
-          <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
-          <div class="muted" style="font-size:11px;margin-top:3px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+          <!-- 2軸を構造で表現: 行 = 入場アーキ、各行のカード = 銘柄プロファイル。
+               現状は「押し目」行のみ有効。モメンタム/逆張り行は設計中 (グレー)。 -->
+          <div id="role-grid" style="display:flex;flex-direction:column;gap:6px">
+            <div style="display:flex;gap:8px;align-items:stretch">
+              <div style="flex:0 0 70px;font-size:12px;font-weight:600;color:#06c;display:flex;align-items:center;border-right:3px solid #06c;padding-right:8px">押し目</div>
+              <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px;flex:1 1 auto"></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;opacity:0.55">
+              <div style="flex:0 0 70px;font-size:12px;font-weight:600;color:#9aa0a6;border-right:3px solid #d8dadd;padding-right:8px">モメンタム</div>
+              <div style="flex:1 1 auto;font-size:11px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:10px 12px">設計中 — 新高値ブレイクの継続を取る入場アーキ(1x向け)</div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;opacity:0.55">
+              <div style="flex:0 0 70px;font-size:12px;font-weight:600;color:#9aa0a6;border-right:3px solid #d8dadd;padding-right:8px">逆張り</div>
+              <div style="flex:1 1 auto;font-size:11px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:10px 12px">設計中 — 売られすぎの反発を拾う入場アーキ(1x向け)</div>
+            </div>
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
         </div>
         <!-- ホバー時に画面右へ出る大プレビュー (fixed)。 -->
         <div id="role-preview" style="display:none;position:fixed;right:16px;top:96px;width:300px;z-index:60;background:#fff;border:1px solid #d0d0d5;border-radius:10px;box-shadow:0 6px 22px rgba(0,0,0,0.14);padding:10px 12px">

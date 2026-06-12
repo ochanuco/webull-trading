@@ -1681,7 +1681,10 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     // #role-stats: ロール比較ギャラリー + ホバー右プレビューが ship される。
     expect(body).toContain('id="role-gallery"')
     expect(body).toContain('id="role-preview"')
-    expect(body).toContain('ホバーで右に詳細')
+    // 2軸を構造で表現: 入場アーキ行 (押し目 + 設計中の モメンタム/逆張り)
+    expect(body).toContain('id="role-grid"')
+    expect(body).toContain('モメンタム')
+    expect(body).toContain('逆張り')
     // role 別 preset 解決値 (入場ゲート閾値・stop/TP) が含まれる。
     expect(body).toContain('leveraged_trend: { tr: 8, heat: 60')
     expect(body).toContain('inverse_hedge: { tr: 15, heat: 40')
