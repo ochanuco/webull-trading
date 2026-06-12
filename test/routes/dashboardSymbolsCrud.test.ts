@@ -1467,6 +1467,10 @@ describe('dashboard symbol_config role / entry override (#452)', () => {
     expect(body).toContain('name="role"')
     // select 廃止 → hidden input に現在の role が入る (#role-stats)
     expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role" value="core_trend">/)
+    // #layout 回帰: 編集モードの「銘柄」値セルは 1 div に包む (裸の <span></span> を
+    // グリッドに直接出すと 2 列レイアウトが 1 セルずれて全崩れする)。
+    expect(body).not.toMatch(/readonly style="padding:6px;background:#eee">\s*<span><\/span>/)
+    expect(body).toContain('symbol は immutable です')
     // fraction → % 表示
     expect(body).toMatch(/name="pullback_max_override"[^>]*value="-1\.5"/)
     expect(body).toMatch(/name="min_return_50d_override"[^>]*value="3"/)
