@@ -10655,15 +10655,53 @@ function symbolFormBody(args: SymbolFormArgs): string {
           };
           var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
-          // 共通の価格ラダー SVG。big=true で軸ラベル付きの大版。
-          function ladder(role, w, h, big) {
+          // 銘柄別 override 入力 (任意セクション) を読む。空 → null。
+          var OV_NAMES = {
+            tr: 'min_return_50d_override', heat: 'max_sma50_deviation_pct_override',
+            atr: 'max_atr_ratio_override', pbMax: 'pullback_max_override',
+            pbMin: 'pullback_min_override', stop: 'stop_pct_override',
+            tp: 'take_profit_pct_override', tstop: 'time_stop_days_override', katr: 'k_atr_override'
+          };
+          function ovNum(name) {
+            var el = document.getElementsByName(name)[0];
+            if (!el) return null;
+            var v = (el.value || '').trim();
+            if (v === '') return null;
+            var n = Number(v);
+            return isFinite(n) ? n : null;
+          }
+          function ovSel(name) {
+            var el = document.getElementsByName(name)[0];
+            return el ? (el.value || '') : '';
+          }
+          // 実効値 = override ?? preset ?? (sma50 は global 既定 true)。
+          function eff(role) {
+            var b = P[role], r = {}, ov = {}, any = false;
+            var keys = ['tr', 'heat', 'atr', 'pbMax', 'pbMin', 'stop', 'tp', 'tstop', 'katr'];
+            for (var i = 0; i < keys.length; i++) {
+              var k = keys[i], o = ovNum(OV_NAMES[k]);
+              r[k] = (o == null) ? b[k] : o;
+              ov[k] = o != null;
+              if (o != null) any = true;
+            }
+            var sma = ovSel('require_above_sma50_override');
+            r.sma50 = sma === '' ? true : (sma === 'true');
+            ov.sma50 = sma !== '';
+            if (sma !== '') any = true;
+            ov.any = any;
+            r.ov = ov;
+            return r;
+          }
+          function omark(b) { return b ? ' <span style="color:#d97706;font-weight:700" title="この銘柄の override">*</span>' : ''; }
+          // 価格ラダー SVG。p = 実効パラメータ。big=true で軸ラベル付き。
+          function ladder(role, p, w, h, big) {
             function y(pct) { return 12 + (4 - pct) * ((h - 24) / 15); } // +4%..-11% 固定
             if (role === 'cash_parking') {
               return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="#5b8c5a" text-anchor="middle">entry なし</text></svg>';
             }
-            var p = P[role], color = COLOR[role];
+            var color = COLOR[role], ov = p.ov || {};
             var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
-            var X0 = 14, X1 = big ? w - 64 : w - 12, a = [];
+            var X0 = 14, X1 = big ? w - 70 : w - 12, a = [];
             a.push('<line x1="' + X0 + '" y1="' + y(0).toFixed(1) + '" x2="' + X1 + '" y2="' + y(0).toFixed(1) + '" stroke="#c4c8cd" stroke-width="1"/>');
             var zy = y(p.pbMax), zh = y(p.pbMin) - y(p.pbMax);
             a.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
@@ -10672,51 +10710,62 @@ function symbolFormBody(args: SymbolFormArgs): string {
             a.push('<line x1="' + X0 + '" y1="' + y(tp).toFixed(1) + '" x2="' + X1 + '" y2="' + y(tp).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
             if (big) {
               var lx = X1 + 4;
+              var mz = (ov.pbMax || ov.pbMin) ? ' *' : '', ms = ov.stop ? ' *' : '', mt = ov.tp ? ' *' : '';
               a.push('<text x="' + lx + '" y="' + y(0).toFixed(1) + '" font-size="8" fill="#80868b" dominant-baseline="middle">高値 0%</text>');
-              a.push('<text x="' + lx + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%</text>');
-              a.push('<text x="' + lx + '" y="' + y(st).toFixed(1) + '" font-size="8" fill="#c22d2d" dominant-baseline="middle">stop ' + fmtPct(p.stop) + '</text>');
-              a.push('<text x="' + lx + '" y="' + y(tp).toFixed(1) + '" font-size="8" fill="#0e9f6e" dominant-baseline="middle">TP ' + fmtPct(p.tp) + '</text>');
+              a.push('<text x="' + lx + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%' + mz + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(st).toFixed(1) + '" font-size="8" fill="#c22d2d" dominant-baseline="middle">stop ' + fmtPct(p.stop) + ms + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(tp).toFixed(1) + '" font-size="8" fill="#0e9f6e" dominant-baseline="middle">TP ' + fmtPct(p.tp) + mt + '</text>');
             } else {
               a.push('<text x="' + X0 + '" y="' + (y(0) - 2).toFixed(1) + '" font-size="7" fill="#9aa0a6">高値0%</text>');
             }
             return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '" style="overflow:visible">' + a.join('') + '</svg>';
           }
-          function gateHtml(role) {
+          function gateHtml(role, p) {
             if (role === 'cash_parking') return '<div style="color:#5b8c5a;font-size:11px">戦略 entry なし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定なし)。</div>';
-            var p = P[role], g = [];
+            var ov = p.ov || {}, g = [];
             g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">入場ゲート(閾値)</div>');
-            g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + '</div>');
-            g.push('<div>SMA50 上抜け必須</div>');
-            g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + '</div>');
-            g.push('<div>ボラ(ATR比) ≤ ' + p.atr + '×</div>');
-            g.push('<div>押し目 ' + p.pbMax + '% 〜 ' + p.pbMin + '%</div>');
+            g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + omark(ov.tr) + '</div>');
+            g.push('<div>SMA50 ' + (p.sma50 ? '上抜け必須' : '上抜け不問') + omark(ov.sma50) + '</div>');
+            g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + omark(ov.heat) + '</div>');
+            g.push('<div>ボラ(ATR比) ≤ ' + p.atr + '×' + omark(ov.atr) + '</div>');
+            g.push('<div>押し目 ' + p.pbMax + '% 〜 ' + p.pbMin + '%' + omark(ov.pbMax || ov.pbMin) + '</div>');
             g.push('<div style="font-weight:600;margin:4px 0 2px">退場</div>');
-            g.push('<div>損切 ' + fmtPct(p.stop) + ' / 利確 ' + fmtPct(p.tp) + '</div>');
-            g.push('<div>保有上限 ' + p.tstop + '日 (損切ATR ' + p.katr + '×)</div>');
+            g.push('<div>損切 ' + fmtPct(p.stop) + ' / 利確 ' + fmtPct(p.tp) + omark(ov.stop || ov.tp) + '</div>');
+            g.push('<div>保有上限 ' + p.tstop + '日 (損切ATR ' + p.katr + '×)' + omark(ov.tstop || ov.katr) + '</div>');
             return '<div style="font-size:11px;line-height:1.55">' + g.join('') + '</div>';
           }
           function cardHtml(role) {
             var color = COLOR[role] || '#5f6368';
+            // カードは preset (ロールの素性) を固定表示。override 反映は右プレビューだけ。
             return '<div class="role-tpl-card" data-role="' + role + '" ' +
               'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:6px 8px;background:#fff;width:150px">' +
               '<div style="font-size:11px;font-weight:600;margin-bottom:2px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
-              ladder(role, 134, 96, false) +
+              ladder(role, P[role] || {}, 134, 96, false) +
               '<div style="font-size:10px;color:#86868b;margin-top:1px">保有 ' + (role === 'cash_parking' ? '—' : P[role].tstop + '日') + '</div>' +
               '</div>';
           }
           var selected = ${JSON.stringify(roleValue)};
+          var currentShown = selected;
           function labelOf(role) { return LABEL[role] || (role ? ('⚠ ' + role) : '未選択'); }
           function showPreview(role) {
+            currentShown = role;
             var pv = document.getElementById('role-preview');
             var body = document.getElementById('role-preview-body');
             if (!pv || !body) return;
             if (!role || (!P[role] && role !== 'cash_parking')) { pv.style.display = 'none'; return; }
             var color = COLOR[role] || '#5f6368';
+            if (role === 'cash_parking') {
+              body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">待機資金</div>' + ladder(role, {}, 280, 120, true) + '<div style="margin-top:6px">' + gateHtml(role, {}) + '</div>';
+              pv.style.display = '';
+              return;
+            }
+            var p = eff(role);
+            var note = p.ov.any ? 'preset + この銘柄の override (* 印) を反映' : 'preset の姿 (override 未設定)';
             body.innerHTML =
               '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">' + LABEL[role] + '</div>' +
-              ladder(role, 280, 150, true) +
-              '<div style="margin-top:6px">' + gateHtml(role) + '</div>' +
-              '<div style="font-size:10px;color:#aaa;margin-top:6px">直近高値=0% 基準・preset 値の模式</div>';
+              ladder(role, p, 280, 150, true) +
+              '<div style="margin-top:6px">' + gateHtml(role, p) + '</div>' +
+              '<div style="font-size:10px;color:#aaa;margin-top:6px">直近高値=0% 基準・実効値の模式<br>' + note + '</div>';
             pv.style.display = '';
           }
           function highlight(role) {
@@ -10737,8 +10786,10 @@ function symbolFormBody(args: SymbolFormArgs): string {
             highlight(role);
             showPreview(role);
           }
-          var gallery = document.getElementById('role-gallery');
-          if (gallery) {
+          function rerender() { showPreview(currentShown); }
+          function init() {
+            var gallery = document.getElementById('role-gallery');
+            if (!gallery) return;
             gallery.innerHTML = ORDER.map(cardHtml).join('');
             var cards = gallery.querySelectorAll('.role-tpl-card');
             for (var i = 0; i < cards.length; i++) {
@@ -10748,13 +10799,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
                 card.addEventListener('mouseenter', function () { showPreview(r); });
               })(cards[i]);
             }
-            // ホバーが外れたら選択中ロールのプレビューに戻す (無ければ消す)。
+            // ホバーが外れたら選択中ロールのプレビューに戻す。
             gallery.addEventListener('mouseleave', function () { showPreview(selected); });
+            // 銘柄別 override を編集したら実効プレビューを即更新。
+            var names = ['min_return_50d_override', 'max_sma50_deviation_pct_override', 'max_atr_ratio_override', 'pullback_max_override', 'pullback_min_override', 'stop_pct_override', 'take_profit_pct_override', 'time_stop_days_override', 'k_atr_override', 'require_above_sma50_override'];
+            for (var j = 0; j < names.length; j++) {
+              var el = document.getElementsByName(names[j])[0];
+              if (el) { el.addEventListener('input', rerender); el.addEventListener('change', rerender); }
+            }
             var cur = document.getElementById('role-current');
             if (cur) cur.textContent = labelOf(selected);
             highlight(selected);
             showPreview(selected);
           }
+          if (document.readyState !== 'loading') init();
+          else document.addEventListener('DOMContentLoaded', init);
         })();
         </script>
         <label>状態</label>
