@@ -9300,6 +9300,33 @@ export function symbolMapEditorBody(
         draft[item.sym] = { connected: false, fallback: null };
       }
       delete removedOnCanvas[item.sym];
+      // 対の相方も在庫にあれば 2 枚セットで出す (片割れだけ盤面に出て
+      // 「見えないのに対で共有」の幽霊配分を作らないため)。線は引いた側のみ。
+      if (item.partner) {
+        var pItem = item.partner;
+        var pKnown = nodeBySym[pItem.sym];
+        var pSaved = pKnown ? baseline[pItem.sym] : null;
+        var pn = pKnown || {
+          sym: pItem.sym,
+          pct: 0,
+          role: pItem.role,
+          color: pItem.color,
+          held: null,
+          entryRequired: false,
+          fallback: null,
+          inverse: pItem.inverse,
+          currency: pItem.currency,
+        };
+        programmatic = true;
+        addSymbolNode(pn, pos.x, pos.y + 120, { spawned: pSaved ? pSaved.active === false : true });
+        programmatic = false;
+        if (pSaved) {
+          baseline[pItem.sym] = pSaved;
+          draft[pItem.sym] = { connected: false, fallback: null };
+        }
+        delete removedOnCanvas[pItem.sym];
+        data.inactive = data.inactive.filter(function (x) { return x.sym !== pItem.sym; });
+      }
       // 接続の意味づけは通常ハンドラと同じ規則で draft に反映する。
       var src = symOf[srcNodeId];
       if (accountSymOf[src]) {
@@ -9319,12 +9346,33 @@ export function symbolMapEditorBody(
         return { sym: sym, role: n.role, color: n.color, currency: n.currency, inverse: n.inverse };
       });
       var candidates = data.inactive.concat(removedItems).filter(function (x) { return x.currency === ccy; });
+      // 口座から引いた場合、対 (両方在庫) は 1 エントリに畳んで 2 枚セットで出す
+      // (対 = 1 枝なので個別に出すのは意味論として誤り)。退避先 (銘柄から引いた
+      // 場合) は対象を 1 銘柄に決める必要があるため個別のまま。
+      if (accountSymOf[src]) {
+        var bySym2 = {};
+        candidates.forEach(function (x) { bySym2[x.sym] = x; });
+        var merged = [];
+        var used = {};
+        candidates.forEach(function (x) {
+          if (used[x.sym]) return;
+          used[x.sym] = true;
+          if (x.inverse && bySym2[x.inverse] && !used[x.inverse]) {
+            used[x.inverse] = true;
+            merged.push(Object.assign({}, x, { partner: bySym2[x.inverse], pairLabel: x.sym + ' ⇄ ' + x.inverse }));
+          } else {
+            merged.push(x);
+          }
+        });
+        candidates = merged;
+      }
       if (candidates.length === 0) return;
       picker.innerHTML = '<div class="muted" style="padding:2px 6px 6px">既存 Inactive 銘柄を紐づけ (' + ccy + ')</div>' +
         candidates.map(function (x) {
           return '<div class="sm-spawn-item" data-sym="' + x.sym + '" style="padding:5px 10px;border-radius:6px;cursor:pointer">' +
-            '<strong style="color:' + x.color + '">' + x.sym + '</strong>' +
-            (x.role ? ' <span class="muted" style="font-size:10px">' + x.role + '</span>' : '') + '</div>';
+            '<strong style="color:' + x.color + '">' + (x.pairLabel || x.sym) + '</strong>' +
+            (x.pairLabel ? ' <span class="muted" style="font-size:10px">対 ・ 2 枚で出現</span>' : '') +
+            (!x.pairLabel && x.role ? ' <span class="muted" style="font-size:10px">' + x.role + '</span>' : '') + '</div>';
         }).join('');
       picker.style.left = clientX + 'px';
       picker.style.top = clientY + 'px';
