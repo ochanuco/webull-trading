@@ -19,7 +19,7 @@ import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/g
 import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
 import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency, SymbolRole } from '../infrastructure/db/symbolConfigRepo'
-import { loadInversePairs, loadPairRegimeConfigs, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs, loadPairRegimeConfigs, parseCashFallbacksJson, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
@@ -424,6 +424,7 @@ export const dashboard = new Hono<DashboardBindings>()
           entryStatuses,
           heldSymbols,
           symbolCurrency: universe.symbolCurrency,
+    inversePairs: universe.inversePairs,
         })
         const sortedCharts = sortGridChartsByEntryPriority(charts, entryStatuses, universe)
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
@@ -582,7 +583,7 @@ export const dashboard = new Hono<DashboardBindings>()
                   targetWeight: universe.symbolBudgetAllocPct[focusSymbol] ?? null,
                   entryRequired: universe.symbolEntryRequired[focusSymbol] === true,
                   alwaysActive: universe.symbolAlwaysActive[focusSymbol] === true,
-                  cashFallbackSymbol: universe.symbolCashFallback[focusSymbol] ?? null,
+                  cashFallbackSymbols: universe.symbolCashFallback[focusSymbol] ?? null,
                 }
               : null,
           }),
@@ -5902,7 +5903,7 @@ export interface SymbolPolicySummary {
   targetWeight: number | null
   entryRequired: boolean
   alwaysActive: boolean
-  cashFallbackSymbol: string | null
+  cashFallbackSymbols: string[] | null
 }
 
 /**
@@ -7387,7 +7388,7 @@ export function renderSymbolPolicyLine(
     policy.targetWeight !== null ||
     policy.entryRequired ||
     policy.alwaysActive ||
-    policy.cashFallbackSymbol !== null
+    policy.cashFallbackSymbols !== null
   if (!hasAny) return ''
   const parts: string[] = []
   if (policy.role !== null) {
@@ -7403,9 +7404,9 @@ export function renderSymbolPolicyLine(
   }
   if (policy.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
   if (policy.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
-  if (policy.cashFallbackSymbol !== null) {
+  if (policy.cashFallbackSymbols !== null) {
     parts.push(
-      `退避先 <a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(policy.cashFallbackSymbol)}">${esc(policy.cashFallbackSymbol)}</a>`,
+      `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
     )
   }
   return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
@@ -8797,7 +8798,7 @@ export function symbolMapEditorBody(
     active: boolean
     held: Record<string, string>
     entryRequired: boolean
-    fallbackSyms: Record<string, string | null>
+    fallbackSyms: Record<string, string[]>
     y: number
   }
   const units: Unit[] = []
@@ -8834,7 +8835,9 @@ export function symbolMapEditorBody(
         syms.filter((x) => amounts[x] !== undefined).map((x) => [x, amounts[x]!.native]),
       ),
       entryRequired: members.some((m) => m.entryRequired === true),
-      fallbackSyms: Object.fromEntries(syms.map((x) => [x, bySym.get(x)?.cashFallbackSymbol?.toUpperCase() ?? null])),
+      fallbackSyms: Object.fromEntries(
+        syms.map((x) => [x, parseCashFallbacksJson(bySym.get(x)?.cashFallbackSymbols, x)]),
+      ),
       y: 0,
     }
     for (const x of syms) unitOfSym[x] = unit.id
@@ -8844,17 +8847,15 @@ export function symbolMapEditorBody(
   if (onCanvas.length === 0) {
     return `<p class="muted">有効な銘柄がありません。</p>`
   }
-  // unit の退避先 (unit 単位): 各側の fallback が指す unit。混在は先頭優先 +
-  // 警告 (旧データの片側欠け等は適用で側別に正規化される)。
-  const fallbackUnitOf = (u: Unit): { id: string | null; mixed: boolean } => {
+  // unit の退避先 (unit 単位、#496 多分岐): 各側の fallback リストが指す unit
+  // 群の和集合。側ごとの食い違い (旧データの片側欠け等) は適用で側別に正規化
+  // される。
+  const fallbackUnitsOf = (u: Unit): string[] => {
     const targets = u.syms
-      .map((x) => u.fallbackSyms[x])
-      .filter((x): x is string => x !== null)
+      .flatMap((x) => u.fallbackSyms[x] ?? [])
       .map((x) => unitOfSym[x] ?? null)
       .filter((x): x is string => x !== null)
-    if (targets.length === 0) return { id: null, mixed: false }
-    const uniq = [...new Set(targets)]
-    return { id: uniq[0]!, mixed: uniq.length > 1 }
+    return [...new Set(targets)]
   }
   // JPY 群 → USD 群で縦に並べる。
   let yCursor = 30
@@ -8876,7 +8877,7 @@ export function symbolMapEditorBody(
       pct: u.pct,
       held: u.held,
       entryRequired: u.entryRequired,
-      fallback: fallbackUnitOf(u),
+      fallbacks: fallbackUnitsOf(u),
       y: u.y,
     })),
     // スポーン在庫: 盤面に無い (= 全側 inactive) unit。
@@ -8977,10 +8978,15 @@ export function symbolMapEditorBody(
   .sm-card .sm-status-pending{color:#b25000;font-size:11px}
   .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
   .sm-card .sm-share{font-weight:600}
-  .sm-card .sm-sim{margin-top:4px;padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5}
-  .sm-card .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
-  .sm-card .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
-  .sm-card .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
+  /* シミュレーション結果はカードの「外」に浮かせる (#496 follow-up): フロー内に
+     置くとカードが伸び、Drawflow が線の端点を再計算しないため点と線がズレる。
+     absolute overlay なら几何が一切変わらない。 */
+  #symbol-map-editor .drawflow .drawflow-node{overflow:visible}
+  .sm-sim-wrap{position:absolute;top:calc(100% + 4px);left:2px;right:2px;z-index:6;display:flex;flex-direction:column;gap:3px;pointer-events:none}
+  .sm-sim{padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5;box-shadow:0 1px 4px rgba(0,0,0,0.18)}
+  .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
+  .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
+  .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
   #symbol-map-editor svg.connection.sm-sim-flow path{stroke:#0e9f6e !important;stroke-width:4px;stroke-dasharray:10 6;animation:smflow 1.2s linear infinite}
   #symbol-map-editor svg.connection.sm-sim-dim path{opacity:0.25}
   @keyframes smflow{to{stroke-dashoffset:-32}}
@@ -9000,6 +9006,35 @@ export function symbolMapEditorBody(
     editor.start();
     if (isView) el.classList.add('sm-view');
 
+    // 盤面レイアウトの記憶 (#496 follow-up): ノード位置とパン/ズームを
+    // localStorage に保存する (origin 単位・管理画面のみなのでティッカーと座標が
+    // 残る程度は許容、operator 合意)。view/edit でキーを共有して同じ配置に。
+    var LAYOUT_KEY = 'webull-sm-map-layout-v1';
+    var savedLayout = {};
+    try {
+      savedLayout = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}') || {};
+    } catch (e) { savedLayout = {}; }
+    var savedPos = savedLayout.pos || {};
+    function persistLayout() {
+      try {
+        var pos = {};
+        Object.keys(idOf).forEach(function (uid) {
+          var d2 = editor.drawflow.drawflow[editor.module].data[idOf[uid]];
+          if (d2) pos[uid] = { x: d2.pos_x, y: d2.pos_y };
+        });
+        Object.keys(accountIds).forEach(function (ccy) {
+          var d2 = editor.drawflow.drawflow[editor.module].data[accountIds[ccy]];
+          if (d2) pos['__account_' + ccy + '__'] = { x: d2.pos_x, y: d2.pos_y };
+        });
+        localStorage.setItem(LAYOUT_KEY, JSON.stringify({
+          pos: pos,
+          zoom: editor.zoom,
+          canvasX: editor.canvas_x,
+          canvasY: editor.canvas_y,
+        }));
+      } catch (e) { /* private mode 等は黙って諦める (表示専用機能) */ }
+    }
+
     var idOf = {};      // unitId -> drawflow node id
     var unitOf = {};    // drawflow node id -> unitId
     var unitBy = {};    // unitId -> unit payload
@@ -9016,7 +9051,8 @@ export function symbolMapEditorBody(
     currencies.forEach(function (ccy) {
       var label = ccy === 'JPY' ? '日本口座 (JPY)' : '米国口座 (USD)';
       var y = ccy === 'JPY' ? 30 + ((Math.max(nJpy, 1) - 1) * 130) / 2 : 30 + nJpy * 130 + ((Math.max(data.units.length - nJpy, 1) - 1) * 130) / 2;
-      var id = editor.addNode('口座' + ccy, 0, 1, 40, y, 'sm-node sm-account',
+      var saved = savedPos['__account_' + ccy + '__'];
+      var id = editor.addNode('口座' + ccy, 0, 1, saved ? saved.x : 40, saved ? saved.y : y, 'sm-node sm-account',
         { unit: '口座' + ccy },
         '<div class="sm-card"><div class="sm-title" style="color:#fff">' + label + '</div>' +
         '<div class="sm-meta" style="color:#e8eaed">—</div></div>');
@@ -9046,15 +9082,16 @@ export function symbolMapEditorBody(
     function addUnitNode(u, x, y, opts2) {
       var spawned = !!(opts2 && opts2.spawned);
       unitBy[u.id] = u;
-      baseline[u.id] = baseline[u.id] || { pct: u.pct || 0, fallback: (u.fallback && u.fallback.id) || null, active: !spawned };
-      draft[u.id] = { connected: (u.pct || 0) > 0, fallback: (u.fallback && u.fallback.id) || null };
+      baseline[u.id] = baseline[u.id] || { pct: u.pct || 0, fallbacks: (u.fallbacks || []).slice().sort(), active: !spawned };
+      draft[u.id] = { connected: (u.pct || 0) > 0, fallbacks: (u.fallbacks || []).slice() };
       var id = editor.addNode(u.id, 1, 1, x, y, 'sm-node ' + (u.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { unit: u.id }, unitCardHtml(u, spawned));
       idOf[u.id] = id;
       unitOf[id] = u.id;
       return id;
     }
     data.units.forEach(function (u) {
-      addUnitNode(u, u.pct > 0 ? 360 : 760, u.y);
+      var saved = savedPos[u.id];
+      addUnitNode(u, saved ? saved.x : (u.pct > 0 ? 360 : 760), saved ? saved.y : u.y);
     });
 
     function tagConnectionClass(srcId, dstId, cls) {
@@ -9064,13 +9101,24 @@ export function symbolMapEditorBody(
     programmatic = true;
     data.units.forEach(function (u) {
       if (u.pct > 0) editor.addConnection(accountIds[u.currency], idOf[u.id], 'output_1', 'input_1');
-      var fb = u.fallback && u.fallback.id;
-      if (fb && idOf[fb]) {
+      (u.fallbacks || []).forEach(function (fb) {
+        if (!idOf[fb]) return;
         editor.addConnection(idOf[u.id], idOf[fb], 'output_1', 'input_1');
         tagConnectionClass(idOf[u.id], idOf[fb], 'sm-fallback');
-      }
+      });
     });
     programmatic = false;
+
+    // パン/ズームの復元と、移動・ズームのたびの保存。
+    if (typeof savedLayout.zoom === 'number' && savedLayout.zoom > 0.2 && savedLayout.zoom <= 2) {
+      editor.zoom = savedLayout.zoom;
+      editor.canvas_x = savedLayout.canvasX || 0;
+      editor.canvas_y = savedLayout.canvasY || 0;
+      editor.zoom_refresh();
+    }
+    editor.on('nodeMoved', function () { persistLayout(); });
+    editor.on('zoom', function () { persistLayout(); });
+    editor.on('translate', function () { persistLayout(); });
 
     function deriveShares() {
       var branches = 0;
@@ -9105,7 +9153,7 @@ export function symbolMapEditorBody(
     // ---- シミュレーション (両モード共通)。結果は銘柄 → unit カードに重ねる。
     var simBtn = document.getElementById('sm-simulate');
     function clearSim() {
-      el.querySelectorAll('.sm-sim').forEach(function (n) { n.remove(); });
+      el.querySelectorAll('.sm-sim-wrap').forEach(function (n) { n.remove(); });
       el.querySelectorAll('svg.connection.sm-sim-flow').forEach(function (n) { n.classList.remove('sm-sim-flow'); });
       el.querySelectorAll('svg.connection.sm-sim-dim').forEach(function (n) { n.classList.remove('sm-sim-dim'); });
       document.getElementById('sm-sim-meta').hidden = true;
@@ -9115,35 +9163,46 @@ export function symbolMapEditorBody(
     function simBadge(uid, cls, html) {
       var nodeEl = document.getElementById('node-' + idOf[uid]);
       if (!nodeEl) return;
-      var card = nodeEl.querySelector('.sm-card');
-      if (!card) return;
+      var wrap = nodeEl.querySelector('.sm-sim-wrap');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.className = 'sm-sim-wrap';
+        nodeEl.appendChild(wrap);
+      }
       var div = document.createElement('div');
       div.className = 'sm-sim ' + cls;
       div.innerHTML = html;
-      card.appendChild(div);
+      wrap.appendChild(div);
     }
-    // 適用/シミュレートで使う「unit → 銘柄ごとの fallback 展開」。
+    // 適用/シミュレートで使う「unit → 銘柄ごとの fallback 展開」(#496 多分岐)。
+    // 各 src 側は dst unit ごとに 1 銘柄ずつ受け取る:
     //   対→対: 役割で側合わせ (leveraged↔leveraged)、なければ並び順。
     //   対→単独: 両側 → 同一先。単独→単独: そのまま。
-    function expandFallback(srcUid, dstUid) {
+    function expandFallbacks(srcUid, dstUids) {
       var src = unitBy[srcUid];
       var out = {};
-      if (dstUid === null) {
-        src.syms.forEach(function (x) { out[x] = null; });
-        return out;
-      }
-      var dst = unitBy[dstUid];
-      src.syms.forEach(function (x, i) {
-        if (dst.syms.length === 1) {
-          out[x] = dst.syms[0];
-          return;
-        }
-        var role = src.roles[x];
-        var match = null;
-        dst.syms.forEach(function (y) { if (dst.roles[y] === role && role) match = y; });
-        out[x] = match || dst.syms[Math.min(i, dst.syms.length - 1)];
+      src.syms.forEach(function (x) { out[x] = (dstUids && dstUids.length > 0) ? [] : null; });
+      (dstUids || []).forEach(function (dstUid) {
+        var dst = unitBy[dstUid];
+        src.syms.forEach(function (x, i) {
+          var pick;
+          if (dst.syms.length === 1) {
+            pick = dst.syms[0];
+          } else {
+            var role = src.roles[x];
+            var match = null;
+            dst.syms.forEach(function (y) { if (dst.roles[y] === role && role) match = y; });
+            pick = match || dst.syms[Math.min(i, dst.syms.length - 1)];
+          }
+          out[x].push(pick);
+        });
       });
       return out;
+    }
+    function fallbacksChanged(uid) {
+      var a = (draft[uid].fallbacks || []).slice().sort().join(',');
+      var b = (baseline[uid].fallbacks || []).slice().sort().join(',');
+      return a !== b;
     }
     if (simBtn) simBtn.addEventListener('click', function () {
       simBtn.disabled = true;
@@ -9158,8 +9217,8 @@ export function symbolMapEditorBody(
           if (d.shares[uid] !== baseline[uid].pct) {
             u.syms.forEach(function (x) { pcts[x] = d.shares[uid] > 0 ? d.shares[uid] : null; });
           }
-          if ((draft[uid].fallback || null) !== (baseline[uid].fallback || null)) {
-            var exp = expandFallback(uid, draft[uid].fallback || null);
+          if (fallbacksChanged(uid)) {
+            var exp = expandFallbacks(uid, draft[uid].fallbacks);
             Object.keys(exp).forEach(function (x) { fallbacks[x] = exp[x]; });
           }
         });
@@ -9179,8 +9238,9 @@ export function symbolMapEditorBody(
           clearSim();
           var pctTxt = function (w) { return Math.round(w * 1000) / 10 + '%'; };
           Object.keys(draft).forEach(function (uid) {
-            var fb = draft[uid].fallback;
-            if (fb && idOf[fb]) tagConnectionClass(idOf[uid], idOf[fb], 'sm-sim-dim');
+            (draft[uid].fallbacks || []).forEach(function (fb) {
+              if (idOf[fb]) tagConnectionClass(idOf[uid], idOf[fb], 'sm-sim-dim');
+            });
           });
           var planBySym = {};
           if (res.plan) res.plan.orders.forEach(function (o) { planBySym[o.symbol] = o; });
@@ -9192,12 +9252,16 @@ export function symbolMapEditorBody(
             var held = res.heldSymbols.indexOf(sym) !== -1;
             var prefix = unitBy[uid].syms.length > 1 ? sym + ': ' : '';
             if (a.rerouteTo) {
-              simBadge(uid, 'sm-sim-reroute', prefix + '判定 ' + status + ' → <strong>' + pctTxt(a.targetWeight) + ' を ' + a.rerouteTo + ' へ退避</strong>');
-              var dstUid = data.unitOfSym[a.rerouteTo];
-              if (dstUid && idOf[dstUid]) {
-                var conn = el.querySelector('svg.connection.node_in_node-' + idOf[dstUid] + '.node_out_node-' + idOf[uid]);
-                if (conn) { conn.classList.remove('sm-sim-dim'); conn.classList.add('sm-sim-flow'); }
-              }
+              var targets = Array.isArray(a.rerouteTo) ? a.rerouteTo : [a.rerouteTo];
+              var per = targets.length > 1 ? ' (各 ' + pctTxt(a.targetWeight / targets.length) + ')' : '';
+              simBadge(uid, 'sm-sim-reroute', prefix + '判定 ' + status + ' → <strong>' + pctTxt(a.targetWeight) + ' を ' + targets.join('/') + ' へ退避' + per + '</strong>');
+              targets.forEach(function (t) {
+                var dstUid = data.unitOfSym[t];
+                if (dstUid && idOf[dstUid]) {
+                  var conn = el.querySelector('svg.connection.node_in_node-' + idOf[dstUid] + '.node_out_node-' + idOf[uid]);
+                  if (conn) { conn.classList.remove('sm-sim-dim'); conn.classList.add('sm-sim-flow'); }
+                }
+              });
             } else {
               simBadge(uid, 'sm-sim-active', prefix + (held ? '保有中' : '判定 ' + status) + ' ・ <strong>active ' + pctTxt(a.activeWeight) + '</strong>');
             }
@@ -9253,8 +9317,9 @@ export function symbolMapEditorBody(
         var uid = queue.pop();
         if (seen[uid]) continue;
         seen[uid] = true;
-        var fb = draft[uid].fallback;
-        if (fb && draft[fb] && !seen[fb]) queue.push(fb);
+        (draft[uid].fallbacks || []).forEach(function (fb) {
+          if (draft[fb] && !seen[fb]) queue.push(fb);
+        });
       }
       return seen;
     }
@@ -9284,15 +9349,17 @@ export function symbolMapEditorBody(
         var u = unitBy[uid];
         var newPct = d.shares[uid];
         var pctChanged = newPct !== b.pct;
-        var fbChanged = (draft[uid].fallback || null) !== (b.fallback || null);
+        var fbChanged = fallbacksChanged(uid);
         if (pctChanged) {
           items.push(u.label + ': 配分 ' + (b.pct ? b.pct + '%' : 'なし') + ' → ' + (newPct ? '1/' + d.branches + ' = ' + newPct + '%' : '解除 (risk-%)'));
         }
         if (fbChanged) {
-          if (draft[uid].fallback) {
-            var exp = expandFallback(uid, draft[uid].fallback);
-            var detail = u.syms.map(function (x) { return x + '→' + exp[x]; }).join(' / ');
-            items.push(u.label + ': 退避先 → ' + unitBy[draft[uid].fallback].label + ' (' + detail + '、条件連動 ON)');
+          var fbs = draft[uid].fallbacks || [];
+          if (fbs.length > 0) {
+            var exp = expandFallbacks(uid, fbs);
+            var detail = u.syms.map(function (x) { return x + '→' + exp[x].join('+'); }).join(' / ');
+            var split = fbs.length > 1 ? '、各 1/' + fbs.length + ' に等分割' : '';
+            items.push(u.label + ': 退避先 → ' + fbs.map(function (f) { return unitBy[f].label; }).join(' + ') + ' (' + detail + split + '、条件連動 ON)');
           } else {
             items.push(u.label + ': 退避先を解除');
           }
@@ -9326,8 +9393,10 @@ export function symbolMapEditorBody(
       delete idOf[uid];
       removedOnCanvas[uid] = true;
       draft[uid].connected = false;
-      draft[uid].fallback = null;
-      Object.keys(draft).forEach(function (x) { if (draft[x].fallback === uid) draft[x].fallback = null; });
+      draft[uid].fallbacks = [];
+      Object.keys(draft).forEach(function (x) {
+        draft[x].fallbacks = (draft[x].fallbacks || []).filter(function (f) { return f !== uid; });
+      });
       renderChanges();
     });
 
@@ -9370,13 +9439,16 @@ export function symbolMapEditorBody(
         alert('異通貨の退避先は設定できません (同一通貨のみ)。');
         return;
       }
-      // 退避は unit 1 本 — 既存の退避線を外して張る。
-      if (draft[src].fallback && idOf[draft[src].fallback]) {
+      // 退避は多分岐可 (#496): 追加で**等分割**される。重複と上限 (4) のみ防ぐ。
+      var cur = draft[src].fallbacks || [];
+      if (cur.indexOf(dst) !== -1 || cur.length >= 4) {
         programmatic = true;
-        editor.removeSingleConnection(idOf[src], idOf[draft[src].fallback], 'output_1', 'input_1');
+        editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
         programmatic = false;
+        if (cur.length >= 4) alert('退避先は最大 4 つまでです。');
+        return;
       }
-      draft[src].fallback = dst;
+      draft[src].fallbacks = cur.concat([dst]);
       tagConnectionClass(info.output_id, info.input_id, 'sm-fallback');
       markConnectionPending(info.output_id, info.input_id);
       renderChanges();
@@ -9392,7 +9464,7 @@ export function symbolMapEditorBody(
         renderChanges();
         return;
       }
-      if (draft[src].fallback === dst) draft[src].fallback = null;
+      draft[src].fallbacks = (draft[src].fallbacks || []).filter(function (f) { return f !== dst; });
       renderChanges();
     });
 
@@ -9438,7 +9510,7 @@ export function symbolMapEditorBody(
       if (accountCcyOf[src]) {
         draft[u.id].connected = true;
       } else {
-        draft[src].fallback = u.id;
+        draft[src].fallbacks = (draft[src].fallbacks || []).concat([u.id]);
         tagConnectionClass(srcNodeId, newId, 'sm-fallback');
       }
       markConnectionPending(srcNodeId, newId);
@@ -9585,22 +9657,24 @@ export function symbolMapEditorBody(
         draft[newDst].connected = true;
         markConnectionPending(state.srcId, idOf[newDst]);
       } else {
-        if (draft[src].fallback === oldDst) draft[src].fallback = null;
-        var invalid = (unitBy[src].syms.length === 1 && unitBy[newDst].syms.length > 1) || unitBy[src].currency !== unitBy[newDst].currency;
+        draft[src].fallbacks = (draft[src].fallbacks || []).filter(function (f) { return f !== oldDst; });
+        var invalid = (unitBy[src].syms.length === 1 && unitBy[newDst].syms.length > 1) ||
+          unitBy[src].currency !== unitBy[newDst].currency ||
+          (draft[src].fallbacks || []).indexOf(newDst) !== -1;
         if (invalid) {
-          alert('その付け替えはできません (単独→対 or 異通貨)。元に戻します。');
+          alert('その付け替えはできません (単独→対 / 異通貨 / 重複)。元に戻します。');
           programmatic = true;
           editor.addConnection(state.srcId, state.oldDstId, 'output_1', 'input_1');
           programmatic = false;
           tagConnectionClass(state.srcId, state.oldDstId, 'sm-fallback');
-          draft[src].fallback = oldDst;
+          draft[src].fallbacks = (draft[src].fallbacks || []).concat([oldDst]);
           renderChanges();
           return;
         }
         programmatic = true;
         editor.addConnection(state.srcId, idOf[newDst], 'output_1', 'input_1');
         programmatic = false;
-        draft[src].fallback = newDst;
+        draft[src].fallbacks = (draft[src].fallbacks || []).concat([newDst]);
         tagConnectionClass(state.srcId, idOf[newDst], 'sm-fallback');
         markConnectionPending(state.srcId, idOf[newDst]);
       }
@@ -9637,7 +9711,7 @@ export function symbolMapEditorBody(
       var d = deriveShares();
       var ad = activeDiffs();
       var pctUnits = Object.keys(draft).filter(function (uid) { return d.shares[uid] !== baseline[uid].pct; });
-      var fbUnits = Object.keys(draft).filter(function (uid) { return (draft[uid].fallback || null) !== (baseline[uid].fallback || null); });
+      var fbUnits = Object.keys(draft).filter(function (uid) { return fallbacksChanged(uid); });
       if (pctUnits.length === 0 && fbUnits.length === 0 && ad.activate.length === 0 && ad.deactivate.length === 0) return;
       var confirmMsg = '表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%';
       if (ad.activate.length > 0) confirmMsg += ' ・ 有効化 ' + ad.activate.map(function (x) { return unitBy[x].label; }).join('/');
@@ -9672,14 +9746,14 @@ export function symbolMapEditorBody(
         });
       }
       fbUnits.forEach(function (uid) {
-        var exp = expandFallback(uid, draft[uid].fallback || null);
+        var exp = expandFallbacks(uid, draft[uid].fallbacks || []);
         Object.keys(exp).forEach(function (sym) {
           steps = steps.then(function () {
             return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/cash-fallback', {
               method: 'POST',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ target: exp[sym] }),
+              body: JSON.stringify({ targets: exp[sym] }),
             }).then(function (r) {
               if (!r.ok) return r.json().then(function (b) { throw new Error(sym + ' の退避先の保存に失敗: ' + (b.error || 'HTTP ' + r.status)); });
             });
@@ -10162,9 +10236,12 @@ export function renderSymbolRoleCell(row: SymbolConfigRow): string {
   const notes: string[] = []
   if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
   if (row.entryRequired) notes.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
-  if (row.cashFallbackSymbol) {
+  const fallbackList = parseCashFallbacksJson(row.cashFallbackSymbols, row.symbol)
+  if (fallbackList.length > 0) {
     notes.push(
-      `<a href="/dashboard/symbols/${encodeURIComponent(row.cashFallbackSymbol)}/edit" title="条件未通過時の退避先">→${esc(row.cashFallbackSymbol)}</a>`,
+      `<span title="条件未通過時の退避先${fallbackList.length > 1 ? ' (等分割)' : ''}">→${fallbackList
+        .map((fb) => `<a href="/dashboard/symbols/${encodeURIComponent(fb)}/edit">${esc(fb)}</a>`)
+        .join('/')}</span>`,
     )
   }
   const noteHtml = notes.length
@@ -10241,7 +10318,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
   // 条件連動配分 (#452 Layer 3)。
   const entryRequiredChecked = row?.entryRequired ? ' checked' : ''
   const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
-  const cashFallbackValue = row?.cashFallbackSymbol ?? ''
+  const cashFallbackValue = row ? parseCashFallbacksJson(row.cashFallbackSymbols, row.symbol).join(', ') : ''
   const timeStopPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
     : '空欄で global default を使用'
@@ -10486,7 +10563,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
         </label>
         <label>退避先</label>
         <div>
-          <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="10" pattern="[A-Za-z0-9]{0,10}" placeholder="例: SGOV" style="padding:6px;width:160px;text-transform:uppercase">
+          <input type="text" name="cash_fallback_symbol" value="${esc(cashFallbackValue)}" maxlength="60" placeholder="例: SGOV, USMV (複数は等分割)" style="padding:6px;width:240px;text-transform:uppercase">
           <span class="muted" style="font-size:12px;margin-left:6px"><strong>条件連動 ON のときのみ有効</strong>。同一通貨のみ。自動発注は flag (default off) を on にするまで無し</span>
         </div>`,
       hasAllocValues,

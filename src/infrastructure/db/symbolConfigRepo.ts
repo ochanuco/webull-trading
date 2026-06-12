@@ -136,7 +136,7 @@ export interface SymbolConfigSnapshot {
    * symbol → cash_fallback_symbol (#452)。NULL / 不正 ticker / self 参照は不在
    * (= 退避しない、現金のまま)。
    */
-  symbolCashFallback: Record<string, string>
+  symbolCashFallback: Record<string, string[]>
 }
 
 /**
@@ -176,7 +176,7 @@ export async function loadSymbolConfig(
   const symbolRequireAboveSma50Override: Record<string, boolean> = {}
   const symbolEntryRequired: Record<string, boolean> = {}
   const symbolAlwaysActive: Record<string, boolean> = {}
-  const symbolCashFallback: Record<string, string> = {}
+  const symbolCashFallback: Record<string, string[]> = {}
   for (const row of rows) {
     const symbol = row.symbol.toUpperCase()
     if (row.active) {
@@ -330,13 +330,12 @@ export async function loadSymbolConfig(
     if (row.alwaysActive === true) {
       symbolAlwaysActive[symbol] = true
     }
-    // 退避先は ticker 文法 + self 参照禁止まで検証。無効値は不在 (= 退避なし、
-    // 現金のまま) — 誤った退避先に積み増すより安全側。
-    if (row.cashFallbackSymbol !== null && row.cashFallbackSymbol !== undefined) {
-      const fallback = row.cashFallbackSymbol.trim().toUpperCase()
-      if (/^[A-Z0-9]{1,10}$/.test(fallback) && fallback !== symbol) {
-        symbolCashFallback[symbol] = fallback
-      }
+    // 退避先 (#496 多分岐: JSON 配列)。要素ごとに ticker 文法 + self 参照禁止
+    // まで検証し、無効要素は捨てる (= その取り分は現金のまま) — 誤った退避先に
+    // 積み増すより安全側。不正 JSON / 空配列は不在。
+    const fallbacks = parseCashFallbacksJson(row.cashFallbackSymbols, symbol)
+    if (fallbacks.length > 0) {
+      symbolCashFallback[symbol] = fallbacks
     }
   }
   return {
@@ -428,7 +427,7 @@ export interface SymbolConfigWriteInput {
   /** 常時 target = active (cash_parking 用、#452)。default false。 */
   alwaysActive: boolean
   /** 条件未通過時の退避先 symbol (NULL = 退避しない、#452)。 */
-  cashFallbackSymbol: string | null
+  cashFallbackSymbols: string[] | null
 }
 
 /**
@@ -469,7 +468,7 @@ export async function insertSymbolConfig(
       requireAboveSma50Override: input.requireAboveSma50Override,
       entryRequired: input.entryRequired,
       alwaysActive: input.alwaysActive,
-      cashFallbackSymbol: input.cashFallbackSymbol,
+      cashFallbackSymbols: cashFallbacksToJson(input.cashFallbackSymbols),
       updatedAt: nowIso,
     })
   } catch (err) {
@@ -527,7 +526,7 @@ export async function updateSymbolConfig(
       requireAboveSma50Override: input.requireAboveSma50Override,
       entryRequired: input.entryRequired,
       alwaysActive: input.alwaysActive,
-      cashFallbackSymbol: input.cashFallbackSymbol,
+      cashFallbackSymbols: cashFallbacksToJson(input.cashFallbackSymbols),
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, input.symbol))
@@ -604,29 +603,58 @@ export async function toggleSymbolActive(
  * clear は entry_required を触らない (条件連動自体の意図は別设定)。
  * 同値なら UPDATE しない (updatedAt だけ無監査で進むのを防ぐ)。
  */
+/** 退避先 JSON 配列の検証付き parse (#496)。不正は空配列 (= 退避なし)。 */
+export function parseCashFallbacksJson(raw: string | null | undefined, selfSymbol: string): string[] {
+  if (raw === null || raw === undefined) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const out: string[] = []
+  for (const item of parsed) {
+    if (typeof item !== 'string') continue
+    const sym = item.trim().toUpperCase()
+    if (!/^[A-Z0-9]{1,10}$/.test(sym)) continue
+    if (sym === selfSymbol.toUpperCase()) continue
+    if (!out.includes(sym)) out.push(sym)
+    if (out.length >= MAX_CASH_FALLBACKS) break
+  }
+  return out
+}
+
+/** 退避先の上限 (等分割の最小取り分が薄くなりすぎない防御値)。 */
+export const MAX_CASH_FALLBACKS = 4
+
+function cashFallbacksToJson(targets: string[] | null): string | null {
+  if (targets === null || targets.length === 0) return null
+  return JSON.stringify(targets)
+}
+
 export async function updateCashFallback(
   db: DrizzleD1Database,
   symbol: string,
-  target: string | null,
+  targets: string[] | null,
   nowIso: string,
 ): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
   const before = await findSymbolConfig(db, symbol)
   if (before === null) return null
   const beforeSnapshot: SymbolConfigRow = { ...before }
-  // NOTE: 対の両側がそれぞれ退避先を持つ「側別の対→対退避」(SOXL→TQQQ /
-  // SOXS→SQQQ) は正当な構成 — 二重買いはインバース対ガード (建玉は片側のみ)
-  // が退避先側でも防ぐ。以前あった「相方の退避先を自動クリア」はこの構成を
-  // 壊す誤実装だったため撤回 (operator 指摘)。
-  const sameTarget = (before.cashFallbackSymbol ?? null) === (target ?? null)
-  const needsEntryRequired = target !== null && before.entryRequired !== true
+  // NOTE: 対の両側がそれぞれ退避先を持つ「側別の対→対退避」は正当な構成。
+  // 複数先 (#496) は配分計算側で等分割される。
+  const normalized = cashFallbacksToJson(targets)
+  const sameTarget = (before.cashFallbackSymbols ?? null) === normalized
+  const needsEntryRequired = normalized !== null && before.entryRequired !== true
   if (sameTarget && !needsEntryRequired) {
     return { before: beforeSnapshot, after: beforeSnapshot }
   }
   await db
     .update(symbolConfig)
     .set({
-      cashFallbackSymbol: target,
-      ...(target !== null ? { entryRequired: true } : {}),
+      cashFallbackSymbols: normalized,
+      ...(normalized !== null ? { entryRequired: true } : {}),
       updatedAt: nowIso,
     })
     .where(eq(symbolConfig.symbol, symbol))
@@ -892,7 +920,7 @@ export async function createSymbolPair(
       // できない。default (false / NULL) = 従来挙動で開始。
       entryRequired: false,
       alwaysActive: false,
-      cashFallbackSymbol: null,
+      cashFallbackSymbols: null,
       updatedAt: nowIso,
     })
     await db.batch([delLink, insCounterpart, insLink])

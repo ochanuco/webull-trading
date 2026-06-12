@@ -1,0 +1,1 @@
+ALTER TABLE `symbol_config` DROP COLUMN `cash_fallback_symbol`;

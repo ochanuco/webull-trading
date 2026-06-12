@@ -750,6 +750,7 @@ export async function runStrategyCron(
         .map(([sym]) => sym),
     ),
     symbolCurrency: universe.symbolCurrency,
+    inversePairs: universe.inversePairs,
   })
   analysis.allocation = { view: allocationView, ordersEnabled: global.cashFallbackOrdersEnabled }
 

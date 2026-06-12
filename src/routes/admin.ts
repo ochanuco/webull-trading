@@ -52,6 +52,8 @@ import {
   toggleSymbolActive,
   updateBudgetAllocPct,
   updateCashFallback,
+  MAX_CASH_FALLBACKS,
+  parseCashFallbacksJson,
   updateSymbolConfig,
   isSymbolRole,
   SYMBOL_ROLES,
@@ -1768,7 +1770,7 @@ export const admin = new Hono<AppBindings>()
       if (pct <= 0) delete targetWeights[sym]
       else targetWeights[sym] = pct / 100
     }
-    const cashFallback: Record<string, string> = { ...universe.symbolCashFallback }
+    const cashFallback: Record<string, string[]> = { ...universe.symbolCashFallback }
     const entryRequired = new Set(Object.keys(universe.symbolEntryRequired))
     for (const [symRaw, v] of Object.entries(body.fallbacks ?? {})) {
       const sym = normalizeSymbol(symRaw)
@@ -1776,10 +1778,20 @@ export const admin = new Hono<AppBindings>()
         delete cashFallback[sym]
         continue
       }
-      if (typeof v !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(v.trim())) {
-        throw new ValidationError(`fallbacks.${sym} must be a ticker or null`, { field: 'fallbacks' })
+      const list = Array.isArray(v) ? v : [v]
+      const out: string[] = []
+      for (const item of list) {
+        if (typeof item !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(item.trim())) {
+          throw new ValidationError(`fallbacks.${sym} must be tickers or null`, { field: 'fallbacks' })
+        }
+        const t = normalizeSymbol(item)
+        if (!out.includes(t)) out.push(t)
       }
-      cashFallback[sym] = normalizeSymbol(v)
+      if (out.length === 0) {
+        delete cashFallback[sym]
+        continue
+      }
+      cashFallback[sym] = out
       // canvas 同様、退避先の設定は条件連動 ON を含意する。
       entryRequired.add(sym)
     }
@@ -1839,6 +1851,7 @@ export const admin = new Hono<AppBindings>()
       entryStatuses,
       heldSymbols,
       symbolCurrency: universe.symbolCurrency,
+      inversePairs: universe.inversePairs,
     })
 
     // 退避の実発注プラン。total_capital_jpy 未設定なら金額換算不可 (fail-closed
@@ -1872,9 +1885,10 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * 退避先の set / clear (#symbol-relation-map 編集キャンバス)。
-   * body: { target: 'SGOV' } で設定 (entry_required も同時に ON)、
-   * { target: null } で解除。検証: 両銘柄が登録済み・同一通貨・self 禁止。
+   * 退避先の set / clear (#symbol-relation-map 編集キャンバス、#496 多分岐)。
+   * body: { targets: ['SGOV','USMV'] } で設定 (entry_required も同時に ON、
+   * 複数は配分計算で等分割)、{ targets: null } で解除。旧 { target } も受ける。
+   * 検証: 全銘柄が登録済み・同一通貨・self 禁止・上限 MAX_CASH_FALLBACKS。
    */
   .post('/symbol-config/:symbol/cash-fallback', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -1882,50 +1896,58 @@ export const admin = new Hono<AppBindings>()
     }
     const symbol = normalizeSymbol(c.req.param('symbol'))
     const body = (await c.req.json().catch(() => null)) as unknown
-    // primitive / 配列 JSON で `'target' in body` が TypeError → 500 になるのを防ぐ
-    // (CodeRabbit #485): 先に object 判定して 400 に落とす。
-    if (body === null || typeof body !== 'object' || Array.isArray(body) || !('target' in body)) {
-      throw new ValidationError("body must be JSON { target: string | null }", { field: 'target' })
+    if (body === null || typeof body !== 'object' || Array.isArray(body) || !('targets' in body || 'target' in body)) {
+      throw new ValidationError("body must be JSON { targets: string[] | null }", { field: 'targets' })
     }
-    const payload = body as { target?: unknown }
-    let target: string | null = null
-    if (payload.target !== null) {
-      if (typeof payload.target !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(payload.target.trim())) {
-        throw new ValidationError('target must be a ticker or null', { field: 'target' })
+    const payload = body as { targets?: unknown; target?: unknown }
+    const rawTargets = 'targets' in payload ? payload.targets : payload.target
+    let targets: string[] | null = null
+    if (rawTargets !== null) {
+      const list = Array.isArray(rawTargets) ? rawTargets : [rawTargets]
+      const out: string[] = []
+      for (const item of list) {
+        if (typeof item !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(item.trim())) {
+          throw new ValidationError('targets must be tickers or null', { field: 'targets' })
+        }
+        const sym = normalizeSymbol(item)
+        if (sym === symbol) {
+          throw new ValidationError('targets must differ from the symbol itself', { field: 'targets' })
+        }
+        if (!out.includes(sym)) out.push(sym)
       }
-      target = normalizeSymbol(payload.target)
-      if (target === symbol) {
-        throw new ValidationError('target must differ from the symbol itself', { field: 'target' })
+      if (out.length > MAX_CASH_FALLBACKS) {
+        throw new ValidationError(`targets must have at most ${MAX_CASH_FALLBACKS} symbols`, { field: 'targets' })
       }
+      targets = out.length > 0 ? out : null
     }
     const db = createDb(c.env.DB)
     const source = await findSymbolConfig(db, symbol)
     if (source === null) return c.json({ error: 'symbol not found' }, 404)
-    if (target !== null) {
+    for (const target of targets ?? []) {
       const targetRow = await findSymbolConfig(db, target)
       if (targetRow === null) {
-        throw new ValidationError(`target ${target} is not a registered symbol`, { field: 'target' })
+        throw new ValidationError(`target ${target} is not a registered symbol`, { field: 'targets' })
       }
       // 通貨跨ぎの退避は配分計算側で skip される (fail-closed) ため、入力時点で拒否する。
       if (targetRow.currency !== source.currency) {
         throw new ValidationError(
-          `target currency ${targetRow.currency} must match ${source.currency}`,
-          { field: 'target' },
+          `target ${target} currency ${targetRow.currency} must match ${source.currency}`,
+          { field: 'targets' },
         )
       }
     }
-    const result = await updateCashFallback(db, symbol, target, new Date().toISOString())
+    const result = await updateCashFallback(db, symbol, targets, new Date().toISOString())
     if (result === null) return c.json({ error: 'symbol not found' }, 404)
     await writeAuditLog(
       c,
       '/admin/symbol-config/cash-fallback',
       `symbol=${symbol}`,
-      { cashFallbackSymbol: result.before.cashFallbackSymbol, entryRequired: result.before.entryRequired },
-      { cashFallbackSymbol: result.after.cashFallbackSymbol, entryRequired: result.after.entryRequired },
+      { cashFallbackSymbols: result.before.cashFallbackSymbols, entryRequired: result.before.entryRequired },
+      { cashFallbackSymbols: result.after.cashFallbackSymbols, entryRequired: result.after.entryRequired },
     )
     return c.json({
       symbol,
-      cashFallbackSymbol: result.after.cashFallbackSymbol,
+      cashFallbackSymbols: result.after.cashFallbackSymbols,
       entryRequired: result.after.entryRequired,
     })
   })
@@ -2727,7 +2749,7 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   // ticker 文法 + self 参照禁止。空 → NULL (= 退避しない)。
   const entryRequired = parseFormBool(raw.entry_required ?? raw.entryRequired, false)
   const alwaysActive = parseFormBool(raw.always_active ?? raw.alwaysActive, false)
-  const cashFallbackSymbol = parseCashFallbackSymbol(
+  const cashFallbackSymbols = parseCashFallbackSymbols(
     raw.cash_fallback_symbol ?? raw.cashFallbackSymbol,
     symbol,
   )
@@ -2755,34 +2777,54 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     requireAboveSma50Override,
     entryRequired,
     alwaysActive,
-    cashFallbackSymbol,
+    cashFallbackSymbols,
   }
 }
 
 /**
- * cash_fallback_symbol (#452): 空 / undefined → NULL。ticker 文法外・self 参照は
- * 400 (誤った退避先へ積み増す事故の入口防御)。
+ * cash_fallback_symbol(s) (#452 / #496 多分岐): form はカンマ/空白区切り text。
+ * 空 / undefined → NULL。ticker 文法外・self 参照・上限超過は 400
+ * (誤った退避先へ積み増す事故の入口防御)。
  */
-function parseCashFallbackSymbol(value: unknown, selfSymbol: string): string | null {
+function parseCashFallbackSymbols(value: unknown, selfSymbol: string): string[] | null {
   if (value === undefined || value === null) return null
-  if (typeof value !== 'string') {
-    throw new ValidationError('cashFallbackSymbol must be a symbol string', {
-      field: 'cashFallbackSymbol',
+  let tokens: string[]
+  if (Array.isArray(value)) {
+    tokens = value.map((v) => {
+      if (typeof v !== 'string') {
+        throw new ValidationError('cashFallbackSymbols must be symbols', { field: 'cashFallbackSymbols' })
+      }
+      return v
+    })
+  } else if (typeof value === 'string') {
+    tokens = value.split(/[\s,]+/)
+  } else {
+    throw new ValidationError('cashFallbackSymbols must be a string or array', {
+      field: 'cashFallbackSymbols',
     })
   }
-  const sym = value.trim().toUpperCase()
-  if (sym === '') return null
-  if (!/^[A-Z0-9]{1,10}$/.test(sym)) {
-    throw new ValidationError(`cashFallbackSymbol is not a valid symbol: ${sym}`, {
-      field: 'cashFallbackSymbol',
+  const out: string[] = []
+  for (const token of tokens) {
+    const sym = token.trim().toUpperCase()
+    if (sym === '') continue
+    if (!/^[A-Z0-9]{1,10}$/.test(sym)) {
+      throw new ValidationError(`cashFallbackSymbols contains an invalid symbol: ${sym}`, {
+        field: 'cashFallbackSymbols',
+      })
+    }
+    if (sym === selfSymbol.toUpperCase()) {
+      throw new ValidationError('cashFallbackSymbols cannot reference itself', {
+        field: 'cashFallbackSymbols',
+      })
+    }
+    if (!out.includes(sym)) out.push(sym)
+  }
+  if (out.length > MAX_CASH_FALLBACKS) {
+    throw new ValidationError(`cashFallbackSymbols must have at most ${MAX_CASH_FALLBACKS} symbols`, {
+      field: 'cashFallbackSymbols',
     })
   }
-  if (sym === selfSymbol.toUpperCase()) {
-    throw new ValidationError('cashFallbackSymbol cannot reference itself', {
-      field: 'cashFallbackSymbol',
-    })
-  }
-  return sym
+  return out.length > 0 ? out : null
 }
 
 /**

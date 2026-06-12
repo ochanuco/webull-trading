@@ -26,7 +26,8 @@ export interface ConditionalAllocationPolicy {
   /** always_active=true の集合。 */
   alwaysActive: ReadonlySet<string>
   /** symbol → 退避先 symbol。 */
-  cashFallback: Record<string, string>
+  /** symbol → 退避先リスト (#496 多分岐)。複数なら等分割で流す。 */
+  cashFallback: Record<string, string[]>
 }
 
 export interface AllocationComputeInput {
@@ -39,6 +40,13 @@ export interface AllocationComputeInput {
   heldSymbols: ReadonlySet<string>
   /** symbol → 通貨。退避の同一通貨チェックに使う (不在は 'USD' 扱い)。 */
   symbolCurrency: Record<string, SymbolCurrency>
+  /**
+   * インバース対 (両方向 map)。対は **1 枠を共有**する (#315) ため、退避の
+   * 二重流出を抑止するのに使う (#452 follow-up): 両側が同時に未通過のとき
+   * 退避できるのは片側分のみ、相方が枠を使用中 (保有 or 判定通過) のときは
+   * 退避自体しない。未指定は従来挙動 (対を知らない)。
+   */
+  inversePairs?: Record<string, string>
 }
 
 export interface SymbolAllocation {
@@ -47,8 +55,8 @@ export interface SymbolAllocation {
   targetWeight: number
   /** 判定連動後の実配分。退避受入分を含む。 */
   activeWeight: number
-  /** 自銘柄の枠が退避された先 (退避なしは undefined)。 */
-  rerouteTo?: string
+  /** 自銘柄の枠が退避された先 (#496 で複数化。退避なしは undefined)。 */
+  rerouteTo?: string[]
   /** 退避 / 据え置きの理由 (操作者向け)。 */
   reason: string
   /** 他銘柄から退避で受け入れた weight 合計 (退避先のみ > 0)。 */
@@ -99,26 +107,53 @@ export function computeConditionalAllocation(input: AllocationComputeInput): All
       continue
     }
     // 未通過 (WATCH / NG / 評価不能) → 実配分 0。退避先があり同一通貨なら積み増す。
+    // 複数先 (#496) は**設定数で等分割** — 無効な先 (通貨不一致等) の取り分は
+    // 再正規化せず現金のまま (fail-closed)。
     alloc.activeWeight = 0
     const statusLabel = status ?? '評価データ無し'
-    const fallback = input.policy.cashFallback[symbol]
-    if (fallback === undefined) {
+    const fallbacks = input.policy.cashFallback[symbol]
+    if (fallbacks === undefined || fallbacks.length === 0) {
       alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (退避先未設定 → 現金のまま)`
       continue
     }
     const ownCurrency = input.symbolCurrency[symbol] ?? 'USD'
-    const fallbackCurrency = input.symbolCurrency[fallback] ?? 'USD'
-    if (ownCurrency !== fallbackCurrency) {
-      alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (退避先 ${fallback} と通貨不一致 → 現金のまま)`
+    const validFallbacks = fallbacks.filter(
+      (fb) => (input.symbolCurrency[fb] ?? 'USD') === ownCurrency,
+    )
+    if (validFallbacks.length === 0) {
+      alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (退避先 ${fallbacks.join('/')} と通貨不一致 → 現金のまま)`
       continue
     }
-    alloc.rerouteTo = fallback
-    alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 → ${fallback} へ退避`
-    const fallbackAlloc = ensure(fallback, input.targetWeights[fallback] ?? 0)
-    fallbackAlloc.activeWeight += target
-    fallbackAlloc.reroutedInWeight += target
-    if (fallbackAlloc.reason === '') {
-      fallbackAlloc.reason = '退避受入のみ (自身の target なし)'
+    // 対の枠は 1 つ (#315): 相方が枠を使用中 (保有 or 判定通過) なら退避しない。
+    // 両側とも未通過なら退避できるのは片側分のみ — 先頭 (Object.entries の
+    // 反復順で先に処理された側) が退避済みなら、こちらは枠なしとして止める。
+    const partner = input.inversePairs?.[symbol]
+    if (partner !== undefined) {
+      const partnerHeld = input.heldSymbols.has(partner)
+      const partnerEligible = isEntryEligible(input.entryStatuses[partner])
+      if (partnerHeld || partnerEligible) {
+        alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (対の枠は ${partner} が使用中 → 退避なし)`
+        continue
+      }
+      const partnerAlloc = bySymbol[partner]
+      if (partnerAlloc !== undefined && partnerAlloc.rerouteTo !== undefined) {
+        alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (対の枠は ${partner} 側から退避済み → 二重退避なし)`
+        continue
+      }
+    }
+    alloc.rerouteTo = validFallbacks
+    const slice = target / fallbacks.length
+    alloc.reason =
+      fallbacks.length === 1
+        ? `entry 判定 ${statusLabel}: 実配分 0 → ${validFallbacks[0]} へ退避`
+        : `entry 判定 ${statusLabel}: 実配分 0 → ${validFallbacks.join('/')} へ等分割で退避 (各 1/${fallbacks.length})`
+    for (const fb of validFallbacks) {
+      const fallbackAlloc = ensure(fb, input.targetWeights[fb] ?? 0)
+      fallbackAlloc.activeWeight += slice
+      fallbackAlloc.reroutedInWeight += slice
+      if (fallbackAlloc.reason === '') {
+        fallbackAlloc.reason = '退避受入のみ (自身の target なし)'
+      }
     }
   }
   return { bySymbol }

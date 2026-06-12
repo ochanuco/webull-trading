@@ -2638,7 +2638,7 @@ describe('renderAllocationLine (#452 Layer 3 target/active 並記)', () => {
     policy: {
       entryRequired: new Set(['TQQQ']),
       alwaysActive: new Set(['SGOV']),
-      cashFallback: { TQQQ: 'SGOV' },
+      cashFallback: { TQQQ: ['SGOV'] },
     },
     entryStatuses: { TQQQ: 'NG' },
     heldSymbols: new Set(),
@@ -2673,7 +2673,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
       targetWeight: 0.05,
       entryRequired: true,
       alwaysActive: false,
-      cashFallbackSymbol: 'SGOV',
+      cashFallbackSymbols: ['SGOV'],
     })
     expect(html).toContain('leveraged_trend')
     expect(html).toContain('レバETF・トレンド')
@@ -2690,7 +2690,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
         targetWeight: null,
         entryRequired: false,
         alwaysActive: false,
-        cashFallbackSymbol: null,
+        cashFallbackSymbols: null,
       }),
     ).toBe('')
   })
@@ -2701,7 +2701,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
       targetWeight: null,
       entryRequired: false,
       alwaysActive: false,
-      cashFallbackSymbol: null,
+      cashFallbackSymbols: null,
     })
     expect(html).toContain('⚠ unknown')
   })
@@ -2718,7 +2718,7 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
       role: null,
       currency: 'USD',
       budgetAllocPct: null,
-      cashFallbackSymbol: null,
+      cashFallbackSymbols: null,
       entryRequired: false,
       ...over,
     }) as SymbolConfigRow
@@ -2729,8 +2729,8 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
   it('対は 1 unit (leveraged 側が先頭)、配分は対で 1 枠、退避は unit 解決', () => {
     const html = symbolMapEditorBody(
       [
-        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5, cashFallbackSymbol: 'SQQQ', entryRequired: true }),
-        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbol: 'TQQQ', entryRequired: true }),
+        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5, cashFallbackSymbols: '["SQQQ"]', entryRequired: true }),
+        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbols: '["TQQQ"]', entryRequired: true }),
         edRow({ symbol: 'TQQQ', role: 'leveraged_trend' }),
         edRow({ symbol: 'SQQQ', role: 'inverse_hedge' }),
       ],
@@ -2742,7 +2742,7 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
     expect(sox).toMatchObject({
       label: 'SOXL ⇄ SOXS',
       pct: 50,
-      fallback: { id: 'TQQQ/SQQQ', mixed: false },
+      fallbacks: ['TQQQ/SQQQ'],
     })
     // 保有は side 単位で持つ (SQQQ $44)
     const qqq = payload.units.find((u: { id: string }) => u.id === 'TQQQ/SQQQ')
@@ -2751,11 +2751,11 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
     expect(payload.unitOfSym.SOXS).toBe('SOXL/SOXS')
   })
 
-  it('片側だけ退避が欠けた旧データは mixed=false で先頭 unit に解決 (適用で側別に正規化される)', () => {
+  it('片側だけ退避が欠けた旧データも unit の退避として解決 (適用で側別に正規化される)', () => {
     const html = symbolMapEditorBody(
       [
         edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 }),
-        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5, cashFallbackSymbol: 'SQQQ', entryRequired: true }),
+        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5, cashFallbackSymbols: '["SQQQ"]', entryRequired: true }),
         edRow({ symbol: 'TQQQ', role: 'leveraged_trend' }),
         edRow({ symbol: 'SQQQ', role: 'inverse_hedge' }),
       ],
@@ -2764,7 +2764,22 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
     )
     const payload = payloadOf(html)
     const sox = payload.units.find((u: { id: string }) => u.id === 'SOXL/SOXS')
-    expect(sox.fallback).toEqual({ id: 'TQQQ/SQQQ', mixed: false })
+    expect(sox.fallbacks).toEqual(['TQQQ/SQQQ'])
+  })
+
+  it('多分岐退避 (#496): 複数先は unit の fallbacks に並ぶ', () => {
+    const html = symbolMapEditorBody(
+      [
+        edRow({ symbol: 'AAPL', role: 'core_trend', budgetAllocPct: 0.5, cashFallbackSymbols: '["SGOV","USMV"]', entryRequired: true }),
+        edRow({ symbol: 'SGOV', role: 'cash_parking' }),
+        edRow({ symbol: 'USMV', role: 'low_volatility' }),
+      ],
+      {},
+      {},
+    )
+    const payload = payloadOf(html)
+    const aapl = payload.units.find((u: { id: string }) => u.id === 'AAPL')
+    expect(aapl.fallbacks.sort()).toEqual(['SGOV', 'USMV'])
   })
 
   it('全側 inactive の unit はスポーン在庫に入る', () => {
@@ -2810,7 +2825,7 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
   it('inline script は構文エラーなく parse できる (#462 regression 防止)', () => {
     const html = symbolMapEditorBody(
       [
-        edRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV', entryRequired: true }),
+        edRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbols: '["SGOV"]', entryRequired: true }),
         edRow({ symbol: 'SGOV', role: 'cash_parking' }),
       ],
       {},

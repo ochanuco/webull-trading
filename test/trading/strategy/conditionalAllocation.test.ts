@@ -10,7 +10,7 @@ const baseInput = (): AllocationComputeInput => ({
   policy: {
     entryRequired: new Set(['QQQ', 'TQQQ', 'SOXL']),
     alwaysActive: new Set(['SGOV']),
-    cashFallback: { QQQ: 'SGOV', TQQQ: 'SGOV', SOXL: 'SGOV' },
+    cashFallback: { QQQ: ['SGOV'], TQQQ: ['SGOV'], SOXL: ['SGOV'] },
   },
   entryStatuses: { SGOV: 'NG', QQQ: 'ENTRY', TQQQ: 'WATCH', SOXL: 'NG' },
   heldSymbols: new Set(),
@@ -23,7 +23,7 @@ describe('computeConditionalAllocation (#452 Layer 3)', () => {
     // QQQ は ENTRY → target 維持。TQQQ/SOXL は未通過 → 0、SGOV へ +10%。
     expect(view.bySymbol.QQQ!.activeWeight).toBeCloseTo(0.2, 9)
     expect(view.bySymbol.TQQQ!.activeWeight).toBe(0)
-    expect(view.bySymbol.TQQQ!.rerouteTo).toBe('SGOV')
+    expect(view.bySymbol.TQQQ!.rerouteTo).toEqual(['SGOV'])
     expect(view.bySymbol.SOXL!.activeWeight).toBe(0)
     expect(view.bySymbol.SGOV!.activeWeight).toBeCloseTo(0.8, 9)
     expect(view.bySymbol.SGOV!.reroutedInWeight).toBeCloseTo(0.1, 9)
@@ -91,6 +91,79 @@ describe('computeConditionalAllocation (#452 Layer 3)', () => {
     const view = computeConditionalAllocation(input)
     expect(view.bySymbol.SGOV!.targetWeight).toBe(0)
     expect(view.bySymbol.SGOV!.activeWeight).toBeCloseTo(0.1, 9)
+  })
+})
+
+describe('computeConditionalAllocation × 多分岐退避 (#496 等分割)', () => {
+  it('複数先は設定数で等分割し、無効な先の取り分は現金のまま (再正規化しない)', () => {
+    const view = computeConditionalAllocation({
+      targetWeights: { AAPL: 0.6 },
+      policy: {
+        entryRequired: new Set(['AAPL']),
+        alwaysActive: new Set(),
+        cashFallback: { AAPL: ['SGOV', 'USMV', '1357'] }, // 1357 は JPY = 無効
+      },
+      entryStatuses: { AAPL: 'WATCH' },
+      heldSymbols: new Set(),
+      symbolCurrency: { AAPL: 'USD', SGOV: 'USD', USMV: 'USD', '1357': 'JPY' },
+    })
+    // 設定 3 件で等分割 (各 0.2)。無効な 1357 の取り分は流れない = 合計 0.4 のみ退避
+    expect(view.bySymbol.SGOV!.reroutedInWeight).toBeCloseTo(0.2)
+    expect(view.bySymbol.USMV!.reroutedInWeight).toBeCloseTo(0.2)
+    expect(view.bySymbol['1357']).toBeUndefined()
+    expect(view.bySymbol.AAPL!.rerouteTo).toEqual(['SGOV', 'USMV'])
+    expect(view.bySymbol.AAPL!.reason).toContain('等分割')
+  })
+})
+
+describe('computeConditionalAllocation × インバース対 (枠共有の退避抑止)', () => {
+  const pairInput = (): AllocationComputeInput => ({
+    targetWeights: { SOXL: 0.5, SOXS: 0.5 },
+    policy: {
+      entryRequired: new Set(['SOXL', 'SOXS']),
+      alwaysActive: new Set(),
+      cashFallback: { SOXL: ['VUG'], SOXS: ['VUG'] },
+    },
+    entryStatuses: { SOXL: 'WATCH', SOXS: 'WATCH' },
+    heldSymbols: new Set(),
+    symbolCurrency: { SOXL: 'USD', SOXS: 'USD', VUG: 'USD' },
+    inversePairs: { SOXL: 'SOXS', SOXS: 'SOXL' },
+  })
+
+  it('両側未通過でも退避は片側分のみ (対の 1 枠が二重に流れない)', () => {
+    const view = computeConditionalAllocation(pairInput())
+    const vug = view.bySymbol.VUG!
+    expect(vug.reroutedInWeight).toBeCloseTo(0.5) // 1.0 (二重) ではなく 0.5
+    const rerouted = [view.bySymbol.SOXL!, view.bySymbol.SOXS!].filter((a) => a.rerouteTo !== undefined)
+    expect(rerouted).toHaveLength(1)
+    const suppressed = [view.bySymbol.SOXL!, view.bySymbol.SOXS!].find((a) => a.rerouteTo === undefined)!
+    expect(suppressed.activeWeight).toBe(0)
+    expect(suppressed.reason).toContain('二重退避なし')
+  })
+
+  it('相方が保有中なら退避しない (枠は使用中)', () => {
+    const input = pairInput()
+    input.heldSymbols = new Set(['SOXL'])
+    const view = computeConditionalAllocation(input)
+    expect(view.bySymbol.SOXS!.rerouteTo).toBeUndefined()
+    expect(view.bySymbol.SOXS!.reason).toContain('使用中')
+    expect(view.bySymbol.VUG).toBeUndefined() // 退避ゼロなので VUG に枠は流れない
+  })
+
+  it('相方が判定通過 (ENTRY) なら退避しない', () => {
+    const input = pairInput()
+    input.entryStatuses = { SOXL: 'ENTRY', SOXS: 'WATCH' }
+    const view = computeConditionalAllocation(input)
+    expect(view.bySymbol.SOXL!.activeWeight).toBeCloseTo(0.5)
+    expect(view.bySymbol.SOXS!.rerouteTo).toBeUndefined()
+    expect(view.bySymbol.SOXS!.reason).toContain('使用中')
+  })
+
+  it('inversePairs 未指定は従来挙動 (互換)', () => {
+    const input = pairInput()
+    delete (input as { inversePairs?: unknown }).inversePairs
+    const view = computeConditionalAllocation(input)
+    expect(view.bySymbol.VUG!.reroutedInWeight).toBeCloseTo(1.0)
   })
 })
 
