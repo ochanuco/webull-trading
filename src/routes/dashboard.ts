@@ -8852,11 +8852,13 @@ export function symbolMapEditorBody(
       <strong style="font-size:12px">未適用の変更</strong>
       <ul id="sm-changes-list" style="margin:4px 0 0 16px;padding:0;font-size:12px"></ul>
     </div>
+    <button type="button" id="sm-simulate" style="padding:6px 12px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:13px">シミュレート</button>
     <button type="button" id="sm-apply" style="padding:6px 18px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">適用</button>
     <button type="button" id="sm-reset" style="padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">リセット</button>
   </div>`
     : `<p class="muted" style="margin:0 0 6px;font-size:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols/map">✏️ 編集モード</a>
+    <button type="button" id="sm-simulate" style="padding:3px 10px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
     <span>口座 (日本/米国) → 銘柄 = 配分 (1/枝 均等) ・ 銘柄 → 銘柄の点線 = 退避先 ・ ${legend}</span>
   </p>`
   const canvasHeight = mode === 'edit'
@@ -8887,6 +8889,7 @@ export function symbolMapEditorBody(
   .sm-card .sm-share{font-weight:600}
   </style>
   <div id="symbol-map-editor"></div>
+  <div id="sm-sim-result" hidden style="margin-top:8px;padding:10px 12px;background:#f0f6ff;border:1px solid #9ab8dd;border-radius:8px;font-size:12px"></div>
   ${chipRow}
   ${safeJsonScript('__symbolMapEditor', payload)}
   <script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
@@ -9002,8 +9005,78 @@ export function symbolMapEditorBody(
       return d;
     }
 
+    // 配分シミュレーション (#symbol-relation-map dry-run): cron と同一の pure
+    // 関数を使う read-only API に、view = 現在の DB 設定 / edit = 適用前の draft
+    // を渡し、「いま cron が走ったら配分はどう流れるか」を表示する。
+    var simBtn = document.getElementById('sm-simulate');
+    if (simBtn) simBtn.addEventListener('click', function () {
+      var resultEl = document.getElementById('sm-sim-result');
+      simBtn.disabled = true;
+      simBtn.textContent = '計算中…';
+      var bodyPayload = {};
+      if (!isView) {
+        var d = deriveShares();
+        var pcts = {};
+        var fallbacks = {};
+        Object.keys(draft).forEach(function (sym) {
+          if (d.shares[sym] !== baseline[sym].pct) pcts[sym] = d.shares[sym] > 0 ? d.shares[sym] : null;
+          if ((draft[sym].fallback || null) !== (baseline[sym].fallback || null)) fallbacks[sym] = draft[sym].fallback;
+        });
+        bodyPayload = { pcts: pcts, fallbacks: fallbacks };
+      }
+      fetch('/admin/allocation/simulate', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (res) {
+          var lines = [];
+          Object.keys(res.allocations).sort().forEach(function (sym) {
+            var a = res.allocations[sym];
+            var t = Math.round(a.targetWeight * 1000) / 10;
+            var act = Math.round(a.activeWeight * 1000) / 10;
+            var line = '<strong>' + sym + '</strong>: target ' + t + '% → active ' + act + '%';
+            if (a.rerouteTo) line += ' <span style="color:#0e9f6e">┈▶ ' + a.rerouteTo + ' へ退避</span>';
+            if (a.reroutedInWeight > 0) line += ' <span style="color:#0e9f6e">(+' + Math.round(a.reroutedInWeight * 1000) / 10 + '% 受入)</span>';
+            line += ' <span style="color:#6e6e73">— ' + a.reason + ' / 判定 ' + (res.entryStatuses[sym] || '—') + (res.heldSymbols.indexOf(sym) !== -1 ? ' / 保有中' : '') + '</span>';
+            lines.push('<li>' + line + '</li>');
+          });
+          var planHtml = '';
+          if (res.plan) {
+            var orders = res.plan.orders.map(function (o) {
+              return '<li>' + o.symbol + ' を ' + o.quantity + ' 単位 買付予定 (退避の受け皿)</li>';
+            });
+            var skips = res.plan.skipped.map(function (k) {
+              return '<li class="muted">' + k.symbol + ': skip — ' + k.reason + '</li>';
+            });
+            planHtml = '<div style="margin-top:6px"><strong>退避の予定注文</strong>' +
+              (res.ordersEnabledFlag ? '' : ' <span style="color:#b25000">(自動発注 flag OFF — cron は判定のみで発注しない)</span>') +
+              '<ul style="margin:4px 0 0 16px;padding:0">' + (orders.join('') || '<li class="muted">なし</li>') + skips.join('') + '</ul></div>';
+          }
+          var notesHtml = res.notes.length
+            ? '<div class="muted" style="margin-top:6px;font-size:11px">' + res.notes.map(function (n) { return '⚠ ' + n; }).join('<br>') + '</div>'
+            : '';
+          resultEl.innerHTML = '<strong>シミュレーション結果</strong> <span class="muted">(' + (res.draftApplied ? '未適用の draft 込み' : '現在の保存済み設定') + ' ・ ' + res.simulatedAt + ' ・ cron と同一ロジック / 発注なし)</span>' +
+            '<ul style="margin:6px 0 0 16px;padding:0">' + lines.join('') + '</ul>' + planHtml + notesHtml;
+          resultEl.hidden = false;
+        })
+        .catch(function (e) {
+          resultEl.innerHTML = '<span style="color:#c22">シミュレーション失敗: ' + e.message + '</span>';
+          resultEl.hidden = false;
+        })
+        .then(function () {
+          simBtn.disabled = false;
+          simBtn.textContent = 'シミュレート';
+        });
+    });
+
     if (isView) {
-      // 読み取り専用: 共有値の描画だけ行い、編集系ハンドラは付けない。
+      // 読み取り専用: 共有値の描画と simulate だけ。編集系ハンドラは付けない。
       renderShares();
       return;
     }
