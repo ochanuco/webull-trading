@@ -9006,6 +9006,35 @@ export function symbolMapEditorBody(
     editor.start();
     if (isView) el.classList.add('sm-view');
 
+    // 盤面レイアウトの記憶 (#496 follow-up): ノード位置とパン/ズームを
+    // localStorage に保存する (origin 単位・管理画面のみなので銘柄名と座標が
+    // 残る程度は許容、operator 合意)。view/edit でキーを共有して同じ配置に。
+    var LAYOUT_KEY = 'webull-sm-map-layout-v1';
+    var savedLayout = {};
+    try {
+      savedLayout = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}') || {};
+    } catch (e) { savedLayout = {}; }
+    var savedPos = savedLayout.pos || {};
+    function persistLayout() {
+      try {
+        var pos = {};
+        Object.keys(idOf).forEach(function (uid) {
+          var d2 = editor.drawflow.drawflow[editor.module].data[idOf[uid]];
+          if (d2) pos[uid] = { x: d2.pos_x, y: d2.pos_y };
+        });
+        Object.keys(accountIds).forEach(function (ccy) {
+          var d2 = editor.drawflow.drawflow[editor.module].data[accountIds[ccy]];
+          if (d2) pos['__account_' + ccy + '__'] = { x: d2.pos_x, y: d2.pos_y };
+        });
+        localStorage.setItem(LAYOUT_KEY, JSON.stringify({
+          pos: pos,
+          zoom: editor.zoom,
+          canvasX: editor.canvas_x,
+          canvasY: editor.canvas_y,
+        }));
+      } catch (e) { /* private mode 等は黙って諦める (表示専用機能) */ }
+    }
+
     var idOf = {};      // unitId -> drawflow node id
     var unitOf = {};    // drawflow node id -> unitId
     var unitBy = {};    // unitId -> unit payload
@@ -9022,7 +9051,8 @@ export function symbolMapEditorBody(
     currencies.forEach(function (ccy) {
       var label = ccy === 'JPY' ? '日本口座 (JPY)' : '米国口座 (USD)';
       var y = ccy === 'JPY' ? 30 + ((Math.max(nJpy, 1) - 1) * 130) / 2 : 30 + nJpy * 130 + ((Math.max(data.units.length - nJpy, 1) - 1) * 130) / 2;
-      var id = editor.addNode('口座' + ccy, 0, 1, 40, y, 'sm-node sm-account',
+      var saved = savedPos['__account_' + ccy + '__'];
+      var id = editor.addNode('口座' + ccy, 0, 1, saved ? saved.x : 40, saved ? saved.y : y, 'sm-node sm-account',
         { unit: '口座' + ccy },
         '<div class="sm-card"><div class="sm-title" style="color:#fff">' + label + '</div>' +
         '<div class="sm-meta" style="color:#e8eaed">—</div></div>');
@@ -9060,7 +9090,8 @@ export function symbolMapEditorBody(
       return id;
     }
     data.units.forEach(function (u) {
-      addUnitNode(u, u.pct > 0 ? 360 : 760, u.y);
+      var saved = savedPos[u.id];
+      addUnitNode(u, saved ? saved.x : (u.pct > 0 ? 360 : 760), saved ? saved.y : u.y);
     });
 
     function tagConnectionClass(srcId, dstId, cls) {
@@ -9077,6 +9108,17 @@ export function symbolMapEditorBody(
       });
     });
     programmatic = false;
+
+    // パン/ズームの復元と、移動・ズームのたびの保存。
+    if (typeof savedLayout.zoom === 'number' && savedLayout.zoom > 0.2 && savedLayout.zoom <= 2) {
+      editor.zoom = savedLayout.zoom;
+      editor.canvas_x = savedLayout.canvasX || 0;
+      editor.canvas_y = savedLayout.canvasY || 0;
+      editor.zoom_refresh();
+    }
+    editor.on('nodeMoved', function () { persistLayout(); });
+    editor.on('zoom', function () { persistLayout(); });
+    editor.on('translate', function () { persistLayout(); });
 
     function deriveShares() {
       var branches = 0;
