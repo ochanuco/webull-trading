@@ -8990,6 +8990,29 @@ export function symbolMapEditorBody(
     });
     programmatic = false;
 
+    // カード削除 = 「盤面から下ろす」: 全切断 + (到達不能として) 適用で無効化、
+    // かつスポーンのピッカー在庫に戻して再召喚できるようにする。
+    var removedOnCanvas = {};
+    editor.on('nodeRemoved', function (id) {
+      var sym = symOf[id];
+      if (!sym) return;
+      if (accountSymOf[sym]) {
+        alert('口座カードは削除できません。再読込します。');
+        location.reload();
+        return;
+      }
+      delete symOf[id];
+      delete idOf[sym];
+      removedOnCanvas[sym] = true;
+      draft[sym].connected = false;
+      draft[sym].fallback = null;
+      // この銘柄を退避先にしていた線も Drawflow 側で消えている — draft を追従。
+      Object.keys(draft).forEach(function (x) {
+        if (draft[x].fallback === sym) draft[x].fallback = null;
+      });
+      renderChanges();
+    });
+
     // 1/枝 の導出: 接続中の銘柄を対 (インバース) ごとに 1 枝として数え、
     // 各枝 = round(100/N, 1dp)。接続中の銘柄は対の両側とも同じ % (枠共有)。
     // 対 (インバース) は枠共有 = 1 枝なので、**線は片側 1 本で対全体が接続扱い**。
@@ -9253,7 +9276,11 @@ export function symbolMapEditorBody(
     }
     function spawnAndConnect(item, srcNodeId, clientX, clientY) {
       var pos = canvasPos(clientX, clientY);
-      var n = {
+      // 盤面から下ろした既知銘柄の再召喚は baseline (元の active / pct) を保持する
+      // — addSymbolNode は baseline を初期化するため退避してから戻す。
+      var known = nodeBySym[item.sym];
+      var savedBaseline = known ? baseline[item.sym] : null;
+      var n = known || {
         sym: item.sym,
         pct: 0,
         role: item.role,
@@ -9265,9 +9292,14 @@ export function symbolMapEditorBody(
         currency: item.currency,
       };
       programmatic = true;
-      var newId = addSymbolNode(n, pos.x, pos.y, { spawned: true });
+      var newId = addSymbolNode(n, pos.x, pos.y, { spawned: savedBaseline ? savedBaseline.active === false : true });
       editor.addConnection(srcNodeId, newId, 'output_1', 'input_1');
       programmatic = false;
+      if (savedBaseline) {
+        baseline[item.sym] = savedBaseline;
+        draft[item.sym] = { connected: false, fallback: null };
+      }
+      delete removedOnCanvas[item.sym];
       // 接続の意味づけは通常ハンドラと同じ規則で draft に反映する。
       var src = symOf[srcNodeId];
       if (accountSymOf[src]) {
@@ -9282,7 +9314,11 @@ export function symbolMapEditorBody(
     function showPicker(srcNodeId, clientX, clientY) {
       var src = symOf[srcNodeId];
       var ccy = accountSymOf[src] ? accountSymOf[src] : nodeBySym[src].currency;
-      var candidates = data.inactive.filter(function (x) { return x.currency === ccy; });
+      var removedItems = Object.keys(removedOnCanvas).map(function (sym) {
+        var n = nodeBySym[sym];
+        return { sym: sym, role: n.role, color: n.color, currency: n.currency, inverse: n.inverse };
+      });
+      var candidates = data.inactive.concat(removedItems).filter(function (x) { return x.currency === ccy; });
       if (candidates.length === 0) return;
       picker.innerHTML = '<div class="muted" style="padding:2px 6px 6px">既存 Inactive 銘柄を紐づけ (' + ccy + ')</div>' +
         candidates.map(function (x) {
