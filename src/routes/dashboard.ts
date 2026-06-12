@@ -10619,7 +10619,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
         <label>ロール${REQ}</label>
         <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap">
           <div>
-            <select name="role" required id="symbol-form-role" style="padding:6px" onchange="window.renderRoleRadar(this.value)">
+            <select name="role" required id="symbol-form-role" style="padding:6px" onchange="window.renderRoleTemplate(this.value)">
               ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
               ${
                 mode === 'new'
@@ -10634,77 +10634,85 @@ function symbolFormBody(args: SymbolFormArgs): string {
             ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
             <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
           </div>
-          <!-- #role-stats: 装備画面風に、選択ロールの入場/退場スタイルを六角形レーダーで表示。 -->
-          <div id="role-radar-wrap" style="display:none;text-align:center;background:#fafafd;border:1px solid #ececf2;border-radius:8px;padding:6px 8px 8px">
-            <div style="font-size:10px;color:#86868b;margin-bottom:-4px">入場↑ / 退場↓ スタイル</div>
-            <svg id="role-radar" viewBox="0 0 200 212" width="190" height="201" style="overflow:visible"></svg>
-            <div id="role-radar-summary" style="font-size:11px;color:#444;max-width:200px;margin:2px auto 0;line-height:1.4"></div>
+          <!-- #role-stats: ロールの入場ゲート閾値と押し目/stop/TP を、ライブ銘柄
+               ではなく role preset から作った「虚のチャート + ゲート」で表示
+               (個別銘柄チャートタブの視覚言語を流用)。 -->
+          <div id="role-tpl-wrap" style="display:none;background:#fafafd;border:1px solid #ececf2;border-radius:8px;padding:8px 10px;max-width:360px">
+            <div style="font-size:10px;color:#86868b;margin-bottom:2px">ロード・テンプレート <span style="color:#aaa">(直近高値=0% 基準・preset 値の模式)</span></div>
+            <div style="display:flex;gap:10px;align-items:flex-start">
+              <svg id="role-tpl-chart" viewBox="0 0 150 178" width="150" height="178" style="overflow:visible;flex:0 0 auto"></svg>
+              <div id="role-tpl-gate" style="font-size:11px;line-height:1.55;flex:1 1 auto"></div>
+            </div>
           </div>
         </div>
         <script>
         (function () {
-          var AXES = ['勢い要求', '押し目待ち', '高値追い', '保有の長さ', '損切りの粘り', '利確待ち'];
-          var STATS = {
-            leveraged_trend: [5, 10, 10, 7, 8, 9],
-            core_trend: [2, 8, 3, 7, 8, 9],
-            low_volatility: [1, 5, 2, 10, 3, 3],
-            sector_trend: [3, 8, 5, 7, 8, 9],
-            inverse_hedge: [10, 10, 7, 3, 5, 9]
-          };
-          var SUMMARY = {
-            leveraged_trend: '深い押し目で乗り高値追いも許容。保有~10日、利確+7%まで引っ張る (global default)',
-            core_trend: '緩い勢いで早めにエントリー、過熱は回避。保有~10日',
-            low_volatility: '浅い押しで乗り、損切り・利確とも早い。保有は最長15日',
-            sector_trend: '中程度の勢い・押し目で入る。exit は global 据え置き',
-            inverse_hedge: '強い下落勢いを要求、保有5日で即退出 (ボラ drag 回避)',
-            cash_parking: '戦略 entry なし。条件未達時の退避先・常時配分'
+          // ROLE_RULE_PRESETS を global default に重ねた解決値 (%・日・倍)。
+          var P = {
+            leveraged_trend: { tr: 8, heat: 60, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            core_trend: { tr: 3, heat: 20, atr: 1.5, pbMax: -1.5, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            low_volatility: { tr: 1.5, heat: 10, atr: 1.3, pbMax: -1, pbMin: -3, stop: -1.5, tp: 2.5, tstop: 15, katr: 2.0 },
+            sector_trend: { tr: 4, heat: 30, atr: 1.5, pbMax: -2, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            inverse_hedge: { tr: 15, heat: 40, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 5, katr: 1.5 }
           };
           var COLOR = {
-            cash_parking: '#5b8c5a', core_trend: '#1a56db', leveraged_trend: '#d97706',
+            core_trend: '#1a56db', leveraged_trend: '#d97706',
             low_volatility: '#7e3af2', sector_trend: '#0e9f9f', inverse_hedge: '#c22d2d'
           };
-          var CX = 100, CY = 100, R = 60;
-          function pt(i, scale) {
-            var ang = (-90 + i * 60) * Math.PI / 180;
-            return [CX + R * scale * Math.cos(ang), CY + R * scale * Math.sin(ang)];
-          }
-          function ring(scale) {
-            var s = '';
-            for (var i = 0; i < 6; i++) { var p = pt(i, scale); s += p[0].toFixed(1) + ',' + p[1].toFixed(1) + ' '; }
-            return s.trim();
-          }
-          window.renderRoleRadar = function (role) {
-            var wrap = document.getElementById('role-radar-wrap');
+          // 価格軸: +4%(上) 〜 -11%(下) 固定。% あたり 10px。
+          function yOf(pct) { return 16 + (4 - pct) * 10; }
+          function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
+          window.renderRoleTemplate = function (role) {
+            var wrap = document.getElementById('role-tpl-wrap');
             if (!wrap) return;
-            var svg = document.getElementById('role-radar');
-            var sum = document.getElementById('role-radar-summary');
-            var vals = STATS[role];
-            if (!vals && role !== 'cash_parking') { wrap.style.display = 'none'; return; }
+            var svg = document.getElementById('role-tpl-chart');
+            var gate = document.getElementById('role-tpl-gate');
+            if (role === 'cash_parking') {
+              wrap.style.display = '';
+              svg.innerHTML = '<text x="75" y="80" font-size="11" fill="#5b8c5a" text-anchor="middle">entry なし</text>';
+              gate.innerHTML = '<strong>cash_parking</strong><br>戦略 entry なし。条件連動の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定を行わない)。';
+              return;
+            }
+            var p = P[role];
+            if (!p) { wrap.style.display = 'none'; return; }
             wrap.style.display = '';
             var color = COLOR[role] || '#5f6368';
+            var entryMid = (p.pbMax + p.pbMin) / 2;
+            var tpLv = entryMid + p.tp;
+            var stopLv = entryMid + p.stop;
+            var X0 = 40, X1 = 110; // price bar の左右
             var parts = [];
-            for (var g = 1; g <= 4; g++) {
-              parts.push('<polygon points="' + ring(g / 4) + '" fill="none" stroke="#e6e6ec" stroke-width="1"/>');
-            }
-            for (var i = 0; i < 6; i++) {
-              var pe = pt(i, 1);
-              parts.push('<line x1="' + CX + '" y1="' + CY + '" x2="' + pe[0].toFixed(1) + '" y2="' + pe[1].toFixed(1) + '" stroke="#e6e6ec" stroke-width="1"/>');
-              var pl = pt(i, 1.2);
-              var anchor = pl[0] > CX + 2 ? 'start' : (pl[0] < CX - 2 ? 'end' : 'middle');
-              parts.push('<text x="' + pl[0].toFixed(1) + '" y="' + pl[1].toFixed(1) + '" font-size="9" fill="#6e6e73" text-anchor="' + anchor + '" dominant-baseline="middle">' + AXES[i] + '</text>');
-            }
-            if (vals) {
-              var poly = '';
-              for (var k = 0; k < 6; k++) { var pv = pt(k, vals[k] / 10); poly += pv[0].toFixed(1) + ',' + pv[1].toFixed(1) + ' '; }
-              parts.push('<polygon points="' + poly.trim() + '" fill="' + color + '33" stroke="' + color + '" stroke-width="2"/>');
-              for (var m = 0; m < 6; m++) { var pd = pt(m, vals[m] / 10); parts.push('<circle cx="' + pd[0].toFixed(1) + '" cy="' + pd[1].toFixed(1) + '" r="2.5" fill="' + color + '"/>'); }
-            } else {
-              parts.push('<text x="' + CX + '" y="' + CY + '" font-size="11" fill="#9a5b00" text-anchor="middle" dominant-baseline="middle">entry なし</text>');
-            }
+            // 直近高値 基準線 (0%)
+            parts.push('<line x1="' + X0 + '" y1="' + yOf(0) + '" x2="' + X1 + '" y2="' + yOf(0) + '" stroke="#9aa0a6" stroke-width="1"/>');
+            parts.push('<text x="' + (X0 - 3) + '" y="' + yOf(0) + '" font-size="8" fill="#80868b" text-anchor="end" dominant-baseline="middle">高値</text>');
+            // 押し目ゾーン (entry 帯)
+            var zy = yOf(p.pbMax), zh = yOf(p.pbMin) - yOf(p.pbMax);
+            parts.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
+            parts.push('<text x="' + (X1 + 3) + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" text-anchor="start" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%</text>');
+            // entry marker
+            parts.push('<circle cx="' + ((X0 + X1) / 2) + '" cy="' + yOf(entryMid).toFixed(1) + '" r="3" fill="' + color + '"/>');
+            parts.push('<text x="' + ((X0 + X1) / 2) + '" y="' + (yOf(entryMid) - 5).toFixed(1) + '" font-size="8" fill="' + color + '" text-anchor="middle">entry</text>');
+            // stop (赤破線)
+            parts.push('<line x1="' + X0 + '" y1="' + yOf(stopLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(stopLv).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
+            parts.push('<text x="' + (X1 + 3) + '" y="' + yOf(stopLv).toFixed(1) + '" font-size="8" fill="#c22d2d" text-anchor="start" dominant-baseline="middle">stop ' + fmtPct(p.stop) + '</text>');
+            // TP (緑破線)
+            parts.push('<line x1="' + X0 + '" y1="' + yOf(tpLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(tpLv).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
+            parts.push('<text x="' + (X1 + 3) + '" y="' + yOf(tpLv).toFixed(1) + '" font-size="8" fill="#0e9f6e" text-anchor="start" dominant-baseline="middle">TP ' + fmtPct(p.tp) + '</text>');
             svg.innerHTML = parts.join('');
-            if (sum) sum.textContent = SUMMARY[role] || '';
+            // 入場ゲート(閾値) + 退場
+            var g = [];
+            g.push('<div style="font-weight:600;margin-bottom:2px">入場ゲート(閾値)</div>');
+            g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + '</div>');
+            g.push('<div>SMA50 上抜け必須</div>');
+            g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + '</div>');
+            g.push('<div>ボラ(ATR比) ≤ ' + p.atr + '×</div>');
+            g.push('<div>押し目 ' + p.pbMax + '% 〜 ' + p.pbMin + '%</div>');
+            g.push('<div style="font-weight:600;margin:4px 0 2px">退場</div>');
+            g.push('<div>損切 ' + fmtPct(p.stop) + ' / 利確 ' + fmtPct(p.tp) + '</div>');
+            g.push('<div>保有上限 ' + p.tstop + '日 (損切ATR ' + p.katr + '×)</div>');
+            gate.innerHTML = g.join('');
           };
-          window.renderRoleRadar(${JSON.stringify(roleValue)});
+          window.renderRoleTemplate(${JSON.stringify(roleValue)});
         })();
         </script>
         <label>状態</label>
