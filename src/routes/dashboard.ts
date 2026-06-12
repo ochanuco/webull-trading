@@ -826,7 +826,20 @@ export const dashboard = new Hono<DashboardBindings>()
         q: c.req.query('q') ?? '',
       }
       return c.html(
-        renderLayout(c, '銘柄管理', symbolsListBody({ rows, inversePairs, pairRegimes, mapAmounts, errorCode, errorSymbol, filter })),
+        renderLayout(
+          c,
+          '銘柄管理',
+          symbolsListBody({
+            rows,
+            inversePairs,
+            pairRegimes,
+            mapAmounts,
+            errorCode,
+            errorSymbol,
+            filter,
+            tab: c.req.query('tab') === 'workflow' ? 'workflow' : 'list',
+          }),
+        ),
       )
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
@@ -847,6 +860,7 @@ export const dashboard = new Hono<DashboardBindings>()
       const inversePairs = await loadInversePairs(createDb(c.env.DB)).catch(
         () => ({}) as Record<string, string>,
       )
+      const pairRegimes = await loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => [])
       const mapAmounts: Record<string, { native: string; jpy: number }> = {}
       if (c.env.SYMBOL_STATE) {
         const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
@@ -864,7 +878,7 @@ export const dashboard = new Hono<DashboardBindings>()
           }),
         )
       }
-      return c.html(renderLayout(c, '配分マップ編集', symbolMapEditorBody(rows, inversePairs, mapAmounts)))
+      return c.html(renderLayout(c, '配分マップ編集', symbolMapEditorBody(rows, inversePairs, mapAmounts, { pairRegimes })))
     } catch (err) {
       return c.html(renderLayout(c, '配分マップ編集', unavailable(messageOf(err))))
     }
@@ -8737,29 +8751,40 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
   })
 }
 
+const ROLE_NODE_COLORS: Record<string, string> = {
+  cash_parking: '#5b8c5a',
+  core_trend: '#1a56db',
+  leveraged_trend: '#d97706',
+  low_volatility: '#7e3af2',
+  sector_trend: '#0e9f9f',
+  inverse_hedge: '#c22d2d',
+}
+
 /**
- * 配分マップ編集キャンバス (#symbol-relation-map)。**draft 編集 + 1/枝 配分**:
+ * 配分マップキャンバス (#symbol-relation-map)。edit / view の 2 モードで
+ * **同じ描画コードを共有**する (operator 要望: 銘柄管理ページの図と
+ * /symbols/map の図を揃える):
  *
- *   - 配分は % 入力ではなく**トポロジーから導出**する (operator 指定)。
- *     口座に繋がっている枝数 N に対し各枝 = 100/N %。インバース対は両方
- *     繋がっていても **1 枝** として数え、両側に同じ % を書く (枠共有 #315 と
- *     同じ意味)。合計は構造的に常に 100% — % の手管理によるカオスを排除する。
- *   - 線を引く / 消すは draft に積み、変更箇所をハイライト + サマリ表示して
- *     「適用」で一括保存 → reload。DB / cron は従来どおり budget_alloc_pct
- *     (fraction) を読む — 変換はこのエディタの適用時のみ。
- *   - 銘柄 → 銘柄の線 = 退避先 (1 銘柄 1 本、設定時に条件連動も ON)
- *   - 口座から切断 = 配分解除 (NULL = risk-% サイジングに戻る)
- * インバース対 / proxy はカード内に表示のみ (不変条件があるためキャンバス編集不可)。
+ *   - 'edit' (/dashboard/symbols/map): draft 編集 + 適用バー。
+ *     配分は 1/枝 のトポロジー導出 (対は 1 枝、% は適用時に変換)、
+ *     銘柄 → 銘柄の線 = 退避先 (1 本制限、設定時に条件連動 ON、異通貨拒否)
+ *   - 'view' (銘柄管理ページ埋め込み): Drawflow editor_mode='view' の読み取り
+ *     専用。編集バー・ハンドラなし、編集モードへのリンクのみ
+ * 起点は通貨別口座カード (予算プールは単一 = JPY 換算ベースのまま、カードは
+ * 通貨内訳表示)。インバース対 / regime proxy は脚注チップ。
  */
 export function symbolMapEditorBody(
   rows: SymbolConfigRow[],
   inversePairs: Record<string, string>,
   amounts: Record<string, { native: string; jpy: number }>,
+  opts: { mode?: 'edit' | 'view'; pairRegimes?: PairRegimeEntry[] } = {},
 ): string {
+  const mode = opts.mode ?? 'edit'
+  const pairRegimes = opts.pairRegimes ?? []
   const active = rows.filter((r) => r.active)
   const pctOf = (r: SymbolConfigRow): number =>
     r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
-  const nodes = active.map((r, i) => {
+  const nodes = active.map((r) => {
     const sym = r.symbol.toUpperCase()
     return {
       sym,
@@ -8771,10 +8796,22 @@ export function symbolMapEditorBody(
       fallback: r.cashFallbackSymbol?.toUpperCase() ?? null,
       inverse: inversePairs[sym]?.toUpperCase() ?? null,
       currency: r.currency,
-      y: 0, // 後段で通貨グループ順に再計算する (JPY 群 → USD 群)
-      order: i,
+      y: 0,
     }
   })
+  if (nodes.length === 0) {
+    return `<p class="muted">有効な銘柄がありません。</p>`
+  }
+  // 空中リリースで呼び出せる既存 Inactive 銘柄 (Miro の新規付箋風 spawn 用)。
+  const inactive = rows
+    .filter((r) => !r.active)
+    .map((r) => ({
+      sym: r.symbol.toUpperCase(),
+      role: r.role ?? null,
+      color: ROLE_NODE_COLORS[r.role ?? ''] ?? '#5f6368',
+      currency: r.currency,
+      inverse: inversePairs[r.symbol.toUpperCase()]?.toUpperCase() ?? null,
+    }))
   // JPY 銘柄を上群、USD 銘柄を下群に並べ、それぞれの口座カードの近くに置く。
   let yCursor = 30
   for (const ccy of ['JPY', 'USD']) {
@@ -8783,24 +8820,55 @@ export function symbolMapEditorBody(
       yCursor += 120
     }
   }
-  if (nodes.length === 0) {
-    return `<p class="muted">有効な銘柄がありません。</p>`
+  const payload = { nodes, inactive, mode }
+
+  // 脚注チップ: インバース対 / regime proxy (量の流れではない構造情報)。
+  // キャンバスに出ている (= active) 銘柄に関係するものだけ表示する — inactive
+  // 銘柄の対の注記が浮く問題 (CodeRabbit #487)。misconfig な regime は隠さず
+  // 警告チップで出す (fail-closed の異常を operator が認識できるように)。
+  const activeSyms = new Set(nodes.map((n) => n.sym))
+  const chips: string[] = []
+  const seenPair = new Set<string>()
+  for (const [symA, inv] of Object.entries(inversePairs)) {
+    const a = symA.toUpperCase()
+    const b = inv.toUpperCase()
+    const key = [a, b].sort().join('/')
+    if (seenPair.has(key)) continue
+    seenPair.add(key)
+    if (!activeSyms.has(a) || !activeSyms.has(b)) continue
+    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fdecec;color:#c22d2d;font-size:11px">インバース対 ${esc(a)} ⇄ ${esc(b)}</span>`)
   }
-  const payload = { nodes }
-  return `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-    <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
-    <span class="muted" style="font-size:12px">
-      <strong>口座 (日本/米国) → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い、予算プールは全体共通) で % は自動計算 ・
-      <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON)。
-      <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete。
-    </span>
-    <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
-    <span class="muted" style="font-size:12px">
-      変更は即保存されません — サマリを確認して<strong>「適用」で一括保存</strong>。
-      塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
+  for (const pair of pairRegimes) {
+    const members = [pair.proxySymbol, pair.bullSymbol, pair.bearSymbol].map((x) => x.toUpperCase())
+    if (!members.some((x) => activeSyms.has(x))) continue
+    if (pair.invalidConfig !== null) {
+      chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fff4e5;color:#9a5b00;font-size:11px">⚠ regime misconfig ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}: ${esc(pair.invalidConfig)} (zone=unknown で両側 BUY 停止中)</span>`)
+      continue
+    }
+    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
+  }
+  const chipRow = chips.length > 0
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
+    : ''
+  const legend = `塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
       <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
-      <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>
-    </span>
+      <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>`
+  // edit ヘッダーは道具だけ (説明文は読まれない、編集領域を最大化 — operator
+  // 指摘)。操作説明は ? アイコンの hover tooltip に退避。
+  const helpText = [
+    '口座 → 銘柄の線 = 配分 (1/枝 均等、対は 1 枝、予算プールは全体共通)',
+    '銘柄 → 銘柄の線 = 退避先 (1 銘柄 1 本、条件連動も ON)',
+    '線の削除 = 線を選択 → Backspace / Delete',
+    '線を空中で放す = 既存 Inactive 銘柄を呼び出して紐づけ (適用で有効化)',
+    '口座から到達できない銘柄は適用時に無効化 (保有中は除く)',
+    '変更は「適用」までは保存されない',
+  ].join('\n')
+  const header = mode === 'edit'
+    ? `<p style="margin:0 0 6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理</a>
+    <button type="button" id="sm-simulate" style="padding:4px 12px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
+    <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
+    <span title="${esc(helpText)}" style="cursor:help;color:#9aa0a6;font-size:14px;border:1px solid #d0d0d5;border-radius:50%;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center">?</span>
   </p>
   <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:#fff8e6;border:1px solid #e6c46a;border-radius:8px;margin-bottom:8px">
     <div style="flex:1;min-width:0">
@@ -8809,10 +8877,20 @@ export function symbolMapEditorBody(
     </div>
     <button type="button" id="sm-apply" style="padding:6px 18px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">適用</button>
     <button type="button" id="sm-reset" style="padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">リセット</button>
-  </div>
+  </div>`
+    : `<p class="muted" style="margin:0 0 6px;font-size:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <a href="/dashboard/symbols/map">✏️ 編集モード</a>
+    <button type="button" id="sm-simulate" style="padding:3px 10px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
+    <span title="${esc(helpText)}" style="cursor:help;color:#9aa0a6;font-size:13px;border:1px solid #d0d0d5;border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center">?</span>
+    <span>${legend}</span>
+  </p>`
+  const canvasHeight = mode === 'edit'
+    ? 'height:calc(100vh - 150px);min-height:520px'
+    : `height:${Math.max(300, yCursor + 60)}px`
+  return `${header}
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css">
   <style>
-  #symbol-map-editor{height:calc(100vh - 220px);min-height:480px;background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
+  #symbol-map-editor{${canvasHeight};background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
   #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:200px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
   #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
   #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
@@ -8826,14 +8904,30 @@ export function symbolMapEditorBody(
   #symbol-map-editor .drawflow .drawflow-node .input:hover,
   #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
   #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
+  /* 対の共有側 (自分の線が 1 本も無い側) はポートを出さない — 線は常に代表側 1 本 */
+  #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .input,
+  #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .output{display:none}
   .sm-card{padding:8px 10px;font-size:12px}
   .sm-card .sm-title{font-size:14px;font-weight:700}
   .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
   .sm-card .sm-status-pending{color:#b25000;font-size:11px}
   .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
   .sm-card .sm-share{font-weight:600}
+  .sm-card .sm-sim{margin-top:4px;padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5}
+  .sm-card .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
+  .sm-card .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
+  .sm-card .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
+  #symbol-map-editor svg.connection.sm-sim-flow path{stroke:#0e9f6e !important;stroke-width:4px;stroke-dasharray:10 6;animation:smflow 1.2s linear infinite}
+  #symbol-map-editor svg.connection.sm-sim-dim path{opacity:0.25}
+  @keyframes smflow{to{stroke-dashoffset:-32}}
   </style>
+  <div id="sm-sim-meta" hidden style="display:flex;gap:10px;align-items:center;margin:0 0 6px;padding:6px 10px;background:#eafaf1;border:1px solid #0e9f6e;border-radius:8px;font-size:12px">
+    <strong style="color:#0e9f6e">シミュレーション表示中</strong>
+    <span id="sm-sim-meta-text" class="muted" style="flex:1;min-width:0"></span>
+    <button type="button" id="sm-sim-clear" style="padding:2px 10px;background:#fff;border:1px solid #0e9f6e;color:#0e9f6e;border-radius:6px;cursor:pointer;font-size:12px">クリア</button>
+  </div>
   <div id="symbol-map-editor"></div>
+  ${chipRow}
   ${safeJsonScript('__symbolMapEditor', payload)}
   <script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
   <script>
@@ -8841,25 +8935,29 @@ export function symbolMapEditorBody(
     var data = window.__symbolMapEditor;
     var el = document.getElementById('symbol-map-editor');
     if (!data || !el || typeof Drawflow === 'undefined') return;
+    var isView = data.mode === 'view';
     var editor = new Drawflow(el);
-    editor.reroute = true;
+    // reroute (線クリックで経由点の丸を生成) は使わない — 削除のための選択
+    // クリックのたびに点が残る (operator 指摘)。
+    editor.reroute = false;
+    if (isView) editor.editor_mode = 'view';
     editor.start();
     var idOf = {};
     var symOf = {};
     var nodeBySym = {};
-    var baseline = {};   // sym -> { pct, fallback }
-    var draft = {};      // sym -> { connected, fallback }
+    var baseline = {};
+    var draft = {};
     var programmatic = false;
 
-    // 起点は通貨別の口座カード (operator 指定)。予算プール自体は単一 (JPY 換算
-    // ベース #budget-jpy-base-fx) なので 1/枝 は全体共通 — カードには通貨内訳を出す。
+    // 起点は通貨別の口座カード。予算プール自体は単一 (JPY 換算ベース
+    // #budget-jpy-base-fx) なので 1/枝 は全体共通 — カードには通貨内訳を出す。
     var currencies = [];
     data.nodes.forEach(function (n) { if (currencies.indexOf(n.currency) === -1) currencies.push(n.currency); });
-    currencies.sort(); // JPY, USD の順
+    currencies.sort();
     var accountIds = {};
     var accountSymOf = {};
     var nJpy = data.nodes.filter(function (n) { return n.currency === 'JPY'; }).length;
-    currencies.forEach(function (ccy, i) {
+    currencies.forEach(function (ccy) {
       var label = ccy === 'JPY' ? '日本口座 (JPY)' : '米国口座 (USD)';
       var y = ccy === 'JPY' ? 30 + ((Math.max(nJpy, 1) - 1) * 120) / 2 : 30 + nJpy * 120 + ((Math.max(data.nodes.length - nJpy, 1) - 1) * 120) / 2;
       var id = editor.addNode('口座' + ccy, 0, 1, 40, y, 'sm-node sm-account',
@@ -8871,13 +8969,16 @@ export function symbolMapEditorBody(
       accountSymOf['__account_' + ccy + '__'] = ccy;
     });
 
-    data.nodes.forEach(function (n) {
+    function addSymbolNode(n, x, y, opts2) {
       nodeBySym[n.sym] = n;
-      baseline[n.sym] = { pct: n.pct, fallback: n.fallback };
-      draft[n.sym] = { connected: n.pct > 0, fallback: n.fallback };
+      var spawned = !!(opts2 && opts2.spawned);
+      baseline[n.sym] = { pct: n.pct || 0, fallback: n.fallback || null, active: !spawned };
+      draft[n.sym] = { connected: (n.pct || 0) > 0, fallback: n.fallback || null };
       var statusHtml = n.held
         ? '<div class="sm-status-active">Active ・ ' + n.held + '</div>'
-        : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
+        : spawned
+          ? '<div class="sm-status-pending">Inactive (適用で有効化)</div>'
+          : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
       var metaParts = [];
       if (n.role) metaParts.push(n.role);
       if (n.inverse) metaParts.push('⇄ ' + n.inverse);
@@ -8888,34 +8989,81 @@ export function symbolMapEditorBody(
         '<div style="margin-top:4px">配分 <span class="sm-share" id="sm-share-' + n.sym + '">—</span></div>' +
         '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
         '</div>';
-      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node ' + (n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { sym: n.sym }, html);
+      var id = editor.addNode(n.sym, 1, 1, x, y, 'sm-node ' + (n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { sym: n.sym }, html);
       idOf[n.sym] = id;
       symOf[id] = n.sym;
+      return id;
+    }
+    data.nodes.forEach(function (n) {
+      addSymbolNode(n, n.pct > 0 ? 360 : 760, n.y);
     });
 
     programmatic = true;
+    // 対は「線 1 本」をシード時から徹底する: DB は両側に pct を持つが、線は
+    // 代表側 (先に並ぶ方) のみ張る。サブ側は draft 上も connected=false にし、
+    // 「対で共有」表示に任せる — こうしないとサブ側の線を消しても apply 対象に
+    // ならず、リロードで復活してしまう。
+    var seededPairEdge = {};
     data.nodes.forEach(function (n) {
-      if (n.pct > 0) editor.addConnection(accountIds[n.currency], idOf[n.sym], 'output_1', 'input_1');
+      if (n.pct > 0) {
+        var pairKey = n.inverse ? [n.sym, n.inverse].sort().join('/') : n.sym;
+        if (seededPairEdge[pairKey]) {
+          draft[n.sym].connected = false;
+        } else {
+          seededPairEdge[pairKey] = true;
+          editor.addConnection(accountIds[n.currency], idOf[n.sym], 'output_1', 'input_1');
+        }
+      }
       if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
     });
     programmatic = false;
 
+    // カード削除 = 「盤面から下ろす」: 全切断 + (到達不能として) 適用で無効化、
+    // かつスポーンのピッカー在庫に戻して再召喚できるようにする。
+    var removedOnCanvas = {};
+    editor.on('nodeRemoved', function (id) {
+      var sym = symOf[id];
+      if (!sym) return;
+      if (accountSymOf[sym]) {
+        alert('口座カードは削除できません。再読込します。');
+        location.reload();
+        return;
+      }
+      delete symOf[id];
+      delete idOf[sym];
+      removedOnCanvas[sym] = true;
+      draft[sym].connected = false;
+      draft[sym].fallback = null;
+      // この銘柄を退避先にしていた線も Drawflow 側で消えている — draft を追従。
+      Object.keys(draft).forEach(function (x) {
+        if (draft[x].fallback === sym) draft[x].fallback = null;
+      });
+      renderChanges();
+    });
+
     // 1/枝 の導出: 接続中の銘柄を対 (インバース) ごとに 1 枝として数え、
     // 各枝 = round(100/N, 1dp)。接続中の銘柄は対の両側とも同じ % (枠共有)。
+    // 対 (インバース) は枠共有 = 1 枝なので、**線は片側 1 本で対全体が接続扱い**。
+    // 相方は自分の線が無くても同じ share を持つ (「対で共有」表示)。
+    function effConnected(sym) {
+      if (draft[sym].connected) return true;
+      var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+      return !!(inv && draft[inv] && draft[inv].connected);
+    }
     function deriveShares() {
       var branches = 0;
       var seen = {};
       Object.keys(draft).forEach(function (sym) {
-        if (!draft[sym].connected || seen[sym]) return;
+        if (!effConnected(sym) || seen[sym]) return;
         seen[sym] = true;
         var inv = nodeBySym[sym].inverse;
-        if (inv && draft[inv] && draft[inv].connected) seen[inv] = true;
+        if (inv && draft[inv]) seen[inv] = true;
         branches += 1;
       });
       var share = branches > 0 ? Math.round((100 / branches) * 10) / 10 : 0;
       var shares = {};
       Object.keys(draft).forEach(function (sym) {
-        shares[sym] = draft[sym].connected ? share : 0;
+        shares[sym] = effConnected(sym) ? share : 0;
       });
       return { branches: branches, share: share, shares: shares };
     }
@@ -8924,21 +9072,24 @@ export function symbolMapEditorBody(
       Object.keys(draft).forEach(function (sym) {
         var span = document.getElementById('sm-share-' + sym);
         if (!span) return;
-        span.textContent = draft[sym].connected ? '1/' + d.branches + ' = ' + d.share + '%' : 'なし (risk-%)';
+        span.textContent = draft[sym].connected
+          ? '1/' + d.branches + ' = ' + d.share + '%'
+          : effConnected(sym)
+            ? '1/' + d.branches + ' = ' + d.share + '% (対で共有)'
+            : 'なし (risk-%)';
       });
       currencies.forEach(function (ccy) {
         var accountEl = document.getElementById('node-' + accountIds[ccy]);
         if (!accountEl) return;
         var meta = accountEl.querySelector('.sm-meta');
         if (!meta) return;
-        // 通貨内訳: この口座配下の枝数と小計% (対は 1 枝)。予算プールは全体共通。
         var seenCcy = {};
         var ccyBranches = 0;
         Object.keys(draft).forEach(function (sym) {
-          if (!draft[sym].connected || nodeBySym[sym].currency !== ccy || seenCcy[sym]) return;
+          if (!effConnected(sym) || nodeBySym[sym].currency !== ccy || seenCcy[sym]) return;
           seenCcy[sym] = true;
           var inv = nodeBySym[sym].inverse;
-          if (inv && draft[inv] && draft[inv].connected) seenCcy[inv] = true;
+          if (inv && draft[inv]) seenCcy[inv] = true;
           ccyBranches += 1;
         });
         var subtotal = Math.round(ccyBranches * d.share * 10) / 10;
@@ -8946,6 +9097,242 @@ export function symbolMapEditorBody(
       });
       return d;
     }
+
+    // 配分シミュレーション (#symbol-relation-map dry-run): cron と同一の pure
+    // 関数を使う read-only API に、view = 現在の DB 設定 / edit = 適用前の draft
+    // を渡し、結果を**キャンバスのカード上に直接重ねる** (下部パネルはスクロールが
+    // 必要で読めない、という operator 指摘で廃止):
+    //   - 各カードに判定・実効配分のバッジ / 受け皿カードに受入量と予定注文
+    //   - 実際に発火する退避線を緑のアニメで強調、発火しない退避線は減光
+    var simBtn = document.getElementById('sm-simulate');
+    function clearSim() {
+      el.querySelectorAll('.sm-sim').forEach(function (n) { n.remove(); });
+      el.querySelectorAll('svg.connection.sm-sim-flow').forEach(function (n) { n.classList.remove('sm-sim-flow'); });
+      el.querySelectorAll('svg.connection.sm-sim-dim').forEach(function (n) { n.classList.remove('sm-sim-dim'); });
+      document.getElementById('sm-sim-meta').hidden = true;
+    }
+    var clearBtn = document.getElementById('sm-sim-clear');
+    if (clearBtn) clearBtn.addEventListener('click', clearSim);
+    function simBadge(sym, cls, html) {
+      var nodeEl = document.getElementById('node-' + idOf[sym]);
+      if (!nodeEl) return;
+      var card = nodeEl.querySelector('.sm-card');
+      if (!card) return;
+      var div = document.createElement('div');
+      div.className = 'sm-sim ' + cls;
+      div.innerHTML = html;
+      card.appendChild(div);
+    }
+    if (simBtn) simBtn.addEventListener('click', function () {
+      simBtn.disabled = true;
+      simBtn.textContent = '計算中…';
+      var bodyPayload = {};
+      if (!isView) {
+        var d = deriveShares();
+        var pcts = {};
+        var fallbacks = {};
+        Object.keys(draft).forEach(function (sym) {
+          if (d.shares[sym] !== baseline[sym].pct) pcts[sym] = d.shares[sym] > 0 ? d.shares[sym] : null;
+          if ((draft[sym].fallback || null) !== (baseline[sym].fallback || null)) fallbacks[sym] = draft[sym].fallback;
+        });
+        bodyPayload = { pcts: pcts, fallbacks: fallbacks };
+      }
+      fetch('/admin/allocation/simulate', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (res) {
+          clearSim();
+          var pctTxt = function (w) { return Math.round(w * 1000) / 10 + '%'; };
+          // 退避線の発火/非発火を先に塗り分け (全退避線を減光 → 発火分だけ強調)。
+          Object.keys(draft).forEach(function (sym) {
+            var fb = draft[sym].fallback;
+            if (fb && idOf[fb]) {
+              var conn = el.querySelector('svg.connection.node_in_node-' + idOf[fb] + '.node_out_node-' + idOf[sym]);
+              if (conn) conn.classList.add('sm-sim-dim');
+            }
+          });
+          var planBySym = {};
+          if (res.plan) {
+            res.plan.orders.forEach(function (o) { planBySym[o.symbol] = o; });
+          }
+          Object.keys(res.allocations).forEach(function (sym) {
+            var a = res.allocations[sym];
+            if (!idOf[sym]) return;
+            var status = res.entryStatuses[sym] || '—';
+            var held = res.heldSymbols.indexOf(sym) !== -1;
+            if (a.rerouteTo) {
+              simBadge(sym, 'sm-sim-reroute', '判定 ' + status + ' → <strong>' + pctTxt(a.targetWeight) + ' を ' + a.rerouteTo + ' へ退避</strong>');
+              if (idOf[a.rerouteTo]) {
+                var conn = el.querySelector('svg.connection.node_in_node-' + idOf[a.rerouteTo] + '.node_out_node-' + idOf[sym]);
+                if (conn) { conn.classList.remove('sm-sim-dim'); conn.classList.add('sm-sim-flow'); }
+              }
+            } else {
+              var why = held ? '保有中' : '判定 ' + status;
+              simBadge(sym, 'sm-sim-active', why + ' ・ <strong>active ' + pctTxt(a.activeWeight) + '</strong>');
+            }
+            if (a.reroutedInWeight > 0) {
+              var order = planBySym[sym];
+              simBadge(sym, 'sm-sim-recv', '受入 +' + pctTxt(a.reroutedInWeight) +
+                (order ? ' ・ <strong>' + order.quantity + ' 単位 買付予定</strong>' : ''));
+            }
+          });
+          var metaBits = [(res.draftApplied ? '未適用 draft 込み' : '保存済み設定'), 'cron と同一ロジック ・ 発注なし'];
+          if (res.plan && !res.ordersEnabledFlag && res.plan.orders.length > 0) metaBits.push('自動発注 flag OFF (cron は判定のみ)');
+          if (res.plan) {
+            res.plan.skipped.forEach(function (k) { metaBits.push('⚠ ' + k.symbol + ' skip: ' + k.reason); });
+          }
+          res.notes.forEach(function (n) { metaBits.push('⚠ ' + n); });
+          document.getElementById('sm-sim-meta-text').textContent = metaBits.join(' ・ ');
+          document.getElementById('sm-sim-meta').hidden = false;
+        })
+        .catch(function (e) {
+          document.getElementById('sm-sim-meta-text').textContent = 'シミュレーション失敗: ' + e.message;
+          document.getElementById('sm-sim-meta').hidden = false;
+        })
+        .then(function () {
+          simBtn.disabled = false;
+          simBtn.textContent = 'シミュレート';
+        });
+    });
+
+    // インバース対の 2 枚を「一塊」として見せる装飾コネクタ (operator 要望)。
+    // Drawflow の変形コンテナ (.drawflow) 内に置くのでパン/ズーム/ドラッグに
+    // 追従する。pointer-events 無効の純装飾 — 線の編集対象にはならない。
+    var pairLinkSvg = null;
+    function updatePairLinks() {
+      var container = el.querySelector('.drawflow');
+      if (!container) return;
+      if (!pairLinkSvg) {
+        pairLinkSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        pairLinkSvg.setAttribute('class', 'sm-pair-links');
+        pairLinkSvg.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;pointer-events:none;z-index:0';
+        container.insertBefore(pairLinkSvg, container.firstChild);
+      }
+      while (pairLinkSvg.firstChild) pairLinkSvg.removeChild(pairLinkSvg.firstChild);
+      var seenPairLink = {};
+      Object.keys(idOf).forEach(function (sym) {
+        var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+        if (!inv || !idOf[inv]) return;
+        var key = [sym, inv].sort().join('/');
+        if (seenPairLink[key]) return;
+        seenPairLink[key] = true;
+        var a = document.getElementById('node-' + idOf[sym]);
+        var b = document.getElementById('node-' + idOf[inv]);
+        if (!a || !b) return;
+        var ax = a.offsetLeft + a.offsetWidth / 2;
+        var ay = a.offsetTop + a.offsetHeight / 2;
+        var bx = b.offsetLeft + b.offsetWidth / 2;
+        var by = b.offsetTop + b.offsetHeight / 2;
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', ax);
+        line.setAttribute('y1', ay);
+        line.setAttribute('x2', bx);
+        line.setAttribute('y2', by);
+        line.setAttribute('stroke', '#c22d2d');
+        line.setAttribute('stroke-width', '2');
+        line.setAttribute('stroke-dasharray', '4 4');
+        line.setAttribute('opacity', '0.55');
+        pairLinkSvg.appendChild(line);
+        var mx = (ax + bx) / 2;
+        var my = (ay + by) / 2;
+        var bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        bg.setAttribute('x', mx - 13);
+        bg.setAttribute('y', my - 10);
+        bg.setAttribute('width', 26);
+        bg.setAttribute('height', 20);
+        bg.setAttribute('rx', 10);
+        bg.setAttribute('fill', '#fdecec');
+        bg.setAttribute('stroke', '#c22d2d');
+        bg.setAttribute('stroke-width', '1');
+        pairLinkSvg.appendChild(bg);
+        var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', mx);
+        label.setAttribute('y', my + 4);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('font-size', '12');
+        label.setAttribute('fill', '#c22d2d');
+        label.textContent = '⇄';
+        pairLinkSvg.appendChild(label);
+      });
+    }
+    editor.on('nodeMoved', function () { updatePairLinks(); });
+    editor.on('nodeRemoved', function () { setTimeout(updatePairLinks, 0); });
+    setTimeout(updatePairLinks, 0);
+
+    // 対の共有側 (エッジ関与ゼロ) はポート (グレー点) を隠す。線を引き直して
+    // 主従が入れ替われば表示も追従する。エッジが 1 本でも絡む側は機能上必要な
+    // ので出したまま。
+    function updatePairPorts() {
+      Object.keys(idOf).forEach(function (sym) {
+        var nodeEl = document.getElementById('node-' + idOf[sym]);
+        if (!nodeEl || !draft[sym]) return;
+        var hasIncomingFallback = Object.keys(draft).some(function (x) { return draft[x].fallback === sym; });
+        var isSub = effConnected(sym) && !draft[sym].connected && !draft[sym].fallback && !hasIncomingFallback;
+        nodeEl.classList.toggle('sm-pair-sub', isSub);
+      });
+    }
+    setTimeout(updatePairPorts, 0);
+
+    if (isView) {
+      // 読み取り専用: 共有値の描画と simulate だけ。編集系ハンドラは付けない。
+      renderShares();
+      return;
+    }
+
+    // 対は一塊: 片方のカードをドラッグしたら相方も同じ移動量で追従させる
+    // (operator 要望)。Drawflow はドラッグ中イベントを出さないので、ドラッグ側の
+    // style 位置を mousemove で読んで delta を相方に適用し、mouseup で
+    // Drawflow 内部 data の座標も確定させる。delta は canvas 座標系なので
+    // ズーム非依存。
+    var pairDrag = null;
+    el.addEventListener('mousedown', function (ev) {
+      if (ev.target.closest && (ev.target.closest('.input') || ev.target.closest('.output'))) return;
+      var nodeEl = ev.target.closest ? ev.target.closest('.drawflow-node') : null;
+      if (!nodeEl) return;
+      var id = parseInt(nodeEl.id.replace('node-', ''), 10);
+      var sym = symOf[id];
+      if (!sym || accountSymOf[sym]) return;
+      var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+      if (!inv || !idOf[inv]) return;
+      var pEl = document.getElementById('node-' + idOf[inv]);
+      if (!pEl) return;
+      pairDrag = {
+        pid: idOf[inv],
+        nodeEl: nodeEl,
+        pEl: pEl,
+        startL: nodeEl.offsetLeft,
+        startT: nodeEl.offsetTop,
+        pStartL: pEl.offsetLeft,
+        pStartT: pEl.offsetTop,
+      };
+    });
+    document.addEventListener('mousemove', function () {
+      if (!pairDrag) return;
+      var dx = pairDrag.nodeEl.offsetLeft - pairDrag.startL;
+      var dy = pairDrag.nodeEl.offsetTop - pairDrag.startT;
+      if (dx === 0 && dy === 0) return;
+      pairDrag.pEl.style.left = pairDrag.pStartL + dx + 'px';
+      pairDrag.pEl.style.top = pairDrag.pStartT + dy + 'px';
+      editor.updateConnectionNodes('node-' + pairDrag.pid);
+      updatePairLinks();
+    });
+    document.addEventListener('mouseup', function () {
+      if (!pairDrag) return;
+      var d2 = editor.drawflow.drawflow[editor.module].data[pairDrag.pid];
+      if (d2) {
+        d2.pos_x = pairDrag.pEl.offsetLeft;
+        d2.pos_y = pairDrag.pEl.offsetTop;
+      }
+      pairDrag = null;
+      updatePairLinks();
+    });
 
     function markConnectionPending(srcId, dstId) {
       var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);
@@ -8955,7 +9342,42 @@ export function symbolMapEditorBody(
       var nodeEl = document.getElementById('node-' + idOf[sym]);
       if (nodeEl) nodeEl.classList.toggle('sm-dirty', dirty);
     }
+    // 口座からの到達性 (直接 = 配分線、間接 = 退避先 / インバース対) で
+    // Active/Inactive を導出する (operator 指定: 紐づいていない銘柄は Inactive)。
+    function reachableSet() {
+      var seen = {};
+      var queue = Object.keys(draft).filter(function (sym) { return effConnected(sym); });
+      while (queue.length > 0) {
+        var sym = queue.pop();
+        if (seen[sym]) continue;
+        seen[sym] = true;
+        var fb = draft[sym].fallback;
+        if (fb && draft[fb] && !seen[fb]) queue.push(fb);
+        var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+        if (inv && draft[inv] && !seen[inv]) queue.push(inv);
+      }
+      return seen;
+    }
+    function activeDiffs() {
+      var reach = reachableSet();
+      var activate = [];
+      var deactivate = [];
+      var heldSkip = [];
+      Object.keys(draft).forEach(function (sym) {
+        var willActive = !!reach[sym];
+        var wasActive = baseline[sym].active !== false;
+        if (willActive && !wasActive) activate.push(sym);
+        if (!willActive && wasActive) {
+          // 保有中の銘柄は無効化しない (exit 管理が止まる) — fail-safe。
+          if (nodeBySym[sym].held) heldSkip.push(sym);
+          else deactivate.push(sym);
+        }
+      });
+      return { activate: activate, deactivate: deactivate, heldSkip: heldSkip };
+    }
     function renderChanges() {
+      updatePairLinks();
+      updatePairPorts();
       var d = renderShares();
       var bar = document.getElementById('sm-changes-bar');
       var list = document.getElementById('sm-changes-list');
@@ -8974,11 +9396,187 @@ export function symbolMapEditorBody(
         }
         setCardDirty(sym, pctChanged || fbChanged);
       });
+      var ad = activeDiffs();
+      ad.activate.forEach(function (sym) { items.push(sym + ': 有効化 (口座に接続)'); });
+      ad.deactivate.forEach(function (sym) {
+        items.push(sym + ': 無効化 (口座から到達不能)');
+        setCardDirty(sym, true);
+      });
+      ad.heldSkip.forEach(function (sym) { items.push(sym + ': 到達不能だが保有中のため無効化しません (手動で対応)'); });
       list.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
       bar.hidden = items.length === 0;
       return d;
     }
     renderChanges();
+
+    // 線を空中で放す → 既存 Inactive 銘柄のピッカー (Miro の新規付箋風)。
+    // Drawflow は接続が成立しなかった drop で connectionCancel を発火する。
+    var connStartId = null;
+    var picker = document.createElement('div');
+    picker.id = 'sm-spawn-picker';
+    picker.hidden = true;
+    picker.style.cssText = 'position:fixed;z-index:50;background:#fff;border:1px solid #d0d0d5;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.15);padding:6px;font-size:12px;max-height:240px;overflow:auto';
+    document.body.appendChild(picker);
+    function hidePicker() { picker.hidden = true; connStartId = null; }
+    // 閉じるのは「次の押下」で判定する (click だと、紐を放した瞬間の click が
+    // バブリングして表示直後に閉じてしまう)。
+    document.addEventListener('mousedown', function (ev) {
+      if (!picker.hidden && !picker.contains(ev.target)) hidePicker();
+    });
+    function canvasPos(clientX, clientY) {
+      // Drawflow README の drop 座標変換 (zoom / translate 補正)。
+      var pre = editor.precanvas;
+      var rect = pre.getBoundingClientRect();
+      var zoom = pre.clientWidth / (pre.clientWidth * editor.zoom);
+      return { x: clientX * zoom - rect.x * zoom, y: clientY * zoom - rect.y * zoom };
+    }
+    function spawnAndConnect(item, srcNodeId, clientX, clientY) {
+      var pos = canvasPos(clientX, clientY);
+      // 盤面から下ろした既知銘柄の再召喚は baseline (元の active / pct) を保持する
+      // — addSymbolNode は baseline を初期化するため退避してから戻す。
+      var known = nodeBySym[item.sym];
+      var savedBaseline = known ? baseline[item.sym] : null;
+      var n = known || {
+        sym: item.sym,
+        pct: 0,
+        role: item.role,
+        color: item.color,
+        held: null,
+        entryRequired: false,
+        fallback: null,
+        inverse: item.inverse,
+        currency: item.currency,
+      };
+      programmatic = true;
+      var newId = addSymbolNode(n, pos.x, pos.y, { spawned: savedBaseline ? savedBaseline.active === false : true });
+      editor.addConnection(srcNodeId, newId, 'output_1', 'input_1');
+      programmatic = false;
+      if (savedBaseline) {
+        baseline[item.sym] = savedBaseline;
+        draft[item.sym] = { connected: false, fallback: null };
+      }
+      delete removedOnCanvas[item.sym];
+      // 対の相方も在庫にあれば 2 枚セットで出す (片割れだけ盤面に出て
+      // 「見えないのに対で共有」の幽霊配分を作らないため)。線は引いた側のみ。
+      if (item.partner) {
+        var pItem = item.partner;
+        var pKnown = nodeBySym[pItem.sym];
+        var pSaved = pKnown ? baseline[pItem.sym] : null;
+        var pn = pKnown || {
+          sym: pItem.sym,
+          pct: 0,
+          role: pItem.role,
+          color: pItem.color,
+          held: null,
+          entryRequired: false,
+          fallback: null,
+          inverse: pItem.inverse,
+          currency: pItem.currency,
+        };
+        programmatic = true;
+        addSymbolNode(pn, pos.x, pos.y + 120, { spawned: pSaved ? pSaved.active === false : true });
+        programmatic = false;
+        if (pSaved) {
+          baseline[pItem.sym] = pSaved;
+          draft[pItem.sym] = { connected: false, fallback: null };
+        }
+        delete removedOnCanvas[pItem.sym];
+        data.inactive = data.inactive.filter(function (x) { return x.sym !== pItem.sym; });
+      }
+      // 接続の意味づけは通常ハンドラと同じ規則で draft に反映する。
+      var src = symOf[srcNodeId];
+      if (accountSymOf[src]) {
+        draft[item.sym].connected = true;
+      } else {
+        draft[src].fallback = item.sym;
+      }
+      // 払い出した銘柄はピッカー在庫から除外。
+      data.inactive = data.inactive.filter(function (x) { return x.sym !== item.sym; });
+      renderChanges();
+    }
+    function showPicker(srcNodeId, clientX, clientY) {
+      var src = symOf[srcNodeId];
+      var ccy = accountSymOf[src] ? accountSymOf[src] : nodeBySym[src].currency;
+      var removedItems = Object.keys(removedOnCanvas).map(function (sym) {
+        var n = nodeBySym[sym];
+        return { sym: sym, role: n.role, color: n.color, currency: n.currency, inverse: n.inverse };
+      });
+      var candidates = data.inactive.concat(removedItems).filter(function (x) { return x.currency === ccy; });
+      // 口座から引いた場合、対 (両方在庫) は 1 エントリに畳んで 2 枚セットで出す
+      // (対 = 1 枝なので個別に出すのは意味論として誤り)。退避先 (銘柄から引いた
+      // 場合) は対象を 1 銘柄に決める必要があるため個別のまま。
+      if (accountSymOf[src]) {
+        var bySym2 = {};
+        candidates.forEach(function (x) { bySym2[x.sym] = x; });
+        var merged = [];
+        var used = {};
+        candidates.forEach(function (x) {
+          if (used[x.sym]) return;
+          used[x.sym] = true;
+          if (x.inverse && bySym2[x.inverse] && !used[x.inverse]) {
+            used[x.inverse] = true;
+            merged.push(Object.assign({}, x, { partner: bySym2[x.inverse], pairLabel: x.sym + ' ⇄ ' + x.inverse }));
+          } else {
+            merged.push(x);
+          }
+        });
+        candidates = merged;
+      }
+      if (candidates.length === 0) return;
+      picker.innerHTML = '<div class="muted" style="padding:2px 6px 6px">既存 Inactive 銘柄を紐づけ (' + ccy + ')</div>' +
+        candidates.map(function (x) {
+          return '<div class="sm-spawn-item" data-sym="' + x.sym + '" style="padding:5px 10px;border-radius:6px;cursor:pointer">' +
+            '<strong style="color:' + x.color + '">' + (x.pairLabel || x.sym) + '</strong>' +
+            (x.pairLabel ? ' <span class="muted" style="font-size:10px">対 ・ 2 枚で出現</span>' : '') +
+            (!x.pairLabel && x.role ? ' <span class="muted" style="font-size:10px">' + x.role + '</span>' : '') + '</div>';
+        }).join('');
+      picker.style.left = clientX + 'px';
+      picker.style.top = clientY + 'px';
+      picker.hidden = false;
+      var sx = clientX;
+      var sy = clientY;
+      picker.querySelectorAll('.sm-spawn-item').forEach(function (itemEl) {
+        itemEl.addEventListener('mouseenter', function () { itemEl.style.background = '#f0f6ff'; });
+        itemEl.addEventListener('mouseleave', function () { itemEl.style.background = ''; });
+        itemEl.addEventListener('click', function () {
+          var sym = itemEl.getAttribute('data-sym');
+          var item = null;
+          // 在庫は DB-Inactive + 盤面から下ろした銘柄の合算 (candidates) から解決
+          // する — data.inactive だけ探すと再召喚が無反応になる。
+          candidates.forEach(function (x) { if (x.sym === sym) item = x; });
+          var srcId = srcNodeId;
+          hidePicker();
+          if (item) spawnAndConnect(item, srcId, sx, sy);
+        });
+      });
+    }
+    // Drawflow の connectionStart/Cancel イベントは版により発火しないため、
+    // DOM で直接検知する: output ポート押下で起点を記録し、mouseup の直後に
+    // (connectionCreated が先に走る猶予を置いて) 接続が成立していなければ
+    // 「空中で放した」とみなしてピッカーを出す。
+    var connConsumed = false;
+    el.addEventListener('mousedown', function (ev) {
+      var out = ev.target && ev.target.closest ? ev.target.closest('.output') : null;
+      if (!out) return;
+      var nodeEl = ev.target.closest('.drawflow-node');
+      if (!nodeEl) return;
+      connStartId = parseInt(nodeEl.id.replace('node-', ''), 10);
+      connConsumed = false;
+    });
+    editor.on('connectionCreated', function () { connConsumed = true; connStartId = null; });
+    document.addEventListener('mouseup', function (ev) {
+      if (connStartId === null) return;
+      var srcId = connStartId;
+      var mx = ev.clientX;
+      var my = ev.clientY;
+      // connectionCreated は同じ mouseup で同期的に dispatch される — 1 tick
+      // 待ってから「成立しなかった」ことを確認する。
+      setTimeout(function () {
+        if (connConsumed) { connStartId = null; return; }
+        connStartId = null;
+        showPicker(srcId, mx, my);
+      }, 30);
+    });
 
     editor.on('connectionCreated', function (info) {
       if (programmatic) return;
@@ -8991,7 +9589,6 @@ export function symbolMapEditorBody(
         return;
       }
       if (accountSymOf[src]) {
-        // 通貨の合わない口座からの線は弾く (JPY 口座 → USD 銘柄等)。
         if (nodeBySym[dst].currency !== accountSymOf[src]) {
           programmatic = true;
           editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
@@ -9013,12 +9610,8 @@ export function symbolMapEditorBody(
         alert(src + ' は ' + nodeBySym[src].currency + '、' + dst + ' は ' + nodeBySym[dst].currency + ' です。異通貨の退避先は設定できません (同一通貨のみ)。');
         return;
       }
-      // 退避先は 1 銘柄 1 本 — 既存の出力接続を visual からも外す。
-      if (draft[src].fallback && idOf[draft[src].fallback]) {
-        programmatic = true;
-        editor.removeSingleConnection(idOf[src], idOf[draft[src].fallback], 'output_1', 'input_1');
-        programmatic = false;
-      }
+      // 退避先は 1 対 (単独銘柄は 1 銘柄) 1 本 — 自分と相方の既存退避を外して張る。
+      clearPairFallbacks(src);
       draft[src].fallback = dst;
       markConnectionPending(info.output_id, info.input_id);
       renderChanges();
@@ -9035,6 +9628,134 @@ export function symbolMapEditorBody(
         return;
       }
       if (draft[src].fallback === dst) draft[src].fallback = null;
+      renderChanges();
+    });
+
+    // 入力ポート (左点) ドラッグで既存の線を付け替える (operator 要望:
+    // USMV の左点を NVDA の左点へ → AAPL の退避先が NVDA に移り、USMV は
+    // 到達不能 = 無効化対象になる)。Drawflow に endpoint 再ドラッグは無いので
+    // 自前実装: input 押下で最後の incoming を掴み、ガイド線を引き、別カードで
+    // 放したら同じ規則 (通貨チェック・1 銘柄 1 本) で繋ぎ替える。
+    var retarget = null; // { srcId, oldDstId }
+    var guide = null;
+    function portCenter(nodeId, cls) {
+      var port = el.querySelector('#node-' + nodeId + ' .' + cls);
+      if (!port) return null;
+      var r = port.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    function showGuide(from, to) {
+      if (!guide) {
+        guide = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        guide.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:40';
+        guide.innerHTML = '<line stroke="#6e6e73" stroke-width="2.5" stroke-dasharray="6 5"/>';
+        document.body.appendChild(guide);
+      }
+      var line = guide.querySelector('line');
+      line.setAttribute('x1', from.x);
+      line.setAttribute('y1', from.y);
+      line.setAttribute('x2', to.x);
+      line.setAttribute('y2', to.y);
+    }
+    function hideGuide() {
+      if (guide) { guide.remove(); guide = null; }
+    }
+    // 退避線は「1 対 1 本」: 対の両側に設定すると、対で 1 枠のはずの配分が
+    // 2 回退避されて二重計上になる (computeConditionalAllocation は銘柄単位で
+    // reroute する) ため、相方の既存退避を自動で外してから張る。
+    function clearFallbackOf(sym) {
+      var fb = draft[sym] && draft[sym].fallback;
+      if (!fb) return;
+      if (idOf[sym] && idOf[fb]) {
+        programmatic = true;
+        editor.removeSingleConnection(idOf[sym], idOf[fb], 'output_1', 'input_1');
+        programmatic = false;
+      }
+      draft[sym].fallback = null;
+    }
+    function clearPairFallbacks(srcSym) {
+      clearFallbackOf(srcSym);
+      var inv = nodeBySym[srcSym] && nodeBySym[srcSym].inverse;
+      if (inv && draft[inv]) clearFallbackOf(inv);
+    }
+    function srcNodeIdOf(srcSym) {
+      return accountSymOf[srcSym] ? accountIds[accountSymOf[srcSym]] : idOf[srcSym];
+    }
+    function disconnectDraft(srcSym, dstSym) {
+      programmatic = true;
+      editor.removeSingleConnection(srcNodeIdOf(srcSym), idOf[dstSym], 'output_1', 'input_1');
+      programmatic = false;
+      if (accountSymOf[srcSym]) draft[dstSym].connected = false;
+      else if (draft[srcSym].fallback === dstSym) draft[srcSym].fallback = null;
+    }
+    function connectDraft(srcSym, dstSym) {
+      // 通貨規則は通常の接続と同一。違反は何もしない (付け替え自体を不成立に)。
+      if (accountSymOf[srcSym]) {
+        if (nodeBySym[dstSym].currency !== accountSymOf[srcSym]) {
+          alert(dstSym + ' は ' + nodeBySym[dstSym].currency + ' 銘柄です。' + accountSymOf[srcSym] + ' 口座からは接続できません。');
+          return false;
+        }
+        programmatic = true;
+        editor.addConnection(accountIds[accountSymOf[srcSym]], idOf[dstSym], 'output_1', 'input_1');
+        programmatic = false;
+        draft[dstSym].connected = true;
+        markConnectionPending(accountIds[accountSymOf[srcSym]], idOf[dstSym]);
+        return true;
+      }
+      if (nodeBySym[srcSym].currency !== nodeBySym[dstSym].currency) {
+        alert(srcSym + ' は ' + nodeBySym[srcSym].currency + '、' + dstSym + ' は ' + nodeBySym[dstSym].currency + ' です。異通貨の退避先は設定できません。');
+        return false;
+      }
+      clearPairFallbacks(srcSym)
+      programmatic = true;
+      editor.addConnection(idOf[srcSym], idOf[dstSym], 'output_1', 'input_1');
+      programmatic = false;
+      draft[srcSym].fallback = dstSym;
+      markConnectionPending(idOf[srcSym], idOf[dstSym]);
+      return true;
+    }
+    el.addEventListener('mousedown', function (ev) {
+      var inp = ev.target && ev.target.closest ? ev.target.closest('.input') : null;
+      if (!inp) return;
+      var nodeEl = ev.target.closest('.drawflow-node');
+      if (!nodeEl) return;
+      var dstId = parseInt(nodeEl.id.replace('node-', ''), 10);
+      var dstSym = symOf[dstId];
+      if (!dstSym || accountSymOf[dstSym]) return;
+      // Drawflow 内部 data から incoming を引く (最後に張られた線を掴む)。
+      var moduleData = editor.drawflow.drawflow[editor.module].data[dstId];
+      var conns = moduleData && moduleData.inputs && moduleData.inputs.input_1 ? moduleData.inputs.input_1.connections : [];
+      if (!conns || conns.length === 0) return;
+      var srcId = parseInt(conns[conns.length - 1].node, 10);
+      ev.preventDefault();
+      ev.stopPropagation();
+      retarget = { srcId: srcId, oldDstId: dstId };
+      var from = portCenter(srcId, 'output') || { x: ev.clientX, y: ev.clientY };
+      showGuide(from, { x: ev.clientX, y: ev.clientY });
+    }, true);
+    document.addEventListener('mousemove', function (ev) {
+      if (!retarget) return;
+      var from = portCenter(retarget.srcId, 'output') || { x: ev.clientX, y: ev.clientY };
+      showGuide(from, { x: ev.clientX, y: ev.clientY });
+    });
+    document.addEventListener('mouseup', function (ev) {
+      if (!retarget) return;
+      var state = retarget;
+      retarget = null;
+      hideGuide();
+      var dropNode = document.elementFromPoint(ev.clientX, ev.clientY);
+      dropNode = dropNode && dropNode.closest ? dropNode.closest('.drawflow-node') : null;
+      if (!dropNode) return; // 空中: 付け替えキャンセル (現状維持)
+      var newDstId = parseInt(dropNode.id.replace('node-', ''), 10);
+      var newDstSym = symOf[newDstId];
+      var srcSym = symOf[state.srcId];
+      var oldDstSym = symOf[state.oldDstId];
+      if (!newDstSym || accountSymOf[newDstSym] || newDstSym === oldDstSym || newDstSym === srcSym) return;
+      disconnectDraft(srcSym, oldDstSym);
+      if (!connectDraft(srcSym, newDstSym)) {
+        // 規則違反で繋げなかった場合は元に戻す。
+        connectDraft(srcSym, oldDstSym);
+      }
       renderChanges();
     });
 
@@ -9066,11 +9787,30 @@ export function symbolMapEditorBody(
     document.getElementById('sm-reset').addEventListener('click', function () { location.reload(); });
     document.getElementById('sm-apply').addEventListener('click', function () {
       var d = deriveShares();
+      var ad = activeDiffs();
       var pctChanges = Object.keys(draft).filter(function (sym) { return d.shares[sym] !== baseline[sym].pct; });
       var fbChanges = Object.keys(draft).filter(function (sym) { return (draft[sym].fallback || null) !== (baseline[sym].fallback || null); });
-      if (pctChanges.length === 0 && fbChanges.length === 0) return;
-      if (!confirm('表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%)。よろしいですか？')) return;
+      if (pctChanges.length === 0 && fbChanges.length === 0 && ad.activate.length === 0 && ad.deactivate.length === 0) return;
+      var confirmMsg = '表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%';
+      if (ad.activate.length > 0) confirmMsg += ' ・ 有効化 ' + ad.activate.join('/');
+      if (ad.deactivate.length > 0) confirmMsg += ' ・ 無効化 ' + ad.deactivate.join('/');
+      confirmMsg += ')。よろしいですか？';
+      if (!confirm(confirmMsg)) return;
       var steps = Promise.resolve();
+      // 適用順: 有効化 → 配分 → 退避先 → 無効化 (無効化を最後にして、配分・退避の
+      // 書き込み対象が active のまま処理されるようにする)。
+      function toggleStep(sym, label) {
+        return function () {
+          return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/toggle-active', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+          }).then(function (r) {
+            if (!r.ok) throw new Error(sym + ' の' + label + 'に失敗 (HTTP ' + r.status + ')');
+          });
+        };
+      }
+      ad.activate.forEach(function (sym) { steps = steps.then(toggleStep(sym, '有効化')); });
       if (pctChanges.length > 0) {
         var form = new FormData();
         pctChanges.forEach(function (sym) {
@@ -9093,325 +9833,11 @@ export function symbolMapEditorBody(
           });
         });
       });
+      ad.deactivate.forEach(function (sym) { steps = steps.then(toggleStep(sym, '無効化')); });
       steps
         .then(function () { location.reload(); })
         .catch(function (e) { alert(e.message + ' — 再読込して状態を確認してください。'); location.reload(); });
     });
-  });
-  </script>`
-}
-
-/**
- * 配分マップ (#symbol-relation-map)。「口座 (原資) から各銘柄へ何% 割り当て、
- * 参加できていない銘柄の枠はいまどこへ譲られているか」をノードツリーで示す
- * (operator 指定の絵: 口座 ─ SOXL ┈┈▶ TQQQ / ┗ TQQQ)。
- *
- *   - 口座 → 銘柄: 実線 + 配分% (帯の太さも %)
- *   - 銘柄カード: Active (建玉保有 = 参加中、実線枠 + 投入額) /
- *     Pending (未保有 = 様子見、破線枠)
- *   - Pending 銘柄 ┈┈▶ 譲り先: 点線矢印。条件連動 ON は退避先 (なければ現金待機)、
- *     OFF は枠を銘柄に確保したまま現金待機 (グレー点線)
- * インバース対 / regime proxy は量の流れではないので脚注チップ。
- * 表示専用 — 判定・発注には一切関与しない。
- */
-const ROLE_NODE_COLORS: Record<string, string> = {
-  cash_parking: '#5b8c5a',
-  core_trend: '#1a56db',
-  leveraged_trend: '#d97706',
-  low_volatility: '#7e3af2',
-  sector_trend: '#0e9f9f',
-  inverse_hedge: '#c22d2d',
-}
-
-/** 銘柄列の並び (リスク低 → 高で上から)。 */
-const MAP_ROLE_ORDER = [
-  'cash_parking',
-  'low_volatility',
-  'core_trend',
-  'sector_trend',
-  'leveraged_trend',
-  'inverse_hedge',
-  'none',
-] as const
-
-export function renderSymbolRelationMap(
-  rows: SymbolConfigRow[],
-  inversePairs: Record<string, string>,
-  pairRegimes: PairRegimeEntry[],
-  amounts: Record<string, { native: string; jpy: number }> = {},
-): string {
-  const pctOf = (r: SymbolConfigRow): number =>
-    r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
-  const roleOf = (r: SymbolConfigRow): string => r.role ?? 'none'
-  const colorOf = (role: string): string => ROLE_NODE_COLORS[role] ?? '#5f6368'
-
-  // 配分のある有効銘柄が対象 (0% は口座から線が引けない)。
-  const allocated = rows
-    .filter((r) => r.active && pctOf(r) > 0)
-    .sort(
-      (a, b) =>
-        MAP_ROLE_ORDER.indexOf(roleOf(a) as (typeof MAP_ROLE_ORDER)[number]) -
-          MAP_ROLE_ORDER.indexOf(roleOf(b) as (typeof MAP_ROLE_ORDER)[number]) || pctOf(b) - pctOf(a),
-    )
-
-  interface MapNode {
-    name: string
-    /** カード 1 行目。 */
-    title: string
-    /** カード 2 行目 (状態)。 */
-    sub: string
-    color: string
-    /** カードの塗り (通貨で分ける: 口座 = 紺系 / JPY = 桜 / USD = 薄青)。 */
-    fill: string
-    status: 'account' | 'active' | 'pending' | 'cash'
-    x: number
-    y: number
-  }
-  interface MapEdge {
-    source: string
-    target: string
-    /** inert = 退避先設定済みだが条件連動 OFF で不使用 (設定ミスの警告表示)。 */
-    kind: 'alloc' | 'yield' | 'idle' | 'inert'
-    label: string
-    width: number
-  }
-  const nodes: MapNode[] = []
-  const edges: MapEdge[] = []
-  const nodeNames = new Set<string>()
-  const addNode = (n: MapNode): void => {
-    if (nodeNames.has(n.name)) return
-    nodeNames.add(n.name)
-    nodes.push(n)
-  }
-
-  const ROW_H = 64
-  const SYMBOL_X = 360
-  const CASH_X = 640
-  if (allocated.length > 0) {
-    // 予算合計はインバース対の枠共有 (#315 の共有 slider と同じ) を反映して
-    // 「対は max、単独はそのまま」で数える — 単純合計だと 200% 等に見えて誤読する。
-    const counted = new Set<string>()
-    let total = 0
-    for (const r of allocated) {
-      const sym = r.symbol.toUpperCase()
-      if (counted.has(sym)) continue
-      counted.add(sym)
-      const partner = inversePairs[sym]?.toUpperCase()
-      const partnerRow = partner ? allocated.find((x) => x.symbol.toUpperCase() === partner) : undefined
-      if (partnerRow) {
-        counted.add(partner!)
-        total += Math.max(pctOf(r), pctOf(partnerRow))
-      } else {
-        total += pctOf(r)
-      }
-    }
-    const centerY = 40 + ((allocated.length - 1) * ROW_H) / 2
-    addNode({
-      name: '口座',
-      title: `口座 (予算 ${Math.round(total * 10) / 10}%)`,
-      sub: '原資',
-      color: '#3c4043',
-      fill: '#5f6368',
-      status: 'account',
-      x: 90,
-      y: centerY,
-    })
-    let needCash = false
-    allocated.forEach((r, i) => {
-      const sym = r.symbol.toUpperCase()
-      const held = amounts[sym] !== undefined
-      const conditional = r.entryRequired === true
-      addNode({
-        name: sym,
-        title: `${sym} ${pctOf(r)}%`,
-        sub: held ? `Active ・ ${amounts[sym]!.native}` : 'Pending (様子見)',
-        color: colorOf(roleOf(r)),
-        fill: r.currency === 'JPY' ? '#fdf3f2' : '#f0f6ff',
-        status: held ? 'active' : 'pending',
-        x: SYMBOL_X,
-        y: 40 + i * ROW_H,
-      })
-      edges.push({
-        source: '口座',
-        target: sym,
-        kind: 'alloc',
-        label: `${pctOf(r)}%`,
-        width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
-      })
-      // 未保有 (Pending) の枠の現在の行き先。
-      if (!held) {
-        const target = conditional && r.cashFallbackSymbol ? r.cashFallbackSymbol.toUpperCase() : '現金待機'
-        if (target !== sym) {
-          if (target === '現金待機') needCash = true
-          // 退避先が設定されているのに条件連動 OFF = 設定が効いていない状態。
-          // 黙って無視せず inert (琥珀) で警告表示する (operator が SOXL で踏んだ罠)。
-          const inert = !conditional && r.cashFallbackSymbol !== null
-          edges.push({
-            source: sym,
-            target,
-            kind: conditional ? 'yield' : inert ? 'inert' : 'idle',
-            label: conditional
-              ? `代替 ${pctOf(r)}%`
-              : inert
-                ? `待機 ${pctOf(r)}% ⚠ 退避先${r.cashFallbackSymbol!.toUpperCase()}未使用`
-                : `待機 ${pctOf(r)}% (枠確保)`,
-            width: Math.max(1.5, Math.min(8, pctOf(r) / 5)),
-          })
-        }
-      }
-    })
-    if (needCash) {
-      addNode({
-        name: '現金待機',
-        title: '現金待機',
-        sub: '未参加分の置き場',
-        color: '#9aa0a6',
-        fill: '#f5f5f7',
-        status: 'cash',
-        x: CASH_X,
-        y: centerY,
-      })
-    }
-    // 譲り先が未登場の銘柄 (配分 0% の退避先等) は右列に補完する。
-    for (const e of edges) {
-      if (nodeNames.has(e.target)) continue
-      const row = rows.find((x) => x.symbol.toUpperCase() === e.target)
-      addNode({
-        name: e.target,
-        title: e.target,
-        sub: amounts[e.target] ? `Active ・ ${amounts[e.target]!.native}` : '受け皿',
-        color: row ? colorOf(roleOf(row)) : '#9aa0a6',
-        fill: row ? (row.currency === 'JPY' ? '#fdf3f2' : '#f0f6ff') : '#f5f5f7',
-        status: amounts[e.target] ? 'active' : 'pending',
-        x: CASH_X,
-        y: 40 + nodes.length * 8,
-      })
-    }
-  }
-
-  // 構造情報 (量ではない) は脚注チップで: インバース対 / regime proxy。
-  const chips: string[] = []
-  const seenPair = new Set<string>()
-  for (const [sym, inverse] of Object.entries(inversePairs)) {
-    const a = sym.toUpperCase()
-    const b = inverse.toUpperCase()
-    const key = [a, b].sort().join('/')
-    if (seenPair.has(key)) continue
-    seenPair.add(key)
-    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fdecec;color:#c22d2d;font-size:11px">インバース対 ${esc(a)} ⇄ ${esc(b)}</span>`)
-  }
-  for (const pair of pairRegimes) {
-    if (pair.invalidConfig !== null) continue
-    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
-  }
-
-  if (edges.length === 0 && chips.length === 0) return ''
-  const mapHeight = Math.max(220, allocated.length * ROW_H + 80)
-  const chipRow = chips.length > 0
-    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
-    : ''
-  const mapDiv = edges.length > 0
-    ? `<div id="symbol-relation-map" style="height:${mapHeight}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:6px"></div>
-    <p class="muted" style="font-size:11px;margin:4px 0 0">
-      口座 → 銘柄 = 配分% (実線、太さ ∝ %)。塗り: 濃グレー = 口座 ・ 桜 = JPY 銘柄 ・ 薄青 = USD 銘柄。<strong>Active</strong> = 建玉保有で参加中 (実線枠 + 投入額) ／
-      <strong>Pending</strong> = 様子見 (破線枠) で、点線矢印が「いま枠が行っている先」:
-      <span style="color:#0e9f6e">緑 = 退避先へ代替割当 (条件連動 ON)</span> ・
-      <span style="color:#9aa0a6">グレー = 枠確保のまま現金待機</span> ・
-      <span style="color:#b25000">琥珀 ⚠ = 退避先が設定済みなのに条件連動 OFF で不使用</span>。
-    </p>`
-    : ''
-  const payload = { nodes, edges }
-  return `<details open style="margin:0 0 12px">
-    <summary style="cursor:pointer;font-size:13px;font-weight:600">配分マップ <span class="muted" style="font-weight:normal">— 口座 → 銘柄 → 譲り先 (現在形・表示専用)</span> <a href="/dashboard/symbols/map" style="font-size:12px;font-weight:normal;margin-left:8px">✏️ 編集モード</a></summary>
-    ${mapDiv}
-    ${chipRow}
-  </details>
-  <script src="${ECHARTS_CDN}" defer></script>
-  ${safeJsonScript('__symbolRelationMap', payload)}
-  <script>
-  document.addEventListener('DOMContentLoaded', function () {
-    if (typeof echarts === 'undefined') return;
-    var data = window.__symbolRelationMap;
-    var el = document.getElementById('symbol-relation-map');
-    if (!data || !el || data.edges.length === 0) return;
-    var EDGE_STYLE = {
-      alloc: { color: '#8a8f98', type: 'solid' },
-      yield: { color: '#0e9f6e', type: 'dotted' },
-      idle: { color: '#9aa0a6', type: 'dotted' },
-      inert: { color: '#b25000', type: 'dotted' },
-    };
-    var chart = echarts.init(el);
-    chart.setOption({
-      tooltip: {
-        formatter: function (p) {
-          if (p.dataType === 'edge') {
-            if (p.data.kind === 'yield') return p.data.source + ' は様子見のため ' + p.data.label.replace('代替 ', '') + ' を ' + p.data.target + ' に代替割当中';
-            if (p.data.kind === 'idle') return p.data.source + ' は様子見。枠は確保したまま現金待機';
-            if (p.data.kind === 'inert') return p.data.source + ' は退避先が設定されていますが<br><strong>条件連動が OFF のため使われていません</strong>。<br>銘柄編集で「条件連動」を ON にすると退避が有効になります。';
-            return '口座 → ' + p.data.target + ': 配分 ' + p.data.label;
-          }
-          var d = p.data;
-          return '<strong>' + d.title + '</strong><br>' + d.sub;
-        },
-      },
-      series: [{
-        type: 'graph',
-        layout: 'none',
-        roam: true,
-        data: data.nodes.map(function (n) {
-          var isPending = n.status === 'pending';
-          return {
-            name: n.name,
-            x: n.x,
-            y: n.y,
-            title: n.title,
-            sub: n.sub,
-            symbol: 'roundRect',
-            symbolSize: [150, 46],
-            itemStyle: {
-              color: n.fill || '#fff',
-              borderColor: n.color,
-              borderWidth: 2,
-              borderType: isPending ? 'dashed' : 'solid',
-              opacity: isPending ? 0.75 : 1,
-              shadowBlur: 4,
-              shadowColor: 'rgba(0,0,0,0.08)',
-            },
-            label: {
-              show: true,
-              formatter: '{t|' + n.title + '}\\n{s|' + n.sub + '}',
-              rich: {
-                t: { fontSize: 13, fontWeight: 700, color: n.status === 'account' ? '#fff' : '#1d1d1f', lineHeight: 18 },
-                s: {
-                  fontSize: 10,
-                  color: n.status === 'account' ? '#e8eaed' : n.status === 'active' ? '#0e9f6e' : n.status === 'pending' ? '#b25000' : '#6e6e73',
-                  lineHeight: 14,
-                },
-              },
-            },
-          };
-        }),
-        edges: data.edges.map(function (e) {
-          var st = EDGE_STYLE[e.kind];
-          return {
-            source: e.source,
-            target: e.target,
-            kind: e.kind,
-            label: e.label,
-            lineStyle: { color: st.color, type: st.type, width: e.width, curveness: 0.15 },
-            symbol: ['none', 'arrow'],
-            symbolSize: 8,
-            edgeLabel: {
-              show: e.kind !== 'alloc',
-              formatter: e.label,
-              fontSize: 10,
-              color: st.color,
-            },
-          };
-        }),
-      }],
-    });
-    window.addEventListener('resize', function () { chart.resize(); });
   });
   </script>`
 }
@@ -9424,8 +9850,16 @@ function symbolsListBody(args: {
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
+  /** 'list' = 表 (default)、'workflow' = 配分キャンバス。マップ埋め込みでページが
+   *  重くなったため tab 分離 (operator 要望)。Drawflow の読み込みも workflow 時のみ。 */
+  tab?: 'list' | 'workflow'
 }): string {
   const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
+  const tab = args.tab ?? 'list'
+  const tabBar = `<div style="display:flex;gap:4px;margin:0 0 12px;border-bottom:1px solid #e3e3e8">
+    <a href="/dashboard/symbols" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'list' ? '#06c' : 'transparent'};color:${tab === 'list' ? '#06c' : '#5f6368'};font-weight:${tab === 'list' ? '600' : 'normal'}">一覧</a>
+    <a href="/dashboard/symbols?tab=workflow" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'workflow' ? '#06c' : 'transparent'};color:${tab === 'workflow' ? '#06c' : '#5f6368'};font-weight:${tab === 'workflow' ? '600' : 'normal'}">ワークフロー</a>
+  </div>`
   // #415: 買付余力バッジをページ最上部に (全 return が ${errorBanner} を先頭に持つので
   // ここに前置すると一覧・空・フィルタ 0 件の全ケースで表示される)。
   const errorBanner = buyingPowerBadge() + renderSymbolErrorBanner(errorCode, errorSymbol)
@@ -9455,13 +9889,15 @@ function symbolsListBody(args: {
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
   </p>`
 
-  const relationMap = renderSymbolRelationMap(rows, inversePairs, pairRegimes, mapAmounts)
+  if (tab === 'workflow') {
+    return `${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes })}`
+  }
 
   if (rows.length === 0) {
-    return `${errorBanner}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
+    return `${errorBanner}${tabBar}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
   }
   if (filtered.length === 0) {
-    return `${errorBanner}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
+    return `${errorBanner}${tabBar}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
   // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ツリー表記。
   const ordered = orderRowsByPair(filtered, inversePairs)
@@ -9568,7 +10004,7 @@ function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  return `${errorBanner}${relationMap}${filterBar}${headerBar}
+  return `${errorBanner}${tabBar}${filterBar}${headerBar}
   <table>
     <thead><tr>
       <th style="width:28px" title="インバース対のツリー表記"></th>

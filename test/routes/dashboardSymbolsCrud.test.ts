@@ -1757,3 +1757,22 @@ describe('POST /admin/symbol-config/:symbol/cash-fallback (#symbol-relation-map 
     expect((await post(app, 'SOXL', { target: '1357' })).status).toBe(400)
   })
 })
+
+describe('銘柄管理の tab 分離 (#symbol-relation-map)', () => {
+  it('default は一覧タブ (表あり・キャンバスなし)、?tab=workflow でキャンバスのみ', async () => {
+    const db = fakeDb([row({ symbol: 'SOXL', budgetAllocPct: 0.5 })])
+    vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
+    const app = createApp()
+    const listRes = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const listBody = await listRes.text()
+    expect(listBody).toContain('ワークフロー')
+    expect(listBody).toContain('銘柄名') // 表 header
+    expect(listBody).not.toContain('symbol-map-editor')
+
+    const wfRes = await app.request('/dashboard/symbols?tab=workflow', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
+    const wfBody = await wfRes.text()
+    expect(wfBody).toContain('symbol-map-editor')
+    expect(wfBody).toContain("editor.editor_mode = 'view'")
+    expect(wfBody).not.toContain('銘柄名')
+  })
+})

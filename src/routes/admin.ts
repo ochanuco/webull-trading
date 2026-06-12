@@ -25,6 +25,16 @@ import { reconcileFills } from '../trading/reconciliation/reconcileFills'
 import { syncHoldings } from '../trading/reconciliation/syncHoldings'
 import { runStrategyCron } from '../trading/strategy/runStrategyCron'
 import { loadSymbolUniverse } from '../infrastructure/db/symbolUniverse'
+import { selectBarClient } from '../infrastructure/quotes/BarClient'
+import { loadUsdJpyRate } from '../infrastructure/quotes/fxRate'
+import {
+  buildCashRebalancePlan,
+  computeConditionalAllocation,
+  type EntrySnapshot,
+} from '../trading/strategy/conditionalAllocation'
+import { deriveEntryStatusFromIndicators } from '../trading/strategy/entryStatus'
+import { computePullbackIndicators } from '../trading/strategy/indicators'
+import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
 import { YahooBarClient, toYahooSymbol } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
@@ -1719,6 +1729,149 @@ export const admin = new Hono<AppBindings>()
     return c.json({ symbol: symbolPath, deleted: true })
   })
   /**
+   * 配分シミュレーション (#symbol-relation-map dry-run)。**cron と同一の pure
+   * 関数** (computeConditionalAllocation / buildCashRebalancePlan) に、現在の
+   * 設定 (+ 任意の draft 上書き) と最新の判定材料・DO 保有を食わせて、
+   * 「いま cron が走ったら配分はどう流れるか」を返す。読み取り専用 —
+   * 発注経路には構造的に到達しない (execution を一切組み立てない)。
+   * staging の trading_enabled OFF でも動かせる配分ロジック検証手段。
+   *
+   * body (任意): { pcts?: Record<sym, number|null (%)>, fallbacks?: Record<sym, string|null> }
+   * — ワークフロー編集の draft を適用前に試す用。fallback 設定は canvas と同じく
+   * entry_required ON を含意する。
+   */
+  .post('/allocation/simulate', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const bodyRaw = (await c.req.json().catch(() => ({}))) as unknown
+    const body =
+      bodyRaw !== null && typeof bodyRaw === 'object' && !Array.isArray(bodyRaw)
+        ? (bodyRaw as { pcts?: Record<string, unknown>; fallbacks?: Record<string, unknown> })
+        : {}
+    const universe = await loadSymbolUniverse(c.env)
+    const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
+    const notes: string[] = []
+
+    // draft 上書き: pcts (% → fraction、null = 解除)、fallbacks (null = 解除)。
+    const targetWeights: Record<string, number> = { ...universe.symbolBudgetAllocPct }
+    for (const [symRaw, v] of Object.entries(body.pcts ?? {})) {
+      const sym = normalizeSymbol(symRaw)
+      if (v === null) {
+        delete targetWeights[sym]
+        continue
+      }
+      const pct = Number(v)
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+        throw new ValidationError(`pcts.${sym} must be 0..100 or null`, { field: 'pcts' })
+      }
+      if (pct <= 0) delete targetWeights[sym]
+      else targetWeights[sym] = pct / 100
+    }
+    const cashFallback: Record<string, string> = { ...universe.symbolCashFallback }
+    const entryRequired = new Set(Object.keys(universe.symbolEntryRequired))
+    for (const [symRaw, v] of Object.entries(body.fallbacks ?? {})) {
+      const sym = normalizeSymbol(symRaw)
+      if (v === null) {
+        delete cashFallback[sym]
+        continue
+      }
+      if (typeof v !== 'string' || !/^[A-Za-z0-9]{1,10}$/.test(v.trim())) {
+        throw new ValidationError(`fallbacks.${sym} must be a ticker or null`, { field: 'fallbacks' })
+      }
+      cashFallback[sym] = normalizeSymbol(v)
+      // canvas 同様、退避先の設定は条件連動 ON を含意する。
+      entryRequired.add(sym)
+    }
+
+    // 判定材料: cron と同じ bars → indicators → entry status (lookback 60)。
+    const defaultRule: SymbolRule = {
+      stopPct: global.pullbackDefaultStopPct,
+      takeProfitPct: global.pullbackDefaultTakeProfitPct,
+      timeStopDays: global.pullbackDefaultTimeStopDays,
+      pullbackMax: global.pullbackDefaultPullbackMax,
+      pullbackMin: global.pullbackDefaultPullbackMin,
+      minReturn50d: global.pullbackDefaultMinReturn50d,
+      requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+      kAtr: global.pullbackDefaultKAtr,
+      maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
+      maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+    }
+    const rules = buildSymbolRules(defaultRule, universe)
+    const barClient = await selectBarClient(c.env)
+    const stateClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
+    const symbols = [...new Set([...Object.keys(targetWeights), ...entryRequired])]
+    const entryStatuses: Record<string, ReturnType<typeof deriveEntryStatusFromIndicators>['status']> = {}
+    const snapshots: Record<string, EntrySnapshot> = {}
+    const heldSymbols = new Set<string>()
+    await Promise.all(
+      symbols.map(async (sym) => {
+        const state = stateClient ? await stateClient.getState(sym).catch(() => null) : null
+        const heldQty = state?.position && state.position.qty > 0 ? state.position.qty : 0
+        if (heldQty > 0) heldSymbols.add(sym)
+        try {
+          const bars = await barClient.getDailyBars(sym, 60)
+          const indicators = computePullbackIndicators(bars, null)
+          if (!indicators) {
+            entryStatuses[sym] = 'NG'
+            notes.push(`${sym}: bar 不足で指標を計算できず NG 扱い`)
+            snapshots[sym] = { status: 'NG', price: 0, heldQty }
+            return
+          }
+          const status = deriveEntryStatusFromIndicators(indicators, rules[sym] ?? defaultRule).status
+          entryStatuses[sym] = status
+          snapshots[sym] = { status, price: indicators.price, heldQty }
+        } catch (err) {
+          entryStatuses[sym] = 'NG'
+          notes.push(`${sym}: bar 取得失敗 (${err instanceof Error ? err.message : String(err)}) → NG 扱い (fail-closed)`)
+          snapshots[sym] = { status: 'NG', price: 0, heldQty }
+        }
+      }),
+    )
+
+    const allocation = computeConditionalAllocation({
+      targetWeights,
+      policy: {
+        entryRequired,
+        alwaysActive: new Set(Object.keys(universe.symbolAlwaysActive)),
+        cashFallback,
+      },
+      entryStatuses,
+      heldSymbols,
+      symbolCurrency: universe.symbolCurrency,
+    })
+
+    // 退避の実発注プラン。total_capital_jpy 未設定なら金額換算不可 (fail-closed
+    // と同じ理由で undefined のまま) — その旨を notes で返す。
+    let plan: ReturnType<typeof buildCashRebalancePlan> | null = null
+    if (global.totalCapitalJpy != null && Number.isFinite(global.totalCapitalJpy) && global.totalCapitalJpy > 0) {
+      const usdJpy = await loadUsdJpyRate({ requestId: c.get('requestId') })
+      plan = buildCashRebalancePlan({
+        allocation,
+        snapshots,
+        budgetBasisJpy: global.totalCapitalJpy,
+        fxJpyPerCcy: (currency) => (currency === 'JPY' ? 1 : (usdJpy ?? undefined)),
+        symbolCurrency: universe.symbolCurrency,
+        symbolLotSize: universe.symbolLotSize,
+        symbolMaxNotional: universe.symbolMaxNotional,
+        maxOrderNotional: { USD: global.maxOrderNotionalUsd, JPY: global.maxOrderNotionalJpy },
+      })
+    } else {
+      notes.push('total_capital_jpy 未設定のため金額換算 (予定注文) は省略 — cron 側も同条件で発注見送りになる')
+    }
+
+    return c.json({
+      simulatedAt: new Date().toISOString(),
+      draftApplied: Object.keys(body.pcts ?? {}).length > 0 || Object.keys(body.fallbacks ?? {}).length > 0,
+      entryStatuses,
+      heldSymbols: [...heldSymbols],
+      allocations: allocation.bySymbol,
+      plan,
+      ordersEnabledFlag: global.cashFallbackOrdersEnabled,
+      notes,
+    })
+  })
+  /**
    * 退避先の set / clear (#symbol-relation-map 編集キャンバス)。
    * body: { target: 'SGOV' } で設定 (entry_required も同時に ON)、
    * { target: null } で解除。検証: 両銘柄が登録済み・同一通貨・self 禁止。
@@ -1770,10 +1923,20 @@ export const admin = new Hono<AppBindings>()
       { cashFallbackSymbol: result.before.cashFallbackSymbol, entryRequired: result.before.entryRequired },
       { cashFallbackSymbol: result.after.cashFallbackSymbol, entryRequired: result.after.entryRequired },
     )
+    if (result.clearedPartner !== null) {
+      await writeAuditLog(
+        c,
+        '/admin/symbol-config/cash-fallback',
+        `symbol=${result.clearedPartner.symbol}`,
+        { cashFallbackSymbol: result.clearedPartner.previousFallback },
+        { cashFallbackSymbol: null, reason: 'pair-single-fallback rule' },
+      )
+    }
     return c.json({
       symbol,
       cashFallbackSymbol: result.after.cashFallbackSymbol,
       entryRequired: result.after.entryRequired,
+      clearedPartner: result.clearedPartner,
     })
   })
   /**
