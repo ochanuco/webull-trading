@@ -10635,10 +10635,18 @@ function symbolFormBody(args: SymbolFormArgs): string {
             <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
           <div class="role-arch-panel" data-arch="momentum" style="display:none">
-            <div style="font-size:12px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:14px 16px">⚙ 設計中 — 新高値ブレイクの継続を取る入場アーキ(1x向け)。strategist 設計 → red-team の後に有効化。</div>
+            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:12px 14px;line-height:1.6">
+              <strong>⚠ 使用不可(未実装)</strong> — 新高値ブレイクの継続を取る入場アーキ(1x向け)。<br>
+              理由: <b>backtest 未検証</b>(継続エッジ/コスト後を要確認)＋ <b>発注可能な 1x universe が無い</b>(セクター/広域 ETF は OpenAPI 取扱外、発注可は ICLN/TAN/QCLN 等のみ)。<br>
+              有効化条件: ① Webull で取扱 1x が増える ② backtest でエッジ確認(runBacktest モメンタムモード)。それまで選択不可。
+            </div>
           </div>
           <div class="role-arch-panel" data-arch="reversion" style="display:none">
-            <div style="font-size:12px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:14px 16px">⚙ 設計中 — 売られすぎの反発を拾う入場アーキ(1x向け)。strategist 設計 → red-team の後に有効化。</div>
+            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:12px 14px;line-height:1.6">
+              <strong>⚠ 使用不可(見送り)</strong> — 売られすぎの反発を拾う入場アーキ(1x向け)。<br>
+              理由: red-team 評価で <b>$ POC のコスト/為替でエッジ証明困難</b>＋ <b>逆張りに適した 1x(広域指数)が OpenAPI 取扱外</b>(発注可の ICLN/TAN 等はテーマ ETF で逆張り不適=ナイフ掴み)。<br>
+              現状は見送り。再訪は universe 拡大 + notional 引き上げが前提。
+            </div>
           </div>
           <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
         </div>

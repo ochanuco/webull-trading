@@ -1,9 +1,31 @@
-import { computePullbackIndicators, type DailyBar } from '../strategy/indicators'
+import type { Signal } from '../domain/Signal'
+import {
+  computePullbackIndicators,
+  type DailyBar,
+  type PullbackIndicatorSnapshot,
+} from '../strategy/indicators'
 import {
   PullbackUptrendStrategy,
   type SymbolRule,
 } from '../strategy/strategies/PullbackUptrendStrategy'
-import type { PositionState } from '../state/types'
+import type { PendingOrderLock, PositionState } from '../state/types'
+
+/**
+ * Strategy を差し替え可能にする最小インターフェース (#momentum)。
+ * `decide` の input は runBacktest が組み立てる形。PullbackUptrendStrategy も
+ * BreakoutMomentumStrategy もこれを満たす (indicators は snapshot 全部入り)。
+ */
+export interface BacktestStrategy {
+  decide(input: {
+    symbol: string
+    indicators: PullbackIndicatorSnapshot
+    position: PositionState | null
+    pendingOrder: PendingOrderLock | null
+    cooldownUntil: string | null
+    holdBusinessDays: number
+    now: Date
+  }): Signal
+}
 
 /**
  * Offline backtest harness for PullbackUptrendStrategy。issue #198。
@@ -30,8 +52,13 @@ export interface BacktestParams {
   to: string
   /** 初期 cash (positions=0 起点)。BUY シグナル時に floor(cash/price) qty を発注。 */
   initialCash: number
-  /** PullbackUptrendStrategy の rule。entry/exit 判定に使う。 */
+  /** PullbackUptrendStrategy の rule。entry/exit 判定に使う (strategy 未指定時)。 */
   rule: SymbolRule
+  /**
+   * 差し替え用 strategy (#momentum)。未指定なら `rule` から
+   * PullbackUptrendStrategy を構築。BreakoutMomentumStrategy 等を渡せる。
+   */
+  strategy?: BacktestStrategy
 }
 
 export type ExitReason = 'TP' | 'STOP' | 'TIME_STOP' | 'END_OF_DATA'
@@ -107,7 +134,7 @@ export async function runBacktest(
     return finalize(params, trades, equityCurve)
   }
 
-  const strategy = new PullbackUptrendStrategy(params.rule)
+  const strategy: BacktestStrategy = params.strategy ?? new PullbackUptrendStrategy(params.rule)
 
   let cash = params.initialCash
   let position: PositionState | null = null
