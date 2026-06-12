@@ -8887,9 +8887,20 @@ export function symbolMapEditorBody(
   .sm-card .sm-status-pending{color:#b25000;font-size:11px}
   .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
   .sm-card .sm-share{font-weight:600}
+  .sm-card .sm-sim{margin-top:4px;padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5}
+  .sm-card .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
+  .sm-card .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
+  .sm-card .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
+  #symbol-map-editor svg.connection.sm-sim-flow path{stroke:#0e9f6e !important;stroke-width:4px;stroke-dasharray:10 6;animation:smflow 1.2s linear infinite}
+  #symbol-map-editor svg.connection.sm-sim-dim path{opacity:0.25}
+  @keyframes smflow{to{stroke-dashoffset:-32}}
   </style>
+  <div id="sm-sim-meta" hidden style="display:flex;gap:10px;align-items:center;margin:0 0 6px;padding:6px 10px;background:#eafaf1;border:1px solid #0e9f6e;border-radius:8px;font-size:12px">
+    <strong style="color:#0e9f6e">シミュレーション表示中</strong>
+    <span id="sm-sim-meta-text" class="muted" style="flex:1;min-width:0"></span>
+    <button type="button" id="sm-sim-clear" style="padding:2px 10px;background:#fff;border:1px solid #0e9f6e;color:#0e9f6e;border-radius:6px;cursor:pointer;font-size:12px">クリア</button>
+  </div>
   <div id="symbol-map-editor"></div>
-  <div id="sm-sim-result" hidden style="margin-top:8px;padding:10px 12px;background:#f0f6ff;border:1px solid #9ab8dd;border-radius:8px;font-size:12px"></div>
   ${chipRow}
   ${safeJsonScript('__symbolMapEditor', payload)}
   <script src="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.js"></script>
@@ -9007,10 +9018,30 @@ export function symbolMapEditorBody(
 
     // 配分シミュレーション (#symbol-relation-map dry-run): cron と同一の pure
     // 関数を使う read-only API に、view = 現在の DB 設定 / edit = 適用前の draft
-    // を渡し、「いま cron が走ったら配分はどう流れるか」を表示する。
+    // を渡し、結果を**キャンバスのカード上に直接重ねる** (下部パネルはスクロールが
+    // 必要で読めない、という operator 指摘で廃止):
+    //   - 各カードに判定・実効配分のバッジ / 受け皿カードに受入量と予定注文
+    //   - 実際に発火する退避線を緑のアニメで強調、発火しない退避線は減光
     var simBtn = document.getElementById('sm-simulate');
+    function clearSim() {
+      el.querySelectorAll('.sm-sim').forEach(function (n) { n.remove(); });
+      el.querySelectorAll('svg.connection.sm-sim-flow').forEach(function (n) { n.classList.remove('sm-sim-flow'); });
+      el.querySelectorAll('svg.connection.sm-sim-dim').forEach(function (n) { n.classList.remove('sm-sim-dim'); });
+      document.getElementById('sm-sim-meta').hidden = true;
+    }
+    var clearBtn = document.getElementById('sm-sim-clear');
+    if (clearBtn) clearBtn.addEventListener('click', clearSim);
+    function simBadge(sym, cls, html) {
+      var nodeEl = document.getElementById('node-' + idOf[sym]);
+      if (!nodeEl) return;
+      var card = nodeEl.querySelector('.sm-card');
+      if (!card) return;
+      var div = document.createElement('div');
+      div.className = 'sm-sim ' + cls;
+      div.innerHTML = html;
+      card.appendChild(div);
+    }
     if (simBtn) simBtn.addEventListener('click', function () {
-      var resultEl = document.getElementById('sm-sim-result');
       simBtn.disabled = true;
       simBtn.textContent = '計算中…';
       var bodyPayload = {};
@@ -9035,39 +9066,53 @@ export function symbolMapEditorBody(
           return r.json();
         })
         .then(function (res) {
-          var lines = [];
-          Object.keys(res.allocations).sort().forEach(function (sym) {
-            var a = res.allocations[sym];
-            var t = Math.round(a.targetWeight * 1000) / 10;
-            var act = Math.round(a.activeWeight * 1000) / 10;
-            var line = '<strong>' + sym + '</strong>: target ' + t + '% → active ' + act + '%';
-            if (a.rerouteTo) line += ' <span style="color:#0e9f6e">┈▶ ' + a.rerouteTo + ' へ退避</span>';
-            if (a.reroutedInWeight > 0) line += ' <span style="color:#0e9f6e">(+' + Math.round(a.reroutedInWeight * 1000) / 10 + '% 受入)</span>';
-            line += ' <span style="color:#6e6e73">— ' + a.reason + ' / 判定 ' + (res.entryStatuses[sym] || '—') + (res.heldSymbols.indexOf(sym) !== -1 ? ' / 保有中' : '') + '</span>';
-            lines.push('<li>' + line + '</li>');
+          clearSim();
+          var pctTxt = function (w) { return Math.round(w * 1000) / 10 + '%'; };
+          // 退避線の発火/非発火を先に塗り分け (全退避線を減光 → 発火分だけ強調)。
+          Object.keys(draft).forEach(function (sym) {
+            var fb = draft[sym].fallback;
+            if (fb && idOf[fb]) {
+              var conn = el.querySelector('svg.connection.node_in_node-' + idOf[fb] + '.node_out_node-' + idOf[sym]);
+              if (conn) conn.classList.add('sm-sim-dim');
+            }
           });
-          var planHtml = '';
+          var planBySym = {};
           if (res.plan) {
-            var orders = res.plan.orders.map(function (o) {
-              return '<li>' + o.symbol + ' を ' + o.quantity + ' 単位 買付予定 (退避の受け皿)</li>';
-            });
-            var skips = res.plan.skipped.map(function (k) {
-              return '<li class="muted">' + k.symbol + ': skip — ' + k.reason + '</li>';
-            });
-            planHtml = '<div style="margin-top:6px"><strong>退避の予定注文</strong>' +
-              (res.ordersEnabledFlag ? '' : ' <span style="color:#b25000">(自動発注 flag OFF — cron は判定のみで発注しない)</span>') +
-              '<ul style="margin:4px 0 0 16px;padding:0">' + (orders.join('') || '<li class="muted">なし</li>') + skips.join('') + '</ul></div>';
+            res.plan.orders.forEach(function (o) { planBySym[o.symbol] = o; });
           }
-          var notesHtml = res.notes.length
-            ? '<div class="muted" style="margin-top:6px;font-size:11px">' + res.notes.map(function (n) { return '⚠ ' + n; }).join('<br>') + '</div>'
-            : '';
-          resultEl.innerHTML = '<strong>シミュレーション結果</strong> <span class="muted">(' + (res.draftApplied ? '未適用の draft 込み' : '現在の保存済み設定') + ' ・ ' + res.simulatedAt + ' ・ cron と同一ロジック / 発注なし)</span>' +
-            '<ul style="margin:6px 0 0 16px;padding:0">' + lines.join('') + '</ul>' + planHtml + notesHtml;
-          resultEl.hidden = false;
+          Object.keys(res.allocations).forEach(function (sym) {
+            var a = res.allocations[sym];
+            if (!idOf[sym]) return;
+            var status = res.entryStatuses[sym] || '—';
+            var held = res.heldSymbols.indexOf(sym) !== -1;
+            if (a.rerouteTo) {
+              simBadge(sym, 'sm-sim-reroute', '判定 ' + status + ' → <strong>' + pctTxt(a.targetWeight) + ' を ' + a.rerouteTo + ' へ退避</strong>');
+              if (idOf[a.rerouteTo]) {
+                var conn = el.querySelector('svg.connection.node_in_node-' + idOf[a.rerouteTo] + '.node_out_node-' + idOf[sym]);
+                if (conn) { conn.classList.remove('sm-sim-dim'); conn.classList.add('sm-sim-flow'); }
+              }
+            } else {
+              var why = held ? '保有中' : '判定 ' + status;
+              simBadge(sym, 'sm-sim-active', why + ' ・ <strong>active ' + pctTxt(a.activeWeight) + '</strong>');
+            }
+            if (a.reroutedInWeight > 0) {
+              var order = planBySym[sym];
+              simBadge(sym, 'sm-sim-recv', '受入 +' + pctTxt(a.reroutedInWeight) +
+                (order ? ' ・ <strong>' + order.quantity + ' 単位 買付予定</strong>' : ''));
+            }
+          });
+          var metaBits = [(res.draftApplied ? '未適用 draft 込み' : '保存済み設定'), 'cron と同一ロジック ・ 発注なし'];
+          if (res.plan && !res.ordersEnabledFlag && res.plan.orders.length > 0) metaBits.push('自動発注 flag OFF (cron は判定のみ)');
+          if (res.plan) {
+            res.plan.skipped.forEach(function (k) { metaBits.push('⚠ ' + k.symbol + ' skip: ' + k.reason); });
+          }
+          res.notes.forEach(function (n) { metaBits.push('⚠ ' + n); });
+          document.getElementById('sm-sim-meta-text').textContent = metaBits.join(' ・ ');
+          document.getElementById('sm-sim-meta').hidden = false;
         })
         .catch(function (e) {
-          resultEl.innerHTML = '<span style="color:#c22">シミュレーション失敗: ' + e.message + '</span>';
-          resultEl.hidden = false;
+          document.getElementById('sm-sim-meta-text').textContent = 'シミュレーション失敗: ' + e.message;
+          document.getElementById('sm-sim-meta').hidden = false;
         })
         .then(function () {
           simBtn.disabled = false;
