@@ -2123,7 +2123,7 @@ function brokerProbeBody(args: {
       var el = document.getElementById(ids[i]);
       if (el) el.innerHTML = '<span class="muted">...</span>';
     }
-    var pres = ['probe-quote', 'probe-quote-yahoo', 'bp-instrument-raw', 'probe-positions-raw', 'probe-positions-new-raw', 'probe-order-old-raw', 'probe-order-new-raw', 'probe-meta'];
+    var pres = ['probe-quote', 'probe-quote-yahoo', 'bp-instrument-raw', 'probe-positions-raw', 'probe-positions-new-raw', 'probe-order-old-raw', 'probe-order-new-raw', 'probe-tradecheck-raw', 'probe-meta'];
     for (var j = 0; j < pres.length; j++) {
       var pre = document.getElementById(pres[j]);
       if (pre) pre.textContent = '...';

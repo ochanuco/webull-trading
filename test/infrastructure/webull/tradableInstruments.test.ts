@@ -36,8 +36,9 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
       sleep: noSleep,
       fetcher: pagedFetcher([
         { hasNext: true, instruments: [row('SOXL', '1001'), row('SOXS', '1002')] },
-        // SOXL 重複 (last-write-wins) + 新規 TQQQ。hasNext=false で終端。
-        { hasNext: false, instruments: [row('SOXL', '1001'), row('TQQQ', '1003')] },
+        // 2 ページ目の SOXL は **別 payload** (security_id 9999)。dedup が
+        // last-write-wins である事を明示的に固定する。+ 新規 TQQQ、hasNext=false。
+        { hasNext: false, instruments: [row('SOXL', '9999'), row('TQQQ', '1003')] },
       ]),
     })
     expect(result.outcome).toBe('ok')
@@ -46,8 +47,9 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
     const symbols = result.instruments.map((i) => i.symbol).sort()
     expect(symbols).toEqual(['SOXL', 'SOXS', 'TQQQ'])
     const soxl = result.instruments.find((i) => i.symbol === 'SOXL')
-    // instrument_id の末尾 .000000 を除去している。
-    expect(soxl?.instrumentId).toBe('91321001')
+    // last-write-wins: 2 ページ目の値 (91329999) になる (91321001 ではない)。
+    // instrument_id の末尾 .000000 は除去済み。
+    expect(soxl?.instrumentId).toBe('91329999')
   })
 
   it('symbol を大文字正規化する', async () => {

@@ -1,4 +1,4 @@
-import { eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, lt, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import type { TradableInstrumentEntry } from '../webull/tradableInstruments'
@@ -173,10 +173,20 @@ export async function finalizeTradableDisappearance(
     .map((r) => r.symbol.toUpperCase())
   for (let i = 0; i < disappeared.length; i += IN_CHUNK) {
     const chunk = disappeared.slice(i, i + IN_CHUNK)
+    // select と update の間に別 sweep (新しい watermark) が同 symbol を再 upsert
+    // する競合に備え、UPDATE 側でも消失述語 (currently_tradable=true かつ
+    // last_seen_at < watermark) を再評価する。古い snapshot 由来の false 化で
+    // 新しい sweep の結果を上書きしない (cron + 手動 refresh の同時実行対策)。
     await db
       .update(tradableInstrument)
       .set({ currentlyTradable: false, updatedAt: nowIso })
-      .where(inArray(tradableInstrument.symbol, chunk))
+      .where(
+        and(
+          inArray(tradableInstrument.symbol, chunk),
+          eq(tradableInstrument.currentlyTradable, true),
+          lt(tradableInstrument.lastSeenAt, watermarkIso),
+        ),
+      )
   }
   return disappeared
 }

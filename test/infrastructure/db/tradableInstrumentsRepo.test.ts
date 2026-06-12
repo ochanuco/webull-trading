@@ -123,6 +123,11 @@ describe('finalizeTradableDisappearance (watermark mark-and-sweep)', () => {
     const disappeared = await finalizeTradableDisappearance(db, 'wm2', 'now')
     expect(disappeared).toEqual(['USMV'])
     expect(updateCalls).toHaveLength(1)
+    // set 内容まで検証 (誤った set 値の回帰を拾う)。
+    expect((updateCalls[0] as { set: Record<string, unknown> }).set).toMatchObject({
+      currentlyTradable: false,
+      updatedAt: 'now',
+    })
   })
 
   it('消失ゼロなら update を発行しない', async () => {
