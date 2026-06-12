@@ -9482,6 +9482,11 @@ export function symbolMapEditorBody(
         }
         delete removedOnCanvas[pItem.sym];
         data.inactive = data.inactive.filter(function (x) { return x.sym !== pItem.sym; });
+        // 対メンバーから対を召喚した場合は側別ミラー退避を自動配線する
+        // (src の相方 → 召喚した対の相方)。
+        if (spawnedPairFromSymbol) {
+          mirrorPairFallback(src, item.sym);
+        }
       }
       // 接続の意味づけは通常ハンドラと同じ規則で draft に反映する。
       var src = symOf[srcNodeId];
@@ -9490,6 +9495,7 @@ export function symbolMapEditorBody(
       } else {
         draft[src].fallback = item.sym;
       }
+      var spawnedPairFromSymbol = !accountSymOf[src] && item.partner;
       // 払い出した銘柄はピッカー在庫から除外。
       data.inactive = data.inactive.filter(function (x) { return x.sym !== item.sym; });
       renderChanges();
@@ -9502,10 +9508,13 @@ export function symbolMapEditorBody(
         return { sym: sym, role: n.role, color: n.color, currency: n.currency, inverse: n.inverse };
       });
       var candidates = data.inactive.concat(removedItems).filter(function (x) { return x.currency === ccy; });
-      // 口座から引いた場合、対 (両方在庫) は 1 エントリに畳んで 2 枚セットで出す
-      // (対 = 1 枝なので個別に出すのは意味論として誤り)。退避先 (銘柄から引いた
-      // 場合) は対象を 1 銘柄に決める必要があるため個別のまま。
-      if (accountSymOf[src]) {
+      // 対 (両方在庫) を 1 エントリに畳むケース:
+      //   - 口座から引いた場合 (対 = 1 枝)
+      //   - **対メンバーから引いた場合** (側別ミラー退避: SOXL→TQQQ / SOXS→SQQQ を
+      //     1 ジェスチャで張る — operator の設計)
+      // 単独銘柄からの退避は対象を 1 銘柄に決める必要があるため個別のまま。
+      var srcIsPairMember = !accountSymOf[src] && nodeBySym[src] && nodeBySym[src].inverse && draft[nodeBySym[src].inverse];
+      if (accountSymOf[src] || srcIsPairMember) {
         var bySym2 = {};
         candidates.forEach(function (x) { bySym2[x.sym] = x; });
         var merged = [];
@@ -9610,10 +9619,11 @@ export function symbolMapEditorBody(
         alert(src + ' は ' + nodeBySym[src].currency + '、' + dst + ' は ' + nodeBySym[dst].currency + ' です。異通貨の退避先は設定できません (同一通貨のみ)。');
         return;
       }
-      // 退避先は 1 対 (単独銘柄は 1 銘柄) 1 本 — 自分と相方の既存退避を外して張る。
-      clearPairFallbacks(src);
+      // 自分の既存退避を外して張り、対 → 対なら側別ミラーも張る。
+      clearFallbackOf(src);
       draft[src].fallback = dst;
       markConnectionPending(info.output_id, info.input_id);
+      mirrorPairFallback(src, dst);
       renderChanges();
     });
 
@@ -9627,7 +9637,11 @@ export function symbolMapEditorBody(
         renderChanges();
         return;
       }
-      if (draft[src].fallback === dst) draft[src].fallback = null;
+      if (draft[src].fallback === dst) {
+        draft[src].fallback = null;
+        // 対 → 対のミラー退避も連動して外す (張るときと対称)。
+        clearPairFallbackMirror(src);
+      }
       renderChanges();
     });
 
@@ -9660,9 +9674,9 @@ export function symbolMapEditorBody(
     function hideGuide() {
       if (guide) { guide.remove(); guide = null; }
     }
-    // 退避線は「1 対 1 本」: 対の両側に設定すると、対で 1 枠のはずの配分が
-    // 2 回退避されて二重計上になる (computeConditionalAllocation は銘柄単位で
-    // reroute する) ため、相方の既存退避を自動で外してから張る。
+    // 退避は銘柄ごと 1 本。**対 → 対は側別ミラー** (operator の設計: SOXL→TQQQ
+    // を引くと SOXS→SQQQ も連動) — 二重買いはインバース対ガード (建玉は片側
+    // のみ) が退避先側でも防ぐため、両側の退避は正当な構成。
     function clearFallbackOf(sym) {
       var fb = draft[sym] && draft[sym].fallback;
       if (!fb) return;
@@ -9673,10 +9687,28 @@ export function symbolMapEditorBody(
       }
       draft[sym].fallback = null;
     }
-    function clearPairFallbacks(srcSym) {
+    function setFallbackEdge(srcSym, dstSym) {
       clearFallbackOf(srcSym);
-      var inv = nodeBySym[srcSym] && nodeBySym[srcSym].inverse;
-      if (inv && draft[inv]) clearFallbackOf(inv);
+      if (idOf[srcSym] && idOf[dstSym]) {
+        programmatic = true;
+        editor.addConnection(idOf[srcSym], idOf[dstSym], 'output_1', 'input_1');
+        programmatic = false;
+        markConnectionPending(idOf[srcSym], idOf[dstSym]);
+      }
+      draft[srcSym].fallback = dstSym;
+    }
+    // src→dst の退避に対し、双方が対なら相方同士 (側別) もミラーで張る。
+    function mirrorPairFallback(srcSym, dstSym) {
+      var srcInv = nodeBySym[srcSym] && nodeBySym[srcSym].inverse;
+      var dstInv = nodeBySym[dstSym] && nodeBySym[dstSym].inverse;
+      if (!srcInv || !dstInv || !draft[srcInv] || !draft[dstInv]) return null;
+      setFallbackEdge(srcInv, dstInv);
+      return { src: srcInv, dst: dstInv };
+    }
+    function clearPairFallbackMirror(srcSym) {
+      var srcInv = nodeBySym[srcSym] && nodeBySym[srcSym].inverse;
+      if (!srcInv || !draft[srcInv]) return;
+      clearFallbackOf(srcInv);
     }
     function srcNodeIdOf(srcSym) {
       return accountSymOf[srcSym] ? accountIds[accountSymOf[srcSym]] : idOf[srcSym];
@@ -9706,12 +9738,8 @@ export function symbolMapEditorBody(
         alert(srcSym + ' は ' + nodeBySym[srcSym].currency + '、' + dstSym + ' は ' + nodeBySym[dstSym].currency + ' です。異通貨の退避先は設定できません。');
         return false;
       }
-      clearPairFallbacks(srcSym)
-      programmatic = true;
-      editor.addConnection(idOf[srcSym], idOf[dstSym], 'output_1', 'input_1');
-      programmatic = false;
-      draft[srcSym].fallback = dstSym;
-      markConnectionPending(idOf[srcSym], idOf[dstSym]);
+      setFallbackEdge(srcSym, dstSym);
+      mirrorPairFallback(srcSym, dstSym);
       return true;
     }
     el.addEventListener('mousedown', function (ev) {

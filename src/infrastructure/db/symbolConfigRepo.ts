@@ -609,36 +609,18 @@ export async function updateCashFallback(
   symbol: string,
   target: string | null,
   nowIso: string,
-): Promise<{
-  before: SymbolConfigRow
-  after: SymbolConfigRow
-  /** 対の相方から外した退避先 (1 対 1 本ルール)。無ければ null。 */
-  clearedPartner: { symbol: string; previousFallback: string } | null
-} | null> {
+): Promise<{ before: SymbolConfigRow; after: SymbolConfigRow } | null> {
   const before = await findSymbolConfig(db, symbol)
   if (before === null) return null
   const beforeSnapshot: SymbolConfigRow = { ...before }
-  // 1 対 1 本 (キャンバスと同じ規則): 対の両側に退避先があると、対で 1 枠の
-  // 配分が銘柄単位の reroute で二重退避されるため、set 時は相方の退避先を外す。
-  let clearedPartner: { symbol: string; previousFallback: string } | null = null
-  if (target !== null) {
-    const pairs = await loadInversePairs(db).catch(() => ({}) as Record<string, string>)
-    const partner = pairs[symbol.toUpperCase()]
-    if (partner !== undefined) {
-      const partnerRow = await findSymbolConfig(db, partner)
-      if (partnerRow?.cashFallbackSymbol) {
-        await db
-          .update(symbolConfig)
-          .set({ cashFallbackSymbol: null, updatedAt: nowIso })
-          .where(eq(symbolConfig.symbol, partnerRow.symbol))
-        clearedPartner = { symbol: partnerRow.symbol, previousFallback: partnerRow.cashFallbackSymbol }
-      }
-    }
-  }
+  // NOTE: 対の両側がそれぞれ退避先を持つ「側別の対→対退避」(SOXL→TQQQ /
+  // SOXS→SQQQ) は正当な構成 — 二重買いはインバース対ガード (建玉は片側のみ)
+  // が退避先側でも防ぐ。以前あった「相方の退避先を自動クリア」はこの構成を
+  // 壊す誤実装だったため撤回 (operator 指摘)。
   const sameTarget = (before.cashFallbackSymbol ?? null) === (target ?? null)
   const needsEntryRequired = target !== null && before.entryRequired !== true
   if (sameTarget && !needsEntryRequired) {
-    return { before: beforeSnapshot, after: beforeSnapshot, clearedPartner }
+    return { before: beforeSnapshot, after: beforeSnapshot }
   }
   await db
     .update(symbolConfig)
@@ -650,7 +632,7 @@ export async function updateCashFallback(
     .where(eq(symbolConfig.symbol, symbol))
   const after = await findSymbolConfig(db, symbol)
   if (after === null) return null
-  return { before: beforeSnapshot, after, clearedPartner }
+  return { before: beforeSnapshot, after }
 }
 
 export async function updateBudgetAllocPct(
