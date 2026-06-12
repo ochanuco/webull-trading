@@ -8843,38 +8843,39 @@ export function symbolMapEditorBody(
   const legend = `塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
       <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
       <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>`
+  // edit ヘッダーは道具だけ (説明文は読まれない、編集領域を最大化 — operator
+  // 指摘)。操作説明は ? アイコンの hover tooltip に退避。
+  const helpText = [
+    '口座 → 銘柄の線 = 配分 (1/枝 均等、対は 1 枝、予算プールは全体共通)',
+    '銘柄 → 銘柄の線 = 退避先 (1 銘柄 1 本、条件連動も ON)',
+    '線の削除 = 線を選択 → Backspace / Delete',
+    '線を空中で放す = 既存 Inactive 銘柄を呼び出して紐づけ (適用で有効化)',
+    '口座から到達できない銘柄は適用時に無効化 (保有中は除く)',
+    '変更は「適用」までは保存されない',
+  ].join('\n')
   const header = mode === 'edit'
-    ? `<p style="margin:0 0 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-    <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理へ戻る</a>
-    <span class="muted" style="font-size:12px">
-      <strong>口座 (日本/米国) → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い、予算プールは全体共通) で % は自動計算 ・
-      <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON)。
-      <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete ・
-      <strong>線を空中で放す</strong> = 既存 Inactive 銘柄を呼び出して紐づけ (適用で有効化)。
-      <strong>口座から到達できない銘柄は適用時に無効化</strong> (保有中は除く)。
-    </span>
+    ? `<p style="margin:0 0 6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理</a>
+    <button type="button" id="sm-simulate" style="padding:4px 12px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
     <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
-    <span class="muted" style="font-size:12px">
-      変更は即保存されません — サマリを確認して<strong>「適用」で一括保存</strong>。
-      ${legend}
-    </span>
+    <span title="${esc(helpText)}" style="cursor:help;color:#9aa0a6;font-size:14px;border:1px solid #d0d0d5;border-radius:50%;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center">?</span>
   </p>
   <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:#fff8e6;border:1px solid #e6c46a;border-radius:8px;margin-bottom:8px">
     <div style="flex:1;min-width:0">
       <strong style="font-size:12px">未適用の変更</strong>
       <ul id="sm-changes-list" style="margin:4px 0 0 16px;padding:0;font-size:12px"></ul>
     </div>
-    <button type="button" id="sm-simulate" style="padding:6px 12px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:13px">シミュレート</button>
     <button type="button" id="sm-apply" style="padding:6px 18px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">適用</button>
     <button type="button" id="sm-reset" style="padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">リセット</button>
   </div>`
     : `<p class="muted" style="margin:0 0 6px;font-size:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols/map">✏️ 編集モード</a>
     <button type="button" id="sm-simulate" style="padding:3px 10px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
-    <span>口座 (日本/米国) → 銘柄 = 配分 (1/枝 均等) ・ 銘柄 → 銘柄の点線 = 退避先 ・ ${legend}</span>
+    <span title="${esc(helpText)}" style="cursor:help;color:#9aa0a6;font-size:13px;border:1px solid #d0d0d5;border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center">?</span>
+    <span>${legend}</span>
   </p>`
   const canvasHeight = mode === 'edit'
-    ? 'height:calc(100vh - 220px);min-height:480px'
+    ? 'height:calc(100vh - 150px);min-height:520px'
     : `height:${Math.max(300, yCursor + 60)}px`
   return `${header}
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css">
