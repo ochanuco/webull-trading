@@ -10812,12 +10812,17 @@ function symbolFormBody(args: SymbolFormArgs): string {
           function omark(b) { return b ? ' <span style="color:#d97706;font-weight:700" title="この銘柄の override">*</span>' : ''; }
           // 価格ラダー SVG。p = 実効パラメータ。big=true で軸ラベル付き。
           function ladder(role, p, w, h, big) {
-            function y(pct) { return 12 + (4 - pct) * ((h - 24) / 15); } // +4%..-11% 固定
             if (role === 'cash_parking') {
               return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="#5b8c5a" text-anchor="middle">entry なし</text></svg>';
             }
             var color = COLOR[role], ov = p.ov || {};
             var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
+            // 縦軸は描画する全水準 (0% / TP / stop / 押し目バンド) に合わせて動的スケール。
+            // 固定レンジ (+4%..-11%) だと override で押し目や stop を広げた時に SVG 枠外へ
+            // はみ出し、下の入場ゲート文字に重なっていた (operator 指摘) ため。
+            var hi = Math.max(0, tp, p.pbMax) + 2, lo = Math.min(st, p.pbMin) - 2;
+            if (hi - lo < 6) { hi += 1; lo -= 1; }
+            function y(pct) { return 12 + (hi - pct) * ((h - 24) / (hi - lo)); }
             var X0 = 14, X1 = big ? w - 70 : w - 12, a = [];
             a.push('<line x1="' + X0 + '" y1="' + y(0).toFixed(1) + '" x2="' + X1 + '" y2="' + y(0).toFixed(1) + '" stroke="#c4c8cd" stroke-width="1"/>');
             var zy = y(p.pbMax), zh = y(p.pbMin) - y(p.pbMax);
