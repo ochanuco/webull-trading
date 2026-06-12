@@ -8978,10 +8978,15 @@ export function symbolMapEditorBody(
   .sm-card .sm-status-pending{color:#b25000;font-size:11px}
   .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
   .sm-card .sm-share{font-weight:600}
-  .sm-card .sm-sim{margin-top:4px;padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5}
-  .sm-card .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
-  .sm-card .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
-  .sm-card .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
+  /* シミュレーション結果はカードの「外」に浮かせる (#496 follow-up): フロー内に
+     置くとカードが伸び、Drawflow が線の端点を再計算しないため点と線がズレる。
+     absolute overlay なら几何が一切変わらない。 */
+  #symbol-map-editor .drawflow .drawflow-node{overflow:visible}
+  .sm-sim-wrap{position:absolute;top:calc(100% + 4px);left:2px;right:2px;z-index:6;display:flex;flex-direction:column;gap:3px;pointer-events:none}
+  .sm-sim{padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5;box-shadow:0 1px 4px rgba(0,0,0,0.18)}
+  .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
+  .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
+  .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
   #symbol-map-editor svg.connection.sm-sim-flow path{stroke:#0e9f6e !important;stroke-width:4px;stroke-dasharray:10 6;animation:smflow 1.2s linear infinite}
   #symbol-map-editor svg.connection.sm-sim-dim path{opacity:0.25}
   @keyframes smflow{to{stroke-dashoffset:-32}}
@@ -9106,7 +9111,7 @@ export function symbolMapEditorBody(
     // ---- シミュレーション (両モード共通)。結果は銘柄 → unit カードに重ねる。
     var simBtn = document.getElementById('sm-simulate');
     function clearSim() {
-      el.querySelectorAll('.sm-sim').forEach(function (n) { n.remove(); });
+      el.querySelectorAll('.sm-sim-wrap').forEach(function (n) { n.remove(); });
       el.querySelectorAll('svg.connection.sm-sim-flow').forEach(function (n) { n.classList.remove('sm-sim-flow'); });
       el.querySelectorAll('svg.connection.sm-sim-dim').forEach(function (n) { n.classList.remove('sm-sim-dim'); });
       document.getElementById('sm-sim-meta').hidden = true;
@@ -9116,12 +9121,16 @@ export function symbolMapEditorBody(
     function simBadge(uid, cls, html) {
       var nodeEl = document.getElementById('node-' + idOf[uid]);
       if (!nodeEl) return;
-      var card = nodeEl.querySelector('.sm-card');
-      if (!card) return;
+      var wrap = nodeEl.querySelector('.sm-sim-wrap');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.className = 'sm-sim-wrap';
+        nodeEl.appendChild(wrap);
+      }
       var div = document.createElement('div');
       div.className = 'sm-sim ' + cls;
       div.innerHTML = html;
-      card.appendChild(div);
+      wrap.appendChild(div);
     }
     // 適用/シミュレートで使う「unit → 銘柄ごとの fallback 展開」(#496 多分岐)。
     // 各 src 側は dst unit ごとに 1 銘柄ずつ受け取る:
