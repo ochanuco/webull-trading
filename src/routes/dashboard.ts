@@ -10617,30 +10617,22 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <div class="muted" style="font-size:11px;margin-top:2px">未設定の銘柄は発注されません (fail-closed)</div>
         </div>
         <label>ロール${REQ}</label>
-        <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap">
-          <div>
-            <select name="role" required id="symbol-form-role" style="padding:6px" onchange="window.syncRolePick(this.value)">
-              ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
-              ${
-                mode === 'new'
-                  ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
-                  : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
-              }
-              ${SYMBOL_ROLES.map(
-                (r) =>
-                  `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
-              ).join('')}
-            </select>
-            ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-            <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        <div style="flex:1 1 100%">
+          <!-- #role-stats: select を廃止し、カードのギャラリー = ロール選択。クリックで
+               選択 (hidden input に同期)、ホバーで画面右に大きいプレビュー (虚のチャート
+               + 入場ゲート閾値、個別銘柄チャートタブの視覚言語を流用)。 -->
+          <input type="hidden" name="role" id="symbol-form-role" value="${esc(roleValue)}">
+          <div style="font-size:12px;margin-bottom:5px">
+            選択中: <strong id="role-current" style="font-size:13px">—</strong>
+            <span class="muted" style="font-size:11px;margin-left:6px">カードをクリックで選択 / ホバーで右に詳細</span>
           </div>
-          <!-- #role-stats: 6 ロールの「虚のチャート + 入場ゲート」を横並びカードで
-               比較。クリックで select と同期・選択をハイライト (個別銘柄チャート
-               タブの視覚言語を流用)。 -->
-          <div id="role-tpl-wrap" style="display:none;flex:1 1 100%;margin-top:4px">
-            <div style="font-size:10px;color:#86868b;margin-bottom:4px">ロール比較 — 押し目ゾーン / stop / TP と入場ゲート閾値 (直近高値=0% 基準・preset 模式 / クリックで選択)</div>
-            <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
-          </div>
+          ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
+          <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+          <div class="muted" style="font-size:11px;margin-top:3px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        </div>
+        <!-- ホバー時に画面右へ出る大プレビュー (fixed)。 -->
+        <div id="role-preview" style="display:none;position:fixed;right:16px;top:96px;width:300px;z-index:60;background:#fff;border:1px solid #d0d0d5;border-radius:10px;box-shadow:0 6px 22px rgba(0,0,0,0.14);padding:10px 12px">
+          <div id="role-preview-body"></div>
         </div>
         <script>
         (function () {
@@ -10662,63 +10654,106 @@ function symbolFormBody(args: SymbolFormArgs): string {
             inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金'
           };
           var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
-          // 価格軸: +4%(上) 〜 -11%(下) 固定。% あたり 7px。
-          function yOf(pct) { return 10 + (4 - pct) * 7; }
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
-          function miniSvg(role) {
+          // 共通の価格ラダー SVG。big=true で軸ラベル付きの大版。
+          function ladder(role, w, h, big) {
+            function y(pct) { return 12 + (4 - pct) * ((h - 24) / 15); } // +4%..-11% 固定
             if (role === 'cash_parking') {
-              return '<svg viewBox="0 0 140 116" width="140" height="116"><text x="70" y="54" font-size="10" fill="#5b8c5a" text-anchor="middle">entry なし</text><text x="70" y="70" font-size="8" fill="#80868b" text-anchor="middle">(常時配分・退避先)</text></svg>';
+              return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="#5b8c5a" text-anchor="middle">entry なし</text></svg>';
             }
             var p = P[role], color = COLOR[role];
-            var entryMid = (p.pbMax + p.pbMin) / 2, tpLv = entryMid + p.tp, stopLv = entryMid + p.stop;
-            var X0 = 16, X1 = 124, a = [];
-            a.push('<line x1="' + X0 + '" y1="' + yOf(0) + '" x2="' + X1 + '" y2="' + yOf(0) + '" stroke="#c4c8cd" stroke-width="1"/>');
-            a.push('<text x="' + X0 + '" y="' + (yOf(0) - 2) + '" font-size="7" fill="#9aa0a6">高値0%</text>');
-            var zy = yOf(p.pbMax), zh = yOf(p.pbMin) - yOf(p.pbMax);
+            var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
+            var X0 = 14, X1 = big ? w - 64 : w - 12, a = [];
+            a.push('<line x1="' + X0 + '" y1="' + y(0).toFixed(1) + '" x2="' + X1 + '" y2="' + y(0).toFixed(1) + '" stroke="#c4c8cd" stroke-width="1"/>');
+            var zy = y(p.pbMax), zh = y(p.pbMin) - y(p.pbMax);
             a.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
-            a.push('<circle cx="70" cy="' + yOf(entryMid).toFixed(1) + '" r="2.6" fill="' + color + '"/>');
-            a.push('<line x1="' + X0 + '" y1="' + yOf(stopLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(stopLv).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
-            a.push('<line x1="' + X0 + '" y1="' + yOf(tpLv).toFixed(1) + '" x2="' + X1 + '" y2="' + yOf(tpLv).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
-            return '<svg viewBox="0 0 140 116" width="140" height="116" style="overflow:visible">' + a.join('') + '</svg>';
+            a.push('<circle cx="' + ((X0 + X1) / 2).toFixed(1) + '" cy="' + y(em).toFixed(1) + '" r="' + (big ? 3.2 : 2.6) + '" fill="' + color + '"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(st).toFixed(1) + '" x2="' + X1 + '" y2="' + y(st).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(tp).toFixed(1) + '" x2="' + X1 + '" y2="' + y(tp).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
+            if (big) {
+              var lx = X1 + 4;
+              a.push('<text x="' + lx + '" y="' + y(0).toFixed(1) + '" font-size="8" fill="#80868b" dominant-baseline="middle">高値 0%</text>');
+              a.push('<text x="' + lx + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%</text>');
+              a.push('<text x="' + lx + '" y="' + y(st).toFixed(1) + '" font-size="8" fill="#c22d2d" dominant-baseline="middle">stop ' + fmtPct(p.stop) + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(tp).toFixed(1) + '" font-size="8" fill="#0e9f6e" dominant-baseline="middle">TP ' + fmtPct(p.tp) + '</text>');
+            } else {
+              a.push('<text x="' + X0 + '" y="' + (y(0) - 2).toFixed(1) + '" font-size="7" fill="#9aa0a6">高値0%</text>');
+            }
+            return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '" style="overflow:visible">' + a.join('') + '</svg>';
           }
-          function statLines(role) {
-            if (role === 'cash_parking') return '<div style="color:#5b8c5a">pullback 判定なし</div>';
-            var p = P[role];
-            return '<div>押し目 ' + p.pbMax + '〜' + p.pbMin + '%</div>' +
-              '<div><span style="color:#c22d2d">stop ' + fmtPct(p.stop) + '</span> / <span style="color:#0e9f6e">TP ' + fmtPct(p.tp) + '</span></div>' +
-              '<div>保有 ' + p.tstop + '日 ・ 勢い &gt;' + fmtPct(p.tr) + '</div>' +
-              '<div style="color:#86868b">過熱≤' + fmtPct(p.heat) + ' ・ ATR≤' + p.atr + '×</div>';
+          function gateHtml(role) {
+            if (role === 'cash_parking') return '<div style="color:#5b8c5a;font-size:11px">戦略 entry なし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定なし)。</div>';
+            var p = P[role], g = [];
+            g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">入場ゲート(閾値)</div>');
+            g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + '</div>');
+            g.push('<div>SMA50 上抜け必須</div>');
+            g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + '</div>');
+            g.push('<div>ボラ(ATR比) ≤ ' + p.atr + '×</div>');
+            g.push('<div>押し目 ' + p.pbMax + '% 〜 ' + p.pbMin + '%</div>');
+            g.push('<div style="font-weight:600;margin:4px 0 2px">退場</div>');
+            g.push('<div>損切 ' + fmtPct(p.stop) + ' / 利確 ' + fmtPct(p.tp) + '</div>');
+            g.push('<div>保有上限 ' + p.tstop + '日 (損切ATR ' + p.katr + '×)</div>');
+            return '<div style="font-size:11px;line-height:1.55">' + g.join('') + '</div>';
           }
           function cardHtml(role) {
             var color = COLOR[role] || '#5f6368';
-            return '<div class="role-tpl-card" data-role="' + role + '" onclick="window.pickRoleTpl(\\'' + role + '\\')" ' +
-              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:6px 8px;background:#fff;width:158px">' +
+            return '<div class="role-tpl-card" data-role="' + role + '" ' +
+              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:6px 8px;background:#fff;width:150px">' +
               '<div style="font-size:11px;font-weight:600;margin-bottom:2px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
-              miniSvg(role) +
-              '<div style="font-size:10px;line-height:1.5;margin-top:2px">' + statLines(role) + '</div>' +
+              ladder(role, 134, 96, false) +
+              '<div style="font-size:10px;color:#86868b;margin-top:1px">保有 ' + (role === 'cash_parking' ? '—' : P[role].tstop + '日') + '</div>' +
               '</div>';
           }
-          window.pickRoleTpl = function (role) {
-            var sel = document.getElementById('symbol-form-role');
-            if (sel) sel.value = role;
-            window.syncRolePick(role);
-          };
-          window.syncRolePick = function (role) {
+          var selected = ${JSON.stringify(roleValue)};
+          function labelOf(role) { return LABEL[role] || (role ? ('⚠ ' + role) : '未選択'); }
+          function showPreview(role) {
+            var pv = document.getElementById('role-preview');
+            var body = document.getElementById('role-preview-body');
+            if (!pv || !body) return;
+            if (!role || (!P[role] && role !== 'cash_parking')) { pv.style.display = 'none'; return; }
+            var color = COLOR[role] || '#5f6368';
+            body.innerHTML =
+              '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">' + LABEL[role] + '</div>' +
+              ladder(role, 280, 150, true) +
+              '<div style="margin-top:6px">' + gateHtml(role) + '</div>' +
+              '<div style="font-size:10px;color:#aaa;margin-top:6px">直近高値=0% 基準・preset 値の模式</div>';
+            pv.style.display = '';
+          }
+          function highlight(role) {
             var cards = document.querySelectorAll('.role-tpl-card');
             for (var i = 0; i < cards.length; i++) {
-              var r = cards[i].getAttribute('data-role');
-              var on = r === role;
+              var r = cards[i].getAttribute('data-role'), on = r === role;
               cards[i].style.border = on ? ('2px solid ' + (COLOR[r] || '#06c')) : '1px solid #e3e3e8';
               cards[i].style.background = on ? '#fcfbf7' : '#fff';
               cards[i].style.boxShadow = on ? '0 1px 4px rgba(0,0,0,0.08)' : 'none';
             }
-          };
-          var wrap = document.getElementById('role-tpl-wrap');
+          }
+          function pick(role) {
+            selected = role;
+            var inp = document.getElementById('symbol-form-role');
+            if (inp) inp.value = role;
+            var cur = document.getElementById('role-current');
+            if (cur) cur.textContent = labelOf(role);
+            highlight(role);
+            showPreview(role);
+          }
           var gallery = document.getElementById('role-gallery');
-          if (wrap && gallery) {
-            wrap.style.display = '';
+          if (gallery) {
             gallery.innerHTML = ORDER.map(cardHtml).join('');
-            window.syncRolePick(${JSON.stringify(roleValue)});
+            var cards = gallery.querySelectorAll('.role-tpl-card');
+            for (var i = 0; i < cards.length; i++) {
+              (function (card) {
+                var r = card.getAttribute('data-role');
+                card.addEventListener('click', function () { pick(r); });
+                card.addEventListener('mouseenter', function () { showPreview(r); });
+              })(cards[i]);
+            }
+            // ホバーが外れたら選択中ロールのプレビューに戻す (無ければ消す)。
+            gallery.addEventListener('mouseleave', function () { showPreview(selected); });
+            var cur = document.getElementById('role-current');
+            if (cur) cur.textContent = labelOf(selected);
+            highlight(selected);
+            showPreview(selected);
           }
         })();
         </script>
