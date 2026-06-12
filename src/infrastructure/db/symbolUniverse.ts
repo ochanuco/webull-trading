@@ -72,7 +72,7 @@ export interface SymbolUniverse {
   /** always_active=true の集合 (#452、cash_parking 用)。false は不在。 */
   symbolAlwaysActive: Record<string, boolean>
   /** symbol → 退避先 symbol (#452)。不在 = 退避しない。 */
-  symbolCashFallback: Record<string, string>
+  symbolCashFallback: Record<string, string[]>
   inversePairs: Record<string, string>
   /** regime 有効化済みペア (#472)。misconfig は invalidConfig 付き (= unknown 扱い)。 */
   pairRegimes: PairRegimeEntry[]

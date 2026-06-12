@@ -178,7 +178,7 @@ function fakeDb(
               requireAboveSma50Override: (v.requireAboveSma50Override as boolean | null) ?? null,
               entryRequired: v.entryRequired === true || v.entryRequired === 1,
               alwaysActive: v.alwaysActive === true || v.alwaysActive === 1,
-              cashFallbackSymbol: (v.cashFallbackSymbol as string | null) ?? null,
+              cashFallbackSymbols: (v.cashFallbackSymbols as string | null) ?? null,
               updatedAt: String(v.updatedAt ?? ''),
             })
           }
@@ -247,7 +247,7 @@ function row(overrides: Partial<SymbolConfigRow> = {}): SymbolConfigRow {
     requireAboveSma50Override: null,
     entryRequired: false,
     alwaysActive: false,
-    cashFallbackSymbol: null,
+    cashFallbackSymbols: null,
     updatedAt: '2026-04-23T00:00:00.000Z',
     ...overrides,
   }
@@ -1506,7 +1506,7 @@ describe('dashboard symbol_config 条件連動配分 (#452 Layer 3)', () => {
     const inserted = db.inserts.find((i) => i.table === 'symbol_config')!
     expect(inserted.values.entryRequired).toBe(true)
     expect(inserted.values.alwaysActive).toBe(false)
-    expect(inserted.values.cashFallbackSymbol).toBe('SGOV')
+    expect(inserted.values.cashFallbackSymbols).toBe('["SGOV"]')
   })
 
   it('rejects a self-referential cash_fallback_symbol with 400', async () => {
@@ -1534,7 +1534,7 @@ describe('dashboard symbol_config 条件連動配分 (#452 Layer 3)', () => {
 
   it('edit form shows 条件連動配分 fields with current values', async () => {
     const db = fakeDb([
-      row({ symbol: 'QQQ', entryRequired: true, cashFallbackSymbol: 'SGOV' }),
+      row({ symbol: 'QQQ', entryRequired: true, cashFallbackSymbols: '["SGOV"]' }),
     ])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -1562,7 +1562,7 @@ describe('symbols list ロール列 (#452)', () => {
         symbol: 'QQQ',
         role: 'core_trend',
         entryRequired: true,
-        cashFallbackSymbol: 'SGOV',
+        cashFallbackSymbols: '["SGOV"]',
       }),
       row({ symbol: 'SOXL' }), // role NULL = 従来挙動
     ])
@@ -1579,7 +1579,7 @@ describe('symbols list ロール列 (#452)', () => {
     expect(body).toContain('常時配分')
     expect(body).toContain('core_trend')
     expect(body).toContain('条件連動')
-    expect(body).toContain('→SGOV')
+    expect(body).toMatch(/→<a [^>]*>SGOV<\/a>/)
   })
 
   it('不正な role 値は警告表示 (entry 抑止の旨)', async () => {
@@ -1689,7 +1689,7 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
         stopPctOverride: -0.03,
         minReturn50dOverride: 0.03,
         entryRequired: true,
-        cashFallbackSymbol: 'SGOV',
+        cashFallbackSymbols: '["SGOV"]',
       }),
     ])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -1729,19 +1729,19 @@ describe('POST /admin/symbol-config/:symbol/cash-fallback (#symbol-relation-map 
     const res = await post(createApp(), 'SOXL', { target: 'sgov' })
     expect(res.status).toBe(200)
     const updated = db.updates.find((u) => u.table === 'symbol_config')
-    expect(updated?.set).toMatchObject({ cashFallbackSymbol: 'SGOV', entryRequired: true })
+    expect(updated?.set).toMatchObject({ cashFallbackSymbols: '["SGOV"]', entryRequired: true })
     expect(db.inserts.some((i) => i.table === 'config_audit_log')).toBe(true)
   })
 
   it('clear: target null で解除 (entry_required は触らない)', async () => {
     const db = fakeDb([
-      row({ symbol: 'SOXL', currency: 'USD', cashFallbackSymbol: 'SGOV', entryRequired: true }),
+      row({ symbol: 'SOXL', currency: 'USD', cashFallbackSymbols: '["SGOV"]', entryRequired: true }),
     ])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const res = await post(createApp(), 'SOXL', { target: null })
     expect(res.status).toBe(200)
     const updated = db.updates.find((u) => u.table === 'symbol_config')
-    expect(updated?.set).toMatchObject({ cashFallbackSymbol: null })
+    expect(updated?.set).toMatchObject({ cashFallbackSymbols: null })
     expect(updated?.set).not.toHaveProperty('entryRequired')
   })
 

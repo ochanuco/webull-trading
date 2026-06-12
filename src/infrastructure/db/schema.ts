@@ -187,13 +187,14 @@ export const symbolConfig = sqliteTable(
      */
     alwaysActive: integer('always_active', { mode: 'boolean' }).notNull().default(false),
     /**
-     * entry_required 銘柄が条件未通過のときの退避先 symbol (例 'SGOV')。
-     * NULL = 退避しない (浮いた分は現金のまま)。同一通貨の銘柄のみ有効 —
-     * 通貨が異なる場合は配分計算時に退避を skip する (fail-closed、現金待機)。
+     * entry_required 銘柄が条件未通過のときの退避先 symbol 群 (#496 多分岐)。
+     * JSON 配列 text (例 '["SGOV","USMV"]')。複数なら**等分割**で流す。
+     * NULL / 空配列 = 退避しない (浮いた分は現金のまま)。同一通貨の銘柄のみ
+     * 有効 — 通貨が異なる先の取り分は配分計算時に skip (fail-closed、現金待機)。
      * 退避先への**自動発注は global_config.cash_fallback_orders_enabled (default
      * false) を on にするまで行わない** (判定・表示のみ)。
      */
-    cashFallbackSymbol: text('cash_fallback_symbol'),
+    cashFallbackSymbols: text('cash_fallback_symbols'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

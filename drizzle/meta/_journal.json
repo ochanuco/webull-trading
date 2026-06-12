@@ -232,6 +232,20 @@
       "when": 1781193221867,
       "tag": "0032_drop_alternatives",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1781262893984,
+      "tag": "0033_multi_cash_fallback",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1781262918382,
+      "tag": "0034_drop_single_cash_fallback",
+      "breakpoints": true
     }
   ]
 }
