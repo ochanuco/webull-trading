@@ -8924,7 +8924,9 @@ export function symbolMapEditorBody(
     if (!data || !el || typeof Drawflow === 'undefined') return;
     var isView = data.mode === 'view';
     var editor = new Drawflow(el);
-    editor.reroute = true;
+    // reroute (線クリックで経由点の丸を生成) は使わない — 削除のための選択
+    // クリックのたびに点が残る (operator 指摘)。
+    editor.reroute = false;
     if (isView) editor.editor_mode = 'view';
     editor.start();
     var idOf = {};
