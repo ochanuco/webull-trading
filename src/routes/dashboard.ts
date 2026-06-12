@@ -1669,7 +1669,9 @@ const STYLE = `
   .tl-step.tl-decisive{border-left-color:#06c;font-weight:600;box-shadow:0 0 0 1px #cfe0ff inset}
   .tl-mark{flex:0 0 auto}
   .tl-label{flex:1 1 auto;min-width:140px}
-  .tl-cmp{color:#555;font-variant-numeric:tabular-nums}
+  .tl-cmp{color:#222;font-variant-numeric:tabular-nums}
+  .tl-cmp b{color:#06c}
+  .tl-thresh{color:#9aa0a6}
   .tl-msg{color:#86868b;font-style:italic}
   .tl-pick{color:#06c;font-weight:700;font-size:11px}
   .tl-arrow{text-align:center;color:#86868b;line-height:1.1;margin:2px 0}
@@ -4478,15 +4480,47 @@ function renderDecisionLadder(
     if (typeof v === 'number') return String(Math.round(v * 10000) / 10000)
     return String(v)
   }
+  // 演算子 → 閾値の意味する向き (どちらが「現在値」でどちらが「基準」か明示)。
+  const opSymbol: Record<string, string> = {
+    '>': '>', '>=': '≥', '<': '<', '<=': '≤', '==': '=', '!=': '≠',
+    between: '∈', exists: '', not_exists: '',
+  }
+  const thresholdWord = (op?: string): string => {
+    switch (op) {
+      case '>':
+      case '>=':
+        return '必要' // threshold は下限 (これ以上ないと不成立)
+      case '<':
+      case '<=':
+        return '上限' // threshold は上限 (これを超えると不成立)
+      case '==':
+        return '期待'
+      case '!=':
+        return '不可'
+      case 'between':
+        return '範囲'
+      default:
+        return '基準'
+    }
+  }
   const lastIdx = steps.length - 1
   const rows = steps
     .map((s, i) => {
       const ok = s.passed === true
       const mark = ok ? '✅' : '❌'
       const label = esc(s.label_ja || s.label || '?')
+      // 「現在 <実測>(太字)/ <方向語> <記号> <閾値>(muted)」で、どちらが変数で
+      // どちらが基準値かを一目で分かるようにする (#trace-readability)。
+      const aStr = fmt(s.actual)
+      const tStr = fmt(s.threshold)
+      const sym = s.operator ? (opSymbol[s.operator] ?? s.operator) : ''
       const cmp =
         s.actual !== undefined || s.threshold !== undefined
-          ? `<span class="tl-cmp">${esc(fmt(s.actual))}${s.operator ? ' ' + esc(s.operator) + ' ' : ' '}${esc(fmt(s.threshold))}</span>`
+          ? `<span class="tl-cmp">${aStr !== '' ? `現在 <b>${esc(aStr)}</b>` : ''}${
+              tStr !== ''
+                ? `<span class="tl-thresh"> / ${esc(thresholdWord(s.operator))}${sym ? ' ' + esc(sym) : ''} ${esc(tStr)}</span>`
+                : ''
+            }</span>`
           : ''
       const msg = s.message ? `<span class="tl-msg">${esc(s.message)}</span>` : ''
       const decisive = i === lastIdx ? ' tl-decisive' : ''
@@ -8462,22 +8496,31 @@ function fmtPctSigned(v: number): string {
   return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
 }
 
-/** 入場ゲートの「現在値 op 閾値」を人間可読に整形 (#entry-distance)。 */
+/**
+ * 入場ゲートを「現在 <実測> ／ <方向語> <記号> <閾値>」で整形 (#entry-distance /
+ * #trace-readability)。どちらが現在値 (変数) でどちらが基準 (設定) かを語で明示する。
+ * 方向語: 演算子が >/≥ なら閾値は「必要」(下限)、</≤ なら「上限」。
+ */
 function fmtGateValue(g: EntryGateStatus): string {
-  const op = ` ${g.operator} `
-  switch (g.key) {
-    case 'trend':
-    case 'overextension':
-    case 'pullback_shallow':
-    case 'pullback_deep':
-      return `${fmtPctSigned(g.actual)}${op}${fmtPctSigned(g.threshold)}`
-    case 'above_sma50':
-      return `$${g.actual.toFixed(2)}${op}$${g.threshold.toFixed(2)} (SMA50)`
-    case 'volatility':
-      return `${g.actual.toFixed(2)}×${op}${g.threshold.toFixed(2)}×`
-    case 'high20d_valid':
-      return `$${g.actual.toFixed(2)}${op}0`
-  }
+  const sym = ({ '>': '>', '>=': '≥', '<': '<', '<=': '≤' } as Record<string, string>)[g.operator] ?? g.operator
+  const word =
+    g.operator === '<' || g.operator === '<=' ? '上限' : g.operator === '>' || g.operator === '>=' ? '必要' : '基準'
+  const [a, t] = ((): [string, string] => {
+    switch (g.key) {
+      case 'trend':
+      case 'overextension':
+      case 'pullback_shallow':
+      case 'pullback_deep':
+        return [fmtPctSigned(g.actual), fmtPctSigned(g.threshold)]
+      case 'above_sma50':
+        return [`$${g.actual.toFixed(2)}`, `$${g.threshold.toFixed(2)} (SMA50)`]
+      case 'volatility':
+        return [`${g.actual.toFixed(2)}×`, `${g.threshold.toFixed(2)}×`]
+      case 'high20d_valid':
+        return [`$${g.actual.toFixed(2)}`, '0']
+    }
+  })()
+  return `現在 ${a} ／ ${word} ${sym} ${t}`
 }
 
 /**
@@ -8521,7 +8564,7 @@ export function renderBuyabilityPanel(
         : 'この指標が条件を満たすまでは、価格がどこでも入場しません。'
       : ''
     headline = g
-      ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（現在 ${esc(fmtGateValue(g))} 不成立）。${why}`
+      ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g))} 不成立）。${why}`
       : '入場条件 評価不可'
     headColor = '#c22'
   }
