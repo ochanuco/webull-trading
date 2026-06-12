@@ -182,10 +182,31 @@ function step(
 ): DecisionTraceStep {
   return {
     label,
+    label_ja: labelJa(label),
     passed,
     ...(actual !== undefined ? { actual } : {}),
     ...(operator !== undefined ? { operator } : {}),
     ...(threshold !== undefined ? { threshold } : {}),
     ...(message !== undefined ? { message } : {}),
   }
+}
+
+function labelJa(label: string): string {
+  return TRACE_LABEL_JA[label] ?? label
+}
+
+// momentum 固有の trace 識別子 → 日本語ラベル。識別子 (`entry.breakout` 等) は
+// decision_log 互換のため英語据え置きで、表示文字列のみ日本語化する (#trace-readability)。
+const TRACE_LABEL_JA: Record<string, string> = {
+  'guard.pending_order_absent': '未約定注文がない',
+  'guard.cooldown_inactive': 'クールダウン中ではない',
+  'entry.trend_20d_return': '20日騰落率が上昇トレンド条件を満たす',
+  'entry.above_sma50': '株価が50日移動平均線を上回る',
+  'entry.not_blowoff': '移動平均からの上方乖離が過大でない (吹き上げでない)',
+  'entry.breakout_high_valid': '当日除く直近20日高値が有効',
+  'entry.breakout': '株価が直近20日高値をブレイク',
+  'entry.adopt_buy': '買い採用',
+  'exit.take_profit': '利確条件を満たす',
+  'exit.stop_loss': '損切り条件を満たす',
+  'exit.time_stop': '時間切れ手仕舞い条件を満たす',
 }
