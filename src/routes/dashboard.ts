@@ -8904,6 +8904,9 @@ export function symbolMapEditorBody(
   #symbol-map-editor .drawflow .drawflow-node .input:hover,
   #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
   #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
+  /* view モードは編集不可なので全ポートを出さない (線を引く起点を無くす) */
+  #symbol-map-editor.sm-view .drawflow .drawflow-node .input,
+  #symbol-map-editor.sm-view .drawflow .drawflow-node .output{display:none}
   /* 対の共有側 (自分の線が 1 本も無い側) はポートを出さない — 線は常に代表側 1 本 */
   #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .input,
   #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .output{display:none}
@@ -8940,8 +8943,11 @@ export function symbolMapEditorBody(
     // reroute (線クリックで経由点の丸を生成) は使わない — 削除のための選択
     // クリックのたびに点が残る (operator 指摘)。
     editor.reroute = false;
-    if (isView) editor.editor_mode = 'view';
+    // view でも「ノードの移動」は許可する (operator 要望: 重なりを手で整理したい)。
+    // Drawflow の editor_mode='view' は移動も殺すため 'edit' のまま起動し、
+    // 編集系 (線・削除) は下のガードで封じる。移動は表示上のみで保存されない。
     editor.start();
+    if (isView) el.classList.add('sm-view');
     var idOf = {};
     var symOf = {};
     var nodeBySym = {};
@@ -9289,13 +9295,8 @@ export function symbolMapEditorBody(
     }
     setTimeout(updatePairPorts, 0);
 
-    if (isView) {
-      // 読み取り専用: 共有値の描画と simulate だけ。編集系ハンドラは付けない。
-      renderShares();
-      return;
-    }
-
     // 対は一塊: 片方のカードをドラッグしたら相方も同じ移動量で追従させる
+    // (view でも有効 — 移動は許可されているため)
     // (operator 要望)。Drawflow はドラッグ中イベントを出さないので、ドラッグ側の
     // style 位置を mousemove で読んで delta を相方に適用し、mouseup で
     // Drawflow 内部 data の座標も確定させる。delta は canvas 座標系なので
@@ -9342,6 +9343,24 @@ export function symbolMapEditorBody(
       pairDrag = null;
       updatePairLinks();
     });
+
+    if (isView) {
+      // 読み取り専用 + ノード移動可: 編集系 (線・削除) だけ封じる。
+      // ポートは CSS (sm-view) で消えているため線は引けないが、念のため
+      // 接続イベントは即 revert、Delete/Backspace は Drawflow に渡さない。
+      editor.on('connectionCreated', function (info) {
+        editor.removeSingleConnection(info.output_id, info.input_id, info.output_class, info.input_class);
+      });
+      editor.on('nodeRemoved', function () { location.reload(); });
+      el.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Delete' || ev.key === 'Backspace') {
+          ev.stopPropagation();
+          ev.preventDefault();
+        }
+      }, true);
+      renderShares();
+      return;
+    }
 
     function markConnectionPending(srcId, dstId) {
       var conn = el.querySelector('svg.connection.node_in_node-' + dstId + '.node_out_node-' + srcId);

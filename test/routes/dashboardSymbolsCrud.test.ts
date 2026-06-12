@@ -1772,7 +1772,7 @@ describe('銘柄管理の tab 分離 (#symbol-relation-map)', () => {
     const wfRes = await app.request('/dashboard/symbols?tab=workflow', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const wfBody = await wfRes.text()
     expect(wfBody).toContain('symbol-map-editor')
-    expect(wfBody).toContain("editor.editor_mode = 'view'")
+    expect(wfBody).toContain("el.classList.add('sm-view')")
     expect(wfBody).not.toContain('銘柄名')
   })
 })
