@@ -10624,21 +10624,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <input type="hidden" name="role" id="symbol-form-role" value="${esc(roleValue)}">
           <div style="font-size:12px;margin-bottom:6px">選択中: <strong id="role-current" style="font-size:13px">—</strong></div>
           ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
-          <!-- 2軸を構造で表現: 行 = 入場アーキ、各行のカード = 銘柄プロファイル。
-               現状は「押し目」行のみ有効。モメンタム/逆張り行は設計中 (グレー)。 -->
-          <div id="role-grid" style="display:flex;flex-direction:column;gap:6px">
-            <div style="display:flex;gap:8px;align-items:stretch">
-              <div style="flex:0 0 70px;font-size:12px;font-weight:600;color:#06c;display:flex;align-items:center;border-right:3px solid #06c;padding-right:8px">押し目</div>
-              <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px;flex:1 1 auto"></div>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;opacity:0.55">
-              <div style="flex:0 0 70px;font-size:12px;font-weight:600;color:#9aa0a6;border-right:3px solid #d8dadd;padding-right:8px">モメンタム</div>
-              <div style="flex:1 1 auto;font-size:11px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:10px 12px">設計中 — 新高値ブレイクの継続を取る入場アーキ(1x向け)</div>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;opacity:0.55">
-              <div style="flex:0 0 70px;font-size:12px;font-weight:600;color:#9aa0a6;border-right:3px solid #d8dadd;padding-right:8px">逆張り</div>
-              <div style="flex:1 1 auto;font-size:11px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:10px 12px">設計中 — 売られすぎの反発を拾う入場アーキ(1x向け)</div>
-            </div>
+          <!-- 2軸を構造で表現: タブ = 入場アーキ、タブ内のカード = 銘柄プロファイル。
+               現状は「押し目」タブのみ有効。モメンタム/逆張りは設計中。 -->
+          <div style="display:flex;gap:2px;border-bottom:1px solid #e3e3e8;margin-bottom:8px">
+            <button type="button" class="role-arch-tab" data-arch="pullback" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">押し目</button>
+            <button type="button" class="role-arch-tab" data-arch="momentum" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">モメンタム <span style="font-size:10px;color:#bbb">設計中</span></button>
+            <button type="button" class="role-arch-tab" data-arch="reversion" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">逆張り <span style="font-size:10px;color:#bbb">設計中</span></button>
+          </div>
+          <div class="role-arch-panel" data-arch="pullback">
+            <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+          </div>
+          <div class="role-arch-panel" data-arch="momentum" style="display:none">
+            <div style="font-size:12px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:14px 16px">⚙ 設計中 — 新高値ブレイクの継続を取る入場アーキ(1x向け)。strategist 設計 → red-team の後に有効化。</div>
+          </div>
+          <div class="role-arch-panel" data-arch="reversion" style="display:none">
+            <div style="font-size:12px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:14px 16px">⚙ 設計中 — 売られすぎの反発を拾う入場アーキ(1x向け)。strategist 設計 → red-team の後に有効化。</div>
           </div>
           <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
         </div>
@@ -10758,12 +10758,16 @@ function symbolFormBody(args: SymbolFormArgs): string {
           }
           function cardHtml(role) {
             var color = COLOR[role] || '#5f6368';
-            // カードは preset (ロールの素性) を固定表示。override 反映は右プレビューだけ。
+            var d = DESC[role] || {};
+            // カードはグラフ無し (ホバー右プレビューに虚チャートがある)。名前 +
+            // 銘柄プロファイル + 保有 だけのコンパクト表示。
+            var sub = role === 'cash_parking'
+              ? (d.character || '')
+              : (d.character || '') + ' ・ 保有' + P[role].tstop + '日';
             return '<div class="role-tpl-card" data-role="' + role + '" ' +
-              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:6px 8px;background:#fff;width:150px">' +
-              '<div style="font-size:11px;font-weight:600;margin-bottom:2px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
-              ladder(role, P[role] || {}, 134, 96, false) +
-              '<div style="font-size:10px;color:#86868b;margin-top:1px">保有 ' + (role === 'cash_parking' ? '—' : P[role].tstop + '日') + '</div>' +
+              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:8px 10px;background:#fff;min-width:150px">' +
+              '<div style="font-size:12px;font-weight:600"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
+              '<div style="font-size:10px;color:#86868b;margin-top:2px">' + sub + '</div>' +
               '</div>';
           }
           var selected = ${JSON.stringify(roleValue)};
@@ -10838,6 +10842,27 @@ function symbolFormBody(args: SymbolFormArgs): string {
               var el = document.getElementsByName(names[j])[0];
               if (el) { el.addEventListener('input', rerender); el.addEventListener('change', rerender); }
             }
+            // 入場アーキのタブ切替 (押し目=有効、モメンタム/逆張り=設計中パネル)。
+            function setArchTab(arch) {
+              var tabs = document.querySelectorAll('.role-arch-tab');
+              for (var t = 0; t < tabs.length; t++) {
+                var a = tabs[t].getAttribute('data-arch'), on = a === arch;
+                tabs[t].style.borderBottom = on ? '2px solid #06c' : '2px solid transparent';
+                tabs[t].style.color = on ? '#06c' : '#5f6368';
+                tabs[t].style.fontWeight = on ? '600' : 'normal';
+              }
+              var panels = document.querySelectorAll('.role-arch-panel');
+              for (var q = 0; q < panels.length; q++) {
+                panels[q].style.display = panels[q].getAttribute('data-arch') === arch ? '' : 'none';
+              }
+            }
+            var tabs = document.querySelectorAll('.role-arch-tab');
+            for (var k = 0; k < tabs.length; k++) {
+              (function (tab) {
+                tab.addEventListener('click', function () { setArchTab(tab.getAttribute('data-arch')); });
+              })(tabs[k]);
+            }
+            setArchTab('pullback');
             var cur = document.getElementById('role-current');
             if (cur) cur.textContent = labelOf(selected);
             highlight(selected);

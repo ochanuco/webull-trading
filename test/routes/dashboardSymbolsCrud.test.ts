@@ -1681,8 +1681,9 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     // #role-stats: ロール比較ギャラリー + ホバー右プレビューが ship される。
     expect(body).toContain('id="role-gallery"')
     expect(body).toContain('id="role-preview"')
-    // 2軸を構造で表現: 入場アーキ行 (押し目 + 設計中の モメンタム/逆張り)
-    expect(body).toContain('id="role-grid"')
+    // 2軸を構造で表現: 入場アーキのタブ (押し目 + 設計中の モメンタム/逆張り)
+    expect(body).toContain('class="role-arch-tab"')
+    expect(body).toMatch(/data-arch="pullback"/)
     expect(body).toContain('モメンタム')
     expect(body).toContain('逆張り')
     // role 別 preset 解決値 (入場ゲート閾値・stop/TP) が含まれる。
