@@ -4,6 +4,7 @@ import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalR
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { createNotifier } from './infrastructure/notification/createNotifier'
 import { checkMarketDataHealth } from './infrastructure/webull/checkMarketDataHealth'
+import { refreshTradableAllowlist } from './infrastructure/webull/refreshTradableAllowlist'
 import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
@@ -148,6 +149,54 @@ export default {
             console.error(
               JSON.stringify({
                 event: 'webull_market_data_health_check_error',
+                requestId,
+                message,
+              }),
+            )
+          },
+        ),
+      )
+
+      // #460: OpenAPI 取扱可能銘柄 allowlist の日次リフレッシュ。
+      // tradable/list を全件 sweep し D1 にキャッシュ (物理削除しない upsert)。
+      // 取引時間外 (22:00 UTC) に動かして rate limit / 副作用を最小化する。
+      ctx.waitUntil(
+        refreshTradableAllowlist(env, new Date().toISOString()).then(
+          (summary) => {
+            console.log(
+              JSON.stringify({
+                event: 'tradable_allowlist_refresh',
+                requestId,
+                ok: summary.ok,
+                fetched: summary.fetched,
+                complete: summary.complete,
+                pages: summary.pages,
+                upserted: summary.upserted,
+                disappeared: summary.disappeared,
+                disappearedSymbols: summary.disappearedSymbols,
+                error: summary.error ?? null,
+              }),
+            )
+            // 保有中銘柄が allowlist から消えた可能性 = 取扱停止された監視シグナル。
+            // true→false 遷移があれば warning で push する (false→true や新規は通常運用)。
+            if (summary.disappeared > 0) {
+              ctx.waitUntil(
+                createNotifier(env, { requestId })
+                  .notify({
+                    type: 'ERROR',
+                    message: `Webull tradable/list から ${summary.disappeared} 銘柄が消失 (取扱停止の可能性): ${summary.disappearedSymbols.join(', ')}. 保有・運用中なら確認を — issue #460.`,
+                    cause: 'tradable_allowlist_disappeared',
+                    severity: 'warning',
+                  })
+                  .catch(() => undefined),
+              )
+            }
+          },
+          (error) => {
+            const message = error instanceof Error ? error.message : String(error)
+            console.error(
+              JSON.stringify({
+                event: 'tradable_allowlist_refresh_error',
                 requestId,
                 message,
               }),

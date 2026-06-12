@@ -23,6 +23,12 @@ import { loadInversePairs, loadPairRegimeConfigs, parseCashFallbacksJson, SYMBOL
 import { escapeHtml, formatSymbolDisplay } from '../shared/format'
 import { createDb } from '../infrastructure/db/tradeJournalRepo'
 import {
+  getTradableStatusForSymbol,
+  loadTradableAllowlist,
+  type TradableAllowlist,
+  type TradableStatus,
+} from '../infrastructure/db/tradableInstrumentsRepo'
+import {
   MAX_TIME_STOP_DAYS,
   strategyDecisionLog,
   symbolConfig,
@@ -788,11 +794,15 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable('DB not bound')))
     }
     try {
-      const [rows, inversePairs, pairRegimes] = await Promise.all([
+      const [rows, inversePairs, pairRegimes, tradable] = await Promise.all([
         loadAllSymbolConfigRows(c.env.DB),
         loadInversePairs(createDb(c.env.DB)).catch(() => ({}) as Record<string, string>),
         // 関係マップ用 (#symbol-relation-map)。読めなくても一覧は出す。
         loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => []),
+        // #460: OpenAPI 取扱可能銘柄 allowlist。読めなくても一覧は出す (空 map = 全 unknown)。
+        loadTradableAllowlist(createDb(c.env.DB)).catch(
+          () => new Map() as Awaited<ReturnType<typeof loadTradableAllowlist>>,
+        ),
       ])
       // 関係マップの縦軸 = 投入金額 (DO position の qty × avgPrice、ground truth)。
       // 取得失敗・position 無しは 0 (最下段)。fx は表示位置の換算のみに使う。
@@ -835,6 +845,7 @@ export const dashboard = new Hono<DashboardBindings>()
             inversePairs,
             pairRegimes,
             mapAmounts,
+            tradable,
             errorCode,
             errorSymbol,
             filter,
@@ -862,6 +873,10 @@ export const dashboard = new Hono<DashboardBindings>()
         () => ({}) as Record<string, string>,
       )
       const pairRegimes = await loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => [])
+      // #460: OpenAPI 取扱 allowlist (キャンバスの取扱バッジ用)。
+      const tradable = await loadTradableAllowlist(createDb(c.env.DB)).catch(
+        () => new Map() as Awaited<ReturnType<typeof loadTradableAllowlist>>,
+      )
       const mapAmounts: Record<string, { native: string; jpy: number }> = {}
       if (c.env.SYMBOL_STATE) {
         const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
@@ -879,7 +894,7 @@ export const dashboard = new Hono<DashboardBindings>()
           }),
         )
       }
-      return c.html(renderLayout(c, '配分マップ編集', symbolMapEditorBody(rows, inversePairs, mapAmounts, { pairRegimes })))
+      return c.html(renderLayout(c, '配分マップ編集', symbolMapEditorBody(rows, inversePairs, mapAmounts, { pairRegimes, tradable })))
     } catch (err) {
       return c.html(renderLayout(c, '配分マップ編集', unavailable(messageOf(err))))
     }
@@ -928,11 +943,15 @@ export const dashboard = new Hono<DashboardBindings>()
         () => ({}) as Record<string, string>,
       )
       const currentInverse = inversePairs[symbol] ?? null
+      // #460: OpenAPI 取扱 allowlist status (edit は symbol 確定なので server 描画)。
+      const tradableStatus = await getTradableStatusForSymbol(createDb(c.env.DB), symbol).catch(
+        () => 'unknown' as const,
+      )
       return c.html(
         renderLayout(
           c,
           '銘柄管理 - 編集',
-          symbolFormBody({ mode: 'edit', row, error: null, globalDefaults, currentInverse }),
+          symbolFormBody({ mode: 'edit', row, error: null, globalDefaults, currentInverse, tradableStatus }),
         ),
       )
     } catch (err) {
@@ -8778,10 +8797,22 @@ export function symbolMapEditorBody(
   rows: SymbolConfigRow[],
   inversePairs: Record<string, string>,
   amounts: Record<string, { native: string; jpy: number }>,
-  opts: { mode?: 'edit' | 'view'; pairRegimes?: PairRegimeEntry[] } = {},
+  opts: { mode?: 'edit' | 'view'; pairRegimes?: PairRegimeEntry[]; tradable?: TradableAllowlist } = {},
 ): string {
   const mode = opts.mode ?? 'edit'
   const pairRegimes = opts.pairRegimes ?? []
+  const tradable: TradableAllowlist = opts.tradable ?? new Map()
+  // unit の取扱 status = メンバー中で最も重い状態 (unknown > disappeared > tradable)。
+  // ペアで片側が取扱不可なら警告を出す。
+  const tradeRank: Record<TradableStatus, number> = { tradable: 0, disappeared: 1, unknown: 2 }
+  const unitTradeBadge = (syms: string[]): string => {
+    let worst: TradableStatus = 'tradable'
+    for (const x of syms) {
+      const s = tradable.get(x.toUpperCase())?.status ?? 'unknown'
+      if (tradeRank[s] > tradeRank[worst]) worst = s
+    }
+    return tradableBadgeHtml(worst)
+  }
   const bySym = new Map(rows.map((r) => [r.symbol.toUpperCase(), r]))
   const pctOf = (r: SymbolConfigRow): number =>
     r.budgetAllocPct != null ? Math.round(r.budgetAllocPct * 1000) / 10 : 0
@@ -8878,6 +8909,8 @@ export function symbolMapEditorBody(
       held: u.held,
       entryRequired: u.entryRequired,
       fallbacks: fallbackUnitsOf(u),
+      // #460: OpenAPI 取扱バッジ HTML (tradable は空文字)。card に innerHTML 挿入。
+      tradeBadge: unitTradeBadge(u.syms),
       y: u.y,
     })),
     // スポーン在庫: 盤面に無い (= 全側 inactive) unit。
@@ -8890,6 +8923,7 @@ export function symbolMapEditorBody(
         currency: u.currency,
         color: u.color,
         roles: u.roles,
+        tradeBadge: unitTradeBadge(u.syms),
       })),
     unitOfSym,
   }
@@ -9072,9 +9106,12 @@ export function symbolMapEditorBody(
       var metaParts = [];
       if (roleShorts.length > 0) metaParts.push(roleShorts.join(' / '));
       metaParts.push(u.currency);
+      // #460: OpenAPI 取扱バッジ (server 生成済み HTML、tradable は空)。
+      var tradeBadgeHtml = u.tradeBadge ? '<div style="margin-top:4px">' + u.tradeBadge + '</div>' : '';
       return '<div class="sm-card">' +
         '<div class="sm-title" style="color:' + u.color + '">' + u.label + '</div>' +
         statusHtml +
+        tradeBadgeHtml +
         '<div style="margin-top:4px">配分 <span class="sm-share" id="sm-share-' + u.id.replace('/', '_') + '">—</span></div>' +
         '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
         '</div>';
@@ -9776,6 +9813,8 @@ function symbolsListBody(args: {
   inversePairs?: Record<string, string>
   pairRegimes?: PairRegimeEntry[]
   mapAmounts?: Record<string, { native: string; jpy: number }>
+  /** #460: OpenAPI 取扱 allowlist。各行/カードの取扱バッジに使う。 */
+  tradable?: TradableAllowlist
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
@@ -9784,6 +9823,7 @@ function symbolsListBody(args: {
   tab?: 'list' | 'workflow'
 }): string {
   const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
+  const tradable: TradableAllowlist = args.tradable ?? new Map()
   const tab = args.tab ?? 'list'
   const tabBar = `<div style="display:flex;gap:4px;margin:0 0 12px;border-bottom:1px solid #e3e3e8">
     <a href="/dashboard/symbols" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'list' ? '#06c' : 'transparent'};color:${tab === 'list' ? '#06c' : '#5f6368'};font-weight:${tab === 'list' ? '600' : 'normal'}">一覧</a>
@@ -9819,7 +9859,7 @@ function symbolsListBody(args: {
   </p>`
 
   if (tab === 'workflow') {
-    return `${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes })}`
+    return `${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes, tradable })}`
   }
 
   if (rows.length === 0) {
@@ -9912,9 +9952,12 @@ function symbolsListBody(args: {
         ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse!)}/edit" title="${treeTitle}" style="${connStyle}"></a>`
         : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
+      // #460: OpenAPI 取扱 allowlist バッジ (tradable は出さない)。
+      const tradBadge = tradableBadgeHtml(tradable.get(sym)?.status ?? 'unknown')
+      const tradBadgeHtml = tradBadge ? `<div style="margin-top:2px">${tradBadge}</div>` : ''
       return `<tr${rowStyle}>
         <td style="position:relative;width:28px;padding:0">${treeCell}</td>
-        <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong></td>
+        <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong>${tradBadgeHtml}</td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${roleCell}</td>
@@ -10201,6 +10244,44 @@ interface SymbolFormArgs {
   globalDefaults: { timeStopDays: number; kAtr: number } | null
   /** 編集対象が既に対を組んでいる相手 symbol (#315)。未ペア / new は null。 */
   currentInverse?: string | null
+  /** #460: OpenAPI 取扱 allowlist status (edit モードの server 描画用)。 */
+  tradableStatus?: TradableStatus
+}
+
+/**
+ * OpenAPI 取扱 allowlist (#460) のバッジ表現。tradable/list 由来の status を
+ * operator が判断できる短い日本語ラベル + 色 + tooltip にまとめる。
+ *   - tradable    : 直近 sweep で OpenAPI 取扱可
+ *   - disappeared : 過去は取扱可だったが直近 sweep で消失 (取扱停止の可能性)
+ *   - unknown     : allowlist 未観測 (OpenAPI で発注できない可能性)
+ * 登録/発注は止めない警告レイヤー (ユーザー方針: 警告のみ)。`tradable` は
+ * バッジを出さない (ノイズ削減 — 問題のある状態だけ目立たせる)。
+ */
+const TRADABLE_BADGE: Record<
+  Exclude<TradableStatus, 'tradable'>,
+  { label: string; bg: string; fg: string; title: string }
+> = {
+  disappeared: {
+    label: '⚠ 取扱消失',
+    bg: '#fff4e5',
+    fg: '#9a5b00',
+    title:
+      'OpenAPI 取扱リスト (tradable/list) に過去は在籍したが直近の sweep で消失。取扱停止された可能性 — 保有・運用中なら確認を (#460)',
+  },
+  unknown: {
+    label: '⚠ 取扱未確認',
+    bg: '#f1f1f4',
+    fg: '#6e6e73',
+    title:
+      'OpenAPI 取扱リスト (tradable/list) に未観測。アプリで売買できても OpenAPI 経由では発注できない可能性 (USMV 等)。発注後に 417 で弾かれる場合あり (#460)',
+  },
+}
+
+/** allowlist status → 一覧/フォーム用バッジ HTML。tradable は空 (バッジ無し)。 */
+function tradableBadgeHtml(status: TradableStatus): string {
+  if (status === 'tradable') return ''
+  const b = TRADABLE_BADGE[status]
+  return `<span title="${esc(b.title)}" style="display:inline-block;padding:1px 6px;border-radius:6px;background:${b.bg};color:${b.fg};font-size:11px;font-weight:600;white-space:nowrap">${b.label}</span>`
 }
 
 /** role の短い日本語名 (#452)。一覧 / チャートタブのインライン表示用。 */
@@ -10330,10 +10411,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
     row?.budgetAllocPct === null || row?.budgetAllocPct === undefined
       ? ''
       : String(Math.round(row.budgetAllocPct * 1000) / 10)
+  // #460: edit モードは symbol 確定なので allowlist バッジを server 描画。
+  const editAllowlistBadge =
+    mode === 'edit'
+      ? (() => {
+          const badge = tradableBadgeHtml(args.tradableStatus ?? 'unknown')
+          return badge
+            ? `<div style="margin-top:6px">${badge}</div>`
+            : `<div style="margin-top:6px"><span title="OpenAPI 取扱リスト (tradable/list) 在籍 — 発注可能" style="font-size:12px;color:#0e9f6e">✓ OpenAPI 取扱リスト在籍</span></div>`
+        })()
+      : ''
   const symbolField =
     mode === 'edit'
       ? `<input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
          <span></span>
+         ${editAllowlistBadge}
          <p class="muted" style="margin:0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>`
       : `<div>
            <div style="position:relative;display:inline-block">
@@ -10341,6 +10433,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
              <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
            </div>
            <span id="symbol-tradability" style="margin-left:10px;font-size:13px"></span>
+           <div id="symbol-allowlist" style="margin-top:4px;font-size:12px"></div>
          </div>`
   // #315: 登録モード選択 (単体 / インバース対)。new のみ。
   const modeSelector =
@@ -10675,7 +10768,8 @@ function symbolFormBody(args: SymbolFormArgs): string {
       var sym = (symInput.value || '').trim().toUpperCase();
       window._tradabilityDenied = false;
       if (saveBtn) { saveBtn.disabled = false; saveBtn.style.opacity = ''; }
-      if (!/^[A-Z0-9]{1,10}$/.test(sym)) { statusEl.textContent = ''; return; }
+      var allowElEarly = document.getElementById('symbol-allowlist');
+      if (!/^[A-Z0-9]{1,10}$/.test(sym)) { statusEl.textContent = ''; if (allowElEarly) allowElEarly.textContent = ''; return; }
       var mySeq = ++window._tradabilitySeq;
       statusEl.textContent = '⏳ 取扱確認中...';
       statusEl.style.color = '#86868b';
@@ -10693,6 +10787,21 @@ function symbolFormBody(args: SymbolFormArgs): string {
             var lev = Number(res.instrument.etfLeveragedFactor);
             if (Number.isFinite(lev) && lev !== 0) chips.push('レバレッジ ' + (lev > 0 ? '+' : '') + lev + 'x' + (res.instrument.inverseEtf === true ? ' / インバース' : ''));
             if (chips.length > 0) instSuffix = ' ｜ ' + chips.join(' ・ ');
+          }
+          // #460: OpenAPI allowlist (tradable/list)。instrument status (OC) では
+          // 区別できない deny を区別できる唯一の事前シグナルなので別行で強調する。
+          var allowEl = document.getElementById('symbol-allowlist');
+          if (allowEl) {
+            if (res.allowlist === 'tradable') {
+              allowEl.textContent = '✓ OpenAPI 取扱リスト在籍 (発注可能)';
+              allowEl.style.color = '#0e9f6e';
+            } else if (res.allowlist === 'disappeared') {
+              allowEl.textContent = '⚠ OpenAPI 取扱リストから消失 (取扱停止の可能性)';
+              allowEl.style.color = '#9a5b00';
+            } else {
+              allowEl.textContent = '⚠ OpenAPI 取扱リスト未登録 — アプリで売買できても OpenAPI 経由では発注で弾かれる可能性';
+              allowEl.style.color = '#6e6e73';
+            }
           }
           if (res.verdict === 'denied') {
             var why = res.reason === 'known_deny' ? '過去に Webull が発注拒否'

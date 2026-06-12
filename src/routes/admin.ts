@@ -6,6 +6,8 @@ import { rateLimit } from '../middleware/rateLimit'
 import { ValidationError } from '../shared/errors'
 import { createWebullReadClient } from '../infrastructure/webull/WebullReadClient'
 import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
+import { refreshTradableAllowlist } from '../infrastructure/webull/refreshTradableAllowlist'
+import { getTradableStatusForSymbol } from '../infrastructure/db/tradableInstrumentsRepo'
 import {
   resolveAccessToken,
   resolveAccessTokenWithSource,
@@ -1215,6 +1217,28 @@ export const admin = new Hono<AppBindings>()
         : null,
     })
   })
+  /**
+   * #460: OpenAPI 取扱可能銘柄 allowlist の手動リフレッシュ。
+   * 日次 cron (CRON_PORTFOLIO_ROLL) と同じ `refreshTradableAllowlist` を即時実行。
+   * tradable/list を全件 sweep するので rate limit / throttle で数十秒かかる。
+   */
+  .post('/tradable-allowlist/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const summary = await refreshTradableAllowlist(c.env, new Date().toISOString())
+    await writeAuditLog(c, '/admin/tradable-allowlist/refresh', 'tradable-allowlist', null, {
+      ok: summary.ok,
+      fetched: summary.fetched,
+      complete: summary.complete,
+      pages: summary.pages,
+      upserted: summary.upserted,
+      disappeared: summary.disappeared,
+      disappearedSymbols: summary.disappearedSymbols,
+      error: summary.error ?? null,
+    })
+    return c.json(summary)
+  })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
     if (clientOrderId.length === 0) {
@@ -2057,13 +2081,18 @@ export const admin = new Hono<AppBindings>()
       market === 'US'
         ? lookupInstrument(c.env, { symbol: symbolRaw, category: 'US_STOCK' })
         : undefined
+    // #460: OpenAPI allowlist (tradable/list 由来) の status も併せて返す。
+    // instrument status (OC) では区別できない deny を区別できる唯一の事前シグナル。
+    const allowlistStatus = c.env.DB
+      ? await getTradableStatusForSymbol(createDb(c.env.DB), symbolRaw).catch(() => 'unknown' as const)
+      : ('unknown' as const)
     const result = await checkTradability(c.env, {
       symbol: symbolRaw,
       market,
       ...(Number.isFinite(priceRaw) && priceRaw > 0 ? { price: priceRaw } : {}),
       ...(instrumentPromise !== undefined ? { instrument: instrumentPromise } : {}),
     })
-    return c.json(result)
+    return c.json({ ...result, allowlist: allowlistStatus })
   })
   .get('/symbol-config/lookup', rateLimit('ADMIN_WRITE'), async (c) => {
     const queryRaw = c.req.query('q') ?? c.req.query('symbol') ?? ''
