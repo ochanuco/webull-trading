@@ -8904,12 +8904,15 @@ export function symbolMapEditorBody(
   #symbol-map-editor .drawflow .drawflow-node .input:hover,
   #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
   #symbol-map-editor svg.connection.sm-pending path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:3px}
+  /* ポートを「消す」ときは display:none にしない — Drawflow は線の座標を
+     ポート要素の位置から計算するため、layout を消すと線ごと壊れる (実際に
+     全滅した)。visibility:hidden で座標を残して見た目と操作だけ消す。 */
   /* view モードは編集不可なので全ポートを出さない (線を引く起点を無くす) */
   #symbol-map-editor.sm-view .drawflow .drawflow-node .input,
-  #symbol-map-editor.sm-view .drawflow .drawflow-node .output{display:none}
+  #symbol-map-editor.sm-view .drawflow .drawflow-node .output{visibility:hidden;pointer-events:none}
   /* 対の共有側 (自分の線が 1 本も無い側) はポートを出さない — 線は常に代表側 1 本 */
   #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .input,
-  #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .output{display:none}
+  #symbol-map-editor .drawflow .drawflow-node.sm-pair-sub .output{visibility:hidden;pointer-events:none}
   .sm-card{padding:8px 10px;font-size:12px}
   .sm-card .sm-title{font-size:14px;font-weight:700}
   .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
