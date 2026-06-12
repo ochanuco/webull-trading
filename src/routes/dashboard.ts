@@ -9853,10 +9853,47 @@ function symbolsListBody(args: {
     <a href="/dashboard/symbols" style="padding:4px 8px;text-decoration:none;font-size:12px;color:#86868b">リセット</a>
   </form>`
 
+  // #460: allowlist の取得状況サマリ (操作判断のため最終取得日と件数を出す)。
+  const tradableEntries = [...tradable.values()]
+  const tradableCount = tradableEntries.filter((e) => e.status === 'tradable').length
+  const lastSync = tradableEntries.reduce<string>(
+    (acc, e) => (e.lastSeenAt && e.lastSeenAt > acc ? e.lastSeenAt : acc),
+    '',
+  )
+  const allowlistNote =
+    tradableEntries.length === 0
+      ? '<span class="muted" style="font-size:12px">OpenAPI 取扱リスト: 未取得 — 「取扱リスト更新」で取得</span>'
+      : `<span class="muted" style="font-size:12px" title="tradable/list を全件 sweep した結果のキャッシュ (#460)">OpenAPI 取扱リスト: ${tradableCount} 銘柄 (最終取得 ${esc(lastSync.slice(0, 10))})</span>`
   const headerBar = `<p style="margin:0 0 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols/new" style="padding:6px 12px;background:#06c;color:#fff;border-radius:4px;text-decoration:none">+ 新規追加</a>
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
-  </p>`
+    <button type="button" id="tradable-refresh-btn" onclick="window.refreshTradableAllowlist()" style="padding:5px 10px;font-size:12px;background:#fff;border:1px solid #d0d0d5;border-radius:4px;cursor:pointer" title="Webull の OpenAPI 取扱可能銘柄リスト (tradable/list) を今すぐ再取得して allowlist を更新します。全件 sweep のため数十秒かかります (#460)">🔄 取扱リスト更新</button>
+    ${allowlistNote}
+    <span id="tradable-refresh-status" style="font-size:12px"></span>
+  </p>
+  <script>
+  window.refreshTradableAllowlist = function () {
+    var btn = document.getElementById('tradable-refresh-btn');
+    var st = document.getElementById('tradable-refresh-status');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    if (st) { st.textContent = '⏳ tradable/list を取得中 (数十秒)...'; st.style.color = '#86868b'; }
+    fetch('/admin/tradable-allowlist/refresh', { method: 'POST', credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.ok) {
+          if (st) { st.textContent = '✓ ' + res.fetched + ' 銘柄取得' + (res.disappeared > 0 ? ' / ' + res.disappeared + ' 消失' : '') + ' — 再読込します'; st.style.color = '#0e9f6e'; }
+          setTimeout(function () { window.location.reload(); }, 800);
+        } else {
+          if (st) { st.textContent = '⚠ 取得に失敗: ' + ((res && res.error) || 'unknown'); st.style.color = '#c22'; }
+          if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+        }
+      })
+      .catch(function () {
+        if (st) { st.textContent = '⚠ 通信エラー'; st.style.color = '#c22'; }
+        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+      });
+  };
+  </script>`
 
   if (tab === 'workflow') {
     return `${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes, tradable })}`
