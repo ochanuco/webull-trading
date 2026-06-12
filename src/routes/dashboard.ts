@@ -9519,12 +9519,8 @@ export function symbolMapEditorBody(
         alert(src + ' は ' + nodeBySym[src].currency + '、' + dst + ' は ' + nodeBySym[dst].currency + ' です。異通貨の退避先は設定できません (同一通貨のみ)。');
         return;
       }
-      // 退避先は 1 銘柄 1 本 — 既存の出力接続を visual からも外す。
-      if (draft[src].fallback && idOf[draft[src].fallback]) {
-        programmatic = true;
-        editor.removeSingleConnection(idOf[src], idOf[draft[src].fallback], 'output_1', 'input_1');
-        programmatic = false;
-      }
+      // 退避先は 1 対 (単独銘柄は 1 銘柄) 1 本 — 自分と相方の既存退避を外して張る。
+      clearPairFallbacks(src);
       draft[src].fallback = dst;
       markConnectionPending(info.output_id, info.input_id);
       renderChanges();
@@ -9573,6 +9569,24 @@ export function symbolMapEditorBody(
     function hideGuide() {
       if (guide) { guide.remove(); guide = null; }
     }
+    // 退避線は「1 対 1 本」: 対の両側に設定すると、対で 1 枠のはずの配分が
+    // 2 回退避されて二重計上になる (computeConditionalAllocation は銘柄単位で
+    // reroute する) ため、相方の既存退避を自動で外してから張る。
+    function clearFallbackOf(sym) {
+      var fb = draft[sym] && draft[sym].fallback;
+      if (!fb) return;
+      if (idOf[sym] && idOf[fb]) {
+        programmatic = true;
+        editor.removeSingleConnection(idOf[sym], idOf[fb], 'output_1', 'input_1');
+        programmatic = false;
+      }
+      draft[sym].fallback = null;
+    }
+    function clearPairFallbacks(srcSym) {
+      clearFallbackOf(srcSym);
+      var inv = nodeBySym[srcSym] && nodeBySym[srcSym].inverse;
+      if (inv && draft[inv]) clearFallbackOf(inv);
+    }
     function srcNodeIdOf(srcSym) {
       return accountSymOf[srcSym] ? accountIds[accountSymOf[srcSym]] : idOf[srcSym];
     }
@@ -9601,11 +9615,7 @@ export function symbolMapEditorBody(
         alert(srcSym + ' は ' + nodeBySym[srcSym].currency + '、' + dstSym + ' は ' + nodeBySym[dstSym].currency + ' です。異通貨の退避先は設定できません。');
         return false;
       }
-      if (draft[srcSym].fallback && idOf[draft[srcSym].fallback]) {
-        programmatic = true;
-        editor.removeSingleConnection(idOf[srcSym], idOf[draft[srcSym].fallback], 'output_1', 'input_1');
-        programmatic = false;
-      }
+      clearPairFallbacks(srcSym)
       programmatic = true;
       editor.addConnection(idOf[srcSym], idOf[dstSym], 'output_1', 'input_1');
       programmatic = false;
