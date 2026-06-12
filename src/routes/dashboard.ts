@@ -9221,15 +9221,15 @@ export function symbolMapEditorBody(
     // 線を空中で放す → 既存 Inactive 銘柄のピッカー (Miro の新規付箋風)。
     // Drawflow は接続が成立しなかった drop で connectionCancel を発火する。
     var connStartId = null;
-    var lastMouse = { x: 0, y: 0 };
-    el.addEventListener('mousemove', function (ev) { lastMouse = { x: ev.clientX, y: ev.clientY }; });
     var picker = document.createElement('div');
     picker.id = 'sm-spawn-picker';
     picker.hidden = true;
     picker.style.cssText = 'position:fixed;z-index:50;background:#fff;border:1px solid #d0d0d5;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.15);padding:6px;font-size:12px;max-height:240px;overflow:auto';
     document.body.appendChild(picker);
     function hidePicker() { picker.hidden = true; connStartId = null; }
-    document.addEventListener('click', function (ev) {
+    // 閉じるのは「次の押下」で判定する (click だと、紐を放した瞬間の click が
+    // バブリングして表示直後に閉じてしまう)。
+    document.addEventListener('mousedown', function (ev) {
       if (!picker.hidden && !picker.contains(ev.target)) hidePicker();
     });
     function canvasPos(clientX, clientY) {
@@ -9296,14 +9296,33 @@ export function symbolMapEditorBody(
         });
       });
     }
-    editor.on('connectionStart', function (info) { connStartId = info.output_id; });
-    editor.on('connectionCancel', function () {
+    // Drawflow の connectionStart/Cancel イベントは版により発火しないため、
+    // DOM で直接検知する: output ポート押下で起点を記録し、mouseup の直後に
+    // (connectionCreated が先に走る猶予を置いて) 接続が成立していなければ
+    // 「空中で放した」とみなしてピッカーを出す。
+    var connConsumed = false;
+    el.addEventListener('mousedown', function (ev) {
+      var out = ev.target && ev.target.closest ? ev.target.closest('.output') : null;
+      if (!out) return;
+      var nodeEl = ev.target.closest('.drawflow-node');
+      if (!nodeEl) return;
+      connStartId = parseInt(nodeEl.id.replace('node-', ''), 10);
+      connConsumed = false;
+    });
+    editor.on('connectionCreated', function () { connConsumed = true; connStartId = null; });
+    document.addEventListener('mouseup', function (ev) {
       if (connStartId === null) return;
       var srcId = connStartId;
-      connStartId = null;
-      showPicker(srcId, lastMouse.x, lastMouse.y);
+      var mx = ev.clientX;
+      var my = ev.clientY;
+      // connectionCreated は同じ mouseup で同期的に dispatch される — 1 tick
+      // 待ってから「成立しなかった」ことを確認する。
+      setTimeout(function () {
+        if (connConsumed) { connStartId = null; return; }
+        connStartId = null;
+        showPicker(srcId, mx, my);
+      }, 30);
     });
-    editor.on('connectionCreated', function () { connStartId = null; });
 
     editor.on('connectionCreated', function (info) {
       if (programmatic) return;
