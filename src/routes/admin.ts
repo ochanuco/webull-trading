@@ -1221,46 +1221,38 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * #460: OpenAPI 取扱可能銘柄 allowlist の手動リフレッシュ。
-   * tradable/list を全件 sweep するのは rate limit で約1分かかるため、HTTP は
-   * 待たせず **バックグラウンド (waitUntil) で実行**して即 `started` を返す。
-   * 進捗はページ単位で逐次 D1 へ反映されるので、UI は status endpoint を
-   * ポーリングして件数の増加を見られる。
+   * #460: OpenAPI 取扱可能銘柄 allowlist の手動リフレッシュ (チャンク式)。
+   *
+   * 全件 sweep (~50 ページ・約1分) は 1 リクエストの実行予算で完走できないため、
+   * **1 回 = 最大 ~15 ページ (~20秒) を同期処理**して進捗を返す。done=false なら
+   * `nextCursor` と `watermark` を返すので、UI が同じ watermark + cursor で続けて
+   * POST し、done になるまで再開する。watermark は最初の呼び出し (cursor 無し) で
+   * サーバが採番し、以降クライアントが echo する (sweep 全体の mark-and-sweep 基準)。
    */
   .post('/tradable-allowlist/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
-    const env = c.env
-    const dbBinding = c.env.DB
-    const before = await getTradableAllowlistStatus(createDb(dbBinding)).catch(() => null)
-    const job = refreshTradableAllowlist(env, new Date().toISOString())
-      .then(async (summary) => {
-        console.log(
-          JSON.stringify({ event: 'tradable_allowlist_refresh_manual', ...summary }),
-        )
-        await writeAuditLog(c, '/admin/tradable-allowlist/refresh', 'tradable-allowlist', before, {
-          ok: summary.ok,
-          fetched: summary.fetched,
-          complete: summary.complete,
-          pages: summary.pages,
-          upserted: summary.upserted,
-          disappeared: summary.disappeared,
-          disappearedSymbols: summary.disappearedSymbols,
-          error: summary.error ?? null,
-        }).catch(() => undefined)
-      })
-      .catch((err) => {
-        console.error(
-          JSON.stringify({
-            event: 'tradable_allowlist_refresh_manual_error',
-            message: err instanceof Error ? err.message : String(err),
-          }),
-        )
-      })
-    // waitUntil で isolate を生かしたままバックグラウンド完走させる。
-    c.executionCtx.waitUntil(job)
-    return c.json({ started: true, before })
+    const cursorRaw = (c.req.query('cursor') ?? '').trim()
+    const watermarkRaw = (c.req.query('watermark') ?? '').trim()
+    // 初回 (cursor 無し) は watermark を採番。再開時はクライアントの値を信頼。
+    const watermark = watermarkRaw.length > 0 ? watermarkRaw : new Date().toISOString()
+    const summary = await refreshTradableAllowlist(c.env, watermark, {
+      ...(cursorRaw.length > 0 ? { startCursor: cursorRaw } : {}),
+      maxPages: 15,
+    })
+    console.log(JSON.stringify({ event: 'tradable_allowlist_refresh_manual', ...summary }))
+    if (summary.done) {
+      await writeAuditLog(c, '/admin/tradable-allowlist/refresh', 'tradable-allowlist', null, {
+        ok: summary.ok,
+        upserted: summary.upserted,
+        disappeared: summary.disappeared,
+        disappearedSymbols: summary.disappearedSymbols,
+        error: summary.error ?? null,
+      }).catch(() => undefined)
+    }
+    const status = await getTradableAllowlistStatus(createDb(c.env.DB)).catch(() => null)
+    return c.json({ ...summary, watermark, total: status?.total ?? null })
   })
   /**
    * #460: allowlist の現在のサマリ (UI のポーリング用)。リフレッシュ進捗

@@ -39,6 +39,11 @@ export interface FetchTradableInstrumentsResult {
   complete: boolean
   /** 取得ページ数 (監視用)。 */
   pages: number
+  /**
+   * 続きがある場合の次回 `last_security_id` (チャンク分割の再開カーソル)。
+   * complete=true なら undefined。maxPages 打ち切り or error 時に設定される。
+   */
+  nextCursor?: string
   /** outcome='error' のときの詳細。 */
   error?: string
   status?: number | null
@@ -83,6 +88,13 @@ interface FetchInput {
    * 続行する (1 ページの保存失敗で全体を落とさない fail-safe)。
    */
   onPage?: (entries: TradableInstrumentEntry[], pageIndex: number) => Promise<void>
+  /** 再開カーソル (前回の nextCursor)。指定すると `last_security_id` から続ける。 */
+  startCursor?: string
+  /**
+   * このチャンクで取得する最大ページ数 (再開可能分割用)。到達したら
+   * complete=false + nextCursor を返して打ち切る。未指定は MAX_PAGES。
+   */
+  maxPages?: number
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -112,18 +124,20 @@ export async function fetchTradableInstruments(
 
   // symbol で dedup (Map で last-write-wins)。
   const bySymbol = new Map<string, TradableInstrumentEntry>()
-  let lastSecurityId: string | undefined
+  let lastSecurityId: string | undefined = input.startCursor
   let pages = 0
   let rateLimitRetries = 0
+  const pageLimit = Math.min(input.maxPages ?? MAX_PAGES, MAX_PAGES)
 
   for (;;) {
-    if (pages >= MAX_PAGES) {
-      // 想定外の巨大ユニバース。部分結果として返す (呼び出し側は消さない)。
+    if (pages >= pageLimit) {
+      // チャンク上限 (再開可能分割) or hard cap 到達。部分結果 + 再開カーソルを返す。
       return {
         outcome: 'ok',
         instruments: [...bySymbol.values()],
         complete: false,
         pages,
+        ...(lastSecurityId !== undefined ? { nextCursor: lastSecurityId } : {}),
       }
     }
 

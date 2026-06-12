@@ -106,6 +106,35 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
     expect(pageCalls).toEqual([['SOXL', 'SOXS'], ['TQQQ']])
   })
 
+  it('maxPages で打ち切り → complete=false + nextCursor を返す', async () => {
+    // 各ページ hasNext=true。maxPages=2 で 2 ページ取って打ち切る。
+    let i = 0
+    const fetcher = (async () => {
+      i += 1
+      return new Response(
+        JSON.stringify({ hasNext: true, instruments: [row(`S${i}`, String(1000 + i))] }),
+        { status: 200 },
+      )
+    }) as typeof fetch
+    const result = await fetchTradableInstruments(env, { sleep: noSleep, fetcher, maxPages: 2 })
+    expect(result.complete).toBe(false)
+    expect(result.pages).toBe(2)
+    // nextCursor = 2 ページ目の security_id。
+    expect(result.nextCursor).toBe('1002')
+  })
+
+  it('startCursor を last_security_id として送る', async () => {
+    let seenUrl = ''
+    const fetcher = (async (url: string) => {
+      seenUrl = url
+      return new Response(JSON.stringify({ hasNext: false, instruments: [row('SOXL', '1')] }), {
+        status: 200,
+      })
+    }) as unknown as typeof fetch
+    await fetchTradableInstruments(env, { sleep: noSleep, fetcher, startCursor: 'CURSOR123' })
+    expect(seenUrl).toContain('last_security_id=CURSOR123')
+  })
+
   it('onPage が throw しても sweep は継続する (fail-safe)', async () => {
     const result = await fetchTradableInstruments(env, {
       sleep: noSleep,

@@ -20,38 +20,53 @@ function entry(symbol: string): TradableInstrumentEntry {
   }
 }
 
+interface Row {
+  symbol: string
+  currentlyTradable: boolean
+  firstSeenAt?: string
+  lastSeenAt?: string
+  [k: string]: unknown
+}
+
 /**
- * upsertTradablePage は insert().values().onConflictDoUpdate() を chunk 化して
- * db.batch() で流す。finalize は select().from() + update().set().where()。
- * その chain を満たし、書き込みを記録する fake。
+ * 動作する in-memory fake。upsert (batch 経由) は store を実際に更新し、
+ * select は store を読む。これで watermark の mark-and-sweep を実検証できる。
+ * update().set().where() は記録のみ (消失判定の戻り値で検証する)。
  */
-function fakeDb(existing: unknown[]) {
-  const upsertChunks: unknown[][] = []
-  const disappearWheres: unknown[] = []
-  const batched: unknown[][] = []
+function memDb(initial: Row[]) {
+  const store = new Map<string, Row>(initial.map((r) => [r.symbol.toUpperCase(), { ...r }]))
+  const updateCalls: unknown[] = []
+  let batchGroups = 0
   const db = {
-    select: () => ({ from: vi.fn().mockResolvedValue(existing) }),
+    select: (_cols?: unknown) => ({ from: vi.fn(async () => [...store.values()]) }),
     insert: () => ({
-      values: (chunk: unknown[]) => ({
-        onConflictDoUpdate: (_cfg: unknown) => {
-          upsertChunks.push(chunk)
-          return { __stmt: true, chunk }
-        },
+      values: (chunk: Row[]) => ({
+        onConflictDoUpdate: (_cfg: unknown) => ({
+          __apply: () => {
+            for (const row of chunk) {
+              const k = row.symbol.toUpperCase()
+              const prev = store.get(k)
+              if (prev) store.set(k, { ...prev, ...row, firstSeenAt: prev.firstSeenAt })
+              else store.set(k, { ...row })
+            }
+          },
+        }),
       }),
     }),
-    batch: vi.fn(async (stmts: unknown[]) => {
-      batched.push(stmts)
+    batch: vi.fn(async (stmts: { __apply: () => void }[]) => {
+      batchGroups += 1
+      for (const s of stmts) s.__apply()
       return []
     }),
     update: () => ({
-      set: (_s: unknown) => ({
+      set: (s: unknown) => ({
         where: vi.fn(async (w: unknown) => {
-          disappearWheres.push(w)
+          updateCalls.push({ set: s, where: w })
         }),
       }),
     }),
   } as unknown as TradableDb
-  return { db, upsertChunks, disappearWheres, batched }
+  return { db, store, updateCalls, batchGroupsRef: () => batchGroups }
 }
 
 describe('loadTradableAllowlist / lookupTradableStatus', () => {
@@ -70,77 +85,81 @@ describe('loadTradableAllowlist / lookupTradableStatus', () => {
 })
 
 describe('upsertTradablePage', () => {
-  it('chunk 化して onConflictDoUpdate を batch で流す', async () => {
-    const { db, upsertChunks, batched } = fakeDb([])
-    // UPSERT_CHUNK=10 を跨ぐ 12 件 → 2 chunk。
-    const entries = Array.from({ length: 12 }, (_, i) => entry(`S${i}`))
-    const n = await upsertTradablePage(db, entries, 'now')
-    expect(n).toBe(12)
-    expect(upsertChunks).toHaveLength(2)
-    expect(upsertChunks[0]).toHaveLength(10)
-    expect(upsertChunks[1]).toHaveLength(2)
-    expect(batched.length).toBeGreaterThanOrEqual(1)
+  it('chunk 化して store に upsert する (firstSeenAt は保持)', async () => {
+    const { db, store } = memDb([
+      { symbol: 'SOXL', currentlyTradable: true, firstSeenAt: 'old', lastSeenAt: 'old' },
+    ])
+    const entries = Array.from({ length: 12 }, (_, i) => entry(`S${i}`)).concat(entry('SOXL'))
+    const n = await upsertTradablePage(db, entries, 'wm')
+    expect(n).toBe(13)
+    // 既存 SOXL は firstSeenAt 保持、lastSeenAt は watermark に更新。
+    expect(store.get('SOXL')?.firstSeenAt).toBe('old')
+    expect(store.get('SOXL')?.lastSeenAt).toBe('wm')
+    // 新規は firstSeenAt=watermark。
+    expect(store.get('S0')?.firstSeenAt).toBe('wm')
   })
 
   it('空配列は no-op', async () => {
-    const { db, batched } = fakeDb([])
-    expect(await upsertTradablePage(db, [], 'now')).toBe(0)
-    expect(batched).toHaveLength(0)
+    const { db, batchGroupsRef } = memDb([])
+    expect(await upsertTradablePage(db, [], 'wm')).toBe(0)
+    expect(batchGroupsRef()).toBe(0)
   })
 
   it('同一ページ内の重複 symbol は除去する', async () => {
-    const { db, upsertChunks } = fakeDb([])
-    const n = await upsertTradablePage(db, [entry('SOXL'), entry('SOXL'), entry('VUG')], 'now')
+    const { db, store } = memDb([])
+    const n = await upsertTradablePage(db, [entry('SOXL'), entry('SOXL'), entry('VUG')], 'wm')
     expect(n).toBe(2)
-    expect(upsertChunks[0]).toHaveLength(2)
+    expect(store.size).toBe(2)
   })
 })
 
-describe('finalizeTradableDisappearance', () => {
-  it('seen に無い既存 tradable を消失として返す (物理削除しない)', async () => {
-    const { db, disappearWheres } = fakeDb([
-      { symbol: 'SOXL', currentlyTradable: true },
-      { symbol: 'USMV', currentlyTradable: true },
-      { symbol: 'OLD', currentlyTradable: false },
+describe('finalizeTradableDisappearance (watermark mark-and-sweep)', () => {
+  it('watermark 未満の lastSeenAt を持つ tradable 行を消失とする', async () => {
+    const { db, updateCalls } = memDb([
+      { symbol: 'SOXL', currentlyTradable: true, lastSeenAt: 'wm2' }, // 今回 sweep で更新済み
+      { symbol: 'USMV', currentlyTradable: true, lastSeenAt: 'wm1' }, // 前回まで。今回未到達
+      { symbol: 'OLD', currentlyTradable: false, lastSeenAt: 'wm1' }, // 既に false
     ])
-    const disappeared = await finalizeTradableDisappearance(db, new Set(['SOXL']), 'now')
-    // USMV は今回 seen に無い tradable → 消失。OLD は既に false なので対象外。
+    const disappeared = await finalizeTradableDisappearance(db, 'wm2', 'now')
     expect(disappeared).toEqual(['USMV'])
-    expect(disappearWheres).toHaveLength(1)
+    expect(updateCalls).toHaveLength(1)
   })
 
   it('消失ゼロなら update を発行しない', async () => {
-    const { db, disappearWheres } = fakeDb([{ symbol: 'SOXL', currentlyTradable: true }])
-    const disappeared = await finalizeTradableDisappearance(db, new Set(['SOXL']), 'now')
-    expect(disappeared).toEqual([])
-    expect(disappearWheres).toHaveLength(0)
+    const { db, updateCalls } = memDb([{ symbol: 'SOXL', currentlyTradable: true, lastSeenAt: 'wm2' }])
+    expect(await finalizeTradableDisappearance(db, 'wm2', 'now')).toEqual([])
+    expect(updateCalls).toHaveLength(0)
   })
 })
 
 describe('refreshTradableInstruments (一括 helper)', () => {
-  it('complete=true: upsert + 消失判定', async () => {
-    const { db } = fakeDb([
-      { symbol: 'SOXL', currentlyTradable: true },
-      { symbol: 'USMV', currentlyTradable: true },
+  // watermark は単調増加の ISO 文字列で比較される (lex 順)。前回 < 今回 になる値を使う。
+  const PREV = '2026-01-01T00:00:00Z'
+  const NOW = '2026-06-12T00:00:00Z'
+
+  it('complete=true: seen は維持、未 seen の既存 tradable を消失', async () => {
+    const { db } = memDb([
+      { symbol: 'SOXL', currentlyTradable: true, firstSeenAt: PREV, lastSeenAt: PREV },
+      { symbol: 'USMV', currentlyTradable: true, firstSeenAt: PREV, lastSeenAt: PREV },
     ])
     const result = await refreshTradableInstruments(db, [entry('SOXL'), entry('TQQQ')], {
       complete: true,
-      nowIso: 'now',
+      nowIso: NOW,
     })
     expect(result.upserted).toBe(2)
-    expect(result.disappeared).toBe(1)
+    // SOXL は今回 seen (lastSeenAt=NOW)、USMV は未 seen (PREV < NOW) → 消失。
     expect(result.disappearedSymbols).toEqual(['USMV'])
     expect(result.appliedDisappearance).toBe(true)
   })
 
   it('complete=false: 消失判定をスキップ', async () => {
-    const { db } = fakeDb([
-      { symbol: 'SOXL', currentlyTradable: true },
-      { symbol: 'USMV', currentlyTradable: true },
+    const { db } = memDb([
+      { symbol: 'SOXL', currentlyTradable: true, firstSeenAt: PREV, lastSeenAt: PREV },
+      { symbol: 'USMV', currentlyTradable: true, firstSeenAt: PREV, lastSeenAt: PREV },
     ])
     const result = await refreshTradableInstruments(db, [entry('SOXL')], {
       complete: false,
-      nowIso: 'now',
+      nowIso: NOW,
     })
     expect(result.disappeared).toBe(0)
     expect(result.appliedDisappearance).toBe(false)
@@ -154,9 +173,7 @@ describe('getTradableAllowlistStatus', () => {
       { currentlyTradable: true, lastSeenAt: '2026-06-12T22:00:00Z' },
       { currentlyTradable: false, lastSeenAt: '2026-06-10T00:00:00Z' },
     ]
-    const db = {
-      select: () => ({ from: vi.fn().mockResolvedValue(rows) }),
-    } as unknown as TradableDb
+    const db = { select: () => ({ from: vi.fn().mockResolvedValue(rows) }) } as unknown as TradableDb
     const status = await getTradableAllowlistStatus(db)
     expect(status.total).toBe(3)
     expect(status.tradableCount).toBe(2)

@@ -100,11 +100,16 @@ const IN_CHUNK = 80
  * bulk upsert する (#460)。`firstSeenAt` は **conflict 時に更新しない** ので
  * 初回観測時刻が保持される。多数行を per-row await せず chunk + `db.batch` で
  * 数往復に畳む (4957 件の per-row 書き込みは遅すぎるため)。
+ *
+ * `watermarkIso` は **その sweep を識別する単調増加タイムスタンプ** で、seen 行の
+ * `lastSeenAt` に書く。分割 sweep (チャンク) では全チャンクで同じ watermark を
+ * 使い、最後に {@link finalizeTradableDisappearance} が「この watermark で
+ * 触られなかった行 = 消失」を判定する (mark-and-sweep)。
  */
 export async function upsertTradablePage(
   db: TradableDb,
   entries: TradableInstrumentEntry[],
-  nowIso: string,
+  watermarkIso: string,
 ): Promise<number> {
   if (entries.length === 0) return 0
   // 同一ページ内の symbol 重複を除去 (ON CONFLICT 二重発火を避ける)。
@@ -117,9 +122,9 @@ export async function upsertTradablePage(
     currency: e.currency,
     exchangeCode: e.exchangeCode,
     currentlyTradable: true,
-    firstSeenAt: nowIso,
-    lastSeenAt: nowIso,
-    updatedAt: nowIso,
+    firstSeenAt: watermarkIso,
+    lastSeenAt: watermarkIso,
+    updatedAt: watermarkIso,
   }))
 
   const stmts: BatchItem<'sqlite'>[] = []
@@ -137,8 +142,8 @@ export async function upsertTradablePage(
             currency: sql`excluded.currency`,
             exchangeCode: sql`excluded.exchange_code`,
             currentlyTradable: true,
-            lastSeenAt: nowIso,
-            updatedAt: nowIso,
+            lastSeenAt: watermarkIso,
+            updatedAt: watermarkIso,
           },
         }) as unknown as BatchItem<'sqlite'>,
     )
@@ -151,18 +156,20 @@ export async function upsertTradablePage(
 }
 
 /**
- * 完走した sweep の seen 集合に基づき、**含まれない既存 tradable 行**を
- * `currentlyTradable=false` に倒す (消失判定、物理削除しない)。部分結果では
- * 呼んではいけない (誤検知になる)。
+ * mark-and-sweep の sweep フェーズ: 直近 sweep (= `watermarkIso`) で触られなかった
+ * 既存 tradable 行を `currentlyTradable=false` に倒す (消失判定、物理削除しない)。
+ * `lastSeenAt < watermarkIso` が「今回 sweep に出てこなかった」を意味する。
+ * **完走した sweep でのみ呼ぶ** (部分結果で呼ぶと未到達ページの銘柄を誤って
+ * 消失扱いする)。seen 集合を持ち回らずに済むのでチャンク分割と相性が良い。
  */
 export async function finalizeTradableDisappearance(
   db: TradableDb,
-  seenSymbols: Set<string>,
+  watermarkIso: string,
   nowIso: string,
 ): Promise<string[]> {
   const existing = await db.select().from(tradableInstrument)
   const disappeared = existing
-    .filter((r) => r.currentlyTradable && !seenSymbols.has(r.symbol.toUpperCase()))
+    .filter((r) => r.currentlyTradable && (r.lastSeenAt ?? '') < watermarkIso)
     .map((r) => r.symbol.toUpperCase())
   for (let i = 0; i < disappeared.length; i += IN_CHUNK) {
     const chunk = disappeared.slice(i, i + IN_CHUNK)
@@ -207,10 +214,11 @@ export async function refreshTradableInstruments(
   opts: { complete: boolean; nowIso: string },
 ): Promise<RefreshTradableResult> {
   const { complete, nowIso } = opts
-  const seen = new Set(fetched.map((e) => e.symbol.toUpperCase()))
+  // 一括なので watermark = nowIso。seen 行は lastSeenAt=nowIso になり、それ未満の
+  // 既存 tradable 行が消失。
   const upserted = await upsertTradablePage(db, fetched, nowIso)
   const disappearedSymbols = complete
-    ? await finalizeTradableDisappearance(db, seen, nowIso)
+    ? await finalizeTradableDisappearance(db, nowIso, nowIso)
     : []
   return {
     upserted,
