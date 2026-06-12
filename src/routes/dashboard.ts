@@ -9269,12 +9269,21 @@ export function symbolMapEditorBody(
     // 対の共有側 (エッジ関与ゼロ) はポート (グレー点) を隠す。線を引き直して
     // 主従が入れ替われば表示も追従する。エッジが 1 本でも絡む側は機能上必要な
     // ので出したまま。
+    // エッジ関与 (配分線・自分の退避・自分への退避のどれか)。
+    function edgeInvolved(sym) {
+      if (!draft[sym]) return false;
+      if (draft[sym].connected || draft[sym].fallback) return true;
+      return Object.keys(draft).some(function (x) { return draft[x].fallback === sym; });
+    }
     function updatePairPorts() {
       Object.keys(idOf).forEach(function (sym) {
         var nodeEl = document.getElementById('node-' + idOf[sym]);
         if (!nodeEl || !draft[sym]) return;
-        var hasIncomingFallback = Object.keys(draft).some(function (x) { return draft[x].fallback === sym; });
-        var isSub = effConnected(sym) && !draft[sym].connected && !draft[sym].fallback && !hasIncomingFallback;
+        // 対の片側にだけエッジがあるとき、無関与側のポートを隠す。配分共有
+        // (口座接続) に限らず「退避の受け皿としてだけ存在する対」(TQQQ/SQQQ)
+        // にも適用する — 以前は配分側しか見ておらず片手落ちだった。
+        var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+        var isSub = !!inv && !!draft[inv] && !edgeInvolved(sym) && edgeInvolved(inv);
         nodeEl.classList.toggle('sm-pair-sub', isSub);
       });
     }
