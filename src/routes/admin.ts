@@ -1839,6 +1839,7 @@ export const admin = new Hono<AppBindings>()
       entryStatuses,
       heldSymbols,
       symbolCurrency: universe.symbolCurrency,
+    inversePairs: universe.inversePairs,
     })
 
     // 退避の実発注プラン。total_capital_jpy 未設定なら金額換算不可 (fail-closed
