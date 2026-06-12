@@ -8802,6 +8802,16 @@ export function symbolMapEditorBody(
   if (nodes.length === 0) {
     return `<p class="muted">有効な銘柄がありません。</p>`
   }
+  // 空中リリースで呼び出せる既存 Inactive 銘柄 (Miro の新規付箋風 spawn 用)。
+  const inactive = rows
+    .filter((r) => !r.active)
+    .map((r) => ({
+      sym: r.symbol.toUpperCase(),
+      role: r.role ?? null,
+      color: ROLE_NODE_COLORS[r.role ?? ''] ?? '#5f6368',
+      currency: r.currency,
+      inverse: inversePairs[r.symbol.toUpperCase()]?.toUpperCase() ?? null,
+    }))
   // JPY 銘柄を上群、USD 銘柄を下群に並べ、それぞれの口座カードの近くに置く。
   let yCursor = 30
   for (const ccy of ['JPY', 'USD']) {
@@ -8810,7 +8820,7 @@ export function symbolMapEditorBody(
       yCursor += 120
     }
   }
-  const payload = { nodes, mode }
+  const payload = { nodes, inactive, mode }
 
   // 脚注チップ: インバース対 / regime proxy (量の流れではない構造情報)。
   const chips: string[] = []
@@ -8839,7 +8849,9 @@ export function symbolMapEditorBody(
     <span class="muted" style="font-size:12px">
       <strong>口座 (日本/米国) → 銘柄の線</strong> = 配分。各枝は均等 (<strong>1/枝</strong>、対は 1 枝扱い、予算プールは全体共通) で % は自動計算 ・
       <strong>銘柄 → 銘柄の線</strong> = 退避先 (1 銘柄 1 本、条件連動も ON)。
-      <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete。
+      <strong>線の削除</strong> = 線をクリックして選択 → Backspace / Delete ・
+      <strong>線を空中で放す</strong> = 既存 Inactive 銘柄を呼び出して紐づけ (適用で有効化)。
+      <strong>口座から到達できない銘柄は適用時に無効化</strong> (保有中は除く)。
     </span>
     <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
     <span class="muted" style="font-size:12px">
@@ -8941,13 +8953,16 @@ export function symbolMapEditorBody(
       accountSymOf['__account_' + ccy + '__'] = ccy;
     });
 
-    data.nodes.forEach(function (n) {
+    function addSymbolNode(n, x, y, opts2) {
       nodeBySym[n.sym] = n;
-      baseline[n.sym] = { pct: n.pct, fallback: n.fallback };
-      draft[n.sym] = { connected: n.pct > 0, fallback: n.fallback };
+      var spawned = !!(opts2 && opts2.spawned);
+      baseline[n.sym] = { pct: n.pct || 0, fallback: n.fallback || null, active: !spawned };
+      draft[n.sym] = { connected: (n.pct || 0) > 0, fallback: n.fallback || null };
       var statusHtml = n.held
         ? '<div class="sm-status-active">Active ・ ' + n.held + '</div>'
-        : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
+        : spawned
+          ? '<div class="sm-status-pending">Inactive (適用で有効化)</div>'
+          : '<div class="sm-status-pending">Pending (様子見' + (n.entryRequired ? '・条件連動 ON' : '') + ')</div>';
       var metaParts = [];
       if (n.role) metaParts.push(n.role);
       if (n.inverse) metaParts.push('⇄ ' + n.inverse);
@@ -8958,9 +8973,13 @@ export function symbolMapEditorBody(
         '<div style="margin-top:4px">配分 <span class="sm-share" id="sm-share-' + n.sym + '">—</span></div>' +
         '<div class="sm-meta">' + metaParts.join(' ・ ') + '</div>' +
         '</div>';
-      var id = editor.addNode(n.sym, 1, 1, n.pct > 0 ? 360 : 760, n.y, 'sm-node ' + (n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { sym: n.sym }, html);
+      var id = editor.addNode(n.sym, 1, 1, x, y, 'sm-node ' + (n.currency === 'JPY' ? 'sm-jpy' : 'sm-usd'), { sym: n.sym }, html);
       idOf[n.sym] = id;
       symOf[id] = n.sym;
+      return id;
+    }
+    data.nodes.forEach(function (n) {
+      addSymbolNode(n, n.pct > 0 ? 360 : 760, n.y);
     });
 
     programmatic = true;
@@ -9134,6 +9153,39 @@ export function symbolMapEditorBody(
       var nodeEl = document.getElementById('node-' + idOf[sym]);
       if (nodeEl) nodeEl.classList.toggle('sm-dirty', dirty);
     }
+    // 口座からの到達性 (直接 = 配分線、間接 = 退避先 / インバース対) で
+    // Active/Inactive を導出する (operator 指定: 紐づいていない銘柄は Inactive)。
+    function reachableSet() {
+      var seen = {};
+      var queue = Object.keys(draft).filter(function (sym) { return draft[sym].connected; });
+      while (queue.length > 0) {
+        var sym = queue.pop();
+        if (seen[sym]) continue;
+        seen[sym] = true;
+        var fb = draft[sym].fallback;
+        if (fb && draft[fb] && !seen[fb]) queue.push(fb);
+        var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+        if (inv && draft[inv] && !seen[inv]) queue.push(inv);
+      }
+      return seen;
+    }
+    function activeDiffs() {
+      var reach = reachableSet();
+      var activate = [];
+      var deactivate = [];
+      var heldSkip = [];
+      Object.keys(draft).forEach(function (sym) {
+        var willActive = !!reach[sym];
+        var wasActive = baseline[sym].active !== false;
+        if (willActive && !wasActive) activate.push(sym);
+        if (!willActive && wasActive) {
+          // 保有中の銘柄は無効化しない (exit 管理が止まる) — fail-safe。
+          if (nodeBySym[sym].held) heldSkip.push(sym);
+          else deactivate.push(sym);
+        }
+      });
+      return { activate: activate, deactivate: deactivate, heldSkip: heldSkip };
+    }
     function renderChanges() {
       var d = renderShares();
       var bar = document.getElementById('sm-changes-bar');
@@ -9153,11 +9205,105 @@ export function symbolMapEditorBody(
         }
         setCardDirty(sym, pctChanged || fbChanged);
       });
+      var ad = activeDiffs();
+      ad.activate.forEach(function (sym) { items.push(sym + ': 有効化 (口座に接続)'); });
+      ad.deactivate.forEach(function (sym) {
+        items.push(sym + ': 無効化 (口座から到達不能)');
+        setCardDirty(sym, true);
+      });
+      ad.heldSkip.forEach(function (sym) { items.push(sym + ': 到達不能だが保有中のため無効化しません (手動で対応)'); });
       list.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
       bar.hidden = items.length === 0;
       return d;
     }
     renderChanges();
+
+    // 線を空中で放す → 既存 Inactive 銘柄のピッカー (Miro の新規付箋風)。
+    // Drawflow は接続が成立しなかった drop で connectionCancel を発火する。
+    var connStartId = null;
+    var lastMouse = { x: 0, y: 0 };
+    el.addEventListener('mousemove', function (ev) { lastMouse = { x: ev.clientX, y: ev.clientY }; });
+    var picker = document.createElement('div');
+    picker.id = 'sm-spawn-picker';
+    picker.hidden = true;
+    picker.style.cssText = 'position:fixed;z-index:50;background:#fff;border:1px solid #d0d0d5;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.15);padding:6px;font-size:12px;max-height:240px;overflow:auto';
+    document.body.appendChild(picker);
+    function hidePicker() { picker.hidden = true; connStartId = null; }
+    document.addEventListener('click', function (ev) {
+      if (!picker.hidden && !picker.contains(ev.target)) hidePicker();
+    });
+    function canvasPos(clientX, clientY) {
+      // Drawflow README の drop 座標変換 (zoom / translate 補正)。
+      var pre = editor.precanvas;
+      var rect = pre.getBoundingClientRect();
+      var zoom = pre.clientWidth / (pre.clientWidth * editor.zoom);
+      return { x: clientX * zoom - rect.x * zoom, y: clientY * zoom - rect.y * zoom };
+    }
+    function spawnAndConnect(item, srcNodeId, clientX, clientY) {
+      var pos = canvasPos(clientX, clientY);
+      var n = {
+        sym: item.sym,
+        pct: 0,
+        role: item.role,
+        color: item.color,
+        held: null,
+        entryRequired: false,
+        fallback: null,
+        inverse: item.inverse,
+        currency: item.currency,
+      };
+      programmatic = true;
+      var newId = addSymbolNode(n, pos.x, pos.y, { spawned: true });
+      editor.addConnection(srcNodeId, newId, 'output_1', 'input_1');
+      programmatic = false;
+      // 接続の意味づけは通常ハンドラと同じ規則で draft に反映する。
+      var src = symOf[srcNodeId];
+      if (accountSymOf[src]) {
+        draft[item.sym].connected = true;
+      } else {
+        draft[src].fallback = item.sym;
+      }
+      // 払い出した銘柄はピッカー在庫から除外。
+      data.inactive = data.inactive.filter(function (x) { return x.sym !== item.sym; });
+      renderChanges();
+    }
+    function showPicker(srcNodeId, clientX, clientY) {
+      var src = symOf[srcNodeId];
+      var ccy = accountSymOf[src] ? accountSymOf[src] : nodeBySym[src].currency;
+      var candidates = data.inactive.filter(function (x) { return x.currency === ccy; });
+      if (candidates.length === 0) return;
+      picker.innerHTML = '<div class="muted" style="padding:2px 6px 6px">既存 Inactive 銘柄を紐づけ (' + ccy + ')</div>' +
+        candidates.map(function (x) {
+          return '<div class="sm-spawn-item" data-sym="' + x.sym + '" style="padding:5px 10px;border-radius:6px;cursor:pointer">' +
+            '<strong style="color:' + x.color + '">' + x.sym + '</strong>' +
+            (x.role ? ' <span class="muted" style="font-size:10px">' + x.role + '</span>' : '') + '</div>';
+        }).join('');
+      picker.style.left = clientX + 'px';
+      picker.style.top = clientY + 'px';
+      picker.hidden = false;
+      var sx = clientX;
+      var sy = clientY;
+      picker.querySelectorAll('.sm-spawn-item').forEach(function (itemEl) {
+        itemEl.addEventListener('mouseenter', function () { itemEl.style.background = '#f0f6ff'; });
+        itemEl.addEventListener('mouseleave', function () { itemEl.style.background = ''; });
+        itemEl.addEventListener('click', function () {
+          var sym = itemEl.getAttribute('data-sym');
+          var item = null;
+          data.inactive.forEach(function (x) { if (x.sym === sym) item = x; });
+          var srcId = srcNodeId;
+          hidePicker();
+          if (item) spawnAndConnect(item, srcId, sx, sy);
+        });
+      });
+    }
+    editor.on('connectionStart', function (info) { connStartId = info.output_id; });
+    editor.on('connectionCancel', function () {
+      if (connStartId === null) return;
+      var srcId = connStartId;
+      connStartId = null;
+      showPicker(srcId, lastMouse.x, lastMouse.y);
+    });
+    editor.on('connectionCreated', function () { connStartId = null; });
 
     editor.on('connectionCreated', function (info) {
       if (programmatic) return;
@@ -9244,11 +9390,30 @@ export function symbolMapEditorBody(
     document.getElementById('sm-reset').addEventListener('click', function () { location.reload(); });
     document.getElementById('sm-apply').addEventListener('click', function () {
       var d = deriveShares();
+      var ad = activeDiffs();
       var pctChanges = Object.keys(draft).filter(function (sym) { return d.shares[sym] !== baseline[sym].pct; });
       var fbChanges = Object.keys(draft).filter(function (sym) { return (draft[sym].fallback || null) !== (baseline[sym].fallback || null); });
-      if (pctChanges.length === 0 && fbChanges.length === 0) return;
-      if (!confirm('表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%)。よろしいですか？')) return;
+      if (pctChanges.length === 0 && fbChanges.length === 0 && ad.activate.length === 0 && ad.deactivate.length === 0) return;
+      var confirmMsg = '表示中の変更をまとめて適用します (' + d.branches + ' 枝 ・ 1 枝 = ' + d.share + '%';
+      if (ad.activate.length > 0) confirmMsg += ' ・ 有効化 ' + ad.activate.join('/');
+      if (ad.deactivate.length > 0) confirmMsg += ' ・ 無効化 ' + ad.deactivate.join('/');
+      confirmMsg += ')。よろしいですか？';
+      if (!confirm(confirmMsg)) return;
       var steps = Promise.resolve();
+      // 適用順: 有効化 → 配分 → 退避先 → 無効化 (無効化を最後にして、配分・退避の
+      // 書き込み対象が active のまま処理されるようにする)。
+      function toggleStep(sym, label) {
+        return function () {
+          return fetch('/admin/symbol-config/' + encodeURIComponent(sym) + '/toggle-active', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+          }).then(function (r) {
+            if (!r.ok) throw new Error(sym + ' の' + label + 'に失敗 (HTTP ' + r.status + ')');
+          });
+        };
+      }
+      ad.activate.forEach(function (sym) { steps = steps.then(toggleStep(sym, '有効化')); });
       if (pctChanges.length > 0) {
         var form = new FormData();
         pctChanges.forEach(function (sym) {
@@ -9271,6 +9436,7 @@ export function symbolMapEditorBody(
           });
         });
       });
+      ad.deactivate.forEach(function (sym) { steps = steps.then(toggleStep(sym, '無効化')); });
       steps
         .then(function () { location.reload(); })
         .catch(function (e) { alert(e.message + ' — 再読込して状態を確認してください。'); location.reload(); });
