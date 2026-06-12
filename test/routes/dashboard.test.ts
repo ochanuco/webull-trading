@@ -2710,7 +2710,7 @@ describe('renderSymbolPolicyLine (#452 個別銘柄タブのロール表示)', (
 import { symbolMapEditorBody } from '../../src/routes/dashboard'
 import type { SymbolConfigRow } from '../../src/infrastructure/db/schema'
 
-describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス)', () => {
+describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit モデル)', () => {
   const edRow = (over: Partial<SymbolConfigRow>): SymbolConfigRow =>
     ({
       symbol: 'X',
@@ -2723,28 +2723,66 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス)', () 
       ...over,
     }) as SymbolConfigRow
 
-  it('銘柄カード payload (配分% / 状態 / 退避先 / インバース) を積む', () => {
+  const payloadOf = (html: string) =>
+    JSON.parse(html.match(/__symbolMapEditor = ([\s\S]*?);<\/script>/)?.[1] ?? 'null')
+
+  it('対は 1 unit (leveraged 側が先頭)、配分は対で 1 枠、退避は unit 解決', () => {
     const html = symbolMapEditorBody(
       [
-        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbol: 'SGOV', entryRequired: true }),
-        edRow({ symbol: 'SGOV', role: 'cash_parking', budgetAllocPct: 0.1 }),
-        edRow({ symbol: 'GONE', active: false }),
+        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5, cashFallbackSymbol: 'SQQQ', entryRequired: true }),
+        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5, cashFallbackSymbol: 'TQQQ', entryRequired: true }),
+        edRow({ symbol: 'TQQQ', role: 'leveraged_trend' }),
+        edRow({ symbol: 'SQQQ', role: 'inverse_hedge' }),
       ],
-      { SOXL: 'SOXS' },
-      { SGOV: { native: '$100', jpy: 15000 } },
+      { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' },
+      { SQQQ: { native: '$44', jpy: 6600 } },
     )
-    const payload = JSON.parse(html.match(/__symbolMapEditor = ([\s\S]*?);<\/script>/)?.[1] ?? 'null')
-    expect(payload.nodes.map((n: { sym: string }) => n.sym)).toEqual(['SOXL', 'SGOV'])
-    const soxl = payload.nodes.find((n: { sym: string }) => n.sym === 'SOXL')
-    expect(soxl).toMatchObject({ pct: 50, fallback: 'SGOV', entryRequired: true, inverse: 'SOXS' })
-    const sgov = payload.nodes.find((n: { sym: string }) => n.sym === 'SGOV')
-    expect(sgov.held).toBe('$100')
-    // 編集 API への参照が script に含まれる
-    expect(html).toContain('/cash-fallback')
-    expect(html).toContain('/admin/symbol-config/budget-alloc')
+    const payload = payloadOf(html)
+    const sox = payload.units.find((u: { id: string }) => u.id === 'SOXL/SOXS')
+    expect(sox).toMatchObject({
+      label: 'SOXL ⇄ SOXS',
+      pct: 50,
+      fallback: { id: 'TQQQ/SQQQ', mixed: false },
+    })
+    // 保有は side 単位で持つ (SQQQ $44)
+    const qqq = payload.units.find((u: { id: string }) => u.id === 'TQQQ/SQQQ')
+    expect(qqq.held).toEqual({ SQQQ: '$44' })
+    // unitOfSym で銘柄 → unit が引ける (シミュレーション overlay 用)
+    expect(payload.unitOfSym.SOXS).toBe('SOXL/SOXS')
   })
 
-  it("view モード: 編集バー無し + editor_mode='view' + チップ表示 (銘柄管理の図 = map)", () => {
+  it('片側だけ退避が欠けた旧データは mixed=false で先頭 unit に解決 (適用で側別に正規化される)', () => {
+    const html = symbolMapEditorBody(
+      [
+        edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 }),
+        edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5, cashFallbackSymbol: 'SQQQ', entryRequired: true }),
+        edRow({ symbol: 'TQQQ', role: 'leveraged_trend' }),
+        edRow({ symbol: 'SQQQ', role: 'inverse_hedge' }),
+      ],
+      { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' },
+      {},
+    )
+    const payload = payloadOf(html)
+    const sox = payload.units.find((u: { id: string }) => u.id === 'SOXL/SOXS')
+    expect(sox.fallback).toEqual({ id: 'TQQQ/SQQQ', mixed: false })
+  })
+
+  it('全側 inactive の unit はスポーン在庫に入る', () => {
+    const html = symbolMapEditorBody(
+      [
+        edRow({ symbol: 'AAPL', role: 'core_trend', budgetAllocPct: 0.5 }),
+        edRow({ symbol: 'TQQQ', role: 'leveraged_trend', active: false }),
+        edRow({ symbol: 'SQQQ', role: 'inverse_hedge', active: false }),
+      ],
+      { TQQQ: 'SQQQ', SQQQ: 'TQQQ' },
+      {},
+    )
+    const payload = payloadOf(html)
+    expect(payload.units.map((u: { id: string }) => u.id)).toEqual(['AAPL'])
+    expect(payload.inventory.map((u: { id: string }) => u.id)).toEqual(['TQQQ/SQQQ'])
+  })
+
+  it("view モード: 編集バー無し + sm-view + regime チップ (misconfig は警告)", () => {
     const html = symbolMapEditorBody(
       [
         edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 }),
@@ -2752,43 +2790,29 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス)', () 
       ],
       { SOXL: 'SOXS', SOXS: 'SOXL' },
       {},
-      { mode: 'view', pairRegimes: [{ bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null }] },
-    )
-    // 編集バーの DOM 要素が無い (スクリプト文字列には残るが isView で実行されない)
-    expect(html).not.toContain('id="sm-changes-bar"')
-    expect(html).not.toContain('id="sm-apply"')
-    // view はノード移動可・編集封じ (sm-view でポート非表示 + ガード)
-    expect(html).toContain("el.classList.add('sm-view')")
-    expect(html).toContain('✏️ 編集モード')
-    expect(html).toContain('regime proxy SOXX → SOXL/SOXS')
-    expect(html).toContain('インバース対 SOXL ⇄ SOXS')
-  })
-
-  it('チップは盤面 (active) の銘柄に限定し、misconfig regime は警告チップで出す', () => {
-    const html = symbolMapEditorBody(
-      [edRow({ symbol: 'SOXL', role: 'leveraged_trend', budgetAllocPct: 0.5 }),
-       edRow({ symbol: 'SOXS', role: 'inverse_hedge', budgetAllocPct: 0.5 }),
-       edRow({ symbol: '1357', currency: 'JPY', active: false })],
-      { SOXL: 'SOXS', SOXS: 'SOXL', '1357': '1570', '1570': '1357' },
-      {},
       {
         mode: 'view',
         pairRegimes: [
-          { bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXL', invalidConfig: 'self-proxy' },
-          { bullSymbol: '1570', bearSymbol: '1357', proxySymbol: '1321', invalidConfig: null },
+          { bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null },
+          { bullSymbol: 'TQQQ', bearSymbol: 'SQQQ', proxySymbol: 'TQQQ', invalidConfig: 'self-proxy' },
         ],
       },
     )
-    // inactive (1357/1570) の対チップ・regime チップは出ない
-    expect(html).not.toContain('インバース対 1357')
-    expect(html).not.toContain('1321')
-    // misconfig は隠さず警告チップで出す (fail-closed の異常を可視化)
-    expect(html).toContain('regime misconfig SOXL/SOXS: self-proxy')
+    expect(html).not.toContain('id="sm-changes-bar"')
+    expect(html).not.toContain('id="sm-apply"')
+    expect(html).toContain("el.classList.add('sm-view')")
+    expect(html).toContain('✏️ 編集モード')
+    expect(html).toContain('regime proxy SOXX → SOXL/SOXS')
+    // 盤面に無い対の misconfig は出ない (TQQQ/SQQQ inactive 相当 = 未登録)
+    expect(html).not.toContain('self-proxy')
   })
 
   it('inline script は構文エラーなく parse できる (#462 regression 防止)', () => {
     const html = symbolMapEditorBody(
-      [edRow({ symbol: 'AAPL', budgetAllocPct: 0.2 })],
+      [
+        edRow({ symbol: 'VUG', role: 'core_trend', budgetAllocPct: 0.3, cashFallbackSymbol: 'SGOV', entryRequired: true }),
+        edRow({ symbol: 'SGOV', role: 'cash_parking' }),
+      ],
       {},
       {},
     )
