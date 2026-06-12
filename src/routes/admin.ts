@@ -970,6 +970,78 @@ export const admin = new Hono<AppBindings>()
       previewVariants = variants.map((v, i) => ({ label: v.label, result: results[i]! }))
     }
 
+    // #460: per-symbol 取扱判定 probe (tradecheck=1)。tradable/list の全件 sweep を
+    // せずに 1 銘柄の発注可否を引けるか — SDK の per-symbol 取引照会
+    // (/trade/instrument・/trade/security) が tradePolicy (ALL/CLOSE_ONLY/DENIED)
+    // を返すかを本番 access token + account_id で検証する。instrument_id は上の
+    // v2 instrument 照会から取る。すべて GET = read-only。これが効けば
+    // 「登録前に 1 発叩く」on-demand 判定が成立し list-cache が不要になる。
+    let tradeInstrumentProbe:
+      | { instrumentId: string | null; variants: Array<{ label: string; result: ProbeResult }> }
+      | null = null
+    if (c.req.query('tradecheck') === '1') {
+      let instrumentId: string | null = null
+      if (
+        instrumentStockTradeV2.phase === 'response' &&
+        instrumentStockTradeV2.status === 200 &&
+        instrumentStockTradeV2.bodyTruncated
+      ) {
+        try {
+          const arr = JSON.parse(instrumentStockTradeV2.bodyTruncated)
+          const row = Array.isArray(arr)
+            ? arr.find((x: { symbol?: string }) => x?.symbol === symbol)
+            : null
+          const idRaw = (row as { instrument_id?: unknown } | null)?.instrument_id
+          if (idRaw != null) instrumentId = String(idRaw).replace(/\..*$/, '')
+        } catch {
+          // instrument_id 取得失敗時は instrument_id 系 variant をスキップ
+        }
+      }
+      const market = category.startsWith('JP_') ? 'JP' : 'US'
+      const variants: Array<{ label: string; result: ProbeResult }> = []
+      for (const v of ['v2', 'v1']) {
+        if (instrumentId) {
+          variants.push({
+            label: `trade/instrument [${v}]`,
+            result: await probeOnce({
+              method: 'GET',
+              path: '/openapi/trade/instrument',
+              query: { account_id: accountId, instrument_id: instrumentId },
+              version: v,
+            }),
+          })
+          variants.push({
+            label: `trade/instrument no-prefix [${v}]`,
+            result: await probeOnce({
+              method: 'GET',
+              path: '/trade/instrument',
+              query: { account_id: accountId, instrument_id: instrumentId },
+              version: v,
+            }),
+          })
+        }
+        variants.push({
+          label: `trade/security [${v}]`,
+          result: await probeOnce({
+            method: 'GET',
+            path: '/openapi/trade/security',
+            query: { account_id: accountId, symbol, market, instrument_super_type: 'EQUITY' },
+            version: v,
+          }),
+        })
+        variants.push({
+          label: `trade/security no-prefix [${v}]`,
+          result: await probeOnce({
+            method: 'GET',
+            path: '/trade/security',
+            query: { account_id: accountId, symbol, market, instrument_super_type: 'EQUITY' },
+            version: v,
+          }),
+        })
+      }
+      tradeInstrumentProbe = { instrumentId, variants }
+    }
+
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
     // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
     c.header('Cache-Control', 'no-store')
@@ -1022,6 +1094,8 @@ export const admin = new Hono<AppBindings>()
       snapshotTradeV2,
       instrumentStockTradeV2,
       previewVariants,
+      // #460: per-symbol 取扱判定 probe (tradecheck=1 のときのみ非 null)。
+      tradeInstrumentProbe,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:

@@ -2018,6 +2018,9 @@ function brokerProbeBody(args: {
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
           <input type="checkbox" id="probe-preview-check" checked> 発注前検証も実行 <span class="muted" style="font-size:11px">(発注なし)</span>
         </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer" title="SDK の per-symbol 取引照会 (/trade/instrument・/trade/security) が tradePolicy を返すか検証。発注なし read-only (#460)">
+          <input type="checkbox" id="probe-tradecheck"> 取扱判定 (trade/instrument) <span class="muted" style="font-size:11px">#460</span>
+        </label>
         <button type="button" id="probe-submit" style="padding:7px 22px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">診断を実行</button>
       </div>
     </div>
@@ -2068,6 +2071,8 @@ function brokerProbeBody(args: {
       <pre id="probe-positions-new-raw" class="bp-raw">(未実行)</pre>
       <pre id="probe-order-old-raw" class="bp-raw">(未実行)</pre>
       <pre id="probe-order-new-raw" class="bp-raw">(未実行)</pre>
+      <h3 style="margin-top:14px">取扱判定 probe <span class="muted" style="font-size:11px;font-weight:normal">(trade/instrument・trade/security tradePolicy — #460、チェック時のみ)</span></h3>
+      <pre id="probe-tradecheck-raw" class="bp-raw">(未実行)</pre>
       <h3 style="margin-top:14px">meta</h3>
       <pre id="probe-meta" class="bp-raw">(未実行)</pre>
     </div>
@@ -2513,6 +2518,7 @@ function brokerProbeBody(args: {
       url += '&preview=1';
       if (Number.isFinite(opts.price) && opts.price > 0) url += '&price=' + encodeURIComponent(opts.price);
     }
+    if (opts.tradecheck) url += '&tradecheck=1';
     try {
       var u = new URL(window.location.href);
       u.searchParams.set('symbol', symbol);
@@ -2542,6 +2548,22 @@ function brokerProbeBody(args: {
         if (orderNewRaw) orderNewRaw.textContent = prettify(body.orderHistoryNew);
         renderBuyingPower(body);
         renderDriftTable(body);
+        var tcEl = document.getElementById('probe-tradecheck-raw');
+        if (tcEl) {
+          if (body.tradeInstrumentProbe) {
+            var tc = body.tradeInstrumentProbe;
+            var tcLines = ['instrument_id=' + (tc.instrumentId || '(取得失敗)'), ''];
+            (tc.variants || []).forEach(function (vv) {
+              var r = vv.result || {};
+              tcLines.push('● ' + vv.label + ' -> status=' + r.status + ' ok=' + r.ok);
+              if (r.bodyTruncated) tcLines.push('  ' + String(r.bodyTruncated).slice(0, 600));
+              if (r.error) tcLines.push('  error=' + r.error);
+            });
+            tcEl.textContent = tcLines.join('\\n');
+          } else {
+            tcEl.textContent = '(未実行 — 「取扱判定」チェックで実行)';
+          }
+        }
         metaEl.textContent = JSON.stringify({
           timestamp: body.timestamp,
           sandbox: body.sandbox,
@@ -2593,6 +2615,7 @@ function brokerProbeBody(args: {
 
   var submitBtn = document.getElementById('probe-submit');
   var previewCheck = document.getElementById('probe-preview-check');
+  var tradecheckCheck = document.getElementById('probe-tradecheck');
   if (submitBtn) {
     submitBtn.addEventListener('click', function () {
       if (!selected.symbol) {
@@ -2601,8 +2624,12 @@ function brokerProbeBody(args: {
       }
       submitBtn.disabled = true;
       var withPreview = !!(previewCheck && previewCheck.checked);
+      var withTradecheck = !!(tradecheckCheck && tradecheckCheck.checked);
       var previewPrice = lastYahoo.symbol === selected.symbol ? lastYahoo.price : null;
-      probe(selected.symbol, selected.category, withPreview ? { preview: true, price: previewPrice } : {}).finally(function () {
+      var opts = {};
+      if (withPreview) { opts.preview = true; opts.price = previewPrice; }
+      if (withTradecheck) opts.tradecheck = true;
+      probe(selected.symbol, selected.category, opts).finally(function () {
         submitBtn.disabled = false;
       });
     });
