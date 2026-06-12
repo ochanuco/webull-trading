@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 import {
   buildEntrySuppressedSymbols,
   buildHalfEntrySymbols,
+  buildMomentumRules,
+  buildMomentumSymbols,
   buildSymbolRules,
   ROLE_RULE_PRESETS,
   type SymbolRuleOverrides,
 } from '../../../src/trading/strategy/symbolRuleResolution'
+import { TEST_DEFAULT_MOMENTUM_RULE } from '../../../src/trading/strategy/strategies/BreakoutMomentumStrategy'
 import { TEST_DEFAULT_RULE } from '../../../src/trading/strategy/strategies/PullbackUptrendStrategy'
 
 const emptyOverrides = (): SymbolRuleOverrides => ({
@@ -20,6 +23,41 @@ const emptyOverrides = (): SymbolRuleOverrides => ({
   symbolMaxAtrRatioOverride: {},
   symbolMaxSma50DeviationPctOverride: {},
   symbolRequireAboveSma50Override: {},
+})
+
+describe('momentum role (#momentum)', () => {
+  it('momentum は entry-enabled (suppress されない)', () => {
+    const ov = emptyOverrides()
+    ov.symbolRole = { ICLN: 'momentum', SGOV: 'cash_parking' }
+    const suppressed = buildEntrySuppressedSymbols(ov.symbolRole)
+    expect(suppressed.ICLN).toBeUndefined()
+    expect(suppressed.SGOV).toBeDefined() // cash_parking は従来どおり抑止
+  })
+
+  it('momentum は HALF 昇格から除外される', () => {
+    const half = buildHalfEntrySymbols({ ICLN: 'momentum', QQQ: 'core_trend' })
+    expect(half.has('ICLN')).toBe(false)
+    expect(half.has('QQQ')).toBe(true)
+  })
+
+  it('buildMomentumSymbols は role===momentum だけ拾う', () => {
+    const set = buildMomentumSymbols({ ICLN: 'momentum', SOXL: 'leveraged_trend', TAN: 'momentum' })
+    expect([...set].sort()).toEqual(['ICLN', 'TAN'])
+  })
+
+  it('buildMomentumRules は momentum symbol に override を重ねる', () => {
+    const ov = emptyOverrides()
+    ov.symbolRole = { ICLN: 'momentum', SOXL: 'leveraged_trend' }
+    ov.symbolStopPctOverride = { ICLN: -0.03 }
+    ov.symbolTimeStopDaysOverride = { ICLN: 4 }
+    const rules = buildMomentumRules(ov)
+    expect(Object.keys(rules)).toEqual(['ICLN']) // momentum のみ
+    expect(rules.ICLN!.stopPct).toBe(-0.03) // override 反映
+    expect(rules.ICLN!.timeStopDays).toBe(4)
+    // override 無い項目は preset 既定。
+    expect(rules.ICLN!.takeProfitPct).toBe(TEST_DEFAULT_MOMENTUM_RULE.takeProfitPct)
+    expect(rules.ICLN!.breakoutBuffer).toBe(TEST_DEFAULT_MOMENTUM_RULE.breakoutBuffer)
+  })
 })
 
 describe('buildSymbolRules (#452)', () => {

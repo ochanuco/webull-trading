@@ -10378,6 +10378,7 @@ const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
   low_volatility: '低ボラ',
   sector_trend: 'セクター',
   inverse_hedge: 'インバースヘッジ (短期)',
+  momentum: 'モメンタム (⚠未検証)',
 }
 
 /** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
@@ -10388,6 +10389,7 @@ const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   low_volatility: 'low_volatility — 低ボラ ETF (USMV / SPLV 等)',
   sector_trend: 'sector_trend — 1x セクター ETF (SMH / SOXX 等)',
   inverse_hedge: 'inverse_hedge — 3x インバース・短期 (SQQQ / SOXS。1x は override 必須)',
+  momentum: 'momentum — ⚠ モメンタム/ブレイク (1x向け・backtest未検証・要警告)',
 }
 
 /** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
@@ -10617,22 +10619,293 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <div class="muted" style="font-size:11px;margin-top:2px">未設定の銘柄は発注されません (fail-closed)</div>
         </div>
         <label>ロール${REQ}</label>
-        <div>
-          <select name="role" required style="padding:6px">
-            ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
-            ${
-              mode === 'new'
-                ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
-                : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
-            }
-            ${SYMBOL_ROLES.map(
-              (r) =>
-                `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
-            ).join('')}
-          </select>
-          ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-          <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        <div style="flex:1 1 100%">
+          <!-- #role-stats: select を廃止し、カードのギャラリー = ロール選択。クリックで
+               選択 (hidden input に同期)、ホバーで画面右に大きいプレビュー (虚のチャート
+               + 入場ゲート閾値、個別銘柄チャートタブの視覚言語を流用)。 -->
+          <input type="hidden" name="role" id="symbol-form-role" value="${esc(roleValue)}">
+          <div style="font-size:12px;margin-bottom:6px">選択中: <strong id="role-current" style="font-size:13px">—</strong></div>
+          ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
+          <!-- 2軸を構造で表現: タブ = 入場アーキ、タブ内のカード = 銘柄プロファイル。
+               現状は「押し目」タブのみ有効。モメンタム/逆張りは設計中。 -->
+          <div style="display:flex;gap:2px;border-bottom:1px solid #e3e3e8;margin-bottom:8px">
+            <button type="button" class="role-arch-tab" data-arch="pullback" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">押し目</button>
+            <button type="button" class="role-arch-tab" data-arch="momentum" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">モメンタム <span style="font-size:10px;color:#bbb">設計中</span></button>
+            <button type="button" class="role-arch-tab" data-arch="reversion" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">逆張り <span style="font-size:10px;color:#bbb">設計中</span></button>
+          </div>
+          <div class="role-arch-panel" data-arch="pullback">
+            <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+          </div>
+          <div class="role-arch-panel" data-arch="momentum" style="display:none">
+            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:10px 12px;line-height:1.55;margin-bottom:8px">
+              <strong>⚠ 要注意ロール(エッジ未検証)</strong> — 新高値ブレイクの継続を取る入場アーキ。選択・取引は可能ですが、
+              <b>backtest 上、発注可能なテーマ ETF (ICLN/TAN/QCLN) では成績まちまち〜不良 (TAN -60%DD)</b>。広域/テック 1x では有効だがそれらは OpenAPI 発注不可。<b>1x 銘柄のみ</b>に付け、少額・DRY_RUN から。
+            </div>
+            <div id="momentum-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+          </div>
+          <div class="role-arch-panel" data-arch="reversion" style="display:none">
+            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:12px 14px;line-height:1.6">
+              <strong>⚠ 使用不可(見送り)</strong> — 売られすぎの反発を拾う入場アーキ(1x向け)。<br>
+              理由: red-team 評価で <b>$ POC のコスト/為替でエッジ証明困難</b>＋ <b>逆張りに適した 1x(広域指数)が OpenAPI 取扱外</b>(発注可の ICLN/TAN 等はテーマ ETF で逆張り不適=ナイフ掴み)。<br>
+              現状は見送り。再訪は universe 拡大 + notional 引き上げが前提。
+            </div>
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
         </div>
+        <!-- ホバー時に画面右へ出る大プレビュー (fixed)。 -->
+        <div id="role-preview" style="display:none;position:fixed;right:16px;top:96px;width:300px;z-index:60;background:#fff;border:1px solid #d0d0d5;border-radius:10px;box-shadow:0 6px 22px rgba(0,0,0,0.14);padding:10px 12px">
+          <div id="role-preview-body"></div>
+        </div>
+        <script>
+        (function () {
+          // ROLE_RULE_PRESETS を global default に重ねた解決値 (%・日・倍)。
+          var P = {
+            leveraged_trend: { tr: 8, heat: 60, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            core_trend: { tr: 3, heat: 20, atr: 1.5, pbMax: -1.5, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            sector_trend: { tr: 4, heat: 30, atr: 1.5, pbMax: -2, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
+            low_volatility: { tr: 1.5, heat: 10, atr: 1.3, pbMax: -1, pbMin: -3, stop: -1.5, tp: 2.5, tstop: 15, katr: 2.0 },
+            inverse_hedge: { tr: 15, heat: 40, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 5, katr: 1.5 }
+          };
+          var COLOR = {
+            core_trend: '#1a56db', leveraged_trend: '#d97706', sector_trend: '#0e9f9f',
+            low_volatility: '#7e3af2', inverse_hedge: '#c22d2d', cash_parking: '#5b8c5a',
+            momentum: '#b25000'
+          };
+          var LABEL = {
+            leveraged_trend: 'レバETF・トレンド', core_trend: '非レバ・トレンド',
+            sector_trend: 'セクター', low_volatility: '低ボラ',
+            inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金',
+            momentum: 'モメンタム ⚠'
+          };
+          // 2軸の説明 (入場アーキ / horizon / 想定銘柄の性質)。現状は全ロール
+          // 「押し目」アーキ。モメンタム/逆張りアーキは別軸で設計中 (未実装)。
+          var DESC = {
+            leveraged_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '3x レバ ETF' },
+            core_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x トレンド' },
+            sector_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x セクター ETF' },
+            low_volatility: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~15日', character: '低ボラ 1x' },
+            inverse_hedge: { arch: '押し目 (下落レジームの inverse 押し目)', horizon: '超短 5日', character: '3x インバース' },
+            cash_parking: { arch: 'entry なし', horizon: '—', character: '待機資金 (退避先・常時配分)' },
+            momentum: { arch: 'モメンタム (新高値ブレイク継続)', horizon: '短期 3–7日', character: '1x モメンタム ⚠ backtest 未検証' }
+          };
+          var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
+          function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
+          // 銘柄別 override 入力 (任意セクション) を読む。空 → null。
+          var OV_NAMES = {
+            tr: 'min_return_50d_override', heat: 'max_sma50_deviation_pct_override',
+            atr: 'max_atr_ratio_override', pbMax: 'pullback_max_override',
+            pbMin: 'pullback_min_override', stop: 'stop_pct_override',
+            tp: 'take_profit_pct_override', tstop: 'time_stop_days_override', katr: 'k_atr_override'
+          };
+          function ovNum(name) {
+            var el = document.getElementsByName(name)[0];
+            if (!el) return null;
+            var v = (el.value || '').trim();
+            if (v === '') return null;
+            var n = Number(v);
+            return isFinite(n) ? n : null;
+          }
+          function ovSel(name) {
+            var el = document.getElementsByName(name)[0];
+            return el ? (el.value || '') : '';
+          }
+          // 実効値 = override ?? preset ?? (sma50 は global 既定 true)。
+          function eff(role) {
+            var b = P[role], r = {}, ov = {}, any = false;
+            var keys = ['tr', 'heat', 'atr', 'pbMax', 'pbMin', 'stop', 'tp', 'tstop', 'katr'];
+            for (var i = 0; i < keys.length; i++) {
+              var k = keys[i], o = ovNum(OV_NAMES[k]);
+              r[k] = (o == null) ? b[k] : o;
+              ov[k] = o != null;
+              if (o != null) any = true;
+            }
+            var sma = ovSel('require_above_sma50_override');
+            r.sma50 = sma === '' ? true : (sma === 'true');
+            ov.sma50 = sma !== '';
+            if (sma !== '') any = true;
+            ov.any = any;
+            r.ov = ov;
+            return r;
+          }
+          function omark(b) { return b ? ' <span style="color:#d97706;font-weight:700" title="この銘柄の override">*</span>' : ''; }
+          // 価格ラダー SVG。p = 実効パラメータ。big=true で軸ラベル付き。
+          function ladder(role, p, w, h, big) {
+            function y(pct) { return 12 + (4 - pct) * ((h - 24) / 15); } // +4%..-11% 固定
+            if (role === 'cash_parking') {
+              return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="#5b8c5a" text-anchor="middle">entry なし</text></svg>';
+            }
+            var color = COLOR[role], ov = p.ov || {};
+            var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
+            var X0 = 14, X1 = big ? w - 70 : w - 12, a = [];
+            a.push('<line x1="' + X0 + '" y1="' + y(0).toFixed(1) + '" x2="' + X1 + '" y2="' + y(0).toFixed(1) + '" stroke="#c4c8cd" stroke-width="1"/>');
+            var zy = y(p.pbMax), zh = y(p.pbMin) - y(p.pbMax);
+            a.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
+            a.push('<circle cx="' + ((X0 + X1) / 2).toFixed(1) + '" cy="' + y(em).toFixed(1) + '" r="' + (big ? 3.2 : 2.6) + '" fill="' + color + '"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(st).toFixed(1) + '" x2="' + X1 + '" y2="' + y(st).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(tp).toFixed(1) + '" x2="' + X1 + '" y2="' + y(tp).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
+            if (big) {
+              var lx = X1 + 4;
+              var mz = (ov.pbMax || ov.pbMin) ? ' *' : '', ms = ov.stop ? ' *' : '', mt = ov.tp ? ' *' : '';
+              a.push('<text x="' + lx + '" y="' + y(0).toFixed(1) + '" font-size="8" fill="#80868b" dominant-baseline="middle">高値 0%</text>');
+              a.push('<text x="' + lx + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%' + mz + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(st).toFixed(1) + '" font-size="8" fill="#c22d2d" dominant-baseline="middle">stop ' + fmtPct(p.stop) + ms + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(tp).toFixed(1) + '" font-size="8" fill="#0e9f6e" dominant-baseline="middle">TP ' + fmtPct(p.tp) + mt + '</text>');
+            } else {
+              a.push('<text x="' + X0 + '" y="' + (y(0) - 2).toFixed(1) + '" font-size="7" fill="#9aa0a6">高値0%</text>');
+            }
+            return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '" style="overflow:visible">' + a.join('') + '</svg>';
+          }
+          function gateHtml(role, p) {
+            if (role === 'cash_parking') return '<div style="color:#5b8c5a;font-size:11px">戦略 entry なし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定なし)。</div>';
+            var ov = p.ov || {}, g = [];
+            g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">入場ゲート(閾値)</div>');
+            g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + omark(ov.tr) + '</div>');
+            g.push('<div>SMA50 ' + (p.sma50 ? '上抜け必須' : '上抜け不問') + omark(ov.sma50) + '</div>');
+            g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + omark(ov.heat) + '</div>');
+            g.push('<div>ボラ(ATR比) ≤ ' + p.atr + '×' + omark(ov.atr) + '</div>');
+            g.push('<div>押し目 ' + p.pbMax + '% 〜 ' + p.pbMin + '%' + omark(ov.pbMax || ov.pbMin) + '</div>');
+            g.push('<div style="font-weight:600;margin:4px 0 2px">退場</div>');
+            g.push('<div>損切 ' + fmtPct(p.stop) + ' / 利確 ' + fmtPct(p.tp) + omark(ov.stop || ov.tp) + '</div>');
+            g.push('<div>保有上限 ' + p.tstop + '日 (損切ATR ' + p.katr + '×)' + omark(ov.tstop || ov.katr) + '</div>');
+            return '<div style="font-size:11px;line-height:1.55">' + g.join('') + '</div>';
+          }
+          function cardHtml(role) {
+            var color = COLOR[role] || '#5f6368';
+            var d = DESC[role] || {};
+            // カードはグラフ無し (ホバー右プレビューに虚チャートがある)。名前 +
+            // 銘柄プロファイル + 保有 だけのコンパクト表示。
+            var sub = role === 'cash_parking'
+              ? (d.character || '')
+              : (d.character || '') + ' ・ 保有' + P[role].tstop + '日';
+            return '<div class="role-tpl-card" data-role="' + role + '" ' +
+              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:8px 10px;background:#fff;min-width:150px">' +
+              '<div style="font-size:12px;font-weight:600"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
+              '<div style="font-size:10px;color:#86868b;margin-top:2px">' + sub + '</div>' +
+              '</div>';
+          }
+          var selected = ${JSON.stringify(roleValue)};
+          var currentShown = selected;
+          function labelOf(role) { return LABEL[role] || (role ? ('⚠ ' + role) : '未選択'); }
+          // 4 つの説明 (ロール / 入場アーキ / horizon / 想定銘柄の性質)。
+          function descHtml(role) {
+            var d = DESC[role];
+            if (!d) return '';
+            function row(k, v) { return '<div style="display:flex;gap:6px"><span style="color:#86868b;min-width:62px">' + k + '</span><span>' + v + '</span></div>'; }
+            return '<div style="font-size:11px;line-height:1.5;background:#f6f6f9;border-radius:6px;padding:5px 7px;margin-bottom:6px">' +
+              row('入場アーキ', d.arch) + row('horizon', d.horizon) + row('想定銘柄', d.character) + '</div>';
+          }
+          function showPreview(role) {
+            currentShown = role;
+            var pv = document.getElementById('role-preview');
+            var body = document.getElementById('role-preview-body');
+            if (!pv || !body) return;
+            if (role === 'momentum') {
+              body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + COLOR.momentum + '">⚡ モメンタム ⚠</div>' +
+                descHtml('momentum') +
+                '<div style="font-size:11px;line-height:1.55">新高値ブレイクの継続を取る別戦略 (BreakoutMomentumStrategy)。' +
+                'entry: トレンド+ 新高値ブレイク+ SMA50上+ 過熱でない。exit: stop -5% / TP +10% / 保有~7日。<br>' +
+                '<span style="color:#c22;font-weight:600">⚠ backtest 未検証。発注可テーマETFでは成績不良の例あり (TAN -60%DD)。1x のみ・少額で。</span></div>';
+              pv.style.display = '';
+              return;
+            }
+            if (!role || (!P[role] && role !== 'cash_parking')) { pv.style.display = 'none'; return; }
+            var color = COLOR[role] || '#5f6368';
+            if (role === 'cash_parking') {
+              body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">待機資金</div>' + descHtml(role) + ladder(role, {}, 280, 120, true) + '<div style="margin-top:6px">' + gateHtml(role, {}) + '</div>';
+              pv.style.display = '';
+              return;
+            }
+            var p = eff(role);
+            var note = p.ov.any ? 'preset + この銘柄の override (* 印) を反映' : 'preset の姿 (override 未設定)';
+            body.innerHTML =
+              '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">' + LABEL[role] + '</div>' +
+              descHtml(role) +
+              ladder(role, p, 280, 150, true) +
+              '<div style="margin-top:6px">' + gateHtml(role, p) + '</div>' +
+              '<div style="font-size:10px;color:#aaa;margin-top:6px">直近高値=0% 基準・実効値の模式<br>' + note + '</div>';
+            pv.style.display = '';
+          }
+          function highlight(role) {
+            var cards = document.querySelectorAll('.role-tpl-card');
+            for (var i = 0; i < cards.length; i++) {
+              var r = cards[i].getAttribute('data-role'), on = r === role;
+              cards[i].style.border = on ? ('2px solid ' + (COLOR[r] || '#06c')) : '1px solid #e3e3e8';
+              cards[i].style.background = on ? '#fcfbf7' : '#fff';
+              cards[i].style.boxShadow = on ? '0 1px 4px rgba(0,0,0,0.08)' : 'none';
+            }
+          }
+          function pick(role) {
+            selected = role;
+            var inp = document.getElementById('symbol-form-role');
+            if (inp) inp.value = role;
+            var cur = document.getElementById('role-current');
+            if (cur) cur.textContent = labelOf(role);
+            highlight(role);
+            showPreview(role);
+          }
+          function rerender() { showPreview(currentShown); }
+          // momentum はグラフ無し (preset が押し目と別形)。名前 + 性質だけのカード。
+          function momentumCardHtml() {
+            var d = DESC.momentum || {};
+            return '<div class="role-tpl-card" data-role="momentum" ' +
+              'style="cursor:pointer;border:1px solid #f0c98a;border-radius:8px;padding:8px 10px;background:#fffaf2;min-width:150px">' +
+              '<div style="font-size:12px;font-weight:600;color:' + COLOR.momentum + '">⚡ モメンタム</div>' +
+              '<div style="font-size:10px;color:#9a5b00;margin-top:2px">' + (d.character || '') + ' ・ 保有~7日</div>' +
+              '</div>';
+          }
+          function init() {
+            var gallery = document.getElementById('role-gallery');
+            if (!gallery) return;
+            gallery.innerHTML = ORDER.map(cardHtml).join('');
+            var mg = document.getElementById('momentum-gallery');
+            if (mg) mg.innerHTML = momentumCardHtml();
+            // gallery + momentum の全カードに listener を張る。
+            var cards = document.querySelectorAll('.role-tpl-card');
+            for (var i = 0; i < cards.length; i++) {
+              (function (card) {
+                var r = card.getAttribute('data-role');
+                card.addEventListener('click', function () { pick(r); });
+                card.addEventListener('mouseenter', function () { showPreview(r); });
+              })(cards[i]);
+            }
+            // ホバーが外れたら選択中ロールのプレビューに戻す。
+            gallery.addEventListener('mouseleave', function () { showPreview(selected); });
+            // 銘柄別 override を編集したら実効プレビューを即更新。
+            var names = ['min_return_50d_override', 'max_sma50_deviation_pct_override', 'max_atr_ratio_override', 'pullback_max_override', 'pullback_min_override', 'stop_pct_override', 'take_profit_pct_override', 'time_stop_days_override', 'k_atr_override', 'require_above_sma50_override'];
+            for (var j = 0; j < names.length; j++) {
+              var el = document.getElementsByName(names[j])[0];
+              if (el) { el.addEventListener('input', rerender); el.addEventListener('change', rerender); }
+            }
+            // 入場アーキのタブ切替 (押し目=有効、モメンタム/逆張り=設計中パネル)。
+            function setArchTab(arch) {
+              var tabs = document.querySelectorAll('.role-arch-tab');
+              for (var t = 0; t < tabs.length; t++) {
+                var a = tabs[t].getAttribute('data-arch'), on = a === arch;
+                tabs[t].style.borderBottom = on ? '2px solid #06c' : '2px solid transparent';
+                tabs[t].style.color = on ? '#06c' : '#5f6368';
+                tabs[t].style.fontWeight = on ? '600' : 'normal';
+              }
+              var panels = document.querySelectorAll('.role-arch-panel');
+              for (var q = 0; q < panels.length; q++) {
+                panels[q].style.display = panels[q].getAttribute('data-arch') === arch ? '' : 'none';
+              }
+            }
+            var tabs = document.querySelectorAll('.role-arch-tab');
+            for (var k = 0; k < tabs.length; k++) {
+              (function (tab) {
+                tab.addEventListener('click', function () { setArchTab(tab.getAttribute('data-arch')); });
+              })(tabs[k]);
+            }
+            setArchTab(selected === 'momentum' ? 'momentum' : 'pullback');
+            var cur = document.getElementById('role-current');
+            if (cur) cur.textContent = labelOf(selected);
+            highlight(selected);
+            showPreview(selected);
+          }
+          if (document.readyState !== 'loading') init();
+          else document.addEventListener('DOMContentLoaded', init);
+        })();
+        </script>
         <label>状態</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px">
           <input type="hidden" name="active" value="false">
