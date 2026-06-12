@@ -6,6 +6,11 @@ import { rateLimit } from '../middleware/rateLimit'
 import { ValidationError } from '../shared/errors'
 import { createWebullReadClient } from '../infrastructure/webull/WebullReadClient'
 import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
+import { refreshTradableAllowlist } from '../infrastructure/webull/refreshTradableAllowlist'
+import {
+  getTradableAllowlistStatus,
+  getTradableStatusForSymbol,
+} from '../infrastructure/db/tradableInstrumentsRepo'
 import {
   resolveAccessToken,
   resolveAccessTokenWithSource,
@@ -965,6 +970,78 @@ export const admin = new Hono<AppBindings>()
       previewVariants = variants.map((v, i) => ({ label: v.label, result: results[i]! }))
     }
 
+    // #460: per-symbol 取扱判定 probe (tradecheck=1)。tradable/list の全件 sweep を
+    // せずに 1 銘柄の発注可否を引けるか — SDK の per-symbol 取引照会
+    // (/trade/instrument・/trade/security) が tradePolicy (ALL/CLOSE_ONLY/DENIED)
+    // を返すかを本番 access token + account_id で検証する。instrument_id は上の
+    // v2 instrument 照会から取る。すべて GET = read-only。これが効けば
+    // 「登録前に 1 発叩く」on-demand 判定が成立し list-cache が不要になる。
+    let tradeInstrumentProbe:
+      | { instrumentId: string | null; variants: Array<{ label: string; result: ProbeResult }> }
+      | null = null
+    if (c.req.query('tradecheck') === '1') {
+      let instrumentId: string | null = null
+      if (
+        instrumentStockTradeV2.phase === 'response' &&
+        instrumentStockTradeV2.status === 200 &&
+        instrumentStockTradeV2.bodyTruncated
+      ) {
+        try {
+          const arr = JSON.parse(instrumentStockTradeV2.bodyTruncated)
+          const row = Array.isArray(arr)
+            ? arr.find((x: { symbol?: string }) => x?.symbol === symbol)
+            : null
+          const idRaw = (row as { instrument_id?: unknown } | null)?.instrument_id
+          if (idRaw != null) instrumentId = String(idRaw).replace(/\..*$/, '')
+        } catch {
+          // instrument_id 取得失敗時は instrument_id 系 variant をスキップ
+        }
+      }
+      const market = category.startsWith('JP_') ? 'JP' : 'US'
+      const variants: Array<{ label: string; result: ProbeResult }> = []
+      for (const v of ['v2', 'v1']) {
+        if (instrumentId) {
+          variants.push({
+            label: `trade/instrument [${v}]`,
+            result: await probeOnce({
+              method: 'GET',
+              path: '/openapi/trade/instrument',
+              query: { account_id: accountId, instrument_id: instrumentId },
+              version: v,
+            }),
+          })
+          variants.push({
+            label: `trade/instrument no-prefix [${v}]`,
+            result: await probeOnce({
+              method: 'GET',
+              path: '/trade/instrument',
+              query: { account_id: accountId, instrument_id: instrumentId },
+              version: v,
+            }),
+          })
+        }
+        variants.push({
+          label: `trade/security [${v}]`,
+          result: await probeOnce({
+            method: 'GET',
+            path: '/openapi/trade/security',
+            query: { account_id: accountId, symbol, market, instrument_super_type: 'EQUITY' },
+            version: v,
+          }),
+        })
+        variants.push({
+          label: `trade/security no-prefix [${v}]`,
+          result: await probeOnce({
+            method: 'GET',
+            path: '/trade/security',
+            query: { account_id: accountId, symbol, market, instrument_super_type: 'EQUITY' },
+            version: v,
+          }),
+        })
+      }
+      tradeInstrumentProbe = { instrumentId, variants }
+    }
+
     // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
     // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
     c.header('Cache-Control', 'no-store')
@@ -1017,6 +1094,8 @@ export const admin = new Hono<AppBindings>()
       snapshotTradeV2,
       instrumentStockTradeV2,
       previewVariants,
+      // #460: per-symbol 取扱判定 probe (tradecheck=1 のときのみ非 null)。
+      tradeInstrumentProbe,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
         tradeEndpointsOk:
@@ -1214,6 +1293,52 @@ export const admin = new Hono<AppBindings>()
           }
         : null,
     })
+  })
+  /**
+   * #460: OpenAPI 取扱可能銘柄 allowlist の手動リフレッシュ (チャンク式)。
+   *
+   * 全件 sweep (~50 ページ・約1分) は 1 リクエストの実行予算で完走できないため、
+   * **1 回 = 最大 ~15 ページ (~20秒) を同期処理**して進捗を返す。done=false なら
+   * `nextCursor` と `watermark` を返すので、UI が同じ watermark + cursor で続けて
+   * POST し、done になるまで再開する。watermark は最初の呼び出し (cursor 無し) で
+   * サーバが採番し、以降クライアントが echo する (sweep 全体の mark-and-sweep 基準)。
+   */
+  .post('/tradable-allowlist/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const cursorRaw = (c.req.query('cursor') ?? '').trim()
+    const watermarkRaw = (c.req.query('watermark') ?? '').trim()
+    // 初回 (cursor 無し) は watermark を採番。再開時はクライアントの値を信頼。
+    const watermark = watermarkRaw.length > 0 ? watermarkRaw : new Date().toISOString()
+    const summary = await refreshTradableAllowlist(c.env, watermark, {
+      ...(cursorRaw.length > 0 ? { startCursor: cursorRaw } : {}),
+      maxPages: 15,
+    })
+    console.log(JSON.stringify({ event: 'tradable_allowlist_refresh_manual', ...summary }))
+    if (summary.done) {
+      await writeAuditLog(c, '/admin/tradable-allowlist/refresh', 'tradable-allowlist', null, {
+        ok: summary.ok,
+        upserted: summary.upserted,
+        disappeared: summary.disappeared,
+        disappearedSymbols: summary.disappearedSymbols,
+        error: summary.error ?? null,
+      }).catch(() => undefined)
+    }
+    const status = await getTradableAllowlistStatus(createDb(c.env.DB)).catch(() => null)
+    return c.json({ ...summary, watermark, total: status?.total ?? null })
+  })
+  /**
+   * #460: allowlist の現在のサマリ (UI のポーリング用)。リフレッシュ進捗
+   * (件数の増加) と最終取得時刻を返す。
+   */
+  .get('/tradable-allowlist/status', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const status = await getTradableAllowlistStatus(createDb(c.env.DB))
+    return c.json(status)
   })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
@@ -2057,13 +2182,18 @@ export const admin = new Hono<AppBindings>()
       market === 'US'
         ? lookupInstrument(c.env, { symbol: symbolRaw, category: 'US_STOCK' })
         : undefined
+    // #460: OpenAPI allowlist (tradable/list 由来) の status も併せて返す。
+    // instrument status (OC) では区別できない deny を区別できる唯一の事前シグナル。
+    const allowlistStatus = c.env.DB
+      ? await getTradableStatusForSymbol(createDb(c.env.DB), symbolRaw).catch(() => 'unknown' as const)
+      : ('unknown' as const)
     const result = await checkTradability(c.env, {
       symbol: symbolRaw,
       market,
       ...(Number.isFinite(priceRaw) && priceRaw > 0 ? { price: priceRaw } : {}),
       ...(instrumentPromise !== undefined ? { instrument: instrumentPromise } : {}),
     })
-    return c.json(result)
+    return c.json({ ...result, allowlist: allowlistStatus })
   })
   .get('/symbol-config/lookup', rateLimit('ADMIN_WRITE'), async (c) => {
     const queryRaw = c.req.query('q') ?? c.req.query('symbol') ?? ''
