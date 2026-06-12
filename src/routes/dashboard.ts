@@ -9382,6 +9382,120 @@ export function symbolMapEditorBody(
       renderChanges();
     });
 
+    // 入力ポート (左点) ドラッグで既存の線を付け替える (operator 要望:
+    // USMV の左点を NVDA の左点へ → AAPL の退避先が NVDA に移り、USMV は
+    // 到達不能 = 無効化対象になる)。Drawflow に endpoint 再ドラッグは無いので
+    // 自前実装: input 押下で最後の incoming を掴み、ガイド線を引き、別カードで
+    // 放したら同じ規則 (通貨チェック・1 銘柄 1 本) で繋ぎ替える。
+    var retarget = null; // { srcId, oldDstId }
+    var guide = null;
+    function portCenter(nodeId, cls) {
+      var port = el.querySelector('#node-' + nodeId + ' .' + cls);
+      if (!port) return null;
+      var r = port.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    function showGuide(from, to) {
+      if (!guide) {
+        guide = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        guide.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:40';
+        guide.innerHTML = '<line stroke="#6e6e73" stroke-width="2.5" stroke-dasharray="6 5"/>';
+        document.body.appendChild(guide);
+      }
+      var line = guide.querySelector('line');
+      line.setAttribute('x1', from.x);
+      line.setAttribute('y1', from.y);
+      line.setAttribute('x2', to.x);
+      line.setAttribute('y2', to.y);
+    }
+    function hideGuide() {
+      if (guide) { guide.remove(); guide = null; }
+    }
+    function srcNodeIdOf(srcSym) {
+      return accountSymOf[srcSym] ? accountIds[accountSymOf[srcSym]] : idOf[srcSym];
+    }
+    function disconnectDraft(srcSym, dstSym) {
+      programmatic = true;
+      editor.removeSingleConnection(srcNodeIdOf(srcSym), idOf[dstSym], 'output_1', 'input_1');
+      programmatic = false;
+      if (accountSymOf[srcSym]) draft[dstSym].connected = false;
+      else if (draft[srcSym].fallback === dstSym) draft[srcSym].fallback = null;
+    }
+    function connectDraft(srcSym, dstSym) {
+      // 通貨規則は通常の接続と同一。違反は何もしない (付け替え自体を不成立に)。
+      if (accountSymOf[srcSym]) {
+        if (nodeBySym[dstSym].currency !== accountSymOf[srcSym]) {
+          alert(dstSym + ' は ' + nodeBySym[dstSym].currency + ' 銘柄です。' + accountSymOf[srcSym] + ' 口座からは接続できません。');
+          return false;
+        }
+        programmatic = true;
+        editor.addConnection(accountIds[accountSymOf[srcSym]], idOf[dstSym], 'output_1', 'input_1');
+        programmatic = false;
+        draft[dstSym].connected = true;
+        markConnectionPending(accountIds[accountSymOf[srcSym]], idOf[dstSym]);
+        return true;
+      }
+      if (nodeBySym[srcSym].currency !== nodeBySym[dstSym].currency) {
+        alert(srcSym + ' は ' + nodeBySym[srcSym].currency + '、' + dstSym + ' は ' + nodeBySym[dstSym].currency + ' です。異通貨の退避先は設定できません。');
+        return false;
+      }
+      if (draft[srcSym].fallback && idOf[draft[srcSym].fallback]) {
+        programmatic = true;
+        editor.removeSingleConnection(idOf[srcSym], idOf[draft[srcSym].fallback], 'output_1', 'input_1');
+        programmatic = false;
+      }
+      programmatic = true;
+      editor.addConnection(idOf[srcSym], idOf[dstSym], 'output_1', 'input_1');
+      programmatic = false;
+      draft[srcSym].fallback = dstSym;
+      markConnectionPending(idOf[srcSym], idOf[dstSym]);
+      return true;
+    }
+    el.addEventListener('mousedown', function (ev) {
+      var inp = ev.target && ev.target.closest ? ev.target.closest('.input') : null;
+      if (!inp) return;
+      var nodeEl = ev.target.closest('.drawflow-node');
+      if (!nodeEl) return;
+      var dstId = parseInt(nodeEl.id.replace('node-', ''), 10);
+      var dstSym = symOf[dstId];
+      if (!dstSym || accountSymOf[dstSym]) return;
+      // Drawflow 内部 data から incoming を引く (最後に張られた線を掴む)。
+      var moduleData = editor.drawflow.drawflow[editor.module].data[dstId];
+      var conns = moduleData && moduleData.inputs && moduleData.inputs.input_1 ? moduleData.inputs.input_1.connections : [];
+      if (!conns || conns.length === 0) return;
+      var srcId = parseInt(conns[conns.length - 1].node, 10);
+      ev.preventDefault();
+      ev.stopPropagation();
+      retarget = { srcId: srcId, oldDstId: dstId };
+      var from = portCenter(srcId, 'output') || { x: ev.clientX, y: ev.clientY };
+      showGuide(from, { x: ev.clientX, y: ev.clientY });
+    }, true);
+    document.addEventListener('mousemove', function (ev) {
+      if (!retarget) return;
+      var from = portCenter(retarget.srcId, 'output') || { x: ev.clientX, y: ev.clientY };
+      showGuide(from, { x: ev.clientX, y: ev.clientY });
+    });
+    document.addEventListener('mouseup', function (ev) {
+      if (!retarget) return;
+      var state = retarget;
+      retarget = null;
+      hideGuide();
+      var dropNode = document.elementFromPoint(ev.clientX, ev.clientY);
+      dropNode = dropNode && dropNode.closest ? dropNode.closest('.drawflow-node') : null;
+      if (!dropNode) return; // 空中: 付け替えキャンセル (現状維持)
+      var newDstId = parseInt(dropNode.id.replace('node-', ''), 10);
+      var newDstSym = symOf[newDstId];
+      var srcSym = symOf[state.srcId];
+      var oldDstSym = symOf[state.oldDstId];
+      if (!newDstSym || accountSymOf[newDstSym] || newDstSym === oldDstSym || newDstSym === srcSym) return;
+      disconnectDraft(srcSym, oldDstSym);
+      if (!connectDraft(srcSym, newDstSym)) {
+        // 規則違反で繋げなかった場合は元に戻す。
+        connectDraft(srcSym, oldDstSym);
+      }
+      renderChanges();
+    });
+
     // 線の削除を Mac でも自然に: Backspace 単体 (入力欄フォーカス時は除く) と
     // 明示ボタンの両方をサポートする。Drawflow 素の対応は Delete / Cmd+Backspace のみ。
     var deleteBtn = document.getElementById('sm-delete-conn');
