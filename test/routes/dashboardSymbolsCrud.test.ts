@@ -1678,6 +1678,12 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).not.toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
     // 売買単位の fail-closed 注意は 1 行だけ残す
     expect(body).toContain('未設定の銘柄は発注されません (fail-closed)')
+    // #role-stats: ロール選択横に入場/退場スタイルの六角形レーダーが ship される。
+    expect(body).toContain('id="role-radar"')
+    expect(body).toContain('window.renderRoleRadar(')
+    // role 別ステータスデータ (preset 由来) が含まれる。
+    expect(body).toContain('leveraged_trend: [5, 10, 10, 7, 8, 9]')
+    expect(body).toContain('inverse_hedge: [10, 10, 7, 3, 5, 9]')
   })
 
   it('edit フォーム: 値が入っているセクションは開いた状態で表示', async () => {

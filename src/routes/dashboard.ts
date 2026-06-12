@@ -10617,22 +10617,96 @@ function symbolFormBody(args: SymbolFormArgs): string {
           <div class="muted" style="font-size:11px;margin-top:2px">未設定の銘柄は発注されません (fail-closed)</div>
         </div>
         <label>ロール${REQ}</label>
-        <div>
-          <select name="role" required style="padding:6px">
-            ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
-            ${
-              mode === 'new'
-                ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
-                : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
-            }
-            ${SYMBOL_ROLES.map(
-              (r) =>
-                `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
-            ).join('')}
-          </select>
-          ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
-          <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+        <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap">
+          <div>
+            <select name="role" required id="symbol-form-role" style="padding:6px" onchange="window.renderRoleRadar(this.value)">
+              ${roleIsKnown ? '' : `<option value="${esc(roleValue)}" selected>⚠ 不正値: ${esc(roleValue)} (このままでは保存できません)</option>`}
+              ${
+                mode === 'new'
+                  ? `<option value="" disabled${roleValue === '' ? ' selected' : ''}>選択してください</option>`
+                  : `<option value=""${roleValue === '' ? ' selected' : ''}>未設定 (旧銘柄のみ — 従来挙動)</option>`
+              }
+              ${SYMBOL_ROLES.map(
+                (r) =>
+                  `<option value="${r}"${roleValue === r ? ' selected' : ''}>${esc(SYMBOL_ROLE_LABELS[r])}</option>`,
+              ).join('')}
+            </select>
+            ${roleIsKnown ? '' : '<p class="err" style="margin:4px 0 0;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role か「未設定」を明示的に選んで保存してください。</p>'}
+            <div class="muted" style="font-size:11px;margin-top:2px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+          </div>
+          <!-- #role-stats: 装備画面風に、選択ロールの入場/退場スタイルを六角形レーダーで表示。 -->
+          <div id="role-radar-wrap" style="display:none;text-align:center;background:#fafafd;border:1px solid #ececf2;border-radius:8px;padding:6px 8px 8px">
+            <div style="font-size:10px;color:#86868b;margin-bottom:-4px">入場↑ / 退場↓ スタイル</div>
+            <svg id="role-radar" viewBox="0 0 200 212" width="190" height="201" style="overflow:visible"></svg>
+            <div id="role-radar-summary" style="font-size:11px;color:#444;max-width:200px;margin:2px auto 0;line-height:1.4"></div>
+          </div>
         </div>
+        <script>
+        (function () {
+          var AXES = ['勢い要求', '押し目待ち', '高値追い', '保有の長さ', '損切りの粘り', '利確待ち'];
+          var STATS = {
+            leveraged_trend: [5, 10, 10, 7, 8, 9],
+            core_trend: [2, 8, 3, 7, 8, 9],
+            low_volatility: [1, 5, 2, 10, 3, 3],
+            sector_trend: [3, 8, 5, 7, 8, 9],
+            inverse_hedge: [10, 10, 7, 3, 5, 9]
+          };
+          var SUMMARY = {
+            leveraged_trend: '深い押し目で乗り高値追いも許容。保有~10日、利確+7%まで引っ張る (global default)',
+            core_trend: '緩い勢いで早めにエントリー、過熱は回避。保有~10日',
+            low_volatility: '浅い押しで乗り、損切り・利確とも早い。保有は最長15日',
+            sector_trend: '中程度の勢い・押し目で入る。exit は global 据え置き',
+            inverse_hedge: '強い下落勢いを要求、保有5日で即退出 (ボラ drag 回避)',
+            cash_parking: '戦略 entry なし。条件未達時の退避先・常時配分'
+          };
+          var COLOR = {
+            cash_parking: '#5b8c5a', core_trend: '#1a56db', leveraged_trend: '#d97706',
+            low_volatility: '#7e3af2', sector_trend: '#0e9f9f', inverse_hedge: '#c22d2d'
+          };
+          var CX = 100, CY = 100, R = 60;
+          function pt(i, scale) {
+            var ang = (-90 + i * 60) * Math.PI / 180;
+            return [CX + R * scale * Math.cos(ang), CY + R * scale * Math.sin(ang)];
+          }
+          function ring(scale) {
+            var s = '';
+            for (var i = 0; i < 6; i++) { var p = pt(i, scale); s += p[0].toFixed(1) + ',' + p[1].toFixed(1) + ' '; }
+            return s.trim();
+          }
+          window.renderRoleRadar = function (role) {
+            var wrap = document.getElementById('role-radar-wrap');
+            if (!wrap) return;
+            var svg = document.getElementById('role-radar');
+            var sum = document.getElementById('role-radar-summary');
+            var vals = STATS[role];
+            if (!vals && role !== 'cash_parking') { wrap.style.display = 'none'; return; }
+            wrap.style.display = '';
+            var color = COLOR[role] || '#5f6368';
+            var parts = [];
+            for (var g = 1; g <= 4; g++) {
+              parts.push('<polygon points="' + ring(g / 4) + '" fill="none" stroke="#e6e6ec" stroke-width="1"/>');
+            }
+            for (var i = 0; i < 6; i++) {
+              var pe = pt(i, 1);
+              parts.push('<line x1="' + CX + '" y1="' + CY + '" x2="' + pe[0].toFixed(1) + '" y2="' + pe[1].toFixed(1) + '" stroke="#e6e6ec" stroke-width="1"/>');
+              var pl = pt(i, 1.2);
+              var anchor = pl[0] > CX + 2 ? 'start' : (pl[0] < CX - 2 ? 'end' : 'middle');
+              parts.push('<text x="' + pl[0].toFixed(1) + '" y="' + pl[1].toFixed(1) + '" font-size="9" fill="#6e6e73" text-anchor="' + anchor + '" dominant-baseline="middle">' + AXES[i] + '</text>');
+            }
+            if (vals) {
+              var poly = '';
+              for (var k = 0; k < 6; k++) { var pv = pt(k, vals[k] / 10); poly += pv[0].toFixed(1) + ',' + pv[1].toFixed(1) + ' '; }
+              parts.push('<polygon points="' + poly.trim() + '" fill="' + color + '33" stroke="' + color + '" stroke-width="2"/>');
+              for (var m = 0; m < 6; m++) { var pd = pt(m, vals[m] / 10); parts.push('<circle cx="' + pd[0].toFixed(1) + '" cy="' + pd[1].toFixed(1) + '" r="2.5" fill="' + color + '"/>'); }
+            } else {
+              parts.push('<text x="' + CX + '" y="' + CY + '" font-size="11" fill="#9a5b00" text-anchor="middle" dominant-baseline="middle">entry なし</text>');
+            }
+            svg.innerHTML = parts.join('');
+            if (sum) sum.textContent = SUMMARY[role] || '';
+          };
+          window.renderRoleRadar(${JSON.stringify(roleValue)});
+        })();
+        </script>
         <label>状態</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px">
           <input type="hidden" name="active" value="false">
