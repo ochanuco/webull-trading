@@ -94,6 +94,57 @@ describe('computeConditionalAllocation (#452 Layer 3)', () => {
   })
 })
 
+describe('computeConditionalAllocation × インバース対 (枠共有の退避抑止)', () => {
+  const pairInput = (): AllocationComputeInput => ({
+    targetWeights: { SOXL: 0.5, SOXS: 0.5 },
+    policy: {
+      entryRequired: new Set(['SOXL', 'SOXS']),
+      alwaysActive: new Set(),
+      cashFallback: { SOXL: 'VUG', SOXS: 'VUG' },
+    },
+    entryStatuses: { SOXL: 'WATCH', SOXS: 'WATCH' },
+    heldSymbols: new Set(),
+    symbolCurrency: { SOXL: 'USD', SOXS: 'USD', VUG: 'USD' },
+    inversePairs: { SOXL: 'SOXS', SOXS: 'SOXL' },
+  })
+
+  it('両側未通過でも退避は片側分のみ (対の 1 枠が二重に流れない)', () => {
+    const view = computeConditionalAllocation(pairInput())
+    const vug = view.bySymbol.VUG!
+    expect(vug.reroutedInWeight).toBeCloseTo(0.5) // 1.0 (二重) ではなく 0.5
+    const rerouted = [view.bySymbol.SOXL!, view.bySymbol.SOXS!].filter((a) => a.rerouteTo !== undefined)
+    expect(rerouted).toHaveLength(1)
+    const suppressed = [view.bySymbol.SOXL!, view.bySymbol.SOXS!].find((a) => a.rerouteTo === undefined)!
+    expect(suppressed.activeWeight).toBe(0)
+    expect(suppressed.reason).toContain('二重退避なし')
+  })
+
+  it('相方が保有中なら退避しない (枠は使用中)', () => {
+    const input = pairInput()
+    input.heldSymbols = new Set(['SOXL'])
+    const view = computeConditionalAllocation(input)
+    expect(view.bySymbol.SOXS!.rerouteTo).toBeUndefined()
+    expect(view.bySymbol.SOXS!.reason).toContain('使用中')
+    expect(view.bySymbol.VUG).toBeUndefined() // 退避ゼロなので VUG に枠は流れない
+  })
+
+  it('相方が判定通過 (ENTRY) なら退避しない', () => {
+    const input = pairInput()
+    input.entryStatuses = { SOXL: 'ENTRY', SOXS: 'WATCH' }
+    const view = computeConditionalAllocation(input)
+    expect(view.bySymbol.SOXL!.activeWeight).toBeCloseTo(0.5)
+    expect(view.bySymbol.SOXS!.rerouteTo).toBeUndefined()
+    expect(view.bySymbol.SOXS!.reason).toContain('使用中')
+  })
+
+  it('inversePairs 未指定は従来挙動 (互換)', () => {
+    const input = pairInput()
+    delete (input as { inversePairs?: unknown }).inversePairs
+    const view = computeConditionalAllocation(input)
+    expect(view.bySymbol.VUG!.reroutedInWeight).toBeCloseTo(1.0)
+  })
+})
+
 describe('buildCashRebalancePlan (#452 Layer 3)', () => {
   const view = computeConditionalAllocation(baseInput()) // SGOV active 0.8
 

@@ -424,6 +424,7 @@ export const dashboard = new Hono<DashboardBindings>()
           entryStatuses,
           heldSymbols,
           symbolCurrency: universe.symbolCurrency,
+    inversePairs: universe.inversePairs,
         })
         const sortedCharts = sortGridChartsByEntryPriority(charts, entryStatuses, universe)
         // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に

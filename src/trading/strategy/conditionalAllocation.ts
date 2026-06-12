@@ -39,6 +39,13 @@ export interface AllocationComputeInput {
   heldSymbols: ReadonlySet<string>
   /** symbol → 通貨。退避の同一通貨チェックに使う (不在は 'USD' 扱い)。 */
   symbolCurrency: Record<string, SymbolCurrency>
+  /**
+   * インバース対 (両方向 map)。対は **1 枠を共有**する (#315) ため、退避の
+   * 二重流出を抑止するのに使う (#452 follow-up): 両側が同時に未通過のとき
+   * 退避できるのは片側分のみ、相方が枠を使用中 (保有 or 判定通過) のときは
+   * 退避自体しない。未指定は従来挙動 (対を知らない)。
+   */
+  inversePairs?: Record<string, string>
 }
 
 export interface SymbolAllocation {
@@ -111,6 +118,23 @@ export function computeConditionalAllocation(input: AllocationComputeInput): All
     if (ownCurrency !== fallbackCurrency) {
       alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (退避先 ${fallback} と通貨不一致 → 現金のまま)`
       continue
+    }
+    // 対の枠は 1 つ (#315): 相方が枠を使用中 (保有 or 判定通過) なら退避しない。
+    // 両側とも未通過なら退避できるのは片側分のみ — 先頭 (Object.entries の
+    // 反復順で先に処理された側) が退避済みなら、こちらは枠なしとして止める。
+    const partner = input.inversePairs?.[symbol]
+    if (partner !== undefined) {
+      const partnerHeld = input.heldSymbols.has(partner)
+      const partnerEligible = isEntryEligible(input.entryStatuses[partner])
+      if (partnerHeld || partnerEligible) {
+        alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (対の枠は ${partner} が使用中 → 退避なし)`
+        continue
+      }
+      const partnerAlloc = bySymbol[partner]
+      if (partnerAlloc !== undefined && partnerAlloc.rerouteTo !== undefined) {
+        alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 (対の枠は ${partner} 側から退避済み → 二重退避なし)`
+        continue
+      }
     }
     alloc.rerouteTo = fallback
     alloc.reason = `entry 判定 ${statusLabel}: 実配分 0 → ${fallback} へ退避`
