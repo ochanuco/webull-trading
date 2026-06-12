@@ -9872,21 +9872,45 @@ function symbolsListBody(args: {
     <span id="tradable-refresh-status" style="font-size:12px"></span>
   </p>
   <script>
+  // #460: リフレッシュはバックグラウンド実行。POST は即返り、status を
+  // ポーリングして件数の増加をライブ表示する。件数が 2 回連続で増えなく
+  // なったら完了とみなして再読込 (バッジを反映)。
   window.refreshTradableAllowlist = function () {
     var btn = document.getElementById('tradable-refresh-btn');
     var st = document.getElementById('tradable-refresh-status');
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
-    if (st) { st.textContent = '⏳ tradable/list を取得中 (数十秒)...'; st.style.color = '#86868b'; }
+    if (st) { st.textContent = '⏳ 取得を開始しました (全件まで約1分)...'; st.style.color = '#86868b'; }
     fetch('/admin/tradable-allowlist/refresh', { method: 'POST', credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (res) {
-        if (res && res.ok) {
-          if (st) { st.textContent = '✓ ' + res.fetched + ' 銘柄取得' + (res.disappeared > 0 ? ' / ' + res.disappeared + ' 消失' : '') + ' — 再読込します'; st.style.color = '#0e9f6e'; }
-          setTimeout(function () { window.location.reload(); }, 800);
-        } else {
-          if (st) { st.textContent = '⚠ 取得に失敗: ' + ((res && res.error) || 'unknown'); st.style.color = '#c22'; }
+        if (!res || !res.started) {
+          if (st) { st.textContent = '⚠ 開始に失敗しました'; st.style.color = '#c22'; }
           if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+          return;
         }
+        var prev = -1;
+        var stable = 0;
+        var ticks = 0;
+        var poll = function () {
+          fetch('/admin/tradable-allowlist/status', { credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+              ticks += 1;
+              var n = (s && s.total) || 0;
+              if (st) { st.textContent = '⏳ 取得中... ' + n + ' 銘柄'; st.style.color = '#86868b'; }
+              if (n > 0 && n === prev) { stable += 1; } else { stable = 0; }
+              prev = n;
+              // 件数が 3 回 (≈7.5s) 連続で動かない、または 40 tick (≈100s) 経過で完了。
+              if ((n > 0 && stable >= 3) || ticks > 40) {
+                if (st) { st.textContent = '✓ ' + n + ' 銘柄 — 再読込します'; st.style.color = '#0e9f6e'; }
+                setTimeout(function () { window.location.reload(); }, 600);
+                return;
+              }
+              setTimeout(poll, 2500);
+            })
+            .catch(function () { setTimeout(poll, 2500); });
+        };
+        setTimeout(poll, 2500);
       })
       .catch(function () {
         if (st) { st.textContent = '⚠ 通信エラー'; st.style.color = '#c22'; }

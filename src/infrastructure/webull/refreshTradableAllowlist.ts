@@ -1,8 +1,8 @@
 import type { Env } from '../../config/env'
 import { createDb } from '../db/tradeJournalRepo'
 import {
-  refreshTradableInstruments,
-  type RefreshTradableResult,
+  finalizeTradableDisappearance,
+  upsertTradablePage,
 } from '../db/tradableInstrumentsRepo'
 import { fetchTradableInstruments } from './tradableInstruments'
 
@@ -41,35 +41,44 @@ export async function refreshTradableAllowlist(
     }
   }
 
-  const result = await fetchTradableInstruments(env)
-  // 何も取れず error のときは DB を触らない (空書き込みで全消失判定を防ぐ)。
+  const db = createDb(env.DB)
+  // 逐次保存: 各ページ取得直後に upsert する。全件 (~50 ページ・rate limit で
+  // 約1分) を待たずに表示へ反映でき、途中中断しても部分結果が残る。
+  let upserted = 0
+  const result = await fetchTradableInstruments(env, {
+    onPage: async (entries) => {
+      upserted += await upsertTradablePage(db, entries, nowIso)
+    },
+  })
+
+  // 何も取れず error のときは消失判定をしない (空 sweep で全消失化を防ぐ)。
   if (result.outcome === 'error' && result.instruments.length === 0) {
     return {
       ok: false,
       fetched: 0,
       complete: false,
       pages: result.pages,
-      upserted: 0,
+      upserted,
       disappeared: 0,
       disappearedSymbols: [],
       error: result.error ?? 'fetch failed',
     }
   }
 
-  const db = createDb(env.DB)
-  const applied: RefreshTradableResult = await refreshTradableInstruments(db, result.instruments, {
-    complete: result.complete,
-    nowIso,
-  })
+  // 完走時のみ消失判定 (部分結果では誤検知になるのでスキップ)。
+  const seen = new Set(result.instruments.map((e) => e.symbol.toUpperCase()))
+  const disappearedSymbols = result.complete
+    ? await finalizeTradableDisappearance(db, seen, nowIso)
+    : []
 
   return {
     ok: result.outcome === 'ok',
     fetched: result.instruments.length,
     complete: result.complete,
     pages: result.pages,
-    upserted: applied.upserted,
-    disappeared: applied.disappeared,
-    disappearedSymbols: applied.disappearedSymbols,
+    upserted,
+    disappeared: disappearedSymbols.length,
+    disappearedSymbols,
     ...(result.outcome === 'error' ? { error: result.error ?? 'partial fetch' } : {}),
   }
 }

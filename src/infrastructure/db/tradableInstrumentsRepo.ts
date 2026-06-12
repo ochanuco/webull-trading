@@ -1,4 +1,5 @@
-import { eq, inArray } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
+import type { BatchItem } from 'drizzle-orm/batch'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import type { TradableInstrumentEntry } from '../webull/tradableInstruments'
 import { tradableInstrument, type TradableInstrumentRow } from './schema'
@@ -87,15 +88,118 @@ export interface RefreshTradableResult {
   appliedDisappearance: boolean
 }
 
+// D1 は 1 文あたり束縛変数 ~100 個まで。1 行 9 列なので 1 chunk = 10 行に抑える。
+const UPSERT_CHUNK = 10
+// db.batch にまとめる文数の上限 (round-trip 削減)。
+const BATCH_STMTS = 40
+// inArray の IN 句に積む symbol 数の上限。
+const IN_CHUNK = 80
+
 /**
- * sweep 結果を allowlist に反映する。
- *
- * - 取得できた銘柄: `currentlyTradable=true`, `lastSeenAt=now` で upsert。
- *   既存行があれば `firstSeenAt` は保持。
- * - **`complete=true` のときだけ**、今回の結果に**含まれない** 既存 tradable 行を
- *   `currentlyTradable=false` に倒す (消失判定)。部分結果 (`complete=false`) で
- *   倒すと誤検知になるのでスキップする。
- * - 物理削除は一切しない。
+ * 取得できた 1 ページ分 (または任意件数) の銘柄を `currentlyTradable=true` で
+ * bulk upsert する (#460)。`firstSeenAt` は **conflict 時に更新しない** ので
+ * 初回観測時刻が保持される。多数行を per-row await せず chunk + `db.batch` で
+ * 数往復に畳む (4957 件の per-row 書き込みは遅すぎるため)。
+ */
+export async function upsertTradablePage(
+  db: TradableDb,
+  entries: TradableInstrumentEntry[],
+  nowIso: string,
+): Promise<number> {
+  if (entries.length === 0) return 0
+  // 同一ページ内の symbol 重複を除去 (ON CONFLICT 二重発火を避ける)。
+  const bySymbol = new Map<string, TradableInstrumentEntry>()
+  for (const e of entries) bySymbol.set(e.symbol.toUpperCase(), e)
+  const rows = [...bySymbol.values()].map((e) => ({
+    symbol: e.symbol.toUpperCase(),
+    instrumentId: e.instrumentId,
+    name: e.name,
+    currency: e.currency,
+    exchangeCode: e.exchangeCode,
+    currentlyTradable: true,
+    firstSeenAt: nowIso,
+    lastSeenAt: nowIso,
+    updatedAt: nowIso,
+  }))
+
+  const stmts: BatchItem<'sqlite'>[] = []
+  for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+    const chunk = rows.slice(i, i + UPSERT_CHUNK)
+    stmts.push(
+      db
+        .insert(tradableInstrument)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: tradableInstrument.symbol,
+          set: {
+            instrumentId: sql`excluded.instrument_id`,
+            name: sql`excluded.name`,
+            currency: sql`excluded.currency`,
+            exchangeCode: sql`excluded.exchange_code`,
+            currentlyTradable: true,
+            lastSeenAt: nowIso,
+            updatedAt: nowIso,
+          },
+        }) as unknown as BatchItem<'sqlite'>,
+    )
+  }
+  for (let i = 0; i < stmts.length; i += BATCH_STMTS) {
+    const group = stmts.slice(i, i + BATCH_STMTS) as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
+    await db.batch(group)
+  }
+  return rows.length
+}
+
+/**
+ * 完走した sweep の seen 集合に基づき、**含まれない既存 tradable 行**を
+ * `currentlyTradable=false` に倒す (消失判定、物理削除しない)。部分結果では
+ * 呼んではいけない (誤検知になる)。
+ */
+export async function finalizeTradableDisappearance(
+  db: TradableDb,
+  seenSymbols: Set<string>,
+  nowIso: string,
+): Promise<string[]> {
+  const existing = await db.select().from(tradableInstrument)
+  const disappeared = existing
+    .filter((r) => r.currentlyTradable && !seenSymbols.has(r.symbol.toUpperCase()))
+    .map((r) => r.symbol.toUpperCase())
+  for (let i = 0; i < disappeared.length; i += IN_CHUNK) {
+    const chunk = disappeared.slice(i, i + IN_CHUNK)
+    await db
+      .update(tradableInstrument)
+      .set({ currentlyTradable: false, updatedAt: nowIso })
+      .where(inArray(tradableInstrument.symbol, chunk))
+  }
+  return disappeared
+}
+
+export interface TradableAllowlistStatus {
+  /** 行総数 (tradable + disappeared)。 */
+  total: number
+  /** currently_tradable=true の件数。 */
+  tradableCount: number
+  /** 最新 last_seen_at (空文字 = 未取得)。 */
+  lastSync: string
+}
+
+/** allowlist のサマリ (UI のポーリング・進捗表示用)。 */
+export async function getTradableAllowlistStatus(db: TradableDb): Promise<TradableAllowlistStatus> {
+  const rows = await db
+    .select({ currentlyTradable: tradableInstrument.currentlyTradable, lastSeenAt: tradableInstrument.lastSeenAt })
+    .from(tradableInstrument)
+  let tradableCount = 0
+  let lastSync = ''
+  for (const r of rows) {
+    if (r.currentlyTradable) tradableCount += 1
+    if (r.lastSeenAt && r.lastSeenAt > lastSync) lastSync = r.lastSeenAt
+  }
+  return { total: rows.length, tradableCount, lastSync }
+}
+
+/**
+ * 全件 (= 1 配列) を一括反映する高水準ヘルパー。逐次保存しない呼び出し側
+ * (テスト等) 向け。live の sweep は `upsertTradablePage` を per-page で呼ぶ。
  */
 export async function refreshTradableInstruments(
   db: TradableDb,
@@ -103,62 +207,13 @@ export async function refreshTradableInstruments(
   opts: { complete: boolean; nowIso: string },
 ): Promise<RefreshTradableResult> {
   const { complete, nowIso } = opts
-  const seen = new Map<string, TradableInstrumentEntry>()
-  for (const e of fetched) seen.set(e.symbol.toUpperCase(), e)
-
-  const existing = await db.select().from(tradableInstrument)
-  const existingBySymbol = new Map(existing.map((r) => [r.symbol.toUpperCase(), r]))
-
-  // 1. seen 銘柄を upsert。
-  for (const [symbol, entry] of seen) {
-    const prior = existingBySymbol.get(symbol)
-    if (prior) {
-      await db
-        .update(tradableInstrument)
-        .set({
-          instrumentId: entry.instrumentId,
-          name: entry.name,
-          currency: entry.currency,
-          exchangeCode: entry.exchangeCode,
-          currentlyTradable: true,
-          lastSeenAt: nowIso,
-          updatedAt: nowIso,
-        })
-        .where(eq(tradableInstrument.symbol, symbol))
-    } else {
-      await db.insert(tradableInstrument).values({
-        symbol,
-        instrumentId: entry.instrumentId,
-        name: entry.name,
-        currency: entry.currency,
-        exchangeCode: entry.exchangeCode,
-        currentlyTradable: true,
-        firstSeenAt: nowIso,
-        lastSeenAt: nowIso,
-        updatedAt: nowIso,
-      })
-    }
-  }
-
-  // 2. 完走時のみ、消えた既存 tradable 行を false に倒す。
-  const disappearedSymbols: string[] = []
-  if (complete) {
-    for (const row of existing) {
-      const key = row.symbol.toUpperCase()
-      if (row.currentlyTradable && !seen.has(key)) {
-        disappearedSymbols.push(key)
-      }
-    }
-    if (disappearedSymbols.length > 0) {
-      await db
-        .update(tradableInstrument)
-        .set({ currentlyTradable: false, updatedAt: nowIso })
-        .where(inArray(tradableInstrument.symbol, disappearedSymbols))
-    }
-  }
-
+  const seen = new Set(fetched.map((e) => e.symbol.toUpperCase()))
+  const upserted = await upsertTradablePage(db, fetched, nowIso)
+  const disappearedSymbols = complete
+    ? await finalizeTradableDisappearance(db, seen, nowIso)
+    : []
   return {
-    upserted: seen.size,
+    upserted,
     disappeared: disappearedSymbols.length,
     disappearedSymbols,
     appliedDisappearance: complete,

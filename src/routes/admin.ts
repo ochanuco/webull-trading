@@ -7,7 +7,10 @@ import { ValidationError } from '../shared/errors'
 import { createWebullReadClient } from '../infrastructure/webull/WebullReadClient'
 import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
 import { refreshTradableAllowlist } from '../infrastructure/webull/refreshTradableAllowlist'
-import { getTradableStatusForSymbol } from '../infrastructure/db/tradableInstrumentsRepo'
+import {
+  getTradableAllowlistStatus,
+  getTradableStatusForSymbol,
+} from '../infrastructure/db/tradableInstrumentsRepo'
 import {
   resolveAccessToken,
   resolveAccessTokenWithSource,
@@ -1219,25 +1222,57 @@ export const admin = new Hono<AppBindings>()
   })
   /**
    * #460: OpenAPI 取扱可能銘柄 allowlist の手動リフレッシュ。
-   * 日次 cron (CRON_PORTFOLIO_ROLL) と同じ `refreshTradableAllowlist` を即時実行。
-   * tradable/list を全件 sweep するので rate limit / throttle で数十秒かかる。
+   * tradable/list を全件 sweep するのは rate limit で約1分かかるため、HTTP は
+   * 待たせず **バックグラウンド (waitUntil) で実行**して即 `started` を返す。
+   * 進捗はページ単位で逐次 D1 へ反映されるので、UI は status endpoint を
+   * ポーリングして件数の増加を見られる。
    */
   .post('/tradable-allowlist/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
     }
-    const summary = await refreshTradableAllowlist(c.env, new Date().toISOString())
-    await writeAuditLog(c, '/admin/tradable-allowlist/refresh', 'tradable-allowlist', null, {
-      ok: summary.ok,
-      fetched: summary.fetched,
-      complete: summary.complete,
-      pages: summary.pages,
-      upserted: summary.upserted,
-      disappeared: summary.disappeared,
-      disappearedSymbols: summary.disappearedSymbols,
-      error: summary.error ?? null,
-    })
-    return c.json(summary)
+    const env = c.env
+    const dbBinding = c.env.DB
+    const before = await getTradableAllowlistStatus(createDb(dbBinding)).catch(() => null)
+    const job = refreshTradableAllowlist(env, new Date().toISOString())
+      .then(async (summary) => {
+        console.log(
+          JSON.stringify({ event: 'tradable_allowlist_refresh_manual', ...summary }),
+        )
+        await writeAuditLog(c, '/admin/tradable-allowlist/refresh', 'tradable-allowlist', before, {
+          ok: summary.ok,
+          fetched: summary.fetched,
+          complete: summary.complete,
+          pages: summary.pages,
+          upserted: summary.upserted,
+          disappeared: summary.disappeared,
+          disappearedSymbols: summary.disappearedSymbols,
+          error: summary.error ?? null,
+        }).catch(() => undefined)
+      })
+      .catch((err) => {
+        console.error(
+          JSON.stringify({
+            event: 'tradable_allowlist_refresh_manual_error',
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        )
+      })
+    // waitUntil で isolate を生かしたままバックグラウンド完走させる。
+    c.executionCtx.waitUntil(job)
+    return c.json({ started: true, before })
+  })
+  /**
+   * #460: allowlist の現在のサマリ (UI のポーリング用)。リフレッシュ進捗
+   * (件数の増加) と最終取得時刻を返す。
+   */
+  .get('/tradable-allowlist/status', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    if (!c.env.DB) {
+      throw new ValidationError('DB binding is not configured', { field: 'env' })
+    }
+    const status = await getTradableAllowlistStatus(createDb(c.env.DB))
+    return c.json(status)
   })
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()

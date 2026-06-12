@@ -90,4 +90,35 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
     expect(result.outcome).toBe('error')
     expect(result.error).toContain('credentials')
   })
+
+  it('onPage がページ毎にそのページ分の entries で呼ばれる (逐次保存)', async () => {
+    const pageCalls: string[][] = []
+    await fetchTradableInstruments(env, {
+      sleep: noSleep,
+      fetcher: pagedFetcher([
+        { hasNext: true, instruments: [row('SOXL', '1'), row('SOXS', '2')] },
+        { hasNext: false, instruments: [row('TQQQ', '3')] },
+      ]),
+      onPage: async (entries) => {
+        pageCalls.push(entries.map((e) => e.symbol))
+      },
+    })
+    expect(pageCalls).toEqual([['SOXL', 'SOXS'], ['TQQQ']])
+  })
+
+  it('onPage が throw しても sweep は継続する (fail-safe)', async () => {
+    const result = await fetchTradableInstruments(env, {
+      sleep: noSleep,
+      fetcher: pagedFetcher([
+        { hasNext: true, instruments: [row('SOXL', '1')] },
+        { hasNext: false, instruments: [row('TQQQ', '2')] },
+      ]),
+      onPage: async () => {
+        throw new Error('persist failed')
+      },
+    })
+    expect(result.outcome).toBe('ok')
+    expect(result.complete).toBe(true)
+    expect(result.instruments.map((e) => e.symbol).sort()).toEqual(['SOXL', 'TQQQ'])
+  })
 })

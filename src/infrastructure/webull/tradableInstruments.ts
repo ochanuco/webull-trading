@@ -76,6 +76,13 @@ interface FetchInput {
   sleep?: (ms: number) => Promise<void>
   /** test seam。default DEFAULT_THROTTLE_MS。 */
   throttleMs?: number
+  /**
+   * 各ページ取得直後に呼ばれる callback (#460 逐次保存)。そのページ分の
+   * 正規化済み entries を渡す。逐次 upsert する事で (1) 全件待たずに表示へ
+   * 反映でき、(2) 途中中断しても部分結果が DB に残る。throw しても sweep は
+   * 続行する (1 ページの保存失敗で全体を落とさない fail-safe)。
+   */
+  onPage?: (entries: TradableInstrumentEntry[], pageIndex: number) => Promise<void>
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -208,18 +215,30 @@ export async function fetchTradableInstruments(
     const rows = Array.isArray(body.instruments) ? body.instruments : []
     pages += 1
 
+    const pageEntries: TradableInstrumentEntry[] = []
     for (const raw of rows) {
       if (typeof raw !== 'object' || raw === null) continue
       const r = raw as Record<string, unknown>
       const symbol = asString(r.symbol)
       if (symbol === null) continue
-      bySymbol.set(symbol.toUpperCase(), {
+      const entry: TradableInstrumentEntry = {
         symbol: symbol.toUpperCase(),
         instrumentId: trimDecimalId(r.instrument_id),
         name: asString(r.name),
         currency: asString(r.currency),
         exchangeCode: asString(r.exchange_code),
-      })
+      }
+      bySymbol.set(entry.symbol, entry)
+      pageEntries.push(entry)
+    }
+
+    // 逐次保存 (#460)。保存失敗は 1 ページ分だけ握り潰して sweep 継続。
+    if (input.onPage && pageEntries.length > 0) {
+      try {
+        await input.onPage(pageEntries, pages - 1)
+      } catch {
+        // 部分保存失敗は致命でない (次の sweep / 後続ページで回復)。
+      }
     }
 
     const lastRow = rows.length > 0 ? (rows[rows.length - 1] as Record<string, unknown>) : undefined
