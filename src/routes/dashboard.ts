@@ -9174,6 +9174,70 @@ export function symbolMapEditorBody(
         });
     });
 
+    // インバース対の 2 枚を「一塊」として見せる装飾コネクタ (operator 要望)。
+    // Drawflow の変形コンテナ (.drawflow) 内に置くのでパン/ズーム/ドラッグに
+    // 追従する。pointer-events 無効の純装飾 — 線の編集対象にはならない。
+    var pairLinkSvg = null;
+    function updatePairLinks() {
+      var container = el.querySelector('.drawflow');
+      if (!container) return;
+      if (!pairLinkSvg) {
+        pairLinkSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        pairLinkSvg.setAttribute('class', 'sm-pair-links');
+        pairLinkSvg.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;pointer-events:none;z-index:0';
+        container.insertBefore(pairLinkSvg, container.firstChild);
+      }
+      while (pairLinkSvg.firstChild) pairLinkSvg.removeChild(pairLinkSvg.firstChild);
+      var seenPairLink = {};
+      Object.keys(idOf).forEach(function (sym) {
+        var inv = nodeBySym[sym] && nodeBySym[sym].inverse;
+        if (!inv || !idOf[inv]) return;
+        var key = [sym, inv].sort().join('/');
+        if (seenPairLink[key]) return;
+        seenPairLink[key] = true;
+        var a = document.getElementById('node-' + idOf[sym]);
+        var b = document.getElementById('node-' + idOf[inv]);
+        if (!a || !b) return;
+        var ax = a.offsetLeft + a.offsetWidth / 2;
+        var ay = a.offsetTop + a.offsetHeight / 2;
+        var bx = b.offsetLeft + b.offsetWidth / 2;
+        var by = b.offsetTop + b.offsetHeight / 2;
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', ax);
+        line.setAttribute('y1', ay);
+        line.setAttribute('x2', bx);
+        line.setAttribute('y2', by);
+        line.setAttribute('stroke', '#c22d2d');
+        line.setAttribute('stroke-width', '2');
+        line.setAttribute('stroke-dasharray', '4 4');
+        line.setAttribute('opacity', '0.55');
+        pairLinkSvg.appendChild(line);
+        var mx = (ax + bx) / 2;
+        var my = (ay + by) / 2;
+        var bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        bg.setAttribute('x', mx - 13);
+        bg.setAttribute('y', my - 10);
+        bg.setAttribute('width', 26);
+        bg.setAttribute('height', 20);
+        bg.setAttribute('rx', 10);
+        bg.setAttribute('fill', '#fdecec');
+        bg.setAttribute('stroke', '#c22d2d');
+        bg.setAttribute('stroke-width', '1');
+        pairLinkSvg.appendChild(bg);
+        var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', mx);
+        label.setAttribute('y', my + 4);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('font-size', '12');
+        label.setAttribute('fill', '#c22d2d');
+        label.textContent = '⇄';
+        pairLinkSvg.appendChild(label);
+      });
+    }
+    editor.on('nodeMoved', function () { updatePairLinks(); });
+    editor.on('nodeRemoved', function () { setTimeout(updatePairLinks, 0); });
+    setTimeout(updatePairLinks, 0);
+
     if (isView) {
       // 読み取り専用: 共有値の描画と simulate だけ。編集系ハンドラは付けない。
       renderShares();
@@ -9222,6 +9286,7 @@ export function symbolMapEditorBody(
       return { activate: activate, deactivate: deactivate, heldSkip: heldSkip };
     }
     function renderChanges() {
+      updatePairLinks();
       var d = renderShares();
       var bar = document.getElementById('sm-changes-bar');
       var list = document.getElementById('sm-changes-list');
