@@ -823,3 +823,47 @@ export const portfolioEquitySnapshot = sqliteTable(
 
 export type PortfolioEquitySnapshotRow = typeof portfolioEquitySnapshot.$inferSelect
 export type PortfolioEquitySnapshotInsert = typeof portfolioEquitySnapshot.$inferInsert
+
+/**
+ * Webull OpenAPI の「実発注できる銘柄」allowlist キャッシュ (#460)。
+ *
+ * 元データは `GET /trade/instrument/tradable/list` (x-version v1, no `/openapi`
+ * prefix, app-level 署名のみで access token 不要)。これは口座が **OpenAPI 経由で
+ * 実際に発注できる銘柄の全集合** で、コンシューマアプリの取扱 universe とは別物。
+ * deny 実証済みの USMV は不在、実運用中の SOXL/SOXS/SQQQ/TQQQ は在籍することを
+ * 本番資格情報で確認済み (2026-06-12)。instrument/stock/list の `status` (USMV も
+ * VUG も OC) では deny を区別できないので、この allowlist が唯一の事前判定路。
+ *
+ * **物理削除しない (upsert only)**: 自動売買で使用中の銘柄が tradable/list から
+ * 消えても行は残す (`currently_tradable=false` にするだけ)。理由は (1) reconcile /
+ * 履歴追跡が壊れない、(2) `true→false` 遷移自体が「保有中銘柄が取扱停止された」
+ * 監視シグナルになる。発注は止めず警告レイヤーとして使い、最終防衛は #460 の
+ * 発注後 417 TICKER_IS_DENY 自動 disable のまま。
+ */
+export const tradableInstrument = sqliteTable(
+  'tradable_instrument',
+  {
+    /** 大文字正規化済みティッカー。 */
+    symbol: text('symbol').primaryKey(),
+    /** Webull instrument_id (端数 `.000000` を除去して保持)。 */
+    instrumentId: text('instrument_id'),
+    name: text('name'),
+    currency: text('currency'),
+    exchangeCode: text('exchange_code'),
+    /** 直近の日次 sweep で tradable/list に在籍したか。false = 過去はいたが消失。 */
+    currentlyTradable: integer('currently_tradable', { mode: 'boolean' }).notNull().default(true),
+    /** 初めて allowlist に観測した時刻 (ISO 8601 UTC)。 */
+    firstSeenAt: text('first_seen_at').notNull(),
+    /** 直近で allowlist に在籍を確認した時刻 (ISO 8601 UTC)。消失後は更新しない。 */
+    lastSeenAt: text('last_seen_at').notNull(),
+    /** 行を最後に書いた時刻 (true→false 遷移含む)。 */
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    // 一覧/ワークフローで「現在取扱不可」だけを引くフィルタ用。
+    currentlyTradableIdx: index('tradable_instrument_currently_idx').on(t.currentlyTradable),
+  }),
+)
+
+export type TradableInstrumentRow = typeof tradableInstrument.$inferSelect
+export type TradableInstrumentInsert = typeof tradableInstrument.$inferInsert
