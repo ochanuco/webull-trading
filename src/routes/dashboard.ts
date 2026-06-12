@@ -8984,8 +8984,21 @@ export function symbolMapEditorBody(
     });
 
     programmatic = true;
+    // 対は「線 1 本」をシード時から徹底する: DB は両側に pct を持つが、線は
+    // 代表側 (先に並ぶ方) のみ張る。サブ側は draft 上も connected=false にし、
+    // 「対で共有」表示に任せる — こうしないとサブ側の線を消しても apply 対象に
+    // ならず、リロードで復活してしまう。
+    var seededPairEdge = {};
     data.nodes.forEach(function (n) {
-      if (n.pct > 0) editor.addConnection(accountIds[n.currency], idOf[n.sym], 'output_1', 'input_1');
+      if (n.pct > 0) {
+        var pairKey = n.inverse ? [n.sym, n.inverse].sort().join('/') : n.sym;
+        if (seededPairEdge[pairKey]) {
+          draft[n.sym].connected = false;
+        } else {
+          seededPairEdge[pairKey] = true;
+          editor.addConnection(accountIds[n.currency], idOf[n.sym], 'output_1', 'input_1');
+        }
+      }
       if (n.fallback && idOf[n.fallback]) editor.addConnection(idOf[n.sym], idOf[n.fallback], 'output_1', 'input_1');
     });
     programmatic = false;
