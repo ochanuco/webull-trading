@@ -1,4 +1,8 @@
 import type { SymbolRole, SymbolRoleValue } from '../../infrastructure/db/symbolConfigRepo'
+import {
+  type MomentumRule,
+  TEST_DEFAULT_MOMENTUM_RULE,
+} from './strategies/BreakoutMomentumStrategy'
 import type { SymbolRule } from './strategies/PullbackUptrendStrategy'
 
 /**
@@ -101,6 +105,8 @@ const ENTRY_ENABLED_ROLES: ReadonlySet<SymbolRole> = new Set([
   'low_volatility',
   'sector_trend',
   'inverse_hedge',
+  // #momentum: entry 有効 (BreakoutMomentumStrategy で判定)。
+  'momentum',
 ])
 
 /**
@@ -113,9 +119,21 @@ export function buildHalfEntrySymbols(
 ): Set<string> {
   const enabled = new Set<string>()
   for (const [symbol, role] of Object.entries(symbolRole)) {
+    // #momentum: モメンタムは HALF 昇格 (degree-gate の near-threshold 許容) と
+    // 相性が悪い (ブレイク未達=もっと手前で 0.5x は逆効果) ので除外。
+    if (role === 'momentum') continue
     if (role !== 'unknown' && ENTRY_ENABLED_ROLES.has(role)) enabled.add(symbol)
   }
   return enabled
+}
+
+/** role === 'momentum' の symbol 集合 (#momentum)。scheduler の戦略分岐に使う。 */
+export function buildMomentumSymbols(symbolRole: Record<string, SymbolRoleValue>): Set<string> {
+  const set = new Set<string>()
+  for (const [symbol, role] of Object.entries(symbolRole)) {
+    if (role === 'momentum') set.add(symbol)
+  }
+  return set
 }
 
 /**
@@ -208,4 +226,32 @@ export function buildSymbolRules(
     }
   }
   return rulesMap
+}
+
+/**
+ * role === 'momentum' の symbol ごとに MomentumRule を組み立てる (#momentum)。
+ * `TEST_DEFAULT_MOMENTUM_RULE` を基準に、既存 override 列 (stop/tp/timeStop/kAtr/
+ * minReturn/maxSma50Dev/requireAboveSma50) を重ねる。breakoutBuffer に対応する
+ * override 列は無いので preset 値のまま。
+ */
+export function buildMomentumRules(
+  overrides: SymbolRuleOverrides,
+  base: MomentumRule = TEST_DEFAULT_MOMENTUM_RULE,
+): Record<string, MomentumRule> {
+  const rules: Record<string, MomentumRule> = {}
+  for (const [sym, role] of Object.entries(overrides.symbolRole)) {
+    if (role !== 'momentum') continue
+    rules[sym] = {
+      ...base,
+      stopPct: overrides.symbolStopPctOverride[sym] ?? base.stopPct,
+      takeProfitPct: overrides.symbolTakeProfitPctOverride[sym] ?? base.takeProfitPct,
+      timeStopDays: overrides.symbolTimeStopDaysOverride[sym] ?? base.timeStopDays,
+      kAtr: overrides.symbolKAtrOverride[sym] ?? base.kAtr,
+      minReturn: overrides.symbolMinReturn50dOverride[sym] ?? base.minReturn,
+      maxSma50DeviationPct:
+        overrides.symbolMaxSma50DeviationPctOverride[sym] ?? base.maxSma50DeviationPct,
+      requireAboveSma50: overrides.symbolRequireAboveSma50Override[sym] ?? base.requireAboveSma50,
+    }
+  }
+  return rules
 }
