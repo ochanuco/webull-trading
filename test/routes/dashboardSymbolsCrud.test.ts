@@ -1465,7 +1465,8 @@ describe('dashboard symbol_config role / entry override (#452)', () => {
     )
     const body = await res.text()
     expect(body).toContain('name="role"')
-    expect(body).toMatch(/<option value="core_trend" selected>/)
+    // select 廃止 → hidden input に現在の role が入る (#role-stats)
+    expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role" value="core_trend">/)
     // fraction → % 表示
     expect(body).toMatch(/name="pullback_max_override"[^>]*value="-1\.5"/)
     expect(body).toMatch(/name="min_return_50d_override"[^>]*value="3"/)
@@ -1602,7 +1603,7 @@ describe('CodeRabbit #453 対応 (不正 role のフォーム防御)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('不正 role はフォームで selected のまま警告表示 (silent に未設定へ戻さない)', async () => {
+  it('不正 role は hidden input に保持され警告表示 (silent に未設定へ戻さない)', async () => {
     const db = fakeDb([row({ symbol: 'OOPS', role: 'cash_praking' })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -1612,10 +1613,9 @@ describe('CodeRabbit #453 対応 (不正 role のフォーム防御)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     const body = await res.text()
-    expect(body).toMatch(/<option value="cash_praking" selected>⚠ 不正値/)
+    // select 廃止 → 不正値は hidden input に保持され、警告を出す (#role-stats)
+    expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role" value="cash_praking">/)
     expect(body).toContain('entry は抑止中')
-    // role select の「未設定」が selected になっていない (他 select の '' とは区別)
-    expect(body).not.toMatch(/<option value="" selected>未設定/)
   })
 })
 
@@ -1667,9 +1667,9 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     const body = await res.text()
     // 必須バッジ: 凡例 1 + 銘柄 / 市場 / 通貨 / 売買単位 / ロール の計 6 箇所
     expect((body.match(/>必須<\/span>/g) ?? []).length).toBe(6)
-    // ロールは基本カードで必須 select (新規はプレースホルダのみ、未設定は選べない)
-    expect(body).toMatch(/<select name="role" required/)
-    expect(body).toContain('<option value="" disabled selected>選択してください</option>')
+    // ロールは select を廃止し hidden input + カードギャラリーで選択 (#role-stats)
+    expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role"/)
+    expect(body).toContain('選択中:')
     // 任意セクションは details で、新規時は閉じている (open なし)
     expect(body).toContain('発注サイズ')
     expect(body).toContain('戦略ロール・entry 条件')
@@ -1678,6 +1678,17 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).not.toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
     // 売買単位の fail-closed 注意は 1 行だけ残す
     expect(body).toContain('未設定の銘柄は発注されません (fail-closed)')
+    // #role-stats: ロール比較ギャラリー + ホバー右プレビューが ship される。
+    expect(body).toContain('id="role-gallery"')
+    expect(body).toContain('id="role-preview"')
+    // 2軸を構造で表現: 入場アーキのタブ (押し目 + 設計中の モメンタム/逆張り)
+    expect(body).toContain('class="role-arch-tab"')
+    expect(body).toMatch(/data-arch="pullback"/)
+    expect(body).toContain('モメンタム')
+    expect(body).toContain('逆張り')
+    // role 別 preset 解決値 (入場ゲート閾値・stop/TP) が含まれる。
+    expect(body).toContain('leveraged_trend: { tr: 8, heat: 60')
+    expect(body).toContain('inverse_hedge: { tr: 15, heat: 40')
   })
 
   it('edit フォーム: 値が入っているセクションは開いた状態で表示', async () => {
