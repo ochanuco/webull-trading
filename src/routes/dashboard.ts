@@ -10626,6 +10626,16 @@ function symbolFormBody(args: SymbolFormArgs): string {
             選択中: <strong id="role-current" style="font-size:13px">—</strong>
             <span class="muted" style="font-size:11px;margin-left:6px">カードをクリックで選択 / ホバーで右に詳細</span>
           </div>
+          <!-- 2軸の案内: 入場アーキ(横) × 銘柄プロファイル(縦のカード)。現状は
+               全ロールが「押し目」アーキ。モメンタム/逆張りは別軸で設計中。 -->
+          <div style="font-size:11px;color:#5f6368;background:#f6f6f9;border-radius:6px;padding:6px 8px;margin-bottom:6px">
+            <strong>2軸</strong>: 入場アーキ × 銘柄プロファイル。
+            入場アーキ =
+            <span style="background:#e7f1ff;color:#06c;border-radius:4px;padding:0 5px">押し目 (有効)</span>
+            <span style="background:#eee;color:#999;border-radius:4px;padding:0 5px" title="設計中・未実装">モメンタム (設計中)</span>
+            <span style="background:#eee;color:#999;border-radius:4px;padding:0 5px" title="設計中・未実装">逆張り (設計中)</span>
+            <span class="muted">／ 下のカード = 銘柄プロファイル(現状すべて押し目アーキ)。ホバーで「入場アーキ/horizon/想定銘柄」の説明。</span>
+          </div>
           ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
           <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           <div class="muted" style="font-size:11px;margin-top:3px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
@@ -10652,6 +10662,16 @@ function symbolFormBody(args: SymbolFormArgs): string {
             leveraged_trend: 'レバETF・トレンド', core_trend: '非レバ・トレンド',
             sector_trend: 'セクター', low_volatility: '低ボラ',
             inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金'
+          };
+          // 2軸の説明 (入場アーキ / horizon / 想定銘柄の性質)。現状は全ロール
+          // 「押し目」アーキ。モメンタム/逆張りアーキは別軸で設計中 (未実装)。
+          var DESC = {
+            leveraged_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '3x レバ ETF' },
+            core_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x トレンド' },
+            sector_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x セクター ETF' },
+            low_volatility: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~15日', character: '低ボラ 1x' },
+            inverse_hedge: { arch: '押し目 (下落レジームの inverse 押し目)', horizon: '超短 5日', character: '3x インバース' },
+            cash_parking: { arch: 'entry なし', horizon: '—', character: '待機資金 (退避先・常時配分)' }
           };
           var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
@@ -10747,6 +10767,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
           var selected = ${JSON.stringify(roleValue)};
           var currentShown = selected;
           function labelOf(role) { return LABEL[role] || (role ? ('⚠ ' + role) : '未選択'); }
+          // 4 つの説明 (ロール / 入場アーキ / horizon / 想定銘柄の性質)。
+          function descHtml(role) {
+            var d = DESC[role];
+            if (!d) return '';
+            function row(k, v) { return '<div style="display:flex;gap:6px"><span style="color:#86868b;min-width:62px">' + k + '</span><span>' + v + '</span></div>'; }
+            return '<div style="font-size:11px;line-height:1.5;background:#f6f6f9;border-radius:6px;padding:5px 7px;margin-bottom:6px">' +
+              row('入場アーキ', d.arch) + row('horizon', d.horizon) + row('想定銘柄', d.character) + '</div>';
+          }
           function showPreview(role) {
             currentShown = role;
             var pv = document.getElementById('role-preview');
@@ -10755,7 +10783,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
             if (!role || (!P[role] && role !== 'cash_parking')) { pv.style.display = 'none'; return; }
             var color = COLOR[role] || '#5f6368';
             if (role === 'cash_parking') {
-              body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">待機資金</div>' + ladder(role, {}, 280, 120, true) + '<div style="margin-top:6px">' + gateHtml(role, {}) + '</div>';
+              body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">待機資金</div>' + descHtml(role) + ladder(role, {}, 280, 120, true) + '<div style="margin-top:6px">' + gateHtml(role, {}) + '</div>';
               pv.style.display = '';
               return;
             }
@@ -10763,6 +10791,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
             var note = p.ov.any ? 'preset + この銘柄の override (* 印) を反映' : 'preset の姿 (override 未設定)';
             body.innerHTML =
               '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">' + LABEL[role] + '</div>' +
+              descHtml(role) +
               ladder(role, p, 280, 150, true) +
               '<div style="margin-top:6px">' + gateHtml(role, p) + '</div>' +
               '<div style="font-size:10px;color:#aaa;margin-top:6px">直近高値=0% 基準・実効値の模式<br>' + note + '</div>';
