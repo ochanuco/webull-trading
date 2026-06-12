@@ -1671,7 +1671,6 @@ const STYLE = `
   .tl-label{flex:1 1 auto;min-width:140px}
   .tl-cmp{color:#222;font-variant-numeric:tabular-nums}
   .tl-cmp b{color:#06c}
-  .tl-thresh{color:#9aa0a6}
   .tl-msg{color:#86868b;font-style:italic}
   .tl-pick{color:#06c;font-weight:700;font-size:11px}
   .tl-arrow{text-align:center;color:#86868b;line-height:1.1;margin:2px 0}
@@ -4431,7 +4430,12 @@ function cronReasonCell(row: {
   const rawReason = row.reason ?? '-'
   const decisionJson = JSON.stringify(cronDecisionJson(row), null, 2)
   const humanDetails = describeCronReason(row.reason)
-  const ladder = renderDecisionLadder(row.traceJson ?? null, row.decision, localized || rawReason)
+  const ladder = renderDecisionLadder(
+    row.traceJson ?? null,
+    row.decision,
+    localized || rawReason,
+    currencyOfSymbol(row.symbol),
+  )
 
   return `<details class="reason-details">
     <summary>${esc(localized || '-')}</summary>
@@ -4446,16 +4450,38 @@ function cronReasonCell(row: {
   </details>`
 }
 
+// trace 識別子 → 左辺 (変数) の表示名 + 単位、必要なら右辺 (閾値) の名前。
+// 左の値が「何の数字か」を明示するため (#trace-readability)。識別子は
+// decision_log 互換で英語据え置き、ここで表示名と単位を与える。
+const TRACE_OPERAND: Record<string, { name: string; unit: 'price' | 'pct' | 'mult' | 'days'; thr?: string }> = {
+  'entry.trend_50d_return': { name: '20日騰落率', unit: 'pct' },
+  'entry.trend_20d_return': { name: '20日騰落率', unit: 'pct' },
+  'entry.above_sma50': { name: '株価', unit: 'price', thr: 'SMA50' },
+  'entry.not_overextended': { name: '移動平均乖離率', unit: 'pct' },
+  'entry.not_blowoff': { name: 'SMA50乖離率', unit: 'pct' },
+  'entry.vol_not_elevated': { name: 'ATR倍率', unit: 'mult' },
+  'entry.high20d_valid': { name: '直近10日高値', unit: 'price' },
+  'entry.breakout_high_valid': { name: '直近20日高値', unit: 'price' },
+  'entry.breakout': { name: '株価', unit: 'price', thr: 'ブレイク水準' },
+  'entry.pullback_not_too_shallow': { name: '押し目率', unit: 'pct' },
+  'entry.pullback_not_too_deep': { name: '押し目率', unit: 'pct' },
+  'exit.take_profit': { name: '損益率', unit: 'pct' },
+  'exit.stop_loss': { name: '損益率', unit: 'pct' },
+  'exit.time_stop': { name: '保有日数', unit: 'days' },
+}
+
 /**
  * 判定トレース (`DecisionTraceStep[]` JSON) を「入力→ロジック層→出力」のラダーに
- * 描画する (#decision-trace)。各 gate を順に ✅/❌ + 比較式 (actual op threshold) で
+ * 描画する (#decision-trace)。各 gate を順に ✅/❌ + 比較式 (左辺名 値 op 閾値) で
  * 並べ、最後のステップ(=分岐を確定させた層)に ◀ を付けて下の出力ボックスへ矢印で繋ぐ。
+ * `currency` は価格系の値に $/¥ を付けるために使う (null なら記号なし)。
  * trace 未保存 (migration 前 / 一部経路) は空文字 (既存表示のまま)。
  */
 function renderDecisionLadder(
   traceJson: string | null,
   decision: string,
   outputReason: string,
+  currency: string | null = null,
 ): string {
   if (!traceJson) return ''
   let steps: Array<{
@@ -4480,27 +4506,21 @@ function renderDecisionLadder(
     if (typeof v === 'number') return String(Math.round(v * 10000) / 10000)
     return String(v)
   }
-  // 演算子 → 閾値の意味する向き (どちらが「現在値」でどちらが「基準」か明示)。
   const opSymbol: Record<string, string> = {
     '>': '>', '>=': '≥', '<': '<', '<=': '≤', '==': '=', '!=': '≠',
     between: '∈', exists: '', not_exists: '',
   }
-  const thresholdWord = (op?: string): string => {
-    switch (op) {
-      case '>':
-      case '>=':
-        return '必要' // threshold は下限 (これ以上ないと不成立)
-      case '<':
-      case '<=':
-        return '上限' // threshold は上限 (これを超えると不成立)
-      case '==':
-        return '期待'
-      case '!=':
-        return '不可'
-      case 'between':
-        return '範囲'
-      default:
-        return '基準'
+  // 単位ごとに値を整形。price は通貨記号 ($/¥) 付き。
+  const fmtVal = (v: number, unit: 'price' | 'pct' | 'mult' | 'days'): string => {
+    switch (unit) {
+      case 'price':
+        return fmtPriceCcy(v, currency)
+      case 'pct':
+        return fmtPctSigned(v)
+      case 'mult':
+        return `${v.toFixed(2)}×`
+      case 'days':
+        return `${Math.round(v)}日`
     }
   }
   const lastIdx = steps.length - 1
@@ -4509,19 +4529,23 @@ function renderDecisionLadder(
       const ok = s.passed === true
       const mark = ok ? '✅' : '❌'
       const label = esc(s.label_ja || s.label || '?')
-      // 「現在 <実測>(太字)/ <方向語> <記号> <閾値>(muted)」で、どちらが変数で
-      // どちらが基準値かを一目で分かるようにする (#trace-readability)。
-      const aStr = fmt(s.actual)
-      const tStr = fmt(s.threshold)
-      const sym = s.operator ? (opSymbol[s.operator] ?? s.operator) : ''
-      const cmp =
-        s.actual !== undefined || s.threshold !== undefined
-          ? `<span class="tl-cmp">${aStr !== '' ? `現在 <b>${esc(aStr)}</b>` : ''}${
-              tStr !== ''
-                ? `<span class="tl-thresh"> / ${esc(thresholdWord(s.operator))}${sym ? ' ' + esc(sym) : ''} ${esc(tStr)}</span>`
-                : ''
-            }</span>`
-          : ''
+      // 「<左辺名> <値>(太字) <記号> [<閾値名>] <閾値>」で、左が何の数字かを明示
+      // する (#trace-readability)。識別子に表示名が無い step は素の比較式。
+      const opSym = s.operator ? (opSymbol[s.operator] ?? s.operator) : ''
+      const meta = s.label ? TRACE_OPERAND[s.label] : undefined
+      let cmp = ''
+      if (s.actual !== undefined || s.threshold !== undefined) {
+        if (meta && typeof s.actual === 'number') {
+          const aStr = fmtVal(s.actual, meta.unit)
+          const tStr = typeof s.threshold === 'number' ? fmtVal(s.threshold, meta.unit) : fmt(s.threshold)
+          const thrName = meta.thr ? `${meta.thr} ` : ''
+          cmp = `<span class="tl-cmp">${esc(meta.name)} <b>${esc(aStr)}</b>${opSym ? ` ${esc(opSym)}` : ''}${tStr !== '' ? ` ${esc(thrName)}${esc(tStr)}` : ''}</span>`
+        } else {
+          const aStr = fmt(s.actual)
+          const tStr = fmt(s.threshold)
+          cmp = `<span class="tl-cmp">${aStr !== '' ? `<b>${esc(aStr)}</b>` : ''}${opSym ? ` ${esc(opSym)} ` : ' '}${esc(tStr)}</span>`
+        }
+      }
       const msg = s.message ? `<span class="tl-msg">${esc(s.message)}</span>` : ''
       const decisive = i === lastIdx ? ' tl-decisive' : ''
       const arrow = i === lastIdx ? '<span class="tl-pick">◀ 採用</span>' : ''
@@ -4549,9 +4573,10 @@ export function renderChartDecisionTrace(
   traceJson: string | null,
   decision: string,
   reason: string | null,
+  currency: string | null = null,
 ): string {
   const outputReason = localizeReason(reason) || (reason ?? '-')
-  const ladder = renderDecisionLadder(traceJson, decision, outputReason)
+  const ladder = renderDecisionLadder(traceJson, decision, outputReason, currency)
   if (ladder) return ladder
   const decUpper = (decision || '').toUpperCase()
   return `<div><strong>判定トレース</strong>
@@ -5157,7 +5182,7 @@ export async function loadSymbolChart(
       price: Number(r.price),
       decision: (r.decision ?? '').toUpperCase() as SymbolChartDecision['decision'],
       reason: r.reason,
-      ladderHtml: renderChartDecisionTrace(r.trace_json, r.decision ?? '', r.reason),
+      ladderHtml: renderChartDecisionTrace(r.trace_json, r.decision ?? '', r.reason, currencyOfSymbol(symbol)),
     }))
     .slice(-MAX_CHART_DECISIONS)
 
@@ -7361,6 +7386,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderBuyabilityPanel(args.buyability ?? null, {
     entryStatus: args.entryStatus ?? null,
+    currency: args.focusSymbol ? currencyOfSymbol(args.focusSymbol) : null,
   })}
   ${renderDecisionPlotCaption(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
@@ -8497,30 +8523,28 @@ function fmtPctSigned(v: number): string {
 }
 
 /**
- * 入場ゲートを「現在 <実測> ／ <方向語> <記号> <閾値>」で整形 (#entry-distance /
- * #trace-readability)。どちらが現在値 (変数) でどちらが基準 (設定) かを語で明示する。
- * 方向語: 演算子が >/≥ なら閾値は「必要」(下限)、</≤ なら「上限」。
+ * 入場ゲートを「<左辺名> <実測> <記号> [<閾値名>] <閾値>」で整形 (#entry-distance /
+ * #trace-readability)。左の値が何の数字かを名前で明示する。価格系は通貨記号 ($/¥)
+ * 付き (currency 未指定なら $)。
  */
-function fmtGateValue(g: EntryGateStatus): string {
+function fmtGateValue(g: EntryGateStatus, currency: string | null = null): string {
   const sym = ({ '>': '>', '>=': '≥', '<': '<', '<=': '≤' } as Record<string, string>)[g.operator] ?? g.operator
-  const word =
-    g.operator === '<' || g.operator === '<=' ? '上限' : g.operator === '>' || g.operator === '>=' ? '必要' : '基準'
-  const [a, t] = ((): [string, string] => {
-    switch (g.key) {
-      case 'trend':
-      case 'overextension':
-      case 'pullback_shallow':
-      case 'pullback_deep':
-        return [fmtPctSigned(g.actual), fmtPctSigned(g.threshold)]
-      case 'above_sma50':
-        return [`$${g.actual.toFixed(2)}`, `$${g.threshold.toFixed(2)} (SMA50)`]
-      case 'volatility':
-        return [`${g.actual.toFixed(2)}×`, `${g.threshold.toFixed(2)}×`]
-      case 'high20d_valid':
-        return [`$${g.actual.toFixed(2)}`, '0']
-    }
-  })()
-  return `現在 ${a} ／ ${word} ${sym} ${t}`
+  const price = (v: number): string => fmtPriceCcy(v, currency)
+  switch (g.key) {
+    case 'trend':
+      return `20日騰落率 ${fmtPctSigned(g.actual)} ${sym} ${fmtPctSigned(g.threshold)}`
+    case 'overextension':
+      return `移動平均乖離率 ${fmtPctSigned(g.actual)} ${sym} ${fmtPctSigned(g.threshold)}`
+    case 'pullback_shallow':
+    case 'pullback_deep':
+      return `押し目率 ${fmtPctSigned(g.actual)} ${sym} ${fmtPctSigned(g.threshold)}`
+    case 'above_sma50':
+      return `株価 ${price(g.actual)} ${sym} SMA50 ${price(g.threshold)}`
+    case 'volatility':
+      return `ATR倍率 ${g.actual.toFixed(2)}× ${sym} ${g.threshold.toFixed(2)}×`
+    case 'high20d_valid':
+      return `直近高値 ${price(g.actual)} ${sym} ${price(g.threshold)}`
+  }
 }
 
 /**
@@ -8534,6 +8558,8 @@ function fmtGateValue(g: EntryGateStatus): string {
 export interface BuyabilityPanelContext {
   /** 段階判定 (#452 PR 2)。null = 出さない。 */
   entryStatus?: EntryStatusResult | null
+  /** 価格表示の通貨 ($/¥)。未指定なら $。 */
+  currency?: string | null
 }
 
 export function renderBuyabilityPanel(
@@ -8543,6 +8569,7 @@ export function renderBuyabilityPanel(
   if (!buyability || !buyability.current) return ''
   const cur = buyability.current
   const status = ctx.entryStatus ?? null
+  const ccy = ctx.currency ?? null
 
   // --- 結論 ---
   let headline: string
@@ -8554,7 +8581,7 @@ export function renderBuyabilityPanel(
   } else if (cur.entryPrice !== null && cur.priceMove !== null) {
     const dir = cur.priceMove < 0 ? '下落' : '上昇'
     const binding = cur.bindingGate ? ` ／ ボトルネック: ${esc(cur.bindingGate.labelJa)}` : ''
-    headline = `入場まで: あと 価格 <strong>${fmtPctSigned(cur.priceMove)}</strong>（$${cur.entryPrice.toFixed(2)} 到達 = ${dir}）${binding}`
+    headline = `入場まで: あと 価格 <strong>${fmtPctSigned(cur.priceMove)}</strong>（${fmtPriceCcy(cur.entryPrice, ccy)} 到達 = ${dir}）${binding}`
     headColor = '#b25000'
   } else {
     const g = cur.bindingGate
@@ -8564,7 +8591,7 @@ export function renderBuyabilityPanel(
         : 'この指標が条件を満たすまでは、価格がどこでも入場しません。'
       : ''
     headline = g
-      ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g))} 不成立）。${why}`
+      ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))} 不成立）。${why}`
       : '入場条件 評価不可'
     headColor = '#c22'
   }
@@ -8624,7 +8651,7 @@ export function renderBuyabilityPanel(
       const tag = binding ? ' <span style="color:#c22;font-weight:600">◀ ボトルネック</span>' : ''
       return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 8px;background:${bg};${border}border-radius:4px;font-size:12px;flex-wrap:wrap">
         <span>${mark}</span><span>${esc(g.labelJa)}</span>
-        <span style="color:#555;font-variant-numeric:tabular-nums">${esc(fmtGateValue(g))}</span>${tag}
+        <span style="color:#555;font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
       </div>`
     })
     .join('')
@@ -8678,6 +8705,15 @@ function fmtPriceCcy(v: number, currency: string | null): string {
   const mark = currency === 'JPY' ? '¥' : '$'
   const digits = currency === 'JPY' ? 0 : 2
   return `${mark}${v.toLocaleString('ja-JP', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
+}
+
+/**
+ * 銘柄コードから通貨を推定する。JP 上場 ETF は 4 桁数字コード (1357 等) なので
+ * 数字始まりは JPY、それ以外 (アルファベット ticker) は USD とみなす。symbolCurrency
+ * マップが手元に無い表示経路 (判定トレース等) 用の軽量フォールバック。
+ */
+function currencyOfSymbol(symbol: string): 'JPY' | 'USD' {
+  return /^\d/.test(symbol.trim()) ? 'JPY' : 'USD'
 }
 
 /**
