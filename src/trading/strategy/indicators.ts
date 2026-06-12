@@ -39,6 +39,12 @@ export interface PullbackIndicatorSnapshot {
   low20d: number
   atr20: number
   baselineAtr20: number
+  /**
+   * ブレイクアウト基準 = **当日を除く** 直近 20 営業日の終値高値 (#momentum)。
+   * `high20d`(当日含む高値)を流用すると自己参照で発火不能になるため別計算。
+   * モメンタム戦略のみ使用 (押し目戦略は参照しない)。bars < 21 のとき 0。
+   */
+  breakoutHigh20: number
 }
 
 /**
@@ -78,6 +84,9 @@ export function computePullbackIndicators(
   // 「price <= high10d * (1 + pullbackMax)」になり、押し目判定が短期化する。
   const high20d = Math.max(...highs.slice(-10))
   const low20d = Math.min(...lows.slice(-20))
+  // ブレイクアウト基準 (#momentum): 当日を除く直近 20 営業日の終値高値。
+  // closes は >=50 本あるので slice(-21,-1) は常に 20 本。
+  const breakoutHigh20 = Math.max(...closes.slice(-21, -1))
   // #318: return lookback 20 営業日に対応。`(last - closes[-20]) / closes[-20]`。
   const return50d = (last - baseline) / baseline
 
@@ -95,7 +104,7 @@ export function computePullbackIndicators(
       ? intradayPrice
       : last
 
-  return { price, sma50, return50d, high20d, low20d, atr20, baselineAtr20 }
+  return { price, sma50, return50d, high20d, low20d, atr20, baselineAtr20, breakoutHigh20 }
 }
 
 export function computeHoldBusinessDays(

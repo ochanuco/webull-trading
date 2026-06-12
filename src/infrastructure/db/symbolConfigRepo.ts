@@ -17,6 +17,10 @@ export const SYMBOL_ROLES = [
   'low_volatility',
   'sector_trend',
   'inverse_hedge',
+  // #momentum: ブレイクアウト/モメンタム入場アーキ。BreakoutMomentumStrategy で
+  // 判定する (押し目とは別 strategy)。登録時に警告を出すが、以降は通常ロールと
+  // 同じく Risk→Execution を通る。1x 向け (3x は使わない運用)。
+  'momentum',
 ] as const
 export type SymbolRole = (typeof SYMBOL_ROLES)[number]
 

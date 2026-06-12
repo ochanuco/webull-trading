@@ -23,6 +23,7 @@ import type { BuyingPowerLedger } from './buyingPower'
 const INTRADAY_CLOSE_WINDOW_MIN = 15
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
+import { BreakoutMomentumStrategy } from './strategies/BreakoutMomentumStrategy'
 import {
   PullbackUptrendStrategy,
   TEST_DEFAULT_RULE,
@@ -63,6 +64,14 @@ export interface PullbackSchedulerOptions {
    */
   defaultRule?: SymbolRule
   rulesMap?: Record<string, SymbolRule>
+  /**
+   * #momentum: role === 'momentum' の symbol 集合。これに含まれる symbol は
+   * `momentumStrategy` で判定する (押し目戦略の代わり)。signal は以降の
+   * Risk→Execution を通常 BUY/SELL と同じく通る。
+   */
+  momentumSymbols?: Set<string>
+  /** #momentum: momentum symbol 用の戦略。未指定なら momentum symbol も押し目で判定 (後方互換)。 */
+  momentumStrategy?: BreakoutMomentumStrategy
   symbolCapMap?: Record<string, number>
   barLookback?: number
   riskPerTradePct?: number
@@ -563,7 +572,12 @@ export async function runPullbackScheduler(
           : 0,
     }
 
-    let signal = strategy.decide({
+    // #momentum: momentum ロールの symbol は BreakoutMomentumStrategy で判定。
+    // signal の形は同じで、以降の lot / risk / buying-power / pending / DRY_RUN
+    // execution は通常 BUY/SELL と全く同じ経路を通る (= 通常ロールと同じ動き)。
+    const useMomentum = !!(options.momentumStrategy && options.momentumSymbols?.has(upper))
+    const decider = useMomentum ? options.momentumStrategy! : strategy
+    let signal = decider.decide({
       symbol: upper,
       indicators,
       position: state.position,

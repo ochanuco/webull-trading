@@ -34,6 +34,18 @@ describe('computePullbackIndicators', () => {
     // low20d は変更なし (20 日窓のまま、dashboard 表示用)。
     // lows are close*0.99, last 20 closes are 140..159 → min = 140 * 0.99
     expect(r.low20d).toBeCloseTo(140 * 0.99, 4)
+    // #momentum: breakoutHigh20 = 当日を除く直近20日の終値高値。
+    // closes[-21..-1] = closes 139..158 → max = 158 (当日 159 は除外)。
+    expect(r.breakoutHigh20).toBe(158)
+  })
+
+  it('breakoutHigh20 は当日終値を含めない (自己参照防止)', () => {
+    // 単調増加なら当日が常に最高値。breakoutHigh20 は前日(=当日除く最高)になる。
+    const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
+    const r = computePullbackIndicators(makeBars(closes))!
+    // 当日 close = 159。breakoutHigh20 は 158 (当日を除外) で、159 にはならない。
+    expect(r.breakoutHigh20).toBe(158)
+    expect(r.breakoutHigh20).toBeLessThan(r.price)
   })
 
   it('low20d picks the smallest low even when not the most recent bar', () => {

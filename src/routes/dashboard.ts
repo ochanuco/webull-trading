@@ -10378,6 +10378,7 @@ const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
   low_volatility: '低ボラ',
   sector_trend: 'セクター',
   inverse_hedge: 'インバースヘッジ (短期)',
+  momentum: 'モメンタム (⚠未検証)',
 }
 
 /** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
@@ -10388,6 +10389,7 @@ const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   low_volatility: 'low_volatility — 低ボラ ETF (USMV / SPLV 等)',
   sector_trend: 'sector_trend — 1x セクター ETF (SMH / SOXX 等)',
   inverse_hedge: 'inverse_hedge — 3x インバース・短期 (SQQQ / SOXS。1x は override 必須)',
+  momentum: 'momentum — ⚠ モメンタム/ブレイク (1x向け・backtest未検証・要警告)',
 }
 
 /** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
@@ -10635,10 +10637,18 @@ function symbolFormBody(args: SymbolFormArgs): string {
             <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
           <div class="role-arch-panel" data-arch="momentum" style="display:none">
-            <div style="font-size:12px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:14px 16px">⚙ 設計中 — 新高値ブレイクの継続を取る入場アーキ(1x向け)。strategist 設計 → red-team の後に有効化。</div>
+            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:10px 12px;line-height:1.55;margin-bottom:8px">
+              <strong>⚠ 要注意ロール(エッジ未検証)</strong> — 新高値ブレイクの継続を取る入場アーキ。選択・取引は可能ですが、
+              <b>backtest 上、発注可能なテーマ ETF (ICLN/TAN/QCLN) では成績まちまち〜不良 (TAN -60%DD)</b>。広域/テック 1x では有効だがそれらは OpenAPI 発注不可。<b>1x 銘柄のみ</b>に付け、少額・DRY_RUN から。
+            </div>
+            <div id="momentum-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
           <div class="role-arch-panel" data-arch="reversion" style="display:none">
-            <div style="font-size:12px;color:#9aa0a6;background:repeating-linear-gradient(45deg,#f6f6f9,#f6f6f9 8px,#f0f0f3 8px,#f0f0f3 16px);border-radius:8px;padding:14px 16px">⚙ 設計中 — 売られすぎの反発を拾う入場アーキ(1x向け)。strategist 設計 → red-team の後に有効化。</div>
+            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:12px 14px;line-height:1.6">
+              <strong>⚠ 使用不可(見送り)</strong> — 売られすぎの反発を拾う入場アーキ(1x向け)。<br>
+              理由: red-team 評価で <b>$ POC のコスト/為替でエッジ証明困難</b>＋ <b>逆張りに適した 1x(広域指数)が OpenAPI 取扱外</b>(発注可の ICLN/TAN 等はテーマ ETF で逆張り不適=ナイフ掴み)。<br>
+              現状は見送り。再訪は universe 拡大 + notional 引き上げが前提。
+            </div>
           </div>
           <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
         </div>
@@ -10658,12 +10668,14 @@ function symbolFormBody(args: SymbolFormArgs): string {
           };
           var COLOR = {
             core_trend: '#1a56db', leveraged_trend: '#d97706', sector_trend: '#0e9f9f',
-            low_volatility: '#7e3af2', inverse_hedge: '#c22d2d', cash_parking: '#5b8c5a'
+            low_volatility: '#7e3af2', inverse_hedge: '#c22d2d', cash_parking: '#5b8c5a',
+            momentum: '#b25000'
           };
           var LABEL = {
             leveraged_trend: 'レバETF・トレンド', core_trend: '非レバ・トレンド',
             sector_trend: 'セクター', low_volatility: '低ボラ',
-            inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金'
+            inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金',
+            momentum: 'モメンタム ⚠'
           };
           // 2軸の説明 (入場アーキ / horizon / 想定銘柄の性質)。現状は全ロール
           // 「押し目」アーキ。モメンタム/逆張りアーキは別軸で設計中 (未実装)。
@@ -10673,7 +10685,8 @@ function symbolFormBody(args: SymbolFormArgs): string {
             sector_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x セクター ETF' },
             low_volatility: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~15日', character: '低ボラ 1x' },
             inverse_hedge: { arch: '押し目 (下落レジームの inverse 押し目)', horizon: '超短 5日', character: '3x インバース' },
-            cash_parking: { arch: 'entry なし', horizon: '—', character: '待機資金 (退避先・常時配分)' }
+            cash_parking: { arch: 'entry なし', horizon: '—', character: '待機資金 (退避先・常時配分)' },
+            momentum: { arch: 'モメンタム (新高値ブレイク継続)', horizon: '短期 3–7日', character: '1x モメンタム ⚠ backtest 未検証' }
           };
           var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
@@ -10786,6 +10799,15 @@ function symbolFormBody(args: SymbolFormArgs): string {
             var pv = document.getElementById('role-preview');
             var body = document.getElementById('role-preview-body');
             if (!pv || !body) return;
+            if (role === 'momentum') {
+              body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + COLOR.momentum + '">⚡ モメンタム ⚠</div>' +
+                descHtml('momentum') +
+                '<div style="font-size:11px;line-height:1.55">新高値ブレイクの継続を取る別戦略 (BreakoutMomentumStrategy)。' +
+                'entry: トレンド+ 新高値ブレイク+ SMA50上+ 過熱でない。exit: stop -5% / TP +10% / 保有~7日。<br>' +
+                '<span style="color:#c22;font-weight:600">⚠ backtest 未検証。発注可テーマETFでは成績不良の例あり (TAN -60%DD)。1x のみ・少額で。</span></div>';
+              pv.style.display = '';
+              return;
+            }
             if (!role || (!P[role] && role !== 'cash_parking')) { pv.style.display = 'none'; return; }
             var color = COLOR[role] || '#5f6368';
             if (role === 'cash_parking') {
@@ -10822,11 +10844,23 @@ function symbolFormBody(args: SymbolFormArgs): string {
             showPreview(role);
           }
           function rerender() { showPreview(currentShown); }
+          // momentum はグラフ無し (preset が押し目と別形)。名前 + 性質だけのカード。
+          function momentumCardHtml() {
+            var d = DESC.momentum || {};
+            return '<div class="role-tpl-card" data-role="momentum" ' +
+              'style="cursor:pointer;border:1px solid #f0c98a;border-radius:8px;padding:8px 10px;background:#fffaf2;min-width:150px">' +
+              '<div style="font-size:12px;font-weight:600;color:' + COLOR.momentum + '">⚡ モメンタム</div>' +
+              '<div style="font-size:10px;color:#9a5b00;margin-top:2px">' + (d.character || '') + ' ・ 保有~7日</div>' +
+              '</div>';
+          }
           function init() {
             var gallery = document.getElementById('role-gallery');
             if (!gallery) return;
             gallery.innerHTML = ORDER.map(cardHtml).join('');
-            var cards = gallery.querySelectorAll('.role-tpl-card');
+            var mg = document.getElementById('momentum-gallery');
+            if (mg) mg.innerHTML = momentumCardHtml();
+            // gallery + momentum の全カードに listener を張る。
+            var cards = document.querySelectorAll('.role-tpl-card');
             for (var i = 0; i < cards.length; i++) {
               (function (card) {
                 var r = card.getAttribute('data-role');
@@ -10862,7 +10896,7 @@ function symbolFormBody(args: SymbolFormArgs): string {
                 tab.addEventListener('click', function () { setArchTab(tab.getAttribute('data-arch')); });
               })(tabs[k]);
             }
-            setArchTab('pullback');
+            setArchTab(selected === 'momentum' ? 'momentum' : 'pullback');
             var cur = document.getElementById('role-current');
             if (cur) cur.textContent = labelOf(selected);
             highlight(selected);

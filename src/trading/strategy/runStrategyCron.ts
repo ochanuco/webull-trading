@@ -46,9 +46,12 @@ import {
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
+import { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } from './strategies/BreakoutMomentumStrategy'
 import {
   buildEntrySuppressedSymbols,
   buildHalfEntrySymbols,
+  buildMomentumRules,
+  buildMomentumSymbols,
   buildSymbolRules,
 } from './symbolRuleResolution'
 import { createTickerDenyGuard } from '../risk/tickerDenyGuard'
@@ -276,6 +279,13 @@ export async function runStrategyCron(
   // 段階判定 HALF (#452 PR 2): entry 有効 role を明示した銘柄のみ 0.5x entry を
   // 許可する。role NULL の既存銘柄は従来の二値挙動のまま。
   const halfEntrySymbols = buildHalfEntrySymbols(universe.symbolRole)
+  // #momentum: role === 'momentum' の銘柄は BreakoutMomentumStrategy で判定する。
+  // signal は以降の Risk→Execution を通常 BUY/SELL と同じ経路で通る。
+  const momentumSymbols = buildMomentumSymbols(universe.symbolRole)
+  const momentumStrategy =
+    momentumSymbols.size > 0
+      ? new BreakoutMomentumStrategy(TEST_DEFAULT_MOMENTUM_RULE, buildMomentumRules(universe))
+      : undefined
   // ペアレジーム layer (#472)。mode='off' か対象ペアなしなら option ごと省略
   // (= scheduler 側は完全に従来挙動)。
   const pairRegimeOption =
@@ -640,6 +650,8 @@ export async function runStrategyCron(
       rulesMap,
       entrySuppressedSymbols,
       halfEntrySymbols,
+      momentumSymbols,
+      ...(momentumStrategy ? { momentumStrategy } : {}),
       ...(onTickerDeny ? { onTickerDeny } : {}),
       ...(pairRegimeOption ? { pairRegime: pairRegimeOption } : {}),
       riskPerTradePct: scaledRiskPerTradePct,
@@ -793,6 +805,8 @@ export async function runStrategyCron(
           buyingPower,
           defaultRule,
           rulesMap,
+          momentumSymbols,
+          ...(momentumStrategy ? { momentumStrategy } : {}),
           requestId: options.requestId,
           notifier,
           perSymbolRisk: {

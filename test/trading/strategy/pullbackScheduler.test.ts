@@ -100,6 +100,51 @@ function mockExecution(): Execution & { calls: unknown[] } {
   }
 }
 
+// 新高値ブレイク bars: 緩く上げて最後の bar で 20日終値高値を超える。
+// 押し目戦略は「新高値=押し目でない」で HOLD、モメンタムは BUY になる。
+function breakoutBars(): DailyBar[] {
+  const bars: DailyBar[] = []
+  for (let i = 0; i < 59; i += 1) bars.push(synth(i, 100 + i * 0.2)) // bar58 close = 111.6
+  bars.push(synth(59, 115)) // 新高値ジャンプ (breakoutHigh20=111.6、115 > 111.6*1.005)
+  return bars
+}
+
+describe('momentum routing (#momentum)', () => {
+  it('momentum symbol はブレイクで BUY、押し目戦略は同 bars で HOLD', async () => {
+    const { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } = await import(
+      '../../../src/trading/strategy/strategies/BreakoutMomentumStrategy'
+    )
+    // 押し目 (momentum 未指定): 新高値なので HOLD = 発注なし。
+    const exPull = mockExecution()
+    const sumPull = await runPullbackScheduler({
+      symbols: ['ICLN'],
+      equity: 100_000,
+      barClient: mockBarClient(breakoutBars()),
+      positionStore: makeStore({}),
+      execution: exPull,
+      now: () => now,
+    })
+    expect(sumPull.buys).toBe(0)
+    expect(exPull.calls).toHaveLength(0)
+
+    // momentum 指定: 同 bars でブレイク BUY。signal は通常経路で execution まで到達。
+    const exMom = mockExecution()
+    const sumMom = await runPullbackScheduler({
+      symbols: ['ICLN'],
+      equity: 100_000,
+      barClient: mockBarClient(breakoutBars()),
+      positionStore: makeStore({}),
+      execution: exMom,
+      momentumSymbols: new Set(['ICLN']),
+      momentumStrategy: new BreakoutMomentumStrategy(TEST_DEFAULT_MOMENTUM_RULE),
+      now: () => now,
+    })
+    expect(sumMom.buys).toBe(1)
+    expect(exMom.calls).toHaveLength(1)
+    expect((exMom.calls[0] as { side: string }).side).toBe('BUY')
+  })
+})
+
 describe('runPullbackScheduler', () => {
   it('places a BUY when the Pullback entry conditions fire', async () => {
     const store = makeStore({})
