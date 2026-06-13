@@ -169,7 +169,12 @@
       "vars": {
         // #21: `WebullTradeClient` の trade gate を通すラベル。'production' のときだけ
         // placeOrder が実行可能。他の値 (staging / dev / 未設定) は強制 DRY_RUN。
-        "ENVIRONMENT": "production"
+        "ENVIRONMENT": "production",
+        // #475: staging canary 後に production へ昇格。Webull Market Data を
+        // primary、^VIX / JP / 障害時は Yahoo へ自動 fallback (FallbackBarClient /
+        // quoteScheduler)。quote と bars を揃える。
+        "QUOTE_SOURCE": "webull",
+        "BAR_SOURCE": "webull"
       },
       "routes": [
         { "pattern": "trading.chanu.co", "custom_domain": true }
