@@ -843,8 +843,8 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
-    expect(reject?.reason).toContain('risk: vix_critical')
+    const held = summary.decisions.find((d) => d.decision === 'HOLD' && (d.reason ?? '').includes('vix_critical'))
+    expect(held?.reason).toContain('risk: vix_critical')
     expect(summary.vix?.regime).toBe('critical')
   })
 
@@ -898,9 +898,9 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
-    expect(reject?.reason).toContain('vix_warning')
-    expect(reject?.reason).toContain('qty rounded to 0')
+    const held = summary.decisions.find((d) => d.decision === 'HOLD' && (d.reason ?? '').includes('vix_warning'))
+    expect(held?.reason).toContain('vix_warning')
+    expect(held?.reason).toContain('qty rounded to 0')
   })
 
   it('does not modify BUY in normal regime (sizeScale = 1)', async () => {
@@ -1001,11 +1001,11 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
     const sellDecision = summary.decisions.find((d) => d.decision === 'SELL')
     expect(sellDecision).toBeDefined()
     expect(sellDecision?.order?.side).toBe('SELL')
-    // vix_critical 起因の REJECT が混ざっていないこと。
-    const vixReject = summary.decisions.find(
-      (d) => d.decision === 'REJECT' && (d.reason ?? '').includes('vix_critical'),
+    // vix_critical 起因の HOLD が混ざっていないこと (SELL 銘柄は VIX 無関係で通る)。
+    const vixHold = summary.decisions.find(
+      (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('vix_critical'),
     )
-    expect(vixReject).toBeUndefined()
+    expect(vixHold).toBeUndefined()
   })
 })
 
@@ -1613,7 +1613,7 @@ describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
 
     expect(summary.buys).toBe(0)
     const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
-    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.decision).toBe('HOLD')
     expect(aapl?.reason).toMatch(/lot-size-round/)
   })
 })
@@ -1638,7 +1638,7 @@ describe('runPullbackScheduler budget-alloc basis fail-closed (#417 buying-power
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
     const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
-    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.decision).toBe('HOLD')
   })
 
   it('places a BUY for a budget symbol once budgetBasisJpy is a real account total', async () => {
