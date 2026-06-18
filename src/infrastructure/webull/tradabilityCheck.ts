@@ -106,7 +106,7 @@ export function buildPreviewOrderVariants(
     quantity: '1',
     time_in_force: 'DAY',
     entrust_type: 'QTY',
-    account_tax_type: 'GENERAL',
+    account_tax_type: 'SPECIFIC',
   }
   return [
     {

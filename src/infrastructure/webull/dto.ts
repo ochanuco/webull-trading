@@ -75,7 +75,7 @@ export interface WebullV2OrderEntry {
   side: 'BUY' | 'SELL'
   time_in_force: 'DAY'
   entrust_type: 'QTY'
-  account_tax_type: 'GENERAL'
+  account_tax_type: 'GENERAL' | 'SPECIFIC'
   /** v2 のみ。combo / multi-leg 未対応 POC では常に 'NORMAL'。 */
   combo_type?: 'NORMAL'
 }
