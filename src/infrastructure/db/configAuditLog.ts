@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, type SQL } from 'drizzle-orm'
+import { and, desc, eq, gte, lt, lte, type SQL } from 'drizzle-orm'
 import { configAuditLog, type ConfigAuditLogRow } from './schema'
 import { createDb } from './tradeJournalRepo'
 
@@ -94,6 +94,8 @@ export interface LoadAuditOptions {
   fromIso?: string
   /** ISO timestamp inclusive upper bound. */
   toIso?: string
+  /** cursor: id < before で古い方へページング。 */
+  before?: number
 }
 
 /**
@@ -112,6 +114,7 @@ export async function loadRecentAudit(
   if (options.endpoint) conditions.push(eq(configAuditLog.endpoint, options.endpoint))
   if (options.fromIso) conditions.push(gte(configAuditLog.timestamp, options.fromIso))
   if (options.toIso) conditions.push(lte(configAuditLog.timestamp, options.toIso))
+  if (options.before !== undefined) conditions.push(lt(configAuditLog.id, options.before))
   if (conditions.length > 0) {
     query = query.where(conditions.length === 1 ? conditions[0] : and(...conditions))
   }

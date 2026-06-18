@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, type SQL } from 'drizzle-orm'
+import { and, desc, eq, inArray, lt, type SQL } from 'drizzle-orm'
 import {
   notificationEmitLog,
   type NotificationEmitLogInsert,
@@ -80,6 +80,8 @@ export interface LoadAlertOptions {
   severities?: NotificationSeverity[]
   /** event_type フィルタ ('TRADE' / 'ERROR' / 'STATE_CHANGE')。空なら全件。 */
   eventType?: NotificationEvent['type']
+  /** cursor: id < before で古い方へページング。 */
+  before?: number
 }
 
 export type AlertRow = NotificationEmitLogRow
@@ -103,6 +105,9 @@ export async function loadRecentAlerts(
   }
   if (options.severities && options.severities.length > 0) {
     conditions.push(inArray(notificationEmitLog.severity, options.severities))
+  }
+  if (options.before !== undefined) {
+    conditions.push(lt(notificationEmitLog.id, options.before))
   }
   if (conditions.length > 0) {
     query = query.where(conditions.length === 1 ? conditions[0] : and(...conditions))
