@@ -1666,9 +1666,16 @@ const STYLE = `
   .subnav-link{color:#1d1d1f;text-decoration:none;padding:3px 10px;border-radius:6px;font-size:12.5px;white-space:nowrap}
   .subnav-link:hover{background:#f0f0f3}
   .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
-  .main{min-width:0;padding:24px}
+  .nav-toggle{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:4px 8px;color:#1d1d1f;line-height:1}
+  .main{min-width:0;padding:24px;overflow-x:auto}
   @media(max-width:780px){
-    .main{padding:16px}
+    .main{padding:12px 8px}
+    .nav-toggle{display:block}
+    .topnav nav{display:none;width:100%;flex-basis:100%;order:10}
+    .topnav nav.open{display:flex}
+    .topnav .nav-sep{display:none}
+    .topnav .nav-link{font-size:14px;padding:8px 12px}
+    .topnav-killswitch{order:5}
   }
   /* KPI カード */
   .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
@@ -1900,6 +1907,7 @@ function layout(
 <header class="header">
   <div class="topnav">
     <div class="brand">Webull Trading</div>
+    <button class="nav-toggle" onclick="this.nextElementSibling.classList.toggle('open')" aria-label="メニュー">☰</button>
     <nav>${renderTopNav(activePath)}</nav>
     ${navRight}
   </div>
@@ -3275,7 +3283,7 @@ function renderPortfolioEquityChart(
         title: { text: '総資産 (dailyStartEquity) 時系列', left: 'center', textStyle: { fontSize: 14 } },
         tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '—' : Number(v).toFixed(2); } },
         legend: { top: 24 },
-        grid: { left: 60, right: 60, top: 60, bottom: 40 },
+        grid: { left: 50, right: 20, top: 60, bottom: 40, containLabel: true },
         xAxis: { type: 'category', data: dates },
         yAxis: yAxis,
         series: series,
@@ -6955,7 +6963,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         // bottom は x軸ラベル分 (28px) のみ。
         // right は stop/TP の endLabel ("stop X (preview)" 等) が見切れないよう
         // 80px 確保 (短い "stop X (-Y%)" でも余白として違和感ない範囲)。
-        grid: { left: 50, right: 120, top: 56, bottom: 28 },
+        grid: { left: 50, right: 20, top: 56, bottom: 28, containLabel: true },
         dataZoom: dataZoomCfg,
         // category mode: categories = intradayBars 各 bar の ISO timestamp。
         // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
