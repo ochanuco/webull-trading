@@ -441,7 +441,7 @@ describe('dashboard', () => {
     const body = await res.text()
 
     expect(body).toContain('<details class="reason-details">')
-    expect(body).toContain('発注スキップ: 売買単位未満')
+    expect(body).toContain('買付余力不足: 売買単位未満')
     expect(body).toContain('計算上は 79 株まで建てられるが、必要な売買単位 100 株に届かないため発注しません。')
     expect(body).toContain('<strong>RUNID</strong>')
     expect(body).toContain('<code>req-1</code>')

@@ -108,37 +108,37 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
   })
 
   describe('発注スキップ / 発注中', () => {
-    it('lot-size-round with diagnostics → 建玉可 / 1単元', () => {
+    it('lot-size-round with diagnostics', () => {
       expect(
         localizeReason(
           'sizing rejected: lot-size-round (raw qty 98 < lot 100, stop 203.00, entry 2876)',
         ),
       ).toBe(
-        '発注スキップ: 売買単位未満 (建玉可 98 株 < 1単元 100 株、損切り幅 203.00/株、株価 2876)',
+        '買付余力不足: 売買単位未満 (98 株 < 1単元 100 株、株価 2876)',
       )
     })
 
-    it('insufficient-risk-budget → リスク予算枯渇', () => {
+    it('insufficient-risk-budget', () => {
       expect(
         localizeReason('sizing rejected: insufficient-risk-budget (budget 0.00)'),
-      ).toBe('発注スキップ: リスク予算枯渇 (残 0.00)')
+      ).toBe('買付余力不足: リスク予算残 0.00')
     })
 
     it('invalid-stop', () => {
       expect(localizeReason('sizing rejected: invalid-stop (stopDistance 0)')).toBe(
-        '発注スキップ: 損切り幅が算出不能 (0)',
+        '発注見送り: 損切り幅が算出不能 (0)',
       )
     })
 
     it('atr-floor', () => {
       expect(localizeReason('sizing rejected: atr-floor')).toBe(
-        '発注スキップ: ボラティリティ低下 (ATR 下限割れ)',
+        '発注見送り: ボラティリティ低下 (ATR 下限割れ)',
       )
     })
 
     it('symbol-cap', () => {
       expect(localizeReason('sizing rejected: symbol-cap')).toBe(
-        '発注スキップ: 銘柄別投資上限超過',
+        '発注見送り: 銘柄別投資上限超過',
       )
     })
 

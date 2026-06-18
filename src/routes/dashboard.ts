@@ -3941,23 +3941,22 @@ export function localizeReason(en: string | null | undefined): string {
       `買い: 上昇トレンド中の押し目買い (下落率 ${fmtPct(p)}、騰落率 ${fmtPct(r)})`,
   )
 
-  // === Sizing 系 reject (発注スキップ) ===
-  // 「建玉可」= risk 予算で保有可能な建玉数 (信用取引等での "許容建玉" 用法)
+  // === Sizing 系 (買付余力不足で発注見送り) ===
   s = s.replace(
     /^sizing rejected: lot-size-round \(raw qty (\S+) < lot (\S+), stop (\S+), entry (\S+)\)$/,
-    '発注スキップ: 売買単位未満 (建玉可 $1 株 < 1単元 $2 株、損切り幅 $3/株、株価 $4)',
+    '買付余力不足: 売買単位未満 ($1 株 < 1単元 $2 株、株価 $4)',
   )
   s = s.replace(
     /^sizing rejected: insufficient-risk-budget \(budget (\S+)\)$/,
-    '発注スキップ: リスク予算枯渇 (残 $1)',
+    '買付余力不足: リスク予算残 $1',
   )
-  s = s.replace(/^sizing rejected: atr-floor$/, '発注スキップ: ボラティリティ低下 (ATR 下限割れ)')
-  s = s.replace(/^sizing rejected: symbol-cap$/, '発注スキップ: 銘柄別投資上限超過')
+  s = s.replace(/^sizing rejected: atr-floor$/, '発注見送り: ボラティリティ低下 (ATR 下限割れ)')
+  s = s.replace(/^sizing rejected: symbol-cap$/, '発注見送り: 銘柄別投資上限超過')
   s = s.replace(
     /^sizing rejected: invalid-stop \(stopDistance (\S+)\)$/,
-    '発注スキップ: 損切り幅が算出不能 ($1)',
+    '発注見送り: 損切り幅が算出不能 ($1)',
   )
-  s = s.replace(/^sizing rejected: zero qty$/, '発注スキップ: 発注株数が 0')
+  s = s.replace(/^sizing rejected: zero qty$/, '買付余力不足: 1株分の余力なし')
 
   // === Scheduler inline ===
   s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の建玉なし')

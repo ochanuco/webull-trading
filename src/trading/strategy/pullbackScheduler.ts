@@ -1617,7 +1617,7 @@ function labelJa(label: string): string {
 }
 
 const TRACE_LABEL_JA: Record<string, string> = {
-  'sizing.quantity_positive': '発注数量が1株/1単元以上ある',
+  'sizing.quantity_positive': '買付余力が1株/1単元以上ある',
   'sizing.lot_size_configured': '売買単位 (lot_size) が設定済み',
   'exit.intraday_close': 'intraday-only 引け前強制クローズ',
   'scheduler.price_valid': '株価が有効',
