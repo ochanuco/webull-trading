@@ -895,10 +895,10 @@ export async function runPullbackScheduler(
           lotSize: resolvedLotSize,
           entryPrice: indicators.price,
         })
-        summary.rejected.push({ symbol: upper, reason })
+        summary.holds += 1
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'HOLD',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -916,10 +916,10 @@ export async function runPullbackScheduler(
         scaledQuantity = lot > 1 ? Math.floor(rawScaled / lot) * lot : Math.floor(rawScaled)
         if (scaledQuantity <= 0) {
           const reason = `sizing rejected: half-entry qty rounded to 0 (raw ${sizing.quantity} × ${positionMultiplier}, lot=${lot})`
-          summary.rejected.push({ symbol: upper, reason })
+          summary.holds += 1
           await emitDecision({
             symbol: upper,
-            decision: 'REJECT',
+            decision: 'HOLD',
             reason,
             price: indicators.price,
             indicatorsJson: JSON.stringify(indicators),
@@ -938,13 +938,11 @@ export async function runPullbackScheduler(
       // SELL は VIX 関係なく通すため、ここで scaling しても OK (BUY 経路だけ)。
       if (options.vixDecision) {
         if (options.vixDecision.sizeScale === 0) {
-          // critical: BUY 全 reject。decision.reason をそのまま乗せて操作者に
-          // 「VIX で止めた」を明示する (localizeReason が日本語化)。
           const reason = `risk: ${options.vixDecision.reason}`
-          summary.rejected.push({ symbol: upper, reason })
+          summary.holds += 1
           await emitDecision({
             symbol: upper,
-            decision: 'REJECT',
+            decision: 'HOLD',
             reason,
             price: indicators.price,
             indicatorsJson: JSON.stringify(indicators),
@@ -967,10 +965,10 @@ export async function runPullbackScheduler(
             : Math.floor(rawScaled)
           if (scaledQuantity <= 0) {
             const reason = `risk: ${options.vixDecision.reason} (qty rounded to 0, lot=${lot})`
-            summary.rejected.push({ symbol: upper, reason })
+            summary.holds += 1
             await emitDecision({
               symbol: upper,
-              decision: 'REJECT',
+              decision: 'HOLD',
               reason,
               price: indicators.price,
               indicatorsJson: JSON.stringify(indicators),
