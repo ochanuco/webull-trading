@@ -31,7 +31,7 @@ export function toWebullPlaceOrderRequest(
     side: intent.side,
     time_in_force: 'DAY' as const,
     entrust_type: 'QTY' as const,
-    account_tax_type: 'GENERAL' as const,
+    account_tax_type: 'SPECIFIC' as const,
   }
   if (schema === 'v2') {
     return {

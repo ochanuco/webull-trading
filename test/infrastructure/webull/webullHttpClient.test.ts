@@ -96,7 +96,7 @@ describe('WebullHttpClient', () => {
           side: 'BUY',
           time_in_force: 'DAY',
           entrust_type: 'QTY',
-          account_tax_type: 'GENERAL',
+          account_tax_type: 'SPECIFIC',
         },
       ],
     })
