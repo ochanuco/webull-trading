@@ -80,7 +80,7 @@ import type {
   PullbackIndicators,
   SymbolRule,
 } from '../trading/strategy/strategies/PullbackUptrendStrategy'
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, or, type SQL } from 'drizzle-orm'
 import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../trading/state/SymbolStateClient'
 import { loadUsdJpyRate } from '../infrastructure/quotes/fxRate'
@@ -259,26 +259,34 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
+    const before = parseCursor(c.req.query('before'))
     // view filter: 全イベント (default) / 約定・手仕舞いのみ / エラーのみ。
     // ジャーナルは 1 注文で複数 lifecycle 行を持つため、operator の主目的
     // (「何が約定した?」「何が失敗した?」) を 1 クリックで絞れるようにする。
     const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(c.req.query('view'))
     const db = createDb(c.env.DB)
     const baseQuery = db.select().from(tradeJournal)
-    const filtered =
-      view === 'fills'
-        ? baseQuery.where(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
-        : view === 'errors'
-          ? // errorMessage だけだと errorClass のみ埋まる失敗行が落ちる (CodeRabbit #469)
-            baseQuery.where(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass)))
-          : baseQuery
+    const conditions: SQL[] = []
+    if (view === 'fills') {
+      conditions.push(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
+    } else if (view === 'errors') {
+      conditions.push(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass))!)
+    }
+    if (before !== undefined) {
+      conditions.push(lt(tradeJournal.id, before))
+    }
+    const filtered = conditions.length > 0
+      ? baseQuery.where(conditions.length === 1 ? conditions[0] : and(...conditions))
+      : baseQuery
     // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
     // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
     const [rows, universe] = await Promise.all([
-      filtered.orderBy(desc(tradeJournal.id)).limit(limit),
+      filtered.orderBy(desc(tradeJournal.id)).limit(limit + 1),
       loadSymbolUniverse(c.env).catch(() => null),
     ])
-    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe, view)))
+    const hasMore = rows.length > limit
+    if (hasMore) rows.pop()
+    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe, view, before, hasMore)))
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
@@ -680,14 +688,17 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound')))
     }
     const limit = clampLimit(c.req.query('limit'))
+    const before = parseCursor(c.req.query('before'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     const db = createDb(c.env.DB)
     try {
       const [rows, universe] = await Promise.all([
-        loadDecisionRows(db, { symbol: symbolFilter, limit }),
+        loadDecisionRows(db, { symbol: symbolFilter, limit: limit + 1, before }),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
-      return c.html(renderLayout(c, '戦略判定', cronBody(rows, limit, symbolFilter, universe)))
+      const hasMore = rows.length > limit
+      if (hasMore) rows.pop()
+      return c.html(renderLayout(c, '戦略判定', cronBody(rows, limit, symbolFilter, universe, before, hasMore)))
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
@@ -719,10 +730,11 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, 'アラート', unavailable('DB not bound')))
     }
     const limit = clampAlertLimit(c.req.query('limit'))
+    const before = parseCursor(c.req.query('before'))
     const severityFilter = parseSeverityFilter(c.req.query('severity'))
     const eventTypeFilter = parseEventTypeFilter(c.req.query('eventType'))
     const currentQuery = parseAlertsQuery(c.req.url)
-    const options: LoadAlertOptions = { limit }
+    const options: LoadAlertOptions = { limit: limit + 1, before }
     if (eventTypeFilter) {
       options.eventType = eventTypeFilter
     }
@@ -734,11 +746,13 @@ export const dashboard = new Hono<DashboardBindings>()
         loadRecentAlerts(c.env.DB, options),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
+      const hasMore = rows.length > limit
+      if (hasMore) rows.pop()
       return c.html(
         renderLayout(
           c,
           'アラート',
-          alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery, universe }),
+          alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore }),
         ),
       )
     } catch (err) {
@@ -752,17 +766,20 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '監査ログ', unavailable('DB not bound')))
     }
     const limit = clampAuditLimit(c.req.query('limit'))
+    const before = parseCursor(c.req.query('before'))
     const actorFilter = trimQuery(c.req.query('actor'))
     const endpointFilter = trimQuery(c.req.query('endpoint'))
     const fromFilter = parseAuditDateFilter(c.req.query('from'), false)
     const toFilter = parseAuditDateFilter(c.req.query('to'), true)
-    const options: LoadAuditOptions = { limit }
+    const options: LoadAuditOptions = { limit: limit + 1, before }
     if (actorFilter) options.actor = actorFilter
     if (endpointFilter) options.endpoint = endpointFilter
     if (fromFilter) options.fromIso = fromFilter
     if (toFilter) options.toIso = toFilter
     try {
       const rows = await loadRecentAudit(c.env.DB, options)
+      const hasMore = rows.length > limit
+      if (hasMore) rows.pop()
       return c.html(
         renderLayout(
           c,
@@ -774,6 +791,8 @@ export const dashboard = new Hono<DashboardBindings>()
             endpointFilter,
             fromFilter: c.req.query('from') ?? '',
             toFilter: c.req.query('to') ?? '',
+            before,
+            hasMore,
           }),
         ),
       )
@@ -1549,6 +1568,32 @@ function clampLimit(raw: string | undefined): number {
   const n = raw === undefined ? 50 : Number.parseInt(raw, 10)
   if (!Number.isFinite(n) || n <= 0) return 50
   return Math.min(n, 200)
+}
+
+function parseCursor(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+function renderPaginationNav(opts: {
+  baseHref: string
+  before: number | undefined
+  lastId: number | undefined
+  hasMore: boolean
+}): string {
+  const parts: string[] = []
+  if (opts.before !== undefined) {
+    const sep = opts.baseHref.includes('?') ? '&' : '?'
+    parts.push(`<a href="${opts.baseHref}" style="padding:6px 14px;border:1px solid #d8d8de;border-radius:6px;text-decoration:none;font-size:13px">← 最新へ</a>`)
+    void sep
+  }
+  if (opts.hasMore && opts.lastId !== undefined) {
+    const sep = opts.baseHref.includes('?') ? '&' : '?'
+    parts.push(`<a href="${opts.baseHref}${sep}before=${opts.lastId}" style="padding:6px 14px;border:1px solid #d8d8de;border-radius:6px;text-decoration:none;font-size:13px">古い方 →</a>`)
+  }
+  if (parts.length === 0) return ''
+  return `<nav style="margin-top:12px;display:flex;gap:8px;justify-content:center">${parts.join('')}</nav>`
 }
 
 /**
@@ -3425,6 +3470,8 @@ function tradesBody(
   limit: number,
   universe?: SymbolUniverse | null,
   view: 'all' | 'fills' | 'errors' = 'all',
+  before?: number,
+  hasMore = false,
 ): string {
   const viewPill = (label: string, v: string, active: boolean): string =>
     `<a href="/dashboard/trades?view=${v}&limit=${limit}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
@@ -3510,6 +3557,12 @@ function tradesBody(
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  ${renderPaginationNav({
+    baseHref: `/dashboard/trades?view=${view}&limit=${limit}`,
+    before,
+    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    hasMore,
+  })}
   ${safeJsonScript('__tradesCopy', {
     meta: {
       page: 'trade_journal (約定履歴)',
@@ -3976,6 +4029,8 @@ interface AlertsBodyArgs {
   currentQuery: URLSearchParams
   /** symbol 列の表示を JP 銘柄向け 番号-会社名 形式にするための universe (load 失敗は null)。 */
   universe?: SymbolUniverse | null
+  before?: number
+  hasMore?: boolean
 }
 
 /**
@@ -4004,7 +4059,7 @@ const ALERT_EVENT_LABELS: Record<string, string> = {
 const ALERT_MESSAGE_FOLD = 160
 
 function alertsBody(args: AlertsBodyArgs): string {
-  const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe } = args
+  const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore = false } = args
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
   const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
   if (rows.length === 0) {
@@ -4051,6 +4106,12 @@ function alertsBody(args: AlertsBodyArgs): string {
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  ${renderPaginationNav({
+    baseHref: buildAlertBaseHref(limit, severityFilter, eventTypeFilter),
+    before,
+    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    hasMore,
+  })}
   ${safeJsonScript('__alertsCopy', {
     meta: {
       page: 'notification_emit_log (アラート)',
@@ -4063,6 +4124,17 @@ function alertsBody(args: AlertsBodyArgs): string {
     rows,
   })}
   ${renderLogCopyScript('__alertsCopy')}`
+}
+
+function buildAlertBaseHref(
+  limit: number,
+  severityFilter: NotificationSeverity[],
+  eventTypeFilter: NotificationEvent['type'] | undefined,
+): string {
+  const params: string[] = [`limit=${limit}`]
+  if (severityFilter.length > 0) params.push(`severity=${severityFilter.join(',')}`)
+  if (eventTypeFilter) params.push(`eventType=${eventTypeFilter}`)
+  return `/dashboard/alerts?${params.join('&')}`
 }
 
 /**
@@ -4127,6 +4199,8 @@ interface AuditBodyArgs {
   /** Raw query string values for the form inputs (passthrough so a typo round-trips). */
   fromFilter: string
   toFilter: string
+  before?: number
+  hasMore?: boolean
 }
 
 /**
@@ -4137,7 +4211,7 @@ interface AuditBodyArgs {
  *   - before_json / after_json は `<details>` で展開表示
  */
 function auditBody(args: AuditBodyArgs): string {
-  const { rows, limit, actorFilter, endpointFilter, fromFilter, toFilter } = args
+  const { rows, limit, actorFilter, endpointFilter, fromFilter, toFilter, before, hasMore = false } = args
   const form = `<form method="get" action="/dashboard/audit" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
   <label>actor<br><input name="actor" value="${esc(actorFilter ?? '')}" placeholder="ai-agent" style="padding:4px 8px"></label>
   <label>endpoint<br><input name="endpoint" value="${esc(endpointFilter ?? '')}" placeholder="/admin/symbols/:symbol/seed-cash" style="padding:4px 8px;min-width:280px"></label>
@@ -4164,13 +4238,24 @@ function auditBody(args: AuditBodyArgs): string {
       </tr>`
     })
     .join('')
+  const auditBaseParams: string[] = [`limit=${limit}`]
+  if (actorFilter) auditBaseParams.push(`actor=${encodeURIComponent(actorFilter)}`)
+  if (endpointFilter) auditBaseParams.push(`endpoint=${encodeURIComponent(endpointFilter)}`)
+  if (fromFilter) auditBaseParams.push(`from=${encodeURIComponent(fromFilter)}`)
+  if (toFilter) auditBaseParams.push(`to=${encodeURIComponent(toFilter)}`)
   return `${header}${form}
   <table>
     <thead><tr>
       <th>timestamp (JST)</th><th>actor</th><th>endpoint</th><th>target</th><th>before</th><th>after</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>`
+  </table>
+  ${renderPaginationNav({
+    baseHref: `/dashboard/audit?${auditBaseParams.join('&')}`,
+    before,
+    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    hasMore,
+  })}`
 }
 
 /**
@@ -4239,7 +4324,7 @@ export interface DecisionRow {
  */
 async function loadDecisionRows(
   db: ReturnType<typeof createDb>,
-  opts: { symbol?: string; limit: number },
+  opts: { symbol?: string; limit: number; before?: number },
 ): Promise<DecisionRow[]> {
   const baseQuery = db
     .select({
@@ -4266,12 +4351,13 @@ async function loadDecisionRows(
         eq(tradeJournal.tradeEventType, 'post_submit'),
       ),
     )
-  return opts.symbol
-    ? baseQuery
-        .where(eq(strategyDecisionLog.symbol, opts.symbol))
-        .orderBy(desc(strategyDecisionLog.id))
-        .limit(opts.limit)
-    : baseQuery.orderBy(desc(strategyDecisionLog.id)).limit(opts.limit)
+  const conditions: SQL[] = []
+  if (opts.symbol) conditions.push(eq(strategyDecisionLog.symbol, opts.symbol))
+  if (opts.before !== undefined) conditions.push(lt(strategyDecisionLog.id, opts.before))
+  const q = conditions.length > 0
+    ? baseQuery.where(conditions.length === 1 ? conditions[0] : and(...conditions))
+    : baseQuery
+  return q.orderBy(desc(strategyDecisionLog.id)).limit(opts.limit)
 }
 
 /**
@@ -4316,21 +4402,32 @@ function cronBody(
   limit: number,
   symbolFilter: string | undefined,
   universe?: SymbolUniverse | null,
+  before?: number,
+  hasMore = false,
 ): string {
   const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
+  const baseHref = symbolFilter
+    ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}`
+    : `/dashboard/cron?limit=${limit}`
   const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> (limit=${limit}, max 200)。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
-    : `<p class="muted">Showing ${rows.length} decisions (limit=${limit}, max 200)。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong>。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+    : `<p class="muted">Showing ${rows.length} decisions。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+  const pagination = renderPaginationNav({
+    baseHref,
+    before,
+    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    hasMore,
+  })
   const rail = renderCronSymbolRail(universe, symbolFilter, limit)
   const main =
     rows.length === 0
-      ? `${header}<p class="muted">判定ログがまだありません。</p>`
+      ? `${header}<p class="muted">判定ログがまだありません。</p>${pagination}`
       : `${header}
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
     showSymbol: true,
     filterLabel: `symbol=${symbolFilter ?? 'all'}, limit=${limit}`,
-  })}`
+  })}${pagination}`
   return rail ? `<div class="symbol-layout">${rail}<div class="symbol-main">${main}</div></div>` : main
 }
 
