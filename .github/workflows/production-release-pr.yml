@@ -66,7 +66,7 @@ jobs:
           git checkout -B release/production origin/production
           while IFS= read -r sha; do
             git cherry-pick "$sha"
-          done < <(git log --reverse --no-merges --pretty=format:"%H" origin/production..origin/main)
+          done < <(git log --reverse --no-merges --cherry-pick --pretty=tformat:"%H" origin/production..origin/main)
 
           push_with_retry() {
             attempt=1
@@ -199,4 +199,5 @@ jobs:
             esac
             attempt=$((attempt + 1))
           done
-          echo "::notice::mergeability not confirmed after retries; operator should verify the PR is not behind."
+          echo "::error::mergeability not confirmed after retries; operator should verify the PR is not behind."
+          exit 1
