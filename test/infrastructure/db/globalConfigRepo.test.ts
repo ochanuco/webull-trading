@@ -126,6 +126,11 @@ describe('loadGlobalConfig — pre-0015 fallback', () => {
     expect(result.vixCriticalThreshold).toBe(GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold)
     expect(result.vixWarningSizeScale).toBe(GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale)
 
+    // 0036 列 (session_window_gate_enabled) も legacy path では default (false) に畳む
+    expect(result.sessionWindowGateEnabled).toBe(
+      GLOBAL_CONFIG_DEFAULTS.sessionWindowGateEnabled,
+    )
+
     // pre_0015_fallback の 1 件だけ warn (legacy_load_failed は出ない)
     expect(warnSpy).toHaveBeenCalledTimes(1)
     const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)

@@ -271,6 +271,14 @@ export const globalConfig = sqliteTable(
     dryRun: integer('dry_run', { mode: 'boolean' }).notNull().default(true),
     tradingEnabled: integer('trading_enabled', { mode: 'boolean' }).notNull().default(false),
     marketHoursCheck: integer('market_hours_check', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * #session-window-gate: true で開場 (US 09:30 ET / JP 08:30 → 09:00 JST) の
+     * 30 分前〜引けの窓外は戦略 cron の評価そのものを skip。false (default) は
+     * 従来通り常時評価。
+     */
+    sessionWindowGateEnabled: integer('session_window_gate_enabled', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     /** @deprecated Phase E で通貨別 cap に移行。互換のため残置、参照はしない。 */
     maxOrderNotional: real('max_order_notional').notNull().default(100),
     /** USD 銘柄 (currency='USD') の 1 注文上限。 */

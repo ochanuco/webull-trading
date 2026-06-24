@@ -13,6 +13,7 @@ export function makeGlobalConfigSnapshot(
     dryRun: true,
     tradingEnabled: true,
     marketHoursCheck: false,
+    sessionWindowGateEnabled: false,
     maxOrderNotional: 100,
     maxOrderNotionalUsd: 100,
     maxOrderNotionalJpy: 100000,

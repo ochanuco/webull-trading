@@ -7,6 +7,11 @@ export interface GlobalConfigSnapshot {
   tradingEnabled: boolean
   marketHoursCheck: boolean
   /**
+   * #session-window-gate: true で開場 30 分前〜引けの窓外は戦略 cron を skip
+   * (市場ごと判定)。default false = 従来通り常時評価。
+   */
+  sessionWindowGateEnabled: boolean
+  /**
    * @deprecated Phase E で通貨別 `maxOrderNotionalUsd` / `maxOrderNotionalJpy`
    * に移行。互換目的でロード時も読み出しているが Risk gate は通貨別値を使う。
    */
@@ -77,6 +82,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   dryRun: true,
   tradingEnabled: false,
   marketHoursCheck: false,
+  sessionWindowGateEnabled: false,
   maxOrderNotional: 100,
   maxOrderNotionalUsd: 2000,
   maxOrderNotionalJpy: 100000,
@@ -340,6 +346,8 @@ export async function loadGlobalConfig(
             vixWarningThreshold: GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
             vixCriticalThreshold: GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
             vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
+            // 0036 追加列 (#session-window-gate)。legacy path は default (false = 常時評価)。
+            sessionWindowGateEnabled: GLOBAL_CONFIG_DEFAULTS.sessionWindowGateEnabled,
             // 0030 追加列 (#452)。legacy path は default (false = 自動発注しない)。
             cashFallbackOrdersEnabled: GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
             // 0031 追加列 (#472)。legacy path は default ('off' = gate 無効)。
@@ -405,6 +413,10 @@ export async function loadGlobalConfig(
       row.vixCriticalThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
     vixWarningSizeScale:
       row.vixWarningSizeScale ?? GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
+    // 0036 で追加 (#session-window-gate)。古い D1 では undefined になり得るため
+    // default (false = 常時評価) へ畳む — 従来挙動側なので安全。
+    sessionWindowGateEnabled:
+      row.sessionWindowGateEnabled ?? GLOBAL_CONFIG_DEFAULTS.sessionWindowGateEnabled,
     // 0030 で追加 (#452)。古い D1 では undefined になり得るため default (false =
     // 自動発注しない) へ畳む — fail-closed 側なので安全。
     cashFallbackOrdersEnabled:

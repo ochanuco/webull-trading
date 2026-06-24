@@ -45,6 +45,7 @@ import {
 } from '../risk/vixRegimeFilter'
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
+import { isWithinStrategyWindow } from '../domain/tradingCalendar'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 import { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } from './strategies/BreakoutMomentumStrategy'
 import {
@@ -79,6 +80,13 @@ const DEFAULT_EQUITY_JPY = 1_500_000
  */
 const SANITY_FAILED_COOLDOWN_MS = 30 * 60 * 1000
 
+/**
+ * #session-window-gate: 開場の何分前から戦略評価を再開するか (分)。
+ * `sessionWindowGateEnabled` が true の時のみ有効。窓 = [開場 - この値, 引け)。
+ * POC 段階では `INTRADAY_CLOSE_WINDOW_MIN` と同様 hard-code (config 化は別 PR)。
+ */
+const PRE_OPEN_WINDOW_MIN = 30
+
 export interface StrategyCronResult {
   summary: PullbackRunSummary
   symbols: string[]
@@ -90,6 +98,7 @@ export interface StrategyCronResult {
   skipReason?:
     | 'trading_disabled'
     | 'no_tradable_symbols'
+    | 'outside_session_window'
     | 'no_bridge_state'
     | 'portfolio_halted'
     | 'drawdown_kill'
@@ -222,6 +231,7 @@ export async function runStrategyCron(
     // 効いた瞬間も STATE_CHANGE 通知できる、#276)。
     tradingEnabled: effectiveTradingEnabled,
     marketHoursCheck: global.marketHoursCheck,
+    sessionWindowGateEnabled: global.sessionWindowGateEnabled,
     drawdownKillThreshold: global.drawdownKillThreshold,
   }
   await detectAndNotifyConfigStateChanges({
@@ -340,6 +350,30 @@ export async function runStrategyCron(
 
   if (universe.allowedSymbols.length === 0) {
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'no_tradable_symbols' }
+  }
+
+  // セッションウィンドウ gate (#session-window-gate)。`sessionWindowGateEnabled`
+  // が true の時、開場 PRE_OPEN_WINDOW_MIN 分前〜引けの窓外は戦略評価そのものを
+  // skip する (cron は発火するが portfolio DO / VIX / 買付余力取得まで全て省く)。
+  // 市場ごとに判定し、窓内の currency だけを後段 run に進める (例: US だけ窓内なら
+  // USD run のみ)。flag off は従来挙動 (全 currency 常時評価)。skip は「設定通り」
+  // なので `trading_disabled` 同様 **通知しない** (noisy 回避)。
+  const sessionNow = new Date()
+  const activeCurrencies = new Set<SymbolCurrency>(
+    (['USD', 'JPY'] as const).filter(
+      (cur) =>
+        byCurrency[cur].length > 0 &&
+        (!global.sessionWindowGateEnabled ||
+          isWithinStrategyWindow(sessionNow, cur === 'JPY' ? 'JP' : 'US', PRE_OPEN_WINDOW_MIN)),
+    ),
+  )
+  if (global.sessionWindowGateEnabled && activeCurrencies.size === 0) {
+    return {
+      summary: emptySummary(),
+      symbols: universe.allowedSymbols,
+      analysis: analysisBase(),
+      skipReason: 'outside_session_window',
+    }
   }
 
   if (!env.SYMBOL_STATE) {
@@ -567,15 +601,17 @@ export async function runStrategyCron(
   // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
   // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
   const summary: PullbackRunSummary = { ...emptySummary(), vix: vixDecision }
+  // run は `activeCurrencies` (= 銘柄あり ∧ (gate off ∨ 窓内)) のみ構築する。
+  // gate off の時は両 currency が active なので従来挙動と一致する (#session-window-gate)。
   const runs: Array<{ currency: SymbolCurrency; equity: number; symbols: string[] }> = []
-  if (byCurrency.USD.length > 0) {
+  if (activeCurrencies.has('USD')) {
     runs.push({
       currency: 'USD',
       equity: sanitizeEquity(global.totalCapitalUsd, DEFAULT_EQUITY_USD),
       symbols: byCurrency.USD,
     })
   }
-  if (byCurrency.JPY.length > 0) {
+  if (activeCurrencies.has('JPY')) {
     runs.push({
       currency: 'JPY',
       equity: sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY),

@@ -325,6 +325,83 @@ describe('runStrategyCron', () => {
     }
   })
 
+  // #session-window-gate: 開場30分前〜引けの窓外は戦略評価を skip する。
+  // 市場ごと判定 (USD→US / JPY→JP)。flag off は従来挙動。
+  describe('session window gate', () => {
+    // 2026-04-20(月) EDT。US 窓 [09:00,16:00 ET]、JP 窓 [08:30,15:30 JST]。
+    const T_US_IN = '2026-04-20T17:00:00.000Z' // US 13:00 ET (in) / JP 02:00 JST 火 (out)
+    const T_JP_IN = '2026-04-20T01:00:00.000Z' // JP 10:00 JST 月 (in) / US 21:00 ET 日 (out)
+    const T_US_OUT = '2026-04-20T06:00:00.000Z' // US 02:00 ET (out)
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const jpyUniverse = () =>
+      makeSymbolUniverse({
+        allowedSymbols: ['7203'],
+        symbolCurrency: { '7203': 'JPY' },
+        symbolMarket: { '7203': 'JP' },
+        symbolLotSize: { '7203': 100 },
+      })
+
+    it('flag off では窓外でも outside_session_window で skip しない', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_US_OUT))
+      // default config は sessionWindowGateEnabled=false。窓外でも gate を通り、
+      // PORTFOLIO_STATE 未 bind で portfolio_halted まで進む (= gate で止まっていない)。
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).not.toBe('outside_session_window')
+      expect(result.skipReason).toBe('portfolio_halted')
+    })
+
+    it('flag on + 全市場窓外 → outside_session_window で即 skip', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_US_OUT))
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).toBe('outside_session_window')
+      expect(result.summary.evaluated).toBe(0)
+    })
+
+    it('flag on + 窓内 → gate を通過して評価に進む', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_US_IN))
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      const result = await runStrategyCron(env)
+      // gate 通過 → 後段 (PORTFOLIO_STATE 未 bind) で portfolio_halted。
+      expect(result.skipReason).not.toBe('outside_session_window')
+      expect(result.skipReason).toBe('portfolio_halted')
+    })
+
+    it('per-market: JPY 銘柄は US 窓内でも JP 窓外なら skip', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_US_IN)) // US in / JP out
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(jpyUniverse())
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).toBe('outside_session_window')
+    })
+
+    it('per-market: JPY 銘柄は JP 窓内なら US 窓外でも評価に進む', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_JP_IN)) // JP in / US out
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(jpyUniverse())
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).not.toBe('outside_session_window')
+      expect(result.skipReason).toBe('portfolio_halted')
+    })
+  })
+
 })
 
 describe('resolvePortfolioForRiskScale', () => {

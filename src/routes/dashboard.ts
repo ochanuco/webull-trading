@@ -3691,6 +3691,11 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     label: '場中チェック (bool)',
     detail: 'true で市場時間外の注文を防ぎます。false は 24 時間発注可 (sandbox 確認用)。',
   },
+  session_window_gate_enabled: {
+    label: '開場前ゲート (bool)',
+    detail:
+      'true で開場30分前〜引けの窓外は戦略判定を skip (US 09:00–16:00 ET / JP 08:30–15:30 JST、市場ごと)。cron は発火しますが評価しません。false は従来通り常時評価。',
+  },
   max_order_notional: {
     label: '1注文上限 (非推奨)',
     detail: '旧 generic 上限 (通貨別 cap 導入前の互換)。現在は参照されないので触らなくて OK。',
