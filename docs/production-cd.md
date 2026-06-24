@@ -42,9 +42,14 @@ pnpm install --frozen-lockfile && pnpm deploy:production
 
 `production` がすでに `main` と同じ commit を指している場合、release PR に差分がないため workflow は PR 作成を skip して success にする。初回 bootstrap 直後や、production が main に追いついている状態ではこれが期待値。
 
-この workflow は default `GITHUB_TOKEN` を使わず、repository secret `PRODUCTION_RELEASE_TOKEN` を必須にする。`GITHUB_TOKEN` で workflow から PR を作成/更新すると、その PR の `pull_request` workflow が自動実行されず approval 待ちになり得るため。
+この workflow は default `GITHUB_TOKEN` を使わず、GitHub App token を使う。`GITHUB_TOKEN` で workflow から PR を作成/更新すると、その PR の `pull_request` workflow が自動実行されず approval 待ちになり得るため。また、CODEOWNER が自分自身なので App bot を PR 作成者にすることで self-approve 制限を回避する。
 
-`PRODUCTION_RELEASE_TOKEN` は fine-grained PAT か GitHub App installation token を使う。必要権限:
+必要な repository secrets:
+
+- `APP_ID`: GitHub App の ID
+- `APP_PRIVATE_KEY`: GitHub App の秘密鍵 (`.pem` の内容)
+
+GitHub App 側に必要な repository permissions:
 
 - Contents: read/write (`release/production` branch push)
 - Pull requests: read/write (`production` 向け PR の create/edit)
