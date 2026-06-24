@@ -56,7 +56,17 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B release/production origin/main
+
+          # Fetch production so we can build release/production on top of it.
+          git fetch --no-tags "$remote" production:refs/remotes/origin/production
+
+          # Start from production tip and cherry-pick non-merge commits from main
+          # that are not yet reachable from production. This keeps release/production
+          # linear so the no-merge-commits ruleset on production is always satisfied.
+          git checkout -B release/production origin/production
+          while IFS= read -r sha; do
+            git cherry-pick "$sha"
+          done < <(git log --reverse --no-merges --cherry-pick --pretty=tformat:"%H" origin/production..origin/main)
 
           push_with_retry() {
             attempt=1
@@ -150,12 +160,11 @@ jobs:
             gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
           fi
 
-      # production は release マージ毎に merge commit を積んで main と分岐するため、
-      # production ルールセットの strict (branch up-to-date 必須) が release PR に
-      # 毎回 "Update branch" を要求する。ここで GitHub の update-branch API を自動で
-      # 叩いて branch を base 最新に揃え、operator が手で押す手間を無くす。
-      # マージ自体は承認ゲートとして手動のまま (本ステップは更新のみ、merge はしない)。
-      - name: Auto-update release PR branch (skip manual "Update branch")
+      # release/production は production をベースにチェリーピックで作成するため、
+      # 通常は production と fast-forward 関係にあり BEHIND にはならない。
+      # production に新コミットが来て BEHIND になった場合は update-branch (merge commit
+      # を生成) ではなく、このワークフローを再実行して release/production を作り直す。
+      - name: Check release PR branch is not behind
         if: steps.production_delta.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -167,31 +176,28 @@ jobs:
             --json number \
             --jq '.[0].number // empty')"
           if [ -z "$pr_number" ]; then
-            echo "::notice::no open release PR; nothing to update."
+            echo "::notice::no open release PR; nothing to check."
             exit 0
           fi
 
-          # mergeStateStatus が BEHIND の間だけ update-branch を叩く。GitHub の
-          # mergeability 計算は非同期なので UNKNOWN は数秒待って再評価。BEHIND 以外
-          # (CLEAN / BLOCKED=要レビュー 等) になったら最新化済みとみなして終了。
           attempt=1
           while [ "$attempt" -le 6 ]; do
             state="$(gh pr view "$pr_number" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo UNKNOWN)"
             case "$state" in
               BEHIND)
-                echo "::notice::release PR #$pr_number is BEHIND; calling update-branch."
-                gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/update-branch" >/dev/null 2>&1 || true
-                sleep 5
+                echo "::error::release PR #$pr_number is BEHIND production. Re-run this workflow to rebuild release/production on the latest production tip."
+                exit 1
                 ;;
               UNKNOWN)
                 echo "mergeability still computing; waiting."
                 sleep 5
                 ;;
               *)
-                echo "::notice::release PR #$pr_number not behind (state=$state); branch is up to date."
+                echo "::notice::release PR #$pr_number state=$state; branch is up to date."
                 exit 0
                 ;;
             esac
             attempt=$((attempt + 1))
           done
-          echo "::notice::update-branch not confirmed after retries; operator may need to click Update branch once."
+          echo "::error::mergeability not confirmed after retries; operator should verify the PR is not behind."
+          exit 1
