@@ -198,3 +198,64 @@ export function isWithinUsCloseWindow(now: Date, minutesBeforeClose: number): bo
     etMinutes < US_REGULAR_CLOSE_ET_MINUTES
   )
 }
+
+/**
+ * 市場ごとのレギュラーセッション (開場 / 引け、市場ローカル分換算)。
+ * - US NYSE: 09:30–16:00 ET
+ * - JP TSE : 09:00–15:30 JST (引けは 2024-11-05 に 15:30 へ延長後の値)
+ *
+ * lunch break (JP 11:30–12:30) / early close (US 13:00 ET) は POC 未対応 —
+ * 窓内扱いで評価は走る (発注は marketHoursCheck / 板で自然に抑制される)。
+ */
+const MARKET_SESSION: Record<
+  TradingMarket,
+  { timeZone: string; openMinutes: number; closeMinutes: number }
+> = {
+  US: { timeZone: 'America/New_York', openMinutes: 9 * 60 + 30, closeMinutes: 16 * 60 },
+  JP: { timeZone: 'Asia/Tokyo', openMinutes: 9 * 60, closeMinutes: 15 * 60 + 30 },
+}
+
+/**
+ * `now` が **当該 market の取引日かつ「開場 `minutesBeforeOpen` 分前〜引け」**
+ * の窓内なら true (#session-window-gate)。戦略 cron を開場前まで停止するゲートに
+ * 使う (窓外は評価そのものを skip)。
+ *
+ * `isWithinUsCloseWindow` と異なり **開場側 (朝)** も判定するため、市場ローカルの
+ * 日付・曜日・時刻をすべて `Intl.DateTimeFormat(timeZone)` から 1 回で抽出する。
+ * 理由: JP 朝 (08:30 JST = 前日 23:30 UTC) は UTC 日付がズレるので、UTC 基準の
+ * `isTradingDay` では曜日・祝日判定を誤る。祝日は **市場ローカル日付**で
+ * `HOLIDAYS[market]` と照合する (2026/2027 を保持、範囲外は曜日判定のみに degrade)。
+ * DST は `Intl` が自動解決する。
+ */
+export function isWithinStrategyWindow(
+  now: Date,
+  market: TradingMarket,
+  minutesBeforeOpen: number,
+): boolean {
+  if (!Number.isFinite(minutesBeforeOpen) || minutesBeforeOpen < 0) return false
+  const session = MARKET_SESSION[market]
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: session.timeZone,
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(now)
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? ''
+  const weekday = get('weekday')
+  if (weekday === 'Sat' || weekday === 'Sun') return false
+  const ymd = `${get('year')}-${get('month')}-${get('day')}`
+  if (HOLIDAYS[market].has(ymd)) return false
+  const hour = Number(get('hour'))
+  const minute = Number(get('minute'))
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false
+  const localMinutes = (hour % 24) * 60 + minute // hour12:false で稀に '24' を返す Intl quirk 対策
+  return (
+    localMinutes >= session.openMinutes - minutesBeforeOpen &&
+    localMinutes < session.closeMinutes
+  )
+}
