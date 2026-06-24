@@ -24,22 +24,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate production release token
-        env:
-          PRODUCTION_RELEASE_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
-        run: |
-          if [ -z "$PRODUCTION_RELEASE_TOKEN" ]; then
-            {
-              echo "::error::PRODUCTION_RELEASE_TOKEN secret is required."
-              echo "Use a fine-grained PAT or GitHub App installation token that can push release/production and create/update production PRs."
-              echo "The default GITHUB_TOKEN must not be used here because workflow-triggered PRs do not reliably trigger the production preflight pull_request workflow."
-            } >&2
-            exit 1
-          fi
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Ensure production branch exists
         env:
-          PRODUCTION_RELEASE_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           if ! git ls-remote --exit-code --heads "$remote" production >/dev/null; then
@@ -53,7 +47,7 @@ jobs:
 
       - name: Update release branch
         env:
-          PRODUCTION_RELEASE_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           remote_release_sha="$(git ls-remote --heads "$remote" release/production | cut -f1)"
@@ -88,7 +82,7 @@ jobs:
       - name: Check production delta
         id: production_delta
         env:
-          PRODUCTION_RELEASE_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags "$remote" production:refs/remotes/origin/production
@@ -105,7 +99,7 @@ jobs:
       - name: Create or update production PR
         if: steps.production_delta.outputs.has_changes == 'true'
         env:
-          GH_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           release_prs="$(
             git log --reverse --pretty=format:%s origin/production..release/production \
@@ -162,7 +156,7 @@ jobs:
       - name: Auto-update release PR branch (skip manual "Update branch")
         if: steps.production_delta.outputs.has_changes == 'true'
         env:
-          GH_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           pr_number="$(gh pr list \
             --base production \
