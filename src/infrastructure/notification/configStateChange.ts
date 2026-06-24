@@ -7,10 +7,11 @@ import type { Notifier, NotificationSeverity } from './Notifier'
  * `global_config` の重要 field の前回値を D1 `config_state_snapshot` に
  * 保存し、cron tick ごとに diff を取って STATE_CHANGE 通知する (#141)。
  *
- * 検知対象は **trading の安全性に直結する** 4 つに絞る:
+ * 検知対象は **trading の安全性に直結する** field に絞る:
  *   - `dry_run`            (true → false: 実発注 ON、危険)
  *   - `trading_enabled`    (false → true: 実発注 ON、危険)
  *   - `market_hours_check` (false → true: 取引時間外 reject、運用変更)
+ *   - `session_window_gate_enabled` (true → false: 開場前 fence が外れる)
  *   - `drawdown_kill_threshold` (絶対値が緩む方向は危険)
  *
  * 「実発注に近づく方向」の遷移は `severity: critical`、逆方向は `info`。
@@ -24,6 +25,7 @@ export interface WatchedConfig {
   dryRun: boolean
   tradingEnabled: boolean
   marketHoursCheck: boolean
+  sessionWindowGateEnabled: boolean
   drawdownKillThreshold: number
 }
 
@@ -31,6 +33,7 @@ export const WATCHED_KEYS: ReadonlyArray<keyof WatchedConfig> = [
   'dryRun',
   'tradingEnabled',
   'marketHoursCheck',
+  'sessionWindowGateEnabled',
   'drawdownKillThreshold',
 ]
 
@@ -117,6 +120,12 @@ export function classifySeverity(
     return 'warning'
   }
   if (field === 'marketHoursCheck') {
+    if (from === true && to === false) return 'critical'
+    if (from === false && to === true) return 'info'
+    return 'warning'
+  }
+  if (field === 'sessionWindowGateEnabled') {
+    // true → false: 開場前 fence が外れ 24h 常時評価に戻る = 緩む方向で critical
     if (from === true && to === false) return 'critical'
     if (from === false && to === true) return 'info'
     return 'warning'

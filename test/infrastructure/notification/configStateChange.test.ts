@@ -14,6 +14,7 @@ const baseCurrent: WatchedConfig = {
   dryRun: true,
   tradingEnabled: false,
   marketHoursCheck: false,
+  sessionWindowGateEnabled: false,
   drawdownKillThreshold: -0.02,
 }
 
@@ -29,6 +30,12 @@ describe('classifySeverity', () => {
   })
   it('trading_enabled true → false is info', () => {
     expect(classifySeverity('tradingEnabled', true, false)).toBe('info')
+  })
+  it('session_window_gate_enabled true → false (fence removed) is critical', () => {
+    expect(classifySeverity('sessionWindowGateEnabled', true, false)).toBe('critical')
+  })
+  it('session_window_gate_enabled false → true (fence added) is info', () => {
+    expect(classifySeverity('sessionWindowGateEnabled', false, true)).toBe('info')
   })
   it('drawdown_kill_threshold loosening (closer to 0) is critical', () => {
     expect(classifySeverity('drawdownKillThreshold', -0.05, -0.02)).toBe('critical')

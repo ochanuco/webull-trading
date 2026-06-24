@@ -1,0 +1,1 @@
+ALTER TABLE `global_config` ADD `session_window_gate_enabled` integer DEFAULT false NOT NULL;

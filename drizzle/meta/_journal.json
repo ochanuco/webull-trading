@@ -253,6 +253,13 @@
       "when": 1781268003149,
       "tag": "0035_add_tradable_instruments",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1782209104396,
+      "tag": "0036_add_session_window_gate",
+      "breakpoints": true
     }
   ]
 }
