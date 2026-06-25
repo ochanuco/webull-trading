@@ -14,6 +14,11 @@ const intent: OrderIntent = {
   clientOrderId: 'coid-test',
 }
 
+const sellIntent: OrderIntent = {
+  ...intent,
+  side: 'SELL',
+}
+
 // #251 / #256: Place Order body schema version の差分テスト。
 // v1 (default / 現挙動) と v2 (新 OpenAPI docs) の body shape を検証。
 describe('toWebullPlaceOrderRequest', () => {
@@ -31,6 +36,7 @@ describe('toWebullPlaceOrderRequest', () => {
       expect(order.support_trading_session).toBe('N')
       expect(order.combo_type).toBeUndefined()
       expect(order.side).toBe('BUY')
+      expect(order.open_or_close).toBe('OPEN')
       expect(order.quantity).toBe('4')
     })
 
@@ -40,6 +46,12 @@ describe('toWebullPlaceOrderRequest', () => {
       expect(body.new_orders[0].support_trading_session).toBe('N')
       expect(body.new_orders[0].limit_price).toBe('12.500')
       expect(body.new_orders[0].combo_type).toBeUndefined()
+    })
+
+    it('SELL intent sets open_or_close=CLOSE to prevent 417 CASH_ACCOUNT_NOT_ALLOW_SELL_SHORT', () => {
+      const body = toWebullPlaceOrderRequest(sellIntent, 'v1', 'acct-1')
+      expect(body.new_orders[0].side).toBe('SELL')
+      expect(body.new_orders[0].open_or_close).toBe('CLOSE')
     })
   })
 

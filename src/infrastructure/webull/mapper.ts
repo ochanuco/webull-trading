@@ -29,6 +29,7 @@ export function toWebullPlaceOrderRequest(
     order_type: 'MARKET' as const,
     quantity: String(intent.quantity),
     side: intent.side,
+    open_or_close: (intent.side === 'BUY' ? 'OPEN' : 'CLOSE') as 'OPEN' | 'CLOSE',
     time_in_force: 'DAY' as const,
     entrust_type: 'QTY' as const,
     account_tax_type: 'SPECIFIC' as const,
