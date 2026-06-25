@@ -60,13 +60,18 @@ jobs:
           # Fetch production so we can build release/production on top of it.
           git fetch --no-tags "$remote" production:refs/remotes/origin/production
 
-          # Start from production tip and cherry-pick non-merge commits from main
-          # that are not yet reachable from production. This keeps release/production
-          # linear so the no-merge-commits ruleset on production is always satisfied.
+          # Squash all changes from main that are not yet on production into a single
+          # commit on top of production. This keeps release/production linear (no merge
+          # commits) even when individual commits conflict with production's context.
+          # Individual commit history is preserved on main; production gets one
+          # release commit per deploy.
           git checkout -B release/production origin/production
-          while IFS= read -r sha; do
-            git cherry-pick "$sha"
-          done < <(git log --reverse --no-merges --cherry-pick --pretty=tformat:"%H" origin/production..origin/main)
+          git merge --squash origin/main
+          if git diff --cached --quiet; then
+            echo "::notice::No changes between production and main; nothing to commit."
+          else
+            git commit -m "release: sync production to main"
+          fi
 
           push_with_retry() {
             attempt=1
