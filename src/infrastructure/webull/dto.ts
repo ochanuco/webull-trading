@@ -73,6 +73,13 @@ export interface WebullV2OrderEntry {
   /** v1: 'N'、v2: 'CORE' (新 enum)。 */
   support_trading_session: string
   side: 'BUY' | 'SELL'
+  /**
+   * ロングの開閉を明示する。v1 / v2 両スキーマで必須。
+   * 未送信時に Webull JP が SELL を空売り開始とみなし、キャッシュ口座で
+   * 417 CASH_ACCOUNT_NOT_ALLOW_SELL_SHORT を返した実績あり (v1 本番, 2026-06-25)。
+   * BUY → 'OPEN'、SELL → 'CLOSE' を常に送る。
+   */
+  open_or_close: 'OPEN' | 'CLOSE'
   time_in_force: 'DAY'
   entrust_type: 'QTY'
   account_tax_type: 'GENERAL' | 'SPECIFIC'
