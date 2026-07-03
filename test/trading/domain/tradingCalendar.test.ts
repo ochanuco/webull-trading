@@ -107,6 +107,11 @@ describe('isWithinStrategyWindow — JP (#session-window-gate)', () => {
 })
 
 describe('isTradingDay', () => {
+  it('invalid Date は fail-closed で false (US/JP とも)', () => {
+    expect(isTradingDay(new Date('invalid'), 'US')).toBe(false)
+    expect(isTradingDay(new Date('invalid'), 'JP')).toBe(false)
+  })
+
   it('returns false for weekends', () => {
     // Sat
     expect(isTradingDay(new Date('2026-04-18T10:00:00.000Z'), 'US')).toBe(false)

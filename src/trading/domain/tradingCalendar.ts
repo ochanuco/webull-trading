@@ -260,6 +260,9 @@ export function isUsMarketEarlyCloseDay(date: Date): boolean {
  * 指定 market の営業日なら true。土日 + 祝日で false。
  */
 export function isTradingDay(date: Date, market: TradingMarket): boolean {
+  // invalid Date は getUTC*() が NaN になり土日/祝日判定をすり抜けて「営業日」
+  // 側 (fail-open) に落ちるため、先に弾く (fail-closed)。
+  if (!Number.isFinite(date.getTime())) return false
   if (isWeekend(date)) return false
   if (market === 'US') {
     // US は従来どおり UTC 日付基準のままルール判定へ委譲 (#547)。static set
