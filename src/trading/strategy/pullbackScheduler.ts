@@ -1302,11 +1302,12 @@ export async function runPullbackScheduler(
         })
         // broker 4xx = 注文の**確定拒否** (417 SELL_SHORT / TICKER_IS_DENY /
         // Insufficient Buying Power 等、再送しても解消しない) → REJECT。
-        // それ以外 (5xx / ネットワーク断 / 非 BrokerRequestError 例外) は
+        // 429 (rate limit) は再送で解消しうる一時的失敗なので除外して ERROR。
+        // それ以外 (5xx / ネットワーク断 / 非 BrokerRequestError 例外) も
         // 原因不明・一時的として ERROR のまま。
         const brokerStatus = error instanceof BrokerRequestError ? error.brokerStatus : undefined
         const isBrokerReject =
-          brokerStatus !== undefined && brokerStatus >= 400 && brokerStatus < 500
+          brokerStatus !== undefined && brokerStatus >= 400 && brokerStatus < 500 && brokerStatus !== 429
         await emitDecision({
           symbol: upper,
           decision: isBrokerReject ? 'REJECT' : 'ERROR',

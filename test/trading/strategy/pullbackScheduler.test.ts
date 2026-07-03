@@ -3,6 +3,7 @@ import type { BarClient, IntradayBar } from '../../../src/infrastructure/quotes/
 import type { Notifier, NotificationEvent } from '../../../src/infrastructure/notification/Notifier'
 import {
   BrokerClientError,
+  BrokerRateLimitError,
   BrokerServerError,
   WEBULL_SELL_QTY_EXCEED_CODE,
 } from '../../../src/shared/errors'
@@ -1855,6 +1856,19 @@ describe('runPullbackScheduler broker submit decision taxonomy (SKIP/REJECT/ERRO
 
   it('非 BrokerRequestError (ネットワーク断など) → ERROR', async () => {
     const summary = await runWith(new Error('fetch failed: network down'))
+    const d = summary.decisions.find((x) => x.symbol === 'AAPL')
+    expect(d?.decision).toBe('ERROR')
+    expect(d?.reason).toMatch(/^broker submit error: /)
+  })
+
+  it('BrokerRateLimitError 429 (rate limit、一時的) → ERROR (REJECT にしない)', async () => {
+    const summary = await runWith(
+      new BrokerRateLimitError(
+        'Webull request failed after 3 attempts with last status 429: <no body>',
+        'placeOrder',
+        { brokerStatus: 429 },
+      ),
+    )
     const d = summary.decisions.find((x) => x.symbol === 'AAPL')
     expect(d?.decision).toBe('ERROR')
     expect(d?.reason).toMatch(/^broker submit error: /)
