@@ -173,9 +173,9 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
-    it('broker submit error → 証券会社側で拒否', () => {
+    it('broker submit error → 発注失敗 (確定拒否か一時的かは decision 列が区別)', () => {
       expect(localizeReason('broker submit error: Webull 429')).toBe(
-        '発注エラー: 証券会社側で拒否 — Webull 429',
+        '発注失敗: 証券会社への発注が成立せず — Webull 429',
       )
     })
   })

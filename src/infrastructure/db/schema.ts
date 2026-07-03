@@ -519,7 +519,7 @@ export type GlobalConfigInsert = typeof globalConfig.$inferInsert
 
 /**
  * Per-symbol decision log from `runPullbackScheduler`。1 row per
- * (cron fire × symbol)。HOLD / BUY / SELL / REJECT / ERROR 全ルートを残す。
+ * (cron fire × symbol)。HOLD / BUY / SELL / SKIP / REJECT / ERROR 全ルートを残す。
  * #128。運用で銘柄単位の診断 (なぜ BUY が出ないのか) に使う。
  * 7 日 TTL で quote feed cron が cleanup 同梱予定。
  */
@@ -530,16 +530,20 @@ export const strategyDecisionLog = sqliteTable(
     timestamp: text('timestamp').notNull(),
     requestId: text('request_id'),
     symbol: text('symbol').notNull(),
-    /** 'BUY' / 'SELL' / 'HOLD' / 'REJECT' / 'ERROR' */
+    /**
+     * 'BUY' / 'SELL' / 'HOLD' / 'SKIP' / 'REJECT' / 'ERROR'。
+     * SKIP = bot 内部ゲート見送り (broker 未到達) / REJECT = broker 4xx 確定拒否 /
+     * ERROR = 原因不明・一時的 (5xx / ネットワーク / 想定外の例外)。
+     */
     decision: text('decision').notNull(),
-    /** signal.reason (HOLD) / sizing.capReason (REJECT) / error.message (ERROR) */
+    /** signal.reason (HOLD) / sizing.capReason (SKIP) / error.message (REJECT/ERROR) */
     reason: text('reason'),
     price: real('price'),
     /** indicators snapshot JSON (debug 用、optional) */
     indicatorsJson: text('indicators_json'),
     /**
      * BUY/SELL 成立時の client_order_id。dashboard が trade_journal と JOIN
-     * して realized_pnl を引くためのキー (#143)。HOLD/REJECT/ERROR は null。
+     * して realized_pnl を引くためのキー (#143)。HOLD/SKIP/REJECT/ERROR は null。
      */
     clientOrderId: text('client_order_id'),
     /**
