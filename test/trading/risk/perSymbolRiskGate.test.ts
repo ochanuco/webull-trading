@@ -239,6 +239,40 @@ describe('evaluatePerSymbolRisk — spread guard', () => {
     expect(decision.reasons[0]).toContain('spread')
   })
 
+  it('reject reason に quote 鮮度 (asOf + Nh stale) を併記する (#547)', () => {
+    // 臨時休場 (session gate をすり抜ける閉場) では fetchedAt は新鮮なまま
+    // asOf だけが古くなる — その stale 板の wide spread reject が休場由来と
+    // reason 単体で読めることを確認する。now - asOf = 19h18m = 19.3h。
+    const asOf = '2026-04-20T19:12:00.000Z'
+    const state: SymbolState = {
+      ...emptySymbolState('DFEN', () => now),
+      lastQuote: quote(100, 1_000, { bid: 99.0, ask: 101.0, asOf }), // spread 2%
+    }
+    const decision = evaluatePerSymbolRisk(
+      { symbol: 'DFEN', side: 'BUY', intentPrice: 100, intentNotional: 100, state, now },
+      baseConfig,
+    )
+    expect(decision.approved).toBe(false)
+    expect(decision.reasons[0]).toBe(
+      `spread 2.000% exceeds US limit 0.250% (quote asOf ${asOf}, 19.3h stale)`,
+    )
+  })
+
+  it('asOf が parse 不能 / 欠落なら鮮度 suffix なしの従来 message (#547)', () => {
+    for (const asOf of ['not-a-date', '']) {
+      const state: SymbolState = {
+        ...emptySymbolState('DFEN', () => now),
+        lastQuote: quote(100, 1_000, { bid: 99.0, ask: 101.0, asOf }),
+      }
+      const decision = evaluatePerSymbolRisk(
+        { symbol: 'DFEN', side: 'BUY', intentPrice: 100, intentNotional: 100, state, now },
+        baseConfig,
+      )
+      expect(decision.approved).toBe(false)
+      expect(decision.reasons[0]).toBe('spread 2.000% exceeds US limit 0.250%')
+    }
+  })
+
   it('approves SELL when spread is wide (exit priority)', () => {
     const state: SymbolState = {
       ...emptySymbolState('SPY', () => now),
