@@ -19,14 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -60,13 +60,18 @@ jobs:
           # Fetch production so we can build release/production on top of it.
           git fetch --no-tags "$remote" production:refs/remotes/origin/production
 
-          # Squash all changes from main that are not yet on production into a single
-          # commit on top of production. This keeps release/production linear (no merge
-          # commits) even when individual commits conflict with production's context.
-          # Individual commit history is preserved on main; production gets one
-          # release commit per deploy.
+          # Snapshot main's tree wholesale on top of production (no 3-way merge).
+          # The release intent is "production := current main content", and release
+          # commits never flow back to main, so the merge-base between the two
+          # branches stays frozen at the last pre-squash-flow release. A frozen
+          # base makes `git merge --squash` accumulate spurious conflicts over
+          # time (add/add on files added after the base and later modified on
+          # main, lockfile churn) — observed 2026-07-03 when 0037 + pnpm-lock
+          # conflicts blocked release PR creation. read-tree sidesteps merging
+          # entirely: the index becomes exactly main's tree, production history
+          # stays linear with one release commit per deploy.
           git checkout -B release/production origin/production
-          git merge --squash origin/main
+          git read-tree -u --reset origin/main
           if git diff --cached --quiet; then
             echo "::notice::No changes between production and main; nothing to commit."
           else
@@ -165,8 +170,9 @@ jobs:
             gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
           fi
 
-      # release/production は production をベースにチェリーピックで作成するため、
-      # 通常は production と fast-forward 関係にあり BEHIND にはならない。
+      # release/production は production の先端に main の snapshot commit を1つ
+      # 積む形で作成するため、通常は production と fast-forward 関係にあり
+      # BEHIND にはならない。
       # production に新コミットが来て BEHIND になった場合は update-branch (merge commit
       # を生成) ではなく、このワークフローを再実行して release/production を作り直す。
       - name: Check release PR branch is not behind
