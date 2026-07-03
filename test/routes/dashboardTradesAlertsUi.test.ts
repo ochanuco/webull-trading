@@ -184,7 +184,7 @@ describe('/dashboard/cron AI 用コピー (#alerts-trades-ui)', () => {
       timestamp: '2026-06-10T17:45:45.592Z',
       requestId: 'run-1',
       symbol: 'USMV',
-      decision: 'REJECT',
+      decision: 'SKIP',
       reason: 'role: low_volatility entry is not enabled (#452)',
       price: 95.46,
       indicatorsJson: '{"price":95.46}',
