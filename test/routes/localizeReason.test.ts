@@ -167,6 +167,23 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
+    it('spread reject (鮮度 suffix 付き) → 休場・閉場中の可能性を明示 (#547)', () => {
+      // UTC 2026-07-02T20:00:00.000Z → JST 2026-07-03 05:00:00
+      expect(
+        localizeReason(
+          'spread 15.121% exceeds US limit 0.250% (quote asOf 2026-07-02T20:00:00.000Z, 19.3h stale)',
+        ),
+      ).toBe(
+        '発注スキップ: 気配スプレッド過大 (15.121% > US 上限 0.250%、板情報は 2026-07-03 05:00:00 JST 時点 / 19.3時間前 — 休場・閉場中の可能性)',
+      )
+    })
+
+    it('spread reject (suffix なしの旧形式) → 数値のみ翻訳', () => {
+      expect(localizeReason('spread 15.121% exceeds US limit 0.250%')).toBe(
+        '発注スキップ: 気配スプレッド過大 (15.121% > US 上限 0.250%)',
+      )
+    })
+
     it('insufficient bars → 日柄不足', () => {
       expect(localizeReason('insufficient bars for indicators')).toBe(
         'データ不足: 指標計算に必要な日柄不足',

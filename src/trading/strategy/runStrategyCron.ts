@@ -45,7 +45,7 @@ import {
 } from '../risk/vixRegimeFilter'
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
-import { isWithinStrategyWindow } from '../domain/tradingCalendar'
+import { evaluateStrategyWindow, type StrategyWindowVerdict } from '../domain/tradingCalendar'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 import { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } from './strategies/BreakoutMomentumStrategy'
 import {
@@ -99,6 +99,7 @@ export interface StrategyCronResult {
     | 'trading_disabled'
     | 'no_tradable_symbols'
     | 'outside_session_window'
+    | 'market_holiday'
     | 'no_bridge_state'
     | 'portfolio_halted'
     | 'drawdown_kill'
@@ -356,23 +357,37 @@ export async function runStrategyCron(
   // が true の時、開場 PRE_OPEN_WINDOW_MIN 分前〜引けの窓外は戦略評価そのものを
   // skip する (cron は発火するが portfolio DO / VIX / 買付余力取得まで全て省く)。
   // 市場ごとに判定し、窓内の currency だけを後段 run に進める (例: US だけ窓内なら
-  // USD run のみ)。flag off は従来挙動 (全 currency 常時評価)。skip は「設定通り」
-  // なので `trading_disabled` 同様 **通知しない** (noisy 回避)。
+  // USD run のみ)。休場日 (US はルール計算 / JP は static テーブル、#547) は
+  // `market_holiday`、それ以外の窓外は `outside_session_window` と skip 理由を
+  // 区別する — 2026-07-03 振替休場で stale-quote SKIP が量産された際、reason から
+  // 休場が読めなかった反省。US 半日取引日は引けが 13:00 ET に短縮される (#547)。
+  // flag off は従来挙動 (全 currency 常時評価)。skip は「設定通り」なので
+  // `trading_disabled` 同様 **通知しない** (noisy 回避)。
   const sessionNow = new Date()
+  const windowVerdicts: StrategyWindowVerdict[] = []
   const activeCurrencies = new Set<SymbolCurrency>(
-    (['USD', 'JPY'] as const).filter(
-      (cur) =>
-        byCurrency[cur].length > 0 &&
-        (!global.sessionWindowGateEnabled ||
-          isWithinStrategyWindow(sessionNow, cur === 'JPY' ? 'JP' : 'US', PRE_OPEN_WINDOW_MIN)),
-    ),
+    (['USD', 'JPY'] as const).filter((cur) => {
+      if (byCurrency[cur].length === 0) return false
+      if (!global.sessionWindowGateEnabled) return true
+      const verdict = evaluateStrategyWindow(
+        sessionNow,
+        cur === 'JPY' ? 'JP' : 'US',
+        PRE_OPEN_WINDOW_MIN,
+      )
+      windowVerdicts.push(verdict)
+      return verdict === 'in_window'
+    }),
   )
   if (global.sessionWindowGateEnabled && activeCurrencies.size === 0) {
+    // 全対象 market が休場のときだけ `market_holiday` (休場と窓外が混在する場合、
+    // 休場だけでは skip の説明にならないので従来ラベルに倒す)。
+    const allHoliday =
+      windowVerdicts.length > 0 && windowVerdicts.every((v) => v === 'market_holiday')
     return {
       summary: emptySummary(),
       symbols: universe.allowedSymbols,
       analysis: analysisBase(),
-      skipReason: 'outside_session_window',
+      skipReason: allHoliday ? 'market_holiday' : 'outside_session_window',
     }
   }
 

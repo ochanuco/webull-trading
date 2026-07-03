@@ -3972,6 +3972,18 @@ export function localizeReason(en: string | null | undefined): string {
   )
   s = s.replace(/^sizing rejected: zero qty$/, '買付余力不足: 1株分の余力なし')
 
+  // === Per-symbol risk gate: spread guard (#547) ===
+  // spread reject は臨時休場 (session gate をルールで書けない閉場) のバック
+  // ストップを兼ねる。鮮度 suffix があれば「板が古い = 休場・閉場中の可能性」を
+  // 明示する。suffix なし (旧形式 / asOf 欠落) は従来通り数値のみ。
+  s = s.replace(
+    /^spread ([\d.]+)% exceeds (US|JP) limit ([\d.]+)%(?: \(quote asOf ([^,]+), ([\d.]+)h stale\))?$/,
+    (_m, pct, mkt, lim, asOf, hours) =>
+      `発注スキップ: 気配スプレッド過大 (${pct}% > ${mkt} 上限 ${lim}%${
+        asOf ? `、板情報は ${fmtJst(asOf)} 時点 / ${hours}時間前 — 休場・閉場中の可能性` : ''
+      })`,
+  )
+
   // === Scheduler inline ===
   s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の建玉なし')
   s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄不足')

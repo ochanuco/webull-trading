@@ -150,7 +150,7 @@ export function evaluatePerSymbolRisk(
   //    bid/ask 欠損は source 次第: Yahoo 等 bid/ask 非対応 source は適用外で通し、
   //    それ以外 (Webull 等) は fail-closed (issue #411 で恒久対応 = Webull bid/ask)。
   if (side === 'BUY') {
-    const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits)
+    const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits, now)
     if (spreadReason !== null) {
       return reject(spreadReason)
     }
@@ -189,6 +189,7 @@ function evaluateSpreadGate(
   symbol: string,
   lastQuote: QuoteSnapshot | null,
   limits: { US: number; JP: number },
+  now: Date,
 ): string | null {
   if (lastQuote === null) return null
   const bid = lastQuote.bid
@@ -216,9 +217,25 @@ function evaluateSpreadGate(
     return 'spread invalid: crossed book, non-finite, or non-positive bid/ask'
   }
   if (spreadPct > limit) {
-    return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%`
+    // 臨時休場 (服喪・緊急閉場) はカレンダーのルール計算 (tradingCalendar #547)
+    // で書けず session window gate をすり抜ける。その場合はこの spread reject が
+    // バックストップになるため、quote 鮮度を併記して「板が古い = 閉場中の可能性」
+    // が reason 単体で読めるようにする。
+    return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%${formatQuoteStaleness(lastQuote.asOf, now)}`
   }
   return null
+}
+
+/**
+ * `" (quote asOf <ISO>, <N>h stale)"` suffix (#547)。asOf 欠落 / parse 不能は
+ * 空文字を返し、reason は従来形のまま。clock skew による負値は 0.0h に clamp。
+ */
+function formatQuoteStaleness(asOf: string | undefined, now: Date): string {
+  if (!asOf) return ''
+  const asOfMs = new Date(asOf).getTime()
+  if (!Number.isFinite(asOfMs)) return ''
+  const staleHours = Math.max(0, (now.getTime() - asOfMs) / 3_600_000)
+  return ` (quote asOf ${asOf}, ${staleHours.toFixed(1)}h stale)`
 }
 
 function evaluateGap(state: SymbolState, thresholdPct: number): string | null {
