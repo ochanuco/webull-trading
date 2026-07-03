@@ -260,6 +260,13 @@
       "when": 1782209104396,
       "tag": "0036_add_session_window_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1783088190965,
+      "tag": "0037_decision_skip_reject_taxonomy",
+      "breakpoints": true
     }
   ]
 }
