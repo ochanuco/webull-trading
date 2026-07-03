@@ -102,7 +102,7 @@ describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) �
   // 各シナリオで:
   //   1. pure helper の判定
   //   2. TradingService.executeTrade() の `riskDecision`
-  //   3. runPullbackScheduler の REJECT decision
+  //   3. runPullbackScheduler の SKIP decision
   // が同じ reason で reject (or 同じく approve) することを確認する。
 
   const tradingConfig: TradingConfig = {
@@ -172,7 +172,7 @@ describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) �
       now: () => now,
     })
     expect(summary.buys).toBe(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('halt or stale quote')
   })
 
@@ -220,7 +220,7 @@ describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) �
       now: () => now,
     })
     expect(summary.buys).toBe(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('inverse-pair exposure')
   })
 

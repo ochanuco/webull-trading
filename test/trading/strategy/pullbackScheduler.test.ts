@@ -193,7 +193,7 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions).toEqual([
       {
         symbol: 'AAPL',
-        decision: 'REJECT',
+        decision: 'SKIP',
         reason: 'insufficient bars for indicators',
       },
     ])
@@ -402,7 +402,7 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('insufficient settled cash')
   })
 
@@ -430,7 +430,7 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('halt or stale quote')
   })
 
@@ -459,7 +459,7 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('bid/ask missing')
   })
 
@@ -513,7 +513,7 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('inverse-pair exposure')
   })
 
@@ -601,7 +601,7 @@ describe('runPullbackScheduler earnings calendar gate (#196)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('risk: earnings_within_1bd')
   })
 
@@ -695,7 +695,7 @@ describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('risk: macro_event_gate: CPI')
   })
 
@@ -804,7 +804,7 @@ describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
       now: () => now,
     })
     expect(summary.buys).toBe(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('earnings_within_1bd')
     expect(reject?.reason).not.toContain('macro_event_gate')
   })
@@ -1154,7 +1154,7 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
     expect(overrideCalls).toHaveLength(0)
     expect(summary.sells).toBe(0)
     expect(summary.errors).toHaveLength(1)
-    const errDecision = summary.decisions.find((d) => d.decision === 'ERROR')
+    const errDecision = summary.decisions.find((d) => d.decision === 'REJECT')
     expect(errDecision?.reason).toContain('OAUTH_OPENAPI_OTHER_ERROR')
   })
 
@@ -1350,7 +1350,7 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
     expect(checkSpy).toHaveBeenCalledWith('9697')
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('sanity_failed cooldown active')
     expect(reject?.reason).toContain('30min')
     expect(reject?.trace?.map((s) => s.label)).toContain('risk.sanity_failed_cooldown')
@@ -1408,7 +1408,7 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
     expect(checkSpy).toHaveBeenCalledWith('9697')
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('sanity_failed cooldown active')
   })
 
@@ -1464,7 +1464,7 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
     expect(execution.calls).toHaveLength(1)
     expect((execution.calls[0] as { symbol: string }).symbol).toBe('AAPL')
     const reject = summary.decisions.find((d) => d.symbol === '9697')
-    expect(reject?.decision).toBe('REJECT')
+    expect(reject?.decision).toBe('SKIP')
     expect(reject?.reason).toContain('sanity_failed cooldown active')
   })
 })
@@ -1575,7 +1575,7 @@ describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
     const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
-    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.decision).toBe('SKIP')
     expect(aapl?.reason).toMatch(/missing-lot-size/)
     expect(summary.rejected).toContainEqual(
       expect.objectContaining({ symbol: 'AAPL', reason: expect.stringMatching(/missing-lot-size/) }),
@@ -1676,7 +1676,7 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
     const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
-    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.decision).toBe('SKIP')
     expect(aapl?.reason).toMatch(/buying-power unavailable/)
   })
 
@@ -1715,7 +1715,7 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
     const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
-    expect(aapl?.decision).toBe('REJECT')
+    expect(aapl?.decision).toBe('SKIP')
     expect(aapl?.reason).toMatch(/insufficient buying power/)
   })
 
@@ -1740,13 +1740,13 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
     })
     expect(summary.buys).toBe(1)
     expect(execution.calls).toHaveLength(1)
-    const rejected = summary.decisions.filter((d) => d.decision === 'REJECT')
+    const rejected = summary.decisions.filter((d) => d.decision === 'SKIP')
     expect(rejected.some((d) => /insufficient buying power/.test(d.reason ?? ''))).toBe(true)
   })
 })
 
 describe('runPullbackScheduler broker-error decision embeds order amount (#417)', () => {
-  it('includes qty + USD/JPY notional in the ERROR reason for a USD symbol', async () => {
+  it('includes qty + USD/JPY notional in the REJECT reason for a USD symbol', async () => {
     const throwing: Execution & { calls: unknown[] } = {
       calls: [],
       async execute(intent) {
@@ -1768,7 +1768,7 @@ describe('runPullbackScheduler broker-error decision embeds order amount (#417)'
       fxJpyPerSymbolCcy: 150,
       now: () => now,
     })
-    const err = summary.decisions.find((d) => d.decision === 'ERROR')
+    const err = summary.decisions.find((d) => d.decision === 'REJECT')
     expect(err).toBeDefined()
     // localize 用の prefix は維持 (発注内容は message の後ろ)。
     expect(err?.reason).toMatch(/^broker submit error: /)
@@ -1795,9 +1795,87 @@ describe('runPullbackScheduler broker-error decision embeds order amount (#417)'
       fxJpyPerSymbolCcy: 1,
       now: () => now,
     })
-    const err = summary.decisions.find((d) => d.decision === 'ERROR')
+    const err = summary.decisions.find((d) => d.decision === 'REJECT')
     expect(err?.reason).toMatch(/発注内容: \d+口 @ ¥/)
     expect(err?.reason).not.toContain('USD/JPY')
+  })
+})
+
+describe('runPullbackScheduler broker submit decision taxonomy (SKIP/REJECT/ERROR)', () => {
+  function throwingExecution(err: Error): Execution & { calls: unknown[] } {
+    const calls: unknown[] = []
+    return {
+      calls,
+      async execute(intent) {
+        calls.push(intent)
+        throw err
+      },
+    }
+  }
+
+  async function runWith(err: Error) {
+    return runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: throwingExecution(err),
+      symbolLotSizeMap: { AAPL: 1 },
+      now: () => now,
+    })
+  }
+
+  it('BrokerRequestError 4xx (確定拒否) → REJECT', async () => {
+    const summary = await runWith(
+      new BrokerClientError(
+        'Webull request failed permanently with status 417: {"error_code":"OAUTH_OPENAPI_ORDER_BUYING_POWER_NOT_ENOUGH"}',
+        'placeOrder',
+        { brokerStatus: 417 },
+      ),
+    )
+    const d = summary.decisions.find((x) => x.symbol === 'AAPL')
+    expect(d?.decision).toBe('REJECT')
+    expect(d?.reason).toMatch(/^broker submit error: /)
+    // summary 構造は従来どおり errors 側に載る (分類のみの変更)
+    expect(summary.errors).toHaveLength(1)
+  })
+
+  it('BrokerRequestError 5xx (一時的) → ERROR', async () => {
+    const summary = await runWith(
+      new BrokerServerError(
+        'Webull request failed after 3 attempts with last status 502: <no body>',
+        'placeOrder',
+        { brokerStatus: 502 },
+      ),
+    )
+    const d = summary.decisions.find((x) => x.symbol === 'AAPL')
+    expect(d?.decision).toBe('ERROR')
+    expect(d?.reason).toMatch(/^broker submit error: /)
+  })
+
+  it('非 BrokerRequestError (ネットワーク断など) → ERROR', async () => {
+    const summary = await runWith(new Error('fetch failed: network down'))
+    const d = summary.decisions.find((x) => x.symbol === 'AAPL')
+    expect(d?.decision).toBe('ERROR')
+    expect(d?.reason).toMatch(/^broker submit error: /)
+  })
+
+  it('内部ゲート見送り (broker 未到達) → SKIP (broker には一切 submit しない)', async () => {
+    const execution = throwingExecution(new Error('must not be called'))
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      entrySuppressedSymbols: { AAPL: 'role: cash_parking (entry 無効)' },
+      now: () => now,
+    })
+    const d = summary.decisions.find((x) => x.symbol === 'AAPL')
+    expect(d?.decision).toBe('SKIP')
+    expect(execution.calls).toHaveLength(0)
+    expect(summary.errors).toHaveLength(0)
   })
 })
 
@@ -1874,7 +1952,7 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.symbol).toBe('SGOV')
     expect(reject?.reason).toContain('cash_parking')
     expect(reject?.trace?.map((s) => s.label)).toContain('risk.role_entry_suppressed')
@@ -2035,7 +2113,7 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('inverse')
   })
 })
@@ -2154,7 +2232,7 @@ describe('inverse_hedge role enabled but inverse-pair gate still wins (#457)', (
     })
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('inverse')
   })
 })
@@ -2191,8 +2269,8 @@ describe('runPullbackScheduler TICKER_IS_DENY hook (#460)', () => {
     })
     expect(hook).toHaveBeenCalledWith('USMV')
     expect(summary.errors).toHaveLength(1)
-    // 通常の ERROR decision / journal は従来どおり残る (hook は追加動作)
-    expect(summary.decisions.find((d) => d.decision === 'ERROR')?.reason).toContain('TICKER_IS_DENY')
+    // broker 417 確定拒否なので REJECT decision / journal は従来どおり残る (hook は追加動作)
+    expect(summary.decisions.find((d) => d.decision === 'REJECT')?.reason).toContain('TICKER_IS_DENY')
   })
 
   it('does not call the hook for other broker errors', async () => {
@@ -2282,7 +2360,7 @@ describe('runPullbackScheduler pair regime layer (#472)', () => {
     }
   }
 
-  it('enforce: zone=bull はブル側 BUY を通し、ベア側 BUY を REJECT する', async () => {
+  it('enforce: zone=bull はブル側 BUY を通し、ベア側 BUY を SKIP する', async () => {
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['SOXL', 'SOXS'],
@@ -2295,12 +2373,12 @@ describe('runPullbackScheduler pair regime layer (#472)', () => {
     })
     expect(summary.buys).toBe(1)
     expect((execution.calls[0] as { symbol: string }).symbol).toBe('SOXL')
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT' && d.symbol === 'SOXS')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP' && d.symbol === 'SOXS')
     expect(reject?.reason).toContain('pair_regime: zone=bull blocks bear entry')
     expect(reject?.trace?.map((s) => s.label)).toContain('risk.pair_regime')
   })
 
-  it('enforce: zone=neutral は両側 BUY を REJECT する (chop 帯の遮断)', async () => {
+  it('enforce: zone=neutral は両側 BUY を SKIP する (chop 帯の遮断)', async () => {
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['SOXL', 'SOXS'],
@@ -2338,11 +2416,11 @@ describe('runPullbackScheduler pair regime layer (#472)', () => {
     // SOXL は保有中 → strategy の SELL (TP) がそのまま通る (unknown でも exit は妨げない)
     expect(summary.sells).toBe(1)
     // SOXS の BUY は unknown で block
-    const reject = summary.decisions.find((d) => d.decision === 'REJECT' && d.symbol === 'SOXS')
+    const reject = summary.decisions.find((d) => d.decision === 'SKIP' && d.symbol === 'SOXS')
     expect(reject?.reason).toContain('zone=unknown')
   })
 
-  it('observe: gate せず trace に zone と「enforce なら REJECT」を残す', async () => {
+  it('observe: gate せず trace に zone と「enforce なら SKIP」を残す', async () => {
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['SOXS'],

@@ -2,8 +2,9 @@ import type { BarClient } from '../../infrastructure/quotes/BarClient'
 import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJournal'
 import { classifyBrokerErrorCause } from '../../infrastructure/notification/brokerErrorSurge'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
-import { isSellQtyExceedError, isTickerDenyError } from '../../shared/errors'
+import { BrokerRequestError, isSellQtyExceedError, isTickerDenyError } from '../../shared/errors'
 import type { DecisionTraceStep } from '../domain/Signal'
+import type { StrategyDecision } from '../domain/StrategyDecision'
 import { inferTradingMarket, isWithinUsCloseWindow } from '../domain/tradingCalendar'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
@@ -119,13 +120,13 @@ export interface PullbackSchedulerOptions {
    */
   intradayOnlySymbols?: Set<string>
   /**
-   * Per-symbol decision sink。HOLD / BUY / SELL / REJECT / ERROR の各 route で
-   * 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake 注入可能。
-   * 呼び出し側が失敗を throw しないのが前提 (logging failure isolation)。
+   * Per-symbol decision sink。HOLD / BUY / SELL / SKIP / REJECT / ERROR の各
+   * route で 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake
+   * 注入可能。呼び出し側が失敗を throw しないのが前提 (logging failure isolation)。
    */
   onDecision?: (record: {
     symbol: string
-    decision: 'BUY' | 'SELL' | 'HOLD' | 'REJECT' | 'ERROR'
+    decision: StrategyDecision
     reason?: string
     price?: number
     indicatorsJson?: string
@@ -193,14 +194,14 @@ export interface PullbackSchedulerOptions {
   vixDecision?: VixRegimeFilterDecision
   /**
    * Entry 抑止 symbol → 理由 (#452)。role が entry 無効 (cash_parking / 定義のみ
-   * の role / enum 外 'unknown') の銘柄の BUY を REJECT する。SELL / HOLD は
+   * の role / enum 外 'unknown') の銘柄の BUY を SKIP する。SELL / HOLD は
    * 対象外 (exit 経路を妨げない)。未注入なら skip (POC 後方互換)。production
    * (`runStrategyCron`) は `buildEntrySuppressedSymbols` の結果を渡す。
    */
   entrySuppressedSymbols?: Record<string, string>
   /**
    * ペアレジーム layer (#472)。mode='observe' は zone/score を trace に残すだけ
-   * (gate しない)、'enforce' は zone が許可しない側の BUY を REJECT し、保有と
+   * (gate しない)、'enforce' は zone が許可しない側の BUY を SKIP し、保有と
    * 反対 zone への flip で SELL (regime_flip) を出す。未注入 = 従来挙動。
    * production (`runStrategyCron`) は global_config + inverse_pairs から組む。
    */
@@ -334,7 +335,7 @@ export interface PullbackRunSummary {
 
 export interface PullbackDecisionTrace {
   symbol: string
-  decision: 'BUY' | 'SELL' | 'HOLD' | 'REJECT' | 'ERROR'
+  decision: StrategyDecision
   reason?: string
   price?: number
   indicatorsJson?: string
@@ -550,7 +551,7 @@ export async function runPullbackScheduler(
     const indicators = computePullbackIndicators(bars, intradayPrice)
     if (!indicators) {
       summary.rejected.push({ symbol: upper, reason: 'insufficient bars for indicators' })
-      await emitDecision({ symbol: upper, decision: 'REJECT', reason: 'insufficient bars for indicators' })
+      await emitDecision({ symbol: upper, decision: 'SKIP', reason: 'insufficient bars for indicators' })
       continue
     }
 
@@ -632,7 +633,7 @@ export async function runPullbackScheduler(
     }
 
     // ペアレジーム (#472): zone/score を全評価の trace に残す (HOLD 含む —
-    // observe 期間の監査が目的なので BUY/REJECT 時だけでは足りない)。
+    // observe 期間の監査が目的なので BUY/SKIP 時だけでは足りない)。
     const regime = regimeBySymbol.get(upper)
     if (regime && options.pairRegime) {
       const d = regime.decision
@@ -641,7 +642,7 @@ export async function runPullbackScheduler(
         state.position !== null && Number.isFinite(state.position.qty) && state.position.qty > 0
       const observeNote =
         options.pairRegime.mode === 'observe' && !allowed && signal.action === 'BUY'
-          ? ' [observe: enforce なら REJECT]'
+          ? ' [observe: enforce なら SKIP]'
           : ''
       const neutralHoldNote =
         held && d.zone === 'neutral'
@@ -743,7 +744,7 @@ export async function runPullbackScheduler(
     }
 
     // ペアレジーム BUY gate (#472、enforce のみ): zone が許可しない側の entry を
-    // REJECT。SELL / exit は一切妨げない。zone permits, gates decide — ここを
+    // SKIP。SELL / exit は一切妨げない。zone permits, gates decide — ここを
     // 通っても以降の全 gate (role / sizing / risk / 余力) は従来どおり評価される。
     if (options.pairRegime?.mode === 'enforce' && signal.action === 'BUY') {
       const regimeGate = regimeBySymbol.get(upper)
@@ -757,7 +758,7 @@ export async function runPullbackScheduler(
           summary.rejected.push({ symbol: upper, reason })
           await emitDecision({
             symbol: upper,
-            decision: 'REJECT',
+            decision: 'SKIP',
             reason,
             price: indicators.price,
             indicatorsJson: JSON.stringify(indicators),
@@ -779,7 +780,7 @@ export async function runPullbackScheduler(
       summary.rejected.push({ symbol: upper, reason })
       await emitDecision({
         symbol: upper,
-        decision: 'REJECT',
+        decision: 'SKIP',
         reason,
         price: indicators.price,
         indicatorsJson: JSON.stringify(indicators),
@@ -819,7 +820,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -854,7 +855,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -993,7 +994,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('scheduler.price_valid', false, indicators.price, '>', 0)),
@@ -1006,7 +1007,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('scheduler.notional_valid', false, notional, '>', 0)),
@@ -1021,7 +1022,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('scheduler.sell_position_exists', false, false, 'exists', true)),
@@ -1033,7 +1034,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('scheduler.position_qty_valid', false, state.position.qty, '>', 0)),
@@ -1045,7 +1046,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('scheduler.price_valid', false, indicators.price, '>', 0)),
@@ -1058,7 +1059,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('scheduler.notional_valid', false, notional, '>', 0)),
@@ -1085,7 +1086,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -1114,7 +1115,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -1170,7 +1171,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -1195,7 +1196,7 @@ export async function runPullbackScheduler(
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason,
           price: indicators.price,
           indicatorsJson: JSON.stringify(indicators),
@@ -1214,7 +1215,7 @@ export async function runPullbackScheduler(
       summary.rejected.push({ symbol: upper, reason })
       await emitDecision({
         symbol: upper,
-        decision: 'REJECT',
+        decision: 'SKIP',
         reason,
         price: indicators.price,
         trace: appendTrace(signal.trace, traceStep('scheduler.pending_lock_expiry_valid', false, expiresAtMs, '>', now().getTime())),
@@ -1232,7 +1233,7 @@ export async function runPullbackScheduler(
       summary.rejected.push({ symbol: upper, reason })
       await emitDecision({
         symbol: upper,
-        decision: 'REJECT',
+        decision: 'SKIP',
         reason,
         price: indicators.price,
         trace: appendTrace(signal.trace, traceStep('scheduler.pending_lock_acquired', false, false, '==', true)),
@@ -1299,9 +1300,16 @@ export async function runPullbackScheduler(
           symbol: upper,
           message: messageOf(error),
         })
+        // broker 4xx = 注文の**確定拒否** (417 SELL_SHORT / TICKER_IS_DENY /
+        // Insufficient Buying Power 等、再送しても解消しない) → REJECT。
+        // それ以外 (5xx / ネットワーク断 / 非 BrokerRequestError 例外) は
+        // 原因不明・一時的として ERROR のまま。
+        const brokerStatus = error instanceof BrokerRequestError ? error.brokerStatus : undefined
+        const isBrokerReject =
+          brokerStatus !== undefined && brokerStatus >= 400 && brokerStatus < 500
         await emitDecision({
           symbol: upper,
-          decision: 'ERROR',
+          decision: isBrokerReject ? 'REJECT' : 'ERROR',
           // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
           // localize は `^broker submit error: ` を prefix match するので、発注内容
           // (何口 / $ と ¥) は **message の後ろ**に付けて prefix を壊さない (#417)。
