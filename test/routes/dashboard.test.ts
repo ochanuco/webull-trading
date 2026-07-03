@@ -424,7 +424,7 @@ describe('dashboard', () => {
           timestamp: '2026-04-23T00:00:00.000Z',
           requestId: 'req-1',
           symbol: '7203',
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason: 'sizing rejected: lot-size-round (raw qty 79 < lot 100, stop 286.00, entry 3765)',
           price: 3765,
           indicatorsJson: '{"price":3765,"return50d":0.45873692367299496}',
@@ -462,7 +462,7 @@ describe('dashboard', () => {
           timestamp: '2026-06-06T00:00:00.000Z',
           requestId: 'req-tr',
           symbol: 'TQQQ',
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason: 'sizing rejected: lot-size-round',
           price: 76,
           indicatorsJson: '{"price":76}',
@@ -496,8 +496,8 @@ describe('dashboard', () => {
     expect(body).toContain('発注数量が1株/1単元以上ある') // ❌ deciding step
     expect(body).toContain('◀ 採用') // 採用された(最後の)ステップに矢印
     expect(body).toContain('lot-size-round') // message
-    expect(body).toContain('tl-out-reject') // 出力ボックス (REJECT 色)
-    expect(body).toContain('出力: <strong>REJECT</strong>')
+    expect(body).toContain('tl-out-skip') // 出力ボックス (SKIP 色)
+    expect(body).toContain('出力: <strong>SKIP</strong>')
   })
 
   it('omits the ladder when trace_json is null (graceful, pre-migration rows)', async () => {
@@ -539,7 +539,7 @@ describe('dashboard', () => {
           timestamp: '2026-04-23T00:00:00.000Z',
           requestId: 'req-1',
           symbol: '7203',
-          decision: 'REJECT',
+          decision: 'SKIP',
           reason: 'sizing rejected: lot-size-round (raw qty 79 < lot 100, stop 286.00, entry 3765)',
           price: 3765,
           indicatorsJson: '{"price":3765}',
@@ -828,8 +828,8 @@ describe('aggregateDecisionRows', () => {
       { day: '2026-04-24', decision: 'SELL', n: 1 },
     ])
     expect(out).toEqual([
-      { date: '2026-04-23', counts: { BUY: 1, SELL: 0, HOLD: 5, REJECT: 2, ERROR: 0 } },
-      { date: '2026-04-24', counts: { BUY: 0, SELL: 1, HOLD: 8, REJECT: 0, ERROR: 0 } },
+      { date: '2026-04-23', counts: { BUY: 1, SELL: 0, HOLD: 5, SKIP: 0, REJECT: 2, ERROR: 0 } },
+      { date: '2026-04-24', counts: { BUY: 0, SELL: 1, HOLD: 8, SKIP: 0, REJECT: 0, ERROR: 0 } },
     ])
   })
 
@@ -1955,7 +1955,7 @@ describe('renderDecisionPlotCaption (判定点プロットの凡例 + 件数)', 
   }
   const oneDecision: SymbolChartDecision = {
     id: 1, timestamp: '2026-06-06T14:00:00.000Z', price: 80,
-    decision: 'REJECT', reason: 'overextension', ladderHtml: '<div>x</div>',
+    decision: 'SKIP', reason: 'overextension', ladderHtml: '<div>x</div>',
   }
 
   it('chart null / decisions 無し / 空配列なら空文字', () => {
@@ -1967,7 +1967,8 @@ describe('renderDecisionPlotCaption (判定点プロットの凡例 + 件数)', 
     const html = renderDecisionPlotCaption(chartWith([oneDecision]))
     expect(html).toContain('買い (BUY)')
     expect(html).toContain('売り (SELL)')
-    expect(html).toContain('見送り (REJECT)')
+    expect(html).toContain('見送り・bot判定 (SKIP)')
+    expect(html).toContain('拒否・証券会社 (REJECT)')
     expect(html).toContain('エラー (ERROR)')
     expect(html).toContain('HOLD')
     expect(html).toContain('クリック')
@@ -2014,7 +2015,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     const html = renderSymbolTab(symbolArgs([
       {
         id: 1, timestamp: '2026-06-06T14:00:00.000Z', price: 80,
-        decision: 'REJECT', reason: 'overextension',
+        decision: 'SKIP', reason: 'overextension',
         ladderHtml: '<div>LADDER_EMBED_MARKER</div>',
       },
     ]))
@@ -2026,13 +2027,14 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     // < に escape されるが marker テキストは残る)
     expect(html).toContain('LADDER_EMBED_MARKER')
     // 凡例キャプションも出る
-    expect(html).toContain('見送り (REJECT)')
+    expect(html).toContain('見送り・bot判定 (SKIP)')
+    expect(html).toContain('拒否・証券会社 (REJECT)')
   })
 
   it('decisions が無ければ凡例は出ず payload も空 (scatter JS は静的に常駐 / runtime で 0 件描画)', () => {
     const html = renderSymbolTab(symbolArgs([]))
     // 凡例キャプションは decisions があるときだけ出す
-    expect(html).not.toContain('見送り (REJECT)')
+    expect(html).not.toContain('見送り・bot判定 (SKIP)')
     // payload の decisions は空配列 (= runtime で scatter 0 点)
     expect(html).toContain('"decisions":[]')
     // placeholder パネルは常に描画

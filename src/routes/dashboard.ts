@@ -1729,7 +1729,7 @@ const STYLE = `
   .tl-output{padding:6px 10px;border-radius:6px;background:#eef;border:1px solid #cfe0ff}
   .tl-output.tl-out-buy{background:#eafaf0;border-color:#a8e0bf}
   .tl-output.tl-out-sell{background:#fdeeee;border-color:#f0bcbc}
-  .tl-output.tl-out-reject,.tl-output.tl-out-error{background:#fdf2e8;border-color:#f0d2a8}
+  .tl-output.tl-out-skip,.tl-output.tl-out-reject,.tl-output.tl-out-error{background:#fdf2e8;border-color:#f0d2a8}
   .reason-panel code{white-space:pre-wrap;word-break:break-word}
   .reason-panel pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px}
   .symbol-disabled{opacity:0.5;font-style:italic;text-decoration:line-through}
@@ -3867,11 +3867,12 @@ function fmtPct(s: string): string {
  * 判定ラベル (10 種):
  *   - 保有前の評価系 4 種: 様子見 / 買い / 発注中 / データ不足
  *   - 保有中の exit 系 4 種: 利食い / 損切り / 時間切れ / 保有継続
- *   - 発注拒否系 2 種: 発注スキップ (pre-submit) / 発注エラー (broker 拒否)
+ *   - 発注不成立系 2 種: 発注スキップ (pre-submit) / 発注失敗 (broker submit 失敗)
  *
  * `発注スキップ` は sizing / 同グループ建玉上限 / 売買単位未満などで
- * **注文送出前** に止めた場合。`発注エラー` は broker に送ったが拒否された
- * 場合 (broker submit error) — 原因が手元か相手方かを区別するため別ラベル。
+ * **注文送出前** に止めた場合 (decision=SKIP)。`発注失敗` は broker に送ったが
+ * 成立しなかった場合 (broker submit error) — 確定拒否 (REJECT) か一時的失敗
+ * (ERROR) かは decision 列が区別する。
  *
  * trading-strategist review に基づき、日本株・信用取引の伝統語 (押し目 /
  * 含み損益 / 建玉 / 単元 / 移動平均線割れ / 日柄 / 手仕舞い / 騰落率 / ロスカット
@@ -3979,7 +3980,7 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: 建玉数が無効 ($1)')
   s = s.replace(/^invalid expiresAt/, 'データ不足: 注文有効期限が無効')
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
-  s = s.replace(/^broker submit error: /, '発注エラー: 証券会社側で拒否 — ')
+  s = s.replace(/^broker submit error: /, '発注失敗: 証券会社への発注が成立せず — ')
 
   return s
 }
@@ -4460,9 +4461,9 @@ function renderDecisionTable(
           ? 'ok'
           : r.decision === 'SELL'
             ? 'warn'
-            : r.decision === 'ERROR'
+            : r.decision === 'ERROR' || r.decision === 'REJECT'
               ? 'err'
-              : r.decision === 'REJECT'
+              : r.decision === 'SKIP'
                 ? 'warn'
                 : 'muted'
       // 実 fill 結果 (trade_journal post_submit から JOIN、#143)
@@ -4823,13 +4824,13 @@ export function computeEquitySeries(
  * Decision breakdown chart 用の日次集計 (#158 Phase 2)。
  *
  * strategy_decision_log を JST 日次でグルーピングし、各 decision
- * (BUY/SELL/HOLD/REJECT/ERROR) のカウントを返す。トレーダーは
- * 「BUY/SELL が出すぎ・出なさすぎ」「REJECT が偏ってないか」を一目で
- * 見たいので、1 日 1 行 × 5 系列の stacked bar 用のデータ形にする。
+ * (BUY/SELL/HOLD/SKIP/REJECT/ERROR) のカウントを返す。トレーダーは
+ * 「BUY/SELL が出すぎ・出なさすぎ」「SKIP/REJECT が偏ってないか」を一目で
+ * 見たいので、1 日 1 行 × 6 系列の stacked bar 用のデータ形にする。
  *
  * 直近 90 日のみ (それ以上はチャートが詰まって読めない)。
  */
-const DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'REJECT', 'ERROR'] as const
+const DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'SKIP', 'REJECT', 'ERROR'] as const
 type DecisionKey = (typeof DECISION_KEYS)[number]
 
 export interface DecisionBreakdownPoint {
@@ -4859,7 +4860,7 @@ export function aggregateDecisionRows(
   for (const r of rows) {
     let bucket = map.get(r.day)
     if (!bucket) {
-      bucket = { BUY: 0, SELL: 0, HOLD: 0, REJECT: 0, ERROR: 0 }
+      bucket = { BUY: 0, SELL: 0, HOLD: 0, SKIP: 0, REJECT: 0, ERROR: 0 }
       map.set(r.day, bucket)
     }
     // 想定外 decision (将来追加など) は ERROR バケットに寄せて見落とし防止
@@ -5047,8 +5048,8 @@ export interface SymbolChartMarker {
  * eval 時刻 (`timestamp`) × eval 価格 (`price`) に色分けの点を打ち、点クリックで
  * `ladderHtml` (= 既存 `renderDecisionLadder` の出力) を脇のパネルに表示する。
  *
- * HOLD (保有継続 / 様子見の定常状態) は省き、判定が動いた BUY/SELL/REJECT/ERROR
- * のみを載せる。価格線・fill ピン・position/preview 線が HOLD 状態は既に表現済み。
+ * HOLD (保有継続 / 様子見の定常状態) は省き、判定が動いた BUY/SELL/SKIP/REJECT/
+ * ERROR のみを載せる。価格線・fill ピン・position/preview 線が HOLD 状態は既に表現済み。
  */
 export interface SymbolChartDecision {
   /** strategy_decision_log の行 id。点の一意キー兼デバッグ用。 */
@@ -5056,7 +5057,7 @@ export interface SymbolChartDecision {
   timestamp: string // ISO UTC (eval 時刻)
   /** eval 時の評価価格 (= strategy_decision_log.price)。y 位置に使う。 */
   price: number
-  decision: 'BUY' | 'SELL' | 'REJECT' | 'ERROR'
+  decision: 'BUY' | 'SELL' | 'SKIP' | 'REJECT' | 'ERROR'
   /** 生 reason (英語)。tooltip では localize して表示。 */
   reason: string | null
   /**
@@ -5109,12 +5110,12 @@ export function computeChartWindowDays(timeStopDays: number): number {
 /**
  * チャートに重ねる判定点の上限 (最新側から採用)。payload サイズ (各点が
  * 事前レンダリングのラダー HTML を持つ) と視認性のガード。HOLD を除いた
- * BUY/SELL/REJECT/ERROR のみが対象なので通常はこの上限に届かない。
+ * BUY/SELL/SKIP/REJECT/ERROR のみが対象なので通常はこの上限に届かない。
  */
 const MAX_CHART_DECISIONS = 250
 
 /** チャート判定点として描画する decision 種別 (HOLD は定常状態なので除外)。 */
-const CHART_PLOTTED_DECISIONS: ReadonlySet<string> = new Set(['BUY', 'SELL', 'REJECT', 'ERROR'])
+const CHART_PLOTTED_DECISIONS: ReadonlySet<string> = new Set(['BUY', 'SELL', 'SKIP', 'REJECT', 'ERROR'])
 
 export interface PivotPoint {
   /** ISO UTC timestamp of the daily bar */
@@ -5178,7 +5179,7 @@ export interface SymbolChartData {
   /** `latestCronPrice` の timestamp (ISO Z)。preview line の to-end 用。null 時 preview 描画スキップ。 */
   latestCronTimestamp: string | null
   /**
-   * チャートに重ねる cron 判定イベント (BUY/SELL/REJECT/ERROR、HOLD 除外)。
+   * チャートに重ねる cron 判定イベント (BUY/SELL/SKIP/REJECT/ERROR、HOLD 除外)。
    * 文字ログ↔グラフ同期用 (#decision-trace)。最新側 `MAX_CHART_DECISIONS` 件まで。
    * 追加 (additive) フィールドなので optional: 古い fixture / grid payload では
    * 省略され、レンダラ側は `|| []` で安全に扱う。
@@ -5274,7 +5275,7 @@ export async function loadSymbolChart(
         low20d: indicators.low20d,
       }
     })
-  // 判定点 (文字ログ↔グラフ同期 #decision-trace): HOLD を除く BUY/SELL/REJECT/
+  // 判定点 (文字ログ↔グラフ同期 #decision-trace): HOLD を除く BUY/SELL/SKIP/REJECT/
   // ERROR を eval 時刻 × eval 価格でチャートに重ねる。各点はクリック時に出す
   // ラダー HTML を server-side で事前レンダリング (renderDecisionLadder 流用)。
   // 最新側 MAX_CHART_DECISIONS 件に cap (各点が HTML を持つため payload ガード)。
@@ -6233,14 +6234,14 @@ function renderQualityTab(args: ChartsBodyQuality): string {
     document.addEventListener('DOMContentLoaded', function () {
       if (typeof echarts === 'undefined') return;
       var data = window.__chartData;
-      var DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'REJECT', 'ERROR'];
-      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', HOLD: '#aaa', REJECT: '#b25000', ERROR: '#c22' };
+      var DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'SKIP', 'REJECT', 'ERROR'];
+      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', HOLD: '#aaa', SKIP: '#b25000', REJECT: '#7c3aed', ERROR: '#c22' };
       var dbDates = data.decisions.map(function (p) { return p.date; });
       var dbEl = document.getElementById('decision-chart');
       if (dbEl && dbDates.length > 0) {
         var dbChart = echarts.init(dbEl);
         dbChart.setOption({
-          title: { text: '日次 Decision breakdown (BUY / SELL / HOLD / REJECT / ERROR)', left: 'center', textStyle: { fontSize: 14 } },
+          title: { text: '日次 Decision breakdown (BUY / SELL / HOLD / SKIP / REJECT / ERROR)', left: 'center', textStyle: { fontSize: 14 } },
           tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
           legend: { top: 22 },
           grid: { left: 50, right: 20, top: 60, bottom: 40 },
@@ -6655,13 +6656,13 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       });
 
       // 判定点 (#decision-trace のグラフ同期): cron の判定イベント (HOLD を除く
-      // BUY/SELL/REJECT/ERROR) を eval 時刻 × eval 価格に色分けでプロットする。
+      // BUY/SELL/SKIP/REJECT/ERROR) を eval 時刻 × eval 価格に色分けでプロットする。
       // 点クリックで脇パネルに判定トレース・ラダー (server 事前レンダリング HTML)
       // を出し、文字ログとグラフを 1 画面で同期させる。category mode では eval
       // 時刻を最近接 ohlc index に snap (markPoint と同じ手法、xForTimestamp 流用)。
       // 色は取引品質タブの DECISION_COLORS と揃える。
-      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', REJECT: '#b25000', ERROR: '#c22' };
-      var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', REJECT: '見送り', ERROR: 'エラー' };
+      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', SKIP: '#b25000', REJECT: '#7c3aed', ERROR: '#c22' };
+      var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', SKIP: '見送り (bot判定)', REJECT: '拒否 (証券会社)', ERROR: 'エラー (原因不明・一時的)' };
       function escHtml(s) {
         return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       }
@@ -7205,7 +7206,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           }] : []),
           // 判定点 scatter: cron 判定イベントを価格チャートに重ねる。z を最前面に
           // 寄せて (candle z:5 / 線 z:6-8 より上) クリック可能にする。REJECT/ERROR
-          // (= 弾かれた点) は少し大きくして「なぜ買えなかったか」を目立たせる。
+          // (= broker 拒否 / 失敗) は少し大きくして目立たせる。SKIP (bot 内部
+          // ゲート見送り) は定常運転に近いので通常サイズ。
           // tooltip は item trigger で decision + reason 要約 (詳細は click→ラダー)。
           ...(decisionPoints.length > 0 ? [{
             name: '判定', type: 'scatter', data: decisionPoints,
@@ -8805,7 +8807,7 @@ export function renderDecisionPlotCaption(chart: SymbolChartData | null): string
     ● は cron の判定イベント。点をクリックすると下に判定トレースが出ます (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}
   </p>
   <div style="font-size:12px;margin:0 0 4px">
-    ${dot('#057a55', '買い (BUY)')}${dot('#1471a8', '売り (SELL)')}${dot('#b25000', '見送り (REJECT)')}${dot('#c22', 'エラー (ERROR)')}
+    ${dot('#057a55', '買い (BUY)')}${dot('#1471a8', '売り (SELL)')}${dot('#b25000', '見送り・bot判定 (SKIP)')}${dot('#7c3aed', '拒否・証券会社 (REJECT)')}${dot('#c22', 'エラー (ERROR)')}
   </div>`
 }
 

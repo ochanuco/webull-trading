@@ -1,4 +1,5 @@
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
+import type { StrategyDecision } from '../../trading/domain/StrategyDecision'
 import { strategyDecisionLog } from '../db/schema'
 import { createDb } from '../db/tradeJournalRepo'
 
@@ -6,7 +7,7 @@ export interface StrategyDecisionRecord {
   timestamp: string
   requestId?: string
   symbol: string
-  decision: 'BUY' | 'SELL' | 'HOLD' | 'REJECT' | 'ERROR'
+  decision: StrategyDecision
   reason?: string | null
   price?: number | null
   indicatorsJson?: string | null
