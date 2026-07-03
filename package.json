@@ -2,7 +2,7 @@
   "name": "webull-trading",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.5.2",
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "tsx scripts/guard-deploy.ts && wrangler deploy",
@@ -23,7 +23,7 @@
     "jose": "^6.2.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260417.1",
+    "@cloudflare/workers-types": "^5.0.0",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.20.6",
     "typescript": "^6.0.0",
