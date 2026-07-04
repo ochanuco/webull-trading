@@ -4,8 +4,8 @@ import { type EvalIndicatorPoint } from '../../../trading/strategy/entryDistance
 import type { PullbackIndicators } from '../../../trading/strategy/strategies/PullbackUptrendStrategy'
 import { SymbolStateClient } from '../../../trading/state/SymbolStateClient'
 import { YahooBarClient } from '../../../infrastructure/quotes/YahooBarClient'
-import { renderChartDecisionTrace } from '../cron'
-import { currencyOfSymbol, messageOf } from '../shared'
+import { type DecisionRow, cronDecisionJson, renderChartDecisionTrace } from '../cron'
+import { currencyOfSymbol, exportMeta, messageOf, parseJsonObject } from '../shared'
 
 /**
  * 銘柄チャートで focus する銘柄を決める (#158 Phase 4)。
@@ -976,4 +976,39 @@ export function jstDayKey(iso: string): string | null {
   const t = new Date(iso).getTime()
   if (!Number.isFinite(t)) return null
   return JST_DAY_FMT.format(new Date(t))
+}
+
+/**
+ * チャート銘柄タブの JSON export packet builder
+ * (schema: `dashboard_chart_symbol_export.v1`, #dashboard-json-api)。
+ *
+ * SSR の銘柄タブと同じ loader (`loadSymbolChart` + `loadDecisionRows`) の結果を
+ * そのまま機械可読化する。HTML 断片は含めない:
+ * - `decisions[].ladderHtml` (事前レンダリング済みラダー HTML) は表示専用なので
+ *   落とし、`chartDecisions` には構造化 field だけを残す。
+ * - 判定履歴側の trace は `decisionHistory[].trace` に parse 済み object で入る
+ *   (AI / スクリプトは raw JSON 文字列を再 parse しなくてよい)。
+ */
+export function buildSymbolChartPacket(chart: SymbolChartData, decisionRows: DecisionRow[]) {
+  return {
+    ...exportMeta('dashboard_chart_symbol_export.v1'),
+    symbol: chart.symbol,
+    /** SSR チャート overlay と同じ effective rule (global → role preset → override)。 */
+    rules: chart.rules,
+    points: chart.points,
+    markers: chart.markers,
+    position: chart.position,
+    trendLine: chart.trendLine,
+    intradayBars: chart.intradayBars,
+    latestCronPrice: chart.latestCronPrice,
+    latestCronTimestamp: chart.latestCronTimestamp,
+    evalIndicators: chart.evalIndicators ?? [],
+    chartDecisions: (chart.decisions ?? []).map(({ ladderHtml: _ladderHtml, ...rest }) => rest),
+    // SSR の判定履歴テーブル (直近 30 件、#decisions-chart-unify) 相当。
+    decisionHistory: decisionRows.map((r) => ({
+      ...cronDecisionJson(r),
+      requestId: r.requestId,
+      trace: parseJsonObject(r.traceJson ?? null),
+    })),
+  }
 }

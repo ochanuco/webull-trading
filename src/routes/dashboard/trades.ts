@@ -1,7 +1,9 @@
 import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
-import type { TradeJournalRow } from '../../infrastructure/db/schema'
+import { type TradeJournalRow, tradeJournal } from '../../infrastructure/db/schema'
+import { createDb } from '../../infrastructure/db/tradeJournalRepo'
+import { and, desc, eq, inArray, isNotNull, lt, or, type SQL } from 'drizzle-orm'
 import { formatRealizedPnl } from './cron'
-import { LOG_COPY_ALL_BTN, displaySymbol, esc, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, pillStyle, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, pillStyle, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
 /** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
 export const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
@@ -29,6 +31,91 @@ export function extractBrokerErrorCode(message: string): string | null {
   return bare ? bare[1]! : null
 }
 
+/** trades ページのクエリ解釈結果 (SSR / JSON export 共用)。 */
+export interface TradesQuery {
+  view: 'all' | 'fills' | 'errors'
+  symbol?: string
+  clientOrderId?: string
+  limit: number
+  before?: number
+}
+
+/**
+ * `?view/symbol/clientOrderId/limit/before` の解釈を 1 か所に寄せる
+ * (#dashboard-json-api)。SSR と `/json` が別々に解釈すると「画面で見た絞り込み
+ * と JSON の絞り込みが微妙に違う」drift 事故になるため。
+ *
+ * - view: 全イベント (default) / 約定・手仕舞いのみ / エラーのみ。ジャーナルは
+ *   1 注文で複数 lifecycle 行を持つため、operator の主目的 (「何が約定した?」
+ *   「何が失敗した?」) を 1 クリックで絞れるようにする。
+ * - symbol / clientOrderId: 銘柄 / 注文単位の絞り込み (#nav-links)。
+ *   clientOrderId は 1 注文の lifecycle 行を縦に並べる「注文詳細ビュー」。
+ */
+export function parseTradesQuery(query: (key: string) => string | undefined): TradesQuery {
+  const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(query('view'))
+  const out: TradesQuery = { view, limit: clampLimit(query('limit')) }
+  const symbol = query('symbol')?.toUpperCase().trim()
+  if (symbol) out.symbol = symbol
+  const clientOrderId = query('clientOrderId')?.trim()
+  if (clientOrderId) out.clientOrderId = clientOrderId
+  const before = parseCursor(query('before'))
+  if (before !== undefined) out.before = before
+  return out
+}
+
+/**
+ * trade_journal から絞り込み済みの行を新しい順に取る (SSR / JSON export 共用)。
+ * SSR 側は `limit + 1` を渡して hasMore 判定に使う (呼び出し側で pop)。
+ */
+export async function loadTradeJournalRows(
+  db: ReturnType<typeof createDb>,
+  q: TradesQuery,
+): Promise<TradeJournalRow[]> {
+  const baseQuery = db.select().from(tradeJournal)
+  const conditions: SQL[] = []
+  if (q.view === 'fills') {
+    conditions.push(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
+  } else if (q.view === 'errors') {
+    conditions.push(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass))!)
+  }
+  if (q.symbol) {
+    conditions.push(eq(tradeJournal.symbol, q.symbol))
+  }
+  if (q.clientOrderId) {
+    conditions.push(eq(tradeJournal.clientOrderId, q.clientOrderId))
+  }
+  if (q.before !== undefined) {
+    conditions.push(lt(tradeJournal.id, q.before))
+  }
+  const filtered = conditions.length > 0
+    ? baseQuery.where(conditions.length === 1 ? conditions[0] : and(...conditions))
+    : baseQuery
+  return filtered.orderBy(desc(tradeJournal.id)).limit(q.limit)
+}
+
+/**
+ * trades packet builder (schema: `dashboard_trades_export.v1`)。
+ *
+ * rows は trade_journal の row そのまま (`__tradesCopy` の rows と同等) —
+ * 表示で省略した field も含めて AI に渡す。filter を envelope に明記するのは
+ * 「この JSON は trade_journal 全体か、どの絞り込みの部分集合か」を受け手が
+ * 誤解しないため (SSR の filter バナー相当)。
+ */
+export function buildTradesPacket(rows: TradeJournalRow[], q: TradesQuery) {
+  return {
+    ...exportMeta('dashboard_trades_export.v1'),
+    filter: {
+      view: q.view,
+      symbol: q.symbol ?? null,
+      clientOrderId: q.clientOrderId ?? null,
+      limit: q.limit,
+      before: q.before ?? null,
+    },
+    rowCount: rows.length,
+    rows,
+  }
+}
+
 export function tradesBody(
   rows: TradeJournalRow[],
   limit: number,
@@ -50,7 +137,11 @@ export function tradesBody(
     : filters.symbol
       ? `<p class="muted" style="font-size:12px;margin:0 0 6px">銘柄 <strong>${esc(displaySymbol(filters.symbol, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(filters.symbol)}">チャートで見る</a> / <a href="/dashboard/cron?symbol=${encodeURIComponent(filters.symbol)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
       : ''
-  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}</nav>`
+  // JSON export へのリンクは現在の絞り込み (view / limit / symbol / clientOrderId /
+  // before) をそのまま引き継ぐ — 「画面で見ている部分集合と同じもの」を開くため。
+  const jsonHref = `/dashboard/trades/json?view=${view}&limit=${limit}${filterQs}${before !== undefined ? `&before=${before}` : ''}`
+  const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" style="margin-left:4px;padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;text-decoration:none">JSON を開く</a>`
+  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}</nav>`
   if (rows.length === 0) {
     return `${filterBanner}${pills}<p class="muted">該当するレコードがありません。</p>`
   }

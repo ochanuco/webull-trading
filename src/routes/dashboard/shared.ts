@@ -132,6 +132,42 @@ export function jsonPretty(payload: unknown, status = 200): Response {
   })
 }
 
+/**
+ * dashboard JSON export の schema バージョニング規約 (#dashboard-json-api)。
+ *
+ * - schema 名は `dashboard_<page>_export.v<N>` 形式 (例: `dashboard_cron_export.v1`)。
+ * - additive change (フィールド追加のみ) は同じ version のまま。
+ * - 既存フィールドの型変更・意味変更・削除は破壊的変更なので v<N+1> に上げる。
+ * - envelope は共通で `{ schema, exportedAt, filter?, rowCount?, ... }`:
+ *   - `schema`     : 上記の versioned 識別子。AI / スクリプトが期待形を判別する鍵。
+ *   - `exportedAt` : 生成時刻 (ISO UTC)。鮮度判断・キャッシュ判定用。
+ *   - `filter`     : クエリ絞り込みを持つページのみ。「この JSON は何の部分集合か」を明示。
+ *   - `rowCount`   : 主行配列を持つページのみ。truncation 検知用。
+ * - secret になり得る値 (token / key / account_id) は絶対に載せない。
+ *
+ * packet builder (`buildXxxPacket`) はこの helper で envelope 共通部を作り、
+ * ページ固有 field を続ける。「画面で見る内容 = AI に渡す JSON」を保つため、
+ * packet は SSR と同じ loader の結果から pure に組み立てること。
+ */
+export function exportMeta(schema: string): { schema: string; exportedAt: string } {
+  return { schema, exportedAt: new Date().toISOString() }
+}
+
+/**
+ * 「JSON を開く」リンク + (任意で) AI 用全件コピーボタンを並べた小さな帯
+ * (#dashboard-json-api)。SSR ページのヘッダ帯に置き、同じ内容の機械可読版へ
+ * 1 クリックで到達できるようにする。
+ *
+ * `copyVarName` は `safeJsonScript` で埋めた copy payload のグローバル変数名。
+ * non-null ならページ内に `renderLogCopyScript(copyVarName)` が既にいる前提で
+ * `LOG_COPY_ALL_BTN` (id=log-copy-all) を並べる — 配線は script 側が id で拾う。
+ * copy payload を持たないページは null (リンクのみ)。
+ */
+export function renderJsonToolbar(jsonHref: string, copyVarName: string | null): string {
+  const copyBtn = copyVarName ? ` ${LOG_COPY_ALL_BTN}` : ''
+  return `<div style="margin:0 0 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" style="padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;text-decoration:none">JSON を開く</a>${copyBtn}</div>`
+}
+
 export function parseJsonObject(value: string | null | undefined): unknown {
   if (!value) return null
   try {
