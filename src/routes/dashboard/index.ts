@@ -1,8 +1,8 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import type { AppBindings } from '../app'
-import type { Env } from '../config/env'
-import { rateLimit } from '../middleware/rateLimit'
+import type { AppBindings } from '../../app'
+import type { Env } from '../../config/env'
+import { rateLimit } from '../../middleware/rateLimit'
 
 /**
  * Dashboard-local Hono context shape。`AppBindings.Variables` の `requestId` に
@@ -14,78 +14,78 @@ type DashboardBindings = AppBindings & {
     killSwitchState: KillSwitchBannerState | null
   }
 }
-import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
-import { loadOverviewPanelsCsv, setOverviewPanels } from '../infrastructure/db/globalConfigRepo'
-import { resolveTradingEnabled } from '../trading/runtime/killSwitch'
-import { loadSymbolUniverse, type SymbolUniverse } from '../infrastructure/db/symbolUniverse'
-import type { SymbolCurrency, SymbolRole } from '../infrastructure/db/symbolConfigRepo'
-import { loadInversePairs, loadPairRegimeConfigs, parseCashFallbacksJson, SYMBOL_ROLES } from '../infrastructure/db/symbolConfigRepo'
-import { escapeHtml, formatSymbolDisplay } from '../shared/format'
-import { createDb } from '../infrastructure/db/tradeJournalRepo'
+import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
+import { loadOverviewPanelsCsv, setOverviewPanels } from '../../infrastructure/db/globalConfigRepo'
+import { resolveTradingEnabled } from '../../trading/runtime/killSwitch'
+import { loadSymbolUniverse, type SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
+import type { SymbolCurrency, SymbolRole } from '../../infrastructure/db/symbolConfigRepo'
+import { loadInversePairs, loadPairRegimeConfigs, parseCashFallbacksJson, SYMBOL_ROLES } from '../../infrastructure/db/symbolConfigRepo'
+import { escapeHtml, formatSymbolDisplay } from '../../shared/format'
+import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import {
   getTradableStatusForSymbol,
   loadTradableAllowlist,
   type TradableAllowlist,
   type TradableStatus,
-} from '../infrastructure/db/tradableInstrumentsRepo'
+} from '../../infrastructure/db/tradableInstrumentsRepo'
 import {
   MAX_TIME_STOP_DAYS,
   strategyDecisionLog,
   symbolConfig,
   tradeJournal,
   type SymbolConfigRow,
-} from '../infrastructure/db/schema'
+} from '../../infrastructure/db/schema'
 import {
   loadRecentAudit,
   type ConfigAuditRow,
   type LoadAuditOptions,
-} from '../infrastructure/db/configAuditLog'
+} from '../../infrastructure/db/configAuditLog'
 import {
   loadRecentAlerts,
   type AlertRow,
   type LoadAlertOptions,
-} from '../infrastructure/notification/notificationEmitLog'
-import type { NotificationSeverity, NotificationEvent } from '../infrastructure/notification/Notifier'
-import { loadVixRegimeSnapshot } from '../infrastructure/notification/vixRegimeChange'
+} from '../../infrastructure/notification/notificationEmitLog'
+import type { NotificationSeverity, NotificationEvent } from '../../infrastructure/notification/Notifier'
+import { loadVixRegimeSnapshot } from '../../infrastructure/notification/vixRegimeChange'
 import {
   loadPortfolioEquitySnapshots,
   type LoadPortfolioEquitySnapshotOptions,
-} from '../infrastructure/db/portfolioEquitySnapshotRepo'
-import type { PortfolioEquitySnapshotRow, TradeJournalRow } from '../infrastructure/db/schema'
-import type { VixRegime } from '../trading/risk/vixRegimeFilter'
+} from '../../infrastructure/db/portfolioEquitySnapshotRepo'
+import type { PortfolioEquitySnapshotRow, TradeJournalRow } from '../../infrastructure/db/schema'
+import type { VixRegime } from '../../trading/risk/vixRegimeFilter'
 import {
   buildBuyabilityView,
   type BuyabilityView,
   type EntryGateStatus,
   type EvalIndicatorPoint,
-} from '../trading/strategy/entryDistance'
+} from '../../trading/strategy/entryDistance'
 import {
   deriveEntryStatus,
   deriveEntryStatusFromIndicators,
   type EntryStatus,
   type EntryStatusResult,
-} from '../trading/strategy/entryStatus'
-import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
+} from '../../trading/strategy/entryStatus'
+import { buildSymbolRules } from '../../trading/strategy/symbolRuleResolution'
 import {
   evaluatePairRegime,
   PAIR_REGIME_ZONE_LABELS,
   type PairRegimeDecision,
   type PairRegimeEntry,
-} from '../trading/strategy/pairRegime'
+} from '../../trading/strategy/pairRegime'
 import {
   computeConditionalAllocation,
   type SymbolAllocation,
-} from '../trading/strategy/conditionalAllocation'
+} from '../../trading/strategy/conditionalAllocation'
 import type {
   PullbackIndicators,
   SymbolRule,
-} from '../trading/strategy/strategies/PullbackUptrendStrategy'
+} from '../../trading/strategy/strategies/PullbackUptrendStrategy'
 import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, or, type SQL } from 'drizzle-orm'
-import { PortfolioStateClient } from '../trading/state/PortfolioStateClient'
-import { SymbolStateClient } from '../trading/state/SymbolStateClient'
-import { loadUsdJpyRate } from '../infrastructure/quotes/fxRate'
-import type { SymbolState } from '../trading/state/types'
-import { YahooBarClient } from '../infrastructure/quotes/YahooBarClient'
+import { PortfolioStateClient } from '../../trading/state/PortfolioStateClient'
+import { SymbolStateClient } from '../../trading/state/SymbolStateClient'
+import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
+import type { SymbolState } from '../../trading/state/types'
+import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
 // #293 calendar events management UI (earnings + macro)。dashboard 側に form
 // 受け handler を置くのは admin/seed が JSON 専用で `application/x-www-form-urlencoded`
 // を受けない (= HTML form から直接 POST できない) ため。バリデーション失敗時に
@@ -95,23 +95,23 @@ import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
   type EarningsCalendarSeedInput,
-} from '../infrastructure/calendar/earningsCalendarRepo'
+} from '../../infrastructure/calendar/earningsCalendarRepo'
 import {
   createMacroEventCalendarDb,
   createMacroEventCalendarRepo,
   type MacroEventCalendarSeedInput,
-} from '../infrastructure/calendar/macroEventCalendarRepo'
-import { earningsCalendar, macroEventCalendar } from '../infrastructure/db/schema'
-import type { EarningsCalendarRow, MacroEventCalendarRow } from '../infrastructure/db/schema'
-import { extractActor, recordChange } from '../infrastructure/db/configAuditLog'
+} from '../../infrastructure/calendar/macroEventCalendarRepo'
+import { earningsCalendar, macroEventCalendar } from '../../infrastructure/db/schema'
+import type { EarningsCalendarRow, MacroEventCalendarRow } from '../../infrastructure/db/schema'
+import { extractActor, recordChange } from '../../infrastructure/db/configAuditLog'
 // #21 Phase B follow-up: Webull token 管理 UI (seed / status / refresh)。
 // admin/webull-token は JSON API、こちらは HTML form + redirect で operator が
 // browser から完結できるようにする (DevTools fetch を強要しない)。
-import { refreshWebullToken } from '../infrastructure/webull/refreshWebullToken'
-import { WebullAuth } from '../infrastructure/webull/WebullAuth'
-import { WebullTokenClient } from '../infrastructure/webull/WebullTokenClient'
-import { WebullTokenStateClient } from '../trading/state/WebullTokenStateClient'
-import type { WebullTokenState } from '../trading/state/WebullTokenStateDO'
+import { refreshWebullToken } from '../../infrastructure/webull/refreshWebullToken'
+import { WebullAuth } from '../../infrastructure/webull/WebullAuth'
+import { WebullTokenClient } from '../../infrastructure/webull/WebullTokenClient'
+import { WebullTokenStateClient } from '../../trading/state/WebullTokenStateClient'
+import type { WebullTokenState } from '../../trading/state/WebullTokenStateDO'
 
 /**
  * Read-only operator dashboard (#121). Server-rendered HTML via Hono — no
