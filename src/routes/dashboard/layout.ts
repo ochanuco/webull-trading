@@ -58,6 +58,15 @@ export const STYLE = `
   .topnav-killswitch[open] summary{background:#f0f0f3}
   .ks-pop{position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:10px 12px;width:240px;box-shadow:0 4px 16px rgba(0,0,0,0.12);z-index:110;font-size:13px}
   .ks-pop .ks-title{font-weight:600;font-size:12px;margin-bottom:2px}
+  /* 運用ドロップダウン (#dashboard-ia): kill switch と同じ details パターンを
+     nav 内に置く。運用系 6 ページ (設定/銘柄管理/イベント/監査/診断/token) を
+     1 グループに畳んでグローバル nav を 4 項目に保つ。 */
+  .topnav-ops{margin:0;position:relative;flex:0 0 auto}
+  .topnav-ops summary{list-style:none;cursor:pointer;font-weight:400}
+  .topnav-ops summary::-webkit-details-marker{display:none}
+  .topnav-ops[open]>summary:not(.active){background:#f0f0f3}
+  .ops-pop{position:absolute;left:0;top:calc(100% + 6px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,0.12);z-index:110;display:flex;flex-direction:column;gap:2px}
+  .ops-pop .nav-link{display:block}
   /* ページ固有 subnav (header 2段目)。topnav active より薄い装飾で階層差を出す */
   .subnav{display:flex;align-items:center;gap:2px;padding:3px 16px 6px;flex-wrap:wrap;border-top:1px solid #f0f0f3}
   .subnav-link{color:#1d1d1f;text-decoration:none;padding:3px 10px;border-radius:6px;font-size:12.5px;white-space:nowrap}
@@ -73,6 +82,10 @@ export const STYLE = `
     .topnav .nav-sep{display:none}
     .topnav .nav-link{font-size:14px;padding:8px 12px}
     .topnav-killswitch{order:5}
+    /* 折り畳み nav 内ではドロップダウンをインライン展開 (絶対配置 popup は
+       折り畳みメニューの高さ計算を壊すため) */
+    .topnav-ops{width:100%}
+    .ops-pop{position:static;box-shadow:none;border:none;padding:2px 0 2px 14px}
   }
   /* KPI カード */
   .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
@@ -174,7 +187,7 @@ export const STYLE = `
 
 export function renderLayout(
   c: {
-    req: { path: string }
+    req: { path: string; url: string }
     env: unknown
     var: { killSwitchState: KillSwitchBannerState | null }
   },
@@ -183,64 +196,119 @@ export function renderLayout(
   subnav = '',
 ): string {
   const killSwitch = killSwitchTopnav(c.var.killSwitchState)
-  return layout(title, body, c.req.path, killSwitch, subnav)
+  // active 判定はグループ単位の前方一致 (#dashboard-ia)。/charts は ?tab= で
+  // 「銘柄」(symbol/grid) と「履歴・分析」(overview/quality) に分かれるため
+  // query も見る。
+  let tab: string | null = null
+  try {
+    tab = new URL(c.req.url).searchParams.get('tab')
+  } catch {
+    // 相対 URL 等で parse できない場合は tab 無し (= overview) 扱い
+  }
+  return layout(title, body, resolveActiveNavGroup(c.req.path, tab), killSwitch, subnav)
 }
 
-/** グローバル nav 定義 (上部バー)。active link は path 完全一致で強調。 */
+/**
+ * グローバル nav (#dashboard-ia): 4 項目 + 運用ドロップダウンに削減。
+ * 資産系 (/positions /portfolio) はホームに統合したため nav からは外す
+ * (URL は直アクセス可のまま維持)。
+ */
+export type NavGroupKey = 'home' | 'symbol' | 'analysis' | 'ops'
+
 export const NAV_GROUPS: ReadonlyArray<{
-  label?: string
-  links: ReadonlyArray<{ href: string; text: string; title?: string }>
+  key: NavGroupKey
+  href: string
+  text: string
+  title?: string
 }> = [
-  { links: [{ href: '/dashboard', text: 'ホーム' }] },
+  { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (資産サマリ / 保有 / 直近の判定)' },
+  { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート / 銘柄グリッド' },
+  { key: 'analysis', href: '/dashboard/trades', text: '履歴・分析', title: '約定履歴 / 戦略判定 / 取引品質 / 資産推移 / アラート' },
+]
+
+/** 運用ドロップダウン内リンク (低頻度の運用・管理ページ)。 */
+export const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
+  { href: '/dashboard/config', text: '設定' },
+  { href: '/dashboard/symbols', text: '銘柄管理' },
+  { href: '/dashboard/events', text: 'イベント' },
+  { href: '/dashboard/audit', text: '監査ログ' },
   {
-    label: '取引状況',
-    links: [
-      { href: '/dashboard/positions', text: 'ポートフォリオ' },
-      { href: '/dashboard/portfolio', text: '口座サマリ' },
-      { href: '/dashboard/trades', text: '約定履歴' },
-    ],
+    href: '/dashboard/broker-probe',
+    text: 'broker 診断',
+    title: 'Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ',
   },
   {
-    label: '戦略・監視',
-    links: [
-      { href: '/dashboard/cron', text: '戦略判定' },
-      { href: '/dashboard/charts', text: 'チャート' },
-      { href: '/dashboard/alerts', text: 'アラート' },
-      { href: '/dashboard/events', text: 'イベント' },
-    ],
-  },
-  {
-    label: '運用',
-    links: [
-      { href: '/dashboard/config', text: '設定' },
-      { href: '/dashboard/symbols', text: '銘柄管理' },
-      { href: '/dashboard/audit', text: '監査ログ' },
-      {
-        href: '/dashboard/broker-probe',
-        text: 'broker 診断',
-        title: 'Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ',
-      },
-      {
-        href: '/dashboard/webull-token',
-        text: 'Webull token',
-        title: 'Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)',
-      },
-    ],
+    href: '/dashboard/webull-token',
+    text: 'Webull token',
+    title: 'Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)',
   },
 ]
 
-export function renderTopNav(activePath?: string): string {
-  // 上部バーではグループ label を出さず縦罫線で区切る (横幅節約)。
-  // グループの意味は各 link の title (hint) で補う。
-  return NAV_GROUPS.map((g) => {
-    return g.links
-      .map((l) => {
-        const active = activePath === l.href ? ' active' : ''
-        const t = l.title ? ` title="${esc(l.title)}"` : g.label ? ` title="${esc(g.label)}"` : ''
-        return `<a class="nav-link${active}" href="${l.href}"${t}>${esc(l.text)}</a>`
-      })
-      .join('')
-  }).join('<span class="nav-sep"></span>')
+/**
+ * 現在ページ → active nav グループの解決 (グループ単位の前方一致)。
+ * /positions /portfolio は nav 外の直アクセスページなので active 無し (null)。
+ */
+export function resolveActiveNavGroup(activePath?: string, tab?: string | null): NavGroupKey | null {
+  if (!activePath) return null
+  if (activePath === '/dashboard' || activePath === '/dashboard/') return 'home'
+  if (activePath === '/dashboard/charts') {
+    // symbol / grid タブは「銘柄」、overview (default) / quality は「履歴・分析」
+    return tab === 'symbol' || tab === 'grid' ? 'symbol' : 'analysis'
+  }
+  for (const p of ['/dashboard/trades', '/dashboard/cron', '/dashboard/alerts']) {
+    if (activePath === p || activePath.startsWith(`${p}/`)) return 'analysis'
+  }
+  for (const l of OPS_NAV_LINKS) {
+    if (activePath === l.href || activePath.startsWith(`${l.href}/`)) return 'ops'
+  }
+  return null
+}
+
+export function renderTopNav(active?: NavGroupKey | null): string {
+  const links = NAV_GROUPS.map((g) => {
+    const activeCls = active === g.key ? ' active' : ''
+    const t = g.title ? ` title="${esc(g.title)}"` : ''
+    return `<a class="nav-link${activeCls}" href="${g.href}"${t}>${esc(g.text)}</a>`
+  }).join('')
+  const opsLinks = OPS_NAV_LINKS.map((l) => {
+    const t = l.title ? ` title="${esc(l.title)}"` : ''
+    return `<a class="nav-link" href="${l.href}"${t}>${esc(l.text)}</a>`
+  }).join('')
+  // 運用は kill switch と同じ details ドロップダウン。summary 自体が現在地
+  // 表示を兼ねる (運用系ページでは active 装飾)。
+  return `${links}<span class="nav-sep"></span><details class="topnav-ops">
+    <summary class="nav-link${active === 'ops' ? ' active' : ''}">運用 ▾</summary>
+    <div class="ops-pop">${opsLinks}</div>
+  </details>`
+}
+
+/**
+ * 「履歴・分析」グループ共通の subnav (#dashboard-ia)。charts の
+ * `renderChartsSubnav` と同型で trades / cron / alerts の 3 ページに出す
+ * (charts ページ自体は既存の charts subnav のまま — subnav 2 本は出さない)。
+ */
+export type AnalysisSubnavKey = 'trades' | 'cron' | 'matrix' | 'quality' | 'equity' | 'alerts'
+
+export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
+  key: AnalysisSubnavKey
+  href: string
+  label: string
+}> = [
+  { key: 'trades', href: '/dashboard/trades', label: '約定履歴' },
+  { key: 'cron', href: '/dashboard/cron', label: '戦略判定' },
+  { key: 'matrix', href: '/dashboard/cron?view=matrix', label: '判定マトリクス' },
+  { key: 'quality', href: '/dashboard/charts?tab=quality', label: '取引品質' },
+  { key: 'equity', href: '/dashboard/charts', label: '資産推移' },
+  { key: 'alerts', href: '/dashboard/alerts', label: 'アラート' },
+]
+
+export function renderAnalysisSubnav(active: AnalysisSubnavKey): string {
+  return ANALYSIS_SUBNAV_ITEMS.map((i) => {
+    if (i.key === active) {
+      return `<span class="subnav-link active">${esc(i.label)}</span>`
+    }
+    return `<a class="subnav-link" href="${i.href}">${esc(i.label)}</a>`
+  }).join('')
 }
 
 /**
@@ -288,7 +356,7 @@ export function killSwitchTopnav(state: KillSwitchBannerState | null): string {
 export function layout(
   title: string,
   body: string,
-  activePath?: string,
+  activeNav?: NavGroupKey | null,
   navRight = '',
   subnav = '',
 ): string {
@@ -305,7 +373,7 @@ export function layout(
   <div class="topnav">
     <div class="brand">Webull Trading</div>
     <button class="nav-toggle" onclick="this.nextElementSibling.classList.toggle('open')" aria-label="メニュー">☰</button>
-    <nav>${renderTopNav(activePath)}</nav>
+    <nav>${renderTopNav(activeNav)}</nav>
     ${navRight}
   </div>
   ${subnav ? `<nav class="subnav">${subnav}</nav>` : ''}
