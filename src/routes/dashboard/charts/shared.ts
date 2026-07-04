@@ -1,0 +1,245 @@
+import type { SymbolUniverse } from '../../../infrastructure/db/symbolUniverse'
+import type { BuyabilityView } from '../../../trading/strategy/entryDistance'
+import type { EntryStatus, EntryStatusResult } from '../../../trading/strategy/entryStatus'
+import type { PairRegimeDecision } from '../../../trading/strategy/pairRegime'
+import type { SymbolAllocation } from '../../../trading/strategy/conditionalAllocation'
+import type { EquityPoint } from './equity'
+import type { SymbolChartData } from './loaders'
+import type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './quality'
+import type { DecisionRow } from '../cron'
+import { esc, isSymbolInactive, unavailable } from '../shared'
+
+/**
+ * 戦略妥当性チャート (#158)。
+ *
+ * 設計方針:
+ * - ECharts CDN load (jsdelivr)、build step 導入しない (POC scope 維持)
+ * - データは `<script>` で window.__chartData に埋込、`</script>` を escape
+ * - CDN 失敗時は chart 部分のみ unavailable 表示で fail-graceful
+ *
+ * Phase 0+1 では equity curve + drawdown のみ。Phase 2-4 で追加予定。
+ */
+
+export const ECHARTS_CDN = 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js'
+
+export type ChartsTab = 'overview' | 'quality' | 'symbol' | 'grid'
+
+export function parseChartsTab(value: string | undefined): ChartsTab {
+  if (value === 'quality' || value === 'symbol' || value === 'grid') return value
+  return 'overview'
+}
+
+export const CHART_TABS: Array<{ id: ChartsTab; label: string; hint: string }> = [
+  { id: 'overview', label: '概要', hint: 'エクイティカーブ + ドローダウン (戦略を続けるか止めるかの判断)' },
+  { id: 'quality', label: '取引品質', hint: 'PnL 分布 + 統計 + Decision breakdown (エッジ / rule の機能性)' },
+  { id: 'symbol', label: '個別銘柄', hint: '価格 + SMA50 + entry/exit (rule と現実の整合)' },
+  { id: 'grid', label: '銘柄グリッド', hint: 'ALLOWED_SYMBOLS を 4 列 grid で並列表示。dataZoom は全 panel 同期 (Datadog 風)' },
+]
+
+export interface ChartsBodyOverview {
+  tab: 'overview'
+  equity: EquityPoint[]
+}
+
+export interface ChartsBodyQuality {
+  tab: 'quality'
+  decisions: DecisionBreakdownPoint[]
+  pnls: number[]
+  stats: TradeStats
+  histogram: PnlHistogramBin[]
+}
+
+/**
+ * 戦略パラメータの現在値スナップショット (PullbackUptrendStrategy)。
+ * チャート併置パネルで「今どのルールで動いているか」を見せるための
+ * read-only view (#168)。default 値からの変更はパネル側で ⚠ flag。
+ */
+export interface StrategyParamsSnapshot {
+  stopPct: number
+  takeProfitPct: number
+  timeStopDays: number
+  pullbackMax: number
+  pullbackMin: number
+  minReturn50d: number
+  requireAboveSma50: boolean
+  kAtr: number
+  /** 過熱ガード閾値 `(price-sma50)/sma50` 上限 (#entry-distance / #overextension)。 */
+  maxSma50DeviationPct: number
+  /** ボラ過熱ガード閾値 `atr20/baselineAtr20` 上限。 */
+  maxAtrRatio: number
+}
+
+/**
+ * ISO UTC timestamp (例: "2026-04-15T00:00:00Z") をパースして Date を返す。
+ * timezone marker (末尾 Z または ±HH:MM offset) が無い datetime 文字列は
+ * `new Date` だと local time 扱いになり (JST runner で意図しないシフト)、
+ * JSDoc の "UTC timestamp" 約束に違反する。`T` を含むのに tz が無ければ
+ * `Z` を補って UTC と解釈させる。date-only ("2026-04-15") は ECMAScript
+ * 仕様で既に UTC 解釈なので変更不要。
+ */
+export function parseIsoTimestamp(raw: string | undefined): Date | null {
+  if (!raw || raw.trim() === '') return null
+  let s = raw.trim()
+  const hasTz = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(s)
+  if (s.includes('T') && !hasTz) {
+    s = `${s}Z`
+  }
+  const d = new Date(s)
+  if (!Number.isFinite(d.getTime())) return null
+  return d
+}
+
+/** chart の zoom 初期 window 既定: 直近 7 日 (UI で zoom 操作可能) */
+export const DEFAULT_ZOOM_WINDOW_MS = 7 * 24 * 3600 * 1000
+
+/**
+ * chart x-axis の zoom 範囲を決める:
+ * 1. URL params (zoomFrom / zoomTo) が valid (from < to) → それを採用
+ * 2. URL に無い + chart に points がある → 直近 7 日 (lastTimestamp - 7d ～ lastTimestamp)
+ * 3. それ以外 (chart 自体空) → null (= 全体表示 / no zoom)
+ *
+ * lastTimestamp 基準なので、休場日や POC 開始直後で `now()` 基準が data
+ * 範囲外になるケースでも broken にならない。
+ */
+export function computeZoomRange(
+  zoomFrom: Date | null,
+  zoomTo: Date | null,
+  chart: SymbolChartData | null,
+): { from: Date; to: Date } | null {
+  if (zoomFrom !== null && zoomTo !== null && zoomFrom < zoomTo) {
+    return { from: zoomFrom, to: zoomTo }
+  }
+  if (!chart || chart.points.length === 0) return null
+  const lastPoint = chart.points[chart.points.length - 1]!
+  const lastMs = new Date(lastPoint.timestamp).getTime()
+  if (!Number.isFinite(lastMs)) return null
+  return {
+    from: new Date(lastMs - DEFAULT_ZOOM_WINDOW_MS),
+    to: new Date(lastMs),
+  }
+}
+
+export interface ChartsBodySymbol {
+  tab: 'symbol'
+  focusSymbol: string | null
+  symbolChart: SymbolChartData | null
+  availableSymbols: string[]
+  /** focus symbol に適用される effective 値 (global → role preset → override)。 */
+  strategyParams: StrategyParamsSnapshot
+  /** global_config の値。effective と異なる項目に「銘柄別」タグを付ける比較基準。 */
+  strategyParamsGlobal?: StrategyParamsSnapshot
+  /** dataZoom 初期範囲。null なら全期間 (full data) */
+  zoom: { from: Date; to: Date } | null
+  /** symbol picker / chart title を JP 銘柄向け 番号-会社名 形式に整形するための universe。 */
+  universe?: SymbolUniverse | null
+  /** 入場距離ビュー (#entry-distance)。「入場まであと/いつ頃」の描画用。null = データ無し。 */
+  buyability?: BuyabilityView | null
+  /** 段階判定 (#452 PR 2)。null = 評価データ無し。 */
+  entryStatus?: EntryStatusResult | null
+  /** focus symbol のロール / 配分ポリシー要約 (#452)。 */
+  symbolPolicy?: SymbolPolicySummary | null
+  /**
+   * focus symbol の判定履歴 (#decisions-chart-unify)。戦略判定ページと同じ
+   * loader/renderer を共用 — チャートの判定 pin と同じデータを表でも読める。
+   */
+  decisionRows?: DecisionRow[]
+  /** ペアレジーム表示 (#472)。regime 有効ペアの一員 + mode != off のときのみ。 */
+  pairRegime?: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null
+}
+
+export interface SymbolPolicySummary {
+  role: string | null
+  /** budget_alloc_pct (fraction)。未設定 (risk-% sizing) は null。 */
+  targetWeight: number | null
+  entryRequired: boolean
+  alwaysActive: boolean
+  cashFallbackSymbols: string[] | null
+}
+
+/**
+ * 銘柄グリッドビュー: ALLOWED_SYMBOLS を 4 列 (responsive) grid で並列表示。
+ * `echarts.connect` で **dataZoom + axisPointer (縦線)** を全 panel 同期、
+ * **tooltip popup は hover 中の panel だけ** に表示する (formatter 内で
+ * window.__gridHoveredPanelId !== elId の panel は空文字を返し popup を抑制、
+ * PR #242)。preset zoom (1D/5D/1M/All) も dispatchAction で全 chart に配信。
+ */
+export interface ChartsBodyGrid {
+  tab: 'grid'
+  /**
+   * Grid に表示する全銘柄 (active + inactive) の SymbolChartData。load 失敗時は
+   * `chart === null`。inactive 銘柄も同じ Map から render し、panel header に
+   * INACTIVE バッジ + grayed style を付与して識別する (`isSymbolInactive` で判定)。
+   *
+   * PR #229 で inactive を grid から外したが、operator から「inactive 銘柄も
+   * 動向確認したい」要望があったため復活。subrequest budget は per-symbol catch
+   * で graceful degrade (個別 panel が空になるだけ、grid 全体は描画される)。
+   */
+  charts: Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>
+  /** dataZoom 初期範囲。null なら全期間 */
+  zoom: { from: Date; to: Date } | null
+  /** panel header の銘柄表示を JP 銘柄向け 番号-会社名 形式にするための universe。 */
+  universe?: SymbolUniverse | null
+  /** symbol → 段階判定 (#452 PR 2)。評価データ無しの銘柄は不在。panel badge 用。 */
+  entryStatuses?: Record<string, EntryStatus>
+  /** symbol → 条件連動配分 (#452 Layer 3)。target weight 関連銘柄のみ。 */
+  allocations?: Record<string, SymbolAllocation>
+}
+
+export type ChartsBodyArgs =
+  | ChartsBodyOverview
+  | ChartsBodyQuality
+  | ChartsBodySymbol
+  | ChartsBodyGrid
+
+/**
+ * チャートの view 切替 (概要 / 取引品質 / 個別銘柄 / 銘柄グリッド)。
+ * header 2段目の subnav として出す (ページ本文の tab strip からサブメニュー化)。
+ * 現在 tab には active 装飾、他は通常リンク。
+ */
+export function renderChartsSubnav(active: ChartsTab, focusSymbol?: string): string {
+  return CHART_TABS.map((t) => {
+    if (t.id === active) {
+      return `<span class="subnav-link active" title="${esc(t.hint)}">${esc(t.label)}</span>`
+    }
+    let href = `/dashboard/charts?tab=${t.id}`
+    if (t.id === 'symbol' && focusSymbol) {
+      href += `&symbol=${encodeURIComponent(focusSymbol)}`
+    }
+    return `<a class="subnav-link" href="${href}" title="${esc(t.hint)}">${esc(t.label)}</a>`
+  }).join('')
+}
+
+/**
+ * dataZoom プリセット (1D / 5D / 1M / All)。TradingView ライクの 1 click ズーム。
+ * lastTimestamp 基準で from/to を data-attr に焼き、client 側 click handler で
+ * symChart.dispatchAction({ type: 'dataZoom', startValue, endValue }) を発火する。
+ * 既存の dataZoom listener が URL を replaceState で更新するので、preset でも
+ * URL ?from / ?to が同期される。
+ */
+export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
+  if (!chart || chart.points.length === 0) return ''
+  const lastPoint = chart.points[chart.points.length - 1]!
+  const lastMs = new Date(lastPoint.timestamp).getTime()
+  if (!Number.isFinite(lastMs)) return ''
+  const earliestMs = (() => {
+    const first = chart.points[0]
+    if (!first) return lastMs
+    const ms = new Date(first.timestamp).getTime()
+    return Number.isFinite(ms) ? ms : lastMs
+  })()
+  const day = 24 * 3600 * 1000
+  // ラベルは Google Finance JA 準拠 (1日 / 5日 / 1か月 / 最大)。
+  const presets: Array<{ label: string; fromMs: number; toMs: number }> = [
+    { label: '1日', fromMs: lastMs - 1 * day, toMs: lastMs },
+    { label: '5日', fromMs: lastMs - 5 * day, toMs: lastMs },
+    { label: '1か月', fromMs: lastMs - 30 * day, toMs: lastMs },
+    { label: '最大', fromMs: earliestMs, toMs: lastMs },
+  ]
+  const buttons = presets
+    .map(
+      (p) =>
+        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}">${esc(p.label)}</button>`,
+    )
+    .join('')
+  return `<p style="margin:8px 0 0">${buttons}</p>`
+}
