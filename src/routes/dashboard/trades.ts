@@ -1,0 +1,155 @@
+import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
+import type { TradeJournalRow } from '../../infrastructure/db/schema'
+import { formatRealizedPnl } from './cron'
+import { LOG_COPY_ALL_BTN, displaySymbol, esc, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, pillStyle, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+
+/** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
+export const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
+  decision: { ja: '判定', color: '#86868b' },
+  intent: { ja: '注文作成', color: '#46608a' },
+  pre_submit: { ja: '送信記録', color: '#46608a' },
+  post_submit: { ja: '送信応答', color: '#46608a' },
+  fill: { ja: '約定', color: '#057a55' },
+  exit: { ja: '手仕舞い', color: '#b25000' },
+}
+
+/** broker error_code → 短い日本語。未知コードは code をそのまま出す。 */
+export const BROKER_ERROR_LABELS: Record<string, string> = {
+  OAUTH_OPENAPI_TICKER_IS_DENY: '銘柄取扱なし',
+  OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY: '売却数量超過',
+  OAUTH_OPENAPI_PARAM_ERR: 'パラメータ不正',
+  INVALID_TOKEN: 'トークン無効',
+}
+
+/** errorMessage から error_code らしき token を抜く (JSON / 平文の両対応)。 */
+export function extractBrokerErrorCode(message: string): string | null {
+  const fromJson = message.match(/"error_code"\s*:\s*"([A-Z0-9_]+)"/)
+  if (fromJson) return fromJson[1]!
+  const bare = message.match(/\b([A-Z][A-Z0-9_]{6,})\b/)
+  return bare ? bare[1]! : null
+}
+
+export function tradesBody(
+  rows: TradeJournalRow[],
+  limit: number,
+  universe?: SymbolUniverse | null,
+  view: 'all' | 'fills' | 'errors' = 'all',
+  before?: number,
+  hasMore = false,
+  filters: { symbol?: string; clientOrderId?: string } = {},
+): string {
+  // symbol / clientOrderId フィルタを view pill・ページネーションの URL に
+  // 伝搬させる (#nav-links)。pill を切り替えても絞り込みが外れないように。
+  const filterQs =
+    (filters.symbol ? `&symbol=${encodeURIComponent(filters.symbol)}` : '') +
+    (filters.clientOrderId ? `&clientOrderId=${encodeURIComponent(filters.clientOrderId)}` : '')
+  const viewPill = (label: string, v: string, active: boolean): string =>
+    `<a href="/dashboard/trades?view=${v}&limit=${limit}${filterQs}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+  const filterBanner = filters.clientOrderId
+    ? `<p class="muted" style="font-size:12px;margin:0 0 6px">注文 <code>${esc(filters.clientOrderId)}</code> の履歴のみ表示。<a href="/dashboard/cron?clientOrderId=${encodeURIComponent(filters.clientOrderId)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
+    : filters.symbol
+      ? `<p class="muted" style="font-size:12px;margin:0 0 6px">銘柄 <strong>${esc(displaySymbol(filters.symbol, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(filters.symbol)}">チャートで見る</a> / <a href="/dashboard/cron?symbol=${encodeURIComponent(filters.symbol)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
+      : ''
+  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}</nav>`
+  if (rows.length === 0) {
+    return `${filterBanner}${pills}<p class="muted">該当するレコードがありません。</p>`
+  }
+  const tbody = rows
+    .map((r) => {
+      const ev = TRADE_EVENT_LABELS[r.tradeEventType] ?? { ja: r.tradeEventType, color: '#86868b' }
+      const eventCell = `<span title="${esc(r.tradeEventType)}" style="color:${ev.color};font-weight:600">● ${esc(ev.ja)}</span>`
+      const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : null
+      const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
+      // ▼ は同一銘柄の約定だけに絞り込み、「判定」は clientOrderId でこの注文の
+      // 判定行 (cron) へ飛ぶ逆リンク (#nav-links)。
+      const symbolCell = r.symbol
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(symbolText!)}</strong></a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の約定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a>`
+        : '<span class="muted">—</span>'
+      const decisionLink = r.clientOrderId
+        ? ` <a href="/dashboard/cron?clientOrderId=${encodeURIComponent(r.clientOrderId)}" class="muted" title="この注文の判定 (戦略判定ログ) を見る" style="font-size:11px">判定→</a>`
+        : ''
+      const sideCell =
+        r.side === 'BUY'
+          ? `<span class="ok" style="font-weight:700">買</span> <span class="muted" style="font-size:11px">BUY</span>`
+          : r.side === 'SELL'
+            ? `<span class="err" style="font-weight:700">売</span> <span class="muted" style="font-size:11px">SELL</span>`
+            : '<span class="muted">—</span>'
+      // 数量: 発注数量 → 約定数量。一致なら 1 つだけ、部分約定が見えるように。
+      const qtyCell =
+        r.filledQty !== null && r.quantity !== null && r.filledQty !== r.quantity
+          ? `${esc(r.quantity)} → <strong>${esc(r.filledQty)}</strong>`
+          : r.filledQty !== null
+            ? `${esc(r.filledQty)}`
+            : r.quantity !== null
+              ? `${esc(r.quantity)}`
+              : '—'
+      const priceCell =
+        r.filledPrice !== null
+          ? fmtNumber(r.filledPrice, 2)
+          : r.limitPrice !== null
+            ? `<span class="muted" title="指値 (未約定)">指 ${fmtNumber(r.limitPrice, 2)}</span>`
+            : '—'
+      const pnlCell =
+        r.realizedPnl !== null
+          ? `${formatRealizedPnl(r.realizedPnl)}${r.exitReason ? ` <span class="muted" style="font-size:11px">${esc(r.exitReason)}</span>` : ''}`
+          : '<span class="muted">—</span>'
+      // 状態: エラーは短い日本語 + code、全文は <details>。enum はそのまま残す
+      // (broker API と grep で突き合わせる運用のため title / details に保持)。
+      let statusCell: string
+      const errorText = r.errorMessage ?? r.errorClass
+      if (errorText) {
+        const code = extractBrokerErrorCode(errorText)
+        const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : (r.errorClass ?? 'エラー')
+        statusCell = `<span style="${pillStyle('#fdecec', '#c22')}">エラー: ${esc(short)}</span>
+          <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
+      } else if (r.brokerStatus === 'FILLED') {
+        statusCell = `<span style="${pillStyle('#e6f6ec', '#057a55')}">約定</span>`
+      } else if (r.brokerStatus) {
+        statusCell = `<span style="${pillStyle('#fff4e6', '#b25000')}" title="${esc(r.brokerStatus)}">${esc(r.brokerStatus)}</span>`
+      } else {
+        statusCell = '<span class="muted">—</span>'
+      }
+      const modeCell =
+        r.mode === 'LIVE'
+          ? `<span style="${pillStyle('#fdecec', '#c22')}">実発注</span>`
+          : r.mode === 'DRY_RUN'
+            ? `<span style="${pillStyle('#f3f3f5', '#86868b')}">DRY</span>`
+            : '<span class="muted">—</span>'
+      return `<tr style="font-size:13px">
+        <td>${logCopyRowBtn(r.id)}</td>
+        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
+        <td style="white-space:nowrap">${eventCell}${decisionLink}</td>
+        <td>${symbolCell}</td>
+        <td style="white-space:nowrap">${sideCell}</td>
+        <td style="text-align:right" class="bp-num">${qtyCell}</td>
+        <td style="text-align:right" class="bp-num">${priceCell}</td>
+        <td style="text-align:right" class="bp-num">${pnlCell}</td>
+        <td>${statusCell}</td>
+        <td>${modeCell}</td>
+      </tr>`
+    })
+    .join('')
+  return `${filterBanner}${pills}
+  <table>
+    <thead><tr style="font-size:12px">
+      <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th style="text-align:right">数量</th><th style="text-align:right">単価</th><th style="text-align:right">実現損益</th><th>状態</th><th>モード</th>
+    </tr></thead>
+    <tbody>${tbody}</tbody>
+  </table>
+  ${renderPaginationNav({
+    baseHref: `/dashboard/trades?view=${view}&limit=${limit}${filterQs}`,
+    before,
+    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    hasMore,
+  })}
+  ${safeJsonScript('__tradesCopy', {
+    meta: {
+      page: 'trade_journal (約定履歴)',
+      filter: `view=${view}, limit=${limit}${filters.symbol ? `, symbol=${filters.symbol}` : ''}${filters.clientOrderId ? `, clientOrderId=${filters.clientOrderId}` : ''}`,
+      generatedAt: new Date().toISOString(),
+    },
+    rows,
+  })}
+  ${renderLogCopyScript('__tradesCopy')}`
+}
