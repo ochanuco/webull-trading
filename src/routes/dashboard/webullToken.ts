@@ -1,4 +1,3 @@
-import { and, lt, or } from 'drizzle-orm'
 import type { WebullTokenState } from '../../trading/state/WebullTokenStateDO'
 import { esc } from './shared'
 

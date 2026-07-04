@@ -4,10 +4,9 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import type { TradableAllowlist, TradableStatus } from '../../infrastructure/db/tradableInstrumentsRepo'
 import { symbolConfig, type SymbolConfigRow } from '../../infrastructure/db/schema'
 import type { PairRegimeEntry } from '../../trading/strategy/pairRegime'
-import { asc, eq, or } from 'drizzle-orm'
-import { layout } from './layout'
+import { asc, eq } from 'drizzle-orm'
 import { buyingPowerBadge } from './overview'
-import { esc, fmtPct, safeJsonScript, unavailable } from './shared'
+import { esc, safeJsonScript } from './shared'
 
 /**
  * 銘柄管理 (#292) ページの SELECT。`symbol_config` 全行 (active + inactive)

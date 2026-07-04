@@ -3,12 +3,10 @@ import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
 import type { PortfolioEquitySnapshotRow } from '../../infrastructure/db/schema'
 import type { VixRegime } from '../../trading/risk/vixRegimeFilter'
 import type { SymbolState } from '../../trading/state/types'
-import { loadSymbolChart } from './charts/loaders'
 import { formatRealizedPnl } from './cron'
-import { layout } from './layout'
 import { type EquityRange, renderPortfolioEquityChart, renderVixRegimeCell } from './portfolio'
 import { pickFreshQuote } from './positions'
-import { displaySymbol, esc, fmtJst, fmtNumber, unavailable } from './shared'
+import { displaySymbol, esc, fmtJst, fmtNumber } from './shared'
 
 // #dashboard-mf-layout: overview パネル定義。設定で ON/OFF (default 全表示)。
 export type OverviewPanel = 'kpi' | 'equity' | 'composition' | 'recent'

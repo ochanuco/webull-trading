@@ -1,7 +1,5 @@
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
-import type { SQL } from 'drizzle-orm'
-import { layout } from './layout'
 import { ALL_OVERVIEW_PANELS, OVERVIEW_PANEL_LABELS, type OverviewPanel } from './overview'
 import { displaySymbol, esc, inactiveTooltip, isSymbolInactive } from './shared'
 

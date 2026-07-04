@@ -1,4 +1,3 @@
-import { Hono } from 'hono'
 import type { AppBindings } from '../../app'
 import type { Env } from '../../config/env'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'

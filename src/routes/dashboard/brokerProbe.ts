@@ -1,6 +1,5 @@
 import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
-import { lt } from 'drizzle-orm'
-import { displaySymbol, esc, unavailable } from './shared'
+import { displaySymbol, esc } from './shared'
 
 /**
  * Broker probe UI body: form + 結果表示器。submit で `/admin/broker/probe` を

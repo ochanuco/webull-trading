@@ -1,12 +1,11 @@
 import type { Env } from '../../../config/env'
 import { MAX_TIME_STOP_DAYS } from '../../../infrastructure/db/schema'
-import { buildBuyabilityView, type EvalIndicatorPoint } from '../../../trading/strategy/entryDistance'
+import { type EvalIndicatorPoint } from '../../../trading/strategy/entryDistance'
 import type { PullbackIndicators } from '../../../trading/strategy/strategies/PullbackUptrendStrategy'
-import { or, type SQL } from 'drizzle-orm'
 import { SymbolStateClient } from '../../../trading/state/SymbolStateClient'
 import { YahooBarClient } from '../../../infrastructure/quotes/YahooBarClient'
-import { renderChartDecisionTrace, renderDecisionLadder } from '../cron'
-import { currencyOfSymbol, esc, messageOf } from '../shared'
+import { renderChartDecisionTrace } from '../cron'
+import { currencyOfSymbol, messageOf } from '../shared'
 
 /**
  * 銘柄チャートで focus する銘柄を決める (#158 Phase 4)。

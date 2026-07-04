@@ -2,7 +2,6 @@ import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
 import { and, desc, eq, lt, type SQL } from 'drizzle-orm'
-import { layout } from './layout'
 import { LOG_COPY_ALL_BTN, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
 /**

@@ -7,7 +7,7 @@ import type { EquityPoint } from './equity'
 import type { SymbolChartData } from './loaders'
 import type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './quality'
 import type { DecisionRow } from '../cron'
-import { esc, isSymbolInactive, unavailable } from '../shared'
+import { esc } from '../shared'
 
 /**
  * 戦略妥当性チャート (#158)。

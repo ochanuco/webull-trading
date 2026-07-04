@@ -1,7 +1,6 @@
 import { loadPortfolioEquitySnapshots, type LoadPortfolioEquitySnapshotOptions } from '../../infrastructure/db/portfolioEquitySnapshotRepo'
 import type { PortfolioEquitySnapshotRow } from '../../infrastructure/db/schema'
 import type { VixRegime } from '../../trading/risk/vixRegimeFilter'
-import { or } from 'drizzle-orm'
 import { ECHARTS_CDN } from './charts/shared'
 import { esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
 

@@ -1,7 +1,19 @@
 import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { AlertRow } from '../../infrastructure/notification/notificationEmitLog'
 import type { NotificationSeverity, NotificationEvent } from '../../infrastructure/notification/Notifier'
-import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, fmtJst, inactiveTooltip, isSymbolInactive, logCopyRowBtn, pillStyle, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import {
+  LOG_COPY_ALL_BTN,
+  displaySymbol,
+  esc,
+  fmtJst,
+  inactiveTooltip,
+  isSymbolInactive,
+  logCopyRowBtn,
+  pillStyle,
+  renderLogCopyScript,
+  renderPaginationNav,
+  safeJsonScript,
+} from './shared'
 import { BROKER_ERROR_LABELS, extractBrokerErrorCode } from './trades'
 
 /**
