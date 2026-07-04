@@ -74,7 +74,8 @@ import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, pa
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
 import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderChartsSubnav, strategyParamsFromGlobal } from './charts/shared'
 import { type SymbolChartRules, buildSymbolChartPacket, loadAllSymbolCharts, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
-import { loadEquityCurve } from './charts/equity'
+import { type EquityTradeMarker, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers } from './charts/equity'
+import { loadBenchmarkSeries } from './charts/benchmark'
 import { computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
 import { chartsBody, sortGridChartsByEntryPriority } from './charts/grid'
 import { type SymbolsListFilter, findSymbolConfigForView, loadAllSymbolConfigRows, symbolFormBody, symbolMapEditorBody, symbolsListBody } from './symbols'
@@ -93,7 +94,10 @@ export { DEFAULT_ZOOM_WINDOW_MS, computeZoomRange, parseChartsTab, parseIsoTimes
 export type { ChartsBodySymbol, ChartsTab, StrategyParamsSnapshot, SymbolPolicySummary } from './charts/shared'
 export { aggregateDailyCloses, anchorJstMidnight, computeChartWindowDays, computeLinearRegressionLine, computeRollingSma, densifyHorizontalLine, densifyTrendLine, deriveOpenPosition, extractSma50, fetchYahooBarsForChart, loadAllSymbolCharts, loadSymbolChart, mergeYahooAndCronPoints, pairClosedTrades, pickDefaultSymbol, resolveFillSide, selectLatestCronSnapshot } from './charts/loaders'
 export type { ClosedTradeSpan, OhlcBar, PivotPoint, SymbolChartData, SymbolChartDecision, SymbolChartMarker, SymbolChartPoint, SymbolChartPosition, SymbolChartRules, TrendLineSegment } from './charts/loaders'
-export { computeEquitySeries, loadEquityCurve } from './charts/equity'
+export { buildOverviewChartData, computeEquitySeries, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers, renderPeriodReturnsTable } from './charts/equity'
+export type { EquityPoint, EquityTradeMarker, MonthlyReturn, OverviewChartData, PeriodReturn } from './charts/equity'
+export { EQUITY_BENCHMARK_SYMBOL, loadBenchmarkSeries, toBenchmarkReturns } from './charts/benchmark'
+export type { BenchmarkPoint } from './charts/benchmark'
 export { aggregateDecisionRows, computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
 export type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './charts/quality'
 export { prevDailyClose, renderAllocationLine, renderBuyabilityPanel, renderDecisionPlotCaption, renderPairRegimeLine, renderPriceHeader, renderStrategyParamsPanel, renderSymbolPolicyLine, renderSymbolTab } from './charts/symbol'
@@ -377,9 +381,40 @@ export const dashboard = new Hono<DashboardBindings>()
       // - quality:  pnls (= stats / histogram) + decisions
       // - symbol:   universe + symbolChart
       if (tab === 'overview') {
-        const equity = await loadEquityCurve(c.env.DB)
+        // マーカー load 失敗 (一時的 D1 エラー等) は equity curve 本体を
+        // 巻き込まず空配列 fallback (マーカー無しで描画)。
+        const [equity, tradeMarkers] = await Promise.all([
+          loadEquityCurve(c.env.DB),
+          loadEquityTradeMarkers(c.env.DB).catch(() => [] as EquityTradeMarker[]),
+        ])
+        // QQQ ベンチマークは Yahoo fetch (network 依存) なので route 側で行い、
+        // `loadEquityCurve` は D1-pure を保つ。取得失敗は null → renderer が
+        // series を省略して注記だけ出す (チャート自体は壊さない fail-graceful)。
+        // 取得期間の先頭は equity / マーカー両方の最古日 (BUY だけで realized
+        // PnL が未確定の初期期間にもベンチマーク線を伸ばすため)。
+        const firstDates = [equity[0]?.date, tradeMarkers[0]?.date].filter(
+          (d): d is string => d !== undefined,
+        )
+        const fromDate = firstDates.length > 0 ? [...firstDates].sort()[0]! : null
+        const benchmark =
+          equity.length > 0 && fromDate !== null
+            ? await loadBenchmarkSeries(c.env, fromDate).catch(() => null)
+            : null
+        const now = new Date()
         return c.html(
-          renderLayout(c, 'チャート', chartsBody({ tab, equity }), renderChartsSubnav(tab)),
+          renderLayout(
+            c,
+            'チャート',
+            chartsBody({
+              tab,
+              equity,
+              tradeMarkers,
+              benchmark,
+              periodReturns: computePeriodReturns(equity, now),
+              monthlyReturns: computeMonthlyReturns(equity),
+            }),
+            renderChartsSubnav(tab),
+          ),
         )
       }
       if (tab === 'quality') {
