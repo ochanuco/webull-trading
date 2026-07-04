@@ -4,7 +4,8 @@ import type { BuyabilityView } from '../../../trading/strategy/entryDistance'
 import type { EntryStatus, EntryStatusResult } from '../../../trading/strategy/entryStatus'
 import type { PairRegimeDecision } from '../../../trading/strategy/pairRegime'
 import type { SymbolAllocation } from '../../../trading/strategy/conditionalAllocation'
-import type { EquityPoint } from './equity'
+import type { EquityPoint, EquityTradeMarker, MonthlyReturn, PeriodReturn } from './equity'
+import type { BenchmarkPoint } from './benchmark'
 import type { SymbolChartData } from './loaders'
 import type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './quality'
 import type { DecisionRow } from '../cron'
@@ -40,6 +41,20 @@ export const CHART_TABS: Array<{ id: ChartsTab; label: string; hint: string }> =
 export interface ChartsBodyOverview {
   tab: 'overview'
   equity: EquityPoint[]
+  /**
+   * equity line に重ねる全銘柄の fill マーカー (#equity-enhance)。
+   * additive フィールドなので optional: 省略時はマーカー非表示 (旧呼出互換)。
+   */
+  tradeMarkers?: EquityTradeMarker[]
+  /**
+   * QQQ ベンチマーク騰落率系列 (右 y 軸に % で重ねる)。
+   * null = Yahoo fetch 失敗 (series 省略、注記のみ表示)。省略も同義。
+   */
+  benchmark?: BenchmarkPoint[] | null
+  /** 期間別リターン (1W / 1M / 3M / YTD / ALL の PnL 変化額)。 */
+  periodReturns?: PeriodReturn[]
+  /** 月次 (JST) PnL 増分 (bar チャート用)。 */
+  monthlyReturns?: MonthlyReturn[]
 }
 
 export interface ChartsBodyQuality {
