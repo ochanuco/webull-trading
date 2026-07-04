@@ -315,10 +315,17 @@ export function renderGridTab(args: ChartsBodyGrid): string {
         var latestFillTs = sc.markers && sc.markers.length > 0
           ? sc.markers[sc.markers.length - 1].timestamp
           : null;
+        // 個別銘柄タブと同じデータ (qty / realizedPnl / fill 時刻 / clientOrderId)
+        // を data に保持する。従来は label 用の値しか持たせておらず、下方の
+        // markPoint tooltip が読む d.qty / d.realizedPnl / d.fillTimestamp が
+        // 常に undefined → 空表示になっていた乖離を解消 (#chart-markers)。
+        // grid はミニパネルなので click パネルは持たない (tooltip 表示まで)。
         var entries = buys.map(function (m) {
           var showLabel = m.timestamp === latestFillTs;
           return {
             name: 'BUY', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
+            realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
+            clientOrderId: m.clientOrderId == null ? null : m.clientOrderId,
             label: { show: showLabel, formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 4, fontSize: 10 },
             itemStyle: { color: '#057a55' },
           };
@@ -328,6 +335,8 @@ export function renderGridTab(args: ChartsBodyGrid): string {
           var pnlLabel = m.realizedPnl == null ? '' : ' ' + (m.realizedPnl >= 0 ? '+' : '') + m.realizedPnl.toFixed(1);
           return {
             name: 'SELL', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
+            realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
+            clientOrderId: m.clientOrderId == null ? null : m.clientOrderId,
             label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 4, fontSize: 10 },
             itemStyle: { color: '#c22' },
           };
@@ -558,7 +567,11 @@ export function renderGridTab(args: ChartsBodyGrid): string {
                       : '<br/>realized PnL: ' + (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
                     var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
                     var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabel(d.fillTimestamp);
-                    return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts;
+                    // clientOrderId は DB 由来文字列なので HTML escape してから
+                    // tooltip に載せる (grid は click パネル無し、id 表示まで)。
+                    var oid = d.clientOrderId == null ? '' : '<br/>order: ' +
+                      String(d.clientOrderId).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts + oid;
                   },
                 },
               } : undefined,
