@@ -3,6 +3,9 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
 import { and, desc, eq, lt, type SQL } from 'drizzle-orm'
 import { LOG_COPY_ALL_BTN, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+// ECHARTS_CDN のみ利用。charts/shared 側の `import type { DecisionRow }` は
+// type-only なので runtime 循環にはならない。
+import { ECHARTS_CDN } from './charts/shared'
 
 /**
  * Strategy / sizing が出力する英語 reason を **初心者にも分かる日本語** に翻訳
@@ -245,6 +248,22 @@ export function renderCronSymbolRail(
   return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${allItem}${items}</aside>`
 }
 
+/**
+ * 一覧 / マトリクスのビュー切替 pill (trades の viewPill と同型の見た目、#PR-5)。
+ * `?symbol=` フィルタは切替を跨いで URL に伝搬させる (matrix 側は集計に使わない
+ * が、一覧へ戻った時に絞り込みが外れないように)。
+ */
+export function renderCronViewPills(
+  active: 'list' | 'matrix',
+  limit: number,
+  symbolFilter?: string,
+): string {
+  const symbolQs = symbolFilter ? `&symbol=${encodeURIComponent(symbolFilter)}` : ''
+  const pill = (label: string, href: string, isActive: boolean): string =>
+    `<a href="${href}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${isActive ? '#1d1d1f' : '#d8d8de'};${isActive ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+  return `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${pill('一覧', `/dashboard/cron?limit=${limit}${symbolQs}`, active === 'list')}${pill('マトリクス', `/dashboard/cron?view=matrix${symbolQs}`, active === 'matrix')}</nav>`
+}
+
 export function cronBody(
   rows: DecisionRow[],
   limit: number,
@@ -272,10 +291,11 @@ export function cronBody(
     hasMore,
   })
   const rail = renderCronSymbolRail(universe, symbolFilter, limit)
+  const viewPills = renderCronViewPills('list', limit, symbolFilter)
   const main =
     rows.length === 0
-      ? `${header}<p class="muted">判定ログがまだありません。</p>${pagination}`
-      : `${header}
+      ? `${viewPills}${header}<p class="muted">判定ログがまだありません。</p>${pagination}`
+      : `${viewPills}${header}
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
     showSymbol: true,
@@ -601,4 +621,306 @@ export function formatRealizedPnl(value: number): string {
   const sign = value > 0 ? '+' : ''
   const cls = value > 0 ? 'ok' : value < 0 ? 'err' : 'muted'
   return `<span class="${cls}">${sign}${value.toLocaleString('ja-JP', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>`
+}
+
+// ============================================================================
+// 判断トレースマトリクス (#PR-5): 銘柄 × 日付 の代表判定を一望する SSR ビュー
+// ============================================================================
+
+/**
+ * セルの代表判定を選ぶ優先度 (高い順)。「その日いちばん重要な出来事」を出す:
+ * 実際に動いた BUY / SELL が最優先、次に対処が必要な ERROR / REJECT / SKIP、
+ * 何も起きなかった HOLD は最後。decision enum は strategy_decision_log の
+ * 'BUY' / 'SELL' / 'HOLD' / 'SKIP' / 'REJECT' / 'ERROR' (schema.ts) に一致させる。
+ */
+export const MATRIX_DECISION_PRIORITY = ['BUY', 'SELL', 'ERROR', 'REJECT', 'SKIP', 'HOLD'] as const
+
+/** loadDecisionMatrix が返す日次集計 1 行 (日付 × symbol × decision × reason)。 */
+export interface DecisionMatrixSourceRow {
+  /** JST 日付 (YYYY-MM-DD) */
+  day: string
+  symbol: string
+  decision: string
+  reason: string | null
+  n: number
+}
+
+/**
+ * strategy_decision_log から直近 days 日 (JST 基準) の集計行を取る。
+ * quality.ts の loadDecisionBreakdown と同じ raw D1 スタイル (GROUP BY 集計は
+ * drizzle query builder より素の SQL の方が読みやすい)。days は defensive に
+ * 1..90 へ clamp してから整数を直接埋め込む (bind 不要にするため)。
+ */
+export async function loadDecisionMatrix(
+  db: D1Database,
+  days = 30,
+): Promise<DecisionMatrixSourceRow[]> {
+  const d = Math.min(Math.max(Math.trunc(days) || 30, 1), 90)
+  const result = await db
+    .prepare(
+      `SELECT date(timestamp, '+9 hours') AS day,
+              symbol,
+              decision,
+              reason,
+              COUNT(*) AS n
+       FROM strategy_decision_log
+       WHERE date(timestamp, '+9 hours') >= date('now', '+9 hours', '-${d - 1} days')
+       GROUP BY day, symbol, decision, reason
+       ORDER BY day ASC, symbol ASC, n DESC`,
+    )
+    .all<DecisionMatrixSourceRow>()
+  return (result.results ?? []).map((r) => ({ ...r, n: Number(r.n) }))
+}
+
+/** マトリクスの 1 セル: その日の代表判定 + 代表 reason。 */
+export interface DecisionMatrixCell {
+  decision: string
+  /** 代表 decision 内で最頻の raw reason (同数は集計順の先頭) */
+  reason: string | null
+  /** 代表 decision の件数 */
+  count: number
+  /** その日・その銘柄の全判定件数 */
+  total: number
+}
+
+export interface DecisionMatrix {
+  /** JST 日付 (昇順) */
+  dates: string[]
+  /** 銘柄昇順。cells は日付キー (判定が無い日はキーなし) */
+  rows: Array<{ symbol: string; cells: Record<string, DecisionMatrixCell> }>
+}
+
+/**
+ * 集計行 → 行 = 銘柄 / 列 = 日付 のマトリクスに整形する pure 関数。
+ * 代表判定は MATRIX_DECISION_PRIORITY 順。想定外 decision (将来追加など) は
+ * ERROR 相当の優先度で扱い、表示から漏れないようにする (quality.ts の
+ * aggregateDecisionRows と同思想)。
+ */
+export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMatrix {
+  const dateSet = new Set<string>()
+  const bySymbol = new Map<string, Map<string, DecisionMatrixSourceRow[]>>()
+  for (const r of rows) {
+    dateSet.add(r.day)
+    let byDay = bySymbol.get(r.symbol)
+    if (!byDay) {
+      byDay = new Map()
+      bySymbol.set(r.symbol, byDay)
+    }
+    const group = byDay.get(r.day)
+    if (group) group.push(r)
+    else byDay.set(r.day, [r])
+  }
+  const priorityOf = (decision: string): number => {
+    const i = (MATRIX_DECISION_PRIORITY as readonly string[]).indexOf(decision)
+    return i === -1 ? MATRIX_DECISION_PRIORITY.indexOf('ERROR') : i
+  }
+  const outRows = [...bySymbol.keys()].sort().map((symbol) => {
+    const cells: Record<string, DecisionMatrixCell> = {}
+    for (const [day, group] of bySymbol.get(symbol)!) {
+      let best = group[0]!
+      for (const g of group) {
+        if (priorityOf(g.decision) < priorityOf(best.decision)) best = g
+      }
+      let rep = best
+      let count = 0
+      let total = 0
+      for (const g of group) {
+        total += g.n
+        if (g.decision !== best.decision) continue
+        count += g.n
+        if (g.n > rep.n) rep = g
+      }
+      cells[day] = { decision: best.decision, reason: rep.reason, count, total }
+    }
+    return { symbol, cells }
+  })
+  return { dates: [...dateSet].sort(), rows: outRows }
+}
+
+/**
+ * reject / skip 理由のカテゴリ (推移チャートの凡例)。key は集計キー、label は
+ * 日本語凡例、color は quality タブの decision breakdown と同系の palette。
+ * カテゴリの粒度は「operator が次に何を確認すべきか」で切る (トレンド不成立
+ * なら待つだけ、資金制約なら入金/配分見直し、データ不足なら feed 調査、…)。
+ */
+export const REASON_CATEGORIES = [
+  { key: 'trend', label: 'トレンド不成立', color: '#1471a8' },
+  { key: 'pullback', label: '押し目条件', color: '#0e9f9f' },
+  { key: 'overheat', label: '過熱・ボラ過大', color: '#b25000' },
+  { key: 'sizing', label: '資金・サイズ制約', color: '#7c3aed' },
+  { key: 'spread', label: 'スプレッド過大', color: '#b58a00' },
+  { key: 'no_position', label: '建玉なし', color: '#4a5568' },
+  { key: 'data', label: 'データ不足', color: '#86868b' },
+  { key: 'cooldown', label: '取引停止・発注中', color: '#c05680' },
+  { key: 'broker', label: '発注失敗 (broker)', color: '#c22222' },
+  { key: 'other', label: 'その他', color: '#aaaaaa' },
+] as const
+
+export type ReasonCategoryKey = (typeof REASON_CATEGORIES)[number]['key']
+
+/**
+ * raw reason 文字列の prefix でカテゴリ化する pure 関数。パターンは
+ * localizeReason / describeCronReason が受ける canonical reason 一覧に対応
+ * させる。未知の形式 (将来追加 / 旧形式) は 'other' に落として合計が欠けない
+ * ようにする。
+ */
+export function categorizeReason(reason: string | null | undefined): ReasonCategoryKey {
+  if (!reason) return 'other'
+  if (/^(?:cooldown active|pending order)/.test(reason)) return 'cooldown'
+  if (/^(?:20d|50d) return /.test(reason) || /^price \S+ <= sma50/.test(reason)) return 'trend'
+  if (/^pullback /.test(reason) || /^invalid (?:10d|20d) high$/.test(reason)) return 'pullback'
+  if (/^(?:sma50 deviation|atr ratio) /.test(reason)) return 'overheat'
+  if (/^sizing rejected/.test(reason)) return 'sizing'
+  if (/^spread /.test(reason)) return 'spread'
+  if (/^SELL without position$/.test(reason)) return 'no_position'
+  if (/^(?:insufficient bars|invalid |bar fetch)/.test(reason)) return 'data'
+  if (/^broker submit error/.test(reason)) return 'broker'
+  return 'other'
+}
+
+export interface ReasonTrendPoint {
+  date: string
+  counts: Record<ReasonCategoryKey, number>
+}
+
+/**
+ * 発注不成立系 (REJECT / SKIP / ERROR) の日次件数をカテゴリ別に集計する
+ * pure 関数。BUY / SELL / HOLD は「不成立の理由」ではないため対象外。
+ */
+export function aggregateReasonTrend(rows: DecisionMatrixSourceRow[]): ReasonTrendPoint[] {
+  const emptyCounts = (): Record<ReasonCategoryKey, number> => {
+    const counts = {} as Record<ReasonCategoryKey, number>
+    for (const cat of REASON_CATEGORIES) counts[cat.key] = 0
+    return counts
+  }
+  const map = new Map<string, Record<ReasonCategoryKey, number>>()
+  for (const r of rows) {
+    if (r.decision !== 'REJECT' && r.decision !== 'SKIP' && r.decision !== 'ERROR') continue
+    let bucket = map.get(r.day)
+    if (!bucket) {
+      bucket = emptyCounts()
+      map.set(r.day, bucket)
+    }
+    bucket[categorizeReason(r.reason)] += r.n
+  }
+  return [...map.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([date, counts]) => ({ date, counts }))
+}
+
+/**
+ * decision → セル pill の見た目。cls は既存の ok/warn/err/muted と同系色。
+ * short は 1 文字 (30 列並べても読める幅)、ja は tooltip 用の日本語併記。
+ */
+const MATRIX_DECISION_LABELS: Record<string, { short: string; ja: string; cls: string }> = {
+  BUY: { short: '買', ja: '買い', cls: 'mx-ok' },
+  SELL: { short: '売', ja: '売り', cls: 'mx-warn' },
+  HOLD: { short: '・', ja: '様子見/保有継続', cls: 'mx-muted' },
+  SKIP: { short: 'ス', ja: '発注スキップ', cls: 'mx-warn' },
+  REJECT: { short: '拒', ja: '発注拒否', cls: 'mx-err' },
+  ERROR: { short: '!', ja: 'エラー', cls: 'mx-err' },
+}
+
+/**
+ * REJECT / SKIP / ERROR 理由の日次推移 stacked bar (ECharts)。quality タブの
+ * decision breakdown と同型 (CDN load + window 変数 + DOMContentLoaded init)。
+ */
+export function renderReasonTrendChart(trend: ReasonTrendPoint[]): string {
+  if (trend.length === 0) {
+    return `<p class="muted" style="margin-top:12px">REJECT / SKIP / ERROR の判定がまだ無いため、理由推移チャートはありません。</p>`
+  }
+  const initScript = `
+    document.addEventListener('DOMContentLoaded', function () {
+      if (typeof echarts === 'undefined') return;
+      var data = window.__matrixTrend;
+      if (!data || !data.points || data.points.length === 0) return;
+      var el = document.getElementById('reason-trend-chart');
+      if (!el) return;
+      var chart = echarts.init(el);
+      chart.setOption({
+        title: { text: '発注不成立 (REJECT / SKIP / ERROR) 理由の日次推移', left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        legend: { top: 22, type: 'scroll' },
+        grid: { left: 50, right: 20, top: 64, bottom: 40 },
+        xAxis: { type: 'category', data: data.points.map(function (p) { return p.date; }) },
+        yAxis: { type: 'value', name: '件数' },
+        series: data.categories.map(function (cat) {
+          return { name: cat.label, type: 'bar', stack: 'reasons',
+            data: data.points.map(function (p) { return p.counts[cat.key] || 0; }),
+            itemStyle: { color: cat.color } };
+        }),
+      });
+      window.addEventListener('resize', function () { chart.resize(); });
+    });
+  `
+  return `<h3 style="margin:20px 0 4px;font-size:14px">発注不成立の理由推移</h3>
+  <div id="reason-trend-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
+  ${safeJsonScript('__matrixTrend', { categories: REASON_CATEGORIES, points: trend })}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script>${initScript}</script>`
+}
+
+/**
+ * マトリクスビュー本体。描画は SSR の HTML table (ECharts に頼らない):
+ * セル = decision の色 pill、title = 代表 reason の日本語、クリックで
+ * その銘柄の判定一覧へ。行頭は銘柄 (チャート銘柄タブへのリンク)。
+ * 30 列 × 銘柄数でも読めるよう 13px 基準 + 横スクロール wrapper。
+ */
+export function decisionMatrixBody(
+  matrix: DecisionMatrix,
+  trend: ReasonTrendPoint[],
+  universe: SymbolUniverse | null | undefined,
+  opts: { days: number; limit: number; symbolFilter?: string },
+): string {
+  const pills = renderCronViewPills('matrix', opts.limit, opts.symbolFilter)
+  const header = `<p class="muted">直近 ${opts.days} 日 (JST) の 銘柄 × 日付 代表判定。セルクリックでその銘柄の判定一覧へ。<a href="/dashboard/cron/matrix/json" target="_blank" rel="noreferrer">JSON を開く</a></p>`
+  if (matrix.rows.length === 0) {
+    return `${pills}${header}<p class="muted">判定ログがまだありません。</p>`
+  }
+  const style = `<style>
+  .mx-wrap{overflow-x:auto;background:#fff;border:1px solid #d0d0d5;border-radius:6px;padding:10px}
+  .mx-table{border-collapse:collapse;font-size:13px}
+  .mx-table th{font-size:11px;color:#86868b;font-weight:600;padding:2px 4px;text-align:center;white-space:nowrap}
+  .mx-table td{padding:2px 3px;text-align:center}
+  .mx-table td.mx-sym{text-align:left;white-space:nowrap;padding-right:10px}
+  .mx-table td.mx-sym a{text-decoration:none;color:#1d1d1f}
+  .mx-pill{display:inline-block;min-width:20px;padding:1px 5px;border-radius:9px;font-size:11px;font-weight:600;text-decoration:none;color:#fff}
+  .mx-pill.mx-ok{background:#057a55}
+  .mx-pill.mx-warn{background:#b25000}
+  .mx-pill.mx-err{background:#c22}
+  .mx-pill.mx-muted{background:#e8e8ed;color:#86868b}
+  .mx-legend{margin-top:8px;font-size:11px;color:#86868b;display:flex;flex-wrap:wrap;gap:10px}
+  </style>`
+  const headCells = matrix.dates
+    .map((d) => `<th title="${esc(d)}">${esc(d.slice(5).replace('-', '/'))}</th>`)
+    .join('')
+  const bodyRows = matrix.rows
+    .map((row) => {
+      const inactive = isSymbolInactive(row.symbol, universe)
+      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(row.symbol, universe))}"` : ''
+      const symCell = `<td class="mx-sym"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(row.symbol)}"${titleAttr}><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(row.symbol, universe))}</strong></a></td>`
+      const cells = matrix.dates
+        .map((d) => {
+          const cell = row.cells[d]
+          if (!cell) return '<td><span class="muted">·</span></td>'
+          const label = MATRIX_DECISION_LABELS[cell.decision] ?? { short: '?', ja: cell.decision, cls: 'mx-err' }
+          const title = `${d} ${cell.decision} (${label.ja}、${cell.count}/${cell.total}件): ${localizeReason(cell.reason)}`
+          return `<td><a class="mx-pill ${label.cls}" href="/dashboard/cron?symbol=${encodeURIComponent(row.symbol)}" title="${esc(title)}">${esc(label.short)}</a></td>`
+        })
+        .join('')
+      return `<tr>${symCell}${cells}</tr>`
+    })
+    .join('')
+  const legend = `<div class="mx-legend">${Object.entries(MATRIX_DECISION_LABELS)
+    .map(([key, v]) => `<span><span class="mx-pill ${v.cls}">${esc(v.short)}</span> ${esc(key)} (${esc(v.ja)})</span>`)
+    .join('')}<span>· = 判定なし</span></div>`
+  return `${pills}${header}
+  <div class="mx-wrap">
+    <table class="mx-table">
+      <thead><tr><th style="text-align:left">銘柄</th>${headCells}</tr></thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+    ${legend}
+  </div>
+  ${renderReasonTrendChart(trend)}`
 }
