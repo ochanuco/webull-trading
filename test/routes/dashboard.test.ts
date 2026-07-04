@@ -210,6 +210,30 @@ describe('dashboard', () => {
     expect(body).toContain('5.00%')
   })
 
+  // #nav-links: 保有銘柄からチャート/判定/設定へ 1 クリックで飛べる
+  // (trades / cron / alerts と同じ導線を positions にも通す)。
+  it('positions symbol cell links to chart tab with 判定/設定 aux links', async () => {
+    const env = {
+      ...baseEnv,
+      DB: {} as D1Database,
+      SYMBOL_STATE: fakeSymbolStateNamespace(),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
+    const body = await res.text()
+    expect(body).toContain('href="/dashboard/charts?tab=symbol&symbol=SOXL"')
+    expect(body).toContain('href="/dashboard/cron?symbol=SOXL"')
+    expect(body).toContain('href="/dashboard/symbols/SOXL/edit"')
+  })
+
+  // #nav-links: 銘柄単位ビューの canonical 短縮 URL。実体はチャート銘柄タブ。
+  it('GET /dashboard/symbols/:symbol redirects to chart symbol tab', async () => {
+    const app = createApp()
+    const res = await app.request('/dashboard/symbols/soxl', { headers: authHeader }, baseEnv)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/dashboard/charts?tab=symbol&symbol=SOXL')
+  })
+
   it('formats positions as `${symbol}-${name}` for both JP and US when name is set', async () => {
     vi.mocked(loadSymbolUniverse).mockResolvedValue(
       makeSymbolUniverse({
