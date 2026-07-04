@@ -29,7 +29,7 @@ import { buildSymbolRules } from '../../trading/strategy/symbolRuleResolution'
 import { evaluatePairRegime, type PairRegimeDecision } from '../../trading/strategy/pairRegime'
 import { computeConditionalAllocation } from '../../trading/strategy/conditionalAllocation'
 import type { SymbolRule } from '../../trading/strategy/strategies/PullbackUptrendStrategy'
-import { and, asc, desc, eq, inArray, isNotNull, lt, or, type SQL } from 'drizzle-orm'
+import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../../trading/state/SymbolStateClient'
 import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
@@ -65,15 +65,15 @@ import { type DashboardBindings, loadKillSwitchState, renderLayout } from './lay
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
 import { ALL_OVERVIEW_PANELS, type OverviewData, loadRecentFills, overviewBody, parseOverviewPanels } from './overview'
-import { loadLatestStrategyPrices, positionsBody } from './positions'
+import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, positionsBody } from './positions'
 import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
-import { tradesBody } from './trades'
+import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
 import { cronBody, cronDecisionJson, loadDecisionRows } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
-import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderChartsSubnav } from './charts/shared'
-import { type SymbolChartRules, loadAllSymbolCharts, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
+import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderChartsSubnav, strategyParamsFromGlobal } from './charts/shared'
+import { type SymbolChartRules, buildSymbolChartPacket, loadAllSymbolCharts, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
 import { loadEquityCurve } from './charts/equity'
 import { computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
 import { chartsBody, sortGridChartsByEntryPriority } from './charts/grid'
@@ -175,24 +175,29 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB || !c.env.SYMBOL_STATE) {
       return c.html(renderLayout(c, 'ポートフォリオ', unavailable('DB or SYMBOL_STATE not bound')))
     }
-    const universe = await loadSymbolUniverse(c.env)
-    const client = new SymbolStateClient(c.env.SYMBOL_STATE)
-    // inactive 銘柄も表示する (operator visibility) — chart に飛んで状態を確認したり
-    // 再有効化判断したりするのに必要。cron / risk gate は引き続き allowedSymbols のみ評価。
-    const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
-    const [rows, strategyPriceMap] = await Promise.all([
-      Promise.all(
-        allDisplaySymbols.map(async (sym) => {
-          try {
-            return { sym, state: await client.getState(sym), error: null as string | null }
-          } catch (err) {
-            return { sym, state: null as SymbolState | null, error: messageOf(err) }
-          }
-        }),
-      ),
-      loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
-    ])
-    return c.html(renderLayout(c, 'ポートフォリオ', positionsBody(rows, strategyPriceMap, universe)))
+    // loader は /positions/json と共用 (#dashboard-json-api) — 「画面で見る内容 =
+    // AI に渡す JSON」を同一の取得結果から作る。
+    const data = await loadPositionsPageData(c.env)
+    return c.html(
+      renderLayout(c, 'ポートフォリオ', positionsBody(data.rows, data.strategyPriceMap, data.universe)),
+    )
+  })
+  /**
+   * positions の JSON export (#dashboard-json-api)。read-only GET のみ。
+   * schema / envelope 規約は shared.ts の `exportMeta` docstring 参照。
+   */
+  .get('/positions/json', async (c) => {
+    if (!c.env.DB || !c.env.SYMBOL_STATE) {
+      return jsonPretty(
+        { error: 'binding_not_configured', message: 'DB or SYMBOL_STATE binding is not configured' },
+        503,
+      )
+    }
+    try {
+      return jsonPretty(buildPositionsPacket(await loadPositionsPageData(c.env)))
+    } catch (err) {
+      return jsonPretty({ error: 'positions_json_export_failed', message: messageOf(err) }, 500)
+    }
   })
   .get('/portfolio', async (c) => {
     if (!c.env.PORTFOLIO_STATE) {
@@ -226,55 +231,44 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound')))
     }
-    const limit = clampLimit(c.req.query('limit'))
-    const before = parseCursor(c.req.query('before'))
-    // view filter: 全イベント (default) / 約定・手仕舞いのみ / エラーのみ。
-    // ジャーナルは 1 注文で複数 lifecycle 行を持つため、operator の主目的
-    // (「何が約定した?」「何が失敗した?」) を 1 クリックで絞れるようにする。
-    const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(c.req.query('view'))
-    // 銘柄 / 注文 (clientOrderId) 絞り込み (#nav-links)。clientOrderId は
-    // 1 注文の lifecycle 行 (pre_submit / post_submit / エラー) を縦に並べる
-    // 「注文詳細ビュー」として機能する。cron の判定行からここへ飛ぶ。
-    const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
-    const clientOrderIdFilter = c.req.query('clientOrderId')?.trim() || undefined
+    // クエリ解釈 + journal query は /trades/json と共用 (#dashboard-json-api)。
+    const q = parseTradesQuery((key) => c.req.query(key))
     const db = createDb(c.env.DB)
-    const baseQuery = db.select().from(tradeJournal)
-    const conditions: SQL[] = []
-    if (view === 'fills') {
-      conditions.push(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
-    } else if (view === 'errors') {
-      conditions.push(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass))!)
-    }
-    if (symbolFilter) {
-      conditions.push(eq(tradeJournal.symbol, symbolFilter))
-    }
-    if (clientOrderIdFilter) {
-      conditions.push(eq(tradeJournal.clientOrderId, clientOrderIdFilter))
-    }
-    if (before !== undefined) {
-      conditions.push(lt(tradeJournal.id, before))
-    }
-    const filtered = conditions.length > 0
-      ? baseQuery.where(conditions.length === 1 ? conditions[0] : and(...conditions))
-      : baseQuery
     // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
     // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
     const [rows, universe] = await Promise.all([
-      filtered.orderBy(desc(tradeJournal.id)).limit(limit + 1),
+      // hasMore 判定のため 1 行余分に取る (limit + 1)。
+      loadTradeJournalRows(db, { ...q, limit: q.limit + 1 }),
       loadSymbolUniverse(c.env).catch(() => null),
     ])
-    const hasMore = rows.length > limit
+    const hasMore = rows.length > q.limit
     if (hasMore) rows.pop()
     return c.html(
       renderLayout(
         c,
         '約定履歴',
-        tradesBody(rows, limit, universe, view, before, hasMore, {
-          symbol: symbolFilter,
-          clientOrderId: clientOrderIdFilter,
+        tradesBody(rows, q.limit, universe, q.view, q.before, hasMore, {
+          symbol: q.symbol,
+          clientOrderId: q.clientOrderId,
         }),
       ),
     )
+  })
+  /**
+   * trades の JSON export (#dashboard-json-api)。SSR と同じクエリ解釈 + 同じ
+   * journal query を通し、rows は trade_journal の row そのまま返す。
+   */
+  .get('/trades/json', async (c) => {
+    if (!c.env.DB) {
+      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
+    }
+    const q = parseTradesQuery((key) => c.req.query(key))
+    try {
+      const rows = await loadTradeJournalRows(createDb(c.env.DB), q)
+      return jsonPretty(buildTradesPacket(rows, q))
+    } catch (err) {
+      return jsonPretty({ error: 'trades_json_export_failed', message: messageOf(err) }, 500)
+    }
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
@@ -317,6 +311,53 @@ export const dashboard = new Hono<DashboardBindings>()
       }),
     )
     return c.redirect('/dashboard/config', 303)
+  })
+  /**
+   * チャート銘柄タブの JSON export (#dashboard-json-api)。SSR の symbol タブと
+   * 同じ loader (`loadSymbolChart` + `loadDecisionRows`) / 同じ effective rule
+   * (`strategyParamsFromGlobal` → `buildSymbolRules`) を通す。
+   *
+   * Hono の path マッチは完全一致なので理論上 `/charts` に食われないが、route は
+   * 定義順マッチのため、将来 `/charts/:sub` 系が生えた時の取り違え事故を避けて
+   * `/charts` より前に定義しておく (JSON が返ることはテストで担保)。
+   */
+  .get('/charts/symbol/json', async (c) => {
+    if (!c.env.DB) {
+      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
+    }
+    const symbol = c.req.query('symbol')?.toUpperCase().trim()
+    if (!symbol) {
+      return jsonPretty({ error: 'symbol_required', message: 'query param ?symbol=X is required' }, 400)
+    }
+    try {
+      const [universe, global] = await Promise.all([
+        loadSymbolUniverse(c.env),
+        loadGlobalConfigFrom(c.env, c.get('requestId')),
+      ])
+      // SSR symbol タブと同じ effective rule 解決 (global → role preset →
+      // override)。SSR が universe 外 symbol を default symbol に差し替えるのと
+      // 違い、こちらは要求 symbol をそのまま使う (未知 symbol は空チャートで
+      // 返る — API 利用者には 404 より「空データ」の方が判別しやすい)。
+      const defaultEntryRule: SymbolRule = strategyParamsFromGlobal(global)
+      const effectiveRules = buildSymbolRules(defaultEntryRule, universe)
+      const entryRule = effectiveRules[symbol] ?? defaultEntryRule
+      const rules: SymbolChartRules = {
+        pullbackMax: entryRule.pullbackMax,
+        pullbackMin: entryRule.pullbackMin,
+        stopPct: entryRule.stopPct,
+        takeProfitPct: entryRule.takeProfitPct,
+        timeStopDays: entryRule.timeStopDays,
+      }
+      const chart = await loadSymbolChart(c.env, symbol, rules)
+      // 判定履歴は SSR と同じ loader / 同じ件数 (直近 30)。load 失敗 (migration
+      // 未適用等) はチャート本体を巻き込まず空配列に落とす (SSR と同挙動)。
+      const decisionRows = await loadDecisionRows(createDb(c.env.DB), { symbol, limit: 30 }).catch(
+        () => [],
+      )
+      return jsonPretty(buildSymbolChartPacket(chart, decisionRows))
+    } catch (err) {
+      return jsonPretty({ error: 'chart_symbol_export_failed', message: messageOf(err) }, 500)
+    }
   })
   .get('/charts', async (c) => {
     if (!c.env.DB) {
@@ -469,18 +510,8 @@ export const dashboard = new Hono<DashboardBindings>()
             ? defaultSymbol
             : universe.allowedSymbols[0] ?? universe.inactiveSymbols[0] ?? null
       // global_config の pullback default (パネルの「銘柄別」タグの比較基準)。
-      const globalParams: StrategyParamsSnapshot = {
-        stopPct: global.pullbackDefaultStopPct,
-        takeProfitPct: global.pullbackDefaultTakeProfitPct,
-        timeStopDays: global.pullbackDefaultTimeStopDays,
-        pullbackMax: global.pullbackDefaultPullbackMax,
-        pullbackMin: global.pullbackDefaultPullbackMin,
-        minReturn50d: global.pullbackDefaultMinReturn50d,
-        requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
-        kAtr: global.pullbackDefaultKAtr,
-        maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
-        maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
-      }
+      // 組み立ては /charts/symbol/json と共用の helper に寄せる (#dashboard-json-api)。
+      const globalParams: StrategyParamsSnapshot = strategyParamsFromGlobal(global)
       // cron と同じ effective rule — global default → role preset → per-symbol
       // override (#452)。drift するとダッシュボードの入場ライン / stop・TP
       // preview / パラメータ表が cron 判定とずれるので必ず buildSymbolRules を

@@ -1,9 +1,11 @@
-import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
+import type { Env } from '../../config/env'
+import { type SymbolUniverse, loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog } from '../../infrastructure/db/schema'
 import { desc, eq } from 'drizzle-orm'
+import { SymbolStateClient } from '../../trading/state/SymbolStateClient'
 import type { SymbolState } from '../../trading/state/types'
-import { JST_FORMATTER, displaySymbol, esc, fmtJst, fmtNumber, formatCooldown, inactiveTooltip, isSymbolInactive } from './shared'
+import { JST_FORMATTER, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, formatCooldown, inactiveTooltip, isSymbolInactive, messageOf, renderJsonToolbar } from './shared'
 
 /**
  * 各銘柄の「strategy が直近に判定で使った価格」を取得。
@@ -85,12 +87,122 @@ export function pickFreshQuote(
     : { price: webull.price, source: webull.source, asOf: webull.asOf }
 }
 
+/** positions ページの loader 結果 (SSR / JSON export 共用)。 */
+export interface PositionsPageData {
+  rows: Array<{ sym: string; state: SymbolState | null; error: string | null }>
+  strategyPriceMap: Map<string, { price: number; asOf: string }>
+  universe: SymbolUniverse
+}
+
+/**
+ * positions ページの loader (#dashboard-json-api)。SSR (`/dashboard/positions`)
+ * と JSON export (`/dashboard/positions/json`) が共用する — 「画面で見る内容 =
+ * AI に渡す JSON」を同一の取得結果から作るため、取得ロジックはここ 1 本に寄せる。
+ */
+export async function loadPositionsPageData(env: Env): Promise<PositionsPageData> {
+  if (!env.DB || !env.SYMBOL_STATE) {
+    throw new Error('DB or SYMBOL_STATE not bound')
+  }
+  const universe = await loadSymbolUniverse(env)
+  const client = new SymbolStateClient(env.SYMBOL_STATE)
+  // inactive 銘柄も表示する (operator visibility) — chart に飛んで状態を確認したり
+  // 再有効化判断したりするのに必要。cron / risk gate は引き続き allowedSymbols のみ評価。
+  const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
+  const [rows, strategyPriceMap] = await Promise.all([
+    Promise.all(
+      allDisplaySymbols.map(async (sym) => {
+        try {
+          return { sym, state: await client.getState(sym), error: null as string | null }
+        } catch (err) {
+          return { sym, state: null as SymbolState | null, error: messageOf(err) }
+        }
+      }),
+    ),
+    loadLatestStrategyPrices(env.DB, allDisplaySymbols),
+  ])
+  return { rows, strategyPriceMap, universe }
+}
+
+/** JSON export の 1 銘柄行。SSR テーブルの表示列と同じ情報の機械可読版。 */
+export interface PositionExportRow {
+  symbol: string
+  displayName: string | null
+  qty: number | null
+  avgPrice: number | null
+  quote: ResolvedQuote | null
+  /** 未実現損益 (%)。SSR の「評価損益」列と同じ式 (現在値 vs 平均取得単価)。 */
+  unrealizedPnlPct: number | null
+  pendingOrderSide: string | null
+  cooldownUntil: string | null
+  inactive: boolean
+  /** DO 取得失敗時のみ非 null。この行の他 field は null になる。 */
+  error: string | null
+}
+
+/**
+ * positions packet builder (schema: `dashboard_positions_export.v1`)。
+ *
+ * SSR の positionsBody と同じ loader 結果から pure に組み立てる。SymbolState の
+ * 内部管理 field (settledCash / pendingSettlement / appliedClientOrderIds) は
+ * 画面にも出していないので packet にも載せない — export は画面同等に絞る。
+ */
+export function buildPositionsPacket(data: PositionsPageData) {
+  const positions: PositionExportRow[] = data.rows.map((r) => {
+    const inactive = isSymbolInactive(r.sym, data.universe)
+    const displayName = data.universe.symbolName[r.sym.toUpperCase()] ?? null
+    if (r.error !== null || r.state === null) {
+      return {
+        symbol: r.sym,
+        displayName,
+        qty: null,
+        avgPrice: null,
+        quote: null,
+        unrealizedPnlPct: null,
+        pendingOrderSide: null,
+        cooldownUntil: null,
+        inactive,
+        error: r.error ?? '状態取得不可',
+      }
+    }
+    const s = r.state
+    const pos = s.position
+    // 現在値の解決は SSR と同じ pickFreshQuote (Webull snapshot vs Yahoo bars の
+    // 新しい方)。画面と JSON で「現在値」がずれると AI 相談時に混乱するため。
+    const webull = s.lastQuote
+      ? { price: s.lastQuote.price, source: s.lastQuote.source, asOf: s.lastQuote.asOf ?? s.lastQuote.fetchedAt }
+      : null
+    const quote = pickFreshQuote(webull, data.strategyPriceMap.get(s.symbol) ?? null)
+    const unrealizedPnlPct =
+      pos !== null && quote !== null && pos.avgPrice > 0
+        ? ((quote.price - pos.avgPrice) / pos.avgPrice) * 100
+        : null
+    return {
+      symbol: s.symbol,
+      displayName,
+      qty: pos?.qty ?? null,
+      avgPrice: pos?.avgPrice ?? null,
+      quote,
+      unrealizedPnlPct,
+      pendingOrderSide: s.pendingOrder?.side ?? null,
+      cooldownUntil: s.cooldownUntil,
+      inactive,
+      error: null,
+    }
+  })
+  return {
+    ...exportMeta('dashboard_positions_export.v1'),
+    rowCount: positions.length,
+    positions,
+  }
+}
+
 export function positionsBody(
   rows: Array<{ sym: string; state: SymbolState | null; error: string | null }>,
   strategyPriceMap: Map<string, { price: number; asOf: string }>,
   universe?: SymbolUniverse | null,
 ): string {
-  if (rows.length === 0) return `<p class="muted">有効な銘柄がありません。</p>`
+  const toolbar = renderJsonToolbar('/dashboard/positions/json', null)
+  if (rows.length === 0) return `${toolbar}<p class="muted">有効な銘柄がありません。</p>`
   const tbody = rows
     .map((r) => {
       const inactive = isSymbolInactive(r.sym, universe)
@@ -130,7 +242,7 @@ export function positionsBody(
       </tr>`
     })
     .join('')
-  return `<p class="muted" style="font-size:12px">
+  return `${toolbar}<p class="muted" style="font-size:12px">
     評価損益は未実現 (現在値 vs 平均取得単価)。実約定損益は
     <a href="/dashboard/cron">/dashboard/cron</a> 「実 損益」列を参照。
   </p>

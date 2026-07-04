@@ -1,3 +1,4 @@
+import type { LoadedGlobalConfig } from '../../../infrastructure/db/globalConfigLoader'
 import type { SymbolUniverse } from '../../../infrastructure/db/symbolUniverse'
 import type { BuyabilityView } from '../../../trading/strategy/entryDistance'
 import type { EntryStatus, EntryStatusResult } from '../../../trading/strategy/entryStatus'
@@ -67,6 +68,28 @@ export interface StrategyParamsSnapshot {
   maxSma50DeviationPct: number
   /** ボラ過熱ガード閾値 `atr20/baselineAtr20` 上限。 */
   maxAtrRatio: number
+}
+
+/**
+ * global_config の pullback default 群 → `StrategyParamsSnapshot` の組み立てを
+ * 1 か所に寄せる (#dashboard-json-api)。SSR 銘柄タブと
+ * `/dashboard/charts/symbol/json` が共用する — 2 か所に literal が増えると
+ * 「画面のパラメータ表と JSON の rules がずれる」drift になるため、field の
+ * 追加・変更は必ずこの関数経由で行うこと。
+ */
+export function strategyParamsFromGlobal(global: LoadedGlobalConfig): StrategyParamsSnapshot {
+  return {
+    stopPct: global.pullbackDefaultStopPct,
+    takeProfitPct: global.pullbackDefaultTakeProfitPct,
+    timeStopDays: global.pullbackDefaultTimeStopDays,
+    pullbackMax: global.pullbackDefaultPullbackMax,
+    pullbackMin: global.pullbackDefaultPullbackMin,
+    minReturn50d: global.pullbackDefaultMinReturn50d,
+    requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+    kAtr: global.pullbackDefaultKAtr,
+    maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
+    maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+  }
 }
 
 /**

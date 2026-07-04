@@ -25,6 +25,7 @@ export function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
       <a href="${esc(symbolCronHref)}" style="font-size:11px">この銘柄の全件 →</a>
       <a href="/dashboard/trades?symbol=${encodeURIComponent(args.focusSymbol)}" style="font-size:11px">この銘柄の約定 →</a>
       <a href="/dashboard/cron" style="font-size:11px">全銘柄 →</a>
+      <a href="/dashboard/charts/symbol/json?symbol=${encodeURIComponent(args.focusSymbol)}" target="_blank" rel="noreferrer" style="font-size:11px" title="チャート + 判定履歴の機械可読版 (#dashboard-json-api)">この銘柄の JSON →</a>
     </h2>
     ${renderDecisionTable(rows, args.universe, {
       copyVarName: '__decisionCopy',
