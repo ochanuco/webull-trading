@@ -264,6 +264,11 @@ export const dashboard = new Hono<DashboardBindings>()
     // ジャーナルは 1 注文で複数 lifecycle 行を持つため、operator の主目的
     // (「何が約定した?」「何が失敗した?」) を 1 クリックで絞れるようにする。
     const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(c.req.query('view'))
+    // 銘柄 / 注文 (clientOrderId) 絞り込み (#nav-links)。clientOrderId は
+    // 1 注文の lifecycle 行 (pre_submit / post_submit / エラー) を縦に並べる
+    // 「注文詳細ビュー」として機能する。cron の判定行からここへ飛ぶ。
+    const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
+    const clientOrderIdFilter = c.req.query('clientOrderId')?.trim() || undefined
     const db = createDb(c.env.DB)
     const baseQuery = db.select().from(tradeJournal)
     const conditions: SQL[] = []
@@ -271,6 +276,12 @@ export const dashboard = new Hono<DashboardBindings>()
       conditions.push(inArray(tradeJournal.tradeEventType, ['fill', 'exit']))
     } else if (view === 'errors') {
       conditions.push(or(isNotNull(tradeJournal.errorMessage), isNotNull(tradeJournal.errorClass))!)
+    }
+    if (symbolFilter) {
+      conditions.push(eq(tradeJournal.symbol, symbolFilter))
+    }
+    if (clientOrderIdFilter) {
+      conditions.push(eq(tradeJournal.clientOrderId, clientOrderIdFilter))
     }
     if (before !== undefined) {
       conditions.push(lt(tradeJournal.id, before))
@@ -286,7 +297,16 @@ export const dashboard = new Hono<DashboardBindings>()
     ])
     const hasMore = rows.length > limit
     if (hasMore) rows.pop()
-    return c.html(renderLayout(c, '約定履歴', tradesBody(rows, limit, universe, view, before, hasMore)))
+    return c.html(
+      renderLayout(
+        c,
+        '約定履歴',
+        tradesBody(rows, limit, universe, view, before, hasMore, {
+          symbol: symbolFilter,
+          clientOrderId: clientOrderIdFilter,
+        }),
+      ),
+    )
   })
   .get('/config', async (c) => {
     if (!c.env.DB) {
@@ -690,15 +710,28 @@ export const dashboard = new Hono<DashboardBindings>()
     const limit = clampLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
+    // trades の「判定→」から飛んでくる注文単位の絞り込み (#nav-links)。
+    const clientOrderIdFilter = c.req.query('clientOrderId')?.trim() || undefined
     const db = createDb(c.env.DB)
     try {
       const [rows, universe] = await Promise.all([
-        loadDecisionRows(db, { symbol: symbolFilter, limit: limit + 1, before }),
+        loadDecisionRows(db, {
+          symbol: symbolFilter,
+          clientOrderId: clientOrderIdFilter,
+          limit: limit + 1,
+          before,
+        }),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
       const hasMore = rows.length > limit
       if (hasMore) rows.pop()
-      return c.html(renderLayout(c, '戦略判定', cronBody(rows, limit, symbolFilter, universe, before, hasMore)))
+      return c.html(
+        renderLayout(
+          c,
+          '戦略判定',
+          cronBody(rows, limit, symbolFilter, universe, before, hasMore, clientOrderIdFilter),
+        ),
+      )
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
@@ -976,6 +1009,17 @@ export const dashboard = new Hono<DashboardBindings>()
     } catch (err) {
       return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(messageOf(err))))
     }
+  })
+  /**
+   * 銘柄単位ビューの canonical 短縮 URL (#nav-links)。実体はチャート銘柄タブ
+   * (判定 pin / ラダー / fill / 設定リンクを持つ) なので redirect で寄せる。
+   * `/symbols/new` / `/symbols/map` / `/symbols/:symbol/edit` より後に定義する
+   * こと (Hono は定義順マッチ)。
+   */
+  .get('/symbols/:symbol', (c) => {
+    const symbol = (c.req.param('symbol') ?? '').trim().toUpperCase()
+    if (symbol.length === 0) return c.redirect('/dashboard/symbols')
+    return c.redirect(`/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbol)}`)
   })
   /**
    * #293 — earnings + macro event calendar 管理 UI。
@@ -3090,7 +3134,7 @@ function positionsBody(
       const symbolClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.sym, universe))}"` : ''
       if (r.error !== null || r.state === null) {
-        return `<tr${rowClass}><td><span${symbolClass}${titleAttr}>${esc(displaySymbol(r.sym, universe))}</span></td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
+        return `<tr${rowClass}><td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.sym)}"${titleAttr} style="text-decoration:none"><span${symbolClass}>${esc(displaySymbol(r.sym, universe))}</span></a></td><td colspan="7" class="err">${esc(r.error ?? '状態取得不可')}</td></tr>`
       }
       const s = r.state
       const pos = s.position
@@ -3108,8 +3152,10 @@ function positionsBody(
       const quoteCell = quote
         ? `${fmtNumber(quote.price, 2)} <span class="muted" style="font-size:11px">(${esc(quote.source)}, ${esc(formatQuoteAsOf(quote.asOf))})</span>`
         : '<span class="muted">—</span>'
+      // 銘柄リンクはチャート銘柄タブへ (trades / cron と同じ導線)。▼ は判定
+      // 絞り込み、⚙ は設定編集への補助リンク (#nav-links)。
       return `<tr${rowClass}>
-        <td><strong><span${symbolClass}${titleAttr}>${esc(displaySymbol(s.symbol, universe))}</span></strong></td>
+        <td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s.symbol)}"${titleAttr} style="text-decoration:none"><strong><span${symbolClass}>${esc(displaySymbol(s.symbol, universe))}</span></strong></a> <a href="/dashboard/cron?symbol=${encodeURIComponent(s.symbol)}" class="muted" title="この銘柄の判定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a> <a href="/dashboard/symbols/${encodeURIComponent(s.symbol)}/edit" class="muted" title="銘柄設定を編集" style="font-size:11px;text-decoration:none">⚙</a></td>
         <td>${pos ? esc(pos.qty) : '<span class="muted">—</span>'}</td>
         <td>${pos ? fmtNumber(pos.avgPrice, 2) : '<span class="muted">—</span>'}</td>
         <td>${quoteCell}</td>
@@ -3480,12 +3526,23 @@ function tradesBody(
   view: 'all' | 'fills' | 'errors' = 'all',
   before?: number,
   hasMore = false,
+  filters: { symbol?: string; clientOrderId?: string } = {},
 ): string {
+  // symbol / clientOrderId フィルタを view pill・ページネーションの URL に
+  // 伝搬させる (#nav-links)。pill を切り替えても絞り込みが外れないように。
+  const filterQs =
+    (filters.symbol ? `&symbol=${encodeURIComponent(filters.symbol)}` : '') +
+    (filters.clientOrderId ? `&clientOrderId=${encodeURIComponent(filters.clientOrderId)}` : '')
   const viewPill = (label: string, v: string, active: boolean): string =>
-    `<a href="/dashboard/trades?view=${v}&limit=${limit}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+    `<a href="/dashboard/trades?view=${v}&limit=${limit}${filterQs}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+  const filterBanner = filters.clientOrderId
+    ? `<p class="muted" style="font-size:12px;margin:0 0 6px">注文 <code>${esc(filters.clientOrderId)}</code> の履歴のみ表示。<a href="/dashboard/cron?clientOrderId=${encodeURIComponent(filters.clientOrderId)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
+    : filters.symbol
+      ? `<p class="muted" style="font-size:12px;margin:0 0 6px">銘柄 <strong>${esc(displaySymbol(filters.symbol, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(filters.symbol)}">チャートで見る</a> / <a href="/dashboard/cron?symbol=${encodeURIComponent(filters.symbol)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
+      : ''
   const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}</nav>`
   if (rows.length === 0) {
-    return `${pills}<p class="muted">該当するレコードがありません。</p>`
+    return `${filterBanner}${pills}<p class="muted">該当するレコードがありません。</p>`
   }
   const tbody = rows
     .map((r) => {
@@ -3493,9 +3550,14 @@ function tradesBody(
       const eventCell = `<span title="${esc(r.tradeEventType)}" style="color:${ev.color};font-weight:600">● ${esc(ev.ja)}</span>`
       const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : null
       const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
+      // ▼ は同一銘柄の約定だけに絞り込み、「判定」は clientOrderId でこの注文の
+      // 判定行 (cron) へ飛ぶ逆リンク (#nav-links)。
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(symbolText!)}</strong></a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(symbolText!)}</strong></a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の約定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a>`
         : '<span class="muted">—</span>'
+      const decisionLink = r.clientOrderId
+        ? ` <a href="/dashboard/cron?clientOrderId=${encodeURIComponent(r.clientOrderId)}" class="muted" title="この注文の判定 (戦略判定ログ) を見る" style="font-size:11px">判定→</a>`
+        : ''
       const sideCell =
         r.side === 'BUY'
           ? `<span class="ok" style="font-weight:700">買</span> <span class="muted" style="font-size:11px">BUY</span>`
@@ -3546,7 +3608,7 @@ function tradesBody(
       return `<tr style="font-size:13px">
         <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
-        <td style="white-space:nowrap">${eventCell}</td>
+        <td style="white-space:nowrap">${eventCell}${decisionLink}</td>
         <td>${symbolCell}</td>
         <td style="white-space:nowrap">${sideCell}</td>
         <td style="text-align:right" class="bp-num">${qtyCell}</td>
@@ -3557,7 +3619,7 @@ function tradesBody(
       </tr>`
     })
     .join('')
-  return `${pills}
+  return `${filterBanner}${pills}
   <table>
     <thead><tr style="font-size:12px">
       <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
@@ -3566,7 +3628,7 @@ function tradesBody(
     <tbody>${tbody}</tbody>
   </table>
   ${renderPaginationNav({
-    baseHref: `/dashboard/trades?view=${view}&limit=${limit}`,
+    baseHref: `/dashboard/trades?view=${view}&limit=${limit}${filterQs}`,
     before,
     lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
     hasMore,
@@ -3574,7 +3636,7 @@ function tradesBody(
   ${safeJsonScript('__tradesCopy', {
     meta: {
       page: 'trade_journal (約定履歴)',
-      filter: `view=${view}, limit=${limit}`,
+      filter: `view=${view}, limit=${limit}${filters.symbol ? `, symbol=${filters.symbol}` : ''}${filters.clientOrderId ? `, clientOrderId=${filters.clientOrderId}` : ''}`,
       generatedAt: new Date().toISOString(),
     },
     rows,
@@ -4349,7 +4411,7 @@ export interface DecisionRow {
  */
 async function loadDecisionRows(
   db: ReturnType<typeof createDb>,
-  opts: { symbol?: string; limit: number; before?: number },
+  opts: { symbol?: string; clientOrderId?: string; limit: number; before?: number },
 ): Promise<DecisionRow[]> {
   const baseQuery = db
     .select({
@@ -4378,6 +4440,8 @@ async function loadDecisionRows(
     )
   const conditions: SQL[] = []
   if (opts.symbol) conditions.push(eq(strategyDecisionLog.symbol, opts.symbol))
+  // trades の「判定→」逆リンク用 (#nav-links)。coid index 済 (schema)。
+  if (opts.clientOrderId) conditions.push(eq(strategyDecisionLog.clientOrderId, opts.clientOrderId))
   if (opts.before !== undefined) conditions.push(lt(strategyDecisionLog.id, opts.before))
   const q = conditions.length > 0
     ? baseQuery.where(conditions.length === 1 ? conditions[0] : and(...conditions))
@@ -4429,14 +4493,19 @@ function cronBody(
   universe?: SymbolUniverse | null,
   before?: number,
   hasMore = false,
+  clientOrderIdFilter?: string,
 ): string {
   const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
-  const baseHref = symbolFilter
-    ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}`
-    : `/dashboard/cron?limit=${limit}`
-  const header = symbolFilter
-    ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong>。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
-    : `<p class="muted">Showing ${rows.length} decisions。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+  const baseHref = clientOrderIdFilter
+    ? `/dashboard/cron?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}&limit=${limit}`
+    : symbolFilter
+      ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}`
+      : `/dashboard/cron?limit=${limit}`
+  const header = clientOrderIdFilter
+    ? `<p class="muted">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a> ${copyAllBtn}</p>`
+    : symbolFilter
+      ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong>。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/trades?symbol=${encodeURIComponent(symbolFilter)}">約定を見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+      : `<p class="muted">Showing ${rows.length} decisions。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
   const pagination = renderPaginationNav({
     baseHref,
     before,
@@ -4451,7 +4520,7 @@ function cronBody(
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
     showSymbol: true,
-    filterLabel: `symbol=${symbolFilter ?? 'all'}, limit=${limit}`,
+    filterLabel: `symbol=${symbolFilter ?? 'all'}${clientOrderIdFilter ? `, clientOrderId=${clientOrderIdFilter}` : ''}, limit=${limit}`,
   })}${pagination}`
   return rail ? `<div class="symbol-layout">${rail}<div class="symbol-main">${main}</div></div>` : main
 }
@@ -4484,10 +4553,16 @@ function renderDecisionTable(
         r.realizedPnl === null || r.realizedPnl === undefined
           ? '-'
           : formatRealizedPnl(r.realizedPnl)
-      const fillCell =
+      // fill があるときは clientOrderId で trades の該当注文 (lifecycle 全行) へ
+      // 飛べるようにする (#nav-links)。
+      const fillText =
         r.filledPrice === null || r.filledPrice === undefined
           ? '-'
           : `${fmtNumber(r.filledPrice, 2)} × ${r.filledQty ?? '?'}`
+      const fillCell =
+        fillText !== '-' && r.clientOrderId
+          ? `<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(r.clientOrderId)}" title="この注文の約定履歴を見る">${esc(fillText)}</a>`
+          : esc(fillText)
       const inactive = isSymbolInactive(r.symbol, universe)
       const symbolClass = inactive ? ' class="symbol-disabled"' : ''
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
@@ -4503,7 +4578,7 @@ function renderDecisionTable(
         <td class="${cls}">${esc(r.decision)}</td>
         <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
-        <td class="muted">${esc(fillCell)}</td>
+        <td class="muted">${fillCell}</td>
         <td>${realizedCell}</td>
       </tr>`
     })
@@ -4566,7 +4641,7 @@ function cronReasonCell(row: {
       <div><strong>読み方</strong>${humanDetails}</div>
       <div><strong>RUNID</strong><br><code>${esc(row.requestId ?? '-')}</code></div>
       <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
-      <div><strong>decision id / clientOrderId</strong><br><code>${row.id}</code> / <code>${esc(row.clientOrderId ?? '-')}</code></div>
+      <div><strong>decision id / clientOrderId</strong><br><code>${row.id}</code> / ${row.clientOrderId ? `<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(row.clientOrderId)}" title="この注文の約定履歴を見る"><code>${esc(row.clientOrderId)}</code></a>` : '<code>-</code>'}</div>
       <div><strong>JSON</strong><br><pre>${esc(decisionJson)}</pre></div>
     </div>
   </details>`
@@ -6306,6 +6381,7 @@ function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
   return `<div style="margin-top:14px">
     <h2 style="font-size:14px;margin:0 0 6px;display:flex;align-items:center;gap:10px">判定履歴 <span class="muted" style="font-size:11px;font-weight:normal">直近 ${rows.length} 件 — チャートの判定 pin と同じデータ</span>
       <a href="${esc(symbolCronHref)}" style="font-size:11px">この銘柄の全件 →</a>
+      <a href="/dashboard/trades?symbol=${encodeURIComponent(args.focusSymbol)}" style="font-size:11px">この銘柄の約定 →</a>
       <a href="/dashboard/cron" style="font-size:11px">全銘柄 →</a>
     </h2>
     ${renderDecisionTable(rows, args.universe, {
@@ -10245,7 +10321,7 @@ function symbolsListBody(args: {
       const tradBadgeHtml = tradBadge ? `<div style="margin-top:2px">${tradBadge}</div>` : ''
       return `<tr${rowStyle}>
         <td style="position:relative;width:28px;padding:0">${treeCell}</td>
-        <td><strong><span${symStyle}>${esc(r.symbol)}</span></strong>${tradBadgeHtml}</td>
+        <td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="チャート銘柄タブで見る" style="text-decoration:none"><strong><span${symStyle}>${esc(r.symbol)}</span></strong></a>${tradBadgeHtml}</td>
         <td>${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${roleCell}</td>
