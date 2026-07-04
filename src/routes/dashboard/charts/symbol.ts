@@ -365,11 +365,14 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       // 内の複数 fill は同じ index に重なる。pin label は側 (top/bottom) と色で
       // 区別するため重なっても 1 件は読める。fillTimestamp は秒精度を保持して
       // hover tooltip で full-precision 時刻として表示される (情報損失なし)。
+      // clientOrderId を data に保持し、pin クリックで side パネルに fill 詳細 +
+      // 取引ジャーナル (/dashboard/trades?clientOrderId=...) への逆リンクを出す。
       var entries = buys.map(function (m) {
         var showLabel = m.timestamp === latestFillTs;
         return {
           name: 'BUY', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
           realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
+          clientOrderId: m.clientOrderId == null ? null : m.clientOrderId,
           label: { show: showLabel, formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
           itemStyle: { color: '#057a55' },
         };
@@ -380,6 +383,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         return {
           name: 'SELL', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
           realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
+          clientOrderId: m.clientOrderId == null ? null : m.clientOrderId,
           label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
           itemStyle: { color: '#c22' },
         };
@@ -404,6 +408,24 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           decision: d.decision, reason: d.reason, evalTs: d.timestamp, ladderHtml: d.ladderHtml,
           itemStyle: { color: color, borderColor: '#fff', borderWidth: 1 },
         };
+      });
+
+      // 保有区間 markArea (#chart-markers): BUY→SELL の closed pair を薄背景で
+      // 塗る (server 側 pairClosedTrades の結果 = sc.holdingSpans)。SELL の
+      // realizedPnl の符号で緑 (勝ち) / 赤 (負け) 系、欠損 (null) は中立グレー。
+      // オープン中の建玉は server が span に含めない (右端まで塗ると「そこで
+      // 決済した」と誤読される) — 現保有は avg/stop/TP 線が担う。
+      // category mode では xAxis に最近接 ohlc index、time mode では ISO を渡す
+      // (markPoint coord と同じ xForTimestamp 流用)。
+      var holdingSpans = sc.holdingSpans || [];
+      var holdingAreaData = holdingSpans.map(function (s) {
+        var color = s.realizedPnl == null
+          ? 'rgba(120, 120, 128, 0.08)'
+          : (s.realizedPnl >= 0 ? 'rgba(5, 122, 85, 0.10)' : 'rgba(204, 34, 34, 0.10)');
+        return [
+          { xAxis: xForTimestamp(s.openTimestamp), itemStyle: { color: color } },
+          { xAxis: xForTimestamp(s.closeTimestamp) },
+        ];
       });
 
       // 保有中なら avg / stop / take-profit を「dense path の独立 line series」
@@ -730,6 +752,16 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
           splitLine: { show: true, lineStyle: { opacity: 0.15 } },
         },
         series: [
+          // 保有区間の薄背景 (markArea、#chart-markers)。host series 自体は
+          // 空 data の line (markArea を legend 名付きでぶら下げるための器)。
+          // z:0 で candle / 線群のさらに背面に置く。色は span ごとに
+          // holdingAreaData 側の itemStyle で指定済み (勝ち緑 / 負け赤)。
+          ...(holdingAreaData.length > 0 ? [{
+            name: '保有区間 (確定)', type: 'line', data: [],
+            symbol: 'none', silent: true, z: 0,
+            itemStyle: { color: 'rgba(120, 120, 128, 0.4)' },
+            markArea: { silent: true, data: holdingAreaData },
+          }] : []),
           // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は表示。
           //
           // 帯は markArea fill のみで表現 (#232 follow-up): 以前は per-timestamp
@@ -850,7 +882,8 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
                     : '<br/>realized PnL: ' + (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
                   var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
                   var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabelSec(d.fillTimestamp);
-                  return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts;
+                  return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts
+                    + '<br/><span style="font-size:10px;color:#888">クリックで注文詳細</span>';
                 },
               },
             } : undefined,
@@ -974,9 +1007,39 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
         if (!tracePanel || !d) return;
         tracePanel.innerHTML = d.ladderHtml || '';
       }
+      // fill ピンクリック → 同じ脇パネルに fill 詳細 + 取引ジャーナルへの
+      // 逆リンクを表示する (#chart-markers)。判定 pin (showDecisionTrace) と
+      // 同じ流儀で innerHTML 差し替えのみ。値は DB 由来なので escHtml を通し、
+      // clientOrderId は URL 側 encodeURIComponent (quote も % escape される
+      // ため href 属性への注入も安全)。
+      function showFillDetail(d) {
+        if (!tracePanel || !d) return;
+        var side = d.name === 'SELL' ? '売り (SELL)' : '買い (BUY)';
+        var sideColor = d.name === 'SELL' ? '#c22' : '#057a55';
+        var price = Number(d.value).toFixed(2);
+        var qty = d.qty == null ? '—' : String(d.qty);
+        var pnl = d.realizedPnl == null
+          ? '—'
+          : (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
+        var pnlColor = d.realizedPnl == null ? '#555' : (d.realizedPnl >= 0 ? '#057a55' : '#c22');
+        var link = d.clientOrderId
+          ? '<a href="/dashboard/trades?clientOrderId=' + encodeURIComponent(d.clientOrderId) + '" style="font-size:12px">この注文の履歴 →</a>'
+          : '<span class="muted" style="font-size:11px">注文 ID 未記録 (旧 fill)</span>';
+        tracePanel.innerHTML =
+          '<div style="font-size:13px;font-weight:600;margin-bottom:4px;color:' + sideColor + '">約定 ' + escHtml(side) + ' @ ' + price + '</div>'
+          + '<div style="font-size:12px">日時: ' + escHtml(d.fillTimestamp == null ? '—' : jstLabelSec(d.fillTimestamp)) + '</div>'
+          + '<div style="font-size:12px">価格 × 数量: ' + price + ' × ' + escHtml(qty) + '</div>'
+          + '<div style="font-size:12px">実現損益: <span style="color:' + pnlColor + '">' + escHtml(pnl) + '</span></div>'
+          + '<div style="margin-top:4px">' + link + '</div>';
+      }
       symChart.on('click', function (p) {
         if (p && p.seriesName === '判定' && p.data && p.data.ladderHtml != null) {
           showDecisionTrace(p.data);
+          if (tracePanel) tracePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else if (p && p.componentType === 'markPoint' && p.data && p.data.fillTimestamp != null) {
+          // fill ピンは candle series の markPoint (componentType で識別)。
+          // 外挿線の「参考 到達」pin は fillTimestamp を持たないので反応しない。
+          showFillDetail(p.data);
           if (tracePanel) tracePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
       });
@@ -1231,7 +1294,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   })}
   ${renderDecisionPlotCaption(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px">
-    <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると、その判定が通った採用ロジックのトレースがここに表示されます。</p>
+    <p class="muted" style="font-size:12px;margin:0">判定点 (●) をクリックすると採用ロジックのトレース、fill ピン (BUY/SELL) をクリックすると約定詳細と注文履歴へのリンクがここに表示されます。</p>
   </div>
   ${renderSymbolDecisionHistory(args)}
   ${renderStrategyParamsPanel(args.strategyParams, args.strategyParamsGlobal)}`

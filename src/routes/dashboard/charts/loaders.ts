@@ -41,6 +41,57 @@ export interface SymbolChartMarker {
   price: number
   qty: number | null
   realizedPnl: number | null
+  /**
+   * fill 元注文の client_order_id。fill マーカー → 取引ジャーナル
+   * (/dashboard/trades?clientOrderId=...) への逆リンクに使う。
+   * additive フィールドなので optional: 古い fixture では省略され、
+   * client 側は null 同等 (リンク非表示) で扱う。
+   */
+  clientOrderId?: string | null
+}
+
+/**
+ * BUY → SELL で閉じた 1 往復の保有区間 (#chart-markers)。チャート上に
+ * 「この期間持っていて、結果 +X / -Y だった」を薄背景 (markArea) で見せる。
+ * オープン中の建玉 (BUY のみで未決済) は含めない — 右端まで塗ると
+ * 「そこで決済した」ように誤読されるため、既存の position 線に任せる。
+ */
+export interface ClosedTradeSpan {
+  /** 区間開始 = 建玉を開いた BUY fill の timestamp (ISO UTC) */
+  openTimestamp: string
+  /** 区間終了 = 決済 SELL fill の timestamp (ISO UTC) */
+  closeTimestamp: string
+  /** 決済 SELL の realized PnL。旧 fill 等で欠損なら null (中立色で描画) */
+  realizedPnl: number | null
+}
+
+/**
+ * fills (時系列昇順) から closed round-trip を組む。`deriveOpenPosition` と
+ * 同じ突合方針の閉区間版:
+ * - フラット状態で最初に現れた BUY を区間開始にする。連続 BUY (position add /
+ *   partial fill 分割) は開始点を動かさない — 「持ち始めた時点」から塗るのが
+ *   保有区間の意味論として正しい
+ * - SELL は全量決済とみなして区間を閉じる (POC 戦略は分割売りしない)。
+ *   realizedPnl はその SELL の値を採用
+ * - BUY 先行の無い SELL (手動売却の残骸 / データ欠損) は区間にしない
+ * - 末尾が BUY で終わる未決済分は返さない (上記 doc comment の通り)
+ */
+export function pairClosedTrades(fills: SymbolChartMarker[]): ClosedTradeSpan[] {
+  const spans: ClosedTradeSpan[] = []
+  let openStart: string | null = null
+  for (const m of fills) {
+    if (m.side === 'BUY') {
+      if (openStart === null) openStart = m.timestamp
+    } else if (openStart !== null) {
+      spans.push({
+        openTimestamp: openStart,
+        closeTimestamp: m.timestamp,
+        realizedPnl: m.realizedPnl,
+      })
+      openStart = null
+    }
+  }
+  return spans
 }
 
 /**
@@ -192,6 +243,12 @@ export interface SymbolChartData {
    * full rule と合わせて `buildBuyabilityView` に渡す。additive で optional。
    */
   evalIndicators?: EvalIndicatorPoint[]
+  /**
+   * BUY → SELL で閉じた保有区間 (markArea 描画用、#chart-markers)。
+   * additive で optional: 古い fixture / payload では省略され、client 側は
+   * `|| []` で安全に扱う。
+   */
+  holdingSpans?: ClosedTradeSpan[]
 }
 
 /**
@@ -243,7 +300,8 @@ export async function loadSymbolChart(
            pre.side AS pre_side,
            ps.filled_price AS filled_price,
            ps.filled_qty AS filled_qty,
-           ps.realized_pnl AS realized_pnl
+           ps.realized_pnl AS realized_pnl,
+           ps.client_order_id AS client_order_id
          FROM trade_journal AS ps
          LEFT JOIN trade_journal AS pre
            ON pre.client_order_id = ps.client_order_id
@@ -260,6 +318,7 @@ export async function loadSymbolChart(
         filled_price: number | null
         filled_qty: number | null
         realized_pnl: number | null
+        client_order_id: string | null
       }>(),
     fetchDoPosition(env, symbol),
   ])
@@ -322,6 +381,7 @@ export async function loadSymbolChart(
       price: Number(r.filled_price),
       qty: r.filled_qty === null ? null : Number(r.filled_qty),
       realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),
+      clientOrderId: r.client_order_id ?? null,
     }))
   // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
@@ -412,6 +472,9 @@ export async function loadSymbolChart(
     latestCronTimestamp,
     decisions,
     evalIndicators,
+    // closed round-trip の保有区間 (markArea 用)。markers は SQL の id ASC で
+    // 時系列昇順が保証されているのでそのまま突合できる。
+    holdingSpans: pairClosedTrades(markers),
   }
 }
 
