@@ -400,6 +400,71 @@ describe('runStrategyCron', () => {
       expect(result.skipReason).not.toBe('outside_session_window')
       expect(result.skipReason).toBe('portfolio_halted')
     })
+
+    // 2026-07-03 は Independence Day 振替休場 (7/4=土)。13:00 ET は通常なら窓内の
+    // 時刻だが、休場日は market_holiday として skip する (#547 — 実際にこの日
+    // stale quote の spread SKIP が量産され、reason から休場と読めなかった)。
+    const T_US_HOLIDAY = '2026-07-03T17:00:00.000Z'
+
+    it('flag on + US 祝日 → market_holiday で skip (#547)', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_US_HOLIDAY))
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).toBe('market_holiday')
+      expect(result.summary.evaluated).toBe(0)
+    })
+
+    it('flag off では祝日でも gate で止まらない (従来挙動)', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(T_US_HOLIDAY))
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).not.toBe('market_holiday')
+      expect(result.skipReason).toBe('portfolio_halted')
+    })
+
+    it('休場と窓外が混在する場合は outside_session_window に倒す', async () => {
+      vi.useFakeTimers()
+      // US = 祝日 / JP = 土曜 02:00 JST (窓外)。全 market skip だが「全休場」では
+      // ないので従来ラベル。
+      vi.setSystemTime(new Date(T_US_HOLIDAY))
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(
+        makeSymbolUniverse({
+          allowedSymbols: ['SOXL', '7203'],
+          symbolCurrency: { SOXL: 'USD', '7203': 'JPY' },
+          symbolMarket: { SOXL: 'US', '7203': 'JP' },
+          symbolLotSize: { SOXL: 1, '7203': 100 },
+        }),
+      )
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).toBe('outside_session_window')
+    })
+
+    it('半日取引日 (2026-11-27) は 13:00 ET 以降 outside_session_window (#547)', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-11-27T18:30:00.000Z')) // 13:30 ET (早引け後)
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).toBe('outside_session_window')
+    })
+
+    it('半日取引日でも 13:00 ET 前は評価に進む', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-11-27T17:00:00.000Z')) // 12:00 ET
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      const result = await runStrategyCron(env)
+      expect(result.skipReason).not.toBe('outside_session_window')
+      expect(result.skipReason).toBe('portfolio_halted')
+    })
   })
 
 })
