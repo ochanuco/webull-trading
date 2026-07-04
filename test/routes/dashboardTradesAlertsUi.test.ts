@@ -127,6 +127,105 @@ describe('/dashboard/trades 新 UI (#alerts-trades-ui)', () => {
   })
 })
 
+describe('/dashboard/trades ⇄ /dashboard/cron 相互リンク (#nav-links)', () => {
+  it('clientOrderId フィルタはバナー + 判定へ戻るリンクを描画し、pill にも伝搬する', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeJournalDb([journalRow({ clientOrderId: 'co-abc123' })]) as never,
+    )
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/trades?clientOrderId=co-abc123',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // フィルタ中バナー: 注文単位の絞り込み + 判定への逆リンク + 全件へ戻る
+    expect(body).toContain('の履歴のみ表示')
+    expect(body).toContain('href="/dashboard/cron?clientOrderId=co-abc123"')
+    expect(body).toContain('href="/dashboard/trades"')
+    // view pill を切り替えても絞り込みが外れない (limit デフォルトは 50)
+    expect(body).toContain('view=fills&limit=50&clientOrderId=co-abc123')
+  })
+
+  it('symbol フィルタはバナー + チャート/判定リンクを描画する', async () => {
+    vi.mocked(createDb).mockReturnValue(fakeJournalDb([journalRow()]) as never)
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/trades?symbol=soxl',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    // symbol は大文字正規化されてリンクに乗る
+    expect(body).toContain('のみ表示')
+    expect(body).toContain('href="/dashboard/charts?tab=symbol&symbol=SOXL"')
+    expect(body).toContain('href="/dashboard/cron?symbol=SOXL"')
+  })
+
+  it('clientOrderId を持つ行は「判定→」逆リンク、銘柄セルは ▼ 絞り込みを持つ', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      fakeJournalDb([journalRow({ clientOrderId: 'co-xyz' })]) as never,
+    )
+    const app = createApp()
+    const res = await app.request('/dashboard/trades', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    expect(body).toContain('href="/dashboard/cron?clientOrderId=co-xyz"')
+    expect(body).toContain('判定→')
+    expect(body).toContain('href="/dashboard/trades?symbol=SOXL"')
+    expect(body).toContain('この銘柄の約定だけに絞り込み')
+  })
+
+  it('cron: clientOrderId フィルタバナーと fill セルの trades リンクを描画する', async () => {
+    const decisionRow = {
+      id: 10,
+      timestamp: '2026-06-10T17:45:45.592Z',
+      requestId: 'run-1',
+      symbol: 'SOXL',
+      decision: 'BUY',
+      reason: 'entry',
+      price: 30.5,
+      indicatorsJson: null,
+      clientOrderId: 'co-fill1',
+      traceJson: null,
+      filledPrice: 30.4,
+      filledQty: 3,
+      realizedPnl: null,
+      brokerStatus: 'FILLED',
+    }
+    vi.mocked(createDb).mockReturnValue(
+      {
+        select() {
+          return {
+            from() {
+              const chain = {
+                leftJoin: () => chain,
+                where: () => chain,
+                orderBy: () => chain,
+                limit: async () => [decisionRow],
+              }
+              return chain
+            },
+          }
+        },
+      } as never,
+    )
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/cron?clientOrderId=co-fill1',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // 注文単位バナー + 約定への逆リンク
+    expect(body).toContain('の判定のみ表示')
+    expect(body).toContain('href="/dashboard/trades?clientOrderId=co-fill1"')
+    // 実 fill セルも同じ注文の trades へ飛べる
+    expect(body).toContain('この注文の約定履歴を見る')
+  })
+})
+
 describe('/dashboard/alerts 新 UI (#alerts-trades-ui)', () => {
   beforeEach(() => {
     vi.mocked(loadRecentAlerts).mockReset()
