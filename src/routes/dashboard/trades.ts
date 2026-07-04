@@ -3,7 +3,7 @@ import { type TradeJournalRow, tradeJournal } from '../../infrastructure/db/sche
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { and, desc, eq, inArray, isNotNull, lt, or, type SQL } from 'drizzle-orm'
 import { formatRealizedPnl } from './cron'
-import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, pillStyle, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
 /** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
 export const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
@@ -131,16 +131,16 @@ export function tradesBody(
     (filters.symbol ? `&symbol=${encodeURIComponent(filters.symbol)}` : '') +
     (filters.clientOrderId ? `&clientOrderId=${encodeURIComponent(filters.clientOrderId)}` : '')
   const viewPill = (label: string, v: string, active: boolean): string =>
-    `<a href="/dashboard/trades?view=${v}&limit=${limit}${filterQs}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${active ? '#1d1d1f' : '#d8d8de'};${active ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+    `<a href="/dashboard/trades?view=${v}&limit=${limit}${filterQs}" class="chip${active ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
   const filterBanner = filters.clientOrderId
-    ? `<p class="muted" style="font-size:12px;margin:0 0 6px">注文 <code>${esc(filters.clientOrderId)}</code> の履歴のみ表示。<a href="/dashboard/cron?clientOrderId=${encodeURIComponent(filters.clientOrderId)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
+    ? `<p class="filter-banner">注文 <code>${esc(filters.clientOrderId)}</code> の履歴のみ表示。<a href="/dashboard/cron?clientOrderId=${encodeURIComponent(filters.clientOrderId)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
     : filters.symbol
-      ? `<p class="muted" style="font-size:12px;margin:0 0 6px">銘柄 <strong>${esc(displaySymbol(filters.symbol, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(filters.symbol)}">チャートで見る</a> / <a href="/dashboard/cron?symbol=${encodeURIComponent(filters.symbol)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
+      ? `<p class="filter-banner">銘柄 <strong>${esc(displaySymbol(filters.symbol, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(filters.symbol)}">チャートで見る</a> / <a href="/dashboard/cron?symbol=${encodeURIComponent(filters.symbol)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
       : ''
   // JSON export へのリンクは現在の絞り込み (view / limit / symbol / clientOrderId /
   // before) をそのまま引き継ぐ — 「画面で見ている部分集合と同じもの」を開くため。
   const jsonHref = `/dashboard/trades/json?view=${view}&limit=${limit}${filterQs}${before !== undefined ? `&before=${before}` : ''}`
-  const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" style="margin-left:4px;padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;text-decoration:none">JSON を開く</a>`
+  const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip" style="margin-left:4px">JSON を開く</a>`
   const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}</nav>`
   if (rows.length === 0) {
     return `${filterBanner}${pills}<p class="muted">該当するレコードがありません。</p>`
@@ -191,30 +191,30 @@ export function tradesBody(
       if (errorText) {
         const code = extractBrokerErrorCode(errorText)
         const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : (r.errorClass ?? 'エラー')
-        statusCell = `<span style="${pillStyle('#fdecec', '#c22')}">エラー: ${esc(short)}</span>
+        statusCell = `<span class="pill err">エラー: ${esc(short)}</span>
           <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
       } else if (r.brokerStatus === 'FILLED') {
-        statusCell = `<span style="${pillStyle('#e6f6ec', '#057a55')}">約定</span>`
+        statusCell = `<span class="pill ok">約定</span>`
       } else if (r.brokerStatus) {
-        statusCell = `<span style="${pillStyle('#fff4e6', '#b25000')}" title="${esc(r.brokerStatus)}">${esc(r.brokerStatus)}</span>`
+        statusCell = `<span class="pill warn" title="${esc(r.brokerStatus)}">${esc(r.brokerStatus)}</span>`
       } else {
         statusCell = '<span class="muted">—</span>'
       }
       const modeCell =
         r.mode === 'LIVE'
-          ? `<span style="${pillStyle('#fdecec', '#c22')}">実発注</span>`
+          ? `<span class="pill err">実発注</span>`
           : r.mode === 'DRY_RUN'
-            ? `<span style="${pillStyle('#f3f3f5', '#86868b')}">DRY</span>`
+            ? `<span class="pill neutral">DRY</span>`
             : '<span class="muted">—</span>'
-      return `<tr style="font-size:13px">
+      return `<tr>
         <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
         <td style="white-space:nowrap">${eventCell}${decisionLink}</td>
         <td>${symbolCell}</td>
         <td style="white-space:nowrap">${sideCell}</td>
-        <td style="text-align:right" class="bp-num">${qtyCell}</td>
-        <td style="text-align:right" class="bp-num">${priceCell}</td>
-        <td style="text-align:right" class="bp-num">${pnlCell}</td>
+        <td class="num">${qtyCell}</td>
+        <td class="num">${priceCell}</td>
+        <td class="num">${pnlCell}</td>
         <td>${statusCell}</td>
         <td>${modeCell}</td>
       </tr>`
@@ -222,9 +222,9 @@ export function tradesBody(
     .join('')
   return `${filterBanner}${pills}
   <table>
-    <thead><tr style="font-size:12px">
+    <thead><tr>
       <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
-      <th style="text-align:right">数量</th><th style="text-align:right">単価</th><th style="text-align:right">実現損益</th><th>状態</th><th>モード</th>
+      <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th><th>状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
