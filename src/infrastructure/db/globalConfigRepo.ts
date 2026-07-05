@@ -123,7 +123,10 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
  * の CSV を読み書きする。表示専用なので `GlobalConfigSnapshot` / cron 経路には通さず、
  * dashboard だけが参照する独立 read/write。
  */
-export const OVERVIEW_PANELS_DEFAULT = 'kpi,equity,composition,recent'
+// #dashboard-ia: status (資産サマリ帯) / positions (保有ポジション) を additive に
+// 追加。未設定 (列 NULL/空) の default は全表示。operator が保存済みの CSV は
+// そのまま尊重する (新 key は再保存まで OFF)。
+export const OVERVIEW_PANELS_DEFAULT = 'status,positions,kpi,equity,composition,recent'
 
 export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<string> {
   try {

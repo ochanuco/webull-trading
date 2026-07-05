@@ -260,7 +260,7 @@ export function renderCronViewPills(
 ): string {
   const symbolQs = symbolFilter ? `&symbol=${encodeURIComponent(symbolFilter)}` : ''
   const pill = (label: string, href: string, isActive: boolean): string =>
-    `<a href="${href}" style="margin-right:6px;padding:3px 12px;border-radius:14px;border:1px solid ${isActive ? '#1d1d1f' : '#d8d8de'};${isActive ? 'background:#1d1d1f;color:#fff;' : 'background:#fff;'}font-size:12px;text-decoration:none">${esc(label)}</a>`
+    `<a href="${href}" class="chip${isActive ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
   return `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${pill('一覧', `/dashboard/cron?limit=${limit}${symbolQs}`, active === 'list')}${pill('マトリクス', `/dashboard/cron?view=matrix${symbolQs}`, active === 'matrix')}</nav>`
 }
 
@@ -280,10 +280,10 @@ export function cronBody(
       ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}`
       : `/dashboard/cron?limit=${limit}`
   const header = clientOrderIdFilter
-    ? `<p class="muted">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a> ${copyAllBtn}</p>`
+    ? `<p class="filter-banner">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a> ${copyAllBtn}</p>`
     : symbolFilter
-      ? `<p class="muted">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong>。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/trades?symbol=${encodeURIComponent(symbolFilter)}">約定を見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
-      : `<p class="muted">Showing ${rows.length} decisions。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+      ? `<p class="filter-banner">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong>。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/trades?symbol=${encodeURIComponent(symbolFilter)}">約定を見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+      : `<p class="filter-banner">Showing ${rows.length} decisions。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
   const pagination = renderPaginationNav({
     baseHref,
     before,
@@ -853,7 +853,7 @@ export function renderReasonTrendChart(trend: ReasonTrendPoint[]): string {
       window.addEventListener('resize', function () { chart.resize(); });
     });
   `
-  return `<h3 style="margin:20px 0 4px;font-size:14px">発注不成立の理由推移</h3>
+  return `<h3 class="sub-head">発注不成立の理由推移</h3>
   <div id="reason-trend-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
   ${safeJsonScript('__matrixTrend', { categories: REASON_CATEGORIES, points: trend })}
   <script src="${ECHARTS_CDN}" defer></script>
@@ -873,7 +873,7 @@ export function decisionMatrixBody(
   opts: { days: number; limit: number; symbolFilter?: string },
 ): string {
   const pills = renderCronViewPills('matrix', opts.limit, opts.symbolFilter)
-  const header = `<p class="muted">直近 ${opts.days} 日 (JST) の 銘柄 × 日付 代表判定。セルクリックでその銘柄の判定一覧へ。<a href="/dashboard/cron/matrix/json" target="_blank" rel="noreferrer">JSON を開く</a></p>`
+  const header = `<p class="filter-banner">直近 ${opts.days} 日 (JST) の 銘柄 × 日付 代表判定。セルクリックでその銘柄の判定一覧へ。<a href="/dashboard/cron/matrix/json" target="_blank" rel="noreferrer">JSON を開く</a></p>`
   if (matrix.rows.length === 0) {
     return `${pills}${header}<p class="muted">判定ログがまだありません。</p>`
   }

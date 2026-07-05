@@ -1236,7 +1236,7 @@ export function symbolsListBody(args: {
       const deleteForm = r.active
         ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
         : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去、インバース対のリンクも解除)。元に戻せません。よろしいですか？');">
-            <button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button>
+            <button type="submit" class="btn-sm danger">削除</button>
           </form>`
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
@@ -1305,9 +1305,9 @@ export function symbolsListBody(args: {
         <td>${esc(r.notes ?? '')}</td>
         <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
         <td>
-          <a href="${esc(editHref)}" style="padding:3px 8px;font-size:12px;text-decoration:none">編集</a>
+          <a href="${esc(editHref)}" class="btn-sm">編集</a>
           <form method="post" action="${esc(toggleAction)}" style="display:inline">
-            <button type="submit" style="padding:3px 8px;font-size:12px;cursor:pointer">${esc(toggleLabel)}</button>
+            <button type="submit" class="btn-sm">${esc(toggleLabel)}</button>
           </form>
           ${deleteForm}
         </td>
