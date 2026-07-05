@@ -4,16 +4,28 @@ import type { PortfolioEquitySnapshotRow } from '../../infrastructure/db/schema'
 import type { VixRegime } from '../../trading/risk/vixRegimeFilter'
 import type { SymbolState } from '../../trading/state/types'
 import { formatRealizedPnl } from './cron'
+import { ECHARTS_CDN } from './charts/shared'
 import { type EquityRange, renderPortfolioEquityChart, renderVixRegimeCell } from './portfolio'
-import { pickFreshQuote } from './positions'
-import { displaySymbol, esc, fmtJst, fmtNumber } from './shared'
+import { pickFreshQuote, positionsBody } from './positions'
+import { displaySymbol, esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
 
 // #dashboard-mf-layout: overview パネル定義。設定で ON/OFF (default 全表示)。
-export type OverviewPanel = 'kpi' | 'equity' | 'composition' | 'recent'
+// #dashboard-ia で status (資産サマリ帯 + スパークライン) / positions (保有
+// ポジション) を additive に追加。既存 key の意味は変えない。
+export type OverviewPanel = 'status' | 'positions' | 'kpi' | 'equity' | 'composition' | 'recent'
 
-export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = ['kpi', 'equity', 'composition', 'recent']
+export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = [
+  'status',
+  'positions',
+  'kpi',
+  'equity',
+  'composition',
+  'recent',
+]
 
 export const OVERVIEW_PANEL_LABELS: Record<OverviewPanel, string> = {
+  status: '資産サマリ帯 (本日開始 equity / 実現損益 / 取引状態 / VIX / USDJPY + 資産スパークライン)',
+  positions: '保有ポジション (positions ページと同じテーブル)',
   kpi: 'KPI カード (総資産 / 当日損益 / 建玉数 / エクスポージャー)',
   equity: '資産推移チャート (期間タブ)',
   composition: '資産構成 + 含み損益ランキング',
@@ -41,6 +53,12 @@ export interface OverviewData {
   } | null
   snapshots: PortfolioEquitySnapshotRow[]
   range: EquityRange
+  /** 資産サマリ帯のスパークライン用 (直近 30 日固定。`snapshots` は ?range= 連動)。 */
+  sparkSnapshots: PortfolioEquitySnapshotRow[]
+  /** USDJPY レート (資産サマリ帯表示用)。取得失敗は null → "—" 表示。 */
+  usdJpy: number | null
+  /** SYMBOL_STATE binding の有無。false なら保有ポジションは誘導リンクのみ。 */
+  symbolStateBound: boolean
   positions: Array<{ sym: string; state: SymbolState | null; error: string | null }>
   strategyPriceMap: Map<string, { price: number; asOf: string }>
   recentTrades: Array<{
@@ -128,6 +146,108 @@ export function collectOpenPositions(data: OverviewData): OpenPositionView[] {
     })
   }
   return out
+}
+
+/**
+ * セクション見出し (h1 なし方針のまま「詳しく見る」導線を付ける小ヘッダ)。
+ * ホームは要約、詳細は各専用ページ (/portfolio /positions /cron /alerts) へ。
+ */
+export function sectionHead(title: string, moreHref: string): string {
+  return `<div class="section-head"><span>${esc(title)}</span><a class="sh-more" href="${moreHref}">詳しく見る →</a></div>`
+}
+
+/**
+ * 資産サマリ帯 (#dashboard-ia 最上段): /portfolio の要約をカード 1 枚に横並び。
+ * PORTFOLIO_STATE DO 不在 (portfolio === null) は帯を省略し、スパークラインも
+ * データ無しなら section ごと消える (graceful)。
+ */
+export function renderStatusPanel(data: OverviewData): string {
+  const spark = renderEquitySparkline(data.sparkSnapshots)
+  const p = data.portfolio
+  if (p === null && spark === '') return ''
+  let band = ''
+  if (p !== null) {
+    const pnlClass = p.dailyRealizedPnl >= 0 ? 'ok' : 'err'
+    const tradingPill = data.tradingEnabled
+      ? '<span class="pill on">取引 ON</span>'
+      : '<span class="pill off">取引 OFF</span>'
+    const item = (label: string, value: string) =>
+      `<div style="min-width:110px"><div class="kpi-label">${esc(label)}</div><div style="font-size:15px;font-weight:700;font-variant-numeric:tabular-nums">${value}</div></div>`
+    band = `<div style="display:flex;flex-wrap:wrap;gap:10px 22px;align-items:flex-end">
+      ${item('本日開始 equity', fmtNumber(p.dailyStartEquity, 2))}
+      ${item('本日実現損益', `<span class="${pnlClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</span>`)}
+      ${item('取引 (effective)', tradingPill)}
+      ${item('VIX レジーム', `<span style="font-size:13px;font-weight:400">${renderVixRegimeCell(data.vixRegime)}</span>`)}
+      ${item('USDJPY', data.usdJpy === null ? '<span class="muted">—</span>' : fmtNumber(data.usdJpy, 2))}
+    </div>`
+  }
+  return `${sectionHead('資産サマリ', '/dashboard/portfolio')}<div class="panel">${band}${spark}</div>`
+}
+
+/**
+ * equity スパークライン (直近 30 日、高さ 80px)。portfolio_equity_snapshot の
+ * dailyStartEquity を 1 本線で描く。USD があれば USD、無ければ JPY。両方
+ * データ無しは '' (帯から省略)。
+ */
+export function renderEquitySparkline(snapshots: PortfolioEquitySnapshotRow[]): string {
+  const dates: string[] = []
+  const usd: Array<number | null> = []
+  const jpy: Array<number | null> = []
+  for (const row of snapshots) {
+    dates.push((row.snapshotAt ?? '').slice(0, 10))
+    usd.push(
+      typeof row.dailyStartEquityUsd === 'number' && Number.isFinite(row.dailyStartEquityUsd)
+        ? row.dailyStartEquityUsd
+        : null,
+    )
+    jpy.push(
+      typeof row.dailyStartEquityJpy === 'number' && Number.isFinite(row.dailyStartEquityJpy)
+        ? row.dailyStartEquityJpy
+        : null,
+    )
+  }
+  const hasUsd = usd.some((v) => v !== null)
+  const hasJpy = jpy.some((v) => v !== null)
+  if (!hasUsd && !hasJpy) return ''
+  const currency = hasUsd ? 'USD' : 'JPY'
+  const values = hasUsd ? usd : jpy
+  const initScript = `
+    document.addEventListener('DOMContentLoaded', function () {
+      if (typeof echarts === 'undefined') return;
+      var el = document.getElementById('home-equity-spark');
+      if (!el) return;
+      var d = window.__homeEquitySpark;
+      var chart = echarts.init(el);
+      chart.setOption({
+        grid: { left: 2, right: 2, top: 4, bottom: 2 },
+        xAxis: { type: 'category', data: d.dates, show: false },
+        yAxis: { type: 'value', show: false, min: 'dataMin', max: 'dataMax' },
+        tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '—' : Number(v).toLocaleString('ja-JP'); } },
+        series: [{ type: 'line', data: d.values, showSymbol: false, connectNulls: false, lineStyle: { width: 1.5, color: '#06c' }, itemStyle: { color: '#06c' }, areaStyle: { opacity: 0.08, color: '#06c' } }],
+      });
+      window.addEventListener('resize', function () { chart.resize(); });
+    });
+  `
+  return `<div style="margin-top:10px">
+    <div class="muted" style="font-size:11px;margin-bottom:2px">資産推移 (直近 30 日, ${currency})</div>
+    <div id="home-equity-spark" style="width:100%;height:80px"></div>
+  </div>
+  ${safeJsonScript('__homeEquitySpark', { dates, values })}
+  <script src="${ECHARTS_CDN}" defer></script>
+  <script>${initScript}</script>`
+}
+
+/**
+ * 保有ポジション section (#dashboard-ia): positions ページと同じ loader 結果 /
+ * 同じテーブル renderer (`positionsBody`) を re-use する。SYMBOL_STATE 不在時は
+ * テーブルを省略して誘導リンクのみ。
+ */
+export function renderHomePositionsSection(data: OverviewData): string {
+  const head = sectionHead('保有ポジション', '/dashboard/positions')
+  if (!data.symbolStateBound) {
+    return `${head}<div class="panel"><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。<a href="/dashboard/positions">保有ポジションページ</a>を参照してください。</p></div>`
+  }
+  return `${head}<div style="margin-bottom:16px">${positionsBody(data.positions, data.strategyPriceMap, data.universe)}</div>`
 }
 
 export function kpiCard(label: string, value: string, sub?: string, subClass?: string): string {
@@ -219,7 +339,7 @@ export function renderRecentPanel(data: OverviewData): string {
     ? '<span class="pill on">取引 ON</span>'
     : '<span class="pill off">取引 OFF</span>'
   return `<div class="panel">
-    <div class="panel-title">最近の約定 / リスク状態</div>
+    <div class="panel-title" style="display:flex;justify-content:space-between;align-items:baseline"><span>最近の約定 / リスク状態</span><span style="font-weight:400;font-size:12px"><a href="/dashboard/cron">判定履歴 →</a> <a href="/dashboard/alerts" style="margin-left:8px">アラート →</a></span></div>
     <div class="panel-row">
       <div>${recentTable}<div style="margin-top:8px"><a href="/dashboard/trades">約定履歴をすべて見る →</a></div></div>
       <div>
@@ -271,10 +391,30 @@ export function buyingPowerBadge(): string {
   </script>`
 }
 
+/**
+ * ECharts CDN の `<script src>` タグ重複除去 (CodeRabbit #559)。status
+ * (スパークライン) と equity (資産推移チャート) はどちらも単独 ON で成立する
+ * 必要があるため各自 CDN タグを持つ — 両方 ON のときだけここで 2 個目以降を
+ * 落とす (同一 src の二重ロードはキャッシュされるが parse/execute が無駄)。
+ */
+export function dedupeEchartsCdnTag(html: string): string {
+  const tag = `<script src="${ECHARTS_CDN}" defer></script>`
+  const parts = html.split(tag)
+  if (parts.length <= 2) return html
+  return parts[0] + tag + parts.slice(1).join('')
+}
+
 export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
+  // 「今日の状況が 1 画面で分かる」順: 資産サマリ帯 → KPI → 保有 → 推移 →
+  // 構成 → 直近の約定/判定。詳細は各セクション見出しの「詳しく見る」で専用ページへ。
+  if (data.panels.has('status')) {
+    const status = renderStatusPanel(data)
+    if (status !== '') sections.push(status)
+  }
   if (data.panels.has('kpi')) sections.push(renderKpiPanel(data, open))
+  if (data.panels.has('positions')) sections.push(renderHomePositionsSection(data))
   if (data.panels.has('equity')) {
     sections.push(
       `<div class="panel">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div>`,
@@ -287,5 +427,5 @@ export function overviewBody(data: OverviewData): string {
       '<p class="muted">表示パネルが選択されていません。<a href="/dashboard/config">設定</a>でパネルを有効化してください。</p>',
     )
   }
-  return buyingPowerBadge() + sections.join('')
+  return dedupeEchartsCdnTag(buyingPowerBadge() + sections.join(''))
 }

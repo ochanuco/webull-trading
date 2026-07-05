@@ -101,7 +101,11 @@ describe('dashboard', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('<title>ダッシュボード')
-    expect(body).toContain('/dashboard/positions')
+    // #dashboard-ia: nav は 4 項目に削減 (positions/portfolio はホーム統合で
+    // nav から外れたため、代わりに再編後のグローバル nav を検証)
+    expect(body).toContain('href="/dashboard/charts?tab=symbol"')
+    expect(body).toContain('href="/dashboard/trades"')
+    expect(body).toContain('運用 ▾')
   })
 
   // #276: kill-switch は全 page 共通でサイドバー下部に表示される (banner → sidebar
@@ -325,17 +329,18 @@ describe('dashboard', () => {
   })
 
   // #dashboard-mf-layout: overview パネル ON/OFF フォーム。createDb mock 未設定 →
-  // loadOverviewPanelsCsv が default fallback → 4 パネルすべて checked で描画。
+  // loadOverviewPanelsCsv が default fallback → 全パネル checked で描画
+  // (#dashboard-ia で status / positions が additive に増え 6 パネル)。
   it('renders overview panel toggle form on config page (all checked by default)', async () => {
     const env = { ...baseEnv, DB: {} as D1Database }
     const app = createApp()
     const res = await app.request('/dashboard/config', { headers: authHeader }, env)
     const body = await res.text()
     expect(body).toContain('action="/dashboard/config/overview-panels"')
-    for (const k of ['kpi', 'equity', 'composition', 'recent']) {
+    for (const k of ALL_OVERVIEW_PANELS) {
       expect(body).toContain(`value="${k}"`)
     }
-    expect((body.match(/name="panels"[^>]*checked/g) ?? []).length).toBe(4)
+    expect((body.match(/name="panels"[^>]*checked/g) ?? []).length).toBe(ALL_OVERVIEW_PANELS.length)
   })
 
   it('saves overview panel selection (303 redirect, CSV deduped + invalid dropped)', async () => {

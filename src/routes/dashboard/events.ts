@@ -363,7 +363,7 @@ export function eventsBody(args: EventsBodyArgs): string {
           <td>${sym}</td>
           <td>${esc(r.earningsDate)}</td>
           <td>${esc(r.notes ?? '-')}</td>
-          <td><form method="post" action="/dashboard/events/earnings/${r.id}/delete" onsubmit="return confirm('${esc(r.symbol)} ${esc(r.earningsDate)} を削除します。よろしいですか？');" style="margin:0"><button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button></form></td>
+          <td><form method="post" action="/dashboard/events/earnings/${r.id}/delete" onsubmit="return confirm('${esc(r.symbol)} ${esc(r.earningsDate)} を削除します。よろしいですか？');" style="margin:0"><button type="submit" class="btn-sm danger">削除</button></form></td>
         </tr>`
       })
       .join('')}</tbody>
@@ -385,7 +385,7 @@ export function eventsBody(args: EventsBodyArgs): string {
           <td><code>${esc(r.eventType)}</code></td>
           <td>${esc(r.notes ?? '-')}</td>
           <td>${esc(r.eventDate)}</td>
-          <td><form method="post" action="/dashboard/events/macro/${r.id}/delete" onsubmit="return confirm('${esc(r.eventType)} ${esc(r.eventDate)} を削除します。よろしいですか？');" style="margin:0"><button type="submit" style="padding:3px 8px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">削除</button></form></td>
+          <td><form method="post" action="/dashboard/events/macro/${r.id}/delete" onsubmit="return confirm('${esc(r.eventType)} ${esc(r.eventDate)} を削除します。よろしいですか？');" style="margin:0"><button type="submit" class="btn-sm danger">削除</button></form></td>
         </tr>`
       })
       .join('')}</tbody>
@@ -394,7 +394,7 @@ export function eventsBody(args: EventsBodyArgs): string {
   return `<p class="muted">期間: ${esc(from)} 〜 ${esc(to)} (now-30d 〜 now+30d)。<code>earnings_calendar</code> / <code>macro_event_calendar</code> は risk gate の avoid ソースです。
   add は <code>now-90d 〜 now+365d</code> の範囲に clamp します。delete は audit に記録されます。</p>
 
-<h2 style="font-size:15px;margin:20px 0 6px 0">決算 (earnings)</h2>
+<h2 class="sub-head">決算 (earnings)</h2>
 ${earningsErr}
 ${earningsNotice}
 <details${earningsFormOpen} style="margin-bottom:12px">
@@ -408,7 +408,7 @@ ${earningsNotice}
 </details>
 ${earningsTable}
 
-<h2 style="font-size:15px;margin:24px 0 6px 0">マクロイベント (macro)</h2>
+<h2 class="sub-head">マクロイベント (macro)</h2>
 ${macroErr}
 ${macroNotice}
 <details${macroFormOpen} style="margin-bottom:12px">

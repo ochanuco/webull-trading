@@ -9,7 +9,6 @@ import {
   inactiveTooltip,
   isSymbolInactive,
   logCopyRowBtn,
-  pillStyle,
   renderLogCopyScript,
   renderPaginationNav,
   safeJsonScript,
@@ -85,11 +84,11 @@ export interface AlertsBodyArgs {
  *   - 表示は最新 100 件 (`?limit=N` で 1〜500)
  *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
  */
-/** severity → 日本語 pill (#alerts-trades-ui)。 */
-export const ALERT_SEVERITY_PILLS: Record<string, { ja: string; bg: string; fg: string }> = {
-  critical: { ja: '重大', bg: '#fdecec', fg: '#c22' },
-  warning: { ja: '警告', bg: '#fff4e6', fg: '#b25000' },
-  info: { ja: '情報', bg: '#eef2f8', fg: '#46608a' },
+/** severity → 日本語 pill (#alerts-trades-ui)。cls は共通 .pill variant (layout.ts)。 */
+export const ALERT_SEVERITY_PILLS: Record<string, { ja: string; cls: string }> = {
+  critical: { ja: '重大', cls: 'err' },
+  warning: { ja: '警告', cls: 'warn' },
+  info: { ja: '情報', cls: 'info' },
 }
 
 /** event type → 日本語。 */
@@ -111,8 +110,8 @@ export function alertsBody(args: AlertsBodyArgs): string {
   }
   const tbody = rows
     .map((r) => {
-      const sev = ALERT_SEVERITY_PILLS[r.severity] ?? { ja: r.severity, bg: '#f3f3f5', fg: '#86868b' }
-      const sevCell = `<span title="${esc(r.severity)}" style="${pillStyle(sev.bg, sev.fg)}">${esc(sev.ja)}</span>`
+      const sev = ALERT_SEVERITY_PILLS[r.severity] ?? { ja: r.severity, cls: 'neutral' }
+      const sevCell = `<span title="${esc(r.severity)}" class="pill ${sev.cls}">${esc(sev.ja)}</span>`
       const eventCell = `<span title="${esc(r.eventType)}" style="font-size:12px">${esc(ALERT_EVENT_LABELS[r.eventType] ?? r.eventType)}</span>`
       const symbolInactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       const symbolCell = r.symbol
@@ -127,11 +126,11 @@ export function alertsBody(args: AlertsBodyArgs): string {
           ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
           : esc(r.message)
       // <details> (block) を含み得るので外側は div (CodeRabbit #469)。
-      const messageCell = `${shortLabel ? `<span style="${pillStyle('#fdecec', '#c22')}">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
+      const messageCell = `${shortLabel ? `<span class="pill err">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
       const causeCell = r.cause
         ? `<code style="font-size:11px">${esc(r.cause)}</code>`
         : '<span class="muted">—</span>'
-      return `<tr style="font-size:13px;vertical-align:top">
+      return `<tr style="vertical-align:top">
         <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
         <td>${sevCell}</td>
@@ -145,7 +144,7 @@ export function alertsBody(args: AlertsBodyArgs): string {
     .join('')
   return `${filterPills}${countLine}
   <table>
-    <thead><tr style="font-size:12px">
+    <thead><tr>
       <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
@@ -201,8 +200,9 @@ export function renderAlertFilterPills(
     const qs = next.toString()
     return qs.length === 0 ? '/dashboard/alerts' : `/dashboard/alerts?${qs}`
   }
+  // trades / cron の view 切替と同じ .chip 見た目に統一 (#dashboard-design)。
   const pill = (label: string, href: string, isActive: boolean): string =>
-    `<a href="${esc(href)}" style="margin-right:6px;${isActive ? 'background:#1d1d1f;color:#fff;' : ''}">${esc(label)}</a>`
+    `<a href="${esc(href)}" class="chip${isActive ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
   const sev = [
     pill('全 severity', buildHref('severity', null), active.length === 0),
     pill(
