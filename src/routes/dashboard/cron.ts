@@ -6,6 +6,10 @@ import { LOG_COPY_ALL_BTN, clampLimit, currencyOfSymbol, displaySymbol, esc, fmt
 // ECHARTS_CDN のみ利用。charts/shared 側の `import type { DecisionRow }` は
 // type-only なので runtime 循環にはならない。
 import { ECHARTS_CDN } from './charts/shared'
+// マトリクスの休場セル判定 (#matrix-closed)。domain 層の純粋関数を表示時に
+// 評価する — 休場 tick は strategy_decision_log に行が残らない設計 (skip 早期
+// return) のため、記録側でなく表示側で暦から区別する。
+import { type TradingMarket, inferTradingMarket, isTradingDay } from '../../trading/domain/tradingCalendar'
 
 /**
  * Strategy / sizing が出力する英語 reason を **初心者にも分かる日本語** に翻訳
@@ -793,8 +797,59 @@ export interface DecisionMatrixCell {
 export interface DecisionMatrix {
   /** JST 日付 (昇順) */
   dates: string[]
-  /** 銘柄昇順。cells は日付キー (判定が無い日はキーなし) */
-  rows: Array<{ symbol: string; cells: Record<string, DecisionMatrixCell> }>
+  /**
+   * 銘柄昇順。cells は日付キー (判定が無い日はキーなし)。
+   * closedDates はその銘柄の市場が休場 (週末/祝日) の日付 — 「休場だから
+   * 判定なし」と「開場していたのにログなし (cron 停止等)」を区別する
+   * (#matrix-closed、opts 付き buildDecisionMatrix でのみ算出)。
+   */
+  rows: Array<{ symbol: string; cells: Record<string, DecisionMatrixCell>; closedDates?: string[] }>
+}
+
+/**
+ * JST 日付 X に「その市場のセッション由来の判定ログが乗り得ない」= 休場か。
+ *
+ * マトリクスの日付キーは JST だが、US セッション (ET 09:30-16:00) は JST では
+ * 同日 22:30〜翌日 06:00 にまたがる。つまり JST 日 X には ET 日 X の前半と
+ * ET 日 X-1 の後半が乗る → US は X と X-1 の両方が非営業日のときだけ休場。
+ * JP はセッションが JST 日内に収まるので暦日そのまま。
+ * `isTradingDay` は UTC 暦日基準なので T12:00:00Z 固定で ymd を評価する
+ * (DST の影響を受けない)。
+ */
+export function isJstDateClosedForMarket(jstYmd: string, market: TradingMarket): boolean {
+  const noon = new Date(`${jstYmd}T12:00:00Z`)
+  if (market === 'JP') return !isTradingDay(noon, 'JP')
+  const prev = new Date(noon.getTime() - 86_400_000)
+  return !isTradingDay(noon, 'US') && !isTradingDay(prev, 'US')
+}
+
+/** now (実時刻) の JST 暦日 YYYY-MM-DD。 */
+function jstYmdOf(now: Date): string {
+  return new Date(now.getTime() + 9 * 3_600_000).toISOString().slice(0, 10)
+}
+
+/**
+ * マトリクスの列日付 (#matrix-closed): 直近 days 日の全 JST 暦日から、
+ * 「全銘柄が休場でデータも無い」列 (JST 日曜など) を落とした昇順リスト。
+ * ログがある日は休場判定に関わらず必ず残す (臨時セッションや過去データの保全)。
+ */
+export function buildMatrixDates(
+  dataDates: ReadonlySet<string>,
+  markets: readonly TradingMarket[],
+  days: number,
+  now: Date,
+): string[] {
+  const out = new Set<string>()
+  const todayNoonUtc = new Date(`${jstYmdOf(now)}T12:00:00Z`).getTime()
+  for (let i = days - 1; i >= 0; i--) {
+    const ymd = new Date(todayNoonUtc - i * 86_400_000).toISOString().slice(0, 10)
+    const anyOpen = markets.some((m) => !isJstDateClosedForMarket(ymd, m))
+    if (dataDates.has(ymd) || anyOpen) out.add(ymd)
+  }
+  // 範囲外のログ日も必ず残す (loadDecisionMatrix 側の窓とずれても列が消えて
+  // データが見えなくなる事故を防ぐ)。
+  for (const d of dataDates) out.add(d)
+  return [...out].sort()
 }
 
 /**
@@ -802,8 +857,16 @@ export interface DecisionMatrix {
  * 代表判定は MATRIX_DECISION_PRIORITY 順。想定外 decision (将来追加など) は
  * ERROR 相当の優先度で扱い、表示から漏れないようにする (quality.ts の
  * aggregateDecisionRows と同思想)。
+ *
+ * opts 指定時 (#matrix-closed): 列を「ログがあった日」でなく直近 days 日の
+ * 全 JST 暦日 (全休列は除去) に広げ、各行に closedDates (休場でログが乗り得ない
+ * 日付) を付ける。opts 省略時は従来どおりログのあった日だけを列にする
+ * (後方互換、now を持たない呼び出し向け)。
  */
-export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMatrix {
+export function buildDecisionMatrix(
+  rows: DecisionMatrixSourceRow[],
+  opts?: { days: number; now: Date },
+): DecisionMatrix {
   const dateSet = new Set<string>()
   const bySymbol = new Map<string, Map<string, DecisionMatrixSourceRow[]>>()
   for (const r of rows) {
@@ -821,7 +884,17 @@ export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMa
     const i = (MATRIX_DECISION_PRIORITY as readonly string[]).indexOf(decision)
     return i === -1 ? MATRIX_DECISION_PRIORITY.indexOf('ERROR') : i
   }
-  const outRows = [...bySymbol.keys()].sort().map((symbol) => {
+  const symbols = [...bySymbol.keys()].sort()
+  // 列: opts 付きは全 JST 暦日 (全休列は除去)、無しは従来のログがあった日のみ。
+  const dates = opts
+    ? buildMatrixDates(
+        dateSet,
+        [...new Set(symbols.map((s) => inferTradingMarket(s)))],
+        opts.days,
+        opts.now,
+      )
+    : [...dateSet].sort()
+  const outRows = symbols.map((symbol) => {
     const cells: Record<string, DecisionMatrixCell> = {}
     for (const [day, group] of bySymbol.get(symbol)!) {
       let best = group[0]!
@@ -839,9 +912,12 @@ export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMa
       }
       cells[day] = { decision: best.decision, reason: rep.reason, count, total }
     }
-    return { symbol, cells }
+    if (!opts) return { symbol, cells }
+    const market = inferTradingMarket(symbol)
+    const closedDates = dates.filter((d) => !cells[d] && isJstDateClosedForMarket(d, market))
+    return { symbol, cells, closedDates }
   })
-  return { dates: [...dateSet].sort(), rows: outRows }
+  return { dates, rows: outRows }
 }
 
 /**
@@ -996,6 +1072,7 @@ export function decisionMatrixBody(
   .mx-pill.mx-warn{background:#b25000}
   .mx-pill.mx-err{background:#c22}
   .mx-pill.mx-muted{background:#e8e8ed;color:#86868b}
+  .mx-closed{display:inline-block;min-width:20px;padding:1px 5px;border-radius:9px;font-size:11px;background:#f3f3f5;color:#b6b6bd}
   .mx-legend{margin-top:8px;font-size:11px;color:#86868b;display:flex;flex-wrap:wrap;gap:10px}
   </style>`
   const headCells = matrix.dates
@@ -1006,10 +1083,15 @@ export function decisionMatrixBody(
       const inactive = isSymbolInactive(row.symbol, universe)
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(row.symbol, universe))}"` : ''
       const symCell = `<td class="mx-sym"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(row.symbol)}"${titleAttr}><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(row.symbol, universe))}</strong></a></td>`
+      const closed = new Set(row.closedDates ?? [])
       const cells = matrix.dates
         .map((d) => {
           const cell = row.cells[d]
-          if (!cell) return '<td><span class="muted">·</span></td>'
+          if (!cell && closed.has(d)) {
+            // 休場 (週末/祝日) — 「判定なし」と区別する (#matrix-closed)
+            return `<td><span class="mx-closed" title="${esc(d)} 休場 (週末/祝日)">休</span></td>`
+          }
+          if (!cell) return '<td><span class="muted" title="開場日だが判定ログなし (cron 停止・銘柄追加前など)">·</span></td>'
           const label = MATRIX_DECISION_LABELS[cell.decision] ?? { short: '?', ja: cell.decision, cls: 'mx-err' }
           const title = `${d} ${cell.decision} (${label.ja}、${cell.count}/${cell.total}件): ${localizeReason(cell.reason)}`
           return `<td><a class="mx-pill ${label.cls}" href="/dashboard/cron?symbol=${encodeURIComponent(row.symbol)}" title="${esc(title)}">${esc(label.short)}</a></td>`
@@ -1020,7 +1102,7 @@ export function decisionMatrixBody(
     .join('')
   const legend = `<div class="mx-legend">${Object.entries(MATRIX_DECISION_LABELS)
     .map(([key, v]) => `<span><span class="mx-pill ${v.cls}">${esc(v.short)}</span> ${esc(key)} (${esc(v.ja)})</span>`)
-    .join('')}<span>· = 判定なし</span></div>`
+    .join('')}<span><span class="mx-closed">休</span> 休場 (週末/祝日)</span><span>· = 開場だが判定ログなし (cron 停止・銘柄追加前など)</span></div>`
   return `${pills}${header}
   <div class="mx-wrap">
     <table class="mx-table">

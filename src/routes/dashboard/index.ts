@@ -623,7 +623,7 @@ export const dashboard = new Hono<DashboardBindings>()
     try {
       const days = 30
       const rows = await loadDecisionMatrix(c.env.DB, days)
-      const matrix = buildDecisionMatrix(rows)
+      const matrix = buildDecisionMatrix(rows, { days, now: new Date() })
       return jsonPretty({
         schema: 'dashboard_cron_matrix_export.v1',
         exportedAt: new Date().toISOString(),
@@ -660,7 +660,7 @@ export const dashboard = new Hono<DashboardBindings>()
             c,
             '戦略判定',
             decisionMatrixBody(
-              buildDecisionMatrix(matrixRows),
+              buildDecisionMatrix(matrixRows, { days, now: new Date() }),
               aggregateReasonTrend(matrixRows),
               universe,
               { days, limit, symbolFilter },
