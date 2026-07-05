@@ -533,4 +533,25 @@ describe('loadDecisionRowsInSession のページ整合 (#cron-session-filter pag
     expect(body).not.toContain('data-id="1"') // limit=2 で切れる
     expect(body).toContain('before=3') // 表示末尾がカーソル
   })
+
+  it('route: 走査打ち切りでページが埋まらなかったら、カーソルは走査末尾へ進む', async () => {
+    // batch1 の先頭 2 行だけ開場、以降 5 バッチ分 (走査上限) すべて休場行。
+    // 走査済み窓内の開場行は表示済みなので、表示末尾 (1199) でなく走査末尾
+    // (201) から次ページを始める — 同じ休場行の舐め直しと空ページを防ぐ。
+    const batches = Array.from({ length: 5 }, (_, b) =>
+      Array.from({ length: 200 }, (_, i) => mkRow(1200 - b * 200 - i, b === 0 && i < 2)),
+    )
+    vi.mocked(createDb).mockReturnValue(batchedDb(batches))
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/cron?limit=50',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('data-id="1200"')
+    expect(body).toContain('data-id="1199"')
+    expect(body).toContain('before=201')
+    expect(body).not.toContain('before=1199')
+  })
 })

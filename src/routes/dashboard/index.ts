@@ -704,9 +704,13 @@ export const dashboard = new Hono<DashboardBindings>()
             page.hasMore,
             clientOrderIdFilter,
             sessionFilter,
-            // 次ページカーソル: 表示した最後の行を優先 (表示と切れ目なく続く)。
-            // 表示 0 件 (走査打ち切り) 時のみ走査末尾で前進させる。
-            page.rows.length > 0 ? page.rows[page.rows.length - 1]!.id : page.lastScannedId,
+            // 次ページカーソル: ページが limit 件で埋まったときは表示末尾
+            // (表示と切れ目なく続く)。埋まらなかったとき (走査打ち切り / データ
+            // 末尾) は走査末尾 — 走査済み窓内の開場行は全て表示済みなので、
+            // 表示末尾から再走査すると同じ休場行を舐め直して空ページを挟むだけ。
+            page.rows.length >= limit
+              ? page.rows[page.rows.length - 1]!.id
+              : page.lastScannedId,
           ),
           cronSubnav,
         ),
