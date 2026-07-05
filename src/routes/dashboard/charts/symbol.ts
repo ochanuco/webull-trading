@@ -6,7 +6,9 @@ import type { EntryStatus, EntryStatusResult } from '../../../trading/strategy/e
 import { PAIR_REGIME_ZONE_LABELS, type PairRegimeDecision } from '../../../trading/strategy/pairRegime'
 import type { SymbolAllocation } from '../../../trading/strategy/conditionalAllocation'
 import { MAX_CHART_DECISIONS, type SymbolChartData, type SymbolChartPoint } from './loaders'
-import { type ChartsBodySymbol, ECHARTS_CDN, type StrategyParamsSnapshot, type SymbolPolicySummary, renderZoomPresetButtons } from './shared'
+import { type ChartsBodyArgs, type ChartsBodySymbol, ECHARTS_CDN, type StrategyParamsSnapshot, type SymbolPolicySummary, renderZoomPresetButtons } from './shared'
+import { renderOverviewTab } from './equity'
+import { renderQualityTab } from './quality'
 import { renderDecisionTable } from '../cron'
 import { currencyOfSymbol, displaySymbol, esc, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, safeJsonScript } from '../shared'
 import { SYMBOL_ROLE_LABELS, SYMBOL_ROLE_LABELS_SHORT } from '../symbols'
@@ -1312,24 +1314,6 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <script>${initScript}</script>`
 }
 
-/**
- * 銘柄グリッドビュー (Datadog dashboard 風)。ALLOWED_SYMBOLS を 4 列 grid で
- * 並列表示。`echarts.connect` で dataZoom + axisPointer (縦線) を全 panel 同期、
- * tooltip popup は hover 中の panel だけに表示 (PR #242、formatter 内で
- * window.__gridHoveredPanelId !== elId のとき空文字を返して描画を抑制)。
- * preset zoom (1D/5D/1M/All) も grid 共通 toolbar から dispatchAction で全 chart
- * に配信。
- *
- * mini chart の構成 (PR #239 で個別銘柄タブと表示要素パリティ):
- * - candle (15m OHLC)
- * - 価格トレンド (linear regression)
- * - SMA50
- * - 押し目ゾーン markArea + sloped 上下端線 (未保有時のみ)
- * - 保有時の avg / stop / TP 水平線 + endLabel
- * - 未保有時の preview stop / TP 点線 + endLabel
- * - BUY/SELL pin (markPoint, hover で qty / PnL / fill 時刻 tooltip)
- * - session divider (vertical lines)
- */
 /** 段階判定 badge の配色 (#452 PR 2)。 */
 export const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
   ENTRY: { label: 'ENTRY', bg: '#e6f6ec', fg: '#057a55' },
@@ -1825,4 +1809,14 @@ export function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   const focusLabel = displaySymbol(args.focusSymbol, args.universe)
   const note = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
   return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong> <span class="muted" style="font-size:11px">(inactive — ${esc(note)})</span></p>`
+}
+
+/**
+ * チャートページのタブ dispatcher (#remove-grid で grid.ts から移設)。
+ * 全タブ renderer に依存するため、最後発の symbol モジュールに置く。
+ */
+export function chartsBody(args: ChartsBodyArgs): string {
+  if (args.tab === 'overview') return renderOverviewTab(args)
+  if (args.tab === 'quality') return renderQualityTab(args)
+  return renderSymbolTab(args)
 }

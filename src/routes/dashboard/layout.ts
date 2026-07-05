@@ -42,7 +42,7 @@ export const STYLE = `
   /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
      コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等)。
      header は topnav (1段目) + ページ固有 subnav (2段目、例: チャートの
-     概要/取引品質/個別銘柄/銘柄グリッド) の最大2段で sticky。 */
+     履歴・分析の 約定履歴/戦略判定/... など) の最大2段で sticky。 */
   .header{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5}
   .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
@@ -169,7 +169,6 @@ export const STYLE = `
   .symbol-disabled{opacity:0.5;font-style:italic;text-decoration:line-through}
   tr.symbol-disabled-row{background:#fafafa}
   tr.symbol-disabled-row td{color:#86868b}
-  .grid-panel.symbol-inactive{background:#fafafa;opacity:0.65}
   /* チャート個別銘柄タブの銘柄レール (左固定)。sticky top は topnav の高さ分逃がす */
   .symbol-layout{display:flex;gap:14px;align-items:flex-start}
   /* sticky の top は「自然位置と同じ高さ」に合わせる (--header-h は layout の
@@ -221,7 +220,7 @@ export function renderLayout(
 ): string {
   const killSwitch = killSwitchTopnav(c.var.killSwitchState)
   // active 判定はグループ単位の前方一致 (#dashboard-ia)。/charts は ?tab= で
-  // 「銘柄」(symbol/grid) と「履歴・分析」(overview/quality) に分かれるため
+  // 「銘柄」(symbol) と「履歴・分析」(overview/quality) に分かれるため
   // query も見る。
   let tab: string | null = null
   try {
@@ -246,7 +245,7 @@ export const NAV_GROUPS: ReadonlyArray<{
   title?: string
 }> = [
   { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (資産サマリ / 保有 / 直近の判定)' },
-  { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート / 銘柄グリッド' },
+  { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート (判定 pin / ラダー / 約定マーカー)' },
   { key: 'analysis', href: '/dashboard/trades', text: '履歴・分析', title: '約定履歴 / 戦略判定 / 取引品質 / 資産推移 / アラート' },
 ]
 
@@ -276,7 +275,8 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   if (!activePath) return null
   if (activePath === '/dashboard' || activePath === '/dashboard/') return 'home'
   if (activePath === '/dashboard/charts') {
-    // symbol / grid タブは「銘柄」、overview (default) / quality は「履歴・分析」
+    // symbol タブは「銘柄」、overview (default) / quality は「履歴・分析」。
+    // 'grid' は廃止済みタブの legacy alias (parseChartsTab が symbol に畳む)。
     return tab === 'symbol' || tab === 'grid' ? 'symbol' : 'analysis'
   }
   for (const p of ['/dashboard/trades', '/dashboard/cron', '/dashboard/alerts']) {
