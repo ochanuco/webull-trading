@@ -1,8 +1,8 @@
 import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
-import { and, desc, eq, lt, type SQL } from 'drizzle-orm'
-import { LOG_COPY_ALL_BTN, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import { and, asc, desc, eq, lt, type SQL } from 'drizzle-orm'
+import { LOG_COPY_ALL_BTN, clampLimit, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 // ECHARTS_CDN のみ利用。charts/shared 側の `import type { DecisionRow }` は
 // type-only なので runtime 循環にはならない。
 import { ECHARTS_CDN } from './charts/shared'
@@ -593,6 +593,113 @@ export function cronDecisionJson(row: {
       filledQty: row.filledQty,
       realizedPnl: row.realizedPnl,
     },
+  }
+}
+
+/** `runCronJsonExport` の戻り値。route は `jsonPretty(payload, status)` するだけ。 */
+export interface CronJsonExportResult {
+  payload: unknown
+  status: 200 | 400 | 404
+}
+
+/**
+ * `/dashboard/cron/json` と MCP `get_cron_decisions` の共通本体 (#553)。
+ *
+ * route の inline 実装をそのまま移設したもの — payload のフィールド構成・
+ * key 順・エラー分岐は route 時代と byte 一致を保つこと (schema:
+ * `dashboard_cron_export.v1`)。route からは requestId / decisionId のみ渡る
+ * (= 既存挙動不変)。symbol / limit は MCP 専用の追加絞り込みで、requestId /
+ * decisionId が無いときだけ効く (loadDecisionRows 共用、新しい順)。
+ */
+export async function runCronJsonExport(
+  db: ReturnType<typeof createDb>,
+  opts: { requestId?: string; decisionId?: string; symbol?: string; limit?: number },
+): Promise<CronJsonExportResult> {
+  const requestedRequestId = opts.requestId?.trim()
+  const requestedDecisionId = opts.decisionId?.trim()
+  let decisionId: number | undefined
+  if (requestedDecisionId && requestedDecisionId.length > 0) {
+    if (!/^[1-9]\d*$/.test(requestedDecisionId)) {
+      return { payload: { error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, status: 400 }
+    }
+    decisionId = Number(requestedDecisionId)
+    if (!Number.isSafeInteger(decisionId) || decisionId <= 0) {
+      return { payload: { error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, status: 400 }
+    }
+  }
+  let requestId = requestedRequestId && requestedRequestId.length > 0
+    ? requestedRequestId
+    : undefined
+  // MCP 専用の symbol 絞り込み: requestId / decisionId 指定より弱い優先度。
+  // 「最新 request の全銘柄」ではなく「この銘柄の直近 N 判定」を返す。
+  if (!requestId && decisionId === undefined && opts.symbol && opts.symbol.trim().length > 0) {
+    const symbol = opts.symbol.toUpperCase().trim()
+    const limit = clampLimit(opts.limit !== undefined ? String(opts.limit) : undefined)
+    const rows = await loadDecisionRows(db, { symbol, limit })
+    return {
+      payload: {
+        schema: 'dashboard_cron_export.v1',
+        exportedAt: new Date().toISOString(),
+        symbol,
+        limit,
+        rowCount: rows.length,
+        decisions: rows.map((r) => ({ ...cronDecisionJson(r), requestId: r.requestId })),
+      },
+      status: 200,
+    }
+  }
+  if (!requestId && decisionId === undefined) {
+    const latest = await db
+      .select({ requestId: strategyDecisionLog.requestId })
+      .from(strategyDecisionLog)
+      .orderBy(desc(strategyDecisionLog.id))
+      .limit(50)
+    requestId = latest.find((row) => row.requestId !== null)?.requestId ?? undefined
+  }
+  if (!requestId && decisionId === undefined) {
+    return { payload: { error: 'no_cron_logs', message: 'strategy_decision_log has no request_id rows' }, status: 404 }
+  }
+
+  const filter = decisionId !== undefined
+    ? eq(strategyDecisionLog.id, decisionId)
+    : eq(strategyDecisionLog.requestId, requestId as string)
+  const rows = await db
+    .select({
+      id: strategyDecisionLog.id,
+      timestamp: strategyDecisionLog.timestamp,
+      requestId: strategyDecisionLog.requestId,
+      symbol: strategyDecisionLog.symbol,
+      decision: strategyDecisionLog.decision,
+      reason: strategyDecisionLog.reason,
+      price: strategyDecisionLog.price,
+      indicatorsJson: strategyDecisionLog.indicatorsJson,
+      clientOrderId: strategyDecisionLog.clientOrderId,
+      traceJson: strategyDecisionLog.traceJson,
+      filledPrice: tradeJournal.filledPrice,
+      filledQty: tradeJournal.filledQty,
+      realizedPnl: tradeJournal.realizedPnl,
+      brokerStatus: tradeJournal.brokerStatus,
+    })
+    .from(strategyDecisionLog)
+    .leftJoin(
+      tradeJournal,
+      and(
+        eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
+        eq(tradeJournal.tradeEventType, 'post_submit'),
+      ),
+    )
+    .where(filter)
+    .orderBy(asc(strategyDecisionLog.id))
+
+  return {
+    payload: {
+      schema: 'dashboard_cron_export.v1',
+      exportedAt: new Date().toISOString(),
+      ...(decisionId !== undefined ? { decisionId } : { requestId }),
+      rowCount: rows.length,
+      decisions: rows.map(cronDecisionJson),
+    },
+    status: 200,
   }
 }
 

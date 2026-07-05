@@ -1,7 +1,7 @@
 import { type ChartsBodyOverview, ECHARTS_CDN } from './shared'
 import type { BenchmarkPoint } from './benchmark'
 import { jstDayKey, resolveFillSide } from './loaders'
-import { esc, fmtNumber, safeJsonScript } from '../shared'
+import { esc, exportMeta, fmtNumber, safeJsonScript } from '../shared'
 
 export interface EquityPoint {
   date: string // YYYY-MM-DD (JST)
@@ -196,6 +196,24 @@ export function computeMonthlyReturns(points: EquityPoint[]): MonthlyReturn[] {
   return [...byMonth.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([month, pnl]) => ({ month, pnl }))
+}
+
+/**
+ * equity packet builder (schema: `dashboard_equity_export.v1`, #553)。
+ *
+ * MCP `get_equity` 用。チャート overview タブと同じ loader (`loadEquityCurve`)
+ * の結果と同じ pure 集計 (期間別 / 月次リターン) を envelope に包むだけ —
+ * 「画面で見る内容 = AI に渡す JSON」の規約 (shared.ts `exportMeta`) に従い、
+ * 集計ロジックをここへ寄せて SSR との drift を作らない。
+ * `now` は引数で受ける (computePeriodReturns と同じテスト容易性の理由)。
+ */
+export function buildEquityPacket(points: EquityPoint[], now: Date) {
+  return {
+    ...exportMeta('dashboard_equity_export.v1'),
+    points,
+    periodReturns: computePeriodReturns(points, now),
+    monthlyReturns: computeMonthlyReturns(points),
+  }
 }
 
 /** overview チャート描画用に整列済みの view model (client inline JS に渡す形)。 */
