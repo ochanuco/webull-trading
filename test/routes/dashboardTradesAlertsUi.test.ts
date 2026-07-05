@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
+import { isDecisionRowInSession } from '../../src/routes/dashboard/cron'
 import { loadRecentAlerts } from '../../src/infrastructure/notification/notificationEmitLog'
 import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
 
@@ -365,5 +366,192 @@ describe('/dashboard/cron 銘柄レール (#decisions-chart-unify)', () => {
     expect(body).toContain('href="/dashboard/cron?symbol=SOXS')
     // inactive 銘柄もレールに出る (grayed)
     expect(body).toContain('href="/dashboard/cron?symbol=SPY')
+  })
+})
+
+describe('/dashboard/cron セッションフィルタ (#cron-session-filter)', () => {
+  function cronDb(rows: unknown[]) {
+    return {
+      select() {
+        return {
+          from() {
+            const chain = {
+              leftJoin: () => chain,
+              where: () => chain,
+              orderBy: () => chain,
+              limit: async () => rows,
+            }
+            return chain
+          },
+        }
+      },
+    } as never
+  }
+  const inSession = {
+    id: 1,
+    timestamp: '2026-06-05T14:30:00.000Z', // ET 10:30 金曜 = US 場中
+    requestId: 'run-1',
+    symbol: 'SOXL',
+    decision: 'HOLD',
+    reason: 'holding: pnl 0.01 within (-0.05, 0.08)',
+    price: 30.5,
+    indicatorsJson: null,
+    clientOrderId: null,
+    traceJson: null,
+    filledPrice: null,
+    filledQty: null,
+    realizedPnl: null,
+    brokerStatus: null,
+  }
+  const outOfSession = {
+    ...inSession,
+    id: 2,
+    timestamp: '2026-06-06T00:00:00.000Z', // ET 金曜 20:00 = 閉場後 (手動 run 相当)
+    reason: 'manual run after close',
+  }
+
+  it('既定 (開場中のみ) は休場時間帯の行を隠し、切替 pill を出す', async () => {
+    vi.mocked(createDb).mockReturnValue(cronDb([inSession, outOfSession]))
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('data-id="1"')
+    expect(body).not.toContain('data-id="2"')
+    expect(body).toContain('開場中のみ')
+    expect(body).toContain('session=all')
+  })
+
+  it('?session=all は全時間帯の行を表示する', async () => {
+    vi.mocked(createDb).mockReturnValue(cronDb([inSession, outOfSession]))
+    const app = createApp()
+    const res = await app.request('/dashboard/cron?session=all', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    expect(body).toContain('data-id="1"')
+    expect(body).toContain('data-id="2"')
+  })
+
+  it('isDecisionRowInSession: JP は JST 場中のみ true、不正 timestamp は true (隠さない)', () => {
+    expect(isDecisionRowInSession('2026-06-05T01:00:00.000Z', '1357')).toBe(true) // JST 10:00 金曜
+    expect(isDecisionRowInSession('2026-06-05T11:00:00.000Z', '1357')).toBe(false) // JST 20:00
+    expect(isDecisionRowInSession('2026-06-05T11:00:00.000Z', 'SOXL')).toBe(false) // ET 07:00 寄り前
+    expect(isDecisionRowInSession('not-a-date', 'SOXL')).toBe(true)
+  })
+})
+
+describe('loadDecisionRowsInSession のページ整合 (#cron-session-filter paging)', () => {
+  const IN_TS = '2026-06-05T14:30:00.000Z' // ET 10:30 金曜 = US 場中
+  const OUT_TS = '2026-06-06T00:00:00.000Z' // ET 金曜 20:00 = 閉場後
+  const mkRow = (id: number, inSession: boolean) => ({
+    id,
+    timestamp: inSession ? IN_TS : OUT_TS,
+    requestId: 'run-1',
+    symbol: 'SOXL',
+    decision: 'HOLD',
+    reason: null,
+    price: 30.5,
+    indicatorsJson: null,
+    clientOrderId: null,
+    traceJson: null,
+    filledPrice: null,
+    filledQty: null,
+    realizedPnl: null,
+    brokerStatus: null,
+  })
+  /**
+   * limit() 呼び出しごとに次のバッチを返す stateful fake (カーソル前進を模擬)。
+   * 判定クエリは leftJoin を通るので、それ以外のクエリ (kill switch の
+   * global_config 読みなど) には空を返して queue を消費させない。
+   */
+  function batchedDb(batches: unknown[][]) {
+    const queue = [...batches]
+    return {
+      select() {
+        let isDecisionQuery = false
+        const chain = {
+          leftJoin: () => {
+            isDecisionQuery = true
+            return chain
+          },
+          where: () => chain,
+          orderBy: () => chain,
+          limit: async () => (isDecisionQuery ? (queue.shift() ?? []) : []),
+        }
+        return { from: () => chain }
+      },
+    } as never
+  }
+
+  it('休場行 200 件を跨いで次バッチから開場行を limit 件そろえる', async () => {
+    const batch1 = Array.from({ length: 200 }, (_, i) => mkRow(400 - i, false))
+    const batch2 = [mkRow(200, true), mkRow(199, true)]
+    vi.mocked(createDb).mockReturnValue(batchedDb([batch1, batch2]))
+    const { loadDecisionRowsInSession } = await import('../../src/routes/dashboard/cron')
+    const page = await loadDecisionRowsInSession(createDb({} as D1Database), { limit: 1 })
+    expect(page.rows.map((r) => r.id)).toEqual([200])
+    expect(page.hasMore).toBe(true) // 開場行が limit+1 件見つかった
+  })
+
+  it('データ末尾に到達したら hasMore=false (フェッチ窓でなく表示行基準)', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      batchedDb([[mkRow(5, true), mkRow(4, false), mkRow(3, true)]]),
+    )
+    const { loadDecisionRowsInSession } = await import('../../src/routes/dashboard/cron')
+    const page = await loadDecisionRowsInSession(createDb({} as D1Database), { limit: 50 })
+    expect(page.rows.map((r) => r.id)).toEqual([5, 3])
+    expect(page.hasMore).toBe(false)
+  })
+
+  it('走査上限 (5 バッチ) で打ち切り、hasMore=true + lastScannedId で前進できる', async () => {
+    const batches = Array.from({ length: 6 }, (_, b) =>
+      Array.from({ length: 200 }, (_, i) => mkRow(2000 - b * 200 - i, false)),
+    )
+    vi.mocked(createDb).mockReturnValue(batchedDb(batches))
+    const { loadDecisionRowsInSession } = await import('../../src/routes/dashboard/cron')
+    const page = await loadDecisionRowsInSession(createDb({} as D1Database), { limit: 50 })
+    expect(page.rows).toEqual([])
+    expect(page.hasMore).toBe(true)
+    expect(page.lastScannedId).toBe(2000 - 5 * 200 + 1) // 5 バッチ分の末尾
+  })
+
+  it('route: 次ページカーソルは「最後に表示した行」の id になる', async () => {
+    // 開場 [5,3,1] / 休場 [4,2]。limit=2 → 表示 [5,3]、次カーソルは 3
+    vi.mocked(createDb).mockReturnValue(
+      batchedDb([[mkRow(5, true), mkRow(4, false), mkRow(3, true), mkRow(2, false), mkRow(1, true)]]),
+    )
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/cron?limit=2',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('data-id="5"')
+    expect(body).toContain('data-id="3"')
+    expect(body).not.toContain('data-id="4"')
+    expect(body).not.toContain('data-id="1"') // limit=2 で切れる
+    expect(body).toContain('before=3') // 表示末尾がカーソル
+  })
+
+  it('route: 走査打ち切りでページが埋まらなかったら、カーソルは走査末尾へ進む', async () => {
+    // batch1 の先頭 2 行だけ開場、以降 5 バッチ分 (走査上限) すべて休場行。
+    // 走査済み窓内の開場行は表示済みなので、表示末尾 (1199) でなく走査末尾
+    // (201) から次ページを始める — 同じ休場行の舐め直しと空ページを防ぐ。
+    const batches = Array.from({ length: 5 }, (_, b) =>
+      Array.from({ length: 200 }, (_, i) => mkRow(1200 - b * 200 - i, b === 0 && i < 2)),
+    )
+    vi.mocked(createDb).mockReturnValue(batchedDb(batches))
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/cron?limit=50',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    const body = await res.text()
+    expect(body).toContain('data-id="1200"')
+    expect(body).toContain('data-id="1199"')
+    expect(body).toContain('before=201')
+    expect(body).not.toContain('before=1199')
   })
 })
