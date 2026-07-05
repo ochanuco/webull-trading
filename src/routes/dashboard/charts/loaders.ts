@@ -479,46 +479,6 @@ export async function loadSymbolChart(
 }
 
 /**
- * 銘柄グリッドビュー用: ALLOWED_SYMBOLS 全銘柄の SymbolChartData を並列取得。
- *
- * 個別 symbol の `loadSymbolChart` 失敗 (Yahoo fetch error / D1 一時的エラー /
- * DO unbound 等) は per-symbol で catch して `{ chart: null, error }` に落とす。
- * 1 銘柄の失敗で grid 全画面が 500 にならないよう、grid view では panel 単位で
- * 「データ取得失敗」を可視化する fallback に倒す (POC 段階で trader が生産に
- * 戻れない事故を避ける)。
- *
- * 注意: Cloudflare Workers の subrequest 制限 (50 / request) を考慮。
- * `loadSymbolChart` は 銘柄あたり ~5 subrequest (Yahoo daily + intraday + D1
- * query + DO query) なので 9 銘柄で ~45 subrequest。ALLOWED_SYMBOLS が増えた
- * 場合は paging or 段階表示が必要だが、POC 規模では十分に余裕がある前提。
- *
- * 並列度は `Promise.all` でフル並列。Workers の I/O concurrency 上限に当たる
- * ようなら `p-limit` 等で絞ることになるが、現状 9 並列なら問題ない。
- */
-export async function loadAllSymbolCharts(
-  env: Env,
-  symbols: string[],
-  rules: SymbolChartRules,
-): Promise<Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>> {
-  if (symbols.length === 0) return []
-  return await Promise.all(
-    symbols.map(async (symbol) => {
-      try {
-        const chart = await loadSymbolChart(env, symbol, rules)
-        return { symbol, chart, error: null as string | null }
-      } catch (err) {
-        // 個別失敗は audit log のため console.warn (Workers logs に流れる)。
-        // panel 側は error 文字列を表示して trader に「この 1 銘柄だけ取得失敗」
-        // を分からせる。
-        // eslint-disable-next-line no-console
-        console.warn('[dashboard] loadAllSymbolCharts symbol failed', { symbol, err: messageOf(err) })
-        return { symbol, chart: null, error: messageOf(err) }
-      }
-    }),
-  )
-}
-
-/**
  * cron-eval points の末尾 (= 実 strategy 評価で参照した最新価格) を取り出して
  * `{ latestCronPrice, latestCronTimestamp }` を返す。preview stop/TP は
  * Yahoo filler を含む `mergedPoints[末尾]` ではなくこちらを使う方針。

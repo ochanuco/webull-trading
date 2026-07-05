@@ -182,7 +182,7 @@ describe('dashboard', () => {
 
   // チャートの view 切替 (概要/取引品質/個別銘柄/銘柄グリッド) は本文 tab strip
   // ではなく header 2段目の subnav に出す (サブメニュー化)。
-  it('charts page renders view switcher as header subnav with active state', async () => {
+  it('charts overview/quality pages share the 履歴・分析 subnav (#remove-grid)', async () => {
     const app = createApp()
     // DB 未バインドでも subnav は出る (本文は unavailable)
     const res = await app.request(
@@ -192,10 +192,16 @@ describe('dashboard', () => {
     )
     const body = await res.text()
     expect(body).toContain('<nav class="subnav">')
+    // trades / cron / alerts と同じ「履歴・分析」subnav に統一 (現在地 = 取引品質)
+    expect(body).toContain('>取引品質</span>')
     expect(body).toContain('class="subnav-link active"')
-    expect(body).toContain('>取引品質<')
-    expect(body).toContain('href="/dashboard/charts?tab=symbol"')
-    expect(body).toContain('href="/dashboard/charts?tab=grid"')
+    expect(body).toContain('href="/dashboard/trades"')
+    expect(body).toContain('href="/dashboard/cron?view=matrix"')
+    // 旧チャート専用 subnav (個別銘柄 / 銘柄グリッド) は出さない
+    // (グローバル nav の「銘柄」リンクは tab=symbol を持つので subnav 内のみ検査)
+    expect(body).not.toContain('銘柄グリッド')
+    const subnavHtml = body.match(/<nav class="subnav">([\s\S]*?)<\/nav>/)?.[1] ?? ''
+    expect(subnavHtml).not.toContain('tab=symbol')
   })
 
 
@@ -2300,242 +2306,6 @@ describe('renderZoomPresetButtons', () => {
   })
 })
 
-import { loadAllSymbolCharts, renderGridTab } from '../../src/routes/dashboard'
-
-describe('loadAllSymbolCharts', () => {
-  // env stub: loadSymbolChart は内部で env.DB / Yahoo / DO を触るが、ここでは
-  // 「並列実行と error handling」だけを検証したい。loadSymbolChart 自体は
-  // module-level export なのでテストが直接呼ぶ前提では env を fully fake する
-  // のが大袈裟になる。代わりに、本テストは「loadSymbolChart が throw した時
-  // に panel が null + error になる」「全成功時に全 panel が chart を持つ」
-  // を cron-only path (env.DB だけ stub) で確認する。
-  // → 上記は SQL 文の prepare/bind 等を fake する必要があり実装重量が大きい
-  //    ため、純関数的に loadAllSymbolCharts の error 吸収を検証する spy 方式
-  //    に切り替える。
-
-  it('1 銘柄が throw しても他は成功 (per-symbol catch)', async () => {
-    // env.DB === undefined にすると loadSymbolChart が即 'DB binding not
-    // available' で throw する → 全 panel が error 状態。並列性と catch を
-    // 確認するための minimal な black-box テスト。
-    const fakeEnv = {} as unknown as Parameters<typeof loadAllSymbolCharts>[0]
-    const result = await loadAllSymbolCharts(fakeEnv, ['AAA', 'BBB', 'CCC'], {
-      pullbackMax: -0.03, pullbackMin: -0.06, stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10,
-    })
-    expect(result).toHaveLength(3)
-    expect(result.map((r) => r.symbol)).toEqual(['AAA', 'BBB', 'CCC'])
-    // 全件が error (DB binding not available)。chart は null。
-    for (const r of result) {
-      expect(r.chart).toBeNull()
-      expect(r.error).not.toBeNull()
-    }
-  })
-
-  it('symbols 空配列 → 空配列を返す (subrequest 浪費なし)', async () => {
-    const fakeEnv = {} as unknown as Parameters<typeof loadAllSymbolCharts>[0]
-    const result = await loadAllSymbolCharts(fakeEnv, [], {
-      pullbackMax: -0.03, pullbackMin: -0.06, stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10,
-    })
-    expect(result).toEqual([])
-  })
-})
-
-describe('renderGridTab', () => {
-  function makeChart(symbol: string, points: SymbolChartPoint[]): SymbolChartData {
-    return {
-      symbol, points, markers: [], position: null,
-      rules: { pullbackMax: -0.03, pullbackMin: -0.06, stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10 },
-      trendLine: null, intradayBars: [],
-      latestCronPrice: null, latestCronTimestamp: null,
-    }
-  }
-
-  it('全銘柄ぶんの panel <div> と preset toolbar / connect 用 grid container を含む', () => {
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: 'SOXL', chart: makeChart('SOXL', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
-        ]), error: null },
-        { symbol: 'TQQQ', chart: makeChart('TQQQ', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 60, sma50: 55, high20d: 65, low20d: 50 },
-        ]), error: null },
-      ],
-      zoom: null,
-    })
-    expect(html).toContain('id="grid-chart-0"')
-    expect(html).toContain('id="grid-chart-1"')
-    expect(html).toContain('SOXL')
-    expect(html).toContain('TQQQ')
-    expect(html).toContain('class="symbols-grid"')
-    expect(html).toContain('?tab=symbol&symbol=SOXL')
-    expect(html).toContain('?tab=symbol&symbol=TQQQ')
-    // preset toolbar (1D/5D/1M/All) は reference chart 由来で出る
-    expect(html).toContain('class="zoom-preset"')
-    expect(html.match(/class="zoom-preset"/g)?.length).toBe(4)
-  })
-
-  it('load 失敗 panel は error メッセージを表示しても全体は描画される', () => {
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: 'OK', chart: makeChart('OK', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 100, sma50: null, high20d: null, low20d: null },
-        ]), error: null },
-        { symbol: 'BAD', chart: null, error: 'Yahoo fetch timeout' },
-      ],
-      zoom: null,
-    })
-    expect(html).toContain('OK')
-    expect(html).toContain('BAD')
-    expect(html).toContain('Yahoo fetch timeout')
-    expect(html).toContain('取得失敗')
-    // 成功 panel の chart container だけ出る (失敗 panel は chart 描画なし)
-    expect(html).toContain('id="grid-chart-0"')
-    expect(html).not.toContain('id="grid-chart-1"')
-  })
-
-  it('charts 空 → ALLOWED_SYMBOLS が空である旨を案内', () => {
-    const html = renderGridTab({ tab: 'grid', charts: [], zoom: null })
-    expect(html).toContain('ALLOWED_SYMBOLS が空')
-  })
-
-  // inactive 銘柄も active と同じく chart データを load して描画する。
-  // ただし `symbol-inactive` クラス + INACTIVE バッジ + symbol-disabled tooltip
-  // で視覚識別する (PR #229 で外したが operator から復活要望)。
-  it('inactive 銘柄も grid-chart container を持ち、INACTIVE バッジと grayed style で識別される', () => {
-    const universe = makeSymbolUniverse({
-      allowedSymbols: ['SOXL'],
-      inactiveSymbols: ['9697'],
-      symbolNotes: { '9697': 'liquidity dropped' },
-      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
-    })
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: 'SOXL', chart: makeChart('SOXL', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
-        ]), error: null },
-        { symbol: '9697', chart: makeChart('9697', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 4500, sma50: 4400, high20d: 4600, low20d: 4300 },
-        ]), error: null },
-      ],
-      zoom: null,
-      universe,
-    })
-    // active / inactive 双方の chart container が出る (= operator が動向確認できる)
-    expect(html).toContain('id="grid-chart-0"')
-    expect(html).toContain('id="grid-chart-1"')
-    // inactive panel に grayed style class が付与される
-    expect(html).toContain('class="grid-panel symbol-inactive"')
-    // active panel は通常 class
-    expect(html).toContain('class="grid-panel"')
-    // INACTIVE バッジ + tooltip (notes 入り)
-    expect(html).toContain('>INACTIVE<')
-    expect(html).toContain('INACTIVE: liquidity dropped')
-    // 個別タブへの link
-    expect(html).toContain('?tab=symbol&symbol=9697')
-    // header link が symbol-disabled (= 取消線で識別)
-    expect(html).toContain('class="symbol-disabled"')
-  })
-
-  // CodeRabbit #230: inline style は CSS class より優先されるため、inactive panel
-  // では `background:#fff` / `text-decoration:none` の inline 上書きを抑制する。
-  // これで `.grid-panel.symbol-inactive { background:#fafafa; opacity:0.65 }` と
-  // `.symbol-disabled { text-decoration:line-through }` が effective になる。
-  it('inactive panel は inline background:#fff を出力せず、CSS class (symbol-inactive) に任せる', () => {
-    const universe = makeSymbolUniverse({
-      allowedSymbols: ['SOXL'],
-      inactiveSymbols: ['9697'],
-      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
-    })
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: '9697', chart: makeChart('9697', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 4500, sma50: 4400, high20d: 4600, low20d: 4300 },
-        ]), error: null },
-      ],
-      zoom: null,
-      universe,
-    })
-    // inactive panel の wrapper には background:#fff が inline で入らない
-    // (= class 側の background:#fafafa が effective)
-    const panelOpenIdx = html.indexOf('class="grid-panel symbol-inactive"')
-    expect(panelOpenIdx).toBeGreaterThanOrEqual(0)
-    const panelOpenEnd = html.indexOf('>', panelOpenIdx)
-    const panelOpenTag = html.slice(panelOpenIdx, panelOpenEnd)
-    expect(panelOpenTag).not.toContain('background:#fff')
-    // inactive header link には text-decoration:none が inline で入らない
-    // (= symbol-disabled の line-through が effective)
-    const linkIdx = html.indexOf('class="symbol-disabled"')
-    expect(linkIdx).toBeGreaterThanOrEqual(0)
-    const linkEnd = html.indexOf('>', linkIdx)
-    const linkOpenTag = html.slice(linkIdx, linkEnd)
-    expect(linkOpenTag).not.toContain('text-decoration:none')
-  })
-
-  // active panel の inline style は従来どおり残す (regression guard)。
-  it('active panel は従来どおり inline background:#fff と link の text-decoration:none を持つ', () => {
-    const universe = makeSymbolUniverse({
-      allowedSymbols: ['SOXL'],
-      inactiveSymbols: [],
-      symbolCurrency: { SOXL: 'USD' },
-    })
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: 'SOXL', chart: makeChart('SOXL', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
-        ]), error: null },
-      ],
-      zoom: null,
-      universe,
-    })
-    expect(html).toContain('background:#fff')
-    expect(html).toContain('text-decoration:none')
-  })
-
-  it('inactive 銘柄で chart load に失敗した場合は active と同じ error 表示 + INACTIVE バッジを併記', () => {
-    const universe = makeSymbolUniverse({
-      allowedSymbols: ['SOXL'],
-      inactiveSymbols: ['9697'],
-      symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
-    })
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: 'SOXL', chart: makeChart('SOXL', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
-        ]), error: null },
-        { symbol: '9697', chart: null, error: 'subrequest budget exhausted' },
-      ],
-      zoom: null,
-      universe,
-    })
-    // 失敗 panel でも INACTIVE バッジと取得失敗バッジが両方出る
-    expect(html).toContain('symbol-inactive')
-    expect(html).toContain('>INACTIVE<')
-    expect(html).toContain('取得失敗')
-    expect(html).toContain('subrequest budget exhausted')
-    // 失敗 panel に chart container は出ない (active と同挙動)
-    expect(html).not.toContain('id="grid-chart-1"')
-  })
-
-  it('universe が無ければ inactive 識別なし (= 全 panel が active 扱い)', () => {
-    const html = renderGridTab({
-      tab: 'grid',
-      charts: [
-        { symbol: 'SOXL', chart: makeChart('SOXL', [
-          { timestamp: '2026-04-25T00:00:00.000Z', price: 120, sma50: 80, high20d: 130, low20d: 100 },
-        ]), error: null },
-      ],
-      zoom: null,
-    })
-    expect(html).not.toContain('symbol-inactive')
-    expect(html).not.toContain('>INACTIVE<')
-  })
-})
-
 import { renderLastRolledCell } from '../../src/routes/dashboard'
 
 describe('renderLastRolledCell (issue #140)', () => {
@@ -2611,7 +2381,6 @@ describe('renderAlertFilterPills', () => {
 })
 
 import { deriveEntryStatus } from '../../src/trading/strategy/entryStatus'
-import { sortGridChartsByEntryPriority } from '../../src/routes/dashboard'
 
 describe('段階判定の表示 (#452 PR 2)', () => {
   function viewFor(price: number) {
@@ -2631,33 +2400,6 @@ describe('段階判定の表示 (#452 PR 2)', () => {
 
 
 
-  it('grid を ENTRY > HALF > WATCH > NG > cash_parking > データ無し > inactive で並べる', () => {
-    const charts = ['SGOV', 'NODATA', 'NG1', 'WATCH1', 'HALF1', 'ENTRY1', 'OFF'].map((symbol) => ({
-      symbol,
-      chart: null,
-      error: null,
-    }))
-    const universe = makeSymbolUniverse({
-      allowedSymbols: ['SGOV', 'NODATA', 'NG1', 'WATCH1', 'HALF1', 'ENTRY1'],
-      inactiveSymbols: ['OFF'],
-      symbolRole: { SGOV: 'cash_parking' },
-    })
-    const sorted = sortGridChartsByEntryPriority(
-      charts,
-      { ENTRY1: 'ENTRY', HALF1: 'HALF', WATCH1: 'WATCH', NG1: 'NG', SGOV: 'ENTRY' },
-      universe,
-    )
-    // SGOV は status より cash_parking が優先で末尾側、inactive (OFF) が最後。
-    expect(sorted.map((c) => c.symbol)).toEqual([
-      'ENTRY1',
-      'HALF1',
-      'WATCH1',
-      'NG1',
-      'SGOV',
-      'NODATA',
-      'OFF',
-    ])
-  })
 })
 
 import { renderAllocationLine } from '../../src/routes/dashboard'
