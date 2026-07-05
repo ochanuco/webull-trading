@@ -24,19 +24,15 @@ import { esc } from '../shared'
 
 export const ECHARTS_CDN = 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js'
 
-export type ChartsTab = 'overview' | 'quality' | 'symbol' | 'grid'
+export type ChartsTab = 'overview' | 'quality' | 'symbol'
 
 export function parseChartsTab(value: string | undefined): ChartsTab {
-  if (value === 'quality' || value === 'symbol' || value === 'grid') return value
+  if (value === 'quality' || value === 'symbol') return value
+  // 旧 銘柄グリッド (#remove-grid): タブ廃止後の旧 URL / ブックマークは
+  // 個別銘柄タブへ寄せる (銘柄横断の視点は rail で代替)。
+  if (value === 'grid') return 'symbol'
   return 'overview'
 }
-
-export const CHART_TABS: Array<{ id: ChartsTab; label: string; hint: string }> = [
-  { id: 'overview', label: '概要', hint: 'エクイティカーブ + ドローダウン (戦略を続けるか止めるかの判断)' },
-  { id: 'quality', label: '取引品質', hint: 'PnL 分布 + 統計 + Decision breakdown (エッジ / rule の機能性)' },
-  { id: 'symbol', label: '個別銘柄', hint: '価格 + SMA50 + entry/exit (rule と現実の整合)' },
-  { id: 'grid', label: '銘柄グリッド', hint: 'ALLOWED_SYMBOLS を 4 列 grid で並列表示。dataZoom は全 panel 同期 (Datadog 風)' },
-]
 
 export interface ChartsBodyOverview {
   tab: 'overview'
@@ -194,58 +190,10 @@ export interface SymbolPolicySummary {
   cashFallbackSymbols: string[] | null
 }
 
-/**
- * 銘柄グリッドビュー: ALLOWED_SYMBOLS を 4 列 (responsive) grid で並列表示。
- * `echarts.connect` で **dataZoom + axisPointer (縦線)** を全 panel 同期、
- * **tooltip popup は hover 中の panel だけ** に表示する (formatter 内で
- * window.__gridHoveredPanelId !== elId の panel は空文字を返し popup を抑制、
- * PR #242)。preset zoom (1D/5D/1M/All) も dispatchAction で全 chart に配信。
- */
-export interface ChartsBodyGrid {
-  tab: 'grid'
-  /**
-   * Grid に表示する全銘柄 (active + inactive) の SymbolChartData。load 失敗時は
-   * `chart === null`。inactive 銘柄も同じ Map から render し、panel header に
-   * INACTIVE バッジ + grayed style を付与して識別する (`isSymbolInactive` で判定)。
-   *
-   * PR #229 で inactive を grid から外したが、operator から「inactive 銘柄も
-   * 動向確認したい」要望があったため復活。subrequest budget は per-symbol catch
-   * で graceful degrade (個別 panel が空になるだけ、grid 全体は描画される)。
-   */
-  charts: Array<{ symbol: string; chart: SymbolChartData | null; error: string | null }>
-  /** dataZoom 初期範囲。null なら全期間 */
-  zoom: { from: Date; to: Date } | null
-  /** panel header の銘柄表示を JP 銘柄向け 番号-会社名 形式にするための universe。 */
-  universe?: SymbolUniverse | null
-  /** symbol → 段階判定 (#452 PR 2)。評価データ無しの銘柄は不在。panel badge 用。 */
-  entryStatuses?: Record<string, EntryStatus>
-  /** symbol → 条件連動配分 (#452 Layer 3)。target weight 関連銘柄のみ。 */
-  allocations?: Record<string, SymbolAllocation>
-}
-
 export type ChartsBodyArgs =
   | ChartsBodyOverview
   | ChartsBodyQuality
   | ChartsBodySymbol
-  | ChartsBodyGrid
-
-/**
- * チャートの view 切替 (概要 / 取引品質 / 個別銘柄 / 銘柄グリッド)。
- * header 2段目の subnav として出す (ページ本文の tab strip からサブメニュー化)。
- * 現在 tab には active 装飾、他は通常リンク。
- */
-export function renderChartsSubnav(active: ChartsTab, focusSymbol?: string): string {
-  return CHART_TABS.map((t) => {
-    if (t.id === active) {
-      return `<span class="subnav-link active" title="${esc(t.hint)}">${esc(t.label)}</span>`
-    }
-    let href = `/dashboard/charts?tab=${t.id}`
-    if (t.id === 'symbol' && focusSymbol) {
-      href += `&symbol=${encodeURIComponent(focusSymbol)}`
-    }
-    return `<a class="subnav-link" href="${href}" title="${esc(t.hint)}">${esc(t.label)}</a>`
-  }).join('')
-}
 
 /**
  * dataZoom プリセット (1D / 5D / 1M / All)。TradingView ライクの 1 click ズーム。

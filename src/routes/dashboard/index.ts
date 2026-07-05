@@ -20,14 +20,9 @@ import {
 import { loadVixRegimeSnapshot } from '../../infrastructure/notification/vixRegimeChange'
 import type { PortfolioEquitySnapshotRow } from '../../infrastructure/db/schema'
 import { buildBuyabilityView } from '../../trading/strategy/entryDistance'
-import {
-  deriveEntryStatus,
-  deriveEntryStatusFromIndicators,
-  type EntryStatus,
-} from '../../trading/strategy/entryStatus'
+import { deriveEntryStatus } from '../../trading/strategy/entryStatus'
 import { buildSymbolRules } from '../../trading/strategy/symbolRuleResolution'
 import { evaluatePairRegime, type PairRegimeDecision } from '../../trading/strategy/pairRegime'
-import { computeConditionalAllocation } from '../../trading/strategy/conditionalAllocation'
 import type { SymbolRule } from '../../trading/strategy/strategies/PullbackUptrendStrategy'
 import { and, asc, desc, eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../../trading/state/PortfolioStateClient'
@@ -72,12 +67,12 @@ import { configBody } from './config'
 import { aggregateReasonTrend, buildDecisionMatrix, cronBody, cronDecisionJson, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
-import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderChartsSubnav, strategyParamsFromGlobal } from './charts/shared'
-import { type SymbolChartRules, buildSymbolChartPacket, loadAllSymbolCharts, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
+import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, strategyParamsFromGlobal } from './charts/shared'
+import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
 import { type EquityTradeMarker, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers } from './charts/equity'
 import { loadBenchmarkSeries } from './charts/benchmark'
 import { computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
-import { chartsBody, sortGridChartsByEntryPriority } from './charts/grid'
+import { chartsBody } from './charts/symbol'
 import { type SymbolsListFilter, findSymbolConfigForView, loadAllSymbolConfigRows, symbolFormBody, symbolMapEditorBody, symbolsListBody } from './symbols'
 import { type EventsEarningsFormEcho, type EventsMacroFormEcho, eventsBody, eventsDisplayRange, loadEarningsInRange, renderEventsWithError, renderEventsWithNotice, validateEarningsForm, validateMacroForm, writeEventsAuditLog } from './events'
 export { safeJsonScript } from './shared'
@@ -92,7 +87,7 @@ export type { DecisionRow } from './cron'
 export { renderAlertFilterPills } from './alerts'
 export { DEFAULT_ZOOM_WINDOW_MS, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderZoomPresetButtons } from './charts/shared'
 export type { ChartsBodySymbol, ChartsTab, StrategyParamsSnapshot, SymbolPolicySummary } from './charts/shared'
-export { aggregateDailyCloses, anchorJstMidnight, computeChartWindowDays, computeLinearRegressionLine, computeRollingSma, densifyHorizontalLine, densifyTrendLine, deriveOpenPosition, extractSma50, fetchYahooBarsForChart, loadAllSymbolCharts, loadSymbolChart, mergeYahooAndCronPoints, pairClosedTrades, pickDefaultSymbol, resolveFillSide, selectLatestCronSnapshot } from './charts/loaders'
+export { aggregateDailyCloses, anchorJstMidnight, computeChartWindowDays, computeLinearRegressionLine, computeRollingSma, densifyHorizontalLine, densifyTrendLine, deriveOpenPosition, extractSma50, fetchYahooBarsForChart, loadSymbolChart, mergeYahooAndCronPoints, pairClosedTrades, pickDefaultSymbol, resolveFillSide, selectLatestCronSnapshot } from './charts/loaders'
 export type { ClosedTradeSpan, OhlcBar, PivotPoint, SymbolChartData, SymbolChartDecision, SymbolChartMarker, SymbolChartPoint, SymbolChartPosition, SymbolChartRules, TrendLineSegment } from './charts/loaders'
 export { buildOverviewChartData, computeEquitySeries, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers, renderPeriodReturnsTable } from './charts/equity'
 export type { EquityPoint, EquityTradeMarker, MonthlyReturn, OverviewChartData, PeriodReturn } from './charts/equity'
@@ -102,8 +97,19 @@ export { aggregateDecisionRows, computePnlHistogram, computeTradeStats, loadDeci
 export type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './charts/quality'
 export { prevDailyClose, renderAllocationLine, renderBuyabilityPanel, renderDecisionPlotCaption, renderPairRegimeLine, renderPriceHeader, renderStrategyParamsPanel, renderSymbolPolicyLine, renderSymbolTab } from './charts/symbol'
 export type { BuyabilityPanelContext } from './charts/symbol'
-export { renderGridTab, sortGridChartsByEntryPriority } from './charts/grid'
 export { assignPairColors, computeBudgetUsage, orderRowsByPair, pairRoles, renderSymbolRoleCell, symbolMapEditorBody } from './symbols'
+
+/**
+ * /charts の subnav (#remove-grid): チャート専用 subnav は廃止し、overview
+ * (資産推移) / quality (取引品質) は trades / cron / alerts と同じ「履歴・分析」
+ * subnav に統一する (画面によってメニュー構成が変わる混乱を避ける)。
+ * 個別銘柄タブは「銘柄」nav + 銘柄レールが導線なので subnav なし。
+ */
+function chartsPageSubnav(tab: ReturnType<typeof parseChartsTab>): string {
+  if (tab === 'overview') return renderAnalysisSubnav('equity')
+  if (tab === 'quality') return renderAnalysisSubnav('quality')
+  return ''
+}
 
 /**
  * Read-only operator dashboard (#121). Server-rendered HTML via Hono — no
@@ -384,7 +390,7 @@ export const dashboard = new Hono<DashboardBindings>()
           c,
           'チャート',
           unavailable('DB not bound'),
-          renderChartsSubnav(parseChartsTab(c.req.query('tab'))),
+          chartsPageSubnav(parseChartsTab(c.req.query('tab'))),
         ),
       )
     }
@@ -427,7 +433,7 @@ export const dashboard = new Hono<DashboardBindings>()
               periodReturns: computePeriodReturns(equity, now),
               monthlyReturns: computeMonthlyReturns(equity),
             }),
-            renderChartsSubnav(tab),
+            chartsPageSubnav(tab),
           ),
         )
       }
@@ -447,99 +453,14 @@ export const dashboard = new Hono<DashboardBindings>()
               stats: computeTradeStats(pnls),
               histogram: computePnlHistogram(pnls),
             }),
-            renderChartsSubnav(tab),
+            chartsPageSubnav(tab),
           ),
         )
       }
       // ?from / ?to (ISO UTC) で chart x-axis のズーム範囲を URL に持つ。
-      // grid / symbol 共通: tab 切替・銘柄切替を跨いで zoom range を維持。
+      // 銘柄切替を跨いで zoom range を維持。
       const zoomFrom = parseIsoTimestamp(c.req.query('from'))
       const zoomTo = parseIsoTimestamp(c.req.query('to'))
-      if (tab === 'grid') {
-        const [universe, global] = await Promise.all([
-          loadSymbolUniverse(c.env),
-          loadGlobalConfigFrom(c.env, c.get('requestId')),
-        ])
-        const rules: SymbolChartRules = {
-          pullbackMax: global.pullbackDefaultPullbackMax,
-          pullbackMin: global.pullbackDefaultPullbackMin,
-          stopPct: global.pullbackDefaultStopPct,
-          takeProfitPct: global.pullbackDefaultTakeProfitPct,
-          timeStopDays: global.pullbackDefaultTimeStopDays,
-        }
-        // active + inactive 双方の chart を load する。inactive 銘柄もチャートで
-        // 動向確認したい (PR #229 で grid から外したが operator から復帰要望)。
-        // `loadAllSymbolCharts` は per-symbol catch (PR #197) で 1 銘柄が失敗
-        // しても他は OK。Workers subrequest budget を超えた場合も該当 panel が
-        // 個別 error 表示になるだけで grid 全体は描画される。視覚識別 (INACTIVE
-        // バッジ + grayed style) は `renderGridTab` 側で symbol 単位に付与する。
-        const allGridSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
-        const charts = await loadAllSymbolCharts(c.env, allGridSymbols, rules)
-        // 段階判定 (#452 PR 2): 各銘柄の最新 eval indicators を cron と同じ
-        // effective rule (global → role preset → override) で 4 段階判定し、
-        // panel badge + 表示優先度ソート (ENTRY > HALF > WATCH > NG >
-        // cash_parking、inactive / データ無しは末尾) に使う。
-        const gridDefaultRule: SymbolRule = {
-          stopPct: global.pullbackDefaultStopPct,
-          takeProfitPct: global.pullbackDefaultTakeProfitPct,
-          timeStopDays: global.pullbackDefaultTimeStopDays,
-          pullbackMax: global.pullbackDefaultPullbackMax,
-          pullbackMin: global.pullbackDefaultPullbackMin,
-          minReturn50d: global.pullbackDefaultMinReturn50d,
-          requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
-          kAtr: global.pullbackDefaultKAtr,
-          maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
-          maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
-        }
-        const gridRules = buildSymbolRules(gridDefaultRule, universe)
-        const entryStatuses: Record<string, EntryStatus> = {}
-        for (const entry of charts) {
-          const lastEval = entry.chart?.evalIndicators?.[entry.chart.evalIndicators.length - 1]
-          if (!lastEval) continue
-          entryStatuses[entry.symbol] = deriveEntryStatusFromIndicators(
-            lastEval.indicators,
-            gridRules[entry.symbol] ?? gridDefaultRule,
-          ).status
-        }
-        // 条件連動配分 (#452 Layer 3): target/active を並記する (「設定上 5% だが
-        // 現在は SGOV に退避中」の可視化)。cron と同じ pure 関数で計算する。
-        const heldSymbols = new Set(
-          charts.filter((entry) => entry.chart?.position != null).map((entry) => entry.symbol),
-        )
-        const allocationView = computeConditionalAllocation({
-          targetWeights: universe.symbolBudgetAllocPct,
-          policy: {
-            entryRequired: new Set(Object.keys(universe.symbolEntryRequired)),
-            alwaysActive: new Set(Object.keys(universe.symbolAlwaysActive)),
-            cashFallback: universe.symbolCashFallback,
-          },
-          entryStatuses,
-          heldSymbols,
-          symbolCurrency: universe.symbolCurrency,
-    inversePairs: universe.inversePairs,
-        })
-        const sortedCharts = sortGridChartsByEntryPriority(charts, entryStatuses, universe)
-        // grid の zoom 基準: 全 panel 共通の dataZoom 同期があるため、最初に
-        // load 成功した chart の lastTimestamp を基準に直近 7 日 (default) を
-        // 採用する。URL ?from / ?to があればそれを優先 (既存と同挙動)。
-        const referenceChart = sortedCharts.find((c) => c.chart !== null)?.chart ?? null
-        const zoom = computeZoomRange(zoomFrom, zoomTo, referenceChart)
-        return c.html(
-          renderLayout(
-            c,
-            'チャート',
-            chartsBody({
-              tab,
-              charts: sortedCharts,
-              zoom,
-              universe,
-              entryStatuses,
-              allocations: allocationView.bySymbol,
-            }),
-            renderChartsSubnav(tab),
-          ),
-        )
-      }
       // tab === 'symbol'
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
       const [universe, global] = await Promise.all([
@@ -669,7 +590,7 @@ export const dashboard = new Hono<DashboardBindings>()
                 }
               : null,
           }),
-          renderChartsSubnav(tab, focusSymbol ?? undefined),
+          '', // 個別銘柄タブは「銘柄」nav + 銘柄レールが導線 (#remove-grid で charts subnav 廃止)
         ),
       )
     } catch (err) {
