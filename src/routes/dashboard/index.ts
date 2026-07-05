@@ -11,7 +11,6 @@ import {
   getTradableStatusForSymbol,
   loadTradableAllowlist,
 } from '../../infrastructure/db/tradableInstrumentsRepo'
-import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
 import { loadRecentAudit, type LoadAuditOptions } from '../../infrastructure/db/configAuditLog'
 import {
   loadRecentAlerts,
@@ -29,7 +28,7 @@ import { buildSymbolRules } from '../../trading/strategy/symbolRuleResolution'
 import { evaluatePairRegime, type PairRegimeDecision } from '../../trading/strategy/pairRegime'
 import { computeConditionalAllocation } from '../../trading/strategy/conditionalAllocation'
 import type { SymbolRule } from '../../trading/strategy/strategies/PullbackUptrendStrategy'
-import { and, asc, desc, eq } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { PortfolioStateClient } from '../../trading/state/PortfolioStateClient'
 import { SymbolStateClient } from '../../trading/state/SymbolStateClient'
 import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
@@ -69,7 +68,7 @@ import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, 
 import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
-import { aggregateReasonTrend, buildDecisionMatrix, cronBody, cronDecisionJson, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows } from './cron'
+import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
 import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderChartsSubnav, strategyParamsFromGlobal } from './charts/shared'
@@ -680,73 +679,14 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
     }
-    const db = createDb(c.env.DB)
-    const requestedRequestId = c.req.query('requestId')?.trim()
-    const requestedDecisionId = c.req.query('decisionId')?.trim()
+    // 本体は MCP `get_cron_decisions` と共用の runCronJsonExport (#553)。
+    // route からは requestId / decisionId のみ渡す — 移設前と出力 byte 一致。
     try {
-      let decisionId: number | undefined
-      if (requestedDecisionId && requestedDecisionId.length > 0) {
-        if (!/^[1-9]\d*$/.test(requestedDecisionId)) {
-          return jsonPretty({ error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, 400)
-        }
-        decisionId = Number(requestedDecisionId)
-        if (!Number.isSafeInteger(decisionId) || decisionId <= 0) {
-          return jsonPretty({ error: 'invalid_decision_id', message: 'decisionId must be a positive integer' }, 400)
-        }
-      }
-      let requestId = requestedRequestId && requestedRequestId.length > 0
-        ? requestedRequestId
-        : undefined
-      if (!requestId && decisionId === undefined) {
-        const latest = await db
-          .select({ requestId: strategyDecisionLog.requestId })
-          .from(strategyDecisionLog)
-          .orderBy(desc(strategyDecisionLog.id))
-          .limit(50)
-        requestId = latest.find((row) => row.requestId !== null)?.requestId ?? undefined
-      }
-      if (!requestId && decisionId === undefined) {
-        return jsonPretty({ error: 'no_cron_logs', message: 'strategy_decision_log has no request_id rows' }, 404)
-      }
-
-      const filter = decisionId !== undefined
-        ? eq(strategyDecisionLog.id, decisionId)
-        : eq(strategyDecisionLog.requestId, requestId as string)
-      const rows = await db
-        .select({
-          id: strategyDecisionLog.id,
-          timestamp: strategyDecisionLog.timestamp,
-          requestId: strategyDecisionLog.requestId,
-          symbol: strategyDecisionLog.symbol,
-          decision: strategyDecisionLog.decision,
-          reason: strategyDecisionLog.reason,
-          price: strategyDecisionLog.price,
-          indicatorsJson: strategyDecisionLog.indicatorsJson,
-          clientOrderId: strategyDecisionLog.clientOrderId,
-          traceJson: strategyDecisionLog.traceJson,
-          filledPrice: tradeJournal.filledPrice,
-          filledQty: tradeJournal.filledQty,
-          realizedPnl: tradeJournal.realizedPnl,
-          brokerStatus: tradeJournal.brokerStatus,
-        })
-        .from(strategyDecisionLog)
-        .leftJoin(
-          tradeJournal,
-          and(
-            eq(strategyDecisionLog.clientOrderId, tradeJournal.clientOrderId),
-            eq(tradeJournal.tradeEventType, 'post_submit'),
-          ),
-        )
-        .where(filter)
-        .orderBy(asc(strategyDecisionLog.id))
-
-      return jsonPretty({
-        schema: 'dashboard_cron_export.v1',
-        exportedAt: new Date().toISOString(),
-        ...(decisionId !== undefined ? { decisionId } : { requestId }),
-        rowCount: rows.length,
-        decisions: rows.map(cronDecisionJson),
+      const { payload, status } = await runCronJsonExport(createDb(c.env.DB), {
+        requestId: c.req.query('requestId'),
+        decisionId: c.req.query('decisionId'),
       })
+      return jsonPretty(payload, status)
     } catch (err) {
       return jsonPretty({ error: 'cron_json_export_failed', message: messageOf(err) }, 500)
     }
