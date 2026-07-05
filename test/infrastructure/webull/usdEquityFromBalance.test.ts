@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { usdEquityFromBalance } from '../../../src/trading/portfolio/usdEquityFromBalance'
+import { usdEquityFromBalance } from '../../../src/infrastructure/webull/usdEquityFromBalance'
 import type { WebullAccountBalanceDto } from '../../../src/infrastructure/webull/dto'
 
 describe('usdEquityFromBalance', () => {

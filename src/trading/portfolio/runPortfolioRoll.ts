@@ -14,12 +14,9 @@ import {
   recordPortfolioEquitySnapshot,
   type RecordPortfolioEquitySnapshotPayload,
 } from '../../infrastructure/db/portfolioEquitySnapshotRepo'
-import type { WebullAccountBalanceDto } from '../../infrastructure/webull/dto'
-import { resolveAccessToken } from '../../infrastructure/webull/resolveAccessToken'
-import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
+import { fetchUsdEquity } from '../../infrastructure/webull/usdEquityFromBalance'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import type { PortfolioStore } from '../state/PortfolioStore'
-import { usdEquityFromBalance } from './usdEquityFromBalance'
 
 /**
  * EOD daily rollover (issue #140 / #319)。`PortfolioStateDO.rollDaily()` を一発
@@ -48,7 +45,8 @@ import { usdEquityFromBalance } from './usdEquityFromBalance'
  *     放置すると実口座資産と乖離し、`computeDrawdownRiskScale` の分母が壊れる
  *     (実績: 円建て値を誤 seed → 分母が実資産の ~47 倍)。
  *   - roll 成功後、`global_config.dryRun` が `false` の時だけ Webull 残高 API
- *     から USD 建て資産 (`usdEquityFromBalance`) を取得し
+ *     から USD 建て資産 (`fetchUsdEquity` — infrastructure 層に閉じた
+ *     token 解決 / broker fetch / DTO parse) を取得し
  *     `store.seedDailyStartEquity()` で上書きする。
  *   - dryRun / config load 失敗 / token 失敗 / broker fetch 失敗 / parse null
  *     はいずれも fail-safe に re-seed を skip し、roll 済みの値をそのまま
@@ -67,15 +65,11 @@ export interface RunPortfolioRollDeps {
   /** Override for unit tests — defaults to `loadGlobalConfigFrom(env, requestId)`.
    * dryRun フラグだけ見るので戻り値は最小限の shape。 */
   loadGlobalConfig?: (env: Env, requestId: string) => Promise<{ dryRun: boolean }>
-  /** Override for unit tests — defaults to `resolveAccessToken(env)`. */
-  resolveAccessToken?: (env: Env) => Promise<string | undefined>
   /** Override for unit tests — defaults to
-   * `createWebullReadClient(env, { accessToken })`. 必要なのは
-   * `getAccountBalance()` だけなので narrow な shape で受ける。 */
-  createReadClient?: (
-    env: Env,
-    opts: { accessToken?: string },
-  ) => { getAccountBalance(): Promise<WebullAccountBalanceDto> }
+   * `fetchUsdEquity(env)` (`resolveAccessToken` → `createWebullReadClient` →
+   * `getAccountBalance` → `usdEquityFromBalance`, all contained in the
+   * infrastructure layer so trading code never sees the raw Webull DTO). */
+  fetchUsdEquity?: (env: Env) => Promise<number | null>
   /** Override for unit tests — defaults to `recordPortfolioEquitySnapshot`. */
   recordSnapshot?: (
     d1: D1Database,
@@ -198,14 +192,8 @@ async function reseedDailyStartEquityFromBroker(
 
   let equity: number | null
   try {
-    const accessToken = deps.resolveAccessToken
-      ? await deps.resolveAccessToken(env)
-      : await resolveAccessToken(env)
-    const readClient = deps.createReadClient
-      ? deps.createReadClient(env, { accessToken })
-      : createWebullReadClient(env, { accessToken })
-    const balance = await readClient.getAccountBalance()
-    equity = usdEquityFromBalance(balance)
+    const fetchEquity = deps.fetchUsdEquity ?? fetchUsdEquity
+    equity = await fetchEquity(env)
   } catch (error) {
     console.error(
       JSON.stringify({

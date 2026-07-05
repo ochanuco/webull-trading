@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runPortfolioRoll } from '../src/trading/portfolio/runPortfolioRoll'
 import type { Env } from '../src/config/env'
-import type { WebullAccountBalanceDto } from '../src/infrastructure/webull/dto'
 import type { PortfolioState } from '../src/trading/state/portfolioTypes'
 import type { PortfolioStore } from '../src/trading/state/PortfolioStore'
 
@@ -291,37 +290,38 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
   })
 
+  // Shared fixture for the two describe blocks below — both exercise the
+  // post-rollDaily() side effects (broker re-seed / D1 snapshot) against the
+  // same before/after roll transition, so a single `rollBefore`/`rollAfter`
+  // pair avoids duplicating the PortfolioState literals (CodeRabbit #574).
+  const rollBefore: PortfolioState = {
+    dailyStartEquity: 10_000,
+    dailyRealizedPnl: -50,
+    appliedClientOrderIds: [],
+    tradingDisabledUntil: null,
+    lastRolledAt: null,
+    openExposureUsd: 0,
+    openExposureJpy: 0,
+    updatedAt: '2026-04-25T22:00:00.000Z',
+  }
+  const rollAfter: PortfolioState = {
+    dailyStartEquity: 9_950,
+    dailyRealizedPnl: 0,
+    appliedClientOrderIds: [],
+    tradingDisabledUntil: null,
+    lastRolledAt: '2026-04-25T22:00:00.000Z',
+    openExposureUsd: 0,
+    openExposureJpy: 0,
+    updatedAt: '2026-04-25T22:00:00.000Z',
+  }
+
   // Broker equity auto-reseed: EOD roll re-seeds `dailyStartEquity` from the
   // Webull balance API so the drawdown gate's denominator tracks the real
-  // account instead of a stale manual seed.
+  // account instead of a stale manual seed. The broker orchestration itself
+  // (token resolve -> read client -> getAccountBalance -> parse) lives in
+  // `fetchUsdEquity` (infrastructure/webull) — these tests only stub that
+  // single seam, per the `RunPortfolioRollDeps.fetchUsdEquity` override.
   describe('broker equity re-seed (dailyStartEquity auto-seed)', () => {
-    const before: PortfolioState = {
-      dailyStartEquity: 10_000,
-      dailyRealizedPnl: -50,
-      appliedClientOrderIds: [],
-      tradingDisabledUntil: null,
-      lastRolledAt: null,
-      openExposureUsd: 0,
-      openExposureJpy: 0,
-      updatedAt: '2026-04-25T22:00:00.000Z',
-    }
-    const after: PortfolioState = {
-      dailyStartEquity: 9_950,
-      dailyRealizedPnl: 0,
-      appliedClientOrderIds: [],
-      tradingDisabledUntil: null,
-      lastRolledAt: '2026-04-25T22:00:00.000Z',
-      openExposureUsd: 0,
-      openExposureJpy: 0,
-      updatedAt: '2026-04-25T22:00:00.000Z',
-    }
-
-    function fakeUsdBalance(cash: string, marketValue: string): WebullAccountBalanceDto {
-      return {
-        account_currency_assets: [{ currency: 'USD', cash_balance: cash, market_value: marketValue }],
-      }
-    }
-
     function warnLogsMatching(reasonSubstring: string): Record<string, unknown>[] {
       return warnSpy.mock.calls
         .map((args: unknown[]) => args[0])
@@ -337,18 +337,18 @@ describe('runPortfolioRoll (issue #140)', () => {
     }
 
     it('dryRun=true: never touches the broker and keeps the rolled equity', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
-      let readClientCalls = 0
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
+      let fetchUsdEquityCalls = 0
       await runPortfolioRoll(baseEnv, 'req-dryrun', {
         portfolioStoreFactory: () => fixture.store,
         now: nowOnSessionDay,
         loadGlobalConfig: async () => ({ dryRun: true }),
-        createReadClient: () => {
-          readClientCalls++
-          return { getAccountBalance: async () => fakeUsdBalance('1', '1') }
+        fetchUsdEquity: async () => {
+          fetchUsdEquityCalls++
+          return 2
         },
       })
-      expect(readClientCalls).toBe(0)
+      expect(fetchUsdEquityCalls).toBe(0)
       expect(fixture.seedCalls).toEqual([])
       const skipped = warnLogsMatching('portfolio_equity_reseed_skipped')
       expect(skipped).toHaveLength(1)
@@ -356,7 +356,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
 
     it('global config load failure: skips the reseed without throwing', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       await expect(
         runPortfolioRoll(baseEnv, 'req-cfgfail', {
           portfolioStoreFactory: () => fixture.store,
@@ -373,18 +373,15 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
 
     it('broker fetch failure: keeps the rolled equity and does not throw', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       await expect(
         runPortfolioRoll(baseEnv, 'req-fetchfail', {
           portfolioStoreFactory: () => fixture.store,
           now: nowOnSessionDay,
           loadGlobalConfig: async () => ({ dryRun: false }),
-          resolveAccessToken: async () => 'tok',
-          createReadClient: () => ({
-            getAccountBalance: async () => {
-              throw new Error('broker down')
-            },
-          }),
+          fetchUsdEquity: async () => {
+            throw new Error('broker down')
+          },
         }),
       ).resolves.toBeUndefined()
       expect(fixture.seedCalls).toEqual([])
@@ -394,13 +391,12 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
 
     it('parsed equity null (no USD entry): keeps the rolled equity', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       await runPortfolioRoll(baseEnv, 'req-nousd', {
         portfolioStoreFactory: () => fixture.store,
         now: nowOnSessionDay,
         loadGlobalConfig: async () => ({ dryRun: false }),
-        resolveAccessToken: async () => 'tok',
-        createReadClient: () => ({ getAccountBalance: async () => ({}) }),
+        fetchUsdEquity: async () => null,
       })
       expect(fixture.seedCalls).toEqual([])
       const skipped = warnLogsMatching('portfolio_equity_reseed_skipped')
@@ -409,13 +405,12 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
 
     it('success: seeds dailyStartEquity with the broker USD equity and logs it', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       await runPortfolioRoll(baseEnv, 'req-success', {
         portfolioStoreFactory: () => fixture.store,
         now: nowOnSessionDay,
         loadGlobalConfig: async () => ({ dryRun: false }),
-        resolveAccessToken: async () => 'tok',
-        createReadClient: () => ({ getAccountBalance: async () => fakeUsdBalance('500', '1000') }),
+        fetchUsdEquity: async () => 1500,
       })
       expect(fixture.seedCalls).toEqual([1500])
       const logs = logSpy.mock.calls
@@ -426,36 +421,15 @@ describe('runPortfolioRoll (issue #140)', () => {
       expect(payload).toMatchObject({
         event: 'portfolio_equity_reseeded',
         requestId: 'req-success',
-        rolledEquity: after.dailyStartEquity,
+        rolledEquity: rollAfter.dailyStartEquity,
         brokerEquity: 1500,
       })
     })
   })
 
   describe('daily equity snapshot (dashboard time series)', () => {
-    const before: PortfolioState = {
-      dailyStartEquity: 10_000,
-      dailyRealizedPnl: -50,
-      appliedClientOrderIds: [],
-      tradingDisabledUntil: null,
-      lastRolledAt: null,
-      openExposureUsd: 0,
-      openExposureJpy: 0,
-      updatedAt: '2026-04-25T22:00:00.000Z',
-    }
-    const after: PortfolioState = {
-      dailyStartEquity: 9_950,
-      dailyRealizedPnl: 0,
-      appliedClientOrderIds: [],
-      tradingDisabledUntil: null,
-      lastRolledAt: '2026-04-25T22:00:00.000Z',
-      openExposureUsd: 0,
-      openExposureJpy: 0,
-      updatedAt: '2026-04-25T22:00:00.000Z',
-    }
-
     it('does not write a snapshot when env.DB is not bound', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       let snapshotCalls = 0
       await runPortfolioRoll(baseEnv, 'req-nodb', {
         portfolioStoreFactory: () => fixture.store,
@@ -469,7 +443,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     })
 
     it('writes a snapshot using the pre-roll (before) equity/pnl regardless of reseed outcome', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       const snapshotCalls: unknown[] = []
       const envWithDb = { ...baseEnv, DB: {} } as unknown as Env
       await runPortfolioRoll(envWithDb, 'req-snap', {
@@ -482,19 +456,19 @@ describe('runPortfolioRoll (issue #140)', () => {
       })
       expect(snapshotCalls).toEqual([
         {
-          snapshotAt: after.updatedAt,
-          dailyStartEquityUsd: before.dailyStartEquity,
+          snapshotAt: rollAfter.updatedAt,
+          dailyStartEquityUsd: rollBefore.dailyStartEquity,
           dailyStartEquityJpy: null,
-          dailyRealizedPnlUsd: before.dailyRealizedPnl,
+          dailyRealizedPnlUsd: rollBefore.dailyRealizedPnl,
           dailyRealizedPnlJpy: null,
-          drawdownPct: before.dailyRealizedPnl / before.dailyStartEquity,
+          drawdownPct: rollBefore.dailyRealizedPnl / rollBefore.dailyStartEquity,
           requestId: 'req-snap',
         },
       ])
     })
 
     it('snapshot write failure logs an error-level event and does not throw', async () => {
-      const fixture = makeStoreWithSeedCapture({ before, after })
+      const fixture = makeStoreWithSeedCapture({ before: rollBefore, after: rollAfter })
       const envWithDb = { ...baseEnv, DB: {} } as unknown as Env
       await expect(
         runPortfolioRoll(envWithDb, 'req-snapfail', {

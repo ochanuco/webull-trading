@@ -1,4 +1,7 @@
-import type { WebullAccountBalanceDto } from '../../infrastructure/webull/dto'
+import type { Env } from '../../config/env'
+import type { WebullAccountBalanceDto } from './dto'
+import { resolveAccessToken } from './resolveAccessToken'
+import { createWebullReadClient } from './WebullReadClient'
 
 /**
  * `WebullAccountBalanceDto.account_currency_assets` から USD 建て資産
@@ -39,4 +42,22 @@ export function usdEquityFromBalance(balance: WebullAccountBalanceDto): number |
   if (total <= 0) return null
 
   return total
+}
+
+/**
+ * `usdEquityFromBalance` の live 経路をまとめた helper (CodeRabbit review
+ * #574: raw Webull DTO を trading 層に漏らさないための境界)。
+ * `resolveAccessToken(env)` → `createWebullReadClient(env, { accessToken })`
+ * → `getAccountBalance()` → `usdEquityFromBalance()` を一括で行う。
+ *
+ * - token 解決 / broker fetch が失敗した場合はそのまま例外を投げる (呼び出し
+ *   側 = `runPortfolioRoll` が `broker_fetch_failed` として catch する設計)。
+ * - broker からは 200 で返ってきたが USD 建て資産を parse できない場合は
+ *   `usdEquityFromBalance` 同様 `null` を返す (捏造しない)。
+ */
+export async function fetchUsdEquity(env: Env): Promise<number | null> {
+  const accessToken = await resolveAccessToken(env)
+  const readClient = createWebullReadClient(env, { accessToken })
+  const balance = await readClient.getAccountBalance()
+  return usdEquityFromBalance(balance)
 }
