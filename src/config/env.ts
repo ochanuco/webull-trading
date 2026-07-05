@@ -393,9 +393,13 @@ export interface Env {
 //   未設定 AND `Cf-Access-Jwt-Assertion` ヘッダ無しの時のみ、この文字列を actor として
 //   stamp する。**deployed env では絶対に設定禁止** (上記 gate で実質無効化されるが、
 //   設定自体しない方が誤爆リスクが少ない)。
+// - CF_ACCESS_MCP_AUD: /mcp 専用 Access application (path 限定 + Service Auth
+//   policy) の AUD tag (#553)。未設定時は CF_ACCESS_AUD に fallback。専用 app を
+//   分ける理由は service token の権限を read-only な /mcp に限定するため。
 export interface Env {
   CF_ACCESS_TEAM_DOMAIN?: string
   CF_ACCESS_AUD?: string
+  CF_ACCESS_MCP_AUD?: string
   ACCESS_DEV_BYPASS_USER?: string
 }
 
