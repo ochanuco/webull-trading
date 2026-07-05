@@ -69,13 +69,24 @@ function pickActor(payload: AccessClaims): string {
   return 'unknown'
 }
 
-export function accessJwtMiddleware(): MiddlewareHandler<{
+/**
+ * `audience: 'mcp'` は /mcp 専用の Access application (path 限定 + Service Auth
+ * policy) の AUD (`CF_ACCESS_MCP_AUD`) を検証する。専用 app を分けるのは、
+ * service token の届く範囲を read-only な /mcp に限定するため (メインの
+ * trading app に Service Auth を足すと token で /admin の書き込み系まで
+ * 通ってしまう)。`CF_ACCESS_MCP_AUD` 未設定時は `CF_ACCESS_AUD` に fallback
+ * (メイン app に Service Auth policy を足す運用も許容する)。
+ */
+export function accessJwtMiddleware(opts?: { audience?: 'default' | 'mcp' }): MiddlewareHandler<{
   Bindings: Env
   Variables: AccessJwtVariables
 }> {
   return async (c, next) => {
     const teamDomain = c.env.CF_ACCESS_TEAM_DOMAIN?.trim()
-    const audience = c.env.CF_ACCESS_AUD?.trim()
+    const audience =
+      opts?.audience === 'mcp'
+        ? c.env.CF_ACCESS_MCP_AUD?.trim() || c.env.CF_ACCESS_AUD?.trim()
+        : c.env.CF_ACCESS_AUD?.trim()
     const devBypassUser = c.env.ACCESS_DEV_BYPASS_USER?.trim()
 
     const jwt = c.req.header('Cf-Access-Jwt-Assertion')
