@@ -391,6 +391,19 @@ export function buyingPowerBadge(): string {
   </script>`
 }
 
+/**
+ * ECharts CDN の `<script src>` タグ重複除去 (CodeRabbit #559)。status
+ * (スパークライン) と equity (資産推移チャート) はどちらも単独 ON で成立する
+ * 必要があるため各自 CDN タグを持つ — 両方 ON のときだけここで 2 個目以降を
+ * 落とす (同一 src の二重ロードはキャッシュされるが parse/execute が無駄)。
+ */
+export function dedupeEchartsCdnTag(html: string): string {
+  const tag = `<script src="${ECHARTS_CDN}" defer></script>`
+  const parts = html.split(tag)
+  if (parts.length <= 2) return html
+  return parts[0] + tag + parts.slice(1).join('')
+}
+
 export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
@@ -414,5 +427,5 @@ export function overviewBody(data: OverviewData): string {
       '<p class="muted">表示パネルが選択されていません。<a href="/dashboard/config">設定</a>でパネルを有効化してください。</p>',
     )
   }
-  return buyingPowerBadge() + sections.join('')
+  return dedupeEchartsCdnTag(buyingPowerBadge() + sections.join(''))
 }

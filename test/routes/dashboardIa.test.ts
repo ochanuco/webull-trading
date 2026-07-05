@@ -374,3 +374,66 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('href="/dashboard/positions"')
   })
 })
+
+describe('dashboard IA — CodeRabbit #559 対応', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ tradingEnabled: true }),
+    )
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({ allowedSymbols: ['SOXL'], symbolCurrency: { SOXL: 'USD' } }),
+    )
+    vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue(sparkRows)
+    vi.mocked(loadUsdJpyRate).mockResolvedValue(150.25)
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('?range=30d ではスナップショットを 1 回だけ取得しスパークラインに再利用する', async () => {
+    const env = {
+      ...baseEnv,
+      DB: fakeD1(),
+      SYMBOL_STATE: fakeSymbolStateNamespace(),
+      PORTFOLIO_STATE: fakePortfolioNamespace(),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard?range=30d', { headers: authHeader }, env)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // equity パネル用と同一クエリ (limit 30) なので D1 取得は 1 回に畳む
+    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 30 })
+    // スパークライン自体は再利用データで描画される
+    expect(body).toContain('id="home-equity-spark"')
+  })
+
+  it('既定 range (90d) ではスパークライン用 30d を別途取得する (挙動不変)', async () => {
+    const env = {
+      ...baseEnv,
+      DB: fakeD1(),
+      SYMBOL_STATE: fakeSymbolStateNamespace(),
+      PORTFOLIO_STATE: fakePortfolioNamespace(),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    expect(res.status).toBe(200)
+    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 90 })
+    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 30 })
+  })
+
+  it('status + equity 両パネル ON でも ECharts CDN script タグは 1 個に畳まれる', async () => {
+    const env = {
+      ...baseEnv,
+      DB: fakeD1(),
+      SYMBOL_STATE: fakeSymbolStateNamespace(),
+      PORTFOLIO_STATE: fakePortfolioNamespace(),
+    }
+    const app = createApp()
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
+    const body = await res.text()
+    // スパークラインと資産推移チャートの両方が描画されている前提で
+    expect(body).toContain('id="home-equity-spark"')
+    const cdnTags = body.match(/<script src="[^"]*echarts[^"]*" defer><\/script>/g) ?? []
+    expect(cdnTags.length).toBe(1)
+  })
+})
