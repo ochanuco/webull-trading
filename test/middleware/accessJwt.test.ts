@@ -272,3 +272,75 @@ describe('accessJwtMiddleware (#29)', () => {
     })
   })
 })
+
+describe('accessJwtMiddleware audience: mcp (#553)', () => {
+  const MCP_AUD = 'aud-tag-mcp'
+  let key: SetupResult
+
+  beforeEach(async () => {
+    _resetJwksCacheForTests()
+    key = await setupKey()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  function buildMcpApp(captured: CapturedActor) {
+    const app = new Hono<{ Bindings: Env; Variables: AccessJwtVariables }>()
+    app.use('/mcp/*', accessJwtMiddleware({ audience: 'mcp' }))
+    app.get('/mcp/x', (c) => {
+      captured.actor = c.get('actor')
+      return c.text('ok')
+    })
+    return app
+  }
+
+  it('CF_ACCESS_MCP_AUD の JWT (service token) を受理する', async () => {
+    stubJwksFetch(key.jwk)
+    const captured: CapturedActor = { actor: undefined }
+    const app = buildMcpApp(captured)
+    const jwt = await signToken(key, { aud: MCP_AUD, commonName: 'webull-mcp-prod' })
+
+    const res = await app.request(
+      '/mcp/x',
+      { headers: { 'Cf-Access-Jwt-Assertion': jwt } },
+      { CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN, CF_ACCESS_AUD: AUD, CF_ACCESS_MCP_AUD: MCP_AUD } as Env,
+    )
+
+    expect(res.status).toBe(200)
+    expect(captured.actor).toBe('webull-mcp-prod')
+  })
+
+  it('CF_ACCESS_MCP_AUD 設定時、メイン app の AUD は /mcp では 401 (専用 app に限定)', async () => {
+    stubJwksFetch(key.jwk)
+    const captured: CapturedActor = { actor: undefined }
+    const app = buildMcpApp(captured)
+    const jwt = await signToken(key, { aud: AUD, email: 'alice@example.com' })
+
+    const res = await app.request(
+      '/mcp/x',
+      { headers: { 'Cf-Access-Jwt-Assertion': jwt } },
+      { CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN, CF_ACCESS_AUD: AUD, CF_ACCESS_MCP_AUD: MCP_AUD } as Env,
+    )
+
+    expect(res.status).toBe(401)
+  })
+
+  it('CF_ACCESS_MCP_AUD 未設定なら CF_ACCESS_AUD に fallback (メイン app 運用も許容)', async () => {
+    stubJwksFetch(key.jwk)
+    const captured: CapturedActor = { actor: undefined }
+    const app = buildMcpApp(captured)
+    const jwt = await signToken(key, { aud: AUD, commonName: 'webull-mcp-prod' })
+
+    const res = await app.request(
+      '/mcp/x',
+      { headers: { 'Cf-Access-Jwt-Assertion': jwt } },
+      { CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN, CF_ACCESS_AUD: AUD } as Env,
+    )
+
+    expect(res.status).toBe(200)
+    expect(captured.actor).toBe('webull-mcp-prod')
+  })
+})

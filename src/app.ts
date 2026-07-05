@@ -58,8 +58,8 @@ export function createApp() {
   // Read-only MCP server (#553 append)。/dashboard と同じ Access JWT 検証を
   // 通す (service token も同じ検証を通過する)。ワイルドカード `/mcp/*` は
   // `/mcp` 単一 path に効かない router があるため base path にも明示的に張る。
-  app.use('/mcp', accessJwtMiddleware())
-  app.use('/mcp/*', accessJwtMiddleware())
+  app.use('/mcp', accessJwtMiddleware({ audience: 'mcp' }))
+  app.use('/mcp/*', accessJwtMiddleware({ audience: 'mcp' }))
   app.route('/mcp', mcp)
   app.onError(errorHandler)
   return app

@@ -121,3 +121,8 @@ WEBULL_ACCESS_TOKEN=
 # BAR_SOURCE (#475): 'webull' で daily/intraday bars を Webull Market Data API に
 # 切替。^VIX / JP 銘柄 / Webull 障害時は Yahoo に自動 fallback。未設定 = yahoo。
 # BAR_SOURCE=webull
+
+# --- MCP (#553) ---
+# CF_ACCESS_MCP_AUD: /mcp 専用 Access application (path 限定 + Service Auth policy)
+# の AUD tag。未設定なら CF_ACCESS_AUD に fallback。設定は wrangler secret:
+#   wrangler secret put CF_ACCESS_MCP_AUD --env=production
