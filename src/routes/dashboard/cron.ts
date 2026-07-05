@@ -9,7 +9,7 @@ import { ECHARTS_CDN } from './charts/shared'
 // マトリクスの休場セル判定 (#matrix-closed)。domain 層の純粋関数を表示時に
 // 評価する — 休場 tick は strategy_decision_log に行が残らない設計 (skip 早期
 // return) のため、記録側でなく表示側で暦から区別する。
-import { type TradingMarket, inferTradingMarket, isTradingDay } from '../../trading/domain/tradingCalendar'
+import { type TradingMarket, inferTradingMarket, isTradingDay, isWithinStrategyWindow } from '../../trading/domain/tradingCalendar'
 
 /**
  * Strategy / sizing が出力する英語 reason を **初心者にも分かる日本語** に翻訳
@@ -276,13 +276,23 @@ export function cronBody(
   before?: number,
   hasMore = false,
   clientOrderIdFilter?: string,
+  sessionFilter: 'open' | 'all' = 'open',
+  /**
+   * ページ送りカーソル用の「フィルタ前の末尾 id」。session フィルタで rows が
+   * 間引かれてもカーソルはフェッチした範囲の末尾で進める (全行が休場時間帯で
+   * 非表示のページでも次ページへ辿れる)。
+   */
+  pageLastId?: number,
 ): string {
   const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
+  // session=all のみ URL に載せる (open が既定)。pill 切替・ページネーションの
+  // 双方に伝搬させ、ページ送りでフィルタが外れないようにする。
+  const sessionQs = sessionFilter === 'all' ? '&session=all' : ''
   const baseHref = clientOrderIdFilter
-    ? `/dashboard/cron?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}&limit=${limit}`
+    ? `/dashboard/cron?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}&limit=${limit}${sessionQs}`
     : symbolFilter
-      ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}`
-      : `/dashboard/cron?limit=${limit}`
+      ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}${sessionQs}`
+      : `/dashboard/cron?limit=${limit}${sessionQs}`
   const header = clientOrderIdFilter
     ? `<p class="filter-banner">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a> ${copyAllBtn}</p>`
     : symbolFilter
@@ -291,14 +301,24 @@ export function cronBody(
   const pagination = renderPaginationNav({
     baseHref,
     before,
-    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    lastId: pageLastId ?? (rows.length > 0 ? rows[rows.length - 1]!.id : undefined),
     hasMore,
   })
   const rail = renderCronSymbolRail(universe, symbolFilter, limit)
-  const viewPills = renderCronViewPills('list', limit, symbolFilter)
+  // 開場中のみ / 全時間帯 の切替 (#cron-session-filter)。休場時間帯の行
+  // (手動 run 等) は既定で隠す。
+  const stripSession = baseHref.replace('&session=all', '')
+  const sessionPills = `<span class="muted" style="font-size:12px;margin-left:8px">時間帯:</span>
+    <a href="${stripSession}" class="chip${sessionFilter === 'open' ? ' active' : ''}">開場中のみ</a>
+    <a href="${stripSession}&session=all" class="chip${sessionFilter === 'all' ? ' active' : ''}" title="休場時間帯に書かれた行 (手動 run 等) も表示する">全時間帯</a>`
+  const viewPills = renderCronViewPills('list', limit, symbolFilter).replace('</nav>', `${sessionPills}</nav>`)
   const main =
     rows.length === 0
-      ? `${viewPills}${header}<p class="muted">判定ログがまだありません。</p>${pagination}`
+      ? `${viewPills}${header}<p class="muted">${
+          sessionFilter === 'open' && pageLastId !== undefined
+            ? 'このページの判定はすべて休場時間帯 (手動 run 等) のため非表示です。'
+            : '判定ログがまだありません。'
+        }</p>${pagination}`
       : `${viewPills}${header}
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
@@ -821,6 +841,19 @@ export function isJstDateClosedForMarket(jstYmd: string, market: TradingMarket):
   if (market === 'JP') return !isTradingDay(noon, 'JP')
   const prev = new Date(noon.getTime() - 86_400_000)
   return !isTradingDay(noon, 'US') && !isTradingDay(prev, 'US')
+}
+
+/**
+ * 判定行がその銘柄の市場の**開場時間中**に書かれたものか (#cron-session-filter)。
+ * 通常の cron はセッション外で行を書かない (skip 早期 return) が、手動 run
+ * (/admin/strategy/run) や過去仕様の行が休場時間帯に残ることがあり、一覧では
+ * 既定で隠す (operator は開場中の判定だけ読みたい)。不正 timestamp は
+ * 隠さない側に倒す (フィルタで情報が消える事故の防止)。
+ */
+export function isDecisionRowInSession(timestampIso: string, symbol: string): boolean {
+  const ts = new Date(timestampIso)
+  if (!Number.isFinite(ts.getTime())) return true
+  return isWithinStrategyWindow(ts, inferTradingMarket(symbol), 0)
 }
 
 /** now (実時刻) の JST 暦日 YYYY-MM-DD。 */
