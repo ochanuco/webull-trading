@@ -63,7 +63,7 @@ import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, 
 import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
-import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, runCronJsonExport } from './cron'
+import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, isDecisionRowInSession, loadDecisionMatrix, loadDecisionRows, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
 import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, strategyParamsFromGlobal } from './charts/shared'
@@ -672,6 +672,10 @@ export const dashboard = new Hono<DashboardBindings>()
         return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
       }
     }
+    // 休場時間帯の行 (手動 run 等) は既定で隠す (#cron-session-filter)。
+    // `?session=all` で全時間帯表示。SQL では時刻×市場×祝日の判定が書けない
+    // (DST もある) ので、ページ分の行を取ってから表示側で間引く。
+    const sessionFilter = c.req.query('session') === 'all' ? ('all' as const) : ('open' as const)
     const db = createDb(c.env.DB)
     try {
       const [rows, universe] = await Promise.all([
@@ -685,11 +689,25 @@ export const dashboard = new Hono<DashboardBindings>()
       ])
       const hasMore = rows.length > limit
       if (hasMore) rows.pop()
+      const visibleRows =
+        sessionFilter === 'open'
+          ? rows.filter((r) => isDecisionRowInSession(r.timestamp, r.symbol))
+          : rows
       return c.html(
         renderLayout(
           c,
           '戦略判定',
-          cronBody(rows, limit, symbolFilter, universe, before, hasMore, clientOrderIdFilter),
+          cronBody(
+            visibleRows,
+            limit,
+            symbolFilter,
+            universe,
+            before,
+            hasMore,
+            clientOrderIdFilter,
+            sessionFilter,
+            rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+          ),
           cronSubnav,
         ),
       )

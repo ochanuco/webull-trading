@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
+import { isDecisionRowInSession } from '../../src/routes/dashboard/cron'
 import { loadRecentAlerts } from '../../src/infrastructure/notification/notificationEmitLog'
 import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
 
@@ -365,5 +366,75 @@ describe('/dashboard/cron 銘柄レール (#decisions-chart-unify)', () => {
     expect(body).toContain('href="/dashboard/cron?symbol=SOXS')
     // inactive 銘柄もレールに出る (grayed)
     expect(body).toContain('href="/dashboard/cron?symbol=SPY')
+  })
+})
+
+describe('/dashboard/cron セッションフィルタ (#cron-session-filter)', () => {
+  function cronDb(rows: unknown[]) {
+    return {
+      select() {
+        return {
+          from() {
+            const chain = {
+              leftJoin: () => chain,
+              where: () => chain,
+              orderBy: () => chain,
+              limit: async () => rows,
+            }
+            return chain
+          },
+        }
+      },
+    } as never
+  }
+  const inSession = {
+    id: 1,
+    timestamp: '2026-06-05T14:30:00.000Z', // ET 10:30 金曜 = US 場中
+    requestId: 'run-1',
+    symbol: 'SOXL',
+    decision: 'HOLD',
+    reason: 'holding: pnl 0.01 within (-0.05, 0.08)',
+    price: 30.5,
+    indicatorsJson: null,
+    clientOrderId: null,
+    traceJson: null,
+    filledPrice: null,
+    filledQty: null,
+    realizedPnl: null,
+    brokerStatus: null,
+  }
+  const outOfSession = {
+    ...inSession,
+    id: 2,
+    timestamp: '2026-06-06T00:00:00.000Z', // ET 金曜 20:00 = 閉場後 (手動 run 相当)
+    reason: 'manual run after close',
+  }
+
+  it('既定 (開場中のみ) は休場時間帯の行を隠し、切替 pill を出す', async () => {
+    vi.mocked(createDb).mockReturnValue(cronDb([inSession, outOfSession]))
+    const app = createApp()
+    const res = await app.request('/dashboard/cron', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('data-id="1"')
+    expect(body).not.toContain('data-id="2"')
+    expect(body).toContain('開場中のみ')
+    expect(body).toContain('session=all')
+  })
+
+  it('?session=all は全時間帯の行を表示する', async () => {
+    vi.mocked(createDb).mockReturnValue(cronDb([inSession, outOfSession]))
+    const app = createApp()
+    const res = await app.request('/dashboard/cron?session=all', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
+    const body = await res.text()
+    expect(body).toContain('data-id="1"')
+    expect(body).toContain('data-id="2"')
+  })
+
+  it('isDecisionRowInSession: JP は JST 場中のみ true、不正 timestamp は true (隠さない)', () => {
+    expect(isDecisionRowInSession('2026-06-05T01:00:00.000Z', '1357')).toBe(true) // JST 10:00 金曜
+    expect(isDecisionRowInSession('2026-06-05T11:00:00.000Z', '1357')).toBe(false) // JST 20:00
+    expect(isDecisionRowInSession('2026-06-05T11:00:00.000Z', 'SOXL')).toBe(false) // ET 07:00 寄り前
+    expect(isDecisionRowInSession('not-a-date', 'SOXL')).toBe(true)
   })
 })
