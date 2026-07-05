@@ -494,7 +494,7 @@ describe('dashboard', () => {
       fakeCronDb([
         {
           id: 200,
-          timestamp: '2026-06-06T00:00:00.000Z',
+          timestamp: '2026-06-05T14:30:00.000Z', // ET 10:30 (場中) — session フィルタ既定 open を通す
           requestId: 'req-tr',
           symbol: 'TQQQ',
           decision: 'SKIP',
@@ -540,7 +540,7 @@ describe('dashboard', () => {
       fakeCronDb([
         {
           id: 201,
-          timestamp: '2026-06-06T00:00:00.000Z',
+          timestamp: '2026-06-05T14:30:00.000Z', // ET 10:30 (場中) — session フィルタ既定 open を通す
           requestId: 'req-old',
           symbol: 'TQQQ',
           decision: 'HOLD',

@@ -6,6 +6,10 @@ import { LOG_COPY_ALL_BTN, clampLimit, currencyOfSymbol, displaySymbol, esc, fmt
 // ECHARTS_CDN のみ利用。charts/shared 側の `import type { DecisionRow }` は
 // type-only なので runtime 循環にはならない。
 import { ECHARTS_CDN } from './charts/shared'
+// マトリクスの休場セル判定 (#matrix-closed)。domain 層の純粋関数を表示時に
+// 評価する — 休場 tick は strategy_decision_log に行が残らない設計 (skip 早期
+// return) のため、記録側でなく表示側で暦から区別する。
+import { type TradingMarket, inferTradingMarket, isTradingDay, isWithinStrategyWindow } from '../../trading/domain/tradingCalendar'
 
 /**
  * Strategy / sizing が出力する英語 reason を **初心者にも分かる日本語** に翻訳
@@ -272,13 +276,23 @@ export function cronBody(
   before?: number,
   hasMore = false,
   clientOrderIdFilter?: string,
+  sessionFilter: 'open' | 'all' = 'open',
+  /**
+   * ページ送りカーソル用の「フィルタ前の末尾 id」。session フィルタで rows が
+   * 間引かれてもカーソルはフェッチした範囲の末尾で進める (全行が休場時間帯で
+   * 非表示のページでも次ページへ辿れる)。
+   */
+  pageLastId?: number,
 ): string {
   const copyAllBtn = rows.length > 0 ? LOG_COPY_ALL_BTN : ''
+  // session=all のみ URL に載せる (open が既定)。pill 切替・ページネーションの
+  // 双方に伝搬させ、ページ送りでフィルタが外れないようにする。
+  const sessionQs = sessionFilter === 'all' ? '&session=all' : ''
   const baseHref = clientOrderIdFilter
-    ? `/dashboard/cron?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}&limit=${limit}`
+    ? `/dashboard/cron?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}&limit=${limit}${sessionQs}`
     : symbolFilter
-      ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}`
-      : `/dashboard/cron?limit=${limit}`
+      ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}${sessionQs}`
+      : `/dashboard/cron?limit=${limit}${sessionQs}`
   const header = clientOrderIdFilter
     ? `<p class="filter-banner">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a> ${copyAllBtn}</p>`
     : symbolFilter
@@ -287,14 +301,24 @@ export function cronBody(
   const pagination = renderPaginationNav({
     baseHref,
     before,
-    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
+    lastId: pageLastId ?? (rows.length > 0 ? rows[rows.length - 1]!.id : undefined),
     hasMore,
   })
   const rail = renderCronSymbolRail(universe, symbolFilter, limit)
-  const viewPills = renderCronViewPills('list', limit, symbolFilter)
+  // 開場中のみ / 全時間帯 の切替 (#cron-session-filter)。休場時間帯の行
+  // (手動 run 等) は既定で隠す。
+  const stripSession = baseHref.replace('&session=all', '')
+  const sessionPills = `<span class="muted" style="font-size:12px;margin-left:8px">時間帯:</span>
+    <a href="${stripSession}" class="chip${sessionFilter === 'open' ? ' active' : ''}">開場中のみ</a>
+    <a href="${stripSession}&session=all" class="chip${sessionFilter === 'all' ? ' active' : ''}" title="休場時間帯に書かれた行 (手動 run 等) も表示する">全時間帯</a>`
+  const viewPills = renderCronViewPills('list', limit, symbolFilter).replace('</nav>', `${sessionPills}</nav>`)
   const main =
     rows.length === 0
-      ? `${viewPills}${header}<p class="muted">判定ログがまだありません。</p>${pagination}`
+      ? `${viewPills}${header}<p class="muted">${
+          sessionFilter === 'open' && pageLastId !== undefined
+            ? 'このページの判定はすべて休場時間帯 (手動 run 等) のため非表示です。'
+            : '判定ログがまだありません。'
+        }</p>${pagination}`
       : `${viewPills}${header}
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
@@ -793,8 +817,126 @@ export interface DecisionMatrixCell {
 export interface DecisionMatrix {
   /** JST 日付 (昇順) */
   dates: string[]
-  /** 銘柄昇順。cells は日付キー (判定が無い日はキーなし) */
-  rows: Array<{ symbol: string; cells: Record<string, DecisionMatrixCell> }>
+  /**
+   * 銘柄昇順。cells は日付キー (判定が無い日はキーなし)。
+   * closedDates はその銘柄の市場が休場 (週末/祝日) の日付 — 「休場だから
+   * 判定なし」と「開場していたのにログなし (cron 停止等)」を区別する
+   * (#matrix-closed、opts 付き buildDecisionMatrix でのみ算出)。
+   */
+  rows: Array<{ symbol: string; cells: Record<string, DecisionMatrixCell>; closedDates?: string[] }>
+}
+
+/**
+ * JST 日付 X に「その市場のセッション由来の判定ログが乗り得ない」= 休場か。
+ *
+ * マトリクスの日付キーは JST だが、US セッション (ET 09:30-16:00) は JST では
+ * 同日 22:30〜翌日 06:00 にまたがる。つまり JST 日 X には ET 日 X の前半と
+ * ET 日 X-1 の後半が乗る → US は X と X-1 の両方が非営業日のときだけ休場。
+ * JP はセッションが JST 日内に収まるので暦日そのまま。
+ * `isTradingDay` は UTC 暦日基準なので T12:00:00Z 固定で ymd を評価する
+ * (DST の影響を受けない)。
+ */
+export function isJstDateClosedForMarket(jstYmd: string, market: TradingMarket): boolean {
+  const noon = new Date(`${jstYmd}T12:00:00Z`)
+  if (market === 'JP') return !isTradingDay(noon, 'JP')
+  const prev = new Date(noon.getTime() - 86_400_000)
+  return !isTradingDay(noon, 'US') && !isTradingDay(prev, 'US')
+}
+
+/**
+ * 判定行がその銘柄の市場の**開場時間中**に書かれたものか (#cron-session-filter)。
+ * 通常の cron はセッション外で行を書かない (skip 早期 return) が、手動 run
+ * (/admin/strategy/run) や過去仕様の行が休場時間帯に残ることがあり、一覧では
+ * 既定で隠す (operator は開場中の判定だけ読みたい)。不正 timestamp は
+ * 隠さない側に倒す (フィルタで情報が消える事故の防止)。
+ */
+export function isDecisionRowInSession(timestampIso: string, symbol: string): boolean {
+  const ts = new Date(timestampIso)
+  if (!Number.isFinite(ts.getTime())) return true
+  return isWithinStrategyWindow(ts, inferTradingMarket(symbol), 0)
+}
+
+/** loadDecisionRowsInSession の 1 バッチのフェッチ幅 (URL limit 上限と同じ)。 */
+const SESSION_FILTER_BATCH_SIZE = 200
+
+/** カーソルを進めながら走査する最大バッチ数 (D1 保護、200 × 5 = 1,000 行)。 */
+const SESSION_FILTER_MAX_BATCHES = 5
+
+/**
+ * 開場中の判定行を limit 件そろえるページローダー (#cron-session-filter)。
+ *
+ * 「limit+1 件フェッチして表示側で間引く」だけだとページの表示件数が不定に
+ * なり、次ページカーソルもフェッチ窓基準で表示と一致しない。ここでは表示行が
+ * limit+1 件 (hasMore 判定込み) そろうまでカーソルを進めながら追加フェッチし、
+ * 次ページの before は「最後に表示した行の id」で切れ目なく続くようにする。
+ *
+ * 走査は最大 SESSION_FILTER_MAX_BATCHES バッチで打ち切る (休場行が延々続く
+ * 病的データで D1 を舐め尽くさないため)。打ち切り時は hasMore=true とし、
+ * lastScannedId (表示 0 件時のカーソル代替) で次ページへ進めるようにする。
+ */
+export async function loadDecisionRowsInSession(
+  db: ReturnType<typeof createDb>,
+  opts: { symbol?: string; clientOrderId?: string; limit: number; before?: number },
+): Promise<{ rows: DecisionRow[]; hasMore: boolean; lastScannedId?: number }> {
+  const target = opts.limit + 1
+  const visible: DecisionRow[] = []
+  let before = opts.before
+  let lastScannedId: number | undefined
+  let truncated = false
+  for (let i = 0; i < SESSION_FILTER_MAX_BATCHES; i++) {
+    const batch = await loadDecisionRows(db, {
+      symbol: opts.symbol,
+      clientOrderId: opts.clientOrderId,
+      limit: SESSION_FILTER_BATCH_SIZE,
+      before,
+    })
+    for (const r of batch) {
+      lastScannedId = r.id
+      if (isDecisionRowInSession(r.timestamp, r.symbol)) visible.push(r)
+      if (visible.length >= target) break
+    }
+    if (visible.length >= target) break
+    if (batch.length < SESSION_FILTER_BATCH_SIZE) break // データ末尾に到達
+    const minId = batch[batch.length - 1]!.id
+    // カーソルが前進しない場合は打ち切る (テスト用 fake db や重複 id の保護)
+    if (before !== undefined && minId >= before) break
+    before = minId
+    if (i === SESSION_FILTER_MAX_BATCHES - 1) truncated = true
+  }
+  return {
+    rows: visible.slice(0, opts.limit),
+    hasMore: visible.length > opts.limit || truncated,
+    lastScannedId,
+  }
+}
+
+/** now (実時刻) の JST 暦日 YYYY-MM-DD。 */
+function jstYmdOf(now: Date): string {
+  return new Date(now.getTime() + 9 * 3_600_000).toISOString().slice(0, 10)
+}
+
+/**
+ * マトリクスの列日付 (#matrix-closed): 直近 days 日の全 JST 暦日から、
+ * 「全銘柄が休場でデータも無い」列 (JST 日曜など) を落とした昇順リスト。
+ * ログがある日は休場判定に関わらず必ず残す (臨時セッションや過去データの保全)。
+ */
+export function buildMatrixDates(
+  dataDates: ReadonlySet<string>,
+  markets: readonly TradingMarket[],
+  days: number,
+  now: Date,
+): string[] {
+  const out = new Set<string>()
+  const todayNoonUtc = new Date(`${jstYmdOf(now)}T12:00:00Z`).getTime()
+  for (let i = days - 1; i >= 0; i--) {
+    const ymd = new Date(todayNoonUtc - i * 86_400_000).toISOString().slice(0, 10)
+    const anyOpen = markets.some((m) => !isJstDateClosedForMarket(ymd, m))
+    if (dataDates.has(ymd) || anyOpen) out.add(ymd)
+  }
+  // 範囲外のログ日も必ず残す (loadDecisionMatrix 側の窓とずれても列が消えて
+  // データが見えなくなる事故を防ぐ)。
+  for (const d of dataDates) out.add(d)
+  return [...out].sort()
 }
 
 /**
@@ -802,8 +944,16 @@ export interface DecisionMatrix {
  * 代表判定は MATRIX_DECISION_PRIORITY 順。想定外 decision (将来追加など) は
  * ERROR 相当の優先度で扱い、表示から漏れないようにする (quality.ts の
  * aggregateDecisionRows と同思想)。
+ *
+ * opts 指定時 (#matrix-closed): 列を「ログがあった日」でなく直近 days 日の
+ * 全 JST 暦日 (全休列は除去) に広げ、各行に closedDates (休場でログが乗り得ない
+ * 日付) を付ける。opts 省略時は従来どおりログのあった日だけを列にする
+ * (後方互換、now を持たない呼び出し向け)。
  */
-export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMatrix {
+export function buildDecisionMatrix(
+  rows: DecisionMatrixSourceRow[],
+  opts?: { days: number; now: Date },
+): DecisionMatrix {
   const dateSet = new Set<string>()
   const bySymbol = new Map<string, Map<string, DecisionMatrixSourceRow[]>>()
   for (const r of rows) {
@@ -821,7 +971,17 @@ export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMa
     const i = (MATRIX_DECISION_PRIORITY as readonly string[]).indexOf(decision)
     return i === -1 ? MATRIX_DECISION_PRIORITY.indexOf('ERROR') : i
   }
-  const outRows = [...bySymbol.keys()].sort().map((symbol) => {
+  const symbols = [...bySymbol.keys()].sort()
+  // 列: opts 付きは全 JST 暦日 (全休列は除去)、無しは従来のログがあった日のみ。
+  const dates = opts
+    ? buildMatrixDates(
+        dateSet,
+        [...new Set(symbols.map((s) => inferTradingMarket(s)))],
+        opts.days,
+        opts.now,
+      )
+    : [...dateSet].sort()
+  const outRows = symbols.map((symbol) => {
     const cells: Record<string, DecisionMatrixCell> = {}
     for (const [day, group] of bySymbol.get(symbol)!) {
       let best = group[0]!
@@ -839,9 +999,12 @@ export function buildDecisionMatrix(rows: DecisionMatrixSourceRow[]): DecisionMa
       }
       cells[day] = { decision: best.decision, reason: rep.reason, count, total }
     }
-    return { symbol, cells }
+    if (!opts) return { symbol, cells }
+    const market = inferTradingMarket(symbol)
+    const closedDates = dates.filter((d) => !cells[d] && isJstDateClosedForMarket(d, market))
+    return { symbol, cells, closedDates }
   })
-  return { dates: [...dateSet].sort(), rows: outRows }
+  return { dates, rows: outRows }
 }
 
 /**
@@ -996,6 +1159,7 @@ export function decisionMatrixBody(
   .mx-pill.mx-warn{background:#b25000}
   .mx-pill.mx-err{background:#c22}
   .mx-pill.mx-muted{background:#e8e8ed;color:#86868b}
+  .mx-closed{display:inline-block;min-width:20px;padding:1px 5px;border-radius:9px;font-size:11px;background:#f3f3f5;color:#b6b6bd}
   .mx-legend{margin-top:8px;font-size:11px;color:#86868b;display:flex;flex-wrap:wrap;gap:10px}
   </style>`
   const headCells = matrix.dates
@@ -1006,10 +1170,15 @@ export function decisionMatrixBody(
       const inactive = isSymbolInactive(row.symbol, universe)
       const titleAttr = inactive ? ` title="${esc(inactiveTooltip(row.symbol, universe))}"` : ''
       const symCell = `<td class="mx-sym"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(row.symbol)}"${titleAttr}><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(row.symbol, universe))}</strong></a></td>`
+      const closed = new Set(row.closedDates ?? [])
       const cells = matrix.dates
         .map((d) => {
           const cell = row.cells[d]
-          if (!cell) return '<td><span class="muted">·</span></td>'
+          if (!cell && closed.has(d)) {
+            // 休場 (週末/祝日) — 「判定なし」と区別する (#matrix-closed)
+            return `<td><span class="mx-closed" title="${esc(d)} 休場 (週末/祝日)">休</span></td>`
+          }
+          if (!cell) return '<td><span class="muted" title="開場日だが判定ログなし (cron 停止・銘柄追加前など)">·</span></td>'
           const label = MATRIX_DECISION_LABELS[cell.decision] ?? { short: '?', ja: cell.decision, cls: 'mx-err' }
           const title = `${d} ${cell.decision} (${label.ja}、${cell.count}/${cell.total}件): ${localizeReason(cell.reason)}`
           return `<td><a class="mx-pill ${label.cls}" href="/dashboard/cron?symbol=${encodeURIComponent(row.symbol)}" title="${esc(title)}">${esc(label.short)}</a></td>`
@@ -1020,7 +1189,7 @@ export function decisionMatrixBody(
     .join('')
   const legend = `<div class="mx-legend">${Object.entries(MATRIX_DECISION_LABELS)
     .map(([key, v]) => `<span><span class="mx-pill ${v.cls}">${esc(v.short)}</span> ${esc(key)} (${esc(v.ja)})</span>`)
-    .join('')}<span>· = 判定なし</span></div>`
+    .join('')}<span><span class="mx-closed">休</span> 休場 (週末/祝日)</span><span>· = 開場だが判定ログなし (cron 停止・銘柄追加前など)</span></div>`
   return `${pills}${header}
   <div class="mx-wrap">
     <table class="mx-table">

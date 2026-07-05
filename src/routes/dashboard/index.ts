@@ -63,7 +63,7 @@ import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, 
 import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
-import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, runCronJsonExport } from './cron'
+import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
 import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, strategyParamsFromGlobal } from './charts/shared'
@@ -623,7 +623,7 @@ export const dashboard = new Hono<DashboardBindings>()
     try {
       const days = 30
       const rows = await loadDecisionMatrix(c.env.DB, days)
-      const matrix = buildDecisionMatrix(rows)
+      const matrix = buildDecisionMatrix(rows, { days, now: new Date() })
       return jsonPretty({
         schema: 'dashboard_cron_matrix_export.v1',
         exportedAt: new Date().toISOString(),
@@ -660,7 +660,7 @@ export const dashboard = new Hono<DashboardBindings>()
             c,
             '戦略判定',
             decisionMatrixBody(
-              buildDecisionMatrix(matrixRows),
+              buildDecisionMatrix(matrixRows, { days, now: new Date() }),
               aggregateReasonTrend(matrixRows),
               universe,
               { days, limit, symbolFilter },
@@ -672,24 +672,46 @@ export const dashboard = new Hono<DashboardBindings>()
         return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
       }
     }
+    // 休場時間帯の行 (手動 run 等) は既定で隠す (#cron-session-filter)。
+    // `?session=all` で全時間帯表示。SQL では時刻×市場×祝日の判定が書けない
+    // (DST もある) ので、開場行が limit 件そろうまでカーソルを進めながら
+    // フェッチする (loadDecisionRowsInSession) — ページの表示件数と次ページ
+    // カーソルを表示行に一致させる。
+    const sessionFilter = c.req.query('session') === 'all' ? ('all' as const) : ('open' as const)
     const db = createDb(c.env.DB)
     try {
-      const [rows, universe] = await Promise.all([
-        loadDecisionRows(db, {
-          symbol: symbolFilter,
-          clientOrderId: clientOrderIdFilter,
-          limit: limit + 1,
-          before,
-        }),
+      const queryOpts = { symbol: symbolFilter, clientOrderId: clientOrderIdFilter, before }
+      const [page, universe] = await Promise.all([
+        sessionFilter === 'open'
+          ? loadDecisionRowsInSession(db, { ...queryOpts, limit })
+          : loadDecisionRows(db, { ...queryOpts, limit: limit + 1 }).then((rows) => {
+              const hasMore = rows.length > limit
+              if (hasMore) rows.pop()
+              return { rows, hasMore, lastScannedId: rows[rows.length - 1]?.id }
+            }),
         loadSymbolUniverse(c.env).catch(() => null),
       ])
-      const hasMore = rows.length > limit
-      if (hasMore) rows.pop()
       return c.html(
         renderLayout(
           c,
           '戦略判定',
-          cronBody(rows, limit, symbolFilter, universe, before, hasMore, clientOrderIdFilter),
+          cronBody(
+            page.rows,
+            limit,
+            symbolFilter,
+            universe,
+            before,
+            page.hasMore,
+            clientOrderIdFilter,
+            sessionFilter,
+            // 次ページカーソル: ページが limit 件で埋まったときは表示末尾
+            // (表示と切れ目なく続く)。埋まらなかったとき (走査打ち切り / データ
+            // 末尾) は走査末尾 — 走査済み窓内の開場行は全て表示済みなので、
+            // 表示末尾から再走査すると同じ休場行を舐め直して空ページを挟むだけ。
+            page.rows.length >= limit
+              ? page.rows[page.rows.length - 1]!.id
+              : page.lastScannedId,
+          ),
           cronSubnav,
         ),
       )
