@@ -153,7 +153,7 @@ export function collectOpenPositions(data: OverviewData): OpenPositionView[] {
  * ホームは要約、詳細は各専用ページ (/portfolio /positions /cron /alerts) へ。
  */
 export function sectionHead(title: string, moreHref: string): string {
-  return `<div style="display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 6px"><span style="font-size:13px;font-weight:700">${esc(title)}</span><a href="${moreHref}" style="font-size:12px">詳しく見る →</a></div>`
+  return `<div class="section-head"><span>${esc(title)}</span><a class="sh-more" href="${moreHref}">詳しく見る →</a></div>`
 }
 
 /**

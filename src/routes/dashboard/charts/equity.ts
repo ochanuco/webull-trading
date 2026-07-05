@@ -279,12 +279,12 @@ export function renderPeriodReturnsTable(rows: PeriodReturn[]): string {
   const cells = rows
     .map((r) => {
       const cls = r.change > 0 ? 'ok' : r.change < 0 ? 'err' : 'muted'
-      return `<td class="${cls}" style="text-align:right">${esc(fmtSignedAmount(r.change))}</td>`
+      return `<td class="${cls} num">${esc(fmtSignedAmount(r.change))}</td>`
     })
     .join('')
   const heads = rows.map((r) => `<th>${esc(r.label)}</th>`).join('')
-  return `<h3 style="font-size:14px;margin:20px 0 6px">期間別リターン (実現 PnL 変化額)</h3>
-  <table style="font-size:13px">
+  return `<h3 class="sub-head">期間別リターン (実現 PnL 変化額)</h3>
+  <table>
     <thead><tr>${heads}</tr></thead>
     <tbody><tr>${cells}</tr></tbody>
   </table>`

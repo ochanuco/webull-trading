@@ -165,7 +165,7 @@ export function exportMeta(schema: string): { schema: string; exportedAt: string
  */
 export function renderJsonToolbar(jsonHref: string, copyVarName: string | null): string {
   const copyBtn = copyVarName ? ` ${LOG_COPY_ALL_BTN}` : ''
-  return `<div style="margin:0 0 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" style="padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;text-decoration:none">JSON を開く</a>${copyBtn}</div>`
+  return `<div style="margin:0 0 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip">JSON を開く</a>${copyBtn}</div>`
 }
 
 export function parseJsonObject(value: string | null | undefined): unknown {
@@ -238,13 +238,10 @@ export function renderLogCopyScript(varName: string): string {
 }
 
 export const LOG_COPY_ALL_BTN =
-  '<button type="button" id="log-copy-all" style="padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;cursor:pointer">📋 表示中を AI 用にコピー</button>'
+  '<button type="button" id="log-copy-all" class="chip">📋 表示中を AI 用にコピー</button>'
 
 export const logCopyRowBtn = (id: number): string =>
   `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 2px">📋</button>`
-
-export const pillStyle = (bg: string, fg: string): string =>
-  `display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${bg};color:${fg};white-space:nowrap`
 
 /**
  * cooldownUntil をポートフォリオテーブル向けに整形。null または past timestamp

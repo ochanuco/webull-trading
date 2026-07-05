@@ -107,6 +107,30 @@ export const STYLE = `
   .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700}
   .pill.dry{background:#057a55;color:#fff}.pill.live{background:#c22;color:#fff}
   .pill.on{background:#057a55;color:#fff}.pill.off{background:#86868b;color:#fff}
+  /* 状態 pill の色 variant (#dashboard-design)。旧 pillStyle() インライン展開の
+     置換 — 効果値 (600 / nowrap / 各色) は旧 pillStyle と同一。 */
+  .pill.ok,.pill.warn,.pill.err,.pill.info,.pill.neutral{font-weight:600;white-space:nowrap}
+  .pill.ok{background:#e6f6ec;color:#057a55}.pill.warn{background:#fff4e6;color:#b25000}
+  .pill.err{background:#fdecec;color:#c22}.pill.info{background:#eef2f8;color:#46608a}
+  .pill.neutral{background:#f3f3f5;color:#86868b}
+  /* 丸チップ (view 切替 / filter pill / JSON リンク / AI コピー)。active は黒反転 */
+  .chip{padding:3px 12px;border-radius:14px;border:1px solid #d8d8de;background:#fff;font-size:12px;text-decoration:none}
+  .chip.active{background:#1d1d1f;border-color:#1d1d1f;color:#fff}
+  button.chip{cursor:pointer}
+  /* 小ボタン / 小リンク (テーブル行内アクション・kill switch フォーム) */
+  .btn-sm{padding:3px 8px;font-size:12px;cursor:pointer}
+  a.btn-sm{text-decoration:none}
+  .btn-sm.danger{background:#c22;color:#fff;border:none;border-radius:4px}
+  .btn-sm.ok{background:#057a55;color:#fff;border:none;border-radius:4px}
+  /* 絞り込み中バナー (trades / cron 上部の説明行) */
+  .filter-banner{color:#86868b;font-size:12px;margin:0 0 6px}
+  /* セクション見出し (小ヘッダ)。sh-more は右端の「詳しく見る」導線 */
+  .section-head{display:flex;align-items:baseline;gap:10px;margin:0 2px 6px;font-size:13px;font-weight:700}
+  .section-head .sh-more{margin-left:auto;font-size:12px;font-weight:400}
+  /* ページ内の中見出し (h2/h3 のインライン指定を統一) */
+  .sub-head{margin:20px 0 6px;font-size:14px;font-weight:700}
+  /* 右寄せ数値セル */
+  .num{text-align:right;font-variant-numeric:tabular-nums}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
@@ -334,12 +358,12 @@ export function killSwitchTopnav(state: KillSwitchBannerState | null): string {
     ? `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" style="display:flex;flex-direction:column;gap:5px;margin-top:6px">
         <input type="hidden" name="enabled" value="false"/>
         <input type="text" name="reason" placeholder="停止理由 (必須)" required maxlength="256" style="padding:4px 6px;font-size:12px;width:100%;box-sizing:border-box"/>
-        <button type="submit" ${disabled} style="padding:5px 10px;font-size:12px;background:#c22;color:#fff;border:none;border-radius:4px;cursor:pointer">取引停止</button>
+        <button type="submit" ${disabled} class="btn-sm danger">取引停止</button>
        </form>`
     : `<form method="post" action="/admin/trading/toggle" class="kill-switch-form" onsubmit="return confirm('取引を再開します。本当によろしいですか？');" style="display:flex;flex-direction:column;gap:5px;margin-top:6px">
         <input type="hidden" name="enabled" value="true"/>
         <input type="text" name="reason" placeholder="再開理由 (必須)" required maxlength="256" style="padding:4px 6px;font-size:12px;width:100%;box-sizing:border-box"/>
-        <button type="submit" ${disabled} style="padding:5px 10px;font-size:12px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">取引再開</button>
+        <button type="submit" ${disabled} class="btn-sm ok">取引再開</button>
        </form>`
   return `<details class="topnav-killswitch">
     <summary>${statusLabel}</summary>
