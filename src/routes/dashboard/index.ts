@@ -61,7 +61,7 @@ import { WebullTokenClient } from '../../infrastructure/webull/WebullTokenClient
 import { WebullTokenStateClient } from '../../trading/state/WebullTokenStateClient'
 import type { WebullTokenState } from '../../trading/state/WebullTokenStateDO'
 import { clampLimit, jsonPretty, messageOf, parseCursor, unavailable } from './shared'
-import { type DashboardBindings, loadKillSwitchState, renderLayout } from './layout'
+import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderLayout } from './layout'
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
 import { ALL_OVERVIEW_PANELS, type OverviewData, loadRecentFills, overviewBody, parseOverviewPanels } from './overview'
@@ -130,13 +130,23 @@ export const dashboard = new Hono<DashboardBindings>()
       const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
       const symbolClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
       const range = parseEquityRange(c.req.query('range'))
-      const [panelsCsv, portfolio, snapshots, positions, strategyPriceMap, recentTrades, vixRegime, global] =
+      const [panelsCsv, portfolio, snapshots, sparkSnapshotsRaw, usdJpy, positions, strategyPriceMap, recentTrades, vixRegime, global] =
         await Promise.all([
           loadOverviewPanelsCsv(db),
           c.env.PORTFOLIO_STATE
             ? new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio().catch(() => null)
             : Promise.resolve(null),
           safeLoadPortfolioSnapshots(c.env.DB, range),
+          // 資産サマリ帯のスパークラインは range 指定と独立に直近 30 日固定。
+          // range=30d (既定) のときは equity パネル用と同一クエリになるため
+          // 取得を省略し snapshots を再利用する (CodeRabbit #559: D1 二重取得)。
+          range === '30d'
+            ? Promise.resolve(null)
+            : safeLoadPortfolioSnapshots(c.env.DB, '30d'),
+          // USDJPY は資産サマリ帯表示用。DO 不在 (帯を出さない) なら fetch 自体を省略。
+          c.env.PORTFOLIO_STATE
+            ? loadUsdJpyRate().catch(() => null)
+            : Promise.resolve(null),
           symbolClient
             ? Promise.all(
                 allDisplaySymbols.map(async (sym) => {
@@ -160,6 +170,9 @@ export const dashboard = new Hono<DashboardBindings>()
         portfolio,
         snapshots,
         range,
+        sparkSnapshots: sparkSnapshotsRaw ?? snapshots,
+        usdJpy,
+        symbolStateBound: symbolClient !== null,
         positions,
         strategyPriceMap,
         recentTrades,
@@ -233,7 +246,7 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/trades', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound')))
+      return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound'), renderAnalysisSubnav('trades')))
     }
     // クエリ解釈 + journal query は /trades/json と共用 (#dashboard-json-api)。
     const q = parseTradesQuery((key) => c.req.query(key))
@@ -255,6 +268,7 @@ export const dashboard = new Hono<DashboardBindings>()
           symbol: q.symbol,
           clientOrderId: q.clientOrderId,
         }),
+        renderAnalysisSubnav('trades'),
       ),
     )
   })
@@ -761,8 +775,10 @@ export const dashboard = new Hono<DashboardBindings>()
     }
   })
   .get('/cron', async (c) => {
+    // subnav の active は一覧 / マトリクスで切替 (履歴・分析 subnav #dashboard-ia)。
+    const cronSubnav = renderAnalysisSubnav(c.req.query('view') === 'matrix' ? 'matrix' : 'cron')
     if (!c.env.DB) {
-      return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound')))
+      return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound'), cronSubnav))
     }
     const limit = clampLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
@@ -788,10 +804,11 @@ export const dashboard = new Hono<DashboardBindings>()
               universe,
               { days, limit, symbolFilter },
             ),
+            cronSubnav,
           ),
         )
       } catch (err) {
-        return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err))))
+        return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
       }
     }
     const db = createDb(c.env.DB)
@@ -812,12 +829,13 @@ export const dashboard = new Hono<DashboardBindings>()
           c,
           '戦略判定',
           cronBody(rows, limit, symbolFilter, universe, before, hasMore, clientOrderIdFilter),
+          cronSubnav,
         ),
       )
     } catch (err) {
       // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
       // (CodeRabbit #132)。段階的デプロイ時の自己保護。
-      return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
     }
   })
   /**
@@ -842,7 +860,7 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/alerts', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, 'アラート', unavailable('DB not bound')))
+      return c.html(renderLayout(c, 'アラート', unavailable('DB not bound'), renderAnalysisSubnav('alerts')))
     }
     const limit = clampAlertLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
@@ -868,12 +886,13 @@ export const dashboard = new Hono<DashboardBindings>()
           c,
           'アラート',
           alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore }),
+          renderAnalysisSubnav('alerts'),
         ),
       )
     } catch (err) {
       // 0012 migration 未適用 (= notification_emit_log テーブル無し) を
       // 500 にせず unavailable に落とす。段階的デプロイ時の自己保護。
-      return c.html(renderLayout(c, 'アラート', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, 'アラート', unavailable(messageOf(err)), renderAnalysisSubnav('alerts')))
     }
   })
   .get('/audit', async (c) => {
