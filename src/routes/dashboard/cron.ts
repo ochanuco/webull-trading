@@ -856,6 +856,60 @@ export function isDecisionRowInSession(timestampIso: string, symbol: string): bo
   return isWithinStrategyWindow(ts, inferTradingMarket(symbol), 0)
 }
 
+/** loadDecisionRowsInSession の 1 バッチのフェッチ幅 (URL limit 上限と同じ)。 */
+const SESSION_FILTER_BATCH_SIZE = 200
+
+/** カーソルを進めながら走査する最大バッチ数 (D1 保護、200 × 5 = 1,000 行)。 */
+const SESSION_FILTER_MAX_BATCHES = 5
+
+/**
+ * 開場中の判定行を limit 件そろえるページローダー (#cron-session-filter)。
+ *
+ * 「limit+1 件フェッチして表示側で間引く」だけだとページの表示件数が不定に
+ * なり、次ページカーソルもフェッチ窓基準で表示と一致しない。ここでは表示行が
+ * limit+1 件 (hasMore 判定込み) そろうまでカーソルを進めながら追加フェッチし、
+ * 次ページの before は「最後に表示した行の id」で切れ目なく続くようにする。
+ *
+ * 走査は最大 SESSION_FILTER_MAX_BATCHES バッチで打ち切る (休場行が延々続く
+ * 病的データで D1 を舐め尽くさないため)。打ち切り時は hasMore=true とし、
+ * lastScannedId (表示 0 件時のカーソル代替) で次ページへ進めるようにする。
+ */
+export async function loadDecisionRowsInSession(
+  db: ReturnType<typeof createDb>,
+  opts: { symbol?: string; clientOrderId?: string; limit: number; before?: number },
+): Promise<{ rows: DecisionRow[]; hasMore: boolean; lastScannedId?: number }> {
+  const target = opts.limit + 1
+  const visible: DecisionRow[] = []
+  let before = opts.before
+  let lastScannedId: number | undefined
+  let truncated = false
+  for (let i = 0; i < SESSION_FILTER_MAX_BATCHES; i++) {
+    const batch = await loadDecisionRows(db, {
+      symbol: opts.symbol,
+      clientOrderId: opts.clientOrderId,
+      limit: SESSION_FILTER_BATCH_SIZE,
+      before,
+    })
+    for (const r of batch) {
+      lastScannedId = r.id
+      if (isDecisionRowInSession(r.timestamp, r.symbol)) visible.push(r)
+      if (visible.length >= target) break
+    }
+    if (visible.length >= target) break
+    if (batch.length < SESSION_FILTER_BATCH_SIZE) break // データ末尾に到達
+    const minId = batch[batch.length - 1]!.id
+    // カーソルが前進しない場合は打ち切る (テスト用 fake db や重複 id の保護)
+    if (before !== undefined && minId >= before) break
+    before = minId
+    if (i === SESSION_FILTER_MAX_BATCHES - 1) truncated = true
+  }
+  return {
+    rows: visible.slice(0, opts.limit),
+    hasMore: visible.length > opts.limit || truncated,
+    lastScannedId,
+  }
+}
+
 /** now (実時刻) の JST 暦日 YYYY-MM-DD。 */
 function jstYmdOf(now: Date): string {
   return new Date(now.getTime() + 9 * 3_600_000).toISOString().slice(0, 10)

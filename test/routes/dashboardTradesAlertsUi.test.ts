@@ -438,3 +438,99 @@ describe('/dashboard/cron セッションフィルタ (#cron-session-filter)', (
     expect(isDecisionRowInSession('not-a-date', 'SOXL')).toBe(true)
   })
 })
+
+describe('loadDecisionRowsInSession のページ整合 (#cron-session-filter paging)', () => {
+  const IN_TS = '2026-06-05T14:30:00.000Z' // ET 10:30 金曜 = US 場中
+  const OUT_TS = '2026-06-06T00:00:00.000Z' // ET 金曜 20:00 = 閉場後
+  const mkRow = (id: number, inSession: boolean) => ({
+    id,
+    timestamp: inSession ? IN_TS : OUT_TS,
+    requestId: 'run-1',
+    symbol: 'SOXL',
+    decision: 'HOLD',
+    reason: null,
+    price: 30.5,
+    indicatorsJson: null,
+    clientOrderId: null,
+    traceJson: null,
+    filledPrice: null,
+    filledQty: null,
+    realizedPnl: null,
+    brokerStatus: null,
+  })
+  /**
+   * limit() 呼び出しごとに次のバッチを返す stateful fake (カーソル前進を模擬)。
+   * 判定クエリは leftJoin を通るので、それ以外のクエリ (kill switch の
+   * global_config 読みなど) には空を返して queue を消費させない。
+   */
+  function batchedDb(batches: unknown[][]) {
+    const queue = [...batches]
+    return {
+      select() {
+        let isDecisionQuery = false
+        const chain = {
+          leftJoin: () => {
+            isDecisionQuery = true
+            return chain
+          },
+          where: () => chain,
+          orderBy: () => chain,
+          limit: async () => (isDecisionQuery ? (queue.shift() ?? []) : []),
+        }
+        return { from: () => chain }
+      },
+    } as never
+  }
+
+  it('休場行 200 件を跨いで次バッチから開場行を limit 件そろえる', async () => {
+    const batch1 = Array.from({ length: 200 }, (_, i) => mkRow(400 - i, false))
+    const batch2 = [mkRow(200, true), mkRow(199, true)]
+    vi.mocked(createDb).mockReturnValue(batchedDb([batch1, batch2]))
+    const { loadDecisionRowsInSession } = await import('../../src/routes/dashboard/cron')
+    const page = await loadDecisionRowsInSession(createDb({} as D1Database), { limit: 1 })
+    expect(page.rows.map((r) => r.id)).toEqual([200])
+    expect(page.hasMore).toBe(true) // 開場行が limit+1 件見つかった
+  })
+
+  it('データ末尾に到達したら hasMore=false (フェッチ窓でなく表示行基準)', async () => {
+    vi.mocked(createDb).mockReturnValue(
+      batchedDb([[mkRow(5, true), mkRow(4, false), mkRow(3, true)]]),
+    )
+    const { loadDecisionRowsInSession } = await import('../../src/routes/dashboard/cron')
+    const page = await loadDecisionRowsInSession(createDb({} as D1Database), { limit: 50 })
+    expect(page.rows.map((r) => r.id)).toEqual([5, 3])
+    expect(page.hasMore).toBe(false)
+  })
+
+  it('走査上限 (5 バッチ) で打ち切り、hasMore=true + lastScannedId で前進できる', async () => {
+    const batches = Array.from({ length: 6 }, (_, b) =>
+      Array.from({ length: 200 }, (_, i) => mkRow(2000 - b * 200 - i, false)),
+    )
+    vi.mocked(createDb).mockReturnValue(batchedDb(batches))
+    const { loadDecisionRowsInSession } = await import('../../src/routes/dashboard/cron')
+    const page = await loadDecisionRowsInSession(createDb({} as D1Database), { limit: 50 })
+    expect(page.rows).toEqual([])
+    expect(page.hasMore).toBe(true)
+    expect(page.lastScannedId).toBe(2000 - 5 * 200 + 1) // 5 バッチ分の末尾
+  })
+
+  it('route: 次ページカーソルは「最後に表示した行」の id になる', async () => {
+    // 開場 [5,3,1] / 休場 [4,2]。limit=2 → 表示 [5,3]、次カーソルは 3
+    vi.mocked(createDb).mockReturnValue(
+      batchedDb([[mkRow(5, true), mkRow(4, false), mkRow(3, true), mkRow(2, false), mkRow(1, true)]]),
+    )
+    const app = createApp()
+    const res = await app.request(
+      '/dashboard/cron?limit=2',
+      { headers: {} },
+      { ...baseEnv, DB: {} as D1Database },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('data-id="5"')
+    expect(body).toContain('data-id="3"')
+    expect(body).not.toContain('data-id="4"')
+    expect(body).not.toContain('data-id="1"') // limit=2 で切れる
+    expect(body).toContain('before=3') // 表示末尾がカーソル
+  })
+})
