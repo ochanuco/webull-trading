@@ -175,6 +175,59 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions[0]?.trace?.find((step) => step.label === 'broker.submit')?.label_ja).toBe('証券会社への発注送信')
   })
 
+  // #reentry: flat な state に前回手仕舞い (lastExecutedPrice + lastExitAt) が
+  // 残っていると、scheduler がそれを strategy に plumb し、窓内 & 値幅不足なら
+  // BUY を price 軸ガードで止める (uptrendBars は本来 BUY する fixture)。
+  it('blocks a would-be BUY when re-entry price guard is active (recent exit near price)', async () => {
+    const recentlyExited: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      // 直近 BUY fixture の last close = 117.5。前回売値をそこに置くと
+      // ceiling = 117.5 - 1*ATR < 117.5 なので必ずガードに掛かる。
+      lastExecutedPrice: 117.5,
+      // now (2026-04-20 Mon) の 1 営業日前 (Fri) → businessDaysSinceExit = 1 < 3。
+      lastExitAt: '2026-04-17T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: recentlyExited }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SOXL')
+    expect(decision?.decision).toBe('HOLD')
+    expect(decision?.reason).toMatch(/re-entry guard/)
+    expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
+    expect(decision?.trace?.map((s) => s.label)).not.toContain('entry.adopt_buy')
+  })
+
+  it('allows the BUY once the re-entry guard window has elapsed', async () => {
+    const staleExit: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      lastExecutedPrice: 117.5,
+      // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
+      lastExitAt: '2026-04-10T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: staleExit }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
+  })
+
   it('HOLDs (and does not submit) when bars are too short for indicators', async () => {
     const store = makeStore({})
     const execution = mockExecution()
@@ -1487,6 +1540,9 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
     // ガード自体の検証は pullbackUptrendStrategy.test.ts の専用ケースで行う。
     maxSma50DeviationPct: 100,
     maxAtrRatio: 100,
+    // 再エントリーガードも既存 scheduler テストでは無効化 (0)。plumbing 検証は専用ケース。
+    reentryMinAtrBelowLastExit: 0,
+    reentryGuardBusinessDays: 0,
   }
 
   it('applies timeStopDays override to the matching symbol and falls through for others', async () => {

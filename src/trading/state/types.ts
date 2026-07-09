@@ -36,6 +36,13 @@ export interface SymbolState {
   settledCash: number
   pendingSettlement: PendingSettlement[]
   lastExecutedPrice: number | null
+  /**
+   * 建玉を閉じた最後の SELL fill の時刻 (ISO 8601)。#reentry の再エントリー
+   * 価格ガードが「前回手仕舞いから何営業日経過したか」の recency 判定に使う。
+   * flat 時の `lastExecutedPrice` (= 前回売値) と対で読む。close 以外の fill
+   * (BUY / 部分 SELL) では更新しない。旧 state には無い → undefined は null 相当。
+   */
+  lastExitAt: string | null
   lastQuote: QuoteSnapshot | null
   updatedAt: string
 }
@@ -51,6 +58,7 @@ export function emptySymbolState(symbol: string, now: () => Date = () => new Dat
     settledCash: 0,
     pendingSettlement: [],
     lastExecutedPrice: null,
+    lastExitAt: null,
     lastQuote: null,
     updatedAt: now().toISOString(),
   }

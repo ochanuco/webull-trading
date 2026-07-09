@@ -19,6 +19,7 @@ function stateWith(symbol: string, position: PositionState | null, updatedAt = '
     settledCash: 0,
     pendingSettlement: [],
     lastExecutedPrice: null,
+    lastExitAt: null,
     lastQuote: null,
     updatedAt,
   }

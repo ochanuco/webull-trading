@@ -58,6 +58,13 @@ export interface MomentumInput {
   pendingOrder: PendingOrderLock | null
   cooldownUntil: string | null
   holdBusinessDays: number
+  /**
+   * #reentry: pullback 戦略の再エントリー価格ガード用フィールド。momentum は
+   * 使わないが、scheduler が両戦略へ同一 input オブジェクトを渡すため (union の
+   * excess property check を通すため) optional で受けておく。
+   */
+  lastExitPrice?: number | null
+  businessDaysSinceExit?: number | null
   now: Date
 }
 

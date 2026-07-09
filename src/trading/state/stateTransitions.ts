@@ -61,12 +61,18 @@ export function recordFill(
   }
 
   const position = applyFillToPosition(state.position, fill, ctx.now)
+  const iso = ctx.now().toISOString()
+  // 建玉を閉じた SELL (position が null に落ちた) のときだけ lastExitAt を刻む。
+  // #reentry の価格ガードが「前回手仕舞いからの経過営業日」を測る起点。
+  // 部分 SELL / BUY では更新しない (position !== null)。
+  const closedByExit = fill.side === 'SELL' && position === null
   return {
     ...state,
     position,
     pendingOrder: null,
     lastExecutedPrice: fill.price,
-    updatedAt: ctx.now().toISOString(),
+    ...(closedByExit ? { lastExitAt: iso } : {}),
+    updatedAt: iso,
   }
 }
 
