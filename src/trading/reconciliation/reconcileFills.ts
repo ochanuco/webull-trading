@@ -1122,11 +1122,13 @@ async function applyFillToState(args: {
     }
   }
 
-  // Stop-out cooldown: a losing exit parks the symbol until the next trading
-  // day so a whipsaw re-entry cannot compound the loss. Ported from the
-  // removed TradeEventHandler — pullbackScheduler reads `state.cooldownUntil`
-  // for its signal decision, so without this write the strategy never
-  // backs off after a losing sell.
+  // Exit cooldown: **any** completed SELL parks the symbol until the next
+  // trading day so a same-day / next-tick re-entry cannot whipsaw. #reentry:
+  // 以前は損失決済 (realizedPnl < 0) のみ cooldown を張っていたが、**良い利確の
+  // 直後に同一銘柄を即買い戻して往復で削る** ケース (SQQQ 実例: +4% TP → 6h 後に
+  // 売値超で買い直し → 含み損) を止められなかった。TP / time-stop / 損切りを問わず
+  // 全 SELL で cooldown を張り、時間軸で買い直しを 1 営業日ブロックする
+  // (価格軸のガードは PullbackUptrendStrategy 側 = 前回売値 −1ATR)。
   //
   // Cooldown failures are intentionally NON-fatal (caught + logged) because
   // the position itself has already been correctly recorded, and a missed
@@ -1136,8 +1138,6 @@ async function applyFillToState(args: {
   // applied.
   if (
     side === 'SELL' &&
-    realizedPnl !== null &&
-    realizedPnl < 0 &&
     env.SYMBOL_STATE &&
     (symbolApplied || portfolioApplied)
   ) {

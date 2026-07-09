@@ -21,6 +21,9 @@ const LEVERAGED_RULE: SymbolRule = {
   // 過熱ガードは既存ケースでは無効化 (大きい値)。ガード検証は専用 describe で実施。
   maxSma50DeviationPct: 100,
   maxAtrRatio: 100,
+  // 再エントリーガードも既存ケースでは無効化 (0)。検証は専用 describe で実施。
+  reentryMinAtrBelowLastExit: 0,
+  reentryGuardBusinessDays: 0,
 }
 
 /** Build a valid BUY-triggering input; individual tests mutate one field. */
@@ -60,6 +63,7 @@ describe('PullbackUptrendStrategy entry', () => {
       ['guard.pending_order_absent', true],
       ['guard.cooldown_inactive', true],
       ['route.position_open', false],
+      ['entry.reentry_below_last_exit', true],
       ['entry.trend_50d_return', true],
       ['entry.above_sma50', true],
       ['entry.not_overextended', true],
@@ -142,6 +146,53 @@ describe('PullbackUptrendStrategy entry', () => {
     const input = goodEntryInput()
     input.cooldownUntil = new Date(now.getTime() + 60_000).toISOString()
     expect(strategy.decide(input).reason).toMatch(/cooldown/)
+  })
+})
+
+// #reentry: 前回売値からの再エントリー価格ガード。窓内 (既定 3 営業日) は前回売値
+// −1ATR 以上安くないと買い直さない。窓外 / 情報欠落は素通り (fail-open)。
+describe('PullbackUptrendStrategy re-entry price guard', () => {
+  const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
+
+  it('HOLDs when re-buying within the window at/above (last exit - 1 ATR)', () => {
+    const input = goodEntryInput() // price 96, atr20 1.5
+    input.lastExitPrice = 96 // ceiling = 96 - 1*1.5 = 94.5; price 96 > 94.5 → block
+    input.businessDaysSinceExit = 1
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.reason).toMatch(/re-entry guard/)
+    expect(signal.trace?.at(-1)).toMatchObject({
+      label: 'entry.reentry_below_last_exit',
+      passed: false,
+    })
+  })
+
+  it('BUYs when re-entry price is sufficiently below last exit within the window', () => {
+    const input = goodEntryInput() // price 96
+    input.lastExitPrice = 100 // ceiling = 100 - 1.5 = 98.5; price 96 <= 98.5 → pass
+    input.businessDaysSinceExit = 1
+    expect(strategy.decide(input).action).toBe('BUY')
+  })
+
+  it('BUYs once the guard window has elapsed even at/above last exit', () => {
+    const input = goodEntryInput()
+    input.lastExitPrice = 96
+    input.businessDaysSinceExit = 3 // >= reentryGuardBusinessDays → guard inactive
+    expect(strategy.decide(input).action).toBe('BUY')
+  })
+
+  it('is fail-open when lastExitPrice is unknown', () => {
+    const input = goodEntryInput()
+    input.lastExitPrice = null
+    input.businessDaysSinceExit = 1
+    expect(strategy.decide(input).action).toBe('BUY')
+  })
+
+  it('is fail-open when businessDaysSinceExit is unknown', () => {
+    const input = goodEntryInput()
+    input.lastExitPrice = 96
+    input.businessDaysSinceExit = null
+    expect(strategy.decide(input).action).toBe('BUY')
   })
 })
 

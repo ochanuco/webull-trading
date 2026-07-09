@@ -213,6 +213,7 @@ describe('renderSymbolTab — fill 詳細パネル + 保有区間 markArea の�
     pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
     requireAboveSma50: true, kAtr: 2,
     maxSma50DeviationPct: 0.6, maxAtrRatio: 1.5,
+    reentryMinAtrBelowLastExit: 1.0, reentryGuardBusinessDays: 3,
   }
   function args(): ChartsBodySymbol {
     return {

@@ -176,10 +176,13 @@ export class SymbolStateDO extends DurableObject<object> {
   }
 
   private normalize(state: SymbolState): SymbolState {
-    if (!('appliedClientOrderIds' in state) ||
-      !Array.isArray((state as { appliedClientOrderIds?: unknown }).appliedClientOrderIds)) {
-      return { ...state, appliedClientOrderIds: [] }
-    }
-    return state
+    const appliedClientOrderIds =
+      'appliedClientOrderIds' in state &&
+      Array.isArray((state as { appliedClientOrderIds?: unknown }).appliedClientOrderIds)
+        ? state.appliedClientOrderIds
+        : []
+    // #reentry: lastExitAt は後付けフィールド。旧 state には欠落しているので
+    // 読み込み時に null へ正規化し、永続データを型 (string | null) と揃える。
+    return { ...state, appliedClientOrderIds, lastExitAt: state.lastExitAt ?? null }
   }
 }
