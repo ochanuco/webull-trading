@@ -359,6 +359,10 @@ export const admin = new Hono<AppBindings>()
         global.pullbackDefaultMaxAtrRatio,
         { mustBePositive: true },
       ),
+      // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
+      // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
+      reentryMinAtrBelowLastExit: 1.0,
+      reentryGuardBusinessDays: 3,
     }
 
     // Need at least 50 warmup bars before `from` for SMA50; estimate generous
@@ -1933,6 +1937,9 @@ export const admin = new Hono<AppBindings>()
       kAtr: global.pullbackDefaultKAtr,
       maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
       maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+      // #reentry: cron の runStrategyCron 既定と一致 (global_config 列化はまだ)。
+      reentryMinAtrBelowLastExit: 1.0,
+      reentryGuardBusinessDays: 3,
     }
     const rules = buildSymbolRules(defaultRule, universe)
     const barClient = await selectBarClient(c.env)
