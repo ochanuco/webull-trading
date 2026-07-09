@@ -79,6 +79,10 @@ export interface StrategyParamsSnapshot {
   maxSma50DeviationPct: number
   /** ボラ過熱ガード閾値 `atr20/baselineAtr20` 上限。 */
   maxAtrRatio: number
+  /** #reentry: 再エントリー価格ガード 前回売値からの最小 ATR 下方距離。 */
+  reentryMinAtrBelowLastExit: number
+  /** #reentry: 再エントリー価格ガードの有効窓 (営業日)。 */
+  reentryGuardBusinessDays: number
 }
 
 /**
@@ -100,6 +104,9 @@ export function strategyParamsFromGlobal(global: LoadedGlobalConfig): StrategyPa
     kAtr: global.pullbackDefaultKAtr,
     maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
     maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+    // #reentry: cron の runStrategyCron 既定と一致 (まだ global_config 列なし)。
+    reentryMinAtrBelowLastExit: 1.0,
+    reentryGuardBusinessDays: 3,
   }
 }
 

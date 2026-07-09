@@ -280,6 +280,10 @@ export async function runStrategyCron(
     kAtr: global.pullbackDefaultKAtr,
     maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
     maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+    // #reentry: 再エントリー価格ガード。まだ global_config 列を持たせていないので
+    // 定数 (前回売値 −1ATR / 3 営業日窓)。チューニングが要れば列/override 化。
+    reentryMinAtrBelowLastExit: 1.0,
+    reentryGuardBusinessDays: 3,
   }
   // Per-symbol rule map (#316 / #exit-atr / #452)。global default → role preset
   // → per-symbol override の順に重ねる。詳細と回帰保証は symbolRuleResolution.ts。

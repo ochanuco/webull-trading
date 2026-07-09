@@ -710,7 +710,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
   })
 
-  it('SELL fill: applies portfolio realized PnL and stamps marker', async () => {
+  it('SELL fill: applies portfolio realized PnL, stamps marker, and parks cooldown even on a profit', async () => {
     const row: CandidateRow = {
       id: 15,
       clientOrderId: 'coid-sell-1',
@@ -772,6 +772,9 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(portfolioStub.applyRealizedPnlOnce).toHaveBeenCalledWith('coid-sell-1', 40)
     expect(summary.stateApplied).toBe(1)
     expect(updates.at(-1)!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
+    // #reentry (Change A): 損益符号を問わず全 SELL で cooldown を張る。+40 の
+    // 利確でも翌営業日まで park し、同日/次tick の買い戻し whipsaw を止める。
+    expect(symbolStub.setCooldown).toHaveBeenCalledTimes(1)
   })
 
   it('repair retry after marker update failure does not double-apply DO state', async () => {

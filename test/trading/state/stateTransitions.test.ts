@@ -93,6 +93,8 @@ describe('recordFill', () => {
     })
     expect(next.pendingOrder).toBeNull()
     expect(next.lastExecutedPrice).toBe(9)
+    // #reentry: BUY は手仕舞いではないので lastExitAt を刻まない。
+    expect(next.lastExitAt).toBeNull()
   })
 
   it('averages the fill price on a subsequent BUY', () => {
@@ -111,6 +113,18 @@ describe('recordFill', () => {
 
     expect(state.position).toBeNull()
     expect(state.lastExecutedPrice).toBe(12)
+    // #reentry: 建玉を閉じた SELL は lastExitAt を fill 時刻で刻む。
+    expect(state.lastExitAt).toBe('2026-04-18T11:00:00.000Z')
+  })
+
+  it('does not stamp lastExitAt on a partial SELL that leaves a position open', () => {
+    let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
+    state = recordFill(state, { side: 'BUY', qty: 3, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
+    state = recordFill(state, { side: 'SELL', qty: 1, price: 12 }, { now: fixedNow('2026-04-18T11:00:00.000Z') })
+
+    // 部分 SELL は position が残る (2 株) → 手仕舞い扱いしない。
+    expect(state.position?.qty).toBe(2)
+    expect(state.lastExitAt).toBeNull()
   })
 
   it('keeps the opened_at timestamp when scaling in', () => {

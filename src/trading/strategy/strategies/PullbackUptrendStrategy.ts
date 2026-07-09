@@ -62,6 +62,21 @@ export interface SymbolRule {
    * 既存の atr-floor (低ボラで size 半減) と対になる高ボラ側の上限。
    */
   maxAtrRatio: number
+  /**
+   * 再エントリー価格ガード (#reentry)。直前に手仕舞いした価格 (flat 時の
+   * `lastExecutedPrice` = 前回売値) より、この倍率 × atr20 以上 **安く** ない限り
+   * 同一銘柄を買い直さない。「良い利確の直後に同水準/上で買い戻して往復で削る」
+   * whipsaw を価格軸で防ぐ (時間軸の cooldown = reconcileFills が全 exit で翌
+   * 営業日まで、と対)。0 で無効。既定 1.0 (= 前回売値 −1ATR)。
+   */
+  reentryMinAtrBelowLastExit: number
+  /**
+   * 再エントリー価格ガードの有効窓 (営業日)。前回手仕舞いからこの日数**未満**の
+   * 間だけ上のガードを適用し、それを過ぎたら無効化して通常のトレンド再 entry を
+   * 妨げない (前回売値より高い新レグでの押し目買いを永久に塞がないため)。
+   * 0 で無効。既定 3。
+   */
+  reentryGuardBusinessDays: number
 }
 
 /**
@@ -80,6 +95,8 @@ export const TEST_DEFAULT_RULE: SymbolRule = Object.freeze({
   kAtr: 2.0,
   maxSma50DeviationPct: 0.6,
   maxAtrRatio: 1.5,
+  reentryMinAtrBelowLastExit: 1.0,
+  reentryGuardBusinessDays: 3,
 })
 
 export interface PullbackInput {
@@ -90,6 +107,16 @@ export interface PullbackInput {
   cooldownUntil: string | null
   /** Business days elapsed since position.openedAt. 0 when position is null. */
   holdBusinessDays: number
+  /**
+   * 前回手仕舞い価格 (#reentry)。flat 時の `SymbolState.lastExecutedPrice`
+   * (= 建玉を閉じた SELL の約定価格) を渡す。null / 未設定なら価格ガード素通り。
+   */
+  lastExitPrice?: number | null
+  /**
+   * 前回手仕舞いからの経過営業日 (#reentry)。scheduler が `lastExitAt` から
+   * market 別に算出して渡す。null なら価格ガード素通り (recency 判定不能)。
+   */
+  businessDaysSinceExit?: number | null
   now: Date
 }
 
@@ -184,6 +211,39 @@ export class PullbackUptrendStrategy {
 
   private entryDecision(input: PullbackInput, rule: SymbolRule, trace: DecisionTraceStep[]): Signal {
     const ind = input.indicators
+
+    // 再エントリー価格ガード (#reentry): 前回手仕舞い (前回売値) から
+    // reentryGuardBusinessDays 営業日以内は、前回売値より reentryMinAtrBelowLastExit
+    // × atr20 以上 安い水準でなければ BUY を見送る。良い利確直後の同水準/高値
+    // 買い戻し (往復で削る whipsaw) を価格軸で止める。窓を過ぎる or 情報欠落
+    // (前回売値 / 経過日数 / atr 不明) は fail-open (通常のトレンド再 entry を妨げない)。
+    const lastExitPrice = input.lastExitPrice ?? null
+    const bdSinceExit = input.businessDaysSinceExit ?? null
+    const reentryGuardActive =
+      rule.reentryMinAtrBelowLastExit > 0 &&
+      rule.reentryGuardBusinessDays > 0 &&
+      lastExitPrice !== null &&
+      Number.isFinite(lastExitPrice) &&
+      lastExitPrice > 0 &&
+      bdSinceExit !== null &&
+      bdSinceExit < rule.reentryGuardBusinessDays &&
+      Number.isFinite(ind.atr20) &&
+      ind.atr20 > 0
+    if (reentryGuardActive) {
+      const reentryCeiling = lastExitPrice! - rule.reentryMinAtrBelowLastExit * ind.atr20
+      if (ind.price > reentryCeiling) {
+        trace.push(step('entry.reentry_below_last_exit', false, ind.price, '<=', reentryCeiling, `within ${bdSinceExit}bd of last exit ${lastExitPrice}`))
+        return hold(
+          input,
+          `re-entry guard: price ${ind.price} > last exit ${lastExitPrice} - ${rule.reentryMinAtrBelowLastExit}*ATR(${ind.atr20.toFixed(2)}) = ${reentryCeiling.toFixed(2)} (${bdSinceExit}bd since exit)`,
+          trace,
+        )
+      }
+      trace.push(step('entry.reentry_below_last_exit', true, ind.price, '<=', reentryCeiling))
+    } else {
+      trace.push(step('entry.reentry_below_last_exit', true, ind.price, '<=', ind.price, 'guard inactive'))
+    }
+
     if (ind.return50d <= rule.minReturn50d) {
       trace.push(step('entry.trend_50d_return', false, ind.return50d, '>', rule.minReturn50d))
       // #318: lookback は 20 営業日 (フィールド名は historical)。reason は人間
@@ -314,6 +374,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'guard.pending_order_absent': '未約定注文がない',
   'guard.cooldown_inactive': 'クールダウン中ではない',
   'route.position_open': '建玉を保有中',
+  'entry.reentry_below_last_exit': '前回売値からの再エントリー間隔・値幅が十分',
   // #318: trace 識別子 (`entry.trend_50d_return` / `entry.high20d_valid`) は
   // 既存 decision_log と互換維持のため据え置き。**表示文字列のみ実 lookback に
   // 合わせて 20日 / 10日 と表記**。

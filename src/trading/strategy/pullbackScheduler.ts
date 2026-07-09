@@ -578,6 +578,14 @@ export async function runPullbackScheduler(
     // execution は通常 BUY/SELL と全く同じ経路を通る (= 通常ロールと同じ動き)。
     const useMomentum = !!(options.momentumStrategy && options.momentumSymbols?.has(upper))
     const decider = useMomentum ? options.momentumStrategy! : strategy
+    // #reentry: flat のときだけ前回手仕舞い情報を渡す (position 保有中は
+    // lastExecutedPrice = 直近 BUY 価格になり得るので再エントリーガードに使わない)。
+    // flat 時は建玉を閉じた SELL が最後の fill なので lastExecutedPrice = 前回売値。
+    const reentryLastExitPrice = state.position === null ? state.lastExecutedPrice : null
+    const reentryBusinessDaysSinceExit =
+      state.position === null && state.lastExitAt
+        ? computeHoldBusinessDays(state.lastExitAt, now(), market)
+        : null
     let signal = decider.decide({
       symbol: upper,
       indicators,
@@ -585,6 +593,8 @@ export async function runPullbackScheduler(
       pendingOrder: state.pendingOrder,
       cooldownUntil: state.cooldownUntil,
       holdBusinessDays,
+      lastExitPrice: reentryLastExitPrice,
+      businessDaysSinceExit: reentryBusinessDaysSinceExit,
       now: now(),
     })
 
