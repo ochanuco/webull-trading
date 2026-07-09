@@ -1399,6 +1399,8 @@ export const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
   kAtr: 2.0,
   maxSma50DeviationPct: 0.6,
   maxAtrRatio: 1.5,
+  reentryMinAtrBelowLastExit: 1.0,
+  reentryGuardBusinessDays: 3,
 }
 
 /**
