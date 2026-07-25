@@ -399,6 +399,13 @@ export const admin = new Hono<AppBindings>()
       to,
       initialCash,
       rule,
+      // #atr-baseline-window: `?atrBaselineExcludeRecent=1` で baseline から
+      // 直近 20 本を除いた場合の成績を測れる。既定は global_config の値
+      // (= 本番と同じ条件) なので、閾値の再校正はこの 2 通りを比べて行う。
+      atrBaselineExcludeRecent:
+        c.req.query('atrBaselineExcludeRecent') === undefined
+          ? global.atrBaselineExcludeRecent
+          : c.req.query('atrBaselineExcludeRecent') === '1',
     }
     const result = await runBacktest(sliced, params)
     return c.json(result)

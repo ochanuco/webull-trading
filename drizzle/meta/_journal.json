@@ -281,6 +281,13 @@
       "when": 1785000435697,
       "tag": "0039_add_trade_cost_config",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1785000927225,
+      "tag": "0040_add_atr_baseline_exclude_recent",
+      "breakpoints": true
     }
   ]
 }

@@ -350,6 +350,14 @@ export const globalConfig = sqliteTable(
     /** 1 注文あたりの固定費 (銘柄通貨建て)。0 で無効。 */
     feeFixedPerOrder: real('fee_fixed_per_order').notNull().default(0),
     /**
+     * baseline ATR から直近 20 本 (atr20 の窓) を除外するか (#atr-baseline-window)。
+     * **既定 false = 従来の重複窓**。true にすると比率が素直になる代わりに
+     * 過熱ガード / atr-floor の閾値を測り直す必要がある。
+     */
+    atrBaselineExcludeRecent: integer('atr_baseline_exclude_recent', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    /**
      * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
      * pullbackSizing に渡る。#23 Lane 2。
      */

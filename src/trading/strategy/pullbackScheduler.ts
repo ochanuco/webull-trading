@@ -207,6 +207,11 @@ export interface PullbackSchedulerOptions {
    */
   tradeCost?: TradeCostConfig
   /**
+   * baseline ATR から直近 20 本を除外するか (#atr-baseline-window)。未注入は
+   * false = 従来窓。閾値の再校正が要るので production は global_config 経由。
+   */
+  atrBaselineExcludeRecent?: boolean
+  /**
    * ペアレジーム layer (#472)。mode='observe' は zone/score を trace に残すだけ
    * (gate しない)、'enforce' は zone が許可しない側の BUY を SKIP し、保有と
    * 反対 zone への flip で SELL (regime_flip) を出す。未注入 = 従来挙動。
@@ -555,7 +560,9 @@ export async function runPullbackScheduler(
       continue
     }
 
-    const indicators = computePullbackIndicators(bars, intradayPrice)
+    const indicators = computePullbackIndicators(bars, intradayPrice, {
+      excludeRecentFromBaseline: options.atrBaselineExcludeRecent === true,
+    })
     if (!indicators) {
       summary.rejected.push({ symbol: upper, reason: 'insufficient bars for indicators' })
       await emitDecision({ symbol: upper, decision: 'SKIP', reason: 'insufficient bars for indicators' })

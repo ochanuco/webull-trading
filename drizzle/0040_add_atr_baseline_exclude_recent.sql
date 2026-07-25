@@ -1,0 +1,1 @@
+ALTER TABLE `global_config` ADD `atr_baseline_exclude_recent` integer DEFAULT false NOT NULL;
