@@ -1,31 +1,37 @@
 # webull-trading
 
-Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking Webull OpenAPI directly (no SDK). Trade-event streaming via a Node-runtime gRPC bridge hosted in a Cloudflare Container.
+Retail auto-trading system on Cloudflare Workers + Hono + TypeScript, speaking Webull OpenAPI directly (no SDK).
 
-**Current scope**: staging で Pullback 戦略が 1h cron で稼働、MARKET 注文が Webull JP UAT (sandbox) に到達して fill まで確認済。US + JP 両通貨対応 (JP は 100 株ロット丸め)。Risk: kill-switch / drawdown kill / ATR stop / drawdown-scaled size / sector bucket cap。read-only dashboard 有り。残タスク: Bearer auth 移行 (#29) / portfolio exposure gate (#77) / JP sandbox tenant (#89、Webull 側 blocker) / multi-account routing (#97)。
+**Current scope**: POC (issue #1、Phase 1–5) は完了。production で Pullback / BreakoutMomentum 戦略が 15 分 cron で実発注稼働中 (Webull JP 本番口座)。US + JP 両通貨対応 (JP は `symbol_config.lot_size` で丸め)。Risk: kill-switch / drawdown kill / ATR stop / drawdown-scaled size / VIX regime filter / earnings・macro event gate / spread guard / ticker deny guard。Cloudflare Access で保護した read-only dashboard + read-only MCP server 有り。
 
 ## アーキテクチャ概要
 
 ```
- ┌──────────────┐  */5 cron       ┌──────────────────────────┐
- │  Cloudflare  │────────────────▶│  quote feed + reconcile   │
- │   Workers    │  */15 * * * * ─▶│  Pullback strategy cron   │
- │              │  /trade/* HTTP  └──────────────────────────┘
- │              │────▶ decide / execute → Webull HTTP
- │              │  /events/trade  ◀────── bridge Container
- │              │  /admin/*       operator (Basic Auth)
- │              │  /dashboard/*   read-only SSR (Basic Auth)
+ ┌──────────────┐  */5  * * * *   ┌────────────────────────────────────┐
+ │  Cloudflare  │────────────────▶│ quote feed + reconcileFills         │
+ │   Workers    │  */15 * * * * ─▶│ strategy cron (Pullback / Breakout) │
+ │              │  0 22  * * * ──▶│ portfolio roll + token refresh +    │
+ │              │                 │ market data health + allowlist 更新  │
+ │              │                 └────────────────────────────────────┘
+ │              │  /trade/*     ──▶ decide / execute → Webull HTTP
+ │              │  /admin/*        operator 操作 (Cloudflare Access)
+ │              │  /dashboard/*    read-only SSR  (Cloudflare Access)
+ │              │  /mcp            read-only MCP  (Access service token)
  └──────┬───────┘
         │
  ┌──────┴────────────────────────────────────────────────────┐
  │              Durable Objects  +  D1                         │
  │  SYMBOL_STATE (per-symbol: position / pending / cooldown)   │
  │  PORTFOLIO_STATE (daily equity / drawdown kill)             │
- │  BRIDGE (Container lifecycle)                               │
- │  DB: trade_journal / symbol_config / inverse_pairs /        │
- │      global_config                                          │
+ │  WEBULL_TOKEN_STATE (x-access-token + 自動 refresh)          │
+ │  DB: trade_journal / symbol_config / global_config /        │
+ │      strategy_decision_log / earnings_calendar /            │
+ │      macro_event_calendar / config_audit_log /              │
+ │      portfolio_equity_snapshot / tradable_instrument ...    │
  └─────────────────────────────────────────────────────────────┘
 ```
+
+> gRPC bridge (Node Container) は PR #110 で撤去済。SELL 後処理は `reconcileFills` に統合され、`/events/trade` ingest も廃止された。
 
 ## Safety defaults (fail-closed)
 
@@ -38,6 +44,7 @@ Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking 
 | `dry_run` | `1` | Execution Mock に固定、broker へ送らない |
 | `trading_enabled` | `0` | Risk layer が全注文 reject |
 | `market_hours_check` | `0` | UTC 13:30-20:00 Mon-Fri チェック |
+| `session_window_gate_enabled` | `0` | 開場 30 分前〜引けの窓外は戦略 cron の評価自体を skip |
 | `drawdown_kill_threshold` | `-0.02` | 日次 realized_pnl / start_equity 比で自動 kill |
 | `stale_quote_ms` | `900000` | halt 判定 (15 min) |
 
@@ -63,6 +70,8 @@ Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking 
 | `pullback_default_min_return_50d` | `0.08` | 50日 return の uptrend filter |
 | `pullback_default_require_above_sma50` | `1` | sma50 超を entry 必須 |
 | `pullback_default_k_atr` | `2.0` | ATR 倍率。`stopDistance = max(k_atr × atr20, pct stop)` |
+| `pullback_default_max_sma50_deviation_pct` | `0.6` | sma50 からの上方乖離が大きすぎる時は entry 見送り |
+| `pullback_default_max_atr_ratio` | `1.5` | ATR 拡大 (ボラ急騰) 時の entry 見送り閾値 |
 
 **Risk gate の動的パラメタ (#23 Lane 2-3):**
 
@@ -71,44 +80,55 @@ Retail auto-trading **POC** on Cloudflare Workers + Hono + TypeScript, speaking 
 | `risk_base_per_trade_pct` | `0.004` | 1 trade 基準 risk (%) |
 | `risk_dd_half_threshold` | `-0.05` | 日次 DD でこれ未満 → size 0.5× |
 | `risk_dd_halt_threshold` | `-0.10` | 日次 DD でこれ未満 → size 0 (halt) |
-| `bucket_exposure_pct` | `0.30` | 同一 `symbol_config.bucket` の open notional ≤ equity × これ |
+| `vix_warning_threshold` | `25.0` | VIX がこれ超で size scale 適用 |
+| `vix_critical_threshold` | `30.0` | VIX がこれ超で新規 entry 停止 |
+| `vix_warning_size_scale` | `0.5` | warning 帯での size 倍率 |
+| `pair_regime_mode` | `'off'` | ペアレジーム layer (#472)。`off` / `observe` (log のみ) / `enforce` |
+| `cash_fallback_orders_enabled` | `0` | 余剰現金の退避先 (SGOV 等) への自動 BUY を許可 (#452) |
 
 加えて:
-- `symbol_config.active = 0` にすれば ALLOWED から外れて cron から除外
-- `symbol_config.bucket` に tag ('semi' / 'jp_auto' 等) を入れると bucket exposure cap 対象
+- `symbol_config.active = 0` にすれば universe から外れて cron から除外
+- `symbol_config` の per-symbol override (`stop_pct_override` / `k_atr_override` / `lot_size` / `budget_alloc_pct` / `role` など) が global default に優先
 - `inverse_pairs` で SOXL/SOXS 同時保有を構造的に禁止
-- Basic Auth で `/trade/*` / `/webull/*` / `/admin/*` / `/dashboard/*` 保護
-- `EVENT_INGEST_SECRET` header + timing-safe 比較で `/events/trade` 保護
+- Cloudflare Access JWT で `/trade/*` / `/webull/*` / `/admin/*` / `/dashboard/*` / `/mcp` を保護 (#29)
+- state 変更 / admin write / dashboard GET は Workers Rate Limit binding で cap (#285)
 
 ## Layout
 
 ```
 src/
   app.ts / index.ts           Hono factory + Workers entry (fetch / scheduled)
-  routes/                     health / trade / webull / events / admin / dashboard
+  routes/                     health / trade / webull / admin / mcp + dashboard/ (画面ごとに分割)
   trading/
-    application/              TradingService / TradeEventService
-    domain/                   Signal / OrderIntent / RiskDecision / ExecutionResult / TradeEvent
-    strategy/                 PullbackUptrendStrategy + pullbackSizing (ATR stop, lot-round) + indicators + scheduler + runStrategyCron
-    risk/                     DefaultRiskPolicy + jpPriceBand + spreadGuard + drawdownRiskScale + bucketExposureGate
+    application/              TradingService
+    domain/                   Signal / OrderIntent / RiskDecision / ExecutionResult / StrategyDecision / tradingCalendar
+    strategy/                 strategies/ (Pullback / BreakoutMomentum / FixedRule) + pullbackSizing (ATR stop, lot-round)
+                              + indicators + pullbackScheduler + runStrategyCron + buyingPower + conditionalAllocation
+    risk/                     DefaultRiskPolicy + spreadGuard + jpPriceBand + drawdownRiskScale + vixRegimeFilter
+                              + earningsGate + macroEventGate + perSymbolRiskGate + tickerDenyGuard
     execution/                Execution + MockExecution + WebullExecution
-    reconciliation/           reconcileFills (Webull order history → D1 + DO apply)
-    state/                    SymbolStateDO / PortfolioStateDO + clients / transitions
-    bridge/                   BridgeContainer (Cloudflare Container DO class) + keepAlive
+    reconciliation/           reconcileFills (Webull order history → D1 + DO apply) + syncHoldings
+    state/                    SymbolStateDO / PortfolioStateDO / WebullTokenStateDO + clients / transitions
+    portfolio/                runPortfolioRoll (EOD rollover)
+    runtime/                  killSwitch + productionReadiness
     quotes/                   quoteScheduler
+    backtest/                 runBacktest
   infrastructure/
-    webull/                   WebullHttpClient / WebullAuth / mapper / TradeEventBridge
-    quotes/                   YahooBarClient (US + JP bar source) / WebullQuoteClient / BarClient
-    logger/                   AuditLogger + tradeJournal (console + D1 sink)
-    db/                       drizzle schema + tradeJournalRepo / symbolConfigRepo / globalConfigRepo + loaders
-  middleware/                 basicAuth
-  shared/                     errors
-  config/                     env (少数: secret 参照のみ)
-Dockerfile                    bridge Container image (repo root context)
-bridge/                       Node gRPC subscriber (pnpm start)
-drizzle/                      generated D1 migrations (0000_init … 0008_bucket_cap)
-docs/                         db-operations.md / seed/*.sql
-test/                         vitest suite (322 cases)
+    webull/                   WebullReadClient / WebullTradeClient (facade) + WebullHttpClient / WebullAuth / mapper
+                              + token flow (WebullTokenClient / refreshWebullToken / resolveAccessToken)
+                              + tradability / instrument lookup / allowlist refresh
+    quotes/                   BarClient / YahooBarClient / YahooQuoteClient / WebullQuoteClient / fxRate
+    calendar/                 us・jp market calendar + earnings / macro event repo
+    notification/             Notifier 実装 + Slack/Discord webhook + 状態変化検知
+    logger/                   AuditLogger + tradeJournal + strategyDecisionLog (console + D1 sink)
+    db/                       drizzle schema + 各 repo (tradeJournal / symbolConfig / globalConfig / ...) + loaders
+  middleware/                 accessJwt (Cloudflare Access) + rateLimit
+  shared/                     errors / format
+  config/                     env (secret / binding の型定義と parser)
+scripts/                      issue-webull-token / list-webull-accounts / guard-deploy / verify-production-d1 / backtest-*
+drizzle/                      generated D1 migrations (0000_init … 0037_decision_skip_reject_taxonomy)
+docs/                         db-operations / env-separation / production-cd / production-deployment / review-queries / seed
+test/                         vitest suite (117 files / 1724 cases)
 ```
 
 ## Dev
@@ -116,37 +136,41 @@ test/                         vitest suite (322 cases)
 ```bash
 pnpm install
 pnpm run typecheck                # tsc --noEmit
-pnpm test                         # vitest (Worker + bridge)
+pnpm test                         # vitest
 pnpm dev                          # wrangler dev (ローカル D1 自動作成)
 pnpm exec wrangler deploy --dry-run
-
-# bridge 単体 typecheck
-cd bridge && pnpm install && pnpm run typecheck
 ```
 
-`.dev.vars.template` を `.dev.vars` にコピーして 1Password `op inject` で値埋め。
+`.dev.vars.example` を `.dev.vars` にコピーして 1Password `op inject` で値埋め。
 
 ## Endpoints
+
+auth 列の `Access` は Cloudflare Access JWT (`Cf-Access-Jwt-Assertion` 検証、#29)。admin は endpoint 数が多いので代表のみ — 全量は `src/routes/admin.ts` / `src/routes/dashboard/index.ts` 参照。
 
 | method | path | auth | 概要 |
 |---|---|---|---|
 | GET | `/health` | none | `{status, timestamp}` |
-| POST | `/trade/decide` | Basic | Signal + OrderIntent + RiskDecision を返す (発注しない) |
-| POST | `/trade/execute` | Basic | 上記 + ExecutionResult (`dry_run=1` で Mock、0 で Webull) |
-| POST | `/webull/order/place` | Basic | 低レベル疎通 endpoint (`dry_run=1` で synthetic response、`dry_run=0` は 403 で拒否。実発注は `/trade/execute` か `/admin/strategy/run` 経由) |
-| POST | `/events/trade` | secret header | bridge からの trade event ingest |
-| POST | `/admin/symbols/:symbol/seed-cash` | Basic | `settled_cash` の初期値投入 |
-| POST | `/admin/portfolio/seed-equity` | Basic | `daily_start_equity` 投入 |
-| POST | `/admin/portfolio/roll-daily` | Basic | EOD rollover (start_equity ← 現 equity、realized=0 に) |
-| POST | `/admin/strategy/run` | Basic | `runStrategyCron` 手動 trigger (cron 待たず試走) |
-| POST | `/admin/orders/reconcile` | Basic | `reconcileFills` 手動 trigger |
-| GET | `/admin/orders/:clientOrderId` | Basic | Webull order history を client_order_id で検索 |
-| GET | `/dashboard` | Basic | read-only ランディング → positions / portfolio / trades / config |
-| GET | `/dashboard/{positions,portfolio,trades,config}` | Basic | DO / D1 snapshot を HTML で可視化 (#121) |
+| POST | `/trade/decide` | Access | Signal + OrderIntent + RiskDecision を返す (発注しない) |
+| POST | `/trade/execute` | Access | 上記 + ExecutionResult (`dry_run=1` で Mock、0 で Webull) |
+| POST | `/webull/order/place` | Access | 低レベル疎通 endpoint (`dry_run=1` で synthetic response、`dry_run=0` は 403 で拒否。実発注は `/trade/execute` か `/admin/strategy/run` 経由) |
+| GET | `/admin/production-readiness` | Access | 本番 gate 解除前の fail-closed preflight (#379) |
+| POST | `/admin/strategy/run` | Access | `runStrategyCron` 手動 trigger (cron 待たず試走) |
+| POST | `/admin/trading/toggle` | Access | `trading_enabled` の切替 (履歴を `trading_toggle_history` に記録) |
+| POST | `/admin/orders/{reconcile,sync-holdings}` | Access | `reconcileFills` / broker 保有との同期を手動 trigger |
+| GET | `/admin/orders/:clientOrderId` | Access | Webull order history を client_order_id で検索 |
+| POST | `/admin/portfolio/{seed-equity,roll-daily,seed-exposure}` | Access | equity 初期化 / EOD rollover / exposure 投入 |
+| POST | `/admin/symbol-config/...` | Access | 銘柄の追加 / 更新 / active 切替 / 予算配分 / 取扱可否チェック |
+| POST | `/admin/webull-token/{seed,refresh}` | Access | `x-access-token` の DO への投入 / 更新 |
+| GET/POST | `/admin/{earnings,macro-events}` | Access | イベントカレンダーの参照 / 投入 / 削除 |
+| GET | `/dashboard` | Access | read-only ランディング (資産サマリ / KPI / equity / 保有 / 直近取引) |
+| GET | `/dashboard/{positions,portfolio,trades,config,cron,charts,symbols,events,alerts,audit,broker-probe,webull-token}` | Access | DO / D1 snapshot を HTML で可視化 |
+| GET | `/dashboard/{positions,trades,cron,charts/symbol}/json` | Access | 同 packet の JSON 版 |
+| GET/POST/DELETE | `/mcp` | Access (service token) | read-only MCP server。dashboard と同一 packet を tool として公開 (#553) |
 
 Cron:
-- `*/5 * * * *` — quote feed (Yahoo bars → SymbolStateDO) + reconcileFills
-- `*/15 * * * *` — Pullback strategy cron (USD + JPY currency-aware、JP は 100株ロット丸め)
+- `*/5 * * * *` — quote feed (bars → SymbolStateDO) + `reconcileFills`
+- `*/15 * * * *` — strategy cron (USD + JPY currency-aware、JP は `lot_size` 丸め)
+- `0 22 * * *` — portfolio roll (EOD) + Webull token refresh + market data health check + tradable allowlist 更新
 
 ## Bindings (wrangler.jsonc)
 
@@ -154,9 +178,11 @@ Cron:
 |---|---|---|
 | Durable Object | `SYMBOL_STATE` | 銘柄ごとの position / pending / cooldown |
 | Durable Object | `PORTFOLIO_STATE` | 日次 equity / drawdown kill |
-| Durable Object | `BRIDGE` | Cloudflare Container (Node gRPC bridge) のライフサイクル |
-| Container | `BridgeContainer` | `./Dockerfile` から build、`max_instances: 1` |
-| D1 Database | `DB` | trade_journal / symbol_config / inverse_pairs / global_config |
+| Durable Object | `WEBULL_TOKEN_STATE` | `x-access-token` の保持と自動 refresh (#21 Phase B) |
+| Rate Limit | `STATE_CHANGE_RATE_LIMIT` | 5 req / 60s — `trading/toggle` 等の状態変更 |
+| Rate Limit | `ADMIN_WRITE_RATE_LIMIT` | 20 req / 60s — その他 admin write |
+| Rate Limit | `DASHBOARD_RATE_LIMIT` | 60 req / 60s — dashboard GET |
+| D1 Database | `DB` | trade_journal / symbol_config / global_config / strategy_decision_log ほか |
 
 ## Secrets (`wrangler secret put`)
 
@@ -164,21 +190,23 @@ Cron:
 
 | Secret | 用途 |
 |---|---|
-| `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` | `/trade/*` / `/webull/*` / `/admin/*` 認証 |
-| `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID` | broker 署名・口座 |
+| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | Cloudflare Access JWT 検証 (#29)。旧 `BASIC_AUTH_*` は廃止 |
+| `CF_ACCESS_MCP_AUD` | `/mcp` 専用 Access application の AUD (#553)。未設定なら `CF_ACCESS_AUD` に fallback |
+| `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID_JP_CASH` | broker 署名・口座 (JP_CASH 単一口座、#109) |
 | `WEBULL_TRADE_API_BASE` | trade API host override (#21)。未設定なら JP prod default (`https://api.webull.co.jp`)。UAT は ALB URL を投入 |
 | `WEBULL_QUOTES_API_BASE` | quotes API host override (#21)。未設定なら JP prod default (`https://data-api.webull.co.jp`)。UAT は ALB URL を投入 |
 | `WEBULL_EVENTS_API_BASE` | events API host override (#21、consumer 未実装)。未設定なら JP prod default (`https://events-api.webull.co.jp`) |
-| `WEBULL_ACCESS_TOKEN` | `x-access-token` ヘッダ値 (#21)。signature とは直交する supplemental auth、JP 本番では必須。`pnpm run issue-token` で発行 + 2FA verify して取得する (下記参照)。15 days inactivity で INVALID 化 (自動 refresh は #21 Phase B で扱う) |
-| `WEBULL_GRPC_ENDPOINT` | bridge の gRPC 接続先 (非公開) |
-| `EVENT_INGEST_URL` | bridge 側から叩く Worker URL (`https://.../events/trade`) |
-| `EVENT_INGEST_SECRET` | `/events/trade` header |
+| `WEBULL_ACCESS_TOKEN` | `x-access-token` の bootstrap fallback (#21)。signature とは直交する supplemental auth、JP 本番では必須。`pnpm run issue-token` で発行 + 2FA verify して取得する (下記参照)。通常運用では DO seed 後に自動 refresh される |
+| `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` | 通知先 webhook (#199)。未設定ならその channel は無効 |
+| `DASHBOARD_BASE_URL` | 通知に添える dashboard link の base URL |
 
 ```bash
-pnpm wrangler secret put BASIC_AUTH_USER --env=staging
+pnpm wrangler secret put CF_ACCESS_AUD --env=staging
 # ... 1 件ずつ、誤 env 防止のため loop 化しない
-pnpm wrangler secret list --env=staging   # 9 件揃ったか確認
+pnpm wrangler secret list --env=staging   # 揃ったか確認
 ```
+
+`x-access-token` は secret ではなく `WEBULL_TOKEN_STATE` DO を正とする運用 (`WEBULL_ACCESS_TOKEN` は DO seed 前の bootstrap fallback)。
 
 ### Webull account_id を取得する
 
@@ -219,7 +247,7 @@ WEBULL_EXISTING_TOKEN=<old token> \
   pnpm run issue-token
 ```
 
-15 days inactivity で `INVALID` 化する。手動再発行は同じ手順、自動 refresh は #21 Phase B (DO ベース) で扱う。
+15 days inactivity で `INVALID` 化する。取得した token は `POST /admin/webull-token/seed` (または `/dashboard/webull-token` の画面) で `WEBULL_TOKEN_STATE` DO に投入する。以降は `0 22 * * *` cron が expires 残り 7 days を切ったら `createToken(existingToken)` で自動 refresh し、失敗時は critical 通知が飛ぶ。
 
 ## D1 セットアップ (初回のみ)
 
@@ -241,35 +269,20 @@ schema 変更・運用 SQL レシピは [`docs/db-operations.md`](docs/db-operat
 
 ## Deploy
 
-CD (Cloudflare Workers Builds) が main push で `pnpm run deploy:staging` を実行:
+deploy は Cloudflare Workers Builds の CD 任せ。手動 `wrangler deploy` は通常不要 (migration も CD に含まれる):
 
-```
-wrangler d1 migrations apply webull-trading-staging --env=staging --remote
-  && wrangler deploy --env=staging
-```
+| Branch | deploy 先 | build command |
+|---|---|---|
+| `main` | staging | `pnpm deploy:staging` |
+| `production` | production | `pnpm deploy:production` |
 
-手動 deploy:
+production は `main` から自動生成される `release/production` → `production` の release PR merge が唯一の入口 (`production` への direct push は禁止)。詳細は [`docs/production-cd.md`](docs/production-cd.md)。
 
-```bash
-pnpm run deploy:staging
-pnpm run deploy:production
-```
+`pnpm run deploy:*` が migration → deploy を `&&` で繋ぐので、migration 失敗時は worker がデプロイされない (壊れた schema に新 code が当たる事故を防ぐ)。production はさらに `pnpm verify:production-d1` が前段に入り、`database_id` 未設定なら止まる。
 
-`pnpm run deploy:*` が migration → deploy を `&&` で繋ぐので、migration 失敗時は worker がデプロイされない (壊れた schema に新 code が当たる事故を防ぐ)。
+## 運用
 
-### bridge Container (Cloudflare Containers β)
-
-`wrangler deploy` が Dockerfile を build → Cloudflare Registry push → `BridgeContainer` DO に配置する。前提:
-
-- Workers **Paid** plan ($5/月) — Containers は Free tier 非対応
-- ローカル build に Docker CLI 互換環境 (Colima 推奨)
-- bridge-specific env (`WEBULL_GRPC_ENDPOINT` / `EVENT_INGEST_URL`) を secret に投入済
-
-詳細は [`bridge/README.md`](bridge/README.md) 参照。
-
-## 運用 (wrangler d1 execute で D1 直編集)
-
-admin API は作らず、wrangler CLI から直接 SQL を叩く運用:
+銘柄追加 / trading toggle / token 投入といった日常操作は `/dashboard` の画面と `/admin/*` API から行える (変更は `config_audit_log` / `trading_toggle_history` に記録される)。画面が無い項目や緊急時は wrangler CLI から直接 SQL を叩く:
 
 ```bash
 # 新 symbol 追加
@@ -291,12 +304,12 @@ pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
   --command "UPDATE global_config SET \
              pullback_default_k_atr = 2.5, \
              risk_dd_half_threshold = -0.05, \
-             bucket_exposure_pct = 0.30 \
+             vix_critical_threshold = 30.0 \
              WHERE id = 'default'"
 
-# symbol に bucket tag を付ける (SOXL/NVDA を 'semi' で集約 cap の対象に)
+# per-symbol override (global default より優先)
 pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
-  --command "UPDATE symbol_config SET bucket = 'semi' WHERE symbol IN ('SOXL','NVDA','SOXS')"
+  --command "UPDATE symbol_config SET k_atr_override = 2.5, stop_pct_override = -0.05 WHERE symbol = 'SOXL'"
 
 # 振り返りクエリ
 pnpm wrangler d1 execute webull-trading-staging --env=staging --remote \
