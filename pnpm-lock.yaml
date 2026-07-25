@@ -13,7 +13,7 @@ importers:
         version: 0.45.2(@cloudflare/workers-types@5.20260724.1)
       hono:
         specifier: ^4.12.14
-        version: 4.12.27
+        version: 4.12.32
       jose:
         specifier: ^6.2.3
         version: 6.2.3
@@ -1055,8 +1055,8 @@ packages:
   get-tsconfig@4.14.0:
     resolution: {integrity: sha512-yTb+8DXzDREzgvYmh6s9vHsSVCHeC0G3PI5bEXNBHtmshPnO+S5O7qgLEOn0I5QvMy6kpZN8K1NKGyilLb93wA==}
 
-  hono@4.12.27:
-    resolution: {integrity: sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q==}
+  hono@4.12.32:
+    resolution: {integrity: sha512-XcuyW9qE2kJn07PkecMOBd5Vq/hMy7mmGw+idz1yblbg9N17ijJODrvPkn7/dwL3Kulj8LcRJ69DLOWf91dRUg==}
     engines: {node: '>=16.9.0'}
 
   jose@6.2.3:
@@ -2025,7 +2025,7 @@ snapshots:
     dependencies:
       resolve-pkg-maps: 1.0.0
 
-  hono@4.12.27: {}
+  hono@4.12.32: {}
 
   jose@6.2.3: {}
 
