@@ -1541,6 +1541,7 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
     maxSma50DeviationPct: 100,
     maxAtrRatio: 100,
     // 再エントリーガードも既存 scheduler テストでは無効化 (0)。plumbing 検証は専用ケース。
+    maxStopToTpRatio: 2.0,
     reentryMinAtrBelowLastExit: 0,
     reentryGuardBusinessDays: 0,
   }

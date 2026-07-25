@@ -40,6 +40,13 @@ export const tradeJournal = sqliteTable('trade_journal', {
   filledQty: real('filled_qty'),
   filledPrice: real('filled_price'),
   realizedPnl: real('realized_pnl'),
+  /**
+   * 売買コストの見積り (#trade-cost)。SELL 行に往復分 (entry + exit) を入れる。
+   * `realized_pnl` は **この額を引いた net**。broker が実費を返さないので
+   * `global_config.fee_pct_of_notional` / `fee_fixed_per_order` からの推定値。
+   * NULL = コスト未設定 (= realized_pnl は gross) か、旧データ。
+   */
+  estimatedCost: real('estimated_cost'),
   holdDays: real('hold_days'),
   exitReason: text('exit_reason'),
   errorClass: text('error_class'),
@@ -327,6 +334,29 @@ export const globalConfig = sqliteTable(
      * ボラ過熱ガード: `atr20/baselineAtr20` がこの比率超で BUY 見送り。POC default 1.5。
      */
     pullbackDefaultMaxAtrRatio: real('pullback_default_max_atr_ratio').notNull().default(1.5),
+    /**
+     * Stop 幅の上限 = |avgPrice * take_profit_pct| * これ (#stop-rr-cap)。ATR 連動
+     * stop が利確幅に対して一方的に広がるのを止め、R:R に下限を作る (2.0 なら
+     * R:R >= 0.5)。0 で無効 = ATR 連動そのまま (従来挙動)。
+     */
+    pullbackDefaultMaxStopToTpRatio: real('pullback_default_max_stop_to_tp_ratio')
+      .notNull()
+      .default(2.0),
+    /**
+     * 売買コスト見積り (#trade-cost)。約定代金に対する料率。realized PnL を
+     * net 化するのに使う。0 = 従来どおり gross。
+     */
+    feePctOfNotional: real('fee_pct_of_notional').notNull().default(0),
+    /** 1 注文あたりの固定費 (銘柄通貨建て)。0 で無効。 */
+    feeFixedPerOrder: real('fee_fixed_per_order').notNull().default(0),
+    /**
+     * baseline ATR から直近 20 本 (atr20 の窓) を除外するか (#atr-baseline-window)。
+     * **既定 false = 従来の重複窓**。true にすると比率が素直になる代わりに
+     * 過熱ガード / atr-floor の閾値を測り直す必要がある。
+     */
+    atrBaselineExcludeRecent: integer('atr_baseline_exclude_recent', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     /**
      * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
      * pullbackSizing に渡る。#23 Lane 2。

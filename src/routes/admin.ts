@@ -359,6 +359,12 @@ export const admin = new Hono<AppBindings>()
         global.pullbackDefaultMaxAtrRatio,
         { mustBePositive: true },
       ),
+      maxStopToTpRatio: readOptionalNumber(
+        c.req.query('maxStopToTpRatio'),
+        'maxStopToTpRatio',
+        global.pullbackDefaultMaxStopToTpRatio,
+        {},
+      ),
       // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
       // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
       reentryMinAtrBelowLastExit: 1.0,
@@ -393,6 +399,13 @@ export const admin = new Hono<AppBindings>()
       to,
       initialCash,
       rule,
+      // #atr-baseline-window: `?atrBaselineExcludeRecent=1` で baseline から
+      // 直近 20 本を除いた場合の成績を測れる。既定は global_config の値
+      // (= 本番と同じ条件) なので、閾値の再校正はこの 2 通りを比べて行う。
+      atrBaselineExcludeRecent:
+        c.req.query('atrBaselineExcludeRecent') === undefined
+          ? global.atrBaselineExcludeRecent
+          : c.req.query('atrBaselineExcludeRecent') === '1',
     }
     const result = await runBacktest(sliced, params)
     return c.json(result)
@@ -1937,6 +1950,7 @@ export const admin = new Hono<AppBindings>()
       kAtr: global.pullbackDefaultKAtr,
       maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
       maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+      maxStopToTpRatio: global.pullbackDefaultMaxStopToTpRatio,
       // #reentry: cron の runStrategyCron 既定と一致 (global_config 列化はまだ)。
       reentryMinAtrBelowLastExit: 1.0,
       reentryGuardBusinessDays: 3,

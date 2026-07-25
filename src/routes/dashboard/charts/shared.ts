@@ -83,6 +83,8 @@ export interface StrategyParamsSnapshot {
   reentryMinAtrBelowLastExit: number
   /** #reentry: 再エントリー価格ガードの有効窓 (営業日)。 */
   reentryGuardBusinessDays: number
+  /** #stop-rr-cap: stop 幅の上限 = |価格 * takeProfitPct| * これ。0 で無効。 */
+  maxStopToTpRatio: number
 }
 
 /**
@@ -104,6 +106,7 @@ export function strategyParamsFromGlobal(global: LoadedGlobalConfig): StrategyPa
     kAtr: global.pullbackDefaultKAtr,
     maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
     maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+    maxStopToTpRatio: global.pullbackDefaultMaxStopToTpRatio,
     // #reentry: cron の runStrategyCron 既定と一致 (まだ global_config 列なし)。
     reentryMinAtrBelowLastExit: 1.0,
     reentryGuardBusinessDays: 3,

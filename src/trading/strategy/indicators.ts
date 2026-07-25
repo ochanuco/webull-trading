@@ -12,6 +12,11 @@ export interface DailyBar {
   close: number
 }
 
+/** baseline ATR から除外する直近本数 (= atr20 の窓)。 */
+const BASELINE_EXCLUDE_RECENT = 20
+/** baseline ATR に使う最大サンプル数 (≈ 3 か月)。 */
+const BASELINE_MAX_SAMPLES = 60
+
 export interface PullbackIndicatorSnapshot {
   price: number
   sma50: number
@@ -38,6 +43,12 @@ export interface PullbackIndicatorSnapshot {
    */
   low20d: number
   atr20: number
+  /**
+   * 長期 ATR baseline。既定は直近 60 本平均 (atr20 の窓を**含む**)。
+   * `excludeRecentFromBaseline` を立てると直近 20 本を除外した平均になり
+   * (#atr-baseline-window)、`atr20 / baselineAtr20` が「直近 vs それ以前」の
+   * 素直な比率になる。閾値の再校正が要るので既定は従来のまま。
+   */
   baselineAtr20: number
   /**
    * ブレイクアウト基準 = **当日を除く** 直近 20 営業日の終値高値 (#momentum)。
@@ -63,9 +74,23 @@ export interface PullbackIndicatorSnapshot {
  * reference high lookback を 10d に短縮。フィールド名 (`return50d` /
  * `high20d`) は storage / dashboard 互換のため据え置き。
  */
+export interface PullbackIndicatorOptions {
+  /**
+   * baseline ATR から直近 20 本 (= atr20 の窓) を除外するか (#atr-baseline-window)。
+   *
+   * **既定 false = 従来の重複窓**。true にすると `atr20 / baselineAtr20` は
+   * 「直近 vs それ以前」の素直な比率になるが、**過熱ガード (maxAtrRatio) と
+   * sizing の atr-floor の閾値は旧 baseline 前提で校正されている**ため、
+   * 同じ閾値のままだと押し目 entry (= 直近 ATR が上がった局面) がほぼ全て
+   * blocked になる。切り替えるときは backtest で閾値を測り直すこと。
+   */
+  excludeRecentFromBaseline?: boolean
+}
+
 export function computePullbackIndicators(
   bars: DailyBar[],
   intradayPrice?: number | null,
+  options?: PullbackIndicatorOptions,
 ): PullbackIndicatorSnapshot | null {
   // SMA50 が 50 bars を必要とするので最小要件は 50。return/high の lookback が
   // 短くなっても warmup 要件は SMA50 に律速されたまま。
@@ -93,9 +118,22 @@ export function computePullbackIndicators(
   const trueRanges = computeTrueRanges(bars)
   if (trueRanges.length < 20) return null
   const atr20 = average(trueRanges.slice(-20))
-  // Baseline ATR = longer-window average that `computePullbackSizing` compares
-  // against to decide whether to floor the size. 60 bars ≈ ~3 months daily.
-  const baselineAtr20 = average(trueRanges.slice(-Math.min(trueRanges.length, 60)))
+  // Baseline ATR (#atr-baseline-window)。60 本平均の中に atr20 の窓が丸ごと
+  // 入っているので、直近ボラが跳ねると baseline も一緒に上がり比率が鈍る
+  // (窓が重なる限り比率は理論上 3 倍で頭打ち)。`excludeRecentFromBaseline` で
+  // 直近 20 本を除外した「直近 vs それ以前」の比率に切り替えられる。
+  //
+  // **既定は従来のまま**: 過熱ガード (maxAtrRatio 1.5) と sizing の atr-floor
+  // (0.5) は重複窓前提で校正されており、除外に切り替えると押し目 entry が
+  // ほぼ全滅する (テスト fixture で BUY 64 ケースが blocked になった)。
+  // 切り替えは backtest で閾値を測り直してから。
+  // bars >= 50 を上で保証しているので TR は 49 本以上あり、直近 20 本を除いても
+  // 29 本以上残る (= サンプル不足の分岐は起き得ない)。
+  const baselineSource =
+    options?.excludeRecentFromBaseline === true
+      ? trueRanges.slice(0, -BASELINE_EXCLUDE_RECENT).slice(-BASELINE_MAX_SAMPLES)
+      : trueRanges.slice(-Math.min(trueRanges.length, BASELINE_MAX_SAMPLES))
+  const baselineAtr20 = average(baselineSource)
 
   // intradayPrice がきちんと正値の有限数なら採用、そうでなければ daily close。
   // `> 0` で 0 / 負値もはじき、Number.isFinite で NaN / Infinity をはじく。

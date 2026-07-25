@@ -50,8 +50,8 @@ tools: Read, Grep, Glob, WebSearch, WebFetch
 
 - 執行可能な broker は **Webull のみ** (POC 段階)
 - 執行頻度は **日次〜分足スケール**。tick-by-tick は不可
-- 保有銘柄は `ALLOWED_SYMBOLS` に制限 (現状 SOXL / SOXS 等の 3x ETF が主想定 — 設計書参照)
-- 1トレードの上限 notional は `MAX_ORDER_NOTIONAL` (env 既定 = $100)
+- 保有銘柄は D1 `symbol_config` (`active = 1`) に制限 (レバレッジ ETF + テーマ ETF が主想定)
+- 1トレードの上限 notional は `global_config.max_order_notional_usd` / `_jpy` (既定 = $2000 / ¥100000)
 - long only、現物のみ (オプション / 先物 / margin なし)
 
 ## コードが必要と言われたとき

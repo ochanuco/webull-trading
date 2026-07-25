@@ -211,7 +211,7 @@ pnpm wrangler secret delete TRADING_ENABLED --env=production
 - WebullTradeClient の ENVIRONMENT='production' gate → 通過 (= live order を broker に投げる)
 - 全 safety net 解除完了
 
-直後の strategy cron (15min 周期) で BUY/SELL シグナル発生時に **本番口座で実発注** が走る。最初は universe を狭く (1-2 銘柄)、`MAX_ORDER_NOTIONAL` を低く絞って動作確認するのが安全。
+直後の strategy cron (15min 周期) で BUY/SELL シグナル発生時に **本番口座で実発注** が走る。最初は universe を狭く (1-2 銘柄)、`global_config.max_order_notional_usd` / `_jpy` を低く絞って動作確認するのが安全。
 
 ## ロールバック
 
