@@ -138,12 +138,8 @@ WHERE id = 'default';
 UPDATE global_config SET drawdown_kill_threshold = -0.03, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE id = 'default';
 
--- bridge を週末も常駐させる (値: auto / always-on / disabled)
-UPDATE global_config SET bridge_run_mode = 'always-on', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-WHERE id = 'default';
-
 -- 現状確認
-SELECT dry_run, trading_enabled, max_order_notional, drawdown_kill_threshold, bridge_run_mode
+SELECT dry_run, trading_enabled, max_order_notional_usd, max_order_notional_jpy, drawdown_kill_threshold
 FROM global_config WHERE id = 'default';
 ```
 
