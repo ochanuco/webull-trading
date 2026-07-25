@@ -134,6 +134,7 @@ export interface StrategyCronAnalysis {
       kAtr: number
       maxSma50DeviationPct: number
       maxAtrRatio: number
+      maxStopToTpRatio: number
     }
     risk: {
       basePerTradePct: number
@@ -297,6 +298,7 @@ export async function runStrategyCron(
     kAtr: global.pullbackDefaultKAtr,
     maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
     maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+    maxStopToTpRatio: global.pullbackDefaultMaxStopToTpRatio,
     // #reentry: 再エントリー価格ガード。まだ global_config 列を持たせていないので
     // 定数 (前回売値 −1ATR / 3 営業日窓)。チューニングが要れば列/override 化。
     reentryMinAtrBelowLastExit: 1.0,

@@ -1078,6 +1078,7 @@ const DEFAULT_PARAMS: StrategyParamsSnapshot = {
   kAtr: 2.0,
   maxSma50DeviationPct: 0.6,
   maxAtrRatio: 1.5,
+  maxStopToTpRatio: 2.0,
   reentryMinAtrBelowLastExit: 1.0,
   reentryGuardBusinessDays: 3,
 }
@@ -2024,6 +2025,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
     requireAboveSma50: true, kAtr: 2,
     maxSma50DeviationPct: 0.6, maxAtrRatio: 1.5,
+    maxStopToTpRatio: 2.0,
     reentryMinAtrBelowLastExit: 1.0, reentryGuardBusinessDays: 3,
   }
   function symbolArgs(
