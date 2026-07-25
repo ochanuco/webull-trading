@@ -359,6 +359,12 @@ export const admin = new Hono<AppBindings>()
         global.pullbackDefaultMaxAtrRatio,
         { mustBePositive: true },
       ),
+      maxStopToTpRatio: readOptionalNumber(
+        c.req.query('maxStopToTpRatio'),
+        'maxStopToTpRatio',
+        global.pullbackDefaultMaxStopToTpRatio,
+        {},
+      ),
       // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
       // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
       reentryMinAtrBelowLastExit: 1.0,
@@ -1937,6 +1943,7 @@ export const admin = new Hono<AppBindings>()
       kAtr: global.pullbackDefaultKAtr,
       maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
       maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
+      maxStopToTpRatio: global.pullbackDefaultMaxStopToTpRatio,
       // #reentry: cron の runStrategyCron 既定と一致 (global_config 列化はまだ)。
       reentryMinAtrBelowLastExit: 1.0,
       reentryGuardBusinessDays: 3,

@@ -1,0 +1,1 @@
+ALTER TABLE `global_config` ADD `pullback_default_max_stop_to_tp_ratio` real DEFAULT 2 NOT NULL;

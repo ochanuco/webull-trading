@@ -1,5 +1,6 @@
 import type { DecisionTraceStep, Signal } from '../../domain/Signal'
 import type { PendingOrderLock, PositionState } from '../../state/types'
+import { resolveStopDistance } from '../stopDistance'
 
 export interface PullbackIndicators {
   price: number
@@ -77,6 +78,13 @@ export interface SymbolRule {
    * 0 で無効。既定 3。
    */
   reentryGuardBusinessDays: number
+  /**
+   * Stop 幅の上限 = |avgPrice * takeProfitPct| * これ (#stop-rr-cap)。ATR 連動
+   * stop が利確幅に対して一方的に広がるのを止め、銘柄ごとの R:R に下限を作る
+   * (2.0 なら R:R >= 0.5)。0 で無効 (= ATR 連動そのまま)。pct stop は floor
+   * なので、cap が名目 stop より狭くなる場合は名目が勝つ。
+   */
+  maxStopToTpRatio: number
 }
 
 /**
@@ -97,6 +105,7 @@ export const TEST_DEFAULT_RULE: SymbolRule = Object.freeze({
   maxAtrRatio: 1.5,
   reentryMinAtrBelowLastExit: 1.0,
   reentryGuardBusinessDays: 3,
+  maxStopToTpRatio: 2.0,
 })
 
 export interface PullbackInput {
@@ -172,24 +181,23 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('exit.take_profit', false, pnlPct, '>=', rule.takeProfitPct))
 
-    // ATR 連動 stop (#exit-atr): 固定 pct stop だけだと高ボラ銘柄 (3x レバ ETF 等) で
-    // 通常変動/寄りギャップに叩かれる。sizing と同式の距離ベースにして「pct stop か
-    // ATR stop の広い方」を採り、ボラに応じて stop 幅を自動で広げる (ノイズ stop-out
-    // 抑制)。atr20<=0/非有限は pct のみに fallback (defensive)。stopPct は最低 stop 幅の floor。
-    const pctStopDistance = Math.abs(position.avgPrice * rule.stopPct)
-    const atrStopDistance =
-      Number.isFinite(input.indicators.atr20) && input.indicators.atr20 > 0
-        ? rule.kAtr * input.indicators.atr20
-        : 0
-    const stopDistance = Math.max(pctStopDistance, atrStopDistance)
-    const effectiveStopPct = position.avgPrice > 0 ? -stopDistance / position.avgPrice : rule.stopPct
-    const stopDominant = atrStopDistance > pctStopDistance ? 'atr' : 'pct'
+    // ATR 連動 stop (#exit-atr) + R:R cap (#stop-rr-cap)。距離の決定は
+    // `resolveStopDistance` に一本化 (sizing と同式)。
+    const stop = resolveStopDistance({
+      price: position.avgPrice,
+      stopPct: rule.stopPct,
+      takeProfitPct: rule.takeProfitPct,
+      atr20: input.indicators.atr20,
+      kAtr: rule.kAtr,
+      maxStopToTpRatio: rule.maxStopToTpRatio,
+    })
+    const effectiveStopPct = stop.effectiveStopPct
     if (pnlPct <= effectiveStopPct) {
       trace.push(step('exit.stop_loss', true, pnlPct, '<=', effectiveStopPct))
       return sell(
         input,
         position,
-        `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${effectiveStopPct.toFixed(4)} (${stopDominant}, dist ${stopDistance.toFixed(2)} = max(pct ${pctStopDistance.toFixed(2)}, atr ${atrStopDistance.toFixed(2)}))`,
+        `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${effectiveStopPct.toFixed(4)} (${stop.dominant}, dist ${stop.distance.toFixed(2)})`,
         trace,
       )
     }
@@ -205,8 +213,17 @@ export class PullbackUptrendStrategy {
       )
     }
     trace.push(step('exit.time_stop', false, input.holdBusinessDays, '>=', rule.timeStopDays))
-    trace.push(step('exit.hold_position', true, pnlPct, 'between', [rule.stopPct, rule.takeProfitPct]))
-    return hold(input, `holding: pnl ${pnlPct.toFixed(4)} within (${rule.stopPct}, ${rule.takeProfitPct})`, trace)
+    // #stop-rr-cap: 表示する下限は名目 `stopPct` ではなく **実効 stop**。
+    // ATR / cap で動く値なので、名目を出すと operator が「-8% で切れる」と
+    // 誤読する (実際は -10.7% だった等)。
+    trace.push(
+      step('exit.hold_position', true, pnlPct, 'between', [effectiveStopPct, rule.takeProfitPct]),
+    )
+    return hold(
+      input,
+      `holding: pnl ${pnlPct.toFixed(4)} within (${effectiveStopPct.toFixed(4)}, ${rule.takeProfitPct})`,
+      trace,
+    )
   }
 
   private entryDecision(input: PullbackInput, rule: SymbolRule, trace: DecisionTraceStep[]): Signal {

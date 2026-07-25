@@ -41,6 +41,8 @@ export interface GlobalConfigSnapshot {
   pullbackDefaultMaxSma50DeviationPct: number
   /** ボラ過熱ガード: atr20/baselineAtr20 がこの比率超で BUY 見送り。 */
   pullbackDefaultMaxAtrRatio: number
+  /** Stop 幅の上限 = |価格 * takeProfitPct| * これ (#stop-rr-cap)。0 で無効。 */
+  pullbackDefaultMaxStopToTpRatio: number
   /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
   riskBasePerTradePct: number
   /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
@@ -104,6 +106,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultKAtr: 2.0,
   pullbackDefaultMaxSma50DeviationPct: 0.6,
   pullbackDefaultMaxAtrRatio: 1.5,
+  pullbackDefaultMaxStopToTpRatio: 2.0,
   riskBasePerTradePct: 0.004,
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
@@ -308,6 +311,7 @@ export async function loadGlobalConfig(
             pullbackDefaultKAtr: globalConfig.pullbackDefaultKAtr,
             pullbackDefaultMaxSma50DeviationPct: globalConfig.pullbackDefaultMaxSma50DeviationPct,
             pullbackDefaultMaxAtrRatio: globalConfig.pullbackDefaultMaxAtrRatio,
+            pullbackDefaultMaxStopToTpRatio: globalConfig.pullbackDefaultMaxStopToTpRatio,
             riskBasePerTradePct: globalConfig.riskBasePerTradePct,
             riskDdHalfThreshold: globalConfig.riskDdHalfThreshold,
             riskDdHaltThreshold: globalConfig.riskDdHaltThreshold,
@@ -342,6 +346,8 @@ export async function loadGlobalConfig(
             pullbackDefaultKAtr: legacyRow.pullbackDefaultKAtr,
             pullbackDefaultMaxSma50DeviationPct: legacyRow.pullbackDefaultMaxSma50DeviationPct,
             pullbackDefaultMaxAtrRatio: legacyRow.pullbackDefaultMaxAtrRatio,
+            // 0038 追加列 (#stop-rr-cap)。legacy path は default。
+            pullbackDefaultMaxStopToTpRatio: GLOBAL_CONFIG_DEFAULTS.pullbackDefaultMaxStopToTpRatio,
             riskBasePerTradePct: legacyRow.riskBasePerTradePct,
             riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
             riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
@@ -404,6 +410,7 @@ export async function loadGlobalConfig(
     pullbackDefaultKAtr: row.pullbackDefaultKAtr,
     pullbackDefaultMaxSma50DeviationPct: row.pullbackDefaultMaxSma50DeviationPct,
     pullbackDefaultMaxAtrRatio: row.pullbackDefaultMaxAtrRatio,
+    pullbackDefaultMaxStopToTpRatio: row.pullbackDefaultMaxStopToTpRatio,
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,

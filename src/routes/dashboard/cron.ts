@@ -54,7 +54,8 @@ export function localizeReason(en: string | null | undefined): string {
     (_m, p, t) => `利食い: 利確目標到達 (含み損益 ${fmtPct(p)} ≥ 目標 ${fmtPct(t)})`,
   )
   s = s.replace(
-    /^stop-loss hit: pnl (\S+) <= (\S+)$/,
+    // #stop-rr-cap: reason 末尾に `(atr, dist 9.06)` 等の内訳が付く形式も受ける。
+    /^stop-loss hit: pnl (\S+) <= (\S+)(?:\s+\(.*\))?$/,
     (_m, p, t) => `損切り: 損切りライン到達 (含み損益 ${fmtPct(p)} ≤ ライン ${fmtPct(t)})`,
   )
   s = s.replace(

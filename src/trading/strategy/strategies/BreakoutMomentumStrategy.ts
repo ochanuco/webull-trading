@@ -1,6 +1,7 @@
 import type { DecisionTraceStep, Signal } from '../../domain/Signal'
 import type { PendingOrderLock, PositionState } from '../../state/types'
 import type { PullbackIndicatorSnapshot } from '../indicators'
+import { resolveStopDistance } from '../stopDistance'
 
 /**
  * ブレイクアウト/モメンタム entry 戦略 (#momentum)。
@@ -37,6 +38,11 @@ export interface MomentumRule {
   maxSma50DeviationPct: number
   /** `price > sma50` を要求するか。 */
   requireAboveSma50: boolean
+  /**
+   * Stop 幅の上限 = |avgPrice * takeProfitPct| * これ (#stop-rr-cap)。押し目側と
+   * 同じ意味。0 で無効。
+   */
+  maxStopToTpRatio: number
 }
 
 /** backtest / unit test 用のデフォルト (全数値 backtest 未検証の初期推定)。 */
@@ -49,6 +55,7 @@ export const TEST_DEFAULT_MOMENTUM_RULE: MomentumRule = Object.freeze({
   breakoutBuffer: 0.005,
   maxSma50DeviationPct: 0.6,
   requireAboveSma50: true,
+  maxStopToTpRatio: 2.0,
 })
 
 export interface MomentumInput {
@@ -153,21 +160,34 @@ function exitDecision(
     return sell(input, position, `take-profit hit: pnl ${pnlPct.toFixed(4)} >= ${rule.takeProfitPct}`, trace)
   }
 
-  const pctStopDistance = Math.abs(position.avgPrice * rule.stopPct)
-  const atrStopDistance =
-    Number.isFinite(input.indicators.atr20) && input.indicators.atr20 > 0 ? rule.kAtr * input.indicators.atr20 : 0
-  const stopDistance = Math.max(pctStopDistance, atrStopDistance)
-  const effectiveStopPct = position.avgPrice > 0 ? -stopDistance / position.avgPrice : rule.stopPct
+  const stop = resolveStopDistance({
+    price: position.avgPrice,
+    stopPct: rule.stopPct,
+    takeProfitPct: rule.takeProfitPct,
+    atr20: input.indicators.atr20,
+    kAtr: rule.kAtr,
+    maxStopToTpRatio: rule.maxStopToTpRatio,
+  })
+  const effectiveStopPct = stop.effectiveStopPct
   if (pnlPct <= effectiveStopPct) {
     trace.push(step('exit.stop_loss', true, pnlPct, '<=', effectiveStopPct))
-    return sell(input, position, `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${effectiveStopPct.toFixed(4)}`, trace)
+    return sell(
+      input,
+      position,
+      `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${effectiveStopPct.toFixed(4)} (${stop.dominant}, dist ${stop.distance.toFixed(2)})`,
+      trace,
+    )
   }
 
   if (input.holdBusinessDays >= rule.timeStopDays) {
     trace.push(step('exit.time_stop', true, input.holdBusinessDays, '>=', rule.timeStopDays))
     return sell(input, position, `time-stop hit: held ${input.holdBusinessDays}d >= ${rule.timeStopDays}d`, trace)
   }
-  return hold(input, `holding: pnl ${pnlPct.toFixed(4)} within (${rule.stopPct}, ${rule.takeProfitPct})`, trace)
+  return hold(
+    input,
+    `holding: pnl ${pnlPct.toFixed(4)} within (${effectiveStopPct.toFixed(4)}, ${rule.takeProfitPct})`,
+    trace,
+  )
 }
 
 function hold(input: MomentumInput, reason: string, trace: DecisionTraceStep[]): Signal {

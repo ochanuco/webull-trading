@@ -897,6 +897,9 @@ export async function runPullbackScheduler(
               riskPerTradePct: options.riskPerTradePct,
               lotSize: resolvedLotSize,
               kAtr: rule.kAtr,
+              // #stop-rr-cap: sizing と exit で同じ stop 幅を使う。
+              takeProfitPct: rule.takeProfitPct,
+              maxStopToTpRatio: rule.maxStopToTpRatio,
               budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
               budgetBasisJpy: options.budgetBasisJpy,
               fxJpyPerSymbolCcy: options.fxJpyPerSymbolCcy,

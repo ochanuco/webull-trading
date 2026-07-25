@@ -72,6 +72,7 @@ Retail auto-trading system on Cloudflare Workers + Hono + TypeScript, speaking W
 | `pullback_default_k_atr` | `2.0` | ATR 倍率。`stopDistance = max(k_atr × atr20, pct stop)` |
 | `pullback_default_max_sma50_deviation_pct` | `0.6` | sma50 からの上方乖離が大きすぎる時は entry 見送り |
 | `pullback_default_max_atr_ratio` | `1.5` | ATR 拡大 (ボラ急騰) 時の entry 見送り閾値 |
+| `pullback_default_max_stop_to_tp_ratio` | `2.0` | stop 幅の上限 = `take_profit_pct × これ`。ATR 連動 stop が利確幅に対して広がりすぎるのを止め R:R に下限を作る (2.0 = R:R 0.5 以上)。`0` で無効 |
 
 **Risk gate の動的パラメタ (#23 Lane 2-3):**
 

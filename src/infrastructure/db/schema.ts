@@ -328,6 +328,14 @@ export const globalConfig = sqliteTable(
      */
     pullbackDefaultMaxAtrRatio: real('pullback_default_max_atr_ratio').notNull().default(1.5),
     /**
+     * Stop 幅の上限 = |avgPrice * take_profit_pct| * これ (#stop-rr-cap)。ATR 連動
+     * stop が利確幅に対して一方的に広がるのを止め、R:R に下限を作る (2.0 なら
+     * R:R >= 0.5)。0 で無効 = ATR 連動そのまま (従来挙動)。
+     */
+    pullbackDefaultMaxStopToTpRatio: real('pullback_default_max_stop_to_tp_ratio')
+      .notNull()
+      .default(2.0),
+    /**
      * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
      * pullbackSizing に渡る。#23 Lane 2。
      */
