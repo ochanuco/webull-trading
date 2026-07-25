@@ -57,6 +57,8 @@ Retail auto-trading system on Cloudflare Workers + Hono + TypeScript, speaking W
 | `total_capital_usd` / `_jpy` | `NULL` | NAV (NULL なら exposure check skip) |
 | `max_portfolio_exposure_pct` | `0.6` | total_capital × これを超える open 合計を禁止 |
 | `spread_limit_pct_{us,jp}` | `0.0025` / `0.006` | spread guard |
+| `fee_pct_of_notional` | `0` | 売買コスト見積りの料率。realized PnL を net 化する (#trade-cost) |
+| `fee_fixed_per_order` | `0` | 同、1 注文あたりの固定費 (銘柄通貨建て) |
 | `gap_reject_pct` | `0.03` | gap 判定 |
 
 **Pullback 戦略の default rule (#118、#124):**

@@ -36,6 +36,8 @@ export function makeGlobalConfigSnapshot(
     pullbackDefaultMaxSma50DeviationPct: 0.6,
     pullbackDefaultMaxAtrRatio: 1.5,
     pullbackDefaultMaxStopToTpRatio: 2.0,
+    feePctOfNotional: 0,
+    feeFixedPerOrder: 0,
     riskBasePerTradePct: 0.004,
     riskDdHalfThreshold: -0.05,
     riskDdHaltThreshold: -0.10,

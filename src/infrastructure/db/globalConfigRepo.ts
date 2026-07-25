@@ -43,6 +43,10 @@ export interface GlobalConfigSnapshot {
   pullbackDefaultMaxAtrRatio: number
   /** Stop 幅の上限 = |価格 * takeProfitPct| * これ (#stop-rr-cap)。0 で無効。 */
   pullbackDefaultMaxStopToTpRatio: number
+  /** 売買コスト見積りの料率 (#trade-cost)。0 で従来どおり gross PnL。 */
+  feePctOfNotional: number
+  /** 売買コスト見積りの 1 注文固定費 (銘柄通貨建て)。 */
+  feeFixedPerOrder: number
   /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
   riskBasePerTradePct: number
   /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
@@ -107,6 +111,8 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultMaxSma50DeviationPct: 0.6,
   pullbackDefaultMaxAtrRatio: 1.5,
   pullbackDefaultMaxStopToTpRatio: 2.0,
+  feePctOfNotional: 0,
+  feeFixedPerOrder: 0,
   riskBasePerTradePct: 0.004,
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
@@ -312,6 +318,8 @@ export async function loadGlobalConfig(
             pullbackDefaultMaxSma50DeviationPct: globalConfig.pullbackDefaultMaxSma50DeviationPct,
             pullbackDefaultMaxAtrRatio: globalConfig.pullbackDefaultMaxAtrRatio,
             pullbackDefaultMaxStopToTpRatio: globalConfig.pullbackDefaultMaxStopToTpRatio,
+            feePctOfNotional: globalConfig.feePctOfNotional,
+            feeFixedPerOrder: globalConfig.feeFixedPerOrder,
             riskBasePerTradePct: globalConfig.riskBasePerTradePct,
             riskDdHalfThreshold: globalConfig.riskDdHalfThreshold,
             riskDdHaltThreshold: globalConfig.riskDdHaltThreshold,
@@ -348,6 +356,9 @@ export async function loadGlobalConfig(
             pullbackDefaultMaxAtrRatio: legacyRow.pullbackDefaultMaxAtrRatio,
             // 0038 追加列 (#stop-rr-cap)。legacy path は default。
             pullbackDefaultMaxStopToTpRatio: GLOBAL_CONFIG_DEFAULTS.pullbackDefaultMaxStopToTpRatio,
+            // 0039 追加列 (#trade-cost)。legacy path は default (= gross PnL)。
+            feePctOfNotional: GLOBAL_CONFIG_DEFAULTS.feePctOfNotional,
+            feeFixedPerOrder: GLOBAL_CONFIG_DEFAULTS.feeFixedPerOrder,
             riskBasePerTradePct: legacyRow.riskBasePerTradePct,
             riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
             riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
@@ -411,6 +422,8 @@ export async function loadGlobalConfig(
     pullbackDefaultMaxSma50DeviationPct: row.pullbackDefaultMaxSma50DeviationPct,
     pullbackDefaultMaxAtrRatio: row.pullbackDefaultMaxAtrRatio,
     pullbackDefaultMaxStopToTpRatio: row.pullbackDefaultMaxStopToTpRatio,
+    feePctOfNotional: row.feePctOfNotional,
+    feeFixedPerOrder: row.feeFixedPerOrder,
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,

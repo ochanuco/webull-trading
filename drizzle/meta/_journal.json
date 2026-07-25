@@ -274,6 +274,13 @@
       "when": 1785000214011,
       "tag": "0038_add_max_stop_to_tp_ratio",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1785000435697,
+      "tag": "0039_add_trade_cost_config",
+      "breakpoints": true
     }
   ]
 }

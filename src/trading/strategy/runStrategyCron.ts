@@ -743,6 +743,11 @@ export async function runStrategyCron(
       defaultRule,
       rulesMap,
       entrySuppressedSymbols: effectiveEntrySuppressed,
+      // #trade-cost: 通知の realized を reconcile と同じ net にする。
+      tradeCost: {
+        feePctOfNotional: global.feePctOfNotional,
+        feeFixedPerOrder: global.feeFixedPerOrder,
+      },
       halfEntrySymbols,
       momentumSymbols,
       ...(momentumStrategy ? { momentumStrategy } : {}),
