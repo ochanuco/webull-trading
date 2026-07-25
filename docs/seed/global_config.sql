@@ -12,7 +12,7 @@ INSERT INTO global_config (
   drawdown_kill_threshold,
   stale_quote_ms, gap_reject_pct,
   spread_limit_pct_us, spread_limit_pct_jp,
-  bridge_run_mode, updated_at
+  updated_at
 ) VALUES (
   'default', 1, 0, 0,
   100,           -- max_order_notional (deprecated placeholder)
@@ -23,5 +23,5 @@ INSERT INTO global_config (
   -0.02,
   900000, 0.03,
   0.0025, 0.006,
-  'auto', '2026-04-20T00:00:00.000Z'
+  '2026-04-20T00:00:00.000Z'
 );
