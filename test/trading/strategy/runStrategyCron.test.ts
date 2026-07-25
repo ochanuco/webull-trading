@@ -6,7 +6,26 @@ import {
   resolvePortfolioForRiskScale,
   runStrategyCron,
 } from '../../../src/trading/strategy/runStrategyCron'
+import { runPullbackScheduler } from '../../../src/trading/strategy/pullbackScheduler'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../../helpers/configFixtures'
+
+const emptySchedulerSummary = () => ({
+  evaluated: 0,
+  buys: 0,
+  sells: 0,
+  holds: 0,
+  rejected: [],
+  errors: [],
+  decisions: [],
+  entrySnapshots: {},
+})
+
+/** 直近の runPullbackScheduler 呼び出しに渡された options。 */
+function lastSchedulerOptions(): Parameters<typeof runPullbackScheduler>[0] {
+  const calls = vi.mocked(runPullbackScheduler).mock.calls
+  expect(calls.length).toBeGreaterThan(0)
+  return calls[calls.length - 1]![0]
+}
 
 vi.mock('../../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
@@ -14,6 +33,14 @@ vi.mock('../../../src/infrastructure/db/globalConfigLoader', () => ({
 vi.mock('../../../src/infrastructure/db/symbolUniverse', () => ({
   loadSymbolUniverse: vi.fn(),
 }))
+// #exit-only-halt: risk halt でも scheduler まで進む (entry だけ抑止) ようになった
+// ので、DO / bar client を叩かずに「何が渡されたか」を検証できるよう scheduler を
+// mock する。scheduler 自身の gate 挙動は pullbackScheduler.test.ts が担保する。
+vi.mock('../../../src/trading/strategy/pullbackScheduler', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../src/trading/strategy/pullbackScheduler')>()
+  return { ...actual, runPullbackScheduler: vi.fn() }
+})
 
 const env = {
   DB: {} as D1Database,
@@ -28,6 +55,7 @@ describe('runStrategyCron', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
     vi.mocked(loadSymbolUniverse).mockResolvedValue(makeSymbolUniverse())
+    vi.mocked(runPullbackScheduler).mockResolvedValue(emptySchedulerSummary())
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
   })
 
@@ -97,7 +125,14 @@ describe('runStrategyCron', () => {
       },
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithPortfolio)
-    expect(result.skipReason).toBe('portfolio_halted')
+    // #exit-only-halt: run 全体は skip せず、entry だけ止めて exit 判定は続ける。
+    expect(result.skipReason).toBeUndefined()
+    expect(result.entryHaltReason).toMatch(/^portfolio_halted: tradingDisabledUntil=/)
+    expect(result.analysis.entryHalt?.reason).toBe(result.entryHaltReason)
+    // 全銘柄が BUY 抑止として scheduler に渡る (SELL は素通り = scheduler 側の契約)。
+    const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
+    expect(Object.keys(suppressed).sort()).toEqual(['SOXL', 'SOXS'])
+    expect(suppressed.SOXL).toBe(result.entryHaltReason)
   })
 
   it('skips with drawdown_kill when realized drawdown exceeds threshold', async () => {
@@ -119,7 +154,36 @@ describe('runStrategyCron', () => {
       },
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithPortfolio)
-    expect(result.skipReason).toBe('drawdown_kill')
+    // drawdown kill は **実現損益**基準 = stop が効いた直後に発火する。ここで
+    // 全停止すると残りの建玉の stop が消えるので、entry だけを止める。
+    expect(result.skipReason).toBeUndefined()
+    expect(result.entryHaltReason).toMatch(/^drawdown_kill: ratio=/)
+    const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
+    expect(suppressed.SOXL).toBe(result.entryHaltReason)
+    expect(suppressed.SOXS).toBe(result.entryHaltReason)
+  })
+
+  it('exit-only halt でも scheduler は全銘柄を評価対象として受け取る (exit を止めない)', async () => {
+    const envWithPortfolio = {
+      ...env,
+      PORTFOLIO_STATE: {
+        idFromName: () => ({}),
+        get: () => ({
+          getPortfolio: vi.fn().mockResolvedValue({
+            dailyStartEquity: 10_000,
+            dailyRealizedPnl: -250,
+            tradingDisabledUntil: null,
+            updatedAt: new Date().toISOString(),
+          }),
+        }),
+      },
+    } as unknown as Parameters<typeof runStrategyCron>[0]
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ drawdownKillThreshold: -0.02 }),
+    )
+    await runStrategyCron(envWithPortfolio)
+    // symbols を間引くと建玉が orphan になる (exit 判定が走らない) ので全銘柄渡す。
+    expect(lastSchedulerOptions().symbols).toEqual(['SOXL', 'SOXS'])
   })
 
   it('fail-closes to portfolio_halted when PORTFOLIO_STATE binding is missing', async () => {
@@ -128,8 +192,10 @@ describe('runStrategyCron', () => {
       SYMBOL_STATE: {} as DurableObjectNamespace<never>,
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithoutPortfolio)
-    expect(result.skipReason).toBe('portfolio_halted')
+    expect(result.skipReason).toBeUndefined()
+    expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     expect(result.analysis.universe.symbols).toEqual(['SOXL', 'SOXS'])
+    expect(lastSchedulerOptions().entrySuppressedSymbols?.SOXL).toBe(result.entryHaltReason)
   })
 
   // dashboard が disabled (active=0) を表示するために `inactiveSymbols` を
@@ -172,7 +238,10 @@ describe('runStrategyCron', () => {
       },
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envBadTimestamp)
-    expect(result.skipReason).toBe('portfolio_halted')
+    expect(result.skipReason).toBeUndefined()
+    expect(result.entryHaltReason).toBe(
+      'portfolio_halted: tradingDisabledUntil=not-an-iso-timestamp',
+    )
   })
 
   it('fail-closes to portfolio_halted when getPortfolio throws', async () => {
@@ -186,7 +255,8 @@ describe('runStrategyCron', () => {
       },
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithBrokenPortfolio)
-    expect(result.skipReason).toBe('portfolio_halted')
+    expect(result.skipReason).toBeUndefined()
+    expect(result.entryHaltReason).toBe('portfolio_halted: getPortfolio threw: DO unreachable')
   })
 
   // CodeRabbit #196 review: 0013 未 migrate な D1 で earnings gate を有効化すると
@@ -312,7 +382,7 @@ describe('runStrategyCron', () => {
         },
       } as unknown as Parameters<typeof runStrategyCron>[0]
       const result = await runStrategyCron(envWithBrokenPortfolio, { requestId: 'req-x' })
-      expect(result.skipReason).toBe('portfolio_halted')
+      expect(result.entryHaltReason).toBe('portfolio_halted: getPortfolio threw: DO unreachable')
       // notify は fire-and-forget なので microtask flush 待ち
       await new Promise((r) => setTimeout(r, 0))
       expect(fetchSpy).toHaveBeenCalled()
@@ -349,10 +419,10 @@ describe('runStrategyCron', () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date(T_US_OUT))
       // default config は sessionWindowGateEnabled=false。窓外でも gate を通り、
-      // PORTFOLIO_STATE 未 bind で portfolio_halted まで進む (= gate で止まっていない)。
+      // PORTFOLIO_STATE 未 bind の exit-only halt まで進む (= gate で止まっていない)。
       const result = await runStrategyCron(env)
-      expect(result.skipReason).not.toBe('outside_session_window')
-      expect(result.skipReason).toBe('portfolio_halted')
+      expect(result.skipReason).toBeUndefined()
+      expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
     it('flag on + 全市場窓外 → outside_session_window で即 skip', async () => {
@@ -375,7 +445,9 @@ describe('runStrategyCron', () => {
       const result = await runStrategyCron(env)
       // gate 通過 → 後段 (PORTFOLIO_STATE 未 bind) で portfolio_halted。
       expect(result.skipReason).not.toBe('outside_session_window')
-      expect(result.skipReason).toBe('portfolio_halted')
+      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
+      // exit-only halt に到達していること。
+      expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
     it('per-market: JPY 銘柄は US 窓内でも JP 窓外なら skip', async () => {
@@ -398,7 +470,9 @@ describe('runStrategyCron', () => {
       vi.mocked(loadSymbolUniverse).mockResolvedValue(jpyUniverse())
       const result = await runStrategyCron(env)
       expect(result.skipReason).not.toBe('outside_session_window')
-      expect(result.skipReason).toBe('portfolio_halted')
+      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
+      // exit-only halt に到達していること。
+      expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
     // 2026-07-03 は Independence Day 振替休場 (7/4=土)。13:00 ET は通常なら窓内の
@@ -422,7 +496,9 @@ describe('runStrategyCron', () => {
       vi.setSystemTime(new Date(T_US_HOLIDAY))
       const result = await runStrategyCron(env)
       expect(result.skipReason).not.toBe('market_holiday')
-      expect(result.skipReason).toBe('portfolio_halted')
+      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
+      // exit-only halt に到達していること。
+      expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
     it('休場と窓外が混在する場合は outside_session_window に倒す', async () => {
@@ -463,7 +539,9 @@ describe('runStrategyCron', () => {
       )
       const result = await runStrategyCron(env)
       expect(result.skipReason).not.toBe('outside_session_window')
-      expect(result.skipReason).toBe('portfolio_halted')
+      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
+      // exit-only halt に到達していること。
+      expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
   })
 

@@ -95,6 +95,11 @@ export interface StrategyCronResult {
    * Webull payloads, only config/risk context and per-symbol decisions.
    */
   analysis: StrategyCronAnalysis
+  /**
+   * run 全体を評価せず抜けた理由。`portfolio_halted` / `drawdown_kill` は
+   * #exit-only-halt 以降 **この経路では出ない** (entry のみ停止に変更)。
+   * 既存の decision log / dashboard filter との互換のため union には残す。
+   */
   skipReason?:
     | 'trading_disabled'
     | 'no_tradable_symbols'
@@ -103,6 +108,12 @@ export interface StrategyCronResult {
     | 'no_bridge_state'
     | 'portfolio_halted'
     | 'drawdown_kill'
+  /**
+   * #exit-only-halt: risk halt により **新規 entry のみ**停止した理由。
+   * `skipReason` (= run 全体を skip) とは排他で、こちらが立っている run は
+   * 建玉の exit 判定を通常どおり実行している。
+   */
+  entryHaltReason?: string
 }
 
 export interface StrategyCronAnalysis {
@@ -149,6 +160,12 @@ export interface StrategyCronAnalysis {
     scale: number
     drawdown: number
   }
+  /**
+   * #exit-only-halt: risk 由来の halt で **新規 entry だけ**を止めている状態。
+   * 全銘柄が BUY 抑止され、exit (stop / TP / time-stop) は通常どおり評価される。
+   * 未設定なら通常運転。
+   */
+  entryHalt?: { reason: string }
   /**
    * VIX regime decision (issue #196 3/3)。`^VIX` の最新値から導出。
    * cron tick で一度だけ算出し、両 currency run に同じ decision を渡す。
@@ -405,24 +422,31 @@ export async function runStrategyCron(
     }
   }
 
-  // Portfolio-level pre-flight (fail-closed):
-  // - PORTFOLIO_STATE binding 不在 → halt (drawdown kill を評価する術が無い)
-  // - getPortfolio 例外 → halt
-  // - tradingDisabledUntil が truthy だが parse 不能 → halt (silent pass 防止)
-  // - tradingDisabledUntil が有効 & 未来 → halt
-  // - drawdown 閾値超過 → halt
-  if (!env.PORTFOLIO_STATE) {
-    emitSkipReasonNotify(notifier, 'portfolio_halted', options.requestId, 'critical', 'PORTFOLIO_STATE binding missing')
-    return {
-      summary: emptySummary(),
-      symbols: universe.allowedSymbols,
-      analysis: analysisBase(),
-      skipReason: 'portfolio_halted',
-    }
-  }
-  const portfolioStore = new PortfolioStateClient(env.PORTFOLIO_STATE)
-  let portfolioSnapshot: Awaited<ReturnType<typeof portfolioStore.getPortfolio>>
+  // Portfolio-level pre-flight。**exit-only halt** (#exit-only-halt):
+  // - PORTFOLIO_STATE binding 不在 → entry 停止
+  // - getPortfolio 例外 → entry 停止
+  // - tradingDisabledUntil が truthy だが parse 不能 → entry 停止 (silent pass 防止)
+  // - tradingDisabledUntil が有効 & 未来 → entry 停止
+  // - drawdown 閾値超過 → entry 停止
+  //
+  // いずれも **新規 BUY だけを止め、保有建玉の exit (stop / TP / time-stop) は
+  // 評価し続ける**。stop はブローカー側の逆指値ではなく cron が毎 tick 評価する
+  // ソフト stop なので、ここで全停止すると「一番荒れている時に建玉の唯一の
+  // 保護が消える」ことになる。特に drawdown kill は **実現損益**基準 = stop が
+  // 効いた直後に発火するため、その順序が起きやすい。
+  //
+  // 全停止のままにするのは operator の明示停止 (`trading_enabled` / env
+  // TRADING_ENABLED) と `no_bridge_state` (SYMBOL_STATE 不在 = 建玉状態が
+  // そもそも読めない) だけ。
+  let entryHaltReason: string | null = null
+  const portfolioStore = env.PORTFOLIO_STATE ? new PortfolioStateClient(env.PORTFOLIO_STATE) : null
+  let portfolioSnapshot: Awaited<ReturnType<PortfolioStateClient['getPortfolio']>> | null = null
   let analysis = analysisBase()
+  if (!portfolioStore) {
+    entryHaltReason = 'portfolio_halted: PORTFOLIO_STATE binding missing'
+    emitSkipReasonNotify(notifier, 'portfolio_halted', options.requestId, 'critical', 'PORTFOLIO_STATE binding missing')
+  }
+  if (portfolioStore) {
   try {
     portfolioSnapshot = await portfolioStore.getPortfolio()
     // `lastRolledAt` は #140 で追加した forward-compat フィールド。古い DO row
@@ -454,15 +478,10 @@ export async function runStrategyCron(
           'critical',
           `tradingDisabledUntil=${portfolioSnapshot.tradingDisabledUntil}`,
         )
-        return {
-          summary: emptySummary(),
-          symbols: universe.allowedSymbols,
-          analysis,
-          skipReason: 'portfolio_halted',
-        }
+        entryHaltReason = `portfolio_halted: tradingDisabledUntil=${portfolioSnapshot.tradingDisabledUntil}`
       }
     }
-    if (portfolioSnapshot.dailyStartEquity > 0) {
+    if (entryHaltReason === null && portfolioSnapshot.dailyStartEquity > 0) {
       const ratio = portfolioSnapshot.dailyRealizedPnl / portfolioSnapshot.dailyStartEquity
       if (ratio <= global.drawdownKillThreshold) {
         emitSkipReasonNotify(
@@ -472,36 +491,31 @@ export async function runStrategyCron(
           'critical',
           `ratio=${ratio.toFixed(4)} <= threshold=${global.drawdownKillThreshold}`,
         )
-        return {
-          summary: emptySummary(),
-          symbols: universe.allowedSymbols,
-          analysis,
-          skipReason: 'drawdown_kill',
-        }
+        entryHaltReason = `drawdown_kill: ratio=${ratio.toFixed(4)} <= threshold=${global.drawdownKillThreshold}`
       }
     }
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
     emitSkipReasonNotify(
       notifier,
       'portfolio_halted',
       options.requestId,
       'critical',
-      `getPortfolio threw: ${error instanceof Error ? error.message : String(error)}`,
+      `getPortfolio threw: ${message}`,
     )
-    return {
-      summary: emptySummary(),
-      symbols: universe.allowedSymbols,
-      analysis,
-      skipReason: 'portfolio_halted',
-    }
+    entryHaltReason = `portfolio_halted: getPortfolio threw: ${message}`
+  }
   }
 
   // Drawdown-scaled risk: derate sizing for the rest of the trading day
   // when realized PnL is underwater but not yet at drawdown_kill threshold.
   // Emits a journal-visible log so the operator can tell a quiet day from
   // a halved one.
+  // portfolio が読めなかった場合 (exit-only halt 中) は 0/0 を渡す。この経路では
+  // entry が全銘柄抑止されているので sizing 結果は使われないが、後続の型と
+  // ログ形状を素通しにするために neutral な値を入れる。
   const { portfolio: portfolioForScale, usedFallback } = resolvePortfolioForRiskScale(
-    portfolioSnapshot,
+    portfolioSnapshot ?? { dailyStartEquity: 0, dailyRealizedPnl: 0 },
     global.totalCapitalUsd,
   )
   if (usedFallback) {
@@ -619,6 +633,29 @@ export async function runStrategyCron(
   // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
   // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
   // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
+  // #exit-only-halt: risk 由来の halt 中は **全銘柄の BUY を抑止**し、SELL /
+  // exit だけを通す。role 由来の抑止理由が既にある銘柄はそちらを優先して残す
+  // (より具体的な理由の方が decision log で有用)。
+  const effectiveEntrySuppressed: Record<string, string> =
+    entryHaltReason === null
+      ? entrySuppressedSymbols
+      : {
+          ...Object.fromEntries(
+            universe.allowedSymbols.map((symbol) => [symbol.toUpperCase(), entryHaltReason]),
+          ),
+          ...entrySuppressedSymbols,
+        }
+  if (entryHaltReason !== null) {
+    console.log(
+      JSON.stringify({
+        event: 'entry_halt_exit_only',
+        requestId: options.requestId,
+        reason: entryHaltReason,
+        symbols: universe.allowedSymbols.length,
+      }),
+    )
+    analysis = { ...analysis, entryHalt: { reason: entryHaltReason } }
+  }
   const summary: PullbackRunSummary = { ...emptySummary(), vix: vixDecision }
   // run は `activeCurrencies` (= 銘柄あり ∧ (gate off ∨ 窓内)) のみ構築する。
   // gate off の時は両 currency が active なので従来挙動と一致する (#session-window-gate)。
@@ -703,7 +740,7 @@ export async function runStrategyCron(
       intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
       defaultRule,
       rulesMap,
-      entrySuppressedSymbols,
+      entrySuppressedSymbols: effectiveEntrySuppressed,
       halfEntrySymbols,
       momentumSymbols,
       ...(momentumStrategy ? { momentumStrategy } : {}),
@@ -821,7 +858,10 @@ export async function runStrategyCron(
   })
   analysis.allocation = { view: allocationView, ordersEnabled: global.cashFallbackOrdersEnabled }
 
-  if (global.cashFallbackOrdersEnabled && budgetBasisJpy !== undefined) {
+  // #exit-only-halt: cash rebalance pass 2 は entrySuppressedSymbols を渡さない
+  // 唯一の BUY 経路なので、halt 中はここで丸ごと止める (退避先への自動 BUY も
+  // 「新規 entry」として扱う)。
+  if (global.cashFallbackOrdersEnabled && budgetBasisJpy !== undefined && entryHaltReason === null) {
     const plan = buildCashRebalancePlan({
       allocation: allocationView,
       snapshots: summary.entrySnapshots,
@@ -892,7 +932,12 @@ export async function runStrategyCron(
     }
   }
 
-  return { summary, symbols: universe.allowedSymbols, analysis }
+  return {
+    summary,
+    symbols: universe.allowedSymbols,
+    analysis,
+    ...(entryHaltReason !== null ? { entryHaltReason } : {}),
+  }
 }
 
 function sanitizeEquity(value: number | null | undefined, fallback: number): number {
