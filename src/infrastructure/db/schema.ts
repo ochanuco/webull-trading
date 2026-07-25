@@ -40,6 +40,13 @@ export const tradeJournal = sqliteTable('trade_journal', {
   filledQty: real('filled_qty'),
   filledPrice: real('filled_price'),
   realizedPnl: real('realized_pnl'),
+  /**
+   * 売買コストの見積り (#trade-cost)。SELL 行に往復分 (entry + exit) を入れる。
+   * `realized_pnl` は **この額を引いた net**。broker が実費を返さないので
+   * `global_config.fee_pct_of_notional` / `fee_fixed_per_order` からの推定値。
+   * NULL = コスト未設定 (= realized_pnl は gross) か、旧データ。
+   */
+  estimatedCost: real('estimated_cost'),
   holdDays: real('hold_days'),
   exitReason: text('exit_reason'),
   errorClass: text('error_class'),
@@ -335,6 +342,13 @@ export const globalConfig = sqliteTable(
     pullbackDefaultMaxStopToTpRatio: real('pullback_default_max_stop_to_tp_ratio')
       .notNull()
       .default(2.0),
+    /**
+     * 売買コスト見積り (#trade-cost)。約定代金に対する料率。realized PnL を
+     * net 化するのに使う。0 = 従来どおり gross。
+     */
+    feePctOfNotional: real('fee_pct_of_notional').notNull().default(0),
+    /** 1 注文あたりの固定費 (銘柄通貨建て)。0 で無効。 */
+    feeFixedPerOrder: real('fee_fixed_per_order').notNull().default(0),
     /**
      * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
      * pullbackSizing に渡る。#23 Lane 2。
