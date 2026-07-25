@@ -85,7 +85,7 @@ VALUES ('GLD', 'SPDR Gold Shares', 'US', 1, 5000, strftime('%Y-%m-%dT%H:%M:%fZ',
 INSERT INTO symbol_config (symbol, name, market, active, max_notional, updated_at)
 VALUES ('7203', 'トヨタ自動車', 'JP', 1, 100000, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
--- 一時停止 (ALLOWED_SYMBOLS から外れる / 次 cron から反映)
+-- 一時停止 (universe から外れる / 次 cron から反映)
 UPDATE symbol_config SET active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE symbol = 'SOXS';
 

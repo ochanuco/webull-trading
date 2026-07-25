@@ -56,12 +56,12 @@ pnpm wrangler d1 migrations apply webull-trading-production --env=production --r
 
 ### 3. Secret を env ごとに投入
 
-`wrangler secret put <KEY> --env=<dev|staging|production>` で投入する。`.dev.vars.example` 末尾に key 一覧と例コマンドがある。
+`wrangler secret put <KEY> --env=<dev|staging|production>` で投入する。key の一覧と用途は `.dev.vars.example` にある。
 
 最小必須:
 
 - `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` (#29 Access auth)
-- `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID`
+- `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID_JP_CASH`
 
 `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` / `EVENT_INGEST_SECRET` は #29 で
 廃止。既存 deploy は `wrangler secret delete <key> --env=<env>` で除去する。

@@ -9,7 +9,7 @@
  *     WEBULL_TRADE_API_BASE=https://jp-openapi-alb.uat.webullbroker.com \
  *     pnpm run accounts
  *
- * Copy the account_id into `.dev.vars` as WEBULL_ACCOUNT_ID.
+ * Copy the account_id into `.dev.vars` as WEBULL_ACCOUNT_ID_JP_CASH.
  */
 
 import { createWebullReadClient } from '../src/infrastructure/webull/WebullReadClient'
