@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "webull": {
+      "command": "op",
+      "args": [
+        "run",
+        "--env-file=.dev.vars",
+        "--",
+        "uvx",
+        "webull-openapi-mcp",
+        "serve"
+      ],
+      "env": {
+        "WEBULL_ENVIRONMENT": "prod",
+        "WEBULL_REGION_ID": "jp",
+        "WEBULL_TOOLSETS": "account,market-data,instrument",
+        "WEBULL_TOKEN_DIR": ".local/webull-mcp/conf"
+      }
+    }
+  }
+}
