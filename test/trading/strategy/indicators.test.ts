@@ -123,3 +123,48 @@ describe('computeHoldBusinessDays', () => {
     expect(computeHoldBusinessDays('not-a-date', new Date(), 'US')).toBe(0)
   })
 })
+
+// #atr-baseline-window: baseline は既定で直近 20 本 (atr20 の窓) を内包する。
+// opt-in で除外でき、その場合だけ「直近 vs それ以前」の素直な比率になる。
+describe('computePullbackIndicators baseline ATR window', () => {
+  /** 前半 40 本は静穏 (幅 1%)、直近 20 本だけボラを 5 倍にした系列。 */
+  function volSpikeBars(): DailyBar[] {
+    return Array.from({ length: 61 }, (_, i) => {
+      const close = 100
+      const spread = i >= 41 ? 0.05 : 0.01
+      const iso = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10)
+      return {
+        date: iso,
+        open: close,
+        high: close * (1 + spread),
+        low: close * (1 - spread),
+        close,
+      }
+    })
+  }
+
+  it('既定では baseline に直近の急騰分が混ざり、比率が鈍る', () => {
+    const r = computePullbackIndicators(volSpikeBars())!
+    const ratio = r.atr20 / r.baselineAtr20
+    // 実際のボラ差は 5 倍だが、baseline が直近を含むので比率は大幅に縮む。
+    expect(ratio).toBeLessThan(3)
+  })
+
+  it('excludeRecentFromBaseline で実際のボラ差 (5 倍) に近い比率になる', () => {
+    const r = computePullbackIndicators(volSpikeBars(), null, {
+      excludeRecentFromBaseline: true,
+    })!
+    const ratio = r.atr20 / r.baselineAtr20
+    expect(ratio).toBeGreaterThan(4)
+  })
+
+  it('最小 bar 数 (50) でも除外後に十分なサンプルが残る', () => {
+    const closes = Array.from({ length: 50 }, (_, i) => 100 + i)
+    const excluded = computePullbackIndicators(makeBars(closes), null, {
+      excludeRecentFromBaseline: true,
+    })!
+    // TR 49 本 − 直近 20 本 = 29 本。0 除算や空平均にならないことを固定する。
+    expect(excluded.baselineAtr20).toBeGreaterThan(0)
+    expect(Number.isFinite(excluded.atr20 / excluded.baselineAtr20)).toBe(true)
+  })
+})

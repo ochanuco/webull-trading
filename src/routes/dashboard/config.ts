@@ -177,15 +177,15 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   pullback_default_pullback_max: {
     label: '押し目上限 (比率、負)',
-    detail: '押し目買いを狙う「浅い側」の下落率閾値。-0.03 なら「-3% 以上下げた銘柄を候補に」。緩めると機会↑、騙し↑。',
+    detail: '押し目買いを狙う「浅い側」の下落率閾値。**直近 10 営業日の高値**から -0.03 なら「-3% 以上下げた銘柄を候補に」。緩めると機会↑、騙し↑。',
   },
   pullback_default_pullback_min: {
     label: '押し目下限 (比率、負)',
-    detail: '押し目買いを狙う「深い側」の下落率閾値。-0.06 なら「-6% より深い下げは敬遠」。深すぎる下げは反発せず転換の可能性。',
+    detail: '押し目買いを狙う「深い側」の下落率閾値。**直近 10 営業日の高値**から -0.06 なら「-6% より深い下げは敬遠」。深すぎる下げは反発せず転換の可能性。',
   },
   pullback_default_min_return_50d: {
-    label: '50日最低騰落率 (比率)',
-    detail: '過去 50 日の騰落率がこの値以上の銘柄だけ押し目買い対象。0.08 = +8%。上昇トレンド銘柄を絞るフィルター。',
+    label: '20日最低騰落率 (比率)',
+    detail: '過去 **20 営業日** の騰落率がこの値以上の銘柄だけ押し目買い対象。0.08 = +8%。上昇トレンド銘柄を絞るフィルター。列名の `50d` は #318 で lookback を 50→20 日に短縮した際の名残 (storage 互換のため据え置き)。',
   },
   pullback_default_require_above_sma50: {
     label: 'SMA50 超必須 (bool)',
@@ -201,7 +201,7 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   pullback_default_max_atr_ratio: {
     label: '過熱ガード: ATR比上限 (倍)',
-    detail: '直近 ATR が baseline (長期平均) のこの倍率を超える高ボラ局面では押し目買いを見送る。1.5 = baseline の 1.5 倍。ボラ・レジーム破綻時の entry を抑制。',
+    detail: '直近 ATR が baseline (**直近 20 日を除いた**長期平均) のこの倍率を超える高ボラ局面では押し目買いを見送る。1.5 = baseline の 1.5 倍。ボラ・レジーム破綻時の entry を抑制。',
   },
   risk_base_per_trade_pct: {
     label: '基本リスク率 (比率)',

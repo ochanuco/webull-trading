@@ -47,6 +47,8 @@ export interface GlobalConfigSnapshot {
   feePctOfNotional: number
   /** 売買コスト見積りの 1 注文固定費 (銘柄通貨建て)。 */
   feeFixedPerOrder: number
+  /** baseline ATR から直近 20 本を除外するか (#atr-baseline-window)。 */
+  atrBaselineExcludeRecent: boolean
   /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
   riskBasePerTradePct: number
   /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
@@ -113,6 +115,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultMaxStopToTpRatio: 2.0,
   feePctOfNotional: 0,
   feeFixedPerOrder: 0,
+  atrBaselineExcludeRecent: false,
   riskBasePerTradePct: 0.004,
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
@@ -320,6 +323,7 @@ export async function loadGlobalConfig(
             pullbackDefaultMaxStopToTpRatio: globalConfig.pullbackDefaultMaxStopToTpRatio,
             feePctOfNotional: globalConfig.feePctOfNotional,
             feeFixedPerOrder: globalConfig.feeFixedPerOrder,
+            atrBaselineExcludeRecent: globalConfig.atrBaselineExcludeRecent,
             riskBasePerTradePct: globalConfig.riskBasePerTradePct,
             riskDdHalfThreshold: globalConfig.riskDdHalfThreshold,
             riskDdHaltThreshold: globalConfig.riskDdHaltThreshold,
@@ -359,6 +363,8 @@ export async function loadGlobalConfig(
             // 0039 追加列 (#trade-cost)。legacy path は default (= gross PnL)。
             feePctOfNotional: GLOBAL_CONFIG_DEFAULTS.feePctOfNotional,
             feeFixedPerOrder: GLOBAL_CONFIG_DEFAULTS.feeFixedPerOrder,
+            // 0040 追加列 (#atr-baseline-window)。legacy path は default (従来窓)。
+            atrBaselineExcludeRecent: GLOBAL_CONFIG_DEFAULTS.atrBaselineExcludeRecent,
             riskBasePerTradePct: legacyRow.riskBasePerTradePct,
             riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
             riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
@@ -424,6 +430,7 @@ export async function loadGlobalConfig(
     pullbackDefaultMaxStopToTpRatio: row.pullbackDefaultMaxStopToTpRatio,
     feePctOfNotional: row.feePctOfNotional,
     feeFixedPerOrder: row.feeFixedPerOrder,
+    atrBaselineExcludeRecent: row.atrBaselineExcludeRecent,
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,
