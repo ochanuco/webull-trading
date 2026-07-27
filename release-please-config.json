@@ -57,5 +57,5 @@
   "bootstrap-sha": "d8adae22c0ee694f1609502afe1cbdf701923a1a",
   "separate-pull-requests": false,
   "include-component-in-tag": false,
-  "pull-request-title-pattern": "chore: release ${version}"
+  "pull-request-title-pattern": "chore${scope}: release${component} ${version}"
 }
