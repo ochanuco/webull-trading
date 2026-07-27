@@ -107,6 +107,17 @@ Required checks:
 
 `workflow_dispatch` で `production release PR` を手動実行すると、最新の Release に対して昇格 PR を作り直せる。
 
+## Merge 方式
+
+ブランチごとに ruleset の `pull_request.allowed_merge_methods` で**強制**している。手で選ばない (選べない)。
+
+| 対象 | 方式 | 理由 |
+|---|---|---|
+| `main` | **merge commit のみ** | フィーチャーブランチの履歴を残す (squash は並列開発でコンフリクト解決や revert の手掛かりを失う) |
+| `production` | **squash のみ** | `release/production` は機械生成の単一コミットブランチ。1 リリース = production の 1 コミットを保ち、ロールバック先を一意にする。`required_linear_history` とも整合 |
+
+`main` が merge commit になったことで、**CHANGELOG の粒度が「PR 単位」から「コミット単位」に変わる**。release-please は releasable unit (`feat` / `fix` / `deps`) をコミット単位で拾うため、ブランチ内の細かいコミットもそのままリリースノートに並ぶ。粒度を保ちたい PR は push 前にローカルで畳む。
+
 ## Versioning
 
 導入時に踏んだ罠 (再導入・移設時の注意):
