@@ -1,20 +1,24 @@
 # Local dev secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
 #
-# Split:
-# - Operational flags (not sensitive): DRY_RUN / TRADING_ENABLED / MARKET_HOURS_CHECK
-#   → live in wrangler.jsonc::vars and wrangler.jsonc::env.<target>.vars.
-#   Override locally by uncommenting the block at the bottom.
-# - Sensitive (personal strategy / credentials / non-public endpoint):
-#   ALLOWED_SYMBOLS / MAX_ORDER_NOTIONAL / SYMBOL_MAX_NOTIONAL /
-#   WEBULL_TRADE_API_BASE / WEBULL_QUOTES_API_BASE / WEBULL_EVENTS_API_BASE /
-#   BASIC_AUTH_* / EVENT_INGEST_SECRET / WEBULL_APP_* / WEBULL_ACCOUNT_ID
-#   → set below for local dev, use `wrangler secret put` for deployed envs.
+# 前提 (#118 以降):
+# - 運用パラメタ (dry_run / trading_enabled / market_hours_check / stale_quote_ms /
+#   gap_reject_pct / 銘柄 universe / notional cap / 戦略 rule など) は **D1 の
+#   `global_config` / `symbol_config`** が真値。env var では持たない。
+#   → `wrangler d1 execute ... "UPDATE global_config SET ..."` で runtime 即反映。
+# - ここに書くのは **credential / 非公開 endpoint / deploy gate** のみ。
+# - deployed env は `wrangler secret put <KEY> --env=<dev|staging|production>`。
+#   production の credential は staging/dev と必ず分ける (誤爆防止)。
+# - 並列 PR での conflict を避けるため、**新しい var は末尾に append** する。
 
+# --- Webull credential (必須) ---
 WEBULL_APP_KEY=
 WEBULL_APP_SECRET=
-# Run `pnpm run accounts` after setting the two above to fetch account_id.
-WEBULL_ACCOUNT_ID=
-# Webull JP host (#21)。env 未設定なら JP **prod** default に fallback:
+# 口座 ID。JP_CASH 単一口座に集約済 (#109)。上 2 つを入れて `pnpm run accounts`
+# を叩くと取得できる (Webull sandbox は dashboard から確認できないため)。
+WEBULL_ACCOUNT_ID_JP_CASH=
+
+# --- Webull JP host (optional) ---
+# env 未設定なら JP **prod** default に fallback:
 #   WEBULL_TRADE_API_BASE  default = https://api.webull.co.jp
 #   WEBULL_QUOTES_API_BASE default = https://data-api.webull.co.jp
 #   WEBULL_EVENTS_API_BASE default = https://events-api.webull.co.jp  (consumer 未実装)
@@ -26,69 +30,10 @@ WEBULL_ACCOUNT_ID=
 # WEBULL_QUOTES_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
 # WEBULL_EVENTS_API_BASE=https://jp-openapi-alb.uat.webullbroker.com
 
-ALLOWED_SYMBOLS=SOXL,SOXS
-MAX_ORDER_NOTIONAL=100
-SYMBOL_MAX_NOTIONAL={"SOXL":200,"SOXS":150}
-
-# Local overrides for operational flags (optional):
-# DRY_RUN=true
-# TRADING_ENABLED=false
-# MARKET_HOURS_CHECK=false
-
-# #38-C risk knobs (optional, both default to sane values):
-# STALE_QUOTE_MS=900000
-# GAP_REJECT_PCT=0.03
-
-# Notification webhooks (#199, optional). 未設定なら通知 no-op。
-# Slack incoming webhook と Discord webhook はそれぞれ単独 / 両方設定可能。
-SLACK_WEBHOOK_URL=
-DISCORD_WEBHOOK_URL=
-# dashboard 通知 link の base URL (例: https://webull-trading.example.workers.dev)。
-DASHBOARD_BASE_URL=
-
-# #257: trade/account endpoint path 上書き (optional、append at end 規約)。
-# default は旧 path (/openapi/account/*)。staging で新 path に切替えるとき
-# 設定する。値は `/` で始まる絶対パスのみ受理、空 / whitespace / 相対 URL
-# は default fallback (broken request 投げない / WEBULL_TRADE_API_BASE bypass 防止)。
-# WEBULL_PATH_POSITIONS=/openapi/assets/positions
-# WEBULL_PATH_ORDERS_HISTORY=/openapi/trade/order/history
-# WEBULL_PATH_ORDERS_PLACE=/openapi/trade/order/place
-
-# #258: trade/account routes の x-version ヘッダ override (optional、append
-# 規約)。default 'v1' (= 現行)。新 docs では v2 推奨だが旧 path でも v1 alias
-# で受理されるので staging で 'v2' 切替え検証してから default 化する。
-# 受理値は 'v1' / 'v2' のみ、それ以外 (空 / whitespace / 任意文字列) は 'v1'
-# fallback (auth signing が壊れるのを防ぐ strict 受理)。
-# WEBULL_TRADE_VERSION=v2
-
-# #256: Place Order body schema version (optional、append 規約)。default 'v1'
-# (現挙動)、'v2' で新 docs 形式 (combo_type=NORMAL / session=CORE / MARKET
-# は limit_price 不要 / account_id を body)。受理値は 'v1' / 'v2' のみ、
-# それ以外 (空 / whitespace / 任意文字列) は 'v1' fallback。
-# WEBULL_PLACE_ORDER_SCHEMA=v2
-
-# #276: runtime kill-switch の deploy-gate override (optional、append 規約)。
-# prod は D1 `global_config.trading_enabled` が真値だが、env を 'false' に
-# すると DB が ON でも強制 OFF (= より制限的が勝つ)。preview / staging で
-# 「DB を間違って ON にしてもこの環境では絶対に発注しない」保険。
-# 受理値: unset / 'true' → DB 尊重、'false' → 強制 OFF、それ以外 → 強制 OFF。
-# TRADING_ENABLED=false
-
-# #277: per-env secrets. `.dev.vars` is local only. For deployed envs use
-# `wrangler secret put <KEY> --env=<dev|staging|production>`. Examples:
-#   wrangler secret put BASIC_AUTH_USER --env=dev
-#   wrangler secret put BASIC_AUTH_PASSWORD --env=dev
-#   wrangler secret put EVENT_INGEST_SECRET --env=dev
-#   wrangler secret put WEBULL_APP_KEY --env=dev
-#   wrangler secret put WEBULL_APP_SECRET --env=dev
-#   wrangler secret put WEBULL_ACCOUNT_ID --env=dev
-# Repeat for --env=staging (sandbox key) and --env=production (live key).
-# Production credentials MUST be distinct from staging/dev to avoid 誤爆.
-
-# #29: Cloudflare Access auth (append 規約)。本 PR で BASIC_AUTH_USER /
-# BASIC_AUTH_PASSWORD / EVENT_INGEST_SECRET は廃止 (上記 #277 ブロック内の
-# 例示はファイル append-only 規約のため残しているが、これらの secret は実体
-# として存在しない。代わりに以下を投入する)。
+# --- 認証 (#29: Cloudflare Access) ---
+# 旧 BASIC_AUTH_USER / BASIC_AUTH_PASSWORD / EVENT_INGEST_SECRET は廃止済 (実体
+# として存在しない)。残っている deployed env があれば
+# `wrangler secret delete <KEY> --env=<env>` で除去する。
 # - Local dev (wrangler dev): ACCESS_DEV_BYPASS_USER のみ設定。middleware が
 #   この文字列を actor として stamp する。**deployed env では絶対に設定禁止**。
 # - dev / staging / production: CF_ACCESS_TEAM_DOMAIN (full URL、例:
@@ -96,33 +41,68 @@ DASHBOARD_BASE_URL=
 #   application AUD tag) を `wrangler secret put --env=<env>` で投入。
 #   CF_ACCESS_TEAM_DOMAIN が設定されていると middleware は ACCESS_DEV_BYPASS_USER
 #   を無視するので、deployed env で誤って bypass var を入れても prod-safe。
-#   投入例:
-#     wrangler secret put CF_ACCESS_TEAM_DOMAIN --env=production
-#     wrangler secret put CF_ACCESS_AUD --env=production
-# 旧 BASIC_AUTH_* / EVENT_INGEST_SECRET は wrangler secret delete --env=<env> で除去。
 ACCESS_DEV_BYPASS_USER=dev@local
 # CF_ACCESS_TEAM_DOMAIN=
 # CF_ACCESS_AUD=
+# /mcp 専用 Access application (path 限定 + Service Auth policy) の AUD tag (#553)。
+# 未設定なら CF_ACCESS_AUD に fallback。
+# CF_ACCESS_MCP_AUD=
 
-# Webull `x-access-token` (#21、append 規約)。token flow 別の supplemental auth:
-#   1. operator が Webull 公式ツールで token 発行 (PENDING 初期 status)
+# --- Webull `x-access-token` (#21) ---
+# signature とは直交する supplemental auth。通常運用の真値は WEBULL_TOKEN_STATE DO
+# 側で、`0 22 * * *` cron が expires 残り 7 days で自動 refresh する。この env は
+# DO seed 前の bootstrap fallback。
+#   1. `pnpm run issue-token` で PENDING token を発行
 #   2. Webull モバイルアプリで 2FA SMS verify (5 min 以内) → NORMAL 化
-#   3. その token 値を投入 (`wrangler secret put WEBULL_ACCESS_TOKEN --env=...`)
-#   4. 15 days inactivity で INVALID → 期限切れ監視 / 再投入は別 issue
-# テスト環境は 2FA 不要で auto-NORMAL、staging では未設定でも動くケース有り。
-# prod では設定漏れ → 401 で発覚させる方針 (= fail-closed ではなく throw しない)。
+#   3. `POST /admin/webull-token/seed` (または /dashboard/webull-token) で DO に投入
+# 15 days inactivity で INVALID 化する。
 WEBULL_ACCESS_TOKEN=
 
-# QUOTE_SOURCE (#475): 'webull' で quote を Webull Market Data API (bid/ask 付き、
-# trade host + v2) に切替。JP 銘柄と Webull 障害時は Yahoo に自動 fallback。
-# 未設定 = yahoo (現行 default)。
-# QUOTE_SOURCE=webull
+# --- 通知 (#199, optional) ---
+# 未設定なら通知 no-op。Slack / Discord はそれぞれ単独 / 両方設定可能。
+SLACK_WEBHOOK_URL=
+DISCORD_WEBHOOK_URL=
+# dashboard 通知 link の base URL (例: https://webull-trading.example.workers.dev)。
+DASHBOARD_BASE_URL=
 
-# BAR_SOURCE (#475): 'webull' で daily/intraday bars を Webull Market Data API に
-# 切替。^VIX / JP 銘柄 / Webull 障害時は Yahoo に自動 fallback。未設定 = yahoo。
+# --- deploy gate (#276, optional) ---
+# prod の kill-switch 真値は D1 `global_config.trading_enabled` だが、env を
+# 'false' にすると DB が ON でも強制 OFF (= より制限的が勝つ)。preview / staging で
+# 「DB を間違って ON にしてもこの環境では絶対に発注しない」保険。
+# 受理値: unset / 'true' → DB 尊重、'false' → 強制 OFF、それ以外 → 強制 OFF。
+# TRADING_ENABLED=false
+
+# --- Webull endpoint path / schema override (optional) ---
+# #257: trade/account endpoint path。default は旧 path (/openapi/account/*)。
+# 値は `/` で始まる絶対パスのみ受理、空 / whitespace / 相対 URL は default fallback
+# (broken request を投げない / WEBULL_TRADE_API_BASE bypass 防止)。
+# WEBULL_PATH_POSITIONS=/openapi/assets/positions
+# WEBULL_PATH_ORDERS_HISTORY=/openapi/trade/order/history
+# WEBULL_PATH_ORDERS_PLACE=/openapi/trade/order/place
+# #415: Account Balance (買付余力 pre-trade ゲート用)。default は v1
+# `/openapi/account/balance`。WEBULL_TRADE_VERSION=v2 運用なら下記を指定。
+# WEBULL_PATH_ACCOUNT_BALANCE=/openapi/assets/balance
+# quote snapshot path の override (UAT 差異吸収用)。
+# WEBULL_QUOTE_PATH=
+# #258: trade/account routes の x-version ヘッダ。受理値は 'v1' / 'v2' のみ、
+# それ以外は 'v1' fallback (auth signing が壊れるのを防ぐ strict 受理)。
+# WEBULL_TRADE_VERSION=v2
+# #256: Place Order body schema version。'v2' で新 docs 形式 (combo_type=NORMAL /
+# session=CORE / MARKET は limit_price 不要 / account_id を body)。同じく strict。
+# WEBULL_PLACE_ORDER_SCHEMA=v2
+
+# --- market data source (#475, optional) ---
+# QUOTE_SOURCE: 'webull' で quote を Webull Market Data API (bid/ask 付き、
+# trade host + v2) に切替。JP 銘柄と Webull 障害時は Yahoo に自動 fallback。
+# BAR_SOURCE: 'webull' で daily/intraday bars を同 API に切替。^VIX / JP 銘柄 /
+# 障害時は Yahoo に自動 fallback。いずれも未設定 = yahoo。
+# QUOTE_SOURCE=webull
 # BAR_SOURCE=webull
 
-# --- MCP (#553) ---
-# CF_ACCESS_MCP_AUD: /mcp 専用 Access application (path 限定 + Service Auth policy)
-# の AUD tag。未設定なら CF_ACCESS_AUD に fallback。設定は wrangler secret:
-#   wrangler secret put CF_ACCESS_MCP_AUD --env=production
+# --- production readiness の閾値 (#376 / #379, optional) ---
+# `GET /admin/production-readiness` の preflight を締める値。取引 gate そのものでは
+# なく、本番 gate を外す前の fail-closed チェックの上限。
+# FIRST_LIVE_MAX_ACTIVE_SYMBOLS=
+# FIRST_LIVE_MAX_ORDER_NOTIONAL_USD=
+# FIRST_LIVE_MAX_ORDER_NOTIONAL_JPY=
+# ROLLBACK_REHEARSAL_MAX_AGE_HOURS=

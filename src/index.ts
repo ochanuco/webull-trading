@@ -218,6 +218,9 @@ export default {
                 requestId,
                 symbols: result.symbols,
                 skipReason: result.skipReason,
+                // #exit-only-halt: run 全体は走っているが新規 entry だけ止めた場合。
+                // skipReason とは排他で、こちらが出ている tick は exit 判定済み。
+                entryHaltReason: result.entryHaltReason ?? null,
                 summary,
                 analysis: result.analysis,
               }),

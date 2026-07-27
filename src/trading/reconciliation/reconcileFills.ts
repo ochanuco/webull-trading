@@ -10,6 +10,8 @@ import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
 import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
+import { loadGlobalConfig } from '../../infrastructure/db/globalConfigRepo'
+import { netRealizedPnl, type TradeCostConfig } from '../domain/tradingCost'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
@@ -286,6 +288,27 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   }
 
   const db = createDb(options.env.DB)
+
+  // #trade-cost: realized PnL を net 化するためのコスト設定。**既存の db handle
+  // を使い回す** (createDb を増やすと呼び出し順に依存した test fixture が壊れる)。
+  // 読み出し失敗は 0 (= gross) に倒す — ここで止めると fill の反映自体が止まり、
+  // DO と broker の split-brain が伸びる方が害が大きい。
+  let tradeCost: TradeCostConfig = { feePctOfNotional: 0, feeFixedPerOrder: 0 }
+  try {
+    const globalConfigSnapshot = await loadGlobalConfig(db, options.requestId)
+    tradeCost = {
+      feePctOfNotional: globalConfigSnapshot.feePctOfNotional,
+      feeFixedPerOrder: globalConfigSnapshot.feeFixedPerOrder,
+    }
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: 'reconcile_trade_cost_config_error',
+        requestId: options.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
+  }
   // Two cohorts in one query:
   //   (a) `broker_status IS NULL` — never-reconciled, the original case.
   //   (b) `broker_status='FILLED' AND state_applied_at IS NULL` — D1 says
@@ -644,6 +667,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     const resolvedSide = resolveJournalSide(detail.side, journalSide)
     const symbol = row.symbol ?? detail.symbol ?? null
     let realizedPnl: number | null = null
+    // #trade-cost: 往復コストの見積り。SELL 行にだけ入る (entry 分もここで引く)。
+    let estimatedCost: number | null = null
     if (
       status === 'FILLED' &&
       resolvedSide === 'SELL' &&
@@ -656,7 +681,17 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         const priorState = await new SymbolStateClient(options.env.SYMBOL_STATE).getState(symbol)
         const avg = priorState.position?.avgPrice
         if (typeof avg === 'number' && Number.isFinite(avg) && avg > 0) {
-          realizedPnl = (filledPrice - avg) * filledQty
+          // #trade-cost: broker が実費を返さないので設定値から往復コストを
+          // 見積り、**net** を realized として記録する。未設定 (既定 0) なら
+          // gross と完全に一致する。
+          const pnl = netRealizedPnl({
+            avgPrice: avg,
+            exitPrice: filledPrice,
+            quantity: filledQty,
+            config: tradeCost,
+          })
+          realizedPnl = pnl.net
+          estimatedCost = pnl.cost > 0 ? pnl.cost : null
         }
       } catch (error) {
         // Not fatal — just means we can't pre-compute realized. Log + continue.
@@ -680,6 +715,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           filledQty,
           filledPrice,
           realizedPnl,
+          ...(estimatedCost !== null ? { estimatedCost } : {}),
         })
         .where(eq(tradeJournal.id, row.id))
       summary.updated.push({ clientOrderId: coid, status, ...(realizedPnl !== null ? { realizedPnl } : {}) })

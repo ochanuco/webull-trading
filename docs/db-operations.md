@@ -85,7 +85,7 @@ VALUES ('GLD', 'SPDR Gold Shares', 'US', 1, 5000, strftime('%Y-%m-%dT%H:%M:%fZ',
 INSERT INTO symbol_config (symbol, name, market, active, max_notional, updated_at)
 VALUES ('7203', 'トヨタ自動車', 'JP', 1, 100000, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
--- 一時停止 (ALLOWED_SYMBOLS から外れる / 次 cron から反映)
+-- 一時停止 (universe から外れる / 次 cron から反映)
 UPDATE symbol_config SET active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE symbol = 'SOXS';
 
@@ -138,12 +138,8 @@ WHERE id = 'default';
 UPDATE global_config SET drawdown_kill_threshold = -0.03, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE id = 'default';
 
--- bridge を週末も常駐させる (値: auto / always-on / disabled)
-UPDATE global_config SET bridge_run_mode = 'always-on', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-WHERE id = 'default';
-
 -- 現状確認
-SELECT dry_run, trading_enabled, max_order_notional, drawdown_kill_threshold, bridge_run_mode
+SELECT dry_run, trading_enabled, max_order_notional_usd, max_order_notional_jpy, drawdown_kill_threshold
 FROM global_config WHERE id = 'default';
 ```
 

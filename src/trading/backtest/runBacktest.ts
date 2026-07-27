@@ -59,6 +59,11 @@ export interface BacktestParams {
    * PullbackUptrendStrategy を構築。BreakoutMomentumStrategy 等を渡せる。
    */
   strategy?: BacktestStrategy
+  /**
+   * baseline ATR から直近 20 本を除外して評価するか (#atr-baseline-window)。
+   * 閾値 (maxAtrRatio / atr-floor) の再校正はここで測る。既定 false = 本番同等。
+   */
+  atrBaselineExcludeRecent?: boolean
 }
 
 export type ExitReason = 'TP' | 'STOP' | 'TIME_STOP' | 'END_OF_DATA'
@@ -154,7 +159,9 @@ export async function runBacktest(
     // and execution fill (T+0). Realistic enough for daily-bar offline eval;
     // intra-day slippage is out of scope.
     const window = bars.slice(Math.max(0, i + 1 - 60), i + 1)
-    const indicators = computePullbackIndicators(window, null)
+    const indicators = computePullbackIndicators(window, null, {
+      excludeRecentFromBaseline: params.atrBaselineExcludeRecent === true,
+    })
     const today = bars[i]!
     if (!indicators) {
       // Should not happen given warmup>=50, but bail safely.

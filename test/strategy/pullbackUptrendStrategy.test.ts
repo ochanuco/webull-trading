@@ -22,6 +22,7 @@ const LEVERAGED_RULE: SymbolRule = {
   maxSma50DeviationPct: 100,
   maxAtrRatio: 100,
   // 再エントリーガードも既存ケースでは無効化 (0)。検証は専用 describe で実施。
+  maxStopToTpRatio: 2.0,
   reentryMinAtrBelowLastExit: 0,
   reentryGuardBusinessDays: 0,
 }
@@ -273,6 +274,29 @@ describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
     const signal = strategy.decide(buildExit(96, 0)) // pnl -4% <= -3% pct
     expect(signal.action).toBe('SELL')
     expect(signal.reason).toMatch(/stop-loss/)
+  })
+
+  // #stop-rr-cap: LEVERAGED_RULE は TP +5% / ratio 2.0 → stop 上限は -10%。
+  // 高 ATR 銘柄で stop が TP の何倍にも広がる (SOXL 実測 -44% vs TP +7%) のを止める。
+  it('caps the ATR stop at takeProfitPct * maxStopToTpRatio', () => {
+    // atr20=10, kAtr 2.5 → atrStopDist=25 (=-25%) だが cap は 5*2=10 (=-10%)。
+    // pnl -12% は cap 後の -10% を割るので SELL。cap 無しなら HOLD だった。
+    const signal = strategy.decide(buildExit(88, 10))
+    expect(signal.action).toBe('SELL')
+    expect(signal.reason).toMatch(/tp-cap/)
+  })
+
+  it('does not fire above the capped stop', () => {
+    // pnl -8% は cap 後の -10% に届かない → HOLD。
+    expect(strategy.decide(buildExit(92, 10)).action).toBe('HOLD')
+  })
+
+  // dashboard の「損切り -X%」表示は HOLD reason から作られるので、名目ではなく
+  // 実効 stop を出す (名目 -3% と実効 -5% がズレたまま表示されていた)。
+  it('HOLD reason reports the effective stop, not the nominal stopPct', () => {
+    const signal = strategy.decide(buildExit(99, 2)) // 実効 stop -5%
+    expect(signal.action).toBe('HOLD')
+    expect(signal.reason).toContain('within (-0.0500')
   })
 })
 

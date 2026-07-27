@@ -221,7 +221,7 @@ emit 箇所は `cause` (ERROR) / `field` (STATE_CHANGE) で識別する。`event
 - 5 分後の次 cron で自然に再走するので、まずは 2-3 tick 待って収まるか観察。
 - 収まらない / 件数が増え続ける → 手動 sweep:
   ```sh
-  curl -X POST -u "$ADMIN_USER:$ADMIN_PASS" \
+  cloudflared access curl -X POST \
     "$WORKER_URL/admin/orders/reconcile?retryStateApply=1"
   ```
   `retryStateApply=1` は cron lookback を抜けた古い行も含めて拾う (issue #142 / #203)。
@@ -267,7 +267,7 @@ emit 箇所は `cause` (ERROR) / `field` (STATE_CHANGE) で識別する。`event
    ```
 3. 直近の quote が D1 / DO に書けているか確認:
    ```sh
-   curl -u "$ADMIN_USER:$ADMIN_PASS" "$WORKER_URL/dashboard/positions"
+   cloudflared access curl "$WORKER_URL/dashboard/positions"
    ```
    `lastQuote` の updatedAt が止まっていれば quote feed の連続失敗確定。
 
@@ -371,11 +371,13 @@ emit 箇所は `cause` (ERROR) / `field` (STATE_CHANGE) で識別する。`event
 
 ### `cause = 'no_bridge_state'` (severity: critical)
 
-**何が起きたか**: 戦略 cron が bridge (Webull state proxy) から position state を取れず、全 skip した。
+**何が起きたか**: 戦略 cron が `SYMBOL_STATE` (Durable Object) binding を取れず、全 skip した。position state を読めない状態で判定するのは fail-closed 違反なので即 halt する (`runStrategyCron`)。
+
+ラベルは gRPC bridge 時代の名残 (bridge 自体は PR #110 で撤去済) で、現在の意味は **DO binding 不在**。
 
 **確認手順**:
 
-1. dashboard `/dashboard/positions` で各 symbol の DO state を確認 (= bridge が無くても DO 経由で取れていれば部分的に判断可)。
+1. `wrangler.jsonc` の該当 env に `SYMBOL_STATE` binding があるか (deploy 事故 / env 追加漏れ)。
 2. workers logs:
    ```sh
    wrangler tail --format=pretty --search '"skipReason":"no_bridge_state"'
@@ -383,8 +385,8 @@ emit 箇所は `cause` (ERROR) / `field` (STATE_CHANGE) で識別する。`event
 
 **対応**:
 
-- bridge 側の deploy / health を確認 (gRPC bridge は別 issue 系列、#22)。
-- 復旧待ち。bridge が戻れば次 cron で自動的に entry が再開。
+- binding を復旧して再 deploy。次 cron で自動的に判定が再開する。
+- dashboard `/dashboard/positions` が同時に 500 / 空なら binding 不在で確定。
 
 ### `event_type = 'STATE_CHANGE'` (severity: critical / info)
 
@@ -541,7 +543,7 @@ wrangler tail --format=pretty --search '"event":"config_state_change_notify_fail
 
 ### Admin endpoint (手動オペレーション)
 
-すべて Basic 認証 (`ADMIN_USER` / `ADMIN_PASS`)。`POST` は idempotent なものだけ列挙。
+すべて Cloudflare Access 認証 (#29)。ブラウザ外から叩くときは `cloudflared access curl` を使う (Access のログインセッションを流用する。service token は本体 application 側で 302 になるので不可)。`POST` は idempotent なものだけ列挙。
 
 | endpoint | 用途 | 主な参照 issue |
 |---|---|---|
@@ -561,50 +563,57 @@ cURL 例:
 
 ```sh
 # 戦略 cron を即実行 (dry_run 中の動作確認)
-curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST "$WORKER_URL/admin/strategy/run"
+cloudflared access curl -X POST "$WORKER_URL/admin/strategy/run"
 
 # split-brain 修復 sweep (lookback 外も)
-curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST \
+cloudflared access curl -X POST \
   "$WORKER_URL/admin/orders/reconcile?retryStateApply=1"
 
 # repair backlog 件数だけ
-curl -u "$ADMIN_USER:$ADMIN_PASS" "$WORKER_URL/admin/orders/repair-status"
+cloudflared access curl "$WORKER_URL/admin/orders/repair-status"
 
 # AAPL の 2026 Q2 earnings を 1 件 seed
-curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST \
+cloudflared access curl -X POST \
   -H 'content-type: application/json' \
   -d '[{"symbol":"AAPL","earnings_date":"2026-04-30","notes":"Q2"}]' \
   "$WORKER_URL/admin/earnings/seed"
 
 # 6 月 FOMC を seed
-curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST \
+cloudflared access curl -X POST \
   -H 'content-type: application/json' \
   -d '[{"event_type":"FOMC","event_date":"2026-06-17","event_time":"14:00","notes":"June FOMC"}]' \
   "$WORKER_URL/admin/macro-events/seed"
 
 # offline backtest (1 銘柄分、計算のみ)
-curl -u "$ADMIN_USER:$ADMIN_PASS" \
+cloudflared access curl \
   "$WORKER_URL/admin/backtest?symbol=SOXL&from=2025-01-01&to=2025-12-31"
 ```
 
 ## Dashboard 索引
 
-すべて Basic 認証 (operator)。
+すべて Cloudflare Access 認証 (operator、#29)。
 
 | URL | 主に何が見えるか |
 |---|---|
-| `/dashboard` | ホーム (各ページ概要のリンク集) |
+| `/dashboard` | ホーム (資産サマリ帯 / KPI / エクイティ / 保有 / 直近取引。表示パネルは `global_config.overview_panels` で切替) |
 | `/dashboard/positions` | 全銘柄の SymbolStateDO (保有 / 平均取得単価 / 未約定 / cooldown) と直近 strategy 価格 |
 | `/dashboard/portfolio` | PortfolioStateDO (`dailyStartEquity` / `dailyRealizedPnl` / drawdown / `lastRolledAt` / kill-switch) |
 | `/dashboard/trades?limit=N` | `trade_journal` 直近 (default 50、最大 200) |
 | `/dashboard/config` | `global_config` 1 行 + `symbol_config` (有効銘柄 + advisory 詳細) |
 | `/dashboard/cron` | `strategy_decision_log` (最新 cron fire 全銘柄)。`?symbol=` / `?requestId=` / `?decisionId=` で絞り込み |
 | `/dashboard/cron/json?requestId=` | 同データを JSON で export (CodeRabbit 共有 / 解析用) |
-| `/dashboard/charts?tab=overview` | エクイティカーブ + drawdown |
+| `/dashboard/charts` (`?tab=overview`) | エクイティカーブ + drawdown + trade marker + QQQ ベンチマーク |
 | `/dashboard/charts?tab=quality` | PnL 分布 + 統計 + Decision breakdown (BUY/SELL/HOLD/REJECT/ERROR) |
-| `/dashboard/charts?tab=symbol&symbol=` | 個別銘柄: candle + SMA50 + 線形回帰 trend + entry/exit pin + position lines (TP/stop/avg) |
-| `/dashboard/charts?tab=grid` | ALLOWED_SYMBOLS を 4 列 grid (全 panel dataZoom 同期) |
+| `/dashboard/charts?tab=symbol&symbol=` | 個別銘柄: candle + SMA50 + 線形回帰 trend + entry/exit pin + position lines (TP/stop/avg)。`/dashboard/charts/symbol/json` で同データを JSON export |
 | `/dashboard/alerts` | `notification_emit_log` 直近。`?severity=critical,warning` / `?eventType=ERROR` / `?limit=N` で絞り込み (severity と eventType は AND で組む) |
+| `/dashboard/symbols` | `symbol_config` 一覧 + 追加 / 編集 (inverse pair / pair regime / tradable allowlist 照合込み)。`/symbols/map` で関係マップ |
+| `/dashboard/events` | `earnings_calendar` / `macro_event_calendar` の参照と投入 (entry gate の入力) |
+| `/dashboard/audit` | `config_audit_log` (設定変更の before/after と actor) |
+| `/dashboard/broker-probe` | Webull API の疎通診断 (`?symbol=` / `?category=`) |
+| `/dashboard/webull-token` | `x-access-token` の状態確認 / seed / refresh |
+| `/mcp` | 同じ packet を read-only MCP tool として公開 (Access service token、#553) |
+
+`?tab=grid` (旧 銘柄グリッド) は廃止済。既存ブックマークは `tab=symbol` に畳まれる。`positions` / `trades` / `cron` は末尾に `/json` を付けると JSON 版が取れる。
 
 ## 関連リンク
 

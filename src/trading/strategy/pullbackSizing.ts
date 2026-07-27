@@ -1,3 +1,5 @@
+import { resolveStopDistance } from './stopDistance'
+
 export interface PullbackSizingInput {
   equity: number
   entryPrice: number
@@ -44,6 +46,14 @@ export interface PullbackSizingInput {
    * Required; invalid (<=0 or non-finite) throws.
    */
   kAtr: number
+  /**
+   * Stop 幅の上限 = |entryPrice * takeProfitPct| * これ (#stop-rr-cap)。exit 側と
+   * **同じ式**で距離を出さないと「サイズを決めた stop」と「実際に切る stop」が
+   * ズレるので、strategy と共有の `resolveStopDistance` を使う。0 / 未指定で無効。
+   */
+  maxStopToTpRatio?: number
+  /** cap の基準となる利確幅 (正値)。未指定なら cap 無効。 */
+  takeProfitPct?: number
 }
 
 export interface PullbackSizingResult {
@@ -132,10 +142,16 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
     quantity = Math.floor(target / input.entryPrice)
   } else {
     // === 従来の risk-% sizing ===
-    const pctStop = Math.abs(input.entryPrice * input.stopPct)
-    // vol-adaptive: kAtr * atr20。atr20=0 (post-halt/gap) は pct stop が floor。
-    const atrStop = input.atr20 > 0 ? input.kAtr * input.atr20 : 0
-    stopDistance = atrStop > pctStop ? atrStop : pctStop
+    // vol-adaptive: kAtr * atr20 (atr20=0 は pct stop が floor)、さらに
+    // R:R cap (#stop-rr-cap)。exit 判定と同一関数で算出する。
+    stopDistance = resolveStopDistance({
+      price: input.entryPrice,
+      stopPct: input.stopPct,
+      takeProfitPct: input.takeProfitPct ?? 0,
+      atr20: input.atr20,
+      kAtr: input.kAtr,
+      maxStopToTpRatio: input.maxStopToTpRatio ?? 0,
+    }).distance
 
     if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop', stopDistance }

@@ -6,6 +6,7 @@ import { BrokerRequestError, isSellQtyExceedError, isTickerDenyError } from '../
 import type { DecisionTraceStep } from '../domain/Signal'
 import type { StrategyDecision } from '../domain/StrategyDecision'
 import { inferTradingMarket, isWithinUsCloseWindow } from '../domain/tradingCalendar'
+import { NO_TRADE_COST, netRealizedPnl, type TradeCostConfig } from '../domain/tradingCost'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
 import type { SymbolState } from '../state/types'
@@ -199,6 +200,17 @@ export interface PullbackSchedulerOptions {
    * (`runStrategyCron`) は `buildEntrySuppressedSymbols` の結果を渡す。
    */
   entrySuppressedSymbols?: Record<string, string>
+  /**
+   * 売買コスト見積り (#trade-cost)。TRADE 通知の realized PnL を net 化する。
+   * 未注入なら 0 (= gross)。永続化される realized は `reconcileFills` 側が
+   * 同じ設定で計算する。
+   */
+  tradeCost?: TradeCostConfig
+  /**
+   * baseline ATR から直近 20 本を除外するか (#atr-baseline-window)。未注入は
+   * false = 従来窓。閾値の再校正が要るので production は global_config 経由。
+   */
+  atrBaselineExcludeRecent?: boolean
   /**
    * ペアレジーム layer (#472)。mode='observe' は zone/score を trace に残すだけ
    * (gate しない)、'enforce' は zone が許可しない側の BUY を SKIP し、保有と
@@ -548,7 +560,9 @@ export async function runPullbackScheduler(
       continue
     }
 
-    const indicators = computePullbackIndicators(bars, intradayPrice)
+    const indicators = computePullbackIndicators(bars, intradayPrice, {
+      excludeRecentFromBaseline: options.atrBaselineExcludeRecent === true,
+    })
     if (!indicators) {
       summary.rejected.push({ symbol: upper, reason: 'insufficient bars for indicators' })
       await emitDecision({ symbol: upper, decision: 'SKIP', reason: 'insufficient bars for indicators' })
@@ -897,6 +911,9 @@ export async function runPullbackScheduler(
               riskPerTradePct: options.riskPerTradePct,
               lotSize: resolvedLotSize,
               kAtr: rule.kAtr,
+              // #stop-rr-cap: sizing と exit で同じ stop 幅を使う。
+              takeProfitPct: rule.takeProfitPct,
+              maxStopToTpRatio: rule.maxStopToTpRatio,
               budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
               budgetBasisJpy: options.budgetBasisJpy,
               fxJpyPerSymbolCcy: options.fxJpyPerSymbolCcy,
@@ -1453,9 +1470,16 @@ export async function runPullbackScheduler(
     // が無い SELL は不正経路 (上で reject 済) なので発生しないはずだが defensive。
     // fallback で qty が変わった場合も executedIntent.quantity を使うので
     // realized PnL は実 SELL 数量分のみ。
+    // #trade-cost: 通知に出す realized も reconcile と同じ net にする
+    // (片方 gross・片方 net だと突き合わせできない)。
     const realizedPnl =
       executedIntent.side === 'SELL' && state.position && Number.isFinite(state.position.avgPrice)
-        ? (executedIntent.price - state.position.avgPrice) * executedIntent.quantity
+        ? netRealizedPnl({
+            avgPrice: state.position.avgPrice,
+            exitPrice: executedIntent.price,
+            quantity: executedIntent.quantity,
+            config: options.tradeCost ?? NO_TRADE_COST,
+          }).net
         : undefined
     emitNotify({
       type: 'TRADE',
