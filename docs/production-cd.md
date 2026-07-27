@@ -109,6 +109,13 @@ Required checks:
 
 ## Versioning
 
+導入時に踏んだ罠 (再導入・移設時の注意):
+
+- **GitHub Release が 1 つも無いと、merged release PR にタグを打てず `untagged, merged release PRs outstanding - aborting` で止まる**。ベースラインの Release (`v1.0.0`) を手で 1 本作る必要がある
+- `packages` に `package-name` を書くと component 扱いになり、grouped release PR (component 無し) と一致せず `PR component: undefined does not match configured component` でタグ生成が skip される。単一パッケージでは書かない
+- combined PR のタイトルは `pull-request-title-pattern` ではなく `group-pull-request-title-pattern` から作られる (既定は `chore: release ${branch}` なので版数が出ない)
+- `pull-request-title-pattern` から `${scope}` / `${component}` を落とすと既存 release PR を逆パースできず、PR の更新が丸ごと skip される
+
 `release-please-config.json` / `.release-please-manifest.json` が正。`release-type: node` なので `package.json` の `version` も追随する。
 
 - 採番は Conventional Commits 由来 (`feat:` → minor / `fix:` → patch / `!` or `BREAKING CHANGE` → major)
