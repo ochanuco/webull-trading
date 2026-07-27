@@ -3,7 +3,6 @@
   "release-type": "node",
   "packages": {
     ".": {
-      "package-name": "webull-trading",
       "changelog-path": "CHANGELOG.md"
     }
   },
@@ -54,7 +53,6 @@
       "hidden": true
     }
   ],
-  "bootstrap-sha": "d8adae22c0ee694f1609502afe1cbdf701923a1a",
   "separate-pull-requests": false,
   "include-component-in-tag": false,
   "pull-request-title-pattern": "chore${scope}: release${component} ${version}",
