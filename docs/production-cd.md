@@ -113,4 +113,5 @@ Required checks:
 
 - 採番は Conventional Commits 由来 (`feat:` → minor / `fix:` → patch / `!` or `BREAKING CHANGE` → major)
 - CHANGELOG に出るのは `feat` / `fix` / `perf` / `refactor` / `deps`。`chore` / `docs` / `test` / `ci` / `style` は hidden
+- **hidden な type だけの変更はリリースを生まない** (実測: `chore(deps)` のみを merge しても release PR は出なかった)。依存更新が production に永久に出ない乖離を避けるため、Renovate は `renovate.json` の packageRules で `fix(deps):` を使わせている
 - ロールバックの参照点は tag。`git checkout vX.Y.Z` した tree を `production` に流し直せば戻せる

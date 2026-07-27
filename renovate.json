@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "依存更新を release-please が採番できる形にする。既定の `chore(deps):` は changelog-sections で hidden にしている = リリース対象にならず、staging には入るのに production へ永久に出ないという乖離が起きるため、patch bump になる `fix(deps):` を使う。",
+      "matchPackageNames": ["*"],
+      "semanticCommitType": "fix",
+      "semanticCommitScope": "deps"
+    }
   ]
 }
