@@ -53,8 +53,6 @@
       "hidden": true
     }
   ],
-  "separate-pull-requests": false,
   "include-component-in-tag": false,
-  "pull-request-title-pattern": "chore${scope}: release${component} ${version}",
-  "group-pull-request-title-pattern": "chore: release ${version}"
+  "pull-request-title-pattern": "chore${scope}: release${component} ${version}"
 }

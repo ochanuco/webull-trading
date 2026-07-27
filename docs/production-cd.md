@@ -113,7 +113,8 @@ Required checks:
 
 - **GitHub Release が 1 つも無いと、merged release PR にタグを打てず `untagged, merged release PRs outstanding - aborting` で止まる**。ベースラインの Release (`v1.0.0`) を手で 1 本作る必要がある
 - `packages` に `package-name` を書くと component 扱いになり、grouped release PR (component 無し) と一致せず `PR component: undefined does not match configured component` でタグ生成が skip される。単一パッケージでは書かない
-- combined PR のタイトルは `pull-request-title-pattern` ではなく `group-pull-request-title-pattern` から作られる (既定は `chore: release ${branch}` なので版数が出ない)
+- **`separate-pull-requests: false` を明示すると Merge プラグインが有効になり、component を持たない grouped PR が作られる**。その PR は merge 後に `PR component: undefined does not match configured component` でタグ生成が skip される。単一パッケージでは書かない (書かない場合の PR title は `chore(main): release x.y.z`)
+- grouped PR を使う場合、タイトルは `pull-request-title-pattern` ではなく `group-pull-request-title-pattern` から作られる (既定は `chore: release ${branch}` なので版数が出ない)
 - `pull-request-title-pattern` から `${scope}` / `${component}` を落とすと既存 release PR を逆パースできず、PR の更新が丸ごと skip される
 
 `release-please-config.json` / `.release-please-manifest.json` が正。`release-type: node` なので `package.json` の `version` も追随する。

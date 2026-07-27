@@ -16,7 +16,7 @@ reviews:
       - "release: promote main to production"
       - "🚀リリース"
       # release-please が作る release PR も本文自動生成なのでレビュー不要
-      - "chore: release"
+      - "chore(main): release"
 
   path_filters:
     - "!.local/**"
