@@ -2,13 +2,22 @@
 
 本番 deploy は `main` への通常 PR merge では走らせず、`production` branch への release PR merge を唯一の入口にする。
 
+リリースは **2 段**になっている:
+
+1. **リリースを切る** — release-please が維持する `chore(main): release x.y.z` PR を merge。ここで version / CHANGELOG が確定し、tag と GitHub Release (自動生成ノート) が publish される
+2. **本番に昇格する** — その Release を trigger に `production` 向けの昇格 PR が作られる。merge すると Workers Builds が deploy
+
+`main` に merge しただけでは昇格 PR は出ない。「リリースを切る」判断が明示的な操作になっている。
+
 ## Branch model
 
 | Branch | Role | Automation |
 |---|---|---|
-| `main` | 開発統合。通常 PR の merge 先 | CI + CodeRabbit |
-| `release/production` | GitHub Actions が `main` から作る release PR branch | force-update by workflow |
+| `main` | 開発統合。通常 PR の merge 先 | CI + CodeRabbit + release-please |
+| `release/production` | GitHub Actions が **tag の tree** から作る昇格 PR branch | force-update by workflow |
 | `production` | Cloudflare Workers Builds の production branch | merge された commit を本番 deploy |
+
+昇格する内容は **tag の時点の tree** で、`main` の先端ではない。リリースを切った後に `main` へ入った変更が、そのリリース名で本番に混ざらないようにしている。
 
 `production` への direct push は禁止。必ず `release/production -> production` の PR を merge する。
 
@@ -87,9 +96,21 @@ Required checks:
 
 ## Release flow
 
-1. 通常 PR を `main` に merge
-2. GitHub Actions が `release/production -> production` PR を作成/更新
-3. Operator が release checklist を確認
-4. release PR を merge
-5. Cloudflare Workers Builds が `production` branch push を検知して production deploy
-6. `/admin/production-readiness` / dashboard / Workers logs で確認
+1. 通常 PR を `main` に merge (Conventional Commits の subject にする — そのままリリースノートの 1 行になる)
+2. `release please` workflow が `chore(main): release x.y.z` PR を作成/更新 (CHANGELOG + version bump)
+3. **リリースを切る**: その PR を merge → tag `vx.y.z` と GitHub Release が publish される
+4. `production release PR` workflow が Release を検知し、tag の tree から `release/production -> production` PR を作成
+5. Operator が release checklist とリリースノートを確認
+6. 昇格 PR を merge
+7. Cloudflare Workers Builds が `production` branch push を検知して production deploy
+8. `/admin/production-readiness` / dashboard / Workers logs で確認
+
+`workflow_dispatch` で `production release PR` を手動実行すると、最新の Release に対して昇格 PR を作り直せる。
+
+## Versioning
+
+`release-please-config.json` / `.release-please-manifest.json` が正。`release-type: node` なので `package.json` の `version` も追随する。
+
+- 採番は Conventional Commits 由来 (`feat:` → minor / `fix:` → patch / `!` or `BREAKING CHANGE` → major)
+- CHANGELOG に出るのは `feat` / `fix` / `perf` / `refactor` / `deps`。`chore` / `docs` / `test` / `ci` / `style` は hidden
+- ロールバックの参照点は tag。`git checkout vX.Y.Z` した tree を `production` に流し直せば戻せる

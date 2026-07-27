@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "node",
+  "packages": {
+    ".": {
+      "package-name": "webull-trading",
+      "changelog-path": "CHANGELOG.md"
+    }
+  },
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "section": "Refactors" },
+    { "type": "deps", "section": "Dependencies" },
+    { "type": "chore", "section": "Chores", "hidden": true },
+    { "type": "docs", "section": "Docs", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "ci", "section": "CI", "hidden": true },
+    { "type": "style", "section": "Style", "hidden": true }
+  ],
+  "bootstrap-sha": "d8adae22c0ee694f1609502afe1cbdf701923a1a",
+  "separate-pull-requests": false,
+  "include-component-in-tag": false
+}
