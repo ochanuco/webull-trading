@@ -193,11 +193,14 @@ jobs:
             --json number \
             --jq '.[0].number // empty')"
 
+          # PR がすでに開いている間に次の Release が出ることがある (昇格前に
+          # もう 1 本切った等)。body だけ更新すると **タイトルが古い版を指したまま**
+          # になり、承認する側が別物を見て merge しかねないので title も揃える。
+          title="🚀リリース $RELEASE_TAG → production"
           if [ -n "$existing" ]; then
-            gh pr edit "$existing" --body-file release-pr-body.md
+            gh pr edit "$existing" --title "$title" --body-file release-pr-body.md
             echo "Updated PR #$existing"
           else
-            title="🚀リリース $RELEASE_TAG → production"
             gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
           fi
 
