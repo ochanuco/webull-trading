@@ -9,35 +9,58 @@ import { type EquityRange, renderPortfolioEquityChart, renderVixRegimeCell } fro
 import { pickFreshQuote, positionsBody } from './positions'
 import { displaySymbol, esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
 
-// #dashboard-mf-layout: overview パネル定義。設定で ON/OFF (default 全表示)。
-// #dashboard-ia で status (資産サマリ帯 + スパークライン) / positions (保有
-// ポジション) を additive に追加。既存 key の意味は変えない。
-export type OverviewPanel = 'status' | 'positions' | 'kpi' | 'equity' | 'composition' | 'recent'
+/**
+ * ホームの表示領域 (#dashboard-ia Phase 3)。
+ *
+ * 旧実装は 6 パネル (status / kpi / equity / positions / composition / recent)
+ * だったが、6 種類の情報ではなく **同じ数字の別表現**が並んでいた (status と
+ * kpi で開始 equity と実現損益が重複、positions と composition は同じ建玉の
+ * 別表現)。3 領域に畳んで重複を消した。
+ *
+ * **運転状態は panel ではない** — 常に最上段に出す。実行モード / 取引 ON-OFF /
+ * 判定と株価の鮮度は、隠せると事故に直結するため設定対象から外している。
+ */
+export type OverviewPanel = 'risk' | 'activity'
 
-export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = [
-  'status',
-  'positions',
-  'kpi',
-  'equity',
-  'composition',
-  'recent',
-]
+export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = ['risk', 'activity']
 
 export const OVERVIEW_PANEL_LABELS: Record<OverviewPanel, string> = {
-  status: '資産サマリ帯 (本日開始 equity / 実現損益 / 取引状態 / VIX / USDJPY + 資産スパークライン)',
-  positions: '保有ポジション (positions ページと同じテーブル)',
-  kpi: 'KPI カード (総資産 / 当日損益 / 建玉数 / エクスポージャー)',
-  equity: '資産推移チャート (期間タブ)',
-  composition: '資産構成 + 含み損益ランキング',
-  recent: '最近の約定 + VIX / リスク状態',
+  risk: 'リスクと建玉 (保有ポジション + 資産構成 / 含み損益ランキング)',
+  activity: '最近の活動 (直近の約定 + 資産推移)',
 }
 
-/** CSV を有効パネル集合へ。不正値は無視、空 (未設定/全部不正) は全表示。 */
+/**
+ * 旧 panel key → 新領域。operator が保存済みの CSV をそのまま解釈できるよう
+ * 読み替える (設定を作り直させない)。`status` は運転状態へ畳まれ、常時表示に
+ * なったので対応先を持たない。
+ */
+const LEGACY_PANEL_MAP: Record<string, OverviewPanel | null> = {
+  status: null,
+  kpi: 'risk',
+  positions: 'risk',
+  composition: 'risk',
+  equity: 'activity',
+  recent: 'activity',
+}
+
+/** CSV を有効領域集合へ。不正値は無視、空 (未設定/全部不正) は全表示。 */
 export function parseOverviewPanels(csv: string | null | undefined): Set<OverviewPanel> {
   const set = new Set<OverviewPanel>()
+  let sawLegacy = false
   for (const tok of (csv ?? '').split(',').map((s) => s.trim())) {
-    if ((ALL_OVERVIEW_PANELS as readonly string[]).includes(tok)) set.add(tok as OverviewPanel)
+    if ((ALL_OVERVIEW_PANELS as readonly string[]).includes(tok)) {
+      set.add(tok as OverviewPanel)
+      continue
+    }
+    const mapped = LEGACY_PANEL_MAP[tok]
+    if (mapped !== undefined) {
+      sawLegacy = true
+      if (mapped !== null) set.add(mapped)
+    }
   }
+  // 旧 CSV が `status` だけ (= 運転状態のみ表示) だった場合、新モデルでは
+  // 運転状態が常時表示なので領域ゼロになる。全表示に倒す方が意図に近い。
+  if (set.size === 0 && sawLegacy) return new Set(ALL_OVERVIEW_PANELS)
   return set.size === 0 ? new Set(ALL_OVERVIEW_PANELS) : set
 }
 
@@ -53,8 +76,6 @@ export interface OverviewData {
   } | null
   snapshots: PortfolioEquitySnapshotRow[]
   range: EquityRange
-  /** 資産サマリ帯のスパークライン用 (直近 30 日固定。`snapshots` は ?range= 連動)。 */
-  sparkSnapshots: PortfolioEquitySnapshotRow[]
   /** USDJPY レート (資産サマリ帯表示用)。取得失敗は null → "—" 表示。 */
   usdJpy: number | null
   /** SYMBOL_STATE binding の有無。false なら保有ポジションは誘導リンクのみ。 */
@@ -161,87 +182,58 @@ export function sectionHead(title: string, moreHref: string): string {
  * PORTFOLIO_STATE DO 不在 (portfolio === null) は帯を省略し、スパークラインも
  * データ無しなら section ごと消える (graceful)。
  */
-export function renderStatusPanel(data: OverviewData): string {
-  const spark = renderEquitySparkline(data.sparkSnapshots)
-  const p = data.portfolio
-  if (p === null && spark === '') return ''
-  let band = ''
-  if (p !== null) {
-    const pnlClass = p.dailyRealizedPnl >= 0 ? 'ok' : 'err'
-    const tradingPill = data.tradingEnabled
-      ? '<span class="pill on">取引 ON</span>'
-      : '<span class="pill off">取引 OFF</span>'
-    const item = (label: string, value: string) =>
-      `<div style="min-width:110px"><div class="kpi-label">${esc(label)}</div><div style="font-size:15px;font-weight:700;font-variant-numeric:tabular-nums">${value}</div></div>`
-    band = `<div style="display:flex;flex-wrap:wrap;gap:10px 22px;align-items:flex-end">
-      ${item('本日開始 equity', fmtNumber(p.dailyStartEquity, 2))}
-      ${item('本日実現損益', `<span class="${pnlClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</span>`)}
-      ${item('取引 (effective)', tradingPill)}
-      ${item('VIX レジーム', `<span style="font-size:13px;font-weight:400">${renderVixRegimeCell(data.vixRegime)}</span>`)}
-      ${item('USDJPY', data.usdJpy === null ? '<span class="muted">—</span>' : fmtNumber(data.usdJpy, 2))}
-    </div>`
-  }
-  return `${sectionHead('資産サマリ', '/dashboard/portfolio')}<div class="panel">${band}${spark}</div>`
+/**
+ * 運転状態 (#dashboard-ia Phase 3): ホーム最上段の固定帯。
+ *
+ * 「いま安全に動いているか」だけを載せる。実行モード / 取引 ON-OFF /
+ * 株価の鮮度は隠せない (設定対象外)。equity 系の数字は下の領域に譲り、ここは
+ * 状態表示に徹する。
+ */
+export function renderRunStatePanel(data: OverviewData): string {
+  const modePill = data.dryRun
+    ? '<span class="pill off">DRY-RUN</span>'
+    : '<span class="pill on">LIVE</span>'
+  const tradingPill = data.tradingEnabled
+    ? '<span class="pill on">取引 ON</span>'
+    : '<span class="pill off">取引 OFF</span>'
+  const item = (label: string, value: string) =>
+    `<div style="min-width:104px"><div class="kpi-label">${esc(label)}</div><div style="font-size:15px;font-weight:700;font-variant-numeric:tabular-nums">${value}</div></div>`
+  const quote = latestQuoteFreshness(data)
+  return `<div class="panel" style="display:flex;flex-wrap:wrap;gap:10px 22px;align-items:flex-end">
+    ${item('実行モード', modePill)}
+    ${item('取引 (effective)', tradingPill)}
+    ${item('株価の鮮度', quote)}
+    ${item('VIX レジーム', `<span style="font-size:13px;font-weight:400">${renderVixRegimeCell(data.vixRegime)}</span>`)}
+    ${item('USDJPY', data.usdJpy === null ? '<span class="muted">—</span>' : fmtNumber(data.usdJpy, 2))}
+    <div style="margin-left:auto;font-size:12px"><a href="/dashboard/alerts">アラート →</a></div>
+  </div>`
 }
 
 /**
- * equity スパークライン (直近 30 日、高さ 80px)。portfolio_equity_snapshot の
- * dailyStartEquity を 1 本線で描く。USD があれば USD、無ければ JPY。両方
- * データ無しは '' (帯から省略)。
+ * 保有・監視銘柄の中で **最も新しい** 株価の取得時刻を相対表示する。
+ * quote feed が止まると全銘柄で同時に古くなるので、最新 1 件で足りる。
  */
-export function renderEquitySparkline(snapshots: PortfolioEquitySnapshotRow[]): string {
-  const dates: string[] = []
-  const usd: Array<number | null> = []
-  const jpy: Array<number | null> = []
-  for (const row of snapshots) {
-    dates.push((row.snapshotAt ?? '').slice(0, 10))
-    usd.push(
-      typeof row.dailyStartEquityUsd === 'number' && Number.isFinite(row.dailyStartEquityUsd)
-        ? row.dailyStartEquityUsd
-        : null,
-    )
-    jpy.push(
-      typeof row.dailyStartEquityJpy === 'number' && Number.isFinite(row.dailyStartEquityJpy)
-        ? row.dailyStartEquityJpy
-        : null,
-    )
+function latestQuoteFreshness(data: OverviewData): string {
+  let latest: number | null = null
+  for (const r of data.positions) {
+    const q = r.state?.lastQuote
+    const iso = q?.asOf ?? q?.fetchedAt
+    if (!iso) continue
+    const t = new Date(iso).getTime()
+    if (Number.isFinite(t) && (latest === null || t > latest)) latest = t
   }
-  const hasUsd = usd.some((v) => v !== null)
-  const hasJpy = jpy.some((v) => v !== null)
-  if (!hasUsd && !hasJpy) return ''
-  const currency = hasUsd ? 'USD' : 'JPY'
-  const values = hasUsd ? usd : jpy
-  const initScript = `
-    document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') return;
-      var el = document.getElementById('home-equity-spark');
-      if (!el) return;
-      var d = window.__homeEquitySpark;
-      var chart = echarts.init(el);
-      chart.setOption({
-        grid: { left: 2, right: 2, top: 4, bottom: 2 },
-        xAxis: { type: 'category', data: d.dates, show: false },
-        yAxis: { type: 'value', show: false, min: 'dataMin', max: 'dataMax' },
-        tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '—' : Number(v).toLocaleString('ja-JP'); } },
-        series: [{ type: 'line', data: d.values, showSymbol: false, connectNulls: false, lineStyle: { width: 1.5, color: '#06c' }, itemStyle: { color: '#06c' }, areaStyle: { opacity: 0.08, color: '#06c' } }],
-      });
-      window.addEventListener('resize', function () { chart.resize(); });
-    });
-  `
-  return `<div style="margin-top:10px">
-    <div class="muted" style="font-size:11px;margin-bottom:2px">資産推移 (直近 30 日, ${currency})</div>
-    <div id="home-equity-spark" style="width:100%;height:80px"></div>
-  </div>
-  ${safeJsonScript('__homeEquitySpark', { dates, values })}
-  <script src="${ECHARTS_CDN}" defer></script>
-  <script>${initScript}</script>`
+  for (const v of data.strategyPriceMap.values()) {
+    const t = new Date(v.asOf).getTime()
+    if (Number.isFinite(t) && (latest === null || t > latest)) latest = t
+  }
+  if (latest === null) return '<span class="muted">—</span>'
+  const min = Math.floor((Date.now() - latest) / 60000)
+  const text = min < 1 ? '1 分未満' : min < 60 ? `${min} 分前` : `${Math.floor(min / 60)} 時間前`
+  // 15 分は global_config.stale_quote_ms の既定 (halt 判定と同じ線)。
+  const cls = min >= 15 ? 'err' : 'ok'
+  return `<span class="${cls}" style="font-size:13px">${esc(text)}</span>`
 }
 
-/**
- * 保有ポジション section (#dashboard-ia): positions ページと同じ loader 結果 /
- * 同じテーブル renderer (`positionsBody`) を re-use する。SYMBOL_STATE 不在時は
- * テーブルを省略して誘導リンクのみ。
- */
 export function renderHomePositionsSection(data: OverviewData): string {
   const head = sectionHead('保有ポジション', '/dashboard/positions')
   if (!data.symbolStateBound) {
@@ -404,28 +396,34 @@ export function dedupeEchartsCdnTag(html: string): string {
   return parts[0] + tag + parts.slice(1).join('')
 }
 
+/** 領域の区切り見出し (#dashboard-ia Phase 3)。 */
+function areaLabel(text: string): string {
+  return `<div class="area-label">${esc(text)}</div>`
+}
+
 export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
-  // 「今日の状況が 1 画面で分かる」順: 資産サマリ帯 → KPI → 保有 → 推移 →
-  // 構成 → 直近の約定/判定。詳細は各セクション見出しの「詳しく見る」で専用ページへ。
-  if (data.panels.has('status')) {
-    const status = renderStatusPanel(data)
-    if (status !== '') sections.push(status)
+
+  // 1. 運転状態 — 常時表示。設定で隠せない。
+  sections.push(renderRunStatePanel(data))
+
+  // 2. リスクと建玉
+  if (data.panels.has('risk')) {
+    sections.push(areaLabel('リスクと建玉'))
+    sections.push(renderKpiPanel(data, open))
+    sections.push(renderHomePositionsSection(data))
+    sections.push(renderCompositionPanel(open))
   }
-  if (data.panels.has('kpi')) sections.push(renderKpiPanel(data, open))
-  if (data.panels.has('positions')) sections.push(renderHomePositionsSection(data))
-  if (data.panels.has('equity')) {
+
+  // 3. 最近の活動
+  if (data.panels.has('activity')) {
+    sections.push(areaLabel('最近の活動'))
+    sections.push(renderRecentPanel(data))
     sections.push(
       `<div class="panel">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div>`,
     )
   }
-  if (data.panels.has('composition')) sections.push(renderCompositionPanel(open))
-  if (data.panels.has('recent')) sections.push(renderRecentPanel(data))
-  if (sections.length === 0) {
-    sections.push(
-      '<p class="muted">表示パネルが選択されていません。<a href="/dashboard/config">設定</a>でパネルを有効化してください。</p>',
-    )
-  }
+
   return dedupeEchartsCdnTag(buyingPowerBadge() + sections.join(''))
 }

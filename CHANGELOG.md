@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/ochanuco/webull-trading/compare/v1.1.1...v1.2.0) (2026-07-28)
+
+
+### Features
+
+* **dashboard:** demote diagnostics out of the daily navigation ([a5abd0a](https://github.com/ochanuco/webull-trading/commit/a5abd0a4e17b15d4f60cc050b6a47f8dc6971a64))
+* **dashboard:** demote diagnostics out of the daily navigation ([8dff7b6](https://github.com/ochanuco/webull-trading/commit/8dff7b6fd5702cc9e327ab8d083bcf0cfb446d61))
+* **dashboard:** fold the home into run state, risk and activity ([dc02f47](https://github.com/ochanuco/webull-trading/commit/dc02f477f8886b434b0c3f7c1046c7c4ecc86f2d))
+* **dashboard:** fold the home into run state, risk and activity ([d41ae7f](https://github.com/ochanuco/webull-trading/commit/d41ae7f70643eb981fff8b3c146455883ac64e23))
+* **dashboard:** name the review tabs after what they show ([c763369](https://github.com/ochanuco/webull-trading/commit/c763369ae72337ffffbb1a9f4c70dd474a7340a7))
+* **dashboard:** name the review tabs after what they show ([3303c1b](https://github.com/ochanuco/webull-trading/commit/3303c1bcf40978faa21d4212cc0d41ff7a99371b))
+
 ## [1.1.1](https://github.com/ochanuco/webull-trading/compare/v1.1.0...v1.1.1) (2026-07-28)
 
 
