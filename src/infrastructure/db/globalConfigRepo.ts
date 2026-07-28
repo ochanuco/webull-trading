@@ -306,8 +306,8 @@ function validateVixConfig(
  * で enum 外の値を安全側 default に inline で倒す。ここは数値 field の
  * 範囲・順序だけを見る。
  *
- * 違反時は defaults fallback (fail-closed = gate 無効の default に倒れる、
- * cron 全停止より安全)。
+ * 違反時は該当する **数値 field のみ** defaults へ差し替える (mode はここでは
+ * 変更しない)。cron 全停止より既知 default で動かす方が安全という判断。
  */
 function validateNewsShockConfig(
   config: GlobalConfigSnapshot,

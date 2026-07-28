@@ -492,6 +492,28 @@ describe('runStrategyCron', () => {
         warnSpy2.mockRestore()
       }
     })
+
+    // CodeRabbit PR #619 review (Major): `news_shock_baseline_days` に DB 上の
+    // 設定ミス (NaN / 非数) が入ると、sanitize 前の値で `sinceIso` を
+    // 計算していた旧コードは `new Date(NaN).toISOString()` の RangeError を
+    // 素通しし、strategy tick 全体 (`runStrategyCron`) を落としていた。
+    // これはその回帰ガード: この描画専用 fixture (`makeGlobalConfigSnapshot`)
+    // は `loadGlobalConfigFrom` を直接 mock しているため、
+    // `globalConfigRepo.validateNewsShockConfig` の DB 側 sanitize を経由
+    // しない — `loadNewsShockDecision` 自身の防御 (指摘1 対応) が単独で
+    // 効くことを確認する。
+    it('completes without throwing when newsShockBaselineDays is NaN (misconfigured DB value)', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ newsShockMode: 'enforce', newsShockBaselineDays: Number.NaN }),
+      )
+      const result = await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
+        requestId: 'req-news-nan-baseline',
+      })
+      // 完走していること自体が主張。加えて cron tick が正常な analysis を
+      // 返していることも確認する (無言で壊れた結果を返していないか)。
+      expect(result.summary).toBeDefined()
+      expect(result.analysis.schema).toBe('strategy_cron_analysis.v1')
+    })
   })
 
   // #141: critical な skip reason は Notifier 経由で push 通知される。

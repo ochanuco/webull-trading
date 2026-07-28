@@ -48,6 +48,7 @@ import { detectAndNotifyRegimeChange } from '../../infrastructure/notification/r
 import {
   DEFAULT_NEWS_SHOCK_CONFIG,
   evaluateNewsShockGate,
+  sanitizeNewsShockConfig,
   type NewsShockGateDecision,
   type NewsShockGateInput,
   type NewsShockRegime,
@@ -661,9 +662,25 @@ export async function runStrategyCron(
       }),
     )
   }
+  // 多層防御の 3 層目 (CodeRabbit PR #619 review): `loadNewsShockDecision` 内部
+  // (sinceIso の sanitize) と `evaluateNewsShockGate` 内部 (config sanitize) を
+  // 直したうえで、それでも想定外の例外が出た場合に strategy tick 全体を
+  // 落とさないための最終防波堤。VIX / broker surge 検知 (上の
+  // `detectAndNotifyVixRegimeChange` / `notifyBrokerErrorSurgeIfChanged` 呼び出し)
+  // と同じ形: fail-open で gate を注入しない (= undefined、BUY sizing に影響
+  // させない) に倒す。
   const newsShockDecision =
     env.DB && newsShockGateReady && global.newsShockMode !== 'off'
-      ? await loadNewsShockDecision(env.DB, global, options.requestId, new Date())
+      ? await loadNewsShockDecision(env.DB, global, options.requestId, new Date()).catch((err) => {
+          console.warn(
+            JSON.stringify({
+              event: 'news_shock_decision_load_failed',
+              requestId: options.requestId,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          )
+          return undefined
+        })
       : undefined
   if (newsShockDecision) {
     analysis = { ...analysis, newsShock: newsShockDecision }
@@ -1340,7 +1357,7 @@ async function loadNewsShockDecision(
   requestId: string | undefined,
   now: Date,
 ): Promise<NewsShockGateDecision> {
-  const config = {
+  const rawConfig = {
     ...DEFAULT_NEWS_SHOCK_CONFIG,
     warnRatio: global.newsShockWarnRatio,
     blockRatio: global.newsShockBlockRatio,
@@ -1353,6 +1370,16 @@ async function loadNewsShockDecision(
     maxAgeMin: global.newsShockMaxAgeMin,
     attentionStalePolicy: global.attentionStalePolicy,
   }
+  // global_config の生値 (`newsShockBaselineDays` 等) は DB UPDATE の typo で
+  // NaN / 非数になり得る。sanitize 前の値で `sinceIso` を計算すると
+  // `new Date(NaN).toISOString()` が RangeError を throw し、この関数の
+  // 呼び出し元 (strategy tick 全体) まで例外が伝播してしまう (CodeRabbit
+  // PR #619 review)。`evaluateNewsShockGate` 内部でも sanitize されるが、
+  // それより前に行う `sinceIso` 計算はその保護の外にあるため、ここで
+  // sanitize 済みの値を使う (以降 sinceIso 計算・evaluateNewsShockGate への
+  // 引き渡しは sane のみを使う。evaluateNewsShockGate 内部で再度 sanitize
+  // されるが冪等なので問題ない)。
+  const config = sanitizeNewsShockConfig(rawConfig)
   const asOf = now.toISOString()
   const sinceIso = new Date(now.getTime() - config.baselineDays * 24 * 60 * 60_000).toISOString()
   const repo = createAttentionObservationRepo(createAttentionObservationDb(db))

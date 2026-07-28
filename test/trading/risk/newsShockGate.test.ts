@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_NEWS_SHOCK_CONFIG,
   evaluateNewsShockGate,
+  sanitizeNewsShockConfig,
   type NewsShockGateConfig,
   type NewsShockGateInput,
   type NewsShockToneObservation,
@@ -299,5 +300,98 @@ describe('evaluateNewsShockGate — defensive config sanitize', () => {
     const decision = evaluateNewsShockGate(input, config)
     // default 'fail_open' restored → sizeScale stays 1.0, not blocked.
     expect(decision.sizeScale).toBe(1.0)
+  })
+})
+
+/**
+ * `sanitizeNewsShockConfig` の直接単体テスト (CodeRabbit PR #619 review)。
+ * `runStrategyCron.loadNewsShockDecision` が `sinceIso` を計算する前に
+ * この関数を呼んで sanitize 済みの値を使うようになったため、呼び出し側の
+ * 契約 (「返り値の各 field は必ず有限/範囲内/順序が正しい」) を独立に保証する。
+ * `evaluateNewsShockGate` 経由の間接テストは上の describe 群で既にカバー
+ * 済みだが、export された関数そのものの入出力契約はここで直接固定する。
+ */
+describe('sanitizeNewsShockConfig', () => {
+  it('returns the input unchanged when everything is already valid', () => {
+    const sane = sanitizeNewsShockConfig(DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(sane).toEqual(DEFAULT_NEWS_SHOCK_CONFIG)
+  })
+
+  it('replaces NaN baselineDays with the default (the exact regression this test guards)', () => {
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, baselineDays: Number.NaN }
+    const sane = sanitizeNewsShockConfig(config)
+    expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
+    expect(Number.isFinite(sane.baselineDays)).toBe(true)
+    // The whole point: sinceIso computed from this value must not blow up.
+    expect(() => new Date(Date.now() - sane.baselineDays * 24 * 60 * 60_000).toISOString()).not.toThrow()
+  })
+
+  it('replaces non-finite / non-integer baselineDays variants (Infinity, 0, negative, float) with the default', () => {
+    for (const bad of [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -3, 2.5]) {
+      const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, baselineDays: bad }
+      const sane = sanitizeNewsShockConfig(config)
+      expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
+    }
+  })
+
+  it('replaces a non-number (string from a bad DB write) baselineDays with the default', () => {
+    const config = {
+      ...DEFAULT_NEWS_SHOCK_CONFIG,
+      baselineDays: 'not-a-number' as unknown as number,
+    } as NewsShockGateConfig
+    const sane = sanitizeNewsShockConfig(config)
+    expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
+  })
+
+  it('resets both warnRatio and blockRatio to defaults when out of range', () => {
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnRatio: Number.NaN, blockRatio: -1 }
+    const sane = sanitizeNewsShockConfig(config)
+    expect(sane.warnRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.warnRatio)
+    expect(sane.blockRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.blockRatio)
+  })
+
+  it('resets both warnRatio and blockRatio to defaults when their order is reversed', () => {
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnRatio: 10, blockRatio: 2 }
+    const sane = sanitizeNewsShockConfig(config)
+    expect(sane.warnRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.warnRatio)
+    expect(sane.blockRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.blockRatio)
+    expect(sane.warnRatio).toBeLessThanOrEqual(sane.blockRatio)
+  })
+
+  it('clamps warnSizeScale outside [0,1] to the default', () => {
+    for (const bad of [-0.1, 1.1, Number.NaN]) {
+      const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnSizeScale: bad }
+      const sane = sanitizeNewsShockConfig(config)
+      expect(sane.warnSizeScale).toBe(DEFAULT_NEWS_SHOCK_CONFIG.warnSizeScale)
+    }
+  })
+
+  it('replaces non-positive-integer minSamples/windowMin/maxAgeMin with defaults', () => {
+    const config: NewsShockGateConfig = {
+      ...DEFAULT_NEWS_SHOCK_CONFIG,
+      minSamples: Number.NaN,
+      windowMin: -10,
+      maxAgeMin: 0,
+    }
+    const sane = sanitizeNewsShockConfig(config)
+    expect(sane.minSamples).toBe(DEFAULT_NEWS_SHOCK_CONFIG.minSamples)
+    expect(sane.windowMin).toBe(DEFAULT_NEWS_SHOCK_CONFIG.windowMin)
+    expect(sane.maxAgeMin).toBe(DEFAULT_NEWS_SHOCK_CONFIG.maxAgeMin)
+  })
+
+  it('replaces an unrecognized attentionStalePolicy with the default', () => {
+    const config = {
+      ...DEFAULT_NEWS_SHOCK_CONFIG,
+      attentionStalePolicy: 'bogus',
+    } as unknown as NewsShockGateConfig
+    const sane = sanitizeNewsShockConfig(config)
+    expect(sane.attentionStalePolicy).toBe(DEFAULT_NEWS_SHOCK_CONFIG.attentionStalePolicy)
+  })
+
+  it('is idempotent (sanitizing an already-sanitized config is a no-op)', () => {
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, baselineDays: Number.NaN, warnRatio: -5 }
+    const once = sanitizeNewsShockConfig(config)
+    const twice = sanitizeNewsShockConfig(once)
+    expect(twice).toEqual(once)
   })
 })

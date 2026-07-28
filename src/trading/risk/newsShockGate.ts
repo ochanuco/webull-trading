@@ -139,7 +139,7 @@ export function evaluateNewsShockGate(
   input: NewsShockGateInput,
   config: NewsShockGateConfig = DEFAULT_NEWS_SHOCK_CONFIG,
 ): NewsShockGateDecision {
-  const sane = sanitizeConfig(config)
+  const sane = sanitizeNewsShockConfig(config)
   const asOf = input.asOf
   const asOfMs = Date.parse(asOf)
   if (!Number.isFinite(asOfMs)) {
@@ -311,8 +311,16 @@ function median(values: number[]): number {
  * config を default に倒して安全圏に正規化する。狙い: DB の UPDATE で入った
  * typo (e.g. warnRatio=NaN, warnSizeScale=2.5) で news shock 経路が暴発しない
  * ようにする (`vixRegimeFilter.sanitizeConfig` と同じ layered defense)。
+ *
+ * export する理由 (CodeRabbit PR #619 review): 呼び出し側 (`runStrategyCron`
+ * の `loadNewsShockDecision`) が `config.baselineDays` の生値を使って
+ * `sinceIso` を計算しており、`evaluateNewsShockGate` 内部の sanitize では
+ * その計算を保護できなかった (NaN が `new Date(NaN).toISOString()` で
+ * `RangeError` を throw する経路)。呼び出し側で先に sanitize した値を使う
+ * ことで防ぐ。`evaluateNewsShockGate` は引き続き内部で同じ関数を呼ぶ
+ * (二重 sanitize は冪等なので問題ない)。
  */
-function sanitizeConfig(config: NewsShockGateConfig): NewsShockGateConfig {
+export function sanitizeNewsShockConfig(config: NewsShockGateConfig): NewsShockGateConfig {
   const warnRatioRaw = isPositiveFinite(config.warnRatio)
     ? config.warnRatio
     : DEFAULT_NEWS_SHOCK_CONFIG.warnRatio
