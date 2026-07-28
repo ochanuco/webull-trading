@@ -333,7 +333,7 @@ export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): s
     .join('')
   return `<div class="panel">
     <div class="panel-title"><span>建玉 ${open.length} 件 / エクスポージャー</span>${exposurePill}</div>
-    <table>
+    <table class="fit">
       <thead><tr><th class="grow">銘柄</th><th class="num">数量</th><th class="num">現在値</th><th class="num">損益</th><th>状態</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -428,7 +428,7 @@ export function renderRecentPanel(data: OverviewData): string {
     })
     .join('')
   const recentTable = data.recentTrades.length
-    ? `<table><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table>`
+    ? `<table class="fit"><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table>`
     : '<p class="muted">約定履歴がありません。</p>'
   // 実行モード / 取引 / VIX は運転状態帯に移したのでここでは繰り返さない。
   return `<div class="panel">
