@@ -205,16 +205,18 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     }
   })
 
-  it('activates 管理 / 診断 summary on their pages, and nothing on nav-less pages (/positions)', async () => {
+  it('activates 管理 / 診断 summary on their pages, and redirects the retired pages', async () => {
     const app = createApp()
     const opsRes = await app.request('/dashboard/config', { headers: authHeader }, baseEnv)
     expect(await opsRes.text()).toContain('<summary class="nav-link active">管理 ▾</summary>')
     const diagRes = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     expect(await diagRes.text()).toContain('診断 ▾</summary>')
-    // /positions は nav 外の直アクセスページ → どのグループも active にしない
-    const posRes = await app.request('/dashboard/positions', { headers: authHeader }, baseEnv)
-    expect(posRes.status).toBe(200)
-    expect(await posRes.text()).not.toContain('nav-link active')
+    // #dashboard-ia Phase 5: /positions /portfolio はホームへ統合済み → 302
+    for (const path of ['/dashboard/positions', '/dashboard/portfolio']) {
+      const res = await app.request(path, { headers: authHeader }, baseEnv)
+      expect(res.status, path).toBe(302)
+      expect(res.headers.get('location'), path).toBe('/dashboard')
+    }
   })
 
   it('resolveActiveNavGroup: charts はタブで 銘柄 / レビュー に分かれ、診断系は diag', () => {

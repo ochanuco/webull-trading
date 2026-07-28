@@ -4,41 +4,6 @@ import type { VixRegime } from '../../trading/risk/vixRegimeFilter'
 import { ECHARTS_CDN } from './charts/shared'
 import { esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
 
-export function portfolioBody(p: {
-  dailyStartEquity: number
-  dailyRealizedPnl: number
-  tradingDisabledUntil: string | null
-  lastRolledAt?: string | null
-  updatedAt: string
-}, vixRegime: VixRegime | null, equity?: {
-  snapshots: PortfolioEquitySnapshotRow[]
-  range: EquityRange
-}): string {
-  const drawdownPct =
-    p.dailyStartEquity > 0 ? (p.dailyRealizedPnl / p.dailyStartEquity) * 100 : null
-  const ddClass = drawdownPct === null ? 'muted' : drawdownPct >= 0 ? 'ok' : 'err'
-  const kill = p.tradingDisabledUntil
-  const lastRolledCell = renderLastRolledCell(p.lastRolledAt ?? null)
-  const vixCell = renderVixRegimeCell(vixRegime)
-  const summaryTable = `<table>
-    <tbody>
-      <tr><th>当日始値資産 (dailyStartEquity)</th><td>${fmtNumber(p.dailyStartEquity, 2)}</td></tr>
-      <tr><th>当日実現損益 (dailyRealizedPnl)</th><td class="${ddClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</td></tr>
-      <tr><th>ドローダウン (drawdown)</th><td class="${ddClass}">${drawdownPct === null ? '—' : fmtNumber(drawdownPct, 2) + '%'}</td></tr>
-      <tr><th>取引停止解除時刻 (tradingDisabledUntil)</th><td>${kill ? `<span class="warn">${esc(fmtJst(kill))}</span>` : '<span class="ok">稼働中</span>'}</td></tr>
-      <tr><th>VIX レジーム (vixRegime)</th><td>${vixCell}</td></tr>
-      <tr><th>EOD ロールオーバー実行時刻 (lastRolledAt)</th><td>${lastRolledCell}</td></tr>
-      <tr><th>更新時刻 (updatedAt)</th><td class="muted">${esc(fmtJst(p.updatedAt))}</td></tr>
-    </tbody>
-  </table>`
-  const chartSection = equity ? renderPortfolioEquityChart(equity.snapshots, equity.range) : ''
-  return summaryTable + chartSection
-}
-
-/**
- * `?range=30d|90d|365d|all` の解釈。default は 90d (3 ヶ月で trend が読める粒度)。
- * 不正値は default に倒す。`all` は cap 内 (3650 件) で全件返し。
- */
 export type EquityRange = '30d' | '90d' | '365d' | 'all'
 
 export function parseEquityRange(value: string | undefined): EquityRange {

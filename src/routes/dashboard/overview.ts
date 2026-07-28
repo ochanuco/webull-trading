@@ -6,7 +6,7 @@ import type { SymbolState } from '../../trading/state/types'
 import { formatRealizedPnl } from './cron'
 import { ECHARTS_CDN } from './charts/shared'
 import { type EquityRange, renderPortfolioEquityChart, renderVixRegimeCell } from './portfolio'
-import { pickFreshQuote, positionsBody } from './positions'
+import { pickFreshQuote } from './positions'
 import { displaySymbol, esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
 
 /**
@@ -281,14 +281,6 @@ function latestQuoteFreshness(data: OverviewData): { html: string; tone: 'live' 
   return renderRelativeAge(new Date(latest).toISOString(), 15)
 }
 
-export function renderHomePositionsSection(data: OverviewData): string {
-  const head = sectionHead('保有ポジション', '/dashboard/positions')
-  if (!data.symbolStateBound) {
-    return `${head}<div class="panel"><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。<a href="/dashboard/positions">保有ポジションページ</a>を参照してください。</p></div>`
-  }
-  return `${head}<div style="margin-bottom:16px">${positionsBody(data.positions, data.strategyPriceMap, data.universe)}</div>`
-}
-
 export function kpiCard(label: string, value: string, sub?: string, subClass?: string): string {
   const subHtml = sub ? `<div class="kpi-sub ${subClass ?? 'muted'}">${sub}</div>` : ''
   return `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${value}</div>${subHtml}</div>`
@@ -351,65 +343,6 @@ function renderExposurePill(data: OverviewData, open: OpenPositionView[]): strin
   const pct = (usd / cap) * 100
   const cls = pct >= 60 ? 'warn' : ''
   return `<span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span>`
-}
-
-export function renderKpiPanel(data: OverviewData, open: OpenPositionView[]): string {
-  const p = data.portfolio
-  const dd = p && p.dailyStartEquity > 0 ? (p.dailyRealizedPnl / p.dailyStartEquity) * 100 : null
-  const pnlClass = p == null ? 'muted' : p.dailyRealizedPnl >= 0 ? 'ok' : 'err'
-  const cards = [
-    kpiCard('当日始値資産', p ? fmtNumber(p.dailyStartEquity, 2) : '—', '口座 dailyStartEquity'),
-    kpiCard(
-      '当日実現損益',
-      p ? `<span class="${pnlClass}">${fmtNumber(p.dailyRealizedPnl, 2)}</span>` : '—',
-      dd === null ? undefined : `DD ${fmtNumber(dd, 2)}%`,
-      dd === null ? 'muted' : dd >= 0 ? 'ok' : 'err',
-    ),
-    kpiCard('建玉数', String(open.length), '保有中の銘柄数'),
-    kpiCard(
-      'Open exposure',
-      p ? `${fmtNumber(p.openExposureUsd, 0)}<span class="muted" style="font-size:12px"> USD</span>` : '—',
-      p ? `${fmtNumber(p.openExposureJpy, 0)} JPY` : undefined,
-    ),
-  ].join('')
-  return `<div class="kpi-grid">${cards}</div>`
-}
-
-export function renderCompositionPanel(open: OpenPositionView[]): string {
-  if (open.length === 0) {
-    return `<div class="panel"><div class="panel-title">資産構成 / 含み損益ランキング</div><p class="muted">保有中の建玉がありません。</p></div>`
-  }
-  // 通貨内シェアで構成比 bar を正規化 (USD/JPY を混ぜない)。
-  const sumByCcy: Record<string, number> = {}
-  for (const o of open) {
-    if (o.marketValue !== null) sumByCcy[o.currency] = (sumByCcy[o.currency] ?? 0) + Math.abs(o.marketValue)
-  }
-  const composition = [...open]
-    .sort((a, b) => (Math.abs(b.marketValue ?? 0)) - (Math.abs(a.marketValue ?? 0)))
-    .map((o) => {
-      const total = sumByCcy[o.currency] ?? 0
-      const share = o.marketValue !== null && total > 0 ? (Math.abs(o.marketValue) / total) * 100 : 0
-      const valueText = o.marketValue !== null ? `${fmtNumber(o.marketValue, 0)} ${o.currency}` : '—'
-      return `<div class="rank-row"><span>${esc(o.sym)} <span class="muted" style="font-size:11px">${fmtNumber(share, 1)}%</span></span><span>${valueText}</span></div>
-        <div class="bar-track"><div class="bar-fill" style="width:${share.toFixed(1)}%"></div></div>`
-    })
-    .join('')
-  // 含み損益% ランキング (up / down)。
-  const ranked = open.filter((o) => o.pnlPct !== null) as Array<OpenPositionView & { pnlPct: number }>
-  const gainers = [...ranked].filter((o) => o.pnlPct >= 0).sort((a, b) => b.pnlPct - a.pnlPct).slice(0, 5)
-  const losers = [...ranked].filter((o) => o.pnlPct < 0).sort((a, b) => a.pnlPct - b.pnlPct).slice(0, 5)
-  const rankRow = (o: OpenPositionView & { pnlPct: number }) =>
-    `<div class="rank-row"><span>${esc(o.sym)}</span><span class="${o.pnlPct >= 0 ? 'ok' : 'err'}">${fmtNumber(o.pnlPct, 2)}%</span></div>`
-  const rankCol = (title: string, items: Array<OpenPositionView & { pnlPct: number }>) =>
-    `<div><div class="muted" style="font-size:12px;margin-bottom:4px">${esc(title)}</div>${items.length ? items.map(rankRow).join('') : '<p class="muted">—</p>'}</div>`
-  return `<div class="panel">
-    <div class="panel-title">資産構成 / 含み損益ランキング</div>
-    <p class="muted" style="font-size:12px;margin-top:0">構成比は通貨内シェア。ランキングは含み損益% (現在値 vs 平均取得単価)。</p>
-    <div class="panel-row">
-      <div><div class="muted" style="font-size:12px;margin-bottom:4px">構成 (評価額)</div>${composition}</div>
-      <div class="panel-row" style="grid-template-columns:1fr 1fr">${rankCol('上昇', gainers)}${rankCol('下落', losers)}</div>
-    </div>
-  </div>`
 }
 
 export function renderRecentPanel(data: OverviewData): string {
