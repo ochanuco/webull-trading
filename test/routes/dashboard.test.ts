@@ -197,7 +197,6 @@ describe('dashboard', () => {
     expect(body).toContain('>成績</span>')
     expect(body).toContain('class="subnav-link active"')
     expect(body).toContain('href="/dashboard/trades"')
-    expect(body).toContain('href="/dashboard/cron?view=matrix"')
     // 旧チャート専用 subnav (個別銘柄 / 銘柄グリッド) は出さない
     // (グローバル nav の「銘柄」リンクは tab=symbol を持つので subnav 内のみ検査)
     expect(body).not.toContain('銘柄グリッド')

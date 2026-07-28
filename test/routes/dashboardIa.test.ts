@@ -173,7 +173,6 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     for (const href of [
       '/dashboard/alerts',
       '/dashboard/cron',
-      '/dashboard/cron?view=matrix',
       '/dashboard/audit',
       '/dashboard/broker-probe',
       '/dashboard/webull-token',
@@ -260,18 +259,15 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
     expect(body).not.toContain('<a class="subnav-link" href="/dashboard/alerts">')
   })
 
-  it('cron page activates 判定ログ, matrix view activates 判定マトリクス (診断 subnav)', async () => {
+  it('cron page activates 判定ログ (診断 subnav)', async () => {
     const app = createApp()
     const cronBody = await (
       await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     ).text()
     expect(cronBody).toContain('<span class="subnav-link active">判定ログ</span>')
-    const matrixBody = await (
-      await app.request('/dashboard/cron?view=matrix', { headers: authHeader }, baseEnv)
-    ).text()
-    expect(matrixBody).toContain('<span class="subnav-link active">判定マトリクス</span>')
+    // 判定マトリクスは廃止 (#dashboard-ia)
+    expect(cronBody).not.toContain('判定マトリクス')
   })
-
   it('alerts page activates アラート', async () => {
     vi.mocked(loadRecentAlerts).mockResolvedValue([])
     const app = createApp()
