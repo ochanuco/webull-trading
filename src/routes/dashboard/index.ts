@@ -68,9 +68,9 @@ import {
   parseOverviewPanels,
 } from './overview'
 import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
-import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, positionsBody } from './positions'
+import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData } from './positions'
 import { resolveStopDistance } from '../../trading/strategy/stopDistance'
-import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
+import { parseEquityRange, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
 import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
@@ -318,17 +318,12 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, 'ダッシュボード', unavailable(messageOf(err))))
     }
   })
-  .get('/positions', async (c) => {
-    if (!c.env.DB || !c.env.SYMBOL_STATE) {
-      return c.html(renderLayout(c, 'ポートフォリオ', unavailable('DB or SYMBOL_STATE not bound')))
-    }
-    // loader は /positions/json と共用 (#dashboard-json-api) — 「画面で見る内容 =
-    // AI に渡す JSON」を同一の取得結果から作る。
-    const data = await loadPositionsPageData(c.env)
-    return c.html(
-      renderLayout(c, 'ポートフォリオ', positionsBody(data.rows, data.strategyPriceMap, data.universe)),
-    )
-  })
+  /**
+   * #dashboard-ia Phase 5: 保有ポジションはホームの「リスクと建玉」に統合済み。
+   * 旧 URL (ブックマーク / 過去の通知リンク) は 302 で送る。JSON export は
+   * AI / スクリプト向けにそのまま残す。
+   */
+  .get('/positions', (c) => c.redirect('/dashboard', 302))
   /**
    * positions の JSON export (#dashboard-json-api)。read-only GET のみ。
    * schema / envelope 規約は shared.ts の `exportMeta` docstring 参照。
@@ -346,34 +341,11 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty({ error: 'positions_json_export_failed', message: messageOf(err) }, 500)
     }
   })
-  .get('/portfolio', async (c) => {
-    if (!c.env.PORTFOLIO_STATE) {
-      return c.html(renderLayout(c, '口座サマリ', unavailable('PORTFOLIO_STATE not bound')))
-    }
-    try {
-      const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
-      // VIX regime (issue #196 3/3) を D1 snapshot から読む。table 未 migration /
-      // bind 不在は null fallback (= 未知扱い、ページ自体は表示)。
-      const vixRegime = c.env.DB
-        ? await loadVixRegimeSnapshot(c.env.DB, c.get('requestId'))
-        : null
-      const range = parseEquityRange(c.req.query('range'))
-      // 総資産時系列 (roll-daily 経由で 1 row / 日)。DB 不在 / load 失敗時は
-      // 空配列で fallback → チャート枠は出さず "データ無し" メッセージにする。
-      const snapshots: PortfolioEquitySnapshotRow[] = c.env.DB
-        ? await safeLoadPortfolioSnapshots(c.env.DB, range)
-        : []
-      return c.html(
-        renderLayout(
-          c,
-          '口座サマリ',
-          portfolioBody(portfolio, vixRegime, { snapshots, range }),
-        ),
-      )
-    } catch (err) {
-      return c.html(renderLayout(c, '口座サマリ', unavailable(messageOf(err))))
-    }
-  })
+  /**
+   * #dashboard-ia Phase 5: 口座サマリはホームの「運転状態」+「リスクと建玉」に
+   * 統合済み。累積 realized PnL の推移はレビュー (`/dashboard/charts`)。
+   */
+  .get('/portfolio', (c) => c.redirect('/dashboard', 302))
   .get('/trades', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound'), renderAnalysisSubnav('trades')))
