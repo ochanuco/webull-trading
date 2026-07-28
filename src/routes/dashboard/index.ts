@@ -135,19 +135,15 @@ export const dashboard = new Hono<DashboardBindings>()
       const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
       const symbolClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
       const range = parseEquityRange(c.req.query('range'))
-      const [panelsCsv, portfolio, snapshots, sparkSnapshotsRaw, usdJpy, positions, strategyPriceMap, recentTrades, vixRegime, global] =
+      const [panelsCsv, portfolio, snapshots, usdJpy, positions, strategyPriceMap, recentTrades, vixRegime, global] =
         await Promise.all([
           loadOverviewPanelsCsv(db),
           c.env.PORTFOLIO_STATE
             ? new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio().catch(() => null)
             : Promise.resolve(null),
+          // #dashboard-ia Phase 3: スパークラインは資産推移チャートと重複する
+          // ので廃止し、スナップショット取得は range 用の 1 回だけになった。
           safeLoadPortfolioSnapshots(c.env.DB, range),
-          // 資産サマリ帯のスパークラインは range 指定と独立に直近 30 日固定。
-          // range=30d (既定) のときは equity パネル用と同一クエリになるため
-          // 取得を省略し snapshots を再利用する (CodeRabbit #559: D1 二重取得)。
-          range === '30d'
-            ? Promise.resolve(null)
-            : safeLoadPortfolioSnapshots(c.env.DB, '30d'),
           // USDJPY は資産サマリ帯表示用。DO 不在 (帯を出さない) なら fetch 自体を省略。
           c.env.PORTFOLIO_STATE
             ? loadUsdJpyRate().catch(() => null)
@@ -175,7 +171,6 @@ export const dashboard = new Hono<DashboardBindings>()
         portfolio,
         snapshots,
         range,
-        sparkSnapshots: sparkSnapshotsRaw ?? snapshots,
         usdJpy,
         symbolStateBound: symbolClient !== null,
         positions,

@@ -47,6 +47,9 @@ export const STYLE = `
   .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
   .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
+  /* #dashboard-ia Phase 3: ホームの領域見出し (運転状態 / リスクと建玉 / 最近の活動)。 */
+  .area-label{font-size:11px;letter-spacing:.12em;color:#6e6e73;margin:18px 0 6px;display:flex;align-items:center;gap:8px}
+  .area-label::after{content:"";flex:1;height:1px;background:#e3e3e8}
   .topnav .nav-sep{width:1px;height:18px;background:#d0d0d5;margin:0 8px;flex:0 0 auto}
   .topnav .nav-link{color:#1d1d1f;text-decoration:none;padding:5px 9px;border-radius:7px;font-size:13px;white-space:nowrap}
   .topnav .nav-link:hover{background:#f0f0f3}

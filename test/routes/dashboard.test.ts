@@ -356,7 +356,7 @@ describe('dashboard', () => {
     // setOverviewPanels は db.batch([select(before), insert().values().onConflictDoUpdate()])。
     // select/insert は batch に渡す statement を組むだけ (mock では空 obj)、実 read は batch が返す。
     // batch 呼び出し自体を spy して原子更新 (read→write 退行) の回帰ガードにする。
-    const batchSpy = vi.fn(async (_stmts: unknown[]) => [[{ value: 'kpi,equity,composition,recent' }], {}])
+    const batchSpy = vi.fn(async (_stmts: unknown[]) => [[{ value: 'risk,activity' }], {}])
     vi.mocked(createDb).mockReturnValue({
       select: () => ({ from: () => ({ where: () => ({ limit: () => ({}) }) }) }),
       insert: () => ({
@@ -380,9 +380,9 @@ describe('dashboard', () => {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams([
-          ['panels', 'kpi'],
-          ['panels', 'recent'],
-          ['panels', 'kpi'],
+          ['panels', 'risk'],
+          ['panels', 'activity'],
+          ['panels', 'risk'],
           ['panels', 'bogus'],
         ]).toString(),
       },
@@ -390,9 +390,9 @@ describe('dashboard', () => {
     )
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/dashboard/config')
-    expect(storedCsv).toBe('kpi,recent')
+    expect(storedCsv).toBe('risk,activity')
     // upsert の insert 部の payload も検証 (初回作成時に正しい行が入る)。
-    expect(insertedValues).toMatchObject({ id: 'default', overviewPanels: 'kpi,recent' })
+    expect(insertedValues).toMatchObject({ id: 'default', overviewPanels: 'risk,activity' })
     expect(typeof insertedValues?.updatedAt).toBe('string')
     // 原子更新の回帰ガード: 1 回の batch に before-read + upsert の 2 statement。
     expect(batchSpy).toHaveBeenCalledTimes(1)
@@ -696,10 +696,17 @@ import { parseOverviewPanels, ALL_OVERVIEW_PANELS } from '../../src/routes/dashb
 
 describe('parseOverviewPanels', () => {
   it('parses a valid CSV into the panel set', () => {
-    expect([...parseOverviewPanels('kpi,recent')].sort()).toEqual(['kpi', 'recent'])
+    expect([...parseOverviewPanels('risk,activity')].sort()).toEqual(['activity', 'risk'])
   })
   it('ignores invalid tokens and whitespace', () => {
-    expect([...parseOverviewPanels(' kpi , bogus , equity ')].sort()).toEqual(['equity', 'kpi'])
+    expect([...parseOverviewPanels(' risk , bogus ')].sort()).toEqual(['risk'])
+  })
+  // #dashboard-ia Phase 3: 旧 6 パネルの CSV が保存済みでも設定を作り直させない。
+  it('maps legacy panel keys onto the new areas', () => {
+    expect([...parseOverviewPanels('risk,activity')].sort()).toEqual(['activity', 'risk'])
+    expect([...parseOverviewPanels('positions,composition')].sort()).toEqual(['risk'])
+    // status は運転状態へ畳まれ常時表示になったため、単独指定は全表示に倒す
+    expect([...parseOverviewPanels('status')].sort()).toEqual(['activity', 'risk'])
   })
   it('empty / all-invalid / null / undefined → all panels (fallback)', () => {
     const all = [...ALL_OVERVIEW_PANELS].sort()

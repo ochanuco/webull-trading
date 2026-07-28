@@ -63,6 +63,9 @@ export function configBody(
     })
     .join('')
   return `${panelForm}
+  <p class="muted" style="font-size:12px;margin:0 0 10px">
+    設定変更は before/after が記録されます — <a href="/dashboard/audit">監査ログを見る →</a>
+  </p>
   <details open>
     <summary>グローバル設定 (global_config)</summary>
     <table>

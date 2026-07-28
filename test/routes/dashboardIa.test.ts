@@ -309,7 +309,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('renders 資産サマリ帯 + スパークライン + 保有ポジション + 直近パネル when DOs are bound', async () => {
+  it('renders 運転状態帯 + 3 領域 (リスクと建玉 / 最近の活動) when DOs are bound', async () => {
     const env = {
       ...baseEnv,
       DB: fakeD1(),
@@ -320,31 +320,27 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // 1. 資産サマリ帯 (portfolio 要約の横並びカード)
-    expect(body).toContain('資産サマリ')
-    expect(body).toContain('本日開始 equity')
-    expect(body).toContain('本日実現損益')
+    // 1. 運転状態帯 (常時表示。実行モードと取引状態は隠せない)
+    expect(body).toContain('実行モード')
+    expect(body).toContain('株価の鮮度')
     expect(body).toContain('取引 ON')
     expect(body).toContain('USDJPY')
     expect(body).toContain('150.25')
-    // 2. equity スパークライン (直近 30 日)
-    expect(body).toContain('id="home-equity-spark"')
-    expect(body).toContain('window.__homeEquitySpark')
+    // 2. 領域見出し
+    expect(body).toContain('リスクと建玉')
+    expect(body).toContain('最近の活動')
     // 3. 保有ポジション (positions と同じテーブル)
     expect(body).toContain('保有ポジション')
     expect(body).toContain('SOXL')
     expect(body).toContain('平均取得単価')
-    // 4. 既存パネル (直近の約定 / リスク状態) + 導線リンク
+    // 4. 直近の約定 + 導線リンク
     expect(body).toContain('最近の約定 / リスク状態')
-    expect(body).toContain('href="/dashboard/portfolio"')
     expect(body).toContain('href="/dashboard/positions"')
     expect(body).toContain('href="/dashboard/cron"')
     expect(body).toContain('href="/dashboard/alerts"')
-    // スパークラインは 30d 固定で別途 load される
-    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 30 })
   })
 
-  it('home inline scripts (sparkline 含む) parse without syntax errors', async () => {
+  it('home inline scripts parse without syntax errors', async () => {
     const env = {
       ...baseEnv,
       DB: fakeD1(),
@@ -391,7 +387,7 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('?range=30d ではスナップショットを 1 回だけ取得しスパークラインに再利用する', async () => {
+  it('スナップショット取得は range 用の 1 回だけ (スパークライン廃止で二重取得なし)', async () => {
     const env = {
       ...baseEnv,
       DB: fakeD1(),
@@ -402,14 +398,13 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
     const res = await app.request('/dashboard?range=30d', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // equity パネル用と同一クエリ (limit 30) なので D1 取得は 1 回に畳む
+    // スパークライン廃止で二重取得は無くなった (range 用の 1 回だけ)
     expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 30 })
-    // スパークライン自体は再利用データで描画される
-    expect(body).toContain('id="home-equity-spark"')
+    expect(body).not.toContain('id="home-equity-spark"')
   })
 
-  it('既定 range (90d) ではスパークライン用 30d を別途取得する (挙動不変)', async () => {
+  it('既定 range (90d) でも取得は 1 回だけ', async () => {
     const env = {
       ...baseEnv,
       DB: fakeD1(),
@@ -419,12 +414,11 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
     const app = createApp()
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
-    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 90 })
-    expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 30 })
   })
 
-  it('status + equity 両パネル ON でも ECharts CDN script タグは 1 個に畳まれる', async () => {
+  it('資産推移チャートを含む領域が出ても ECharts CDN script タグは 1 個に畳まれる', async () => {
     const env = {
       ...baseEnv,
       DB: fakeD1(),
@@ -434,8 +428,6 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
     const app = createApp()
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     const body = await res.text()
-    // スパークラインと資産推移チャートの両方が描画されている前提で
-    expect(body).toContain('id="home-equity-spark"')
     const cdnTags = body.match(/<script src="[^"]*echarts[^"]*" defer><\/script>/g) ?? []
     expect(cdnTags.length).toBe(1)
   })
