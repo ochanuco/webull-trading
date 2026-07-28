@@ -262,3 +262,16 @@ export interface Env {
 export interface Env {
   BAR_SOURCE?: string
 }
+
+
+// news attention producer (issue #196 follow-up、newsShockGate PR 1)。
+// NEWS_ATTENTION_ENABLED: `newsScheduler` の opt-in flag。値が 'true'
+// (大小文字問わず、前後空白 trim) のときだけ GDELT を叩く。未設定 / それ以外は
+// 無効 — この repo の「未設定は安全側 default、明示 opt-in」規約 (QUOTE_SOURCE /
+// BAR_SOURCE と同じ判定パターン)。
+// GDELT_API_BASE: GDELT DOC 2.0 API のベース URL override (テスト用)。未設定なら
+// 本番 URL (`https://api.gdeltproject.org`) を使う。
+export interface Env {
+  NEWS_ATTENTION_ENABLED?: string
+  GDELT_API_BASE?: string
+}
