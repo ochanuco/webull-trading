@@ -139,6 +139,33 @@ export function localizeReason(en: string | null | undefined): string {
       })`,
   )
 
+  // === News shock gate (news-shock-gate PR 2, risk: news_shock_*) ===
+  // `pullbackScheduler.ts` の news shock 判定 (`risk: ${newsDecision.reason}` 形式)。
+  // critical (緊急停止) / warning が lot 丸めで 0 になった場合の 2 経路のみ
+  // decision.reason に出る (warning が qty を縮小しつつ通った場合は BUY の
+  // 通常 reason のまま — VIX warning と同じ挙動)。unavailable /
+  // insufficient_baseline は `attention_stale_policy='block_buy'` の時だけ
+  // reject 経路に出る (既定 fail_open では sizeScale=1.0 で reject しない)。
+  s = s.replace(
+    /^risk: news_shock_critical: ([\d.]+)x(?: tone-([\d.]+))?\s*\(block\)$/,
+    (_m, ratio, tone) =>
+      `発注スキップ: ニュース過熱で緊急停止 (報道量 baseline比 ${ratio}倍${tone ? `、論調悪化 ${tone}` : ''})`,
+  )
+  s = s.replace(
+    /^risk: news_shock_warning: ([\d.]+)x \(size x([\d.]+)\)(?: \(qty rounded to 0, lot=(\d+)\))?$/,
+    (_m, ratio, scale, lot) =>
+      `発注スキップ: ニュース過熱で建玉縮小 (報道量 baseline比 ${ratio}倍、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
+  )
+  s = s.replace(
+    /^risk: news_shock_unavailable_fallback_normal$/,
+    '発注スキップ: ニュース観測データ不足 (block_buy 設定により新規買い停止)',
+  )
+  s = s.replace(
+    /^risk: news_shock_insufficient_baseline: (\d+)\/(\d+)$/,
+    (_m, count, min) =>
+      `発注スキップ: ニュース baseline サンプル不足 (${count}/${min}件、block_buy 設定により新規買い停止)`,
+  )
+
   // === Scheduler inline ===
   s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の建玉なし')
   s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄不足')

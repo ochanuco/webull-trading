@@ -41,6 +41,18 @@ vi.mock('../../../src/trading/strategy/pullbackScheduler', async (importOriginal
     await importOriginal<typeof import('../../../src/trading/strategy/pullbackScheduler')>()
   return { ...actual, runPullbackScheduler: vi.fn() }
 })
+// news-shock-gate PR 2: `loadNewsShockDecision` は D1 read のみ (fetch は
+// しない) だが、drizzle 経由の実 D1 plumbing をここで fake するのは重い。
+// repo 自体を mock して「D1 read があったこと」ではなく「fetch が無いこと」
+// (= 本 PR で最重要な回帰ガード) にテストの焦点を絞る。
+vi.mock('../../../src/infrastructure/db/attentionObservationRepo', () => ({
+  createAttentionObservationDb: vi.fn(() => ({}) as unknown),
+  createAttentionObservationRepo: vi.fn(() => ({
+    fetchRecent: vi.fn().mockResolvedValue([]),
+    bulkInsertIgnore: vi.fn(),
+    purgeOlderThan: vi.fn(),
+  })),
+}))
 
 const env = {
   DB: {} as D1Database,
@@ -357,6 +369,151 @@ describe('runStrategyCron', () => {
     } finally {
       warnSpy2.mockRestore()
     }
+  })
+
+  // news-shock-gate PR 2: 同じ sqlite_master probe パターンで
+  // `attention_observation` (PR 1) の有無を判定する。
+  describe('news shock gate wiring (news-shock-gate PR 2)', () => {
+    /** `sqlite_master` probe で `attention_observation` だけ ready、他は未存在扱いの fake D1。 */
+    function fakeDbWithAttentionReady(): D1Database {
+      return {
+        prepare: vi.fn((sql: string) => ({
+          first: vi.fn(async () =>
+            sql.includes("name='attention_observation'") ? { ok: 1 } : null,
+          ),
+        })),
+      } as unknown as D1Database
+    }
+
+    function envWithHealthyPortfolio(db: D1Database) {
+      return {
+        DB: db,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 10_000,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+    }
+
+    /**
+     * **最重要の回帰ガード**: news shock gate (D1 read のみのはず) を有効化
+     * しても、15分間隔の strategy tick 中の外部 `fetch` 呼び出し回数が
+     * 1 ミリも増えないこと。`globalThis.fetch` を spy に差し替え、
+     * `news_shock_mode='off'` の baseline run と `'enforce'` (+ table ready)
+     * の run で呼び出し回数が完全に一致することを比較する。
+     *
+     * 比較方式を使う理由: `loadVixDecision` が `^VIX` を実 fetch するため
+     * (既存挙動)、tick 中の fetch 回数は 0 にはならない。baseline との
+     * **差分がゼロ**であることが「news shock gate は fetch を足していない」
+     * ことの正しい証拠になる。
+     */
+    it('adds zero external fetch calls when the news shock gate evaluates (enforce mode)', async () => {
+      const fetchSpy = vi.fn(async () => {
+        throw new Error('network disabled in test')
+      })
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = fetchSpy as unknown as typeof fetch
+      const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        // baseline: news_shock_mode='off' (default fixture)。
+        vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+        await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
+          requestId: 'req-news-baseline',
+        })
+        const baselineCalls = fetchSpy.mock.calls.length
+        expect(baselineCalls).toBeGreaterThan(0) // sanity: VIX fetch は実際に起きている
+
+        fetchSpy.mockClear()
+
+        // news shock gate 有効化 + attention_observation ready。
+        vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+          makeGlobalConfigSnapshot({ newsShockMode: 'enforce' }),
+        )
+        await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
+          requestId: 'req-news-enforce',
+        })
+        const enforceCalls = fetchSpy.mock.calls.length
+
+        expect(enforceCalls).toBe(baselineCalls)
+      } finally {
+        globalThis.fetch = originalFetch
+        warnSpy2.mockRestore()
+      }
+    })
+
+    it('passes a newsShockGate option to runPullbackScheduler when mode=enforce and the table is ready', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ newsShockMode: 'enforce' }),
+      )
+      await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
+        requestId: 'req-news-option',
+      })
+      const opts = lastSchedulerOptions()
+      expect(opts.newsShockGate).toBeDefined()
+      expect(opts.newsShockGate?.mode).toBe('enforce')
+      expect(opts.newsShockGate?.decision.regime).toBeDefined()
+    })
+
+    it('omits the newsShockGate option when news_shock_mode=off (default)', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+      await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
+        requestId: 'req-news-off',
+      })
+      const opts = lastSchedulerOptions()
+      expect(opts.newsShockGate).toBeUndefined()
+    })
+
+    it('omits the newsShockGate option and warns when attention_observation table is missing (mode=enforce)', async () => {
+      const firstSpy = vi.fn(async () => null)
+      const fakeDb = {
+        prepare: vi.fn(() => ({ first: firstSpy })),
+      } as unknown as D1Database
+      const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+          makeGlobalConfigSnapshot({ newsShockMode: 'enforce' }),
+        )
+        await runStrategyCron(envWithHealthyPortfolio(fakeDb), { requestId: 'req-news-no-table' })
+        const opts = lastSchedulerOptions()
+        expect(opts.newsShockGate).toBeUndefined()
+        const warnLines = warnSpy2.mock.calls.map((c) => String(c[0]))
+        expect(
+          warnLines.some((l) => l.includes('news_shock_gate_disabled_table_missing')),
+        ).toBe(true)
+      } finally {
+        warnSpy2.mockRestore()
+      }
+    })
+
+    // CodeRabbit PR #619 review (Major): `news_shock_baseline_days` に DB 上の
+    // 設定ミス (NaN / 非数) が入ると、sanitize 前の値で `sinceIso` を
+    // 計算していた旧コードは `new Date(NaN).toISOString()` の RangeError を
+    // 素通しし、strategy tick 全体 (`runStrategyCron`) を落としていた。
+    // これはその回帰ガード: この描画専用 fixture (`makeGlobalConfigSnapshot`)
+    // は `loadGlobalConfigFrom` を直接 mock しているため、
+    // `globalConfigRepo.validateNewsShockConfig` の DB 側 sanitize を経由
+    // しない — `loadNewsShockDecision` 自身の防御 (指摘1 対応) が単独で
+    // 効くことを確認する。
+    it('completes without throwing when newsShockBaselineDays is NaN (misconfigured DB value)', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ newsShockMode: 'enforce', newsShockBaselineDays: Number.NaN }),
+      )
+      const result = await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
+        requestId: 'req-news-nan-baseline',
+      })
+      // 完走していること自体が主張。加えて cron tick が正常な analysis を
+      // 返していることも確認する (無言で壊れた結果を返していないか)。
+      expect(result.summary).toBeDefined()
+      expect(result.analysis.schema).toBe('strategy_cron_analysis.v1')
+    })
   })
 
   // #141: critical な skip reason は Notifier 経由で push 通知される。

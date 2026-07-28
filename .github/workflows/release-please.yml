@@ -1,0 +1,41 @@
+name: release please
+
+# Conventional Commits から CHANGELOG / version / tag / GitHub Release を作る。
+# ここで作られる release PR (`chore(main): release x.y.z`) を merge した時点で
+# 「リリースを切った」ことになり、tag と Release が publish される。
+# production への昇格 PR はその Release を trigger に `production-release-pr`
+# が作る (= main に merge しただけでは本番昇格 PR は出ない)。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: create or update release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # default GITHUB_TOKEN で作った PR / Release は後続 workflow を発火させない
+      # (production-release-pr が release イベントを拾えなくなる)。App token を使う。
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -398,3 +398,198 @@ describe('loadGlobalConfig — VIX validation (CHECK 制約 補完)', () => {
     warnSpy.mockRestore()
   })
 })
+
+/**
+ * news-shock-gate PR 2: 0042 migration (`news_shock_*` / `attention_stale_policy`)
+ * 未適用の環境でも VIX (0015) と同じ「SELECT が SQL レベルで落ちる」罠を踏む。
+ * schema-missing regex を拡張したことの回帰ガード。
+ */
+describe('loadGlobalConfig — news_shock schema-missing fallback (0042)', () => {
+  function fakeDbAllThrowing(message: string) {
+    return {
+      select() {
+        return {
+          from() {
+            return {
+              where() {
+                return {
+                  async limit() {
+                    throw new Error(message)
+                  },
+                }
+              },
+            }
+          },
+        }
+      },
+    } as unknown as Parameters<typeof loadGlobalConfig>[0]
+  }
+
+  it('triggers the same fallback for "no such column: news_shock_mode"', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbAllThrowing('no such column: news_shock_mode')
+    const result = await loadGlobalConfig(db, 'req-news-1')
+    expect(result).toEqual({ ...GLOBAL_CONFIG_DEFAULTS })
+    expect(result.newsShockMode).toBe('off')
+    const first = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(first.event).toBe('global_config_pre_0015_fallback')
+    warnSpy.mockRestore()
+  })
+
+  it('triggers the same fallback for "no such column: attention_stale_policy"', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbAllThrowing('no such column: attention_stale_policy')
+    const result = await loadGlobalConfig(db)
+    expect(result).toEqual({ ...GLOBAL_CONFIG_DEFAULTS })
+    expect(result.attentionStalePolicy).toBe('fail_open')
+    warnSpy.mockRestore()
+  })
+
+  it('still rethrows unrelated errors that do not mention a known missing column', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbAllThrowing('connection refused')
+    await expect(loadGlobalConfig(db)).rejects.toThrow(/connection refused/)
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+})
+
+/**
+ * news-shock-gate PR 2: `newsShockWarnRatio` / `newsShockBlockRatio` /
+ * `newsShockWarnSizeScale` 等の application-level validation (0042 は ALTER
+ * ADD COLUMN のみで CHECK 制約を持たないための compensating control)。
+ * `pairRegimeMode` / `newsShockMode` / `attentionStalePolicy` は enum
+ * fallback (別 code path) なのでここでは扱わない。
+ */
+describe('loadGlobalConfig — news shock validation (CHECK 制約 補完)', () => {
+  function fakeDbWithRow(row: Record<string, unknown>) {
+    return {
+      select(_columns?: unknown) {
+        return {
+          from() {
+            return {
+              where() {
+                return {
+                  async limit() {
+                    return [row]
+                  },
+                }
+              },
+            }
+          },
+        }
+      },
+    } as unknown as Parameters<typeof loadGlobalConfig>[0]
+  }
+
+  const baseRow = {
+    id: 'default',
+    dryRun: true,
+    tradingEnabled: false,
+    marketHoursCheck: false,
+    maxOrderNotional: 100,
+    maxOrderNotionalUsd: 2000,
+    maxOrderNotionalJpy: 100000,
+    totalCapitalUsd: null,
+    totalCapitalJpy: null,
+    maxPortfolioExposurePct: 0.6,
+    drawdownKillThreshold: -0.02,
+    staleQuoteMs: 900000,
+    gapRejectPct: 0.03,
+    spreadLimitPctUs: 0.0025,
+    spreadLimitPctJp: 0.006,
+    pullbackDefaultStopPct: -0.04,
+    pullbackDefaultTakeProfitPct: 0.07,
+    pullbackDefaultTimeStopDays: 10,
+    pullbackDefaultPullbackMax: -0.03,
+    pullbackDefaultPullbackMin: -0.06,
+    pullbackDefaultMinReturn50d: 0.08,
+    pullbackDefaultRequireAboveSma50: true,
+    pullbackDefaultKAtr: 2.0,
+    riskBasePerTradePct: 0.004,
+    riskDdHalfThreshold: -0.05,
+    riskDdHaltThreshold: -0.1,
+    vixWarningThreshold: 25,
+    vixCriticalThreshold: 30,
+    vixWarningSizeScale: 0.5,
+  }
+
+  it('passes through valid news shock values without warning', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      newsShockMode: 'enforce',
+      newsShockWarnRatio: 2.3,
+      newsShockBlockRatio: 4.4,
+      newsShockWarnSizeScale: 0.5,
+    })
+    const result = await loadGlobalConfig(db, 'req-news-ok')
+    expect(result.newsShockMode).toBe('enforce')
+    expect(result.newsShockWarnRatio).toBe(2.3)
+    expect(result.newsShockBlockRatio).toBe(4.4)
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('falls back to defaults when warnRatio > blockRatio (order violation)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({
+      ...baseRow,
+      newsShockWarnRatio: 10,
+      newsShockBlockRatio: 2,
+    })
+    const result = await loadGlobalConfig(db, 'req-news-order')
+    expect(result.newsShockWarnRatio).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio)
+    expect(result.newsShockBlockRatio).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('global_config_news_shock_validation_failed')
+    expect(
+      logged.violations.some(
+        (v: { field: string }) => v.field === 'newsShockWarnRatio/newsShockBlockRatio',
+      ),
+    ).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back to defaults when newsShockWarnSizeScale is out of [0,1]', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, newsShockWarnSizeScale: 3 })
+    const result = await loadGlobalConfig(db, 'req-news-scale')
+    expect(result.newsShockWarnSizeScale).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back to defaults when newsShockMinSamples is not a positive integer', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, newsShockMinSamples: -5 })
+    const result = await loadGlobalConfig(db, 'req-news-samples')
+    expect(result.newsShockMinSamples).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back newsShockMode to "off" for an enum-invalid DB value', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, newsShockMode: 'bogus' })
+    const result = await loadGlobalConfig(db)
+    expect(result.newsShockMode).toBe('off')
+    warnSpy.mockRestore()
+  })
+
+  it('falls back attentionStalePolicy to "fail_open" for an enum-invalid DB value', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, attentionStalePolicy: 'bogus' })
+    const result = await loadGlobalConfig(db)
+    expect(result.attentionStalePolicy).toBe('fail_open')
+    warnSpy.mockRestore()
+  })
+
+  it('honors attentionStalePolicy="block_buy" when explicitly set', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, attentionStalePolicy: 'block_buy' })
+    const result = await loadGlobalConfig(db)
+    expect(result.attentionStalePolicy).toBe('block_buy')
+    warnSpy.mockRestore()
+  })
+})
