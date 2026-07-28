@@ -55,7 +55,7 @@ import { WebullTokenClient } from '../../infrastructure/webull/WebullTokenClient
 import { WebullTokenStateClient } from '../../trading/state/WebullTokenStateClient'
 import type { WebullTokenState } from '../../trading/state/WebullTokenStateDO'
 import { clampLimit, jsonPretty, messageOf, parseCursor, unavailable } from './shared'
-import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderLayout } from './layout'
+import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderDiagSubnav, renderLayout } from './layout'
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
 import { ALL_OVERVIEW_PANELS, type OverviewData, loadRecentFills, overviewBody, parseOverviewPanels } from './overview'
@@ -100,7 +100,7 @@ export { assignPairColors, computeBudgetUsage, orderRowsByPair, pairRoles, rende
 
 /**
  * /charts の subnav (#remove-grid): チャート専用 subnav は廃止し、overview
- * (資産推移) / quality (取引品質) は trades / cron / alerts と同じ「履歴・分析」
+ * (資産推移) / quality (取引品質) は約定履歴と同じ「レビュー」
  * subnav に統一する (画面によってメニュー構成が変わる混乱を避ける)。
  * 個別銘柄タブは「銘柄」nav + 銘柄レールが導線なので subnav なし。
  */
@@ -636,8 +636,8 @@ export const dashboard = new Hono<DashboardBindings>()
     }
   })
   .get('/cron', async (c) => {
-    // subnav の active は一覧 / マトリクスで切替 (履歴・分析 subnav #dashboard-ia)。
-    const cronSubnav = renderAnalysisSubnav(c.req.query('view') === 'matrix' ? 'matrix' : 'cron')
+    // subnav の active は一覧 / マトリクスで切替 (診断 subnav #dashboard-ia)。
+    const cronSubnav = renderDiagSubnav(c.req.query('view') === 'matrix' ? 'matrix' : 'cron')
     if (!c.env.DB) {
       return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound'), cronSubnav))
     }
@@ -743,7 +743,7 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/alerts', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, 'アラート', unavailable('DB not bound'), renderAnalysisSubnav('alerts')))
+      return c.html(renderLayout(c, 'アラート', unavailable('DB not bound'), renderDiagSubnav('alerts')))
     }
     const limit = clampAlertLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
@@ -769,13 +769,13 @@ export const dashboard = new Hono<DashboardBindings>()
           c,
           'アラート',
           alertsBody({ rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore }),
-          renderAnalysisSubnav('alerts'),
+          renderDiagSubnav('alerts'),
         ),
       )
     } catch (err) {
       // 0012 migration 未適用 (= notification_emit_log テーブル無し) を
       // 500 にせず unavailable に落とす。段階的デプロイ時の自己保護。
-      return c.html(renderLayout(c, 'アラート', unavailable(messageOf(err)), renderAnalysisSubnav('alerts')))
+      return c.html(renderLayout(c, 'アラート', unavailable(messageOf(err)), renderDiagSubnav('alerts')))
     }
   })
   .get('/audit', async (c) => {

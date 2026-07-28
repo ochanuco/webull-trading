@@ -105,7 +105,8 @@ describe('dashboard', () => {
     // nav から外れたため、代わりに再編後のグローバル nav を検証)
     expect(body).toContain('href="/dashboard/charts?tab=symbol"')
     expect(body).toContain('href="/dashboard/trades"')
-    expect(body).toContain('運用 ▾')
+    expect(body).toContain('管理 ▾')
+    expect(body).toContain('診断 ▾')
   })
 
   // #276: kill-switch は全 page 共通でサイドバー下部に表示される (banner → sidebar
@@ -182,7 +183,7 @@ describe('dashboard', () => {
 
   // チャートの view 切替 (概要/取引品質/個別銘柄/銘柄グリッド) は本文 tab strip
   // ではなく header 2段目の subnav に出す (サブメニュー化)。
-  it('charts overview/quality pages share the 履歴・分析 subnav (#remove-grid)', async () => {
+  it('charts overview/quality pages share the レビュー subnav (#remove-grid)', async () => {
     const app = createApp()
     // DB 未バインドでも subnav は出る (本文は unavailable)
     const res = await app.request(
@@ -192,7 +193,7 @@ describe('dashboard', () => {
     )
     const body = await res.text()
     expect(body).toContain('<nav class="subnav">')
-    // trades / cron / alerts と同じ「履歴・分析」subnav に統一 (現在地 = 取引品質)
+    // 約定履歴と同じ「レビュー」subnav に統一 (現在地 = 取引品質)
     expect(body).toContain('>取引品質</span>')
     expect(body).toContain('class="subnav-link active"')
     expect(body).toContain('href="/dashboard/trades"')

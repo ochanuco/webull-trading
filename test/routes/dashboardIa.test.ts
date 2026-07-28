@@ -11,9 +11,9 @@ import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configF
 /**
  * #dashboard-ia — 情報アーキテクチャ再編のスモーク。
  *
- * 1. グローバル nav: 13 リンクのフラット並び → 4 項目 (ホーム / 銘柄 /
- *    履歴・分析 / 運用ドロップダウン) + グループ単位の前方一致 active。
- * 2. 履歴・分析 subnav: trades / cron / alerts の 3 ページに共通 subnav。
+ * 1. グローバル nav: 日常 3 画面 (ホーム / 銘柄 / レビュー) + 管理 ▾ + 診断 ▾。
+ *    判定ログ・アラート・監査・broker 診断・token は診断へ降格 (削除はしない)。
+ * 2. レビュー subnav: 約定履歴 / 取引品質 / 資産推移。診断ページは診断 subnav。
  * 3. ホーム統合: 資産サマリ帯 + スパークライン + 保有ポジション (DO あり /
  *    なしの graceful degrade)。
  */
@@ -147,7 +147,7 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('renders 4 groups + 運用 dropdown (positions/portfolio are not in the nav)', async () => {
+  it('renders 3 日常画面 + 管理 / 診断 dropdown (positions/portfolio are not in the nav)', async () => {
     const app = createApp()
     const res = await app.request('/dashboard', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(200)
@@ -159,14 +159,20 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     expect(nav).toContain('href="/dashboard/charts?tab=symbol"')
     expect(nav).toContain('>銘柄</a>')
     expect(nav).toContain('href="/dashboard/trades"')
-    expect(nav).toContain('>履歴・分析</a>')
-    // 運用ドロップダウン (kill switch と同じ details パターン)
+    expect(nav).toContain('>レビュー</a>')
+    // 管理 / 診断ドロップダウン (kill switch と同じ details パターン)
     expect(nav).toContain('<details class="topnav-ops">')
-    expect(nav).toContain('運用 ▾')
+    expect(nav).toContain('管理 ▾')
+    expect(nav).toContain('診断 ▾')
+    // 管理 = 書き込みを伴う画面だけ
+    for (const href of ['/dashboard/config', '/dashboard/symbols', '/dashboard/events']) {
+      expect(nav).toContain(`href="${href}"`)
+    }
+    // 診断 = 障害時にだけ開く画面 (降格しても消さない)
     for (const href of [
-      '/dashboard/config',
-      '/dashboard/symbols',
-      '/dashboard/events',
+      '/dashboard/alerts',
+      '/dashboard/cron',
+      '/dashboard/cron?view=matrix',
       '/dashboard/audit',
       '/dashboard/broker-probe',
       '/dashboard/webull-token',
@@ -180,15 +186,9 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     expect(nav).toContain('class="nav-link active" href="/dashboard"')
   })
 
-  it('activates 履歴・分析 for /trades /cron /alerts and /charts?tab=quality (group prefix match)', async () => {
+  it('activates レビュー for /trades and /charts (quality / equity)', async () => {
     const app = createApp()
-    for (const path of [
-      '/dashboard/trades',
-      '/dashboard/cron',
-      '/dashboard/alerts',
-      '/dashboard/charts?tab=quality',
-      '/dashboard/charts',
-    ]) {
+    for (const path of ['/dashboard/trades', '/dashboard/charts?tab=quality', '/dashboard/charts']) {
       const res = await app.request(path, { headers: authHeader }, baseEnv)
       const body = await res.text()
       expect(body, path).toContain('class="nav-link active" href="/dashboard/trades"')
@@ -204,30 +204,36 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     }
   })
 
-  it('activates 運用 summary on ops pages, and nothing on nav-less pages (/positions)', async () => {
+  it('activates 管理 / 診断 summary on their pages, and nothing on nav-less pages (/positions)', async () => {
     const app = createApp()
     const opsRes = await app.request('/dashboard/config', { headers: authHeader }, baseEnv)
-    expect(await opsRes.text()).toContain('<summary class="nav-link active">運用 ▾</summary>')
+    expect(await opsRes.text()).toContain('<summary class="nav-link active">管理 ▾</summary>')
+    const diagRes = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
+    expect(await diagRes.text()).toContain('診断 ▾</summary>')
     // /positions は nav 外の直アクセスページ → どのグループも active にしない
     const posRes = await app.request('/dashboard/positions', { headers: authHeader }, baseEnv)
     expect(posRes.status).toBe(200)
     expect(await posRes.text()).not.toContain('nav-link active')
   })
 
-  it('resolveActiveNavGroup: charts はタブで 銘柄 / 履歴・分析 に分かれる', () => {
+  it('resolveActiveNavGroup: charts はタブで 銘柄 / レビュー に分かれ、診断系は diag', () => {
     expect(resolveActiveNavGroup('/dashboard')).toBe('home')
     expect(resolveActiveNavGroup('/dashboard/charts', 'symbol')).toBe('symbol')
     expect(resolveActiveNavGroup('/dashboard/charts', 'grid')).toBe('symbol')
-    expect(resolveActiveNavGroup('/dashboard/charts', 'quality')).toBe('analysis')
-    expect(resolveActiveNavGroup('/dashboard/charts', null)).toBe('analysis')
-    expect(resolveActiveNavGroup('/dashboard/cron')).toBe('analysis')
+    expect(resolveActiveNavGroup('/dashboard/charts', 'quality')).toBe('review')
+    expect(resolveActiveNavGroup('/dashboard/charts', null)).toBe('review')
+    expect(resolveActiveNavGroup('/dashboard/trades')).toBe('review')
+    expect(resolveActiveNavGroup('/dashboard/cron')).toBe('diag')
+    expect(resolveActiveNavGroup('/dashboard/alerts')).toBe('diag')
+    expect(resolveActiveNavGroup('/dashboard/audit')).toBe('diag')
+    expect(resolveActiveNavGroup('/dashboard/webull-token')).toBe('diag')
     expect(resolveActiveNavGroup('/dashboard/symbols/SOXL/edit')).toBe('ops')
     expect(resolveActiveNavGroup('/dashboard/positions')).toBeNull()
     expect(resolveActiveNavGroup('/dashboard/portfolio')).toBeNull()
   })
 })
 
-describe('dashboard IA — 履歴・分析 subnav (#dashboard-ia)', () => {
+describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
     vi.mocked(loadSymbolUniverse).mockResolvedValue(
@@ -242,24 +248,21 @@ describe('dashboard IA — 履歴・分析 subnav (#dashboard-ia)', () => {
     const body = await res.text()
     expect(body).toContain('<nav class="subnav">')
     expect(body).toContain('<span class="subnav-link active">約定履歴</span>')
-    for (const href of [
-      '/dashboard/cron',
-      '/dashboard/cron?view=matrix',
-      '/dashboard/charts?tab=quality',
-      '/dashboard/charts',
-      '/dashboard/alerts',
-    ]) {
+    for (const href of ['/dashboard/charts?tab=quality', '/dashboard/charts']) {
       expect(body).toContain(`href="${href}"`)
     }
     expect(body).toContain('資産推移')
+    // 判定ログ / アラートはレビュー subnav からは外れる (診断側へ)
+    expect(body).not.toContain('<a class="subnav-link" href="/dashboard/cron">')
+    expect(body).not.toContain('<a class="subnav-link" href="/dashboard/alerts">')
   })
 
-  it('cron page activates 戦略判定, matrix view activates 判定マトリクス', async () => {
+  it('cron page activates 判定ログ, matrix view activates 判定マトリクス (診断 subnav)', async () => {
     const app = createApp()
     const cronBody = await (
       await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     ).text()
-    expect(cronBody).toContain('<span class="subnav-link active">戦略判定</span>')
+    expect(cronBody).toContain('<span class="subnav-link active">判定ログ</span>')
     const matrixBody = await (
       await app.request('/dashboard/cron?view=matrix', { headers: authHeader }, baseEnv)
     ).text()
