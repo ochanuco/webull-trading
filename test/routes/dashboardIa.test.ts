@@ -447,8 +447,9 @@ describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  // 幅の上限は全ページ (.main = 1400px)。ホームだけ更に狭い (.main-narrow = 1160px)。
-  it('ホームだけ main-narrow が付き、他ページも .main の上限は効く', async () => {
+  // 読み幅の上限は全ページ共通 (1160px)。`main-narrow` はホームの表の列ルール
+  // (grow / nowrap) を効かせるための marker で、幅は変えない。
+  it('ホームだけ main-narrow が付く (表の列ルール用の marker)', async () => {
     const app = createApp()
     const home = await (await app.request('/dashboard', { headers: authHeader }, baseEnv)).text()
     expect(home).toContain('class="main main-narrow"')

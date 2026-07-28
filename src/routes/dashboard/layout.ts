@@ -90,11 +90,10 @@ export const STYLE = `
   .subnav-link:hover{background:#f0f0f3}
   .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
   .nav-toggle{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:4px 8px;color:#1d1d1f;line-height:1}
-  /* ワイドモニタで横に間延びするのを止める。全ページに上限を掛けるが、
-     チャートや判定マトリクスは横に広いほど読みやすいので上限は緩め (1400px)。 */
-  .main{min-width:0;padding:24px;overflow-x:auto;max-width:1400px;margin:0 auto;width:100%}
-  /* ホームは要約画面なので更に狭く。読み幅が短いほど視線移動が減る。 */
-  .main-narrow{max-width:1160px}
+  /* 読み幅の上限は **全ページ共通 1160px**。ページごとに変えると、ホームから
+     約定履歴へ移った瞬間に器の幅が変わって落ち着かない。横に長い表
+     (判定マトリクス / 銘柄管理) は overflow-x で内側にスクロールさせる。 */
+  .main{min-width:0;padding:24px;overflow-x:auto;max-width:1160px;margin:0 auto;width:100%}
   @media(max-width:780px){
     .main{padding:12px 8px}
     .nav-toggle{display:block}
@@ -152,6 +151,10 @@ export const STYLE = `
   .sub-head{margin:20px 0 6px;font-size:14px;font-weight:700}
   /* 右寄せ数値セル */
   .num{text-align:right;font-variant-numeric:tabular-nums}
+  /* 列数の多い表 (約定履歴 / 銘柄管理) は器の幅に収まらない。ページ全体を
+     横スクロールさせると nav ごと動いて操作しづらいので、表だけを内側で
+     スクロールさせる。 */
+  .tablewrap{overflow-x:auto}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
   /* ホームの表: 列幅は内容に任せる (auto)。**1 列目に余りを寄せる指定はしない** —
      時刻や銘柄に 99% を渡すと、数量・状態のような短い列が 1 文字幅まで潰れて
