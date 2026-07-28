@@ -4,6 +4,7 @@ import { loadGlobalConfigFrom } from '../../src/infrastructure/db/globalConfigLo
 import { loadSymbolUniverse } from '../../src/infrastructure/db/symbolUniverse'
 import { loadPortfolioEquitySnapshots } from '../../src/infrastructure/db/portfolioEquitySnapshotRepo'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
+import { fakeD1 } from '../helpers/fakeD1'
 
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
@@ -39,7 +40,7 @@ function fakePortfolioNamespace() {
   } as unknown
 }
 
-describe('/dashboard/portfolio equity chart', () => {
+describe('ホームの資産推移チャート', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
     vi.mocked(loadSymbolUniverse).mockResolvedValue(makeSymbolUniverse({ allowedSymbols: ['SOXL'], symbolCurrency: { SOXL: 'USD' } }))
@@ -71,11 +72,11 @@ describe('/dashboard/portfolio equity chart', () => {
     ])
     const env = {
       ...baseEnv,
-      DB: {} as D1Database,
+      DB: fakeD1(),
       PORTFOLIO_STATE: fakePortfolioNamespace(),
     }
     const app = createApp()
-    const res = await app.request('/dashboard/portfolio', { headers: authHeader }, env)
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('総資産チャート')
@@ -85,21 +86,21 @@ describe('/dashboard/portfolio equity chart', () => {
     expect(body).toContain('"hasUsd":true')
     expect(body).toContain('"hasJpy":true')
     // Range tabs for the chart.
-    expect(body).toContain('/dashboard/portfolio?range=30d')
-    expect(body).toContain('/dashboard/portfolio?range=90d')
-    expect(body).toContain('/dashboard/portfolio?range=365d')
-    expect(body).toContain('/dashboard/portfolio?range=all')
+    expect(body).toContain('/dashboard?range=30d')
+    expect(body).toContain('/dashboard?range=90d')
+    expect(body).toContain('/dashboard?range=365d')
+    expect(body).toContain('/dashboard?range=all')
   })
 
   it('shows the "no data" message and no chart container when there are no snapshots', async () => {
     vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
     const env = {
       ...baseEnv,
-      DB: {} as D1Database,
+      DB: fakeD1(),
       PORTFOLIO_STATE: fakePortfolioNamespace(),
     }
     const app = createApp()
-    const res = await app.request('/dashboard/portfolio', { headers: authHeader }, env)
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('総資産チャート')
@@ -111,46 +112,44 @@ describe('/dashboard/portfolio equity chart', () => {
     const spy = vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
     const env = {
       ...baseEnv,
-      DB: {} as D1Database,
+      DB: fakeD1(),
       PORTFOLIO_STATE: fakePortfolioNamespace(),
     }
     const app = createApp()
-    const res = await app.request('/dashboard/portfolio?range=garbage', { headers: authHeader }, env)
+    const res = await app.request('/dashboard?range=garbage', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     // default = 90d → limit = 90
-    expect(spy).toHaveBeenCalledWith({}, { limit: 90 })
+    expect(spy).toHaveBeenCalledWith(expect.anything(), { limit: 90 })
     const body = await res.text()
     // The 90d tab should be active.
-    expect(body).toMatch(/class="tab tab-active"[^>]*href="\/dashboard\/portfolio\?range=90d"/)
+    expect(body).toMatch(/class="tab tab-active"[^>]*href="\/dashboard\?range=90d"/)
   })
 
   it('honours ?range=all by lifting the snapshot limit', async () => {
     const spy = vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
     const env = {
       ...baseEnv,
-      DB: {} as D1Database,
+      DB: fakeD1(),
       PORTFOLIO_STATE: fakePortfolioNamespace(),
     }
     const app = createApp()
-    const res = await app.request('/dashboard/portfolio?range=all', { headers: authHeader }, env)
+    const res = await app.request('/dashboard?range=all', { headers: authHeader }, env)
     expect(res.status).toBe(200)
-    expect(spy).toHaveBeenCalledWith({}, { limit: 3650 })
+    expect(spy).toHaveBeenCalledWith(expect.anything(), { limit: 3650 })
   })
 
   it('survives a snapshot-load failure with the rest of the page intact', async () => {
     vi.mocked(loadPortfolioEquitySnapshots).mockRejectedValue(new Error('table missing'))
     const env = {
       ...baseEnv,
-      DB: {} as D1Database,
+      DB: fakeD1(),
       PORTFOLIO_STATE: fakePortfolioNamespace(),
     }
     const app = createApp()
-    const res = await app.request('/dashboard/portfolio', { headers: authHeader }, env)
+    const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // Summary table still rendered.
-    expect(body).toContain('dailyStartEquity')
-    // Chart degrades to the "no data" message rather than blowing up the page.
+    // ページ自体は 200 で描画され、チャートだけが "データ無し" に退避する。
     expect(body).toContain('まだ roll-daily 実行履歴がありません')
   })
 })

@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.3.0](https://github.com/ochanuco/webull-trading/compare/v1.2.0...v1.3.0) (2026-07-28)
+
+
+### Features
+
+* **dashboard:** build the home the mock promised ([9a31b90](https://github.com/ochanuco/webull-trading/commit/9a31b90752015d8e2bb3fe1f0d90a1862f723bb1))
+* **dashboard:** build the home the mock promised ([7695315](https://github.com/ochanuco/webull-trading/commit/76953155f36200f128719e0484cbe2a88ce6b57c))
+
+
+### Bug Fixes
+
+* **dashboard:** cap the width on every page, not just the home ([4924fbb](https://github.com/ochanuco/webull-trading/commit/4924fbb943ee31158c5d47d65574ba7953bb3a04))
+* **dashboard:** cap the width on every page, not just the home ([1e354c8](https://github.com/ochanuco/webull-trading/commit/1e354c815e23abc4fcb848a5f4f726c49262271c))
+* **dashboard:** confine the width ceiling to the home page ([32c53dc](https://github.com/ochanuco/webull-trading/commit/32c53dc6ff0b9bb7a3661818c7172425043d987a))
+* **dashboard:** confine the width ceiling to the home page ([28f7784](https://github.com/ochanuco/webull-trading/commit/28f77842387df7140835fdf759dd1a347ad25a64))
+* **dashboard:** keep limit prices on one line in the trade history ([01e75a0](https://github.com/ochanuco/webull-trading/commit/01e75a033d940c33e978875b3290021d0fd454e3))
+* **dashboard:** keep limit prices on one line in the trade history ([60ae3d9](https://github.com/ochanuco/webull-trading/commit/60ae3d9003b5eeff78fc74dc8095150161f0e5b1))
+* **dashboard:** let the name column absorb the slack, not the clock ([663accc](https://github.com/ochanuco/webull-trading/commit/663accc6627a9b73281278c6acad3387af57d18e))
+* **dashboard:** let the name column absorb the slack, not the clock ([e5d4a3f](https://github.com/ochanuco/webull-trading/commit/e5d4a3f342c0a5fdaa398c745b076199f70c3c44))
+
+
+### Refactors
+
+* **dashboard:** drop the decision matrix ([d97fc65](https://github.com/ochanuco/webull-trading/commit/d97fc650e57da1c736fcf400014e28e1cbdf5782))
+* **dashboard:** drop the decision matrix ([93fff69](https://github.com/ochanuco/webull-trading/commit/93fff69eceec998336f6040e35c5e9e3f7ebc6c2))
+* **dashboard:** retire the standalone position and account pages ([0687088](https://github.com/ochanuco/webull-trading/commit/0687088c184e2b469a787498c8986698082decd7))
+* **dashboard:** retire the standalone position and account pages ([5ba7962](https://github.com/ochanuco/webull-trading/commit/5ba7962e093a33dbec706ca4c87a59ab14cb10cb))
+
 ## [1.2.0](https://github.com/ochanuco/webull-trading/compare/v1.1.1...v1.2.0) (2026-07-28)
 
 

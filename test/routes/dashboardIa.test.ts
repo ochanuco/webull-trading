@@ -6,6 +6,7 @@ import { loadPortfolioEquitySnapshots } from '../../src/infrastructure/db/portfo
 import { loadUsdJpyRate } from '../../src/infrastructure/quotes/fxRate'
 import { loadRecentAlerts } from '../../src/infrastructure/notification/notificationEmitLog'
 import { resolveActiveNavGroup } from '../../src/routes/dashboard/layout'
+import { tradesBody } from '../../src/routes/dashboard/trades'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
 /**
@@ -172,7 +173,6 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     for (const href of [
       '/dashboard/alerts',
       '/dashboard/cron',
-      '/dashboard/cron?view=matrix',
       '/dashboard/audit',
       '/dashboard/broker-probe',
       '/dashboard/webull-token',
@@ -204,16 +204,18 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     }
   })
 
-  it('activates 管理 / 診断 summary on their pages, and nothing on nav-less pages (/positions)', async () => {
+  it('activates 管理 / 診断 summary on their pages, and redirects the retired pages', async () => {
     const app = createApp()
     const opsRes = await app.request('/dashboard/config', { headers: authHeader }, baseEnv)
     expect(await opsRes.text()).toContain('<summary class="nav-link active">管理 ▾</summary>')
     const diagRes = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     expect(await diagRes.text()).toContain('診断 ▾</summary>')
-    // /positions は nav 外の直アクセスページ → どのグループも active にしない
-    const posRes = await app.request('/dashboard/positions', { headers: authHeader }, baseEnv)
-    expect(posRes.status).toBe(200)
-    expect(await posRes.text()).not.toContain('nav-link active')
+    // #dashboard-ia Phase 5: /positions /portfolio はホームへ統合済み → 302
+    for (const path of ['/dashboard/positions', '/dashboard/portfolio']) {
+      const res = await app.request(path, { headers: authHeader }, baseEnv)
+      expect(res.status, path).toBe(302)
+      expect(res.headers.get('location'), path).toBe('/dashboard')
+    }
   })
 
   it('resolveActiveNavGroup: charts はタブで 銘柄 / レビュー に分かれ、診断系は diag', () => {
@@ -257,18 +259,15 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
     expect(body).not.toContain('<a class="subnav-link" href="/dashboard/alerts">')
   })
 
-  it('cron page activates 判定ログ, matrix view activates 判定マトリクス (診断 subnav)', async () => {
+  it('cron page activates 判定ログ (診断 subnav)', async () => {
     const app = createApp()
     const cronBody = await (
       await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     ).text()
     expect(cronBody).toContain('<span class="subnav-link active">判定ログ</span>')
-    const matrixBody = await (
-      await app.request('/dashboard/cron?view=matrix', { headers: authHeader }, baseEnv)
-    ).text()
-    expect(matrixBody).toContain('<span class="subnav-link active">判定マトリクス</span>')
+    // 判定マトリクスは廃止 (#dashboard-ia)
+    expect(cronBody).not.toContain('判定マトリクス')
   })
-
   it('alerts page activates アラート', async () => {
     vi.mocked(loadRecentAlerts).mockResolvedValue([])
     const app = createApp()
@@ -324,18 +323,17 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('実行モード')
     expect(body).toContain('株価の鮮度')
     expect(body).toContain('取引 ON')
-    expect(body).toContain('USDJPY')
-    expect(body).toContain('150.25')
+    expect(body).toContain('最終 cron')
+    expect(body).toContain('未確認アラート')
     // 2. 領域見出し
     expect(body).toContain('リスクと建玉')
     expect(body).toContain('最近の活動')
-    // 3. 保有ポジション (positions と同じテーブル)
-    expect(body).toContain('保有ポジション')
-    expect(body).toContain('SOXL')
-    expect(body).toContain('平均取得単価')
+    // 3. リスクと建玉 (KPI / 資産構成を畳んだ 1 枚)
+    expect(body).toContain('建玉')
+    expect(body).toContain('実効 stop は ATR と R:R 上限')
     // 4. 直近の約定 + 導線リンク
-    expect(body).toContain('最近の約定 / リスク状態')
-    expect(body).toContain('href="/dashboard/positions"')
+    expect(body).toContain('直近の約定')
+    expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('href="/dashboard/cron"')
     expect(body).toContain('href="/dashboard/alerts"')
   })
@@ -357,7 +355,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     }
   })
 
-  it('omits 資産サマリ帯 and shows positions guidance link when DOs are missing (graceful)', async () => {
+  it('DO 不在でも運転状態帯は出し、建玉パネルは理由を出す (graceful)', async () => {
     vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
     const env = { ...baseEnv, DB: fakeD1() }
     const app = createApp()
@@ -368,9 +366,11 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).not.toContain('本日開始 equity')
     expect(body).not.toContain('home-equity-spark')
     expect(vi.mocked(loadUsdJpyRate)).not.toHaveBeenCalled()
-    // SYMBOL_STATE 不在 → テーブル省略 + /positions への誘導リンク
+    // SYMBOL_STATE 不在 → 建玉テーブルは出さず理由だけ出す
     expect(body).toContain('SYMBOL_STATE 未配線')
-    expect(body).toContain('href="/dashboard/positions"')
+    // 運転状態帯は DO 不在でも出る (実行モード / 取引は D1 由来)
+    expect(body).toContain('実行モード')
+    expect(body).toContain('未確認アラート')
   })
 })
 
@@ -430,5 +430,74 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
     const body = await res.text()
     const cdnTags = body.match(/<script src="[^"]*echarts[^"]*" defer><\/script>/g) ?? []
     expect(cdnTags.length).toBe(1)
+  })
+})
+
+// #dashboard-ia: 幅の上限は **ホームだけ**。銘柄チャートや判定マトリクスに
+// 効かせると、チャートがはみ出したりテーブルのヘッダが 1 文字ずつ折り返す。
+describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({ allowedSymbols: ['SOXL'], symbolCurrency: { SOXL: 'USD' } }),
+    )
+    vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
+    vi.mocked(loadUsdJpyRate).mockResolvedValue(150.25)
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  // 読み幅の上限は全ページ共通 (1160px)。列幅ルールは table.fit の opt-in なので
+  // main-narrow は現状ホームの marker として残るのみ (幅は変えない)。
+  it('ホームだけ main-narrow が付く (marker、幅は全ページ共通)', async () => {
+    const app = createApp()
+    const home = await (await app.request('/dashboard', { headers: authHeader }, baseEnv)).text()
+    expect(home).toContain('class="main main-narrow"')
+
+    for (const path of ['/dashboard/trades', '/dashboard/charts?tab=symbol', '/dashboard/cron']) {
+      const body = await (await app.request(path, { headers: authHeader }, baseEnv)).text()
+      // CSS 定義自体は全ページに inline されるので、class 属性で判定する
+      expect(body, path).toContain('class="main"')
+      expect(body, path).not.toContain('class="main main-narrow"')
+    }
+  })
+})
+
+// 列幅は「役割」で決める (#dashboard-ia)。1 行 1 レコードで読ませる表は
+// table.fit を付け、余りを吸う列だけ grow を持つ。短い列 (状態 / 数量 / 単価)
+// に幅が回ると値が縦に折り返す。
+describe('table.fit の列ルール (#dashboard-ia)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({ allowedSymbols: ['SOXL'], symbolCurrency: { SOXL: 'USD' } }),
+    )
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('約定履歴は table.fit + 銘柄列が grow', () => {
+    // route ではなく renderer を直接叩く (loader の fake を用意するより堅い)
+    const html = tradesBody(
+      [
+        {
+          id: 1,
+          timestamp: '2026-07-28T00:00:00.000Z',
+          tradeEventType: 'post_submit',
+          symbol: 'SOXL',
+          side: 'BUY',
+          filledQty: 1,
+          filledPrice: 100,
+          limitPrice: 100,
+          notional: 100,
+          realizedPnl: null,
+          brokerStatus: 'FILLED',
+          mode: 'LIVE',
+        } as unknown as Parameters<typeof tradesBody>[0][number],
+      ],
+      50,
+    )
+    expect(html).toContain('<table class="fit">')
+    expect(html).toContain('<th class="grow">銘柄</th>')
+    // 状態 / モードは内容幅で止める (grow を持たない)
+    expect(html).not.toContain('<th class="grow">状態</th>')
   })
 })

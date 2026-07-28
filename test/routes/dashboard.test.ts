@@ -197,7 +197,6 @@ describe('dashboard', () => {
     expect(body).toContain('>成績</span>')
     expect(body).toContain('class="subnav-link active"')
     expect(body).toContain('href="/dashboard/trades"')
-    expect(body).toContain('href="/dashboard/cron?view=matrix"')
     // 旧チャート専用 subnav (個別銘柄 / 銘柄グリッド) は出さない
     // (グローバル nav の「銘柄」リンクは tab=symbol を持つので subnav 内のみ検査)
     expect(body).not.toContain('銘柄グリッド')
@@ -206,74 +205,11 @@ describe('dashboard', () => {
   })
 
 
-  it('renders positions page with DO state', async () => {
-    const env = {
-      ...baseEnv,
-      DB: {} as D1Database,
-      SYMBOL_STATE: fakeSymbolStateNamespace(),
-    }
-    const app = createApp()
-    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('SOXL')
-    expect(body).toContain('100.00')
-    expect(body).toContain('5.00%')
-  })
-
-  // #nav-links: 保有銘柄からチャート/判定/設定へ 1 クリックで飛べる
-  // (trades / cron / alerts と同じ導線を positions にも通す)。
-  it('positions symbol cell links to chart tab with 判定/設定 aux links', async () => {
-    const env = {
-      ...baseEnv,
-      DB: {} as D1Database,
-      SYMBOL_STATE: fakeSymbolStateNamespace(),
-    }
-    const app = createApp()
-    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
-    const body = await res.text()
-    expect(body).toContain('href="/dashboard/charts?tab=symbol&symbol=SOXL"')
-    expect(body).toContain('href="/dashboard/cron?symbol=SOXL"')
-    expect(body).toContain('href="/dashboard/symbols/SOXL/edit"')
-  })
-
-  // #nav-links: 銘柄単位ビューの canonical 短縮 URL。実体はチャート銘柄タブ。
   it('GET /dashboard/symbols/:symbol redirects to chart symbol tab', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/symbols/soxl', { headers: authHeader }, baseEnv)
     expect(res.status).toBe(302)
     expect(res.headers.get('location')).toBe('/dashboard/charts?tab=symbol&symbol=SOXL')
-  })
-
-  it('formats positions as `${symbol}-${name}` for both JP and US when name is set', async () => {
-    vi.mocked(loadSymbolUniverse).mockResolvedValue(
-      makeSymbolUniverse({
-        allowedSymbols: ['7974', 'SOXL'],
-        symbolCurrency: { '7974': 'JPY', SOXL: 'USD' },
-        symbolMarket: { '7974': 'JP', SOXL: 'US' },
-        symbolName: { '7974': '任天堂', SOXL: 'Direxion Semiconductor Bull 3X' },
-      }),
-    )
-    const env = {
-      ...baseEnv,
-      DB: {} as D1Database,
-      SYMBOL_STATE: fakeSymbolStateNamespace(),
-    }
-    const app = createApp()
-    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // JP / US 共に 番号-会社名 形式に整形される (URL routing は symbol のまま)
-    expect(body).toContain('7974-任天堂')
-    expect(body).toContain('SOXL-Direxion Semiconductor Bull 3X')
-  })
-
-  it('renders positions with "unavailable" when SYMBOL_STATE is missing', async () => {
-    const env = { ...baseEnv, DB: {} as D1Database }
-    const app = createApp()
-    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
-    expect(res.status).toBe(200)
-    expect(await res.text()).toContain('利用不可')
   })
 
   it('past cooldownUntil (epoch 0 from admin clear-cooldown) is shown as em-dash, not 1970', async () => {
@@ -286,43 +222,6 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
     const body = await res.text()
     expect(body).not.toContain('1970-01-01')
-  })
-
-  it('future cooldownUntil is shown in JST', async () => {
-    const future = new Date(Date.now() + 3_600_000).toISOString()
-    const env = {
-      ...baseEnv,
-      DB: {} as D1Database,
-      SYMBOL_STATE: fakeSymbolStateNamespace(future),
-    }
-    const app = createApp()
-    const res = await app.request('/dashboard/positions', { headers: authHeader }, env)
-    const body = await res.text()
-    expect(body).toMatch(/<span class="warn">[^<]*JST<\/span>/)
-  })
-
-  it('renders portfolio page', async () => {
-    const env = {
-      ...baseEnv,
-      PORTFOLIO_STATE: fakePortfolioNamespace({
-        dailyStartEquity: 10_000,
-        dailyRealizedPnl: -150,
-        tradingDisabledUntil: null,
-        lastRolledAt: null,
-        updatedAt: '2026-04-23T00:00:00.000Z',
-      }),
-    }
-    const app = createApp()
-    const res = await app.request('/dashboard/portfolio', { headers: authHeader }, env)
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('dailyStartEquity')
-    expect(body).toContain('-1.50%')
-    // 2026-04-23T00:00:00Z → 2026-04-23 09:00:00 JST
-    expect(body).toContain('2026-04-23 09:00:00 JST')
-    // issue #140: lastRolledAt = null は「未実行」表示
-    expect(body).toContain('lastRolledAt')
-    expect(body).toContain('未実行')
   })
 
   it('renders config page with global_config + symbol table', async () => {
