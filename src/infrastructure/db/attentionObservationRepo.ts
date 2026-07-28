@@ -62,7 +62,11 @@ export function createAttentionObservationRepo(
       let inserted = 0
       let skipped = 0
       if (records.length === 0) return { inserted, skipped }
-      const CHUNK = 50
+      // D1 は 1 クエリあたり bound parameter 100 個が上限。multi-row INSERT の
+      // bind 数は `列数 × 行数` なので、7 列 → 100 / 7 = 14 行が安全な最大値。
+      // (CHUNK=50 だと 350 bind になり、GDELT の 1d timeline ~66 点を入れた
+      // 時点で必ず失敗する。)
+      const CHUNK = 14
       for (let i = 0; i < records.length; i += CHUNK) {
         const chunk = records.slice(i, i + CHUNK)
         const values = chunk.map((r) => ({
