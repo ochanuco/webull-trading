@@ -63,9 +63,12 @@ describe('createMacroEventCalendarRepo.bulkUpsert', () => {
 
   it('chunks 25 rows per multi-row INSERT (single subrequest per chunk)', async () => {
     // 30 = CHUNK(25) + 端数(5) — チャンク境界をまたぐ件数を維持する。
+    // 年を進めて 30 件すべてを UNIQUE (event_type, event_date) に対して一意にする。
+    // 月だけを回すと 13 件目から既存行と衝突し、実 DB では onConflictDoNothing が
+    // 効いて 25/4 件は insert されないため、returning() の期待値が実挙動から乖離する。
     const records: MacroEventCalendarSeedInput[] = Array.from({ length: 30 }, (_, i) => ({
       eventType: 'CPI',
-      eventDate: `2026-${String((i % 12) + 1).padStart(2, '0')}-15`,
+      eventDate: `${2026 + Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}-15`,
       eventTime: '08:30',
       notes: null,
     }))
