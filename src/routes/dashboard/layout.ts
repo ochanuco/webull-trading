@@ -42,7 +42,7 @@ export const STYLE = `
   /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
      コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等)。
      header は topnav (1段目) + ページ固有 subnav (2段目、例: チャートの
-     履歴・分析の 約定履歴/戦略判定/... など) の最大2段で sticky。 */
+     レビューの 約定履歴/取引品質/... など) の最大2段で sticky。 */
   .header{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5}
   .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
@@ -220,7 +220,7 @@ export function renderLayout(
 ): string {
   const killSwitch = killSwitchTopnav(c.var.killSwitchState)
   // active 判定はグループ単位の前方一致 (#dashboard-ia)。/charts は ?tab= で
-  // 「銘柄」(symbol) と「履歴・分析」(overview/quality) に分かれるため
+  // 「銘柄」(symbol) と「レビュー」(overview/quality) に分かれるため
   // query も見る。
   let tab: string | null = null
   try {
@@ -232,11 +232,21 @@ export function renderLayout(
 }
 
 /**
- * グローバル nav (#dashboard-ia): 4 項目 + 運用ドロップダウンに削減。
- * 資産系 (/positions /portfolio) はホームに統合したため nav からは外す
+ * グローバル nav (#dashboard-ia Phase 1): 日常の 3 画面 + 管理 + 診断。
+ *
+ * 実利用は「銘柄」「ホームの約定」「取引品質の一部」に偏っており、判定ログ・
+ * アラート・監査・broker 診断・token は平常時に開かれない。**消さずに前面から
+ * 下げる**のがこの再編の主旨で、Phase 1 では URL も機能も変えず、どこから
+ * 辿れるかだけを変える。
+ *
+ * - 管理 (`ops`): 書き込みを伴う画面だけ
+ * - 診断 (`diag`): 障害時にだけ開く画面。MCP は同じ D1 に依存するので AI では
+ *   代替できず、削除はしない
+ *
+ * 資産系 (/positions /portfolio) はホームに統合済みのため nav には出さない
  * (URL は直アクセス可のまま維持)。
  */
-export type NavGroupKey = 'home' | 'symbol' | 'analysis' | 'ops'
+export type NavGroupKey = 'home' | 'symbol' | 'review' | 'ops' | 'diag'
 
 export const NAV_GROUPS: ReadonlyArray<{
   key: NavGroupKey
@@ -244,17 +254,27 @@ export const NAV_GROUPS: ReadonlyArray<{
   text: string
   title?: string
 }> = [
-  { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (資産サマリ / 保有 / 直近の判定)' },
+  { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (運転状態 / 建玉 / 直近の活動)' },
   { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート (判定 pin / ラダー / 約定マーカー)' },
-  { key: 'analysis', href: '/dashboard/trades', text: '履歴・分析', title: '約定履歴 / 戦略判定 / 取引品質 / 資産推移 / アラート' },
+  { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 取引品質 / 資産推移' },
 ]
 
-/** 運用ドロップダウン内リンク (低頻度の運用・管理ページ)。 */
+/** 管理ドロップダウン内リンク (書き込みを伴う低頻度ページ)。 */
 export const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/config', text: '設定' },
   { href: '/dashboard/symbols', text: '銘柄管理' },
   { href: '/dashboard/events', text: 'イベント' },
-  { href: '/dashboard/audit', text: '監査ログ' },
+]
+
+/**
+ * 診断ドロップダウン内リンク。平常時は開かないが、障害時の一次情報と証跡は
+ * ここにしか無い (通知 → アラート → requestId → 判定ログ の導線)。
+ */
+export const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
+  { href: '/dashboard/alerts', text: 'アラート', title: '通知の履歴 (severity / cause で絞り込み)' },
+  { href: '/dashboard/cron', text: '判定ログ', title: 'なぜ買った / 買わなかったかを requestId で追う' },
+  { href: '/dashboard/cron?view=matrix', text: '判定マトリクス', title: '全銘柄 × 直近 cron の判定を一望する' },
+  { href: '/dashboard/audit', text: '監査ログ', title: '設定変更の before/after と実行者' },
   {
     href: '/dashboard/broker-probe',
     text: 'broker 診断',
@@ -275,12 +295,15 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   if (!activePath) return null
   if (activePath === '/dashboard' || activePath === '/dashboard/') return 'home'
   if (activePath === '/dashboard/charts') {
-    // symbol タブは「銘柄」、overview (default) / quality は「履歴・分析」。
+    // symbol タブは「銘柄」、overview (default) / quality は「レビュー」。
     // 'grid' は廃止済みタブの legacy alias (parseChartsTab が symbol に畳む)。
-    return tab === 'symbol' || tab === 'grid' ? 'symbol' : 'analysis'
+    return tab === 'symbol' || tab === 'grid' ? 'symbol' : 'review'
   }
-  for (const p of ['/dashboard/trades', '/dashboard/cron', '/dashboard/alerts']) {
-    if (activePath === p || activePath.startsWith(`${p}/`)) return 'analysis'
+  if (activePath === '/dashboard/trades' || activePath.startsWith('/dashboard/trades/')) {
+    return 'review'
+  }
+  for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token']) {
+    if (activePath === p || activePath.startsWith(`${p}/`)) return 'diag'
   }
   for (const l of OPS_NAV_LINKS) {
     if (activePath === l.href || activePath.startsWith(`${l.href}/`)) return 'ops'
@@ -294,22 +317,33 @@ export function renderTopNav(active?: NavGroupKey | null): string {
     const t = g.title ? ` title="${esc(g.title)}"` : ''
     return `<a class="nav-link${activeCls}" href="${g.href}"${t}>${esc(g.text)}</a>`
   }).join('')
-  const opsLinks = OPS_NAV_LINKS.map((l) => {
-    const t = l.title ? ` title="${esc(l.title)}"` : ''
-    return `<a class="nav-link" href="${l.href}"${t}>${esc(l.text)}</a>`
-  }).join('')
-  // 運用は kill switch と同じ details ドロップダウン。summary 自体が現在地
-  // 表示を兼ねる (運用系ページでは active 装飾)。
+  const popLinks = (items: ReadonlyArray<{ href: string; text: string; title?: string }>) =>
+    items
+      .map((l) => {
+        const t = l.title ? ` title="${esc(l.title)}"` : ''
+        return `<a class="nav-link" href="${l.href}"${t}>${esc(l.text)}</a>`
+      })
+      .join('')
+  // 管理 / 診断は kill switch と同じ details ドロップダウン。summary 自体が
+  // 現在地表示を兼ねる (配下ページでは active 装飾)。
   return `${links}<span class="nav-sep"></span><details class="topnav-ops">
-    <summary class="nav-link${active === 'ops' ? ' active' : ''}">運用 ▾</summary>
-    <div class="ops-pop">${opsLinks}</div>
+    <summary class="nav-link${active === 'ops' ? ' active' : ''}">管理 ▾</summary>
+    <div class="ops-pop">${popLinks(OPS_NAV_LINKS)}</div>
+  </details><details class="topnav-ops">
+    <summary class="nav-link nav-link-quiet${active === 'diag' ? ' active' : ''}">診断 ▾</summary>
+    <div class="ops-pop">${popLinks(DIAG_NAV_LINKS)}</div>
   </details>`
 }
 
 /**
- * 「履歴・分析」グループ共通の subnav (#dashboard-ia)。charts の
+ * 「レビュー」グループ共通の subnav (#dashboard-ia)。charts の
  * `renderChartsSubnav` と同型で trades / cron / alerts の 3 ページに出す
  * (charts ページ自体は既存の charts subnav のまま — subnav 2 本は出さない)。
+ */
+/**
+ * レビュー内 subnav。判定ログ / 判定マトリクス / アラートは診断へ移したので
+ * ここには出さないが、**個別ページ側は同じ subnav を出して迷子を防ぐ**ため
+ * key 自体は残す (active にならないだけ)。
  */
 export type AnalysisSubnavKey = 'trades' | 'cron' | 'matrix' | 'quality' | 'equity' | 'alerts'
 
@@ -319,12 +353,34 @@ export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   label: string
 }> = [
   { key: 'trades', href: '/dashboard/trades', label: '約定履歴' },
-  { key: 'cron', href: '/dashboard/cron', label: '戦略判定' },
-  { key: 'matrix', href: '/dashboard/cron?view=matrix', label: '判定マトリクス' },
   { key: 'quality', href: '/dashboard/charts?tab=quality', label: '取引品質' },
   { key: 'equity', href: '/dashboard/charts', label: '資産推移' },
-  { key: 'alerts', href: '/dashboard/alerts', label: 'アラート' },
 ]
+
+/**
+ * 診断ページ間の subnav。アラート → 判定ログ → 監査の横移動は障害対応で
+ * 実際に使うので、診断側にも subnav を出す (レビュー subnav には出さない)。
+ */
+export type DiagSubnavKey = 'alerts' | 'cron' | 'matrix' | 'audit' | 'probe' | 'token'
+
+const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
+  '/dashboard/alerts': 'alerts',
+  '/dashboard/cron': 'cron',
+  '/dashboard/cron?view=matrix': 'matrix',
+  '/dashboard/audit': 'audit',
+  '/dashboard/broker-probe': 'probe',
+  '/dashboard/webull-token': 'token',
+}
+
+export function renderDiagSubnav(active: DiagSubnavKey): string {
+  return DIAG_NAV_LINKS.map((l) => {
+    const key = DIAG_SUBNAV_KEY_BY_HREF[l.href]
+    if (key === active) {
+      return `<span class="subnav-link active">${esc(l.text)}</span>`
+    }
+    return `<a class="subnav-link" href="${l.href}">${esc(l.text)}</a>`
+  }).join('')
+}
 
 export function renderAnalysisSubnav(active: AnalysisSubnavKey): string {
   return ANALYSIS_SUBNAV_ITEMS.map((i) => {
