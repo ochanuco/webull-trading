@@ -323,7 +323,7 @@ export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): s
               ? `<span class="pill warn">損切りまで ${fmtNumber(stop.toStopPct, 1)}%</span>`
               : '<span class="pill">保有継続</span>'
       return `<tr>
-        <td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}">${esc(displaySymbol(o.sym, data.universe))}</a></td>
+        <td class="grow"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}" title="${esc(displaySymbol(o.sym, data.universe))}">${esc(o.sym)}</a></td>
         <td class="num">${fmtNumber(o.qty, 0)}</td>
         <td class="num">${o.price === null ? '<span class="muted">—</span>' : fmtNumber(o.price, 2)}</td>
         <td class="num ${pnlCls}">${o.pnlPct === null ? '—' : `${fmtNumber(o.pnlPct, 2)}%`}</td>
@@ -334,7 +334,7 @@ export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): s
   return `<div class="panel">
     <div class="panel-title"><span>建玉 ${open.length} 件 / エクスポージャー</span>${exposurePill}</div>
     <table>
-      <thead><tr><th>銘柄</th><th class="num">数量</th><th class="num">現在値</th><th class="num">損益</th><th>状態</th></tr></thead>
+      <thead><tr><th class="grow">銘柄</th><th class="num">数量</th><th class="num">現在値</th><th class="num">損益</th><th>状態</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <p class="muted" style="font-size:12px;margin:10px 0 0">実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は <a href="/dashboard/charts?tab=symbol">銘柄</a> へ。</p>
@@ -419,16 +419,16 @@ export function renderRecentPanel(data: OverviewData): string {
       const pnl = t.realizedPnl !== null ? formatRealizedPnl(t.realizedPnl) : '<span class="muted">—</span>'
       return `<tr>
         <td class="muted" style="font-size:12px">${esc(fmtJst(t.timestamp))}</td>
-        <td><strong>${esc(displaySymbol(t.symbol ?? '—', data.universe))}</strong></td>
+        <td class="grow"><strong title="${esc(displaySymbol(t.symbol ?? '—', data.universe))}">${esc(t.symbol ?? '—')}</strong></td>
         <td class="${sideClass}">${esc(t.side ?? '—')}</td>
-        <td>${t.filledQty !== null ? esc(t.filledQty) : '—'}</td>
-        <td>${t.filledPrice !== null ? fmtNumber(t.filledPrice, 2) : '—'}</td>
-        <td>${pnl}</td>
+        <td class="num">${t.filledQty !== null ? esc(t.filledQty) : '—'}</td>
+        <td class="num">${t.filledPrice !== null ? fmtNumber(t.filledPrice, 2) : '—'}</td>
+        <td class="num">${pnl}</td>
       </tr>`
     })
     .join('')
   const recentTable = data.recentTrades.length
-    ? `<table><thead><tr><th>時刻</th><th>銘柄</th><th>売買</th><th>数量</th><th>約定値</th><th>実損益</th></tr></thead><tbody>${trades}</tbody></table>`
+    ? `<table><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table>`
     : '<p class="muted">約定履歴がありません。</p>'
   // 実行モード / 取引 / VIX は運転状態帯に移したのでここでは繰り返さない。
   return `<div class="panel">
