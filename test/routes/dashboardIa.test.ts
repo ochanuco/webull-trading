@@ -433,3 +433,30 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
     expect(cdnTags.length).toBe(1)
   })
 })
+
+// #dashboard-ia: 幅の上限は **ホームだけ**。銘柄チャートや判定マトリクスに
+// 効かせると、チャートがはみ出したりテーブルのヘッダが 1 文字ずつ折り返す。
+describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({ allowedSymbols: ['SOXL'], symbolCurrency: { SOXL: 'USD' } }),
+    )
+    vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
+    vi.mocked(loadUsdJpyRate).mockResolvedValue(150.25)
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('ホームは main-narrow、それ以外のページには付かない', async () => {
+    const app = createApp()
+    const home = await (await app.request('/dashboard', { headers: authHeader }, baseEnv)).text()
+    expect(home).toContain('class="main main-narrow"')
+
+    for (const path of ['/dashboard/trades', '/dashboard/charts?tab=symbol', '/dashboard/cron']) {
+      const body = await (await app.request(path, { headers: authHeader }, baseEnv)).text()
+      // CSS 定義自体は全ページに inline されるので、class 属性で判定する
+      expect(body, path).toContain('class="main"')
+      expect(body, path).not.toContain('class="main main-narrow"')
+    }
+  })
+})
