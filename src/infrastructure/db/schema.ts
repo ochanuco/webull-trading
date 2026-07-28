@@ -416,6 +416,54 @@ export const globalConfig = sqliteTable(
     cashFallbackOrdersEnabled: integer('cash_fallback_orders_enabled', { mode: 'boolean' })
       .notNull()
       .default(false),
+    /**
+     * News shock gate (issue #196 follow-up、news-shock-gate PR 2)。GDELT の
+     * 報道量急増 + トーン悪化を検知し BUY size を縮小/停止する。'off' (default) |
+     * 'observe' (trace のみ、qty 不変) | 'enforce'。enum 外の DB 値は 'off' に
+     * 倒す (gate 無効が安全側、pairRegimeMode と同じ規約)。ALTER ADD COLUMN で
+     * 追加するため DB CHECK は付けない (vix_* が rebuild 前に取っていたのと同じ
+     * 方針 — 検証は `globalConfigRepo` の runtime sanitize に寄せる)。
+     */
+    newsShockMode: text('news_shock_mode').notNull().default('off'),
+    /**
+     * ratio (直近 max / baseline median) がこれを超えると warning 領域
+     * (size を `news_shock_warn_size_scale` 倍に縮小)。default 2.3 — GDELT
+     * 12ヶ月実測 (356点、`timelinevol`) の p90 (0.832) が baseline median
+     * (0.363) の約 2.29x だったことに由来 (上位約10%を warning とする)。
+     */
+    newsShockWarnRatio: real('news_shock_warn_ratio').notNull().default(2.3),
+    /**
+     * ratio がこれを超え、かつ tone 低下 AND 条件 (requireTone=true 時) を
+     * 満たすと critical (BUY 全停止)。default 4.4 — 同実測の p99 (1.598) が
+     * baseline median の約 4.40x だったことに由来 (上位約1%を critical とする)。
+     */
+    newsShockBlockRatio: real('news_shock_block_ratio').notNull().default(4.4),
+    /** warning 領域の size 倍率。default 0.5。 */
+    newsShockWarnSizeScale: real('news_shock_warn_size_scale').notNull().default(0.5),
+    /**
+     * critical 判定に要求する tone 低下幅 (baselineTone - latestTone)。
+     * 報道量が増えただけ (ポジティブなニュース) で BUY を止めないための AND 条件。
+     * default 1.5。
+     */
+    newsShockToneDropThreshold: real('news_shock_tone_drop_threshold').notNull().default(1.5),
+    /** true (default) で critical 判定に tone 低下 AND 条件を要求する。 */
+    newsShockRequireTone: integer('news_shock_require_tone', { mode: 'boolean' })
+      .notNull()
+      .default(true),
+    /** baseline (median 母集団) の trailing 日数。default 7。 */
+    newsShockBaselineDays: integer('news_shock_baseline_days').notNull().default(7),
+    /** baseline サンプル数の下限。未満なら unknown (insufficient_baseline)。default 200。 */
+    newsShockMinSamples: integer('news_shock_min_samples').notNull().default(200),
+    /** ratio 分子側 (直近 max) の窓 (分)。default 120。 */
+    newsShockWindowMin: integer('news_shock_window_min').notNull().default(120),
+    /** 最新観測がこれより古ければ unknown (unavailable) 扱い。default 90 (分)。 */
+    newsShockMaxAgeMin: integer('news_shock_max_age_min').notNull().default(90),
+    /**
+     * attention 観測 (GDELT producer) が不可用/不足のときの fail-open/closed
+     * 切替。'fail_open' (default、既存 gate と同じ判断) | 'block_buy'
+     * (operator が明示的に fail-closed へ倒す escape hatch)。
+     */
+    attentionStalePolicy: text('attention_stale_policy').notNull().default('fail_open'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

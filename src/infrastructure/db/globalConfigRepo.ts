@@ -79,6 +79,35 @@ export interface GlobalConfigSnapshot {
   pairRegimeThetaBullExit: number
   pairRegimeThetaBearEnter: number
   pairRegimeThetaBearExit: number
+  /**
+   * News shock gate (issue #196 follow-up、news-shock-gate PR 2)。'off'
+   * (default) / 'observe' (trace のみ) / 'enforce'。enum 外の DB 値は 'off'
+   * に倒す (gate 無効が安全側、pairRegimeMode と同じ規約)。
+   */
+  newsShockMode: 'off' | 'observe' | 'enforce'
+  /** ratio (直近 max / baseline median) がこれを超えると warning。default 2.3 (GDELT 12ヶ月実測 p90)。 */
+  newsShockWarnRatio: number
+  /** ratio がこれを超え、かつ tone 条件充足で critical。default 4.4 (同 p99)。 */
+  newsShockBlockRatio: number
+  /** warning 領域の size 倍率。default 0.5。 */
+  newsShockWarnSizeScale: number
+  /** critical 判定に要求する tone 低下幅 (baselineTone - latestTone)。default 1.5。 */
+  newsShockToneDropThreshold: number
+  /** true (default) で critical 判定に tone 低下 AND 条件を要求する。 */
+  newsShockRequireTone: boolean
+  /** baseline (median 母集団) の trailing 日数。default 7。 */
+  newsShockBaselineDays: number
+  /** baseline サンプル数の下限。未満なら unknown (insufficient_baseline)。default 200。 */
+  newsShockMinSamples: number
+  /** ratio 分子側 (直近 max) の窓 (分)。default 120。 */
+  newsShockWindowMin: number
+  /** 最新観測がこれより古ければ unknown (unavailable) 扱い。default 90 (分)。 */
+  newsShockMaxAgeMin: number
+  /**
+   * attention 観測 (GDELT producer) が不可用/不足のときの fail-open/closed
+   * 切替。'fail_open' (default) | 'block_buy' (operator escape hatch)。
+   */
+  attentionStalePolicy: 'fail_open' | 'block_buy'
 }
 
 /**
@@ -128,6 +157,17 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pairRegimeThetaBullExit: 0.01,
   pairRegimeThetaBearEnter: -0.04,
   pairRegimeThetaBearExit: -0.015,
+  newsShockMode: 'off',
+  newsShockWarnRatio: 2.3,
+  newsShockBlockRatio: 4.4,
+  newsShockWarnSizeScale: 0.5,
+  newsShockToneDropThreshold: 1.5,
+  newsShockRequireTone: true,
+  newsShockBaselineDays: 7,
+  newsShockMinSamples: 200,
+  newsShockWindowMin: 120,
+  newsShockMaxAgeMin: 90,
+  attentionStalePolicy: 'fail_open',
 })
 
 /**
@@ -256,6 +296,99 @@ function validateVixConfig(
   return config
 }
 
+/**
+ * News shock config の application-level validation (news-shock-gate PR 2)。
+ * `validateVixConfig` と同じ層防御: 0042 migration は ALTER TABLE ADD COLUMN
+ * のみで DB CHECK を持たないため、範囲・順序をここで検証する。
+ *
+ * enum field (`newsShockMode` / `attentionStalePolicy`) はここでは扱わない —
+ * `pairRegimeMode` と同じく、呼び出し側 (`loadGlobalConfig` の row マッピング)
+ * で enum 外の値を安全側 default に inline で倒す。ここは数値 field の
+ * 範囲・順序だけを見る。
+ *
+ * 違反時は defaults fallback (fail-closed = gate 無効の default に倒れる、
+ * cron 全停止より安全)。
+ */
+function validateNewsShockConfig(
+  config: GlobalConfigSnapshot,
+  requestId: string | undefined,
+): GlobalConfigSnapshot {
+  const violations: Array<{ field: string; value: unknown; expected: string }> = []
+  const {
+    newsShockWarnRatio,
+    newsShockBlockRatio,
+    newsShockWarnSizeScale,
+    newsShockToneDropThreshold,
+    newsShockBaselineDays,
+    newsShockMinSamples,
+    newsShockWindowMin,
+    newsShockMaxAgeMin,
+  } = config
+
+  if (!(newsShockWarnRatio > 0 && newsShockWarnRatio <= 100)) {
+    violations.push({ field: 'newsShockWarnRatio', value: newsShockWarnRatio, expected: '>0 and <=100' })
+  }
+  if (!(newsShockBlockRatio > 0 && newsShockBlockRatio <= 100)) {
+    violations.push({ field: 'newsShockBlockRatio', value: newsShockBlockRatio, expected: '>0 and <=100' })
+  }
+  if (newsShockWarnRatio > newsShockBlockRatio) {
+    violations.push({
+      field: 'newsShockWarnRatio/newsShockBlockRatio',
+      value: { warn: newsShockWarnRatio, block: newsShockBlockRatio },
+      expected: 'warn <= block',
+    })
+  }
+  if (!(newsShockWarnSizeScale >= 0 && newsShockWarnSizeScale <= 1)) {
+    violations.push({
+      field: 'newsShockWarnSizeScale',
+      value: newsShockWarnSizeScale,
+      expected: '>=0 and <=1',
+    })
+  }
+  if (!(newsShockToneDropThreshold >= 0 && newsShockToneDropThreshold <= 100)) {
+    violations.push({
+      field: 'newsShockToneDropThreshold',
+      value: newsShockToneDropThreshold,
+      expected: '>=0 and <=100',
+    })
+  }
+  if (!(Number.isInteger(newsShockBaselineDays) && newsShockBaselineDays > 0 && newsShockBaselineDays <= 365)) {
+    violations.push({ field: 'newsShockBaselineDays', value: newsShockBaselineDays, expected: 'integer >0 and <=365' })
+  }
+  if (!(Number.isInteger(newsShockMinSamples) && newsShockMinSamples > 0 && newsShockMinSamples <= 1_000_000)) {
+    violations.push({ field: 'newsShockMinSamples', value: newsShockMinSamples, expected: 'integer >0 and <=1000000' })
+  }
+  if (!(Number.isInteger(newsShockWindowMin) && newsShockWindowMin > 0 && newsShockWindowMin <= 10_080)) {
+    violations.push({ field: 'newsShockWindowMin', value: newsShockWindowMin, expected: 'integer >0 and <=10080 (1 week in minutes)' })
+  }
+  if (!(Number.isInteger(newsShockMaxAgeMin) && newsShockMaxAgeMin > 0 && newsShockMaxAgeMin <= 10_080)) {
+    violations.push({ field: 'newsShockMaxAgeMin', value: newsShockMaxAgeMin, expected: 'integer >0 and <=10080 (1 week in minutes)' })
+  }
+
+  if (violations.length > 0) {
+    console.warn(
+      JSON.stringify({
+        event: 'global_config_news_shock_validation_failed',
+        requestId: requestId ?? null,
+        violations,
+      }),
+    )
+    return {
+      ...config,
+      newsShockWarnRatio: GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
+      newsShockBlockRatio: GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
+      newsShockWarnSizeScale: GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale,
+      newsShockToneDropThreshold: GLOBAL_CONFIG_DEFAULTS.newsShockToneDropThreshold,
+      newsShockBaselineDays: GLOBAL_CONFIG_DEFAULTS.newsShockBaselineDays,
+      newsShockMinSamples: GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
+      newsShockWindowMin: GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
+      newsShockMaxAgeMin: GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
+    }
+  }
+
+  return config
+}
+
 export async function loadGlobalConfig(
   db: DrizzleD1Database,
   requestId?: string,
@@ -271,14 +404,22 @@ export async function loadGlobalConfig(
   // 障害メッセージに `vix_` が偶然含まれただけで fail-open 化するリスクがあるため、
   // SQLite 系の `no such column: vix_*` か、`vix_<col> not found / does not exist /
   // unknown column` 形式に絞る (CodeRabbit 2nd round 指摘)。
+  //
+  // news-shock-gate PR 2: 0042 migration (`news_shock_*` / `attention_stale_policy`)
+  // 未適用の環境でも同じ「SELECT が SQL レベルで落ちる」罠を踏む。同じ
+  // schema-missing 限定パターンで `news_shock_` / `attention_stale_policy` も
+  // 拾う (単純な `news_shock` 部分一致は他エラーに偶然含まれた場合の fail-open
+  // リスクがあるため避け、`no such column:` / `not found|does not exist|unknown
+  // column` 形式に絞る — vix と同じ規約)。
+  const MISSING_COLUMN_PATTERN = '(?:vix_[a-z_]*|news_shock_[a-z_]*|attention_stale_policy)'
   let rows: GlobalConfigRow[]
   try {
     rows = await db.select().from(globalConfig).where(eq(globalConfig.id, 'default')).limit(1)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const isMissingVixColumn =
-      /no such column:\s*vix_/i.test(message) ||
-      /vix_[a-z_]*\s+(not found|does not exist|unknown column)/i.test(message)
+      new RegExp(`no such column:\\s*${MISSING_COLUMN_PATTERN}`, 'i').test(message) ||
+      new RegExp(`${MISSING_COLUMN_PATTERN}\\s+(not found|does not exist|unknown column)`, 'i').test(message)
     if (isMissingVixColumn) {
       console.warn(
         JSON.stringify({
@@ -333,7 +474,7 @@ export async function loadGlobalConfig(
           .limit(1)
         const legacyRow = legacyRows[0]
         if (legacyRow) {
-          return validateVixConfig({
+          return validateNewsShockConfig(validateVixConfig({
             dryRun: legacyRow.dryRun,
             tradingEnabled: legacyRow.tradingEnabled,
             marketHoursCheck: legacyRow.marketHoursCheck,
@@ -382,7 +523,19 @@ export async function loadGlobalConfig(
             pairRegimeThetaBullExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullExit,
             pairRegimeThetaBearEnter: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
             pairRegimeThetaBearExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
-          }, requestId)
+            // 0042 追加列 (news-shock-gate PR 2)。legacy path は default ('off' = gate 無効)。
+            newsShockMode: GLOBAL_CONFIG_DEFAULTS.newsShockMode,
+            newsShockWarnRatio: GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
+            newsShockBlockRatio: GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
+            newsShockWarnSizeScale: GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale,
+            newsShockToneDropThreshold: GLOBAL_CONFIG_DEFAULTS.newsShockToneDropThreshold,
+            newsShockRequireTone: GLOBAL_CONFIG_DEFAULTS.newsShockRequireTone,
+            newsShockBaselineDays: GLOBAL_CONFIG_DEFAULTS.newsShockBaselineDays,
+            newsShockMinSamples: GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
+            newsShockWindowMin: GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
+            newsShockMaxAgeMin: GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
+            attentionStalePolicy: GLOBAL_CONFIG_DEFAULTS.attentionStalePolicy,
+          }, requestId), requestId)
         }
       } catch (legacyError) {
         // legacy fetch も失敗 → 想定外の double failure。ここまで来たら全 defaults
@@ -396,13 +549,13 @@ export async function loadGlobalConfig(
         )
       }
       // legacy row なし or legacy fetch 失敗 → 全 defaults
-      return validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId)
+      return validateNewsShockConfig(validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId), requestId)
     }
     throw error
   }
   const row = rows[0]
-  if (!row) return validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId)
-  return validateVixConfig({
+  if (!row) return validateNewsShockConfig(validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId), requestId)
+  return validateNewsShockConfig(validateVixConfig({
     dryRun: row.dryRun,
     tradingEnabled: row.tradingEnabled,
     marketHoursCheck: row.marketHoursCheck,
@@ -464,5 +617,22 @@ export async function loadGlobalConfig(
       row.pairRegimeThetaBearEnter ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
     pairRegimeThetaBearExit:
       row.pairRegimeThetaBearExit ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
-  }, requestId)
+    // 0042 で追加 (news-shock-gate PR 2)。古い D1 (ALTER 直前 race / undefined) は
+    // default へ畳む。mode は enum 検証して不正値は 'off' (gate 無効が安全側)。
+    newsShockMode:
+      row.newsShockMode === 'observe' || row.newsShockMode === 'enforce' ? row.newsShockMode : 'off',
+    newsShockWarnRatio: row.newsShockWarnRatio ?? GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
+    newsShockBlockRatio: row.newsShockBlockRatio ?? GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
+    newsShockWarnSizeScale: row.newsShockWarnSizeScale ?? GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale,
+    newsShockToneDropThreshold:
+      row.newsShockToneDropThreshold ?? GLOBAL_CONFIG_DEFAULTS.newsShockToneDropThreshold,
+    newsShockRequireTone: row.newsShockRequireTone ?? GLOBAL_CONFIG_DEFAULTS.newsShockRequireTone,
+    newsShockBaselineDays: row.newsShockBaselineDays ?? GLOBAL_CONFIG_DEFAULTS.newsShockBaselineDays,
+    newsShockMinSamples: row.newsShockMinSamples ?? GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
+    newsShockWindowMin: row.newsShockWindowMin ?? GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
+    newsShockMaxAgeMin: row.newsShockMaxAgeMin ?? GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
+    // attention_stale_policy は enum 検証。不正値は 'fail_open' (既存 gate 全体と
+    // 同じ判断が安全側) に倒す。
+    attentionStalePolicy: row.attentionStalePolicy === 'block_buy' ? 'block_buy' : 'fail_open',
+  }, requestId), requestId)
 }

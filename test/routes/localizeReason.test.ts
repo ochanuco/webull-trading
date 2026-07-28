@@ -184,6 +184,42 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
+    it('news shock critical (with tone) → 緊急停止', () => {
+      expect(localizeReason('risk: news_shock_critical: 5.1x tone-2.3 (block)')).toBe(
+        '発注スキップ: ニュース過熱で緊急停止 (報道量 baseline比 5.1倍、論調悪化 2.3)',
+      )
+    })
+
+    it('news shock critical (no tone, requireTone=false) → 緊急停止', () => {
+      expect(localizeReason('risk: news_shock_critical: 5.1x (block)')).toBe(
+        '発注スキップ: ニュース過熱で緊急停止 (報道量 baseline比 5.1倍)',
+      )
+    })
+
+    it('news shock warning (qty successfully scaled) → 数値のみ翻訳', () => {
+      expect(localizeReason('risk: news_shock_warning: 2.8x (size x0.5)')).toBe(
+        '発注スキップ: ニュース過熱で建玉縮小 (報道量 baseline比 2.8倍、数量 x0.5)',
+      )
+    })
+
+    it('news shock warning rounded to 0 → lot 情報も翻訳', () => {
+      expect(
+        localizeReason('risk: news_shock_warning: 2.8x (size x0.5) (qty rounded to 0, lot=100)'),
+      ).toBe('発注スキップ: ニュース過熱で建玉縮小 (報道量 baseline比 2.8倍、数量 x0.5、売買単位 100 未満で見送り)')
+    })
+
+    it('news shock unavailable (block_buy policy) → データ不足', () => {
+      expect(localizeReason('risk: news_shock_unavailable_fallback_normal')).toBe(
+        '発注スキップ: ニュース観測データ不足 (block_buy 設定により新規買い停止)',
+      )
+    })
+
+    it('news shock insufficient baseline (block_buy policy) → サンプル不足', () => {
+      expect(localizeReason('risk: news_shock_insufficient_baseline: 84/200')).toBe(
+        '発注スキップ: ニュース baseline サンプル不足 (84/200件、block_buy 設定により新規買い停止)',
+      )
+    })
+
     it('insufficient bars → 日柄不足', () => {
       expect(localizeReason('insufficient bars for indicators')).toBe(
         'データ不足: 指標計算に必要な日柄不足',
