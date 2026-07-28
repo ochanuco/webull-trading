@@ -31,6 +31,17 @@
   - 破壊的変更は `feat!:` か body に `BREAKING CHANGE:` (major bump のトリガー)
 - 並列 PR 共有ファイル (`src/app.ts` / `src/config/env.ts` / `.dev.vars.example`) は **末尾 append のみ** → 後発 PR が rebase で解決
 
+## ドキュメント
+
+README は索引のみ。実体は `docs/` にある。
+
+- `docs/onboarding.md` — 開発の始め方 / secrets / Webull 口座の初期作業
+- `docs/architecture.md` — 全体像・cron・bindings・ディレクトリ構成
+- `docs/configuration.md` — `global_config` / `symbol_config` の全パラメタ
+- `docs/endpoints.md` — HTTP endpoint 一覧
+- `docs/db-operations.md` — D1 運用 SQL
+- `docs/production-cd.md` — リリースフロー
+
 ## 関連設定
 
 - `.coderabbit.yaml` — CodeRabbit 自動レビューの path_instructions (Phase scope / POC 姿勢をプリロード)
