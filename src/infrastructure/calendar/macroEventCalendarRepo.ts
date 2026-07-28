@@ -100,10 +100,14 @@ export function createMacroEventCalendarRepo(
       // CodeRabbit #196 review: 1 row 1 INSERT は D1 subrequest を浪費するため
       // chunk multi-row INSERT (`.values([...])`) にまとめる。`.onConflictDoNothing()`
       // で UNIQUE (event_type, event_date) 違反 row のみ skip。
+      //
+      // CHUNK は D1 の bound parameter 上限 (1 クエリ 100 個) から逆算する。
+      // multi-row INSERT の bind 数は `列数 × 行数` なので、4 列 → 100 / 4 = 25 行。
+      // 以前の 50 は 200 bind になり、26 件以上を一度に seed すると失敗していた。
       let inserted = 0
       let skipped = 0
       if (records.length === 0) return { inserted, skipped }
-      const CHUNK = 50
+      const CHUNK = 25
       for (let i = 0; i < records.length; i += CHUNK) {
         const chunk = records.slice(i, i + CHUNK)
         const values = chunk.map((r) => ({

@@ -6,6 +6,7 @@ import { createNotifier } from './infrastructure/notification/createNotifier'
 import { checkMarketDataHealth } from './infrastructure/webull/checkMarketDataHealth'
 import { refreshTradableAllowlist } from './infrastructure/webull/refreshTradableAllowlist'
 import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
+import { runNewsScheduler } from './trading/news/newsScheduler'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
@@ -386,6 +387,28 @@ export default {
           )
         },
       ),
+    )
+    // News attention producer (issue #196 follow-up、newsShockGate PR 1)。
+    // quote/reconcile とは完全に独立 — GDELT 障害・レート制限が取引経路に
+    // 伝播しないことを物理的に保証する配線 (runNewsScheduler 自体も内部で
+    // fetch/DB 失敗を throw せず握りつぶすが、ここでも二重に .catch する)。
+    ctx.waitUntil(
+      runNewsScheduler({ env, requestId })
+        .then((summary) => {
+          if (!summary.ran) return
+          console.log(
+            JSON.stringify({
+              event: 'news_scheduler_run',
+              requestId,
+              probeKey: summary.probeKey,
+              metric: summary.metric,
+              fetched: summary.fetched,
+              inserted: summary.inserted,
+              skipped: summary.skipped,
+            }),
+          )
+        })
+        .catch(() => undefined),
     )
   },
 }

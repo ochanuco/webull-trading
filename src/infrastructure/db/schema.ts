@@ -909,3 +909,50 @@ export const tradableInstrument = sqliteTable(
 
 export type TradableInstrumentRow = typeof tradableInstrument.$inferSelect
 export type TradableInstrumentInsert = typeof tradableInstrument.$inferInsert
+
+/**
+ * News/crowd attention observation store (issue #196 follow-up — newsShockGate /
+ * crowdEuphoriaGate risk gates). Append-only time series shared across sources:
+ * `source` discriminates GDELT report-volume/tone (this PR) from a future
+ * YouTube upload-count producer so both land in one table without a
+ * per-source schema fork.
+ *
+ * This PR is producer-only (`newsScheduler` writes on the 5-minute cron) —
+ * there is no read path from strategy/risk code yet. The gate that reads
+ * this table is a later PR (trading path change is zero here, see plan doc).
+ *
+ * `UNIQUE (source, probe_key, metric, bucket_at)` is the idempotent-backfill
+ * mechanism: GDELT's `timespan=1d` request returns ~96 buckets every tick, so
+ * each tick does a full bulk-insert-ignore over all of them. A missed tick
+ * (cron failure, cold start) self-heals on the next tick — already-seen
+ * buckets just collide on the unique index and are skipped, never duplicated.
+ */
+export const attentionObservation = sqliteTable(
+  'attention_observation',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** データソース。'gdelt' (報道量/トーン、このPR) / 'youtube' (投稿本数、将来PR)。 */
+    source: text('source').notNull(),
+    /** probe 定義のキー (`newsProbes.ts` のコード定数と一致)。 */
+    probeKey: text('probe_key').notNull(),
+    /** 'volume' (報道量%) / 'tone' (平均トーン) / 'upload_count' (投稿本数、将来PR)。 */
+    metric: text('metric').notNull(),
+    /** 観測 bucket の ISO UTC (GDELT timeline の `date` を正規化した値)。 */
+    bucketAt: text('bucket_at').notNull(),
+    value: real('value').notNull(),
+    /** producer が実際に fetch/insert した時刻 (ISO UTC)。 */
+    fetchedAt: text('fetched_at').notNull(),
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    // 冪等 backfill の要 (上記コメント参照)。`macroEventCalendar` と同様、この
+    // unique index が gate (将来PR) の trailing-window range read もカバーする
+    // ので別建ての plain index は追加しない (drop-in covering)。
+    sourceProbeMetricBucketUnique: uniqueIndex(
+      'attention_observation_source_probe_metric_bucket_unique',
+    ).on(t.source, t.probeKey, t.metric, t.bucketAt),
+  }),
+)
+
+export type AttentionObservationRow = typeof attentionObservation.$inferSelect
+export type AttentionObservationInsert = typeof attentionObservation.$inferInsert

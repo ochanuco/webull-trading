@@ -79,10 +79,14 @@ export function createEarningsCalendarRepo(db: EarningsCalendarDb): EarningsCale
       // で multi-row INSERT (chunk) にまとめ、`onConflictDoNothing()` で UNIQUE
       // 違反 row のみ skip する挙動は維持。drizzle d1 driver は VALUES (?,?), (?,?), ...
       // の prepared statement を 1 statement で送るため、chunk あたり 1 subrequest。
+      //
+      // CHUNK は D1 の bound parameter 上限 (1 クエリ 100 個) から逆算する。
+      // multi-row INSERT の bind 数は `列数 × 行数` なので、3 列 → 100 / 3 = 33 行。
+      // 以前の 50 は 150 bind になり、34 件以上を一度に seed すると失敗していた。
       let inserted = 0
       let skipped = 0
       if (records.length === 0) return { inserted, skipped }
-      const CHUNK = 50
+      const CHUNK = 33
       for (let i = 0; i < records.length; i += CHUNK) {
         const chunk = records.slice(i, i + CHUNK)
         const values = chunk.map((r) => ({
