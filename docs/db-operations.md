@@ -138,9 +138,25 @@ WHERE id = 'default';
 UPDATE global_config SET drawdown_kill_threshold = -0.03, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE id = 'default';
 
+-- 戦略 / risk パラメタの runtime tuning (全一覧は docs/configuration.md)
+UPDATE global_config SET
+  pullback_default_k_atr = 2.5,
+  risk_dd_half_threshold = -0.05,
+  vix_critical_threshold = 30.0,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE id = 'default';
+
 -- 現状確認
 SELECT dry_run, trading_enabled, max_order_notional_usd, max_order_notional_jpy, drawdown_kill_threshold
 FROM global_config WHERE id = 'default';
+```
+
+per-symbol override は global default より優先される:
+
+```sql
+UPDATE symbol_config SET k_atr_override = 2.5, stop_pct_override = -0.05,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE symbol = 'SOXL';
 ```
 
 ## currency + budget (#76 Phase E)
