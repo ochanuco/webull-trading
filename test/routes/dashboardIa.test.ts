@@ -474,7 +474,8 @@ describe('table.fit の列ルール (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('約定履歴は table.fit + 銘柄列が grow', () => {
+  // 日時〜実現損益は折り返し禁止。余りを吸って折り返してよいのは 状態 (エラー文)。
+  it('約定履歴は table.fit + 状態列が grow (銘柄は折り返さない)', () => {
     // route ではなく renderer を直接叩く (loader の fake を用意するより堅い)
     const html = tradesBody(
       [
@@ -496,8 +497,9 @@ describe('table.fit の列ルール (#dashboard-ia)', () => {
       50,
     )
     expect(html).toContain('<table class="fit">')
-    expect(html).toContain('<th class="grow">銘柄</th>')
-    // 状態 / モードは内容幅で止める (grow を持たない)
-    expect(html).not.toContain('<th class="grow">状態</th>')
+    expect(html).toContain('<th class="grow">状態</th>')
+    // 銘柄は折り返さない (grow を持たない) → ticker のみ表示で列幅も暴れない
+    expect(html).not.toContain('<th class="grow">銘柄</th>')
+    expect(html).toContain('<strong>SOXL</strong>')
   })
 })

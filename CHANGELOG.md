@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/ochanuco/webull-trading/compare/v1.3.0...v1.3.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **dashboard:** hold the trade columns on one line up to realized PnL ([3e2a53e](https://github.com/ochanuco/webull-trading/commit/3e2a53eb0c38f4548d6bd1b3cef1419dd932f127))
+* **dashboard:** hold the trade columns on one line up to realized PnL ([a5a9705](https://github.com/ochanuco/webull-trading/commit/a5a9705f72a9730b8d6b5d801ad12c0c2df91b36))
+
 ## [1.3.0](https://github.com/ochanuco/webull-trading/compare/v1.2.0...v1.3.0) (2026-07-28)
 
 
