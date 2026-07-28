@@ -153,8 +153,16 @@ export function tradesBody(
       const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       // ▼ は同一銘柄の約定だけに絞り込み、「判定」は clientOrderId でこの注文の
       // 判定行 (cron) へ飛ぶ逆リンク (#nav-links)。
+      // 銘柄は ticker のみ。正式名称 (VUG-Vanguard Growth Index Fund ETF Shares 等)
+      // をそのまま出すと、折り返し禁止の列が横に伸びて表全体が破綻するので
+      // title (ホバー) に逃がす。inactive の注記も同じ title に載せる。
+      const symbolTitle = r.symbol
+        ? inactive
+          ? `${symbolText} — ${inactiveTooltip(r.symbol, universe)}`
+          : (symbolText ?? r.symbol)
+        : ''
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(symbolText!)}</strong></a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の約定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="${esc(symbolTitle)}" style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(r.symbol)}</strong></a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の約定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a>`
         : '<span class="muted">—</span>'
       const decisionLink = r.clientOrderId
         ? ` <a href="/dashboard/cron?clientOrderId=${encodeURIComponent(r.clientOrderId)}" class="muted" title="この注文の判定 (戦略判定ログ) を見る" style="font-size:11px">判定→</a>`
@@ -210,12 +218,12 @@ export function tradesBody(
         <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
         <td style="white-space:nowrap">${eventCell}${decisionLink}</td>
-        <td class="grow">${symbolCell}</td>
+        <td>${symbolCell}</td>
         <td style="white-space:nowrap">${sideCell}</td>
         <td class="num">${qtyCell}</td>
         <td class="num">${priceCell}</td>
         <td class="num">${pnlCell}</td>
-        <td>${statusCell}</td>
+        <td class="grow">${statusCell}</td>
         <td>${modeCell}</td>
       </tr>`
     })
@@ -224,8 +232,9 @@ export function tradesBody(
   <div class="tablewrap">
   <table class="fit">
     <thead><tr>
-      <th></th><th>日時 (JST)</th><th>イベント</th><th class="grow">銘柄</th><th>売買</th>
-      <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th><th>状態</th><th>モード</th>
+      <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th>
+      <th class="grow">状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
