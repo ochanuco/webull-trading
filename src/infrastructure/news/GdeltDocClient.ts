@@ -1,5 +1,15 @@
 const DEFAULT_BASE_URL = 'https://api.gdeltproject.org'
-const DEFAULT_TIMEOUT_MS = 5_000
+/**
+ * GDELT は素で遅い。本番で 5s (quote/bar client からの流用) にしていたところ、
+ * 全 tick が `The operation was aborted` で失敗し 1 件も蓄積できていなかった。
+ * 実測でもレート制限応答を返すだけで 20s 超かかることがある。
+ *
+ * quote/bar の 5s が短いのは、あれが取引判断のクリティカルパスに居て「古い値で
+ * 発注するより落ちる方が安全」だから。GDELT はその経路に居ない — producer は
+ * cron/alarm 側で非同期に回り、gate は D1 を読むだけなので、待っても取引は
+ * 止まらない。取り逃がす方が損。
+ */
+const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_TIMESPAN = '1d'
 /** `response.text()` truncation cap for error messages (avoid logging huge HTML bodies). */
 const BODY_SNIPPET_MAX_CHARS = 200
