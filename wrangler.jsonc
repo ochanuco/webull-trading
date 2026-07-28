@@ -119,7 +119,12 @@
         "QUOTE_SOURCE": "webull",
         // #475③: bars も staging のみ Webull primary (canary)。^VIX / JP /
         // 障害時は Yahoo に自動 fallback。
-        "BAR_SOURCE": "webull"
+        "BAR_SOURCE": "webull",
+        // newsShockGate PR 1: GDELT の報道量 / トーンを attention_observation に
+        // 蓄積する producer の opt-in flag。取引経路からは参照されない観測専用で、
+        // gate 本体は `global_config.news_shock_mode` (既定 off) が別途握る。
+        // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
+        "NEWS_ATTENTION_ENABLED": "true"
       },
       "routes": [
         { "pattern": "trading-staging.chanu.co", "custom_domain": true }
@@ -174,7 +179,12 @@
         // primary、^VIX / JP / 障害時は Yahoo へ自動 fallback (FallbackBarClient /
         // quoteScheduler)。quote と bars を揃える。
         "QUOTE_SOURCE": "webull",
-        "BAR_SOURCE": "webull"
+        "BAR_SOURCE": "webull",
+        // newsShockGate PR 1: 5分 cron で GDELT を 1 リクエストずつ叩き
+        // attention_observation に蓄積する producer の opt-in flag。
+        // これ自体は取引判断に影響しない — gate は `global_config.news_shock_mode`
+        // (既定 off) で別に握っており、閾値を実データで校正するまで off のまま。
+        "NEWS_ATTENTION_ENABLED": "true"
       },
       "routes": [
         { "pattern": "trading.chanu.co", "custom_domain": true }
