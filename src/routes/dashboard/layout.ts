@@ -47,6 +47,20 @@ export const STYLE = `
   .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
   .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
+  /* #dashboard-ia: 運転状態帯のカード。左の色帯で状態を形でも読めるようにする
+     (数値だけだと「取引 OFF」を見落とす)。 */
+  .state-band{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin-bottom:4px}
+  /* flex-grow を持たせると 5 枚が画面幅いっぱいに引き伸ばされ、ラベルと値の
+     間が間延びする。自然幅で左詰めにし、余りは緊急停止ボタンの前に残す。 */
+  .state-card{flex:0 1 auto;min-width:118px;border:1px solid #d0d0d5;border-left:3px solid #d0d0d5;border-radius:6px;padding:8px 14px;background:#fff}
+  .state-card.live{border-left-color:#1a7f37}
+  .state-card.hold{border-left-color:#9a6700}
+  .state-card.alarm{border-left-color:#c0392b}
+  .state-value{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
+  .state-value a{color:inherit;text-decoration:none}
+  .state-value a:hover{text-decoration:underline}
+  .state-kill{align-self:center;margin-left:auto;background:#fdecea;color:#c0392b;border:1px solid #f0b3ac;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;text-decoration:none;white-space:nowrap}
+  .state-kill:hover{background:#f8d7d3}
   /* #dashboard-ia Phase 3: ホームの領域見出し (運転状態 / リスクと建玉 / 最近の活動)。 */
   .area-label{font-size:11px;letter-spacing:.12em;color:#6e6e73;margin:18px 0 6px;display:flex;align-items:center;gap:8px}
   .area-label::after{content:"";flex:1;height:1px;background:#e3e3e8}
@@ -76,7 +90,10 @@ export const STYLE = `
   .subnav-link:hover{background:#f0f0f3}
   .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
   .nav-toggle{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:4px 8px;color:#1d1d1f;line-height:1}
-  .main{min-width:0;padding:24px;overflow-x:auto}
+  /* 読み幅の上限は **全ページ共通 1160px**。ページごとに変えると、ホームから
+     約定履歴へ移った瞬間に器の幅が変わって落ち着かない。横に長い表
+     (約定履歴 / 銘柄管理) は overflow-x で内側にスクロールさせる。 */
+  .main{min-width:0;padding:24px;overflow-x:auto;max-width:1160px;margin:0 auto;width:100%}
   @media(max-width:780px){
     .main{padding:12px 8px}
     .nav-toggle{display:block}
@@ -134,7 +151,18 @@ export const STYLE = `
   .sub-head{margin:20px 0 6px;font-size:14px;font-weight:700}
   /* 右寄せ数値セル */
   .num{text-align:right;font-variant-numeric:tabular-nums}
+  /* 列数の多い表 (約定履歴 / 銘柄管理) は器の幅に収まらない。ページ全体を
+     横スクロールさせると nav ごと動いて操作しづらいので、表だけを内側で
+     スクロールさせる。 */
+  .tablewrap{overflow-x:auto}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
+  /* table.fit: 列幅を「役割」で決める表。**1 列目に余りを寄せる指定はしない** —
+     時刻や状態のような短い列に幅が回ると、値が 1 文字ずつ縦に折り返す。
+     既定で全セル nowrap にし、余りは grow を付けた列 (通常は銘柄) だけが吸う。
+     ホーム / 約定履歴のように「1 行 1 レコードで読ませたい」表に付ける。 */
+  table.fit{table-layout:auto}
+  table.fit th,table.fit td{white-space:nowrap}
+  table.fit th.grow,table.fit td.grow{width:99%;white-space:normal}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
   tr:last-child td{border-bottom:none}
@@ -276,7 +304,6 @@ export const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: 
 export const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/alerts', text: 'アラート', title: '通知の履歴 (severity / cause で絞り込み)' },
   { href: '/dashboard/cron', text: '判定ログ', title: 'なぜ買った / 買わなかったかを requestId で追う' },
-  { href: '/dashboard/cron?view=matrix', text: '判定マトリクス', title: '全銘柄 × 直近 cron の判定を一望する' },
   { href: '/dashboard/audit', text: '監査ログ', title: '設定変更の before/after と実行者' },
   {
     href: '/dashboard/broker-probe',
@@ -344,11 +371,11 @@ export function renderTopNav(active?: NavGroupKey | null): string {
  * (charts ページ自体は既存の charts subnav のまま — subnav 2 本は出さない)。
  */
 /**
- * レビュー内 subnav。判定ログ / 判定マトリクス / アラートは診断へ移したので
+ * レビュー内 subnav。判定ログ / アラートは診断へ移したので
  * ここには出さないが、**個別ページ側は同じ subnav を出して迷子を防ぐ**ため
  * key 自体は残す (active にならないだけ)。
  */
-export type AnalysisSubnavKey = 'trades' | 'cron' | 'matrix' | 'quality' | 'equity' | 'alerts'
+export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts'
 
 export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   key: AnalysisSubnavKey
@@ -368,12 +395,11 @@ export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
  * 診断ページ間の subnav。アラート → 判定ログ → 監査の横移動は障害対応で
  * 実際に使うので、診断側にも subnav を出す (レビュー subnav には出さない)。
  */
-export type DiagSubnavKey = 'alerts' | 'cron' | 'matrix' | 'audit' | 'probe' | 'token'
+export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token'
 
 const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
   '/dashboard/alerts': 'alerts',
   '/dashboard/cron': 'cron',
-  '/dashboard/cron?view=matrix': 'matrix',
   '/dashboard/audit': 'audit',
   '/dashboard/broker-probe': 'probe',
   '/dashboard/webull-token': 'token',
@@ -482,7 +508,7 @@ export function layout(
     window.addEventListener('resize', set);
   })();
 </script>
-<main class="main">
+<main class="main${activeNav === 'home' ? ' main-narrow' : ''}">
   ${body}
   <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
 </main>

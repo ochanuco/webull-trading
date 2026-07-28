@@ -58,12 +58,22 @@ import { clampLimit, jsonPretty, messageOf, parseCursor, unavailable } from './s
 import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderDiagSubnav, renderLayout } from './layout'
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
-import { ALL_OVERVIEW_PANELS, type OverviewData, loadRecentFills, overviewBody, parseOverviewPanels } from './overview'
-import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, positionsBody } from './positions'
-import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
+import {
+  ALL_OVERVIEW_PANELS,
+  type HomeRunSignals,
+  type OverviewData,
+  type StopDistanceView,
+  loadRecentFills,
+  overviewBody,
+  parseOverviewPanels,
+} from './overview'
+import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
+import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData } from './positions'
+import { resolveStopDistance } from '../../trading/strategy/stopDistance'
+import { parseEquityRange, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
-import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
+import { cronBody, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
 import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, strategyParamsFromGlobal } from './charts/shared'
@@ -118,6 +128,117 @@ function chartsPageSubnav(tab: ReturnType<typeof parseChartsTab>): string {
  * still yields a usable landing.
  */
 
+/**
+ * 運転状態帯のシグナル (#dashboard-ia)。判定ログの最新時刻で cron の生存を、
+ * 直近 24h の通知件数でアラート状況を表す。**ack (確認済み) の概念はまだ無い**
+ * ので「未確認」は 24h 件数で代用している。
+ */
+async function loadHomeRunSignals(db: D1Database): Promise<HomeRunSignals> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const [cronRow, alertRows] = await Promise.all([
+    db.prepare('SELECT timestamp FROM strategy_decision_log ORDER BY id DESC LIMIT 1').first<{
+      timestamp: string
+    }>(),
+    db
+      .prepare(
+        "SELECT severity, COUNT(*) AS n FROM notification_emit_log WHERE timestamp >= ? AND severity IN ('critical','warning') GROUP BY severity",
+      )
+      .bind(since)
+      .all<{ severity: string; n: number }>(),
+  ])
+  let alertCritical = 0
+  let alertWarning = 0
+  for (const r of alertRows.results ?? []) {
+    if (r.severity === 'critical') alertCritical = Number(r.n) || 0
+    if (r.severity === 'warning') alertWarning = Number(r.n) || 0
+  }
+  return { lastCronAt: cronRow?.timestamp ?? null, alertCritical, alertWarning }
+}
+
+/** 直近 30 日の勝敗と発注エラー件数 (最近の活動フッター)。 */
+async function loadActivityStats(
+  db: D1Database,
+): Promise<{ wins: number; losses: number; errors: number }> {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+  const row = await db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+         SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+         SUM(CASE WHEN error_class IS NOT NULL THEN 1 ELSE 0 END) AS errors
+       FROM trade_journal WHERE timestamp >= ?`,
+    )
+    .bind(since)
+    .first<{ wins: number | null; losses: number | null; errors: number | null }>()
+  return {
+    wins: Number(row?.wins ?? 0) || 0,
+    losses: Number(row?.losses ?? 0) || 0,
+    errors: Number(row?.errors ?? 0) || 0,
+  }
+}
+
+/**
+ * 銘柄ごとの最新 atr20 (判定ログの indicators_json)。実効 stop の算出に使う。
+ * 判定ログが無い銘柄は不在 → 呼び出し側が pct stop に fallback する。
+ */
+async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  if (symbols.length === 0) return out
+  const rows = await db
+    .prepare(
+      `SELECT symbol, indicators_json FROM strategy_decision_log
+       WHERE id IN (SELECT MAX(id) FROM strategy_decision_log GROUP BY symbol)`,
+    )
+    .all<{ symbol: string | null; indicators_json: string | null }>()
+  for (const r of rows.results ?? []) {
+    if (!r.symbol || !r.indicators_json) continue
+    try {
+      const parsed = JSON.parse(r.indicators_json) as { atr20?: unknown }
+      if (typeof parsed.atr20 === 'number' && Number.isFinite(parsed.atr20) && parsed.atr20 > 0) {
+        out.set(r.symbol.toUpperCase(), parsed.atr20)
+      }
+    } catch {
+      // 壊れた JSON は無視 (stop 距離が出ないだけで画面は描ける)
+    }
+  }
+  return out
+}
+
+/**
+ * 建玉ごとの「実効 stop までの距離」。cron と同じ `resolveStopDistance` を
+ * 通すので、表示値と実際に切られる水準がズレない。
+ */
+function buildStopDistances(
+  positions: Array<{ sym: string; state: SymbolState | null }>,
+  atr20Map: Map<string, number>,
+  defaultRule: SymbolRule,
+  universe: SymbolUniverse,
+): Map<string, StopDistanceView> {
+  const rules = buildSymbolRules(defaultRule, universe)
+  const out = new Map<string, StopDistanceView>()
+  for (const r of positions) {
+    const pos = r.state?.position
+    const quote = r.state?.lastQuote?.price
+    if (!pos || pos.qty <= 0 || !(pos.avgPrice > 0) || typeof quote !== 'number' || !(quote > 0)) {
+      continue
+    }
+    const sym = r.sym.toUpperCase()
+    const rule = rules[sym] ?? defaultRule
+    const stop = resolveStopDistance({
+      price: pos.avgPrice,
+      stopPct: rule.stopPct,
+      takeProfitPct: rule.takeProfitPct,
+      atr20: atr20Map.get(sym) ?? 0,
+      kAtr: rule.kAtr,
+      maxStopToTpRatio: rule.maxStopToTpRatio,
+    })
+    const pnlPct = ((quote - pos.avgPrice) / pos.avgPrice) * 100
+    const effectiveStopPct = stop.effectiveStopPct * 100
+    out.set(sym, { pnlPct, effectiveStopPct, toStopPct: pnlPct - effectiveStopPct })
+  }
+  return out
+}
+
 export const dashboard = new Hono<DashboardBindings>()
   .use('*', rateLimit('DASHBOARD'))
   .use('*', async (c, next) => {
@@ -135,7 +256,7 @@ export const dashboard = new Hono<DashboardBindings>()
       const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
       const symbolClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
       const range = parseEquityRange(c.req.query('range'))
-      const [panelsCsv, portfolio, snapshots, usdJpy, positions, strategyPriceMap, recentTrades, vixRegime, global] =
+      const [panelsCsv, portfolio, snapshots, usdJpy, positions, strategyPriceMap, recentTrades, runSignals, activityStats, atr20Map, vixRegime, global] =
         await Promise.all([
           loadOverviewPanelsCsv(db),
           c.env.PORTFOLIO_STATE
@@ -161,6 +282,12 @@ export const dashboard = new Hono<DashboardBindings>()
             : Promise.resolve([] as Array<{ sym: string; state: SymbolState | null; error: string | null }>),
           loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
           loadRecentFills(c.env.DB, 8),
+          // #dashboard-ia: 運転状態帯 (最終 cron / アラート件数) と
+          // 最近の活動フッター (勝敗 / 発注エラー)。いずれも best-effort で、
+          // 失敗しても home 全体は描画する。
+          loadHomeRunSignals(c.env.DB).catch(() => null),
+          loadActivityStats(c.env.DB).catch(() => null),
+          loadLatestAtr20(c.env.DB, allDisplaySymbols).catch(() => new Map<string, number>()),
           c.env.DB
             ? loadVixRegimeSnapshot(c.env.DB, c.get('requestId')).catch(() => null)
             : Promise.resolve(null),
@@ -176,6 +303,9 @@ export const dashboard = new Hono<DashboardBindings>()
         positions,
         strategyPriceMap,
         recentTrades,
+        runSignals,
+        activityStats,
+        stopDistances: buildStopDistances(positions, atr20Map, strategyParamsFromGlobal(global), universe),
         vixRegime,
         dryRun: global.dryRun,
         // env TRADING_ENABLED の deploy-gate を反映した effective 値 (CodeRabbit #397:
@@ -188,17 +318,12 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, 'ダッシュボード', unavailable(messageOf(err))))
     }
   })
-  .get('/positions', async (c) => {
-    if (!c.env.DB || !c.env.SYMBOL_STATE) {
-      return c.html(renderLayout(c, 'ポートフォリオ', unavailable('DB or SYMBOL_STATE not bound')))
-    }
-    // loader は /positions/json と共用 (#dashboard-json-api) — 「画面で見る内容 =
-    // AI に渡す JSON」を同一の取得結果から作る。
-    const data = await loadPositionsPageData(c.env)
-    return c.html(
-      renderLayout(c, 'ポートフォリオ', positionsBody(data.rows, data.strategyPriceMap, data.universe)),
-    )
-  })
+  /**
+   * #dashboard-ia Phase 5: 保有ポジションはホームの「リスクと建玉」に統合済み。
+   * 旧 URL (ブックマーク / 過去の通知リンク) は 302 で送る。JSON export は
+   * AI / スクリプト向けにそのまま残す。
+   */
+  .get('/positions', (c) => c.redirect('/dashboard', 302))
   /**
    * positions の JSON export (#dashboard-json-api)。read-only GET のみ。
    * schema / envelope 規約は shared.ts の `exportMeta` docstring 参照。
@@ -216,34 +341,11 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty({ error: 'positions_json_export_failed', message: messageOf(err) }, 500)
     }
   })
-  .get('/portfolio', async (c) => {
-    if (!c.env.PORTFOLIO_STATE) {
-      return c.html(renderLayout(c, '口座サマリ', unavailable('PORTFOLIO_STATE not bound')))
-    }
-    try {
-      const portfolio = await new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio()
-      // VIX regime (issue #196 3/3) を D1 snapshot から読む。table 未 migration /
-      // bind 不在は null fallback (= 未知扱い、ページ自体は表示)。
-      const vixRegime = c.env.DB
-        ? await loadVixRegimeSnapshot(c.env.DB, c.get('requestId'))
-        : null
-      const range = parseEquityRange(c.req.query('range'))
-      // 総資産時系列 (roll-daily 経由で 1 row / 日)。DB 不在 / load 失敗時は
-      // 空配列で fallback → チャート枠は出さず "データ無し" メッセージにする。
-      const snapshots: PortfolioEquitySnapshotRow[] = c.env.DB
-        ? await safeLoadPortfolioSnapshots(c.env.DB, range)
-        : []
-      return c.html(
-        renderLayout(
-          c,
-          '口座サマリ',
-          portfolioBody(portfolio, vixRegime, { snapshots, range }),
-        ),
-      )
-    } catch (err) {
-      return c.html(renderLayout(c, '口座サマリ', unavailable(messageOf(err))))
-    }
-  })
+  /**
+   * #dashboard-ia Phase 5: 口座サマリはホームの「運転状態」+「リスクと建玉」に
+   * 統合済み。累積 realized PnL の推移はレビュー (`/dashboard/charts`)。
+   */
+  .get('/portfolio', (c) => c.redirect('/dashboard', 302))
   .get('/trades', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound'), renderAnalysisSubnav('trades')))
@@ -607,32 +709,8 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty({ error: 'cron_json_export_failed', message: messageOf(err) }, 500)
     }
   })
-  /**
-   * 判断トレースマトリクス export (#PR-5)。`?view=matrix` と同じ packet を
-   * `dashboard_cron_matrix_export.v1` envelope で返す (AI 相談 / 外部集計用)。
-   */
-  .get('/cron/matrix/json', async (c) => {
-    if (!c.env.DB) {
-      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
-    }
-    try {
-      const days = 30
-      const rows = await loadDecisionMatrix(c.env.DB, days)
-      const matrix = buildDecisionMatrix(rows, { days, now: new Date() })
-      return jsonPretty({
-        schema: 'dashboard_cron_matrix_export.v1',
-        exportedAt: new Date().toISOString(),
-        days,
-        rowCount: matrix.rows.length,
-        matrix,
-      })
-    } catch (err) {
-      return jsonPretty({ error: 'cron_matrix_export_failed', message: messageOf(err) }, 500)
-    }
-  })
   .get('/cron', async (c) => {
-    // subnav の active は一覧 / マトリクスで切替 (診断 subnav #dashboard-ia)。
-    const cronSubnav = renderDiagSubnav(c.req.query('view') === 'matrix' ? 'matrix' : 'cron')
+    const cronSubnav = renderDiagSubnav('cron')
     if (!c.env.DB) {
       return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound'), cronSubnav))
     }
@@ -641,32 +719,6 @@ export const dashboard = new Hono<DashboardBindings>()
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     // trades の「判定→」から飛んでくる注文単位の絞り込み (#nav-links)。
     const clientOrderIdFilter = c.req.query('clientOrderId')?.trim() || undefined
-    // 判断トレースマトリクス (#PR-5)。symbol / clientOrderId フィルタは集計に
-    // 使わない (URL に付いてきても壊れない) が、一覧へ戻る pill に伝搬させる。
-    if (c.req.query('view') === 'matrix') {
-      try {
-        const days = 30
-        const [matrixRows, universe] = await Promise.all([
-          loadDecisionMatrix(c.env.DB, days),
-          loadSymbolUniverse(c.env).catch(() => null),
-        ])
-        return c.html(
-          renderLayout(
-            c,
-            '戦略判定',
-            decisionMatrixBody(
-              buildDecisionMatrix(matrixRows, { days, now: new Date() }),
-              aggregateReasonTrend(matrixRows),
-              universe,
-              { days, limit, symbolFilter },
-            ),
-            cronSubnav,
-          ),
-        )
-      } catch (err) {
-        return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
-      }
-    }
     // 休場時間帯の行 (手動 run 等) は既定で隠す (#cron-session-filter)。
     // `?session=all` で全時間帯表示。SQL では時刻×市場×祝日の判定が書けない
     // (DST もある) ので、開場行が limit 件そろうまでカーソルを進めながら

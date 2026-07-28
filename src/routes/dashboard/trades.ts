@@ -210,7 +210,7 @@ export function tradesBody(
         <td>${logCopyRowBtn(r.id)}</td>
         <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
         <td style="white-space:nowrap">${eventCell}${decisionLink}</td>
-        <td>${symbolCell}</td>
+        <td class="grow">${symbolCell}</td>
         <td style="white-space:nowrap">${sideCell}</td>
         <td class="num">${qtyCell}</td>
         <td class="num">${priceCell}</td>
@@ -221,13 +221,15 @@ export function tradesBody(
     })
     .join('')
   return `${filterBanner}${pills}
-  <table>
+  <div class="tablewrap">
+  <table class="fit">
     <thead><tr>
-      <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
+      <th></th><th>日時 (JST)</th><th>イベント</th><th class="grow">銘柄</th><th>売買</th>
       <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th><th>状態</th><th>モード</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  </div>
   ${renderPaginationNav({
     baseHref: `/dashboard/trades?view=${view}&limit=${limit}${filterQs}`,
     before,
