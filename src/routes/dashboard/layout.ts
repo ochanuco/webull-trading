@@ -153,11 +153,13 @@ export const STYLE = `
   /* 右寄せ数値セル */
   .num{text-align:right;font-variant-numeric:tabular-nums}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
-  /* 列を均等に開かせない: 1 列目 (銘柄 / 時刻) に余りを寄せ、数値列は内容幅。
-     **ホーム限定**。1 列目がアイコン/ボタン列の表 (判定履歴など) に効かせると
-     他の列が潰れてヘッダが縦に折り返す。 */
-  .main-narrow table th:first-child,.main-narrow table td:first-child{width:99%}
-  .main-narrow table td.num,.main-narrow table th.num{width:1%;white-space:nowrap}
+  /* ホームの表: 列幅は内容に任せる (auto)。**1 列目に余りを寄せる指定はしない** —
+     時刻や銘柄に 99% を渡すと、数量・状態のような短い列が 1 文字幅まで潰れて
+     縦に折り返す。代わりに「折り返してはいけない列」だけを nowrap で守り、
+     余りは grow クラスを持つ列が吸う。 */
+  .main-narrow table{table-layout:auto}
+  .main-narrow table th,.main-narrow table td{white-space:nowrap}
+  .main-narrow table th.grow,.main-narrow table td.grow{width:99%;white-space:normal}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
   tr:last-child td{border-bottom:none}
