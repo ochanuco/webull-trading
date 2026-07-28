@@ -447,7 +447,8 @@ describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('ホームは main-narrow、それ以外のページには付かない', async () => {
+  // 幅の上限は全ページ (.main = 1400px)。ホームだけ更に狭い (.main-narrow = 1160px)。
+  it('ホームだけ main-narrow が付き、他ページも .main の上限は効く', async () => {
     const app = createApp()
     const home = await (await app.request('/dashboard', { headers: authHeader }, baseEnv)).text()
     expect(home).toContain('class="main main-narrow"')
