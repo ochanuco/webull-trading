@@ -47,6 +47,18 @@ export const STYLE = `
   .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
   .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
+  /* #dashboard-ia: 運転状態帯のカード。左の色帯で状態を形でも読めるようにする
+     (数値だけだと「取引 OFF」を見落とす)。 */
+  .state-band{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin-bottom:4px}
+  .state-card{flex:1 1 150px;border:1px solid #d0d0d5;border-left:3px solid #d0d0d5;border-radius:6px;padding:8px 12px;background:#fff}
+  .state-card.live{border-left-color:#1a7f37}
+  .state-card.hold{border-left-color:#9a6700}
+  .state-card.alarm{border-left-color:#c0392b}
+  .state-value{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
+  .state-value a{color:inherit;text-decoration:none}
+  .state-value a:hover{text-decoration:underline}
+  .state-kill{align-self:center;background:#fdecea;color:#c0392b;border:1px solid #f0b3ac;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;text-decoration:none;white-space:nowrap}
+  .state-kill:hover{background:#f8d7d3}
   /* #dashboard-ia Phase 3: ホームの領域見出し (運転状態 / リスクと建玉 / 最近の活動)。 */
   .area-label{font-size:11px;letter-spacing:.12em;color:#6e6e73;margin:18px 0 6px;display:flex;align-items:center;gap:8px}
   .area-label::after{content:"";flex:1;height:1px;background:#e3e3e8}

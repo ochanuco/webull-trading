@@ -58,8 +58,18 @@ import { clampLimit, jsonPretty, messageOf, parseCursor, unavailable } from './s
 import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderDiagSubnav, renderLayout } from './layout'
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
-import { ALL_OVERVIEW_PANELS, type OverviewData, loadRecentFills, overviewBody, parseOverviewPanels } from './overview'
+import {
+  ALL_OVERVIEW_PANELS,
+  type HomeRunSignals,
+  type OverviewData,
+  type StopDistanceView,
+  loadRecentFills,
+  overviewBody,
+  parseOverviewPanels,
+} from './overview'
+import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { buildPositionsPacket, loadLatestStrategyPrices, loadPositionsPageData, positionsBody } from './positions'
+import { resolveStopDistance } from '../../trading/strategy/stopDistance'
 import { parseEquityRange, portfolioBody, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
@@ -118,6 +128,117 @@ function chartsPageSubnav(tab: ReturnType<typeof parseChartsTab>): string {
  * still yields a usable landing.
  */
 
+/**
+ * 運転状態帯のシグナル (#dashboard-ia)。判定ログの最新時刻で cron の生存を、
+ * 直近 24h の通知件数でアラート状況を表す。**ack (確認済み) の概念はまだ無い**
+ * ので「未確認」は 24h 件数で代用している。
+ */
+async function loadHomeRunSignals(db: D1Database): Promise<HomeRunSignals> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const [cronRow, alertRows] = await Promise.all([
+    db.prepare('SELECT timestamp FROM strategy_decision_log ORDER BY id DESC LIMIT 1').first<{
+      timestamp: string
+    }>(),
+    db
+      .prepare(
+        "SELECT severity, COUNT(*) AS n FROM notification_emit_log WHERE timestamp >= ? AND severity IN ('critical','warning') GROUP BY severity",
+      )
+      .bind(since)
+      .all<{ severity: string; n: number }>(),
+  ])
+  let alertCritical = 0
+  let alertWarning = 0
+  for (const r of alertRows.results ?? []) {
+    if (r.severity === 'critical') alertCritical = Number(r.n) || 0
+    if (r.severity === 'warning') alertWarning = Number(r.n) || 0
+  }
+  return { lastCronAt: cronRow?.timestamp ?? null, alertCritical, alertWarning }
+}
+
+/** 直近 30 日の勝敗と発注エラー件数 (最近の活動フッター)。 */
+async function loadActivityStats(
+  db: D1Database,
+): Promise<{ wins: number; losses: number; errors: number }> {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+  const row = await db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+         SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+         SUM(CASE WHEN error_class IS NOT NULL THEN 1 ELSE 0 END) AS errors
+       FROM trade_journal WHERE timestamp >= ?`,
+    )
+    .bind(since)
+    .first<{ wins: number | null; losses: number | null; errors: number | null }>()
+  return {
+    wins: Number(row?.wins ?? 0) || 0,
+    losses: Number(row?.losses ?? 0) || 0,
+    errors: Number(row?.errors ?? 0) || 0,
+  }
+}
+
+/**
+ * 銘柄ごとの最新 atr20 (判定ログの indicators_json)。実効 stop の算出に使う。
+ * 判定ログが無い銘柄は不在 → 呼び出し側が pct stop に fallback する。
+ */
+async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  if (symbols.length === 0) return out
+  const rows = await db
+    .prepare(
+      `SELECT symbol, indicators_json FROM strategy_decision_log
+       WHERE id IN (SELECT MAX(id) FROM strategy_decision_log GROUP BY symbol)`,
+    )
+    .all<{ symbol: string | null; indicators_json: string | null }>()
+  for (const r of rows.results ?? []) {
+    if (!r.symbol || !r.indicators_json) continue
+    try {
+      const parsed = JSON.parse(r.indicators_json) as { atr20?: unknown }
+      if (typeof parsed.atr20 === 'number' && Number.isFinite(parsed.atr20) && parsed.atr20 > 0) {
+        out.set(r.symbol.toUpperCase(), parsed.atr20)
+      }
+    } catch {
+      // 壊れた JSON は無視 (stop 距離が出ないだけで画面は描ける)
+    }
+  }
+  return out
+}
+
+/**
+ * 建玉ごとの「実効 stop までの距離」。cron と同じ `resolveStopDistance` を
+ * 通すので、表示値と実際に切られる水準がズレない。
+ */
+function buildStopDistances(
+  positions: Array<{ sym: string; state: SymbolState | null }>,
+  atr20Map: Map<string, number>,
+  defaultRule: SymbolRule,
+  universe: SymbolUniverse,
+): Map<string, StopDistanceView> {
+  const rules = buildSymbolRules(defaultRule, universe)
+  const out = new Map<string, StopDistanceView>()
+  for (const r of positions) {
+    const pos = r.state?.position
+    const quote = r.state?.lastQuote?.price
+    if (!pos || pos.qty <= 0 || !(pos.avgPrice > 0) || typeof quote !== 'number' || !(quote > 0)) {
+      continue
+    }
+    const sym = r.sym.toUpperCase()
+    const rule = rules[sym] ?? defaultRule
+    const stop = resolveStopDistance({
+      price: pos.avgPrice,
+      stopPct: rule.stopPct,
+      takeProfitPct: rule.takeProfitPct,
+      atr20: atr20Map.get(sym) ?? 0,
+      kAtr: rule.kAtr,
+      maxStopToTpRatio: rule.maxStopToTpRatio,
+    })
+    const pnlPct = ((quote - pos.avgPrice) / pos.avgPrice) * 100
+    const effectiveStopPct = stop.effectiveStopPct * 100
+    out.set(sym, { pnlPct, effectiveStopPct, toStopPct: pnlPct - effectiveStopPct })
+  }
+  return out
+}
+
 export const dashboard = new Hono<DashboardBindings>()
   .use('*', rateLimit('DASHBOARD'))
   .use('*', async (c, next) => {
@@ -135,7 +256,7 @@ export const dashboard = new Hono<DashboardBindings>()
       const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
       const symbolClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
       const range = parseEquityRange(c.req.query('range'))
-      const [panelsCsv, portfolio, snapshots, usdJpy, positions, strategyPriceMap, recentTrades, vixRegime, global] =
+      const [panelsCsv, portfolio, snapshots, usdJpy, positions, strategyPriceMap, recentTrades, runSignals, activityStats, atr20Map, vixRegime, global] =
         await Promise.all([
           loadOverviewPanelsCsv(db),
           c.env.PORTFOLIO_STATE
@@ -161,6 +282,12 @@ export const dashboard = new Hono<DashboardBindings>()
             : Promise.resolve([] as Array<{ sym: string; state: SymbolState | null; error: string | null }>),
           loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
           loadRecentFills(c.env.DB, 8),
+          // #dashboard-ia: 運転状態帯 (最終 cron / アラート件数) と
+          // 最近の活動フッター (勝敗 / 発注エラー)。いずれも best-effort で、
+          // 失敗しても home 全体は描画する。
+          loadHomeRunSignals(c.env.DB).catch(() => null),
+          loadActivityStats(c.env.DB).catch(() => null),
+          loadLatestAtr20(c.env.DB, allDisplaySymbols).catch(() => new Map<string, number>()),
           c.env.DB
             ? loadVixRegimeSnapshot(c.env.DB, c.get('requestId')).catch(() => null)
             : Promise.resolve(null),
@@ -176,6 +303,9 @@ export const dashboard = new Hono<DashboardBindings>()
         positions,
         strategyPriceMap,
         recentTrades,
+        runSignals,
+        activityStats,
+        stopDistances: buildStopDistances(positions, atr20Map, strategyParamsFromGlobal(global), universe),
         vixRegime,
         dryRun: global.dryRun,
         // env TRADING_ENABLED の deploy-gate を反映した effective 値 (CodeRabbit #397:
