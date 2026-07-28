@@ -73,7 +73,7 @@ import { resolveStopDistance } from '../../trading/strategy/stopDistance'
 import { parseEquityRange, safeLoadPortfolioSnapshots } from './portfolio'
 import { buildTradesPacket, loadTradeJournalRows, parseTradesQuery, tradesBody } from './trades'
 import { configBody } from './config'
-import { aggregateReasonTrend, buildDecisionMatrix, cronBody, decisionMatrixBody, loadDecisionMatrix, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
+import { cronBody, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
 import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, strategyParamsFromGlobal } from './charts/shared'
@@ -709,32 +709,8 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty({ error: 'cron_json_export_failed', message: messageOf(err) }, 500)
     }
   })
-  /**
-   * 判断トレースマトリクス export (#PR-5)。`?view=matrix` と同じ packet を
-   * `dashboard_cron_matrix_export.v1` envelope で返す (AI 相談 / 外部集計用)。
-   */
-  .get('/cron/matrix/json', async (c) => {
-    if (!c.env.DB) {
-      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
-    }
-    try {
-      const days = 30
-      const rows = await loadDecisionMatrix(c.env.DB, days)
-      const matrix = buildDecisionMatrix(rows, { days, now: new Date() })
-      return jsonPretty({
-        schema: 'dashboard_cron_matrix_export.v1',
-        exportedAt: new Date().toISOString(),
-        days,
-        rowCount: matrix.rows.length,
-        matrix,
-      })
-    } catch (err) {
-      return jsonPretty({ error: 'cron_matrix_export_failed', message: messageOf(err) }, 500)
-    }
-  })
   .get('/cron', async (c) => {
-    // subnav の active は一覧 / マトリクスで切替 (診断 subnav #dashboard-ia)。
-    const cronSubnav = renderDiagSubnav(c.req.query('view') === 'matrix' ? 'matrix' : 'cron')
+    const cronSubnav = renderDiagSubnav('cron')
     if (!c.env.DB) {
       return c.html(renderLayout(c, '戦略判定', unavailable('DB not bound'), cronSubnav))
     }
@@ -743,32 +719,6 @@ export const dashboard = new Hono<DashboardBindings>()
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
     // trades の「判定→」から飛んでくる注文単位の絞り込み (#nav-links)。
     const clientOrderIdFilter = c.req.query('clientOrderId')?.trim() || undefined
-    // 判断トレースマトリクス (#PR-5)。symbol / clientOrderId フィルタは集計に
-    // 使わない (URL に付いてきても壊れない) が、一覧へ戻る pill に伝搬させる。
-    if (c.req.query('view') === 'matrix') {
-      try {
-        const days = 30
-        const [matrixRows, universe] = await Promise.all([
-          loadDecisionMatrix(c.env.DB, days),
-          loadSymbolUniverse(c.env).catch(() => null),
-        ])
-        return c.html(
-          renderLayout(
-            c,
-            '戦略判定',
-            decisionMatrixBody(
-              buildDecisionMatrix(matrixRows, { days, now: new Date() }),
-              aggregateReasonTrend(matrixRows),
-              universe,
-              { days, limit, symbolFilter },
-            ),
-            cronSubnav,
-          ),
-        )
-      } catch (err) {
-        return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
-      }
-    }
     // 休場時間帯の行 (手動 run 等) は既定で隠す (#cron-session-filter)。
     // `?session=all` で全時間帯表示。SQL では時刻×市場×祝日の判定が書けない
     // (DST もある) ので、開場行が limit 件そろうまでカーソルを進めながら

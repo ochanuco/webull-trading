@@ -92,7 +92,7 @@ export const STYLE = `
   .nav-toggle{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:4px 8px;color:#1d1d1f;line-height:1}
   /* 読み幅の上限は **全ページ共通 1160px**。ページごとに変えると、ホームから
      約定履歴へ移った瞬間に器の幅が変わって落ち着かない。横に長い表
-     (判定マトリクス / 銘柄管理) は overflow-x で内側にスクロールさせる。 */
+     (約定履歴 / 銘柄管理) は overflow-x で内側にスクロールさせる。 */
   .main{min-width:0;padding:24px;overflow-x:auto;max-width:1160px;margin:0 auto;width:100%}
   @media(max-width:780px){
     .main{padding:12px 8px}
@@ -304,7 +304,6 @@ export const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: 
 export const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/alerts', text: 'アラート', title: '通知の履歴 (severity / cause で絞り込み)' },
   { href: '/dashboard/cron', text: '判定ログ', title: 'なぜ買った / 買わなかったかを requestId で追う' },
-  { href: '/dashboard/cron?view=matrix', text: '判定マトリクス', title: '全銘柄 × 直近 cron の判定を一望する' },
   { href: '/dashboard/audit', text: '監査ログ', title: '設定変更の before/after と実行者' },
   {
     href: '/dashboard/broker-probe',
@@ -372,11 +371,11 @@ export function renderTopNav(active?: NavGroupKey | null): string {
  * (charts ページ自体は既存の charts subnav のまま — subnav 2 本は出さない)。
  */
 /**
- * レビュー内 subnav。判定ログ / 判定マトリクス / アラートは診断へ移したので
+ * レビュー内 subnav。判定ログ / アラートは診断へ移したので
  * ここには出さないが、**個別ページ側は同じ subnav を出して迷子を防ぐ**ため
  * key 自体は残す (active にならないだけ)。
  */
-export type AnalysisSubnavKey = 'trades' | 'cron' | 'matrix' | 'quality' | 'equity' | 'alerts'
+export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts'
 
 export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   key: AnalysisSubnavKey
@@ -396,12 +395,11 @@ export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
  * 診断ページ間の subnav。アラート → 判定ログ → 監査の横移動は障害対応で
  * 実際に使うので、診断側にも subnav を出す (レビュー subnav には出さない)。
  */
-export type DiagSubnavKey = 'alerts' | 'cron' | 'matrix' | 'audit' | 'probe' | 'token'
+export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token'
 
 const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
   '/dashboard/alerts': 'alerts',
   '/dashboard/cron': 'cron',
-  '/dashboard/cron?view=matrix': 'matrix',
   '/dashboard/audit': 'audit',
   '/dashboard/broker-probe': 'probe',
   '/dashboard/webull-token': 'token',
