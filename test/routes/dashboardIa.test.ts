@@ -324,18 +324,17 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('実行モード')
     expect(body).toContain('株価の鮮度')
     expect(body).toContain('取引 ON')
-    expect(body).toContain('USDJPY')
-    expect(body).toContain('150.25')
+    expect(body).toContain('最終 cron')
+    expect(body).toContain('未確認アラート')
     // 2. 領域見出し
     expect(body).toContain('リスクと建玉')
     expect(body).toContain('最近の活動')
-    // 3. 保有ポジション (positions と同じテーブル)
-    expect(body).toContain('保有ポジション')
-    expect(body).toContain('SOXL')
-    expect(body).toContain('平均取得単価')
+    // 3. リスクと建玉 (KPI / 資産構成を畳んだ 1 枚)
+    expect(body).toContain('建玉')
+    expect(body).toContain('実効 stop は ATR と R:R 上限')
     // 4. 直近の約定 + 導線リンク
-    expect(body).toContain('最近の約定 / リスク状態')
-    expect(body).toContain('href="/dashboard/positions"')
+    expect(body).toContain('直近の約定')
+    expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('href="/dashboard/cron"')
     expect(body).toContain('href="/dashboard/alerts"')
   })
@@ -357,7 +356,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     }
   })
 
-  it('omits 資産サマリ帯 and shows positions guidance link when DOs are missing (graceful)', async () => {
+  it('DO 不在でも運転状態帯は出し、建玉パネルは理由を出す (graceful)', async () => {
     vi.mocked(loadPortfolioEquitySnapshots).mockResolvedValue([])
     const env = { ...baseEnv, DB: fakeD1() }
     const app = createApp()
@@ -368,9 +367,11 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).not.toContain('本日開始 equity')
     expect(body).not.toContain('home-equity-spark')
     expect(vi.mocked(loadUsdJpyRate)).not.toHaveBeenCalled()
-    // SYMBOL_STATE 不在 → テーブル省略 + /positions への誘導リンク
+    // SYMBOL_STATE 不在 → 建玉テーブルは出さず理由だけ出す
     expect(body).toContain('SYMBOL_STATE 未配線')
-    expect(body).toContain('href="/dashboard/positions"')
+    // 運転状態帯は DO 不在でも出る (実行モード / 取引は D1 由来)
+    expect(body).toContain('実行モード')
+    expect(body).toContain('未確認アラート')
   })
 })
 

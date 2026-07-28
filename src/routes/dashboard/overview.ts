@@ -64,8 +64,32 @@ export function parseOverviewPanels(csv: string | null | undefined): Set<Overvie
   return set.size === 0 ? new Set(ALL_OVERVIEW_PANELS) : set
 }
 
+export interface HomeRunSignals {
+  /** 直近の戦略判定の時刻 (= cron が生きている証拠)。null なら判定ログが空。 */
+  lastCronAt: string | null
+  /** 直近 24h の critical / warning 件数。ack の概念はまだ無いので件数で代用。 */
+  alertCritical: number
+  alertWarning: number
+}
+
+/** 建玉 1 件の「あと何 % で損切りか」。実効 stop は ATR / R:R cap で動く。 */
+export interface StopDistanceView {
+  /** 現在の含み損益 (%)。 */
+  pnlPct: number
+  /** 実効 stop (%、負値)。atr20 が無ければ pct stop。 */
+  effectiveStopPct: number
+  /** stop までの距離 (%、正値)。0 以下なら既に到達している。 */
+  toStopPct: number
+}
+
 export interface OverviewData {
   panels: Set<OverviewPanel>
+  /** 運転状態帯の追加シグナル。未取得 (DB 不在) は null。 */
+  runSignals: HomeRunSignals | null
+  /** symbol → 実効 stop までの距離。計算できない銘柄は不在。 */
+  stopDistances: Map<string, StopDistanceView>
+  /** 直近 30 日の成績 (勝ち / 負け / 発注エラー)。未取得は null。 */
+  activityStats: { wins: number; losses: number; errors: number } | null
   portfolio: {
     dailyStartEquity: number
     dailyRealizedPnl: number
@@ -190,30 +214,56 @@ export function sectionHead(title: string, moreHref: string): string {
  * 状態表示に徹する。
  */
 export function renderRunStatePanel(data: OverviewData): string {
-  const modePill = data.dryRun
-    ? '<span class="pill off">DRY-RUN</span>'
-    : '<span class="pill on">LIVE</span>'
-  const tradingPill = data.tradingEnabled
-    ? '<span class="pill on">取引 ON</span>'
-    : '<span class="pill off">取引 OFF</span>'
-  const item = (label: string, value: string) =>
-    `<div style="min-width:104px"><div class="kpi-label">${esc(label)}</div><div style="font-size:15px;font-weight:700;font-variant-numeric:tabular-nums">${value}</div></div>`
+  const mode = data.dryRun
+    ? { text: 'DRY-RUN', tone: 'hold' as const }
+    : { text: 'LIVE', tone: 'live' as const }
+  const trading = data.tradingEnabled
+    ? { text: 'ON', tone: 'live' as const }
+    : { text: 'OFF', tone: 'hold' as const }
+  const cron = renderRelativeAge(data.runSignals?.lastCronAt ?? null, 20)
   const quote = latestQuoteFreshness(data)
-  return `<div class="panel" style="display:flex;flex-wrap:wrap;gap:10px 22px;align-items:flex-end">
-    ${item('実行モード', modePill)}
-    ${item('取引 (effective)', tradingPill)}
-    ${item('株価の鮮度', quote)}
-    ${item('VIX レジーム', `<span style="font-size:13px;font-weight:400">${renderVixRegimeCell(data.vixRegime)}</span>`)}
-    ${item('USDJPY', data.usdJpy === null ? '<span class="muted">—</span>' : fmtNumber(data.usdJpy, 2))}
-    <div style="margin-left:auto;font-size:12px"><a href="/dashboard/alerts">アラート →</a></div>
+  const crit = data.runSignals?.alertCritical ?? 0
+  const warn = data.runSignals?.alertWarning ?? 0
+  const alert =
+    crit > 0
+      ? { text: `${crit} critical`, tone: 'alarm' as const }
+      : warn > 0
+        ? { text: `${warn} warning`, tone: 'hold' as const }
+        : { text: '0', tone: 'plain' as const }
+  const card = (label: string, value: string, tone: 'live' | 'hold' | 'alarm' | 'plain') =>
+    `<div class="state-card${tone === 'plain' ? '' : ` ${tone}`}"><div class="kpi-label">${esc(label)}</div><div class="state-value">${value}</div></div>`
+  return `<div class="state-band">
+    ${card('実行モード', esc(mode.text), mode.tone)}
+    ${card('取引', esc(trading.text), trading.tone)}
+    ${card('最終 cron', cron.html, cron.tone)}
+    ${card('株価の鮮度', quote.html, quote.tone)}
+    ${card('VIX レジーム', `<span style="font-size:13px;font-weight:400">${renderVixRegimeCell(data.vixRegime)}</span>`, 'plain')}
+    ${card('未確認アラート', `<a href="/dashboard/alerts">${esc(alert.text)}</a>`, alert.tone)}
+    <a class="state-kill" href="/dashboard/config" title="global_config で trading_enabled を切る">緊急停止</a>
   </div>`
+}
+
+/**
+ * ISO 時刻 → 相対表示 + 鮮度の色。`staleMin` を超えたら警告色にする。
+ * cron は 15 分周期なので既定 20 分、quote は stale_quote_ms 既定に合わせ 15 分。
+ */
+function renderRelativeAge(
+  iso: string | null,
+  staleMin: number,
+): { html: string; tone: 'live' | 'hold' | 'plain' } {
+  if (iso === null) return { html: '<span class="muted">—</span>', tone: 'plain' }
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return { html: '<span class="muted">—</span>', tone: 'plain' }
+  const min = Math.floor((Date.now() - t) / 60000)
+  const text = min < 1 ? '1 分未満' : min < 60 ? `${min} 分前` : `${Math.floor(min / 60)} 時間前`
+  return { html: esc(text), tone: min >= staleMin ? 'hold' : 'live' }
 }
 
 /**
  * 保有・監視銘柄の中で **最も新しい** 株価の取得時刻を相対表示する。
  * quote feed が止まると全銘柄で同時に古くなるので、最新 1 件で足りる。
  */
-function latestQuoteFreshness(data: OverviewData): string {
+function latestQuoteFreshness(data: OverviewData): { html: string; tone: 'live' | 'hold' | 'plain' } {
   let latest: number | null = null
   for (const r of data.positions) {
     const q = r.state?.lastQuote
@@ -226,12 +276,9 @@ function latestQuoteFreshness(data: OverviewData): string {
     const t = new Date(v.asOf).getTime()
     if (Number.isFinite(t) && (latest === null || t > latest)) latest = t
   }
-  if (latest === null) return '<span class="muted">—</span>'
-  const min = Math.floor((Date.now() - latest) / 60000)
-  const text = min < 1 ? '1 分未満' : min < 60 ? `${min} 分前` : `${Math.floor(min / 60)} 時間前`
+  if (latest === null) return { html: '<span class="muted">—</span>', tone: 'plain' }
   // 15 分は global_config.stale_quote_ms の既定 (halt 判定と同じ線)。
-  const cls = min >= 15 ? 'err' : 'ok'
-  return `<span class="${cls}" style="font-size:13px">${esc(text)}</span>`
+  return renderRelativeAge(new Date(latest).toISOString(), 15)
 }
 
 export function renderHomePositionsSection(data: OverviewData): string {
@@ -245,6 +292,65 @@ export function renderHomePositionsSection(data: OverviewData): string {
 export function kpiCard(label: string, value: string, sub?: string, subClass?: string): string {
   const subHtml = sub ? `<div class="kpi-sub ${subClass ?? 'muted'}">${sub}</div>` : ''
   return `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${value}</div>${subHtml}</div>`
+}
+
+/**
+ * リスクと建玉 (#dashboard-ia): 建玉テーブル + エクスポージャー + 買付余力。
+ *
+ * 旧ホームは KPI カード / 保有ポジション表 / 資産構成の 3 枚に分かれていたが、
+ * 建玉 2-3 件の口座では同じデータを 3 回見せているだけだった。1 枚に畳み、
+ * **各建玉が実効 stop からどれだけ離れているか**という、表からは読めなかった
+ * 情報を状態列として足す。
+ */
+export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): string {
+  const exposurePill = renderExposurePill(data, open)
+  if (!data.symbolStateBound) {
+    return `<div class="panel"><div class="panel-title"><span>建玉</span></div><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。</p></div>`
+  }
+  if (open.length === 0) {
+    return `<div class="panel"><div class="panel-title"><span>建玉 0 件</span>${exposurePill}</div><p class="muted" style="margin:0">保有中の建玉はありません。</p></div>`
+  }
+  const rows = open
+    .map((o) => {
+      const stop = data.stopDistances.get(o.sym)
+      const pnlCls = o.pnlPct === null ? '' : o.pnlPct >= 0 ? 'ok' : 'err'
+      const state =
+        stop === undefined
+          ? '<span class="muted">—</span>'
+          : stop.toStopPct <= 0
+            ? '<span class="pill off">損切り水準</span>'
+            : stop.toStopPct <= 2
+              ? `<span class="pill warn">損切りまで ${fmtNumber(stop.toStopPct, 1)}%</span>`
+              : '<span class="pill">保有継続</span>'
+      return `<tr>
+        <td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}">${esc(displaySymbol(o.sym, data.universe))}</a></td>
+        <td class="num">${fmtNumber(o.qty, 0)}</td>
+        <td class="num">${o.price === null ? '<span class="muted">—</span>' : fmtNumber(o.price, 2)}</td>
+        <td class="num ${pnlCls}">${o.pnlPct === null ? '—' : `${fmtNumber(o.pnlPct, 2)}%`}</td>
+        <td>${state}</td>
+      </tr>`
+    })
+    .join('')
+  return `<div class="panel">
+    <div class="panel-title"><span>建玉 ${open.length} 件 / エクスポージャー</span>${exposurePill}</div>
+    <table>
+      <thead><tr><th>銘柄</th><th class="num">数量</th><th class="num">現在値</th><th class="num">損益</th><th>状態</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="muted" style="font-size:12px;margin:10px 0 0">実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は <a href="/dashboard/charts?tab=symbol">銘柄</a> へ。</p>
+  </div>`
+}
+
+/** 建玉合計 / total_capital の比率 pill。total_capital 未設定なら件数のみ。 */
+function renderExposurePill(data: OverviewData, open: OpenPositionView[]): string {
+  const usd = open
+    .filter((o) => o.currency === 'USD' && o.marketValue !== null)
+    .reduce((a, o) => a + (o.marketValue ?? 0), 0)
+  const cap = data.portfolio?.dailyStartEquity ?? 0
+  if (!(cap > 0) || usd <= 0) return ''
+  const pct = (usd / cap) * 100
+  const cls = pct >= 60 ? 'warn' : ''
+  return `<span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span>`
 }
 
 export function renderKpiPanel(data: OverviewData, open: OpenPositionView[]): string {
@@ -324,25 +430,20 @@ export function renderRecentPanel(data: OverviewData): string {
   const recentTable = data.recentTrades.length
     ? `<table><thead><tr><th>時刻</th><th>銘柄</th><th>売買</th><th>数量</th><th>約定値</th><th>実損益</th></tr></thead><tbody>${trades}</tbody></table>`
     : '<p class="muted">約定履歴がありません。</p>'
-  const dryPill = data.dryRun
-    ? '<span class="pill dry">DRY-RUN</span>'
-    : '<span class="pill live">LIVE</span>'
-  const tradingPill = data.tradingEnabled
-    ? '<span class="pill on">取引 ON</span>'
-    : '<span class="pill off">取引 OFF</span>'
+  // 実行モード / 取引 / VIX は運転状態帯に移したのでここでは繰り返さない。
   return `<div class="panel">
-    <div class="panel-title" style="display:flex;justify-content:space-between;align-items:baseline"><span>最近の約定 / リスク状態</span><span style="font-weight:400;font-size:12px"><a href="/dashboard/cron">判定履歴 →</a> <a href="/dashboard/alerts" style="margin-left:8px">アラート →</a></span></div>
-    <div class="panel-row">
-      <div>${recentTable}<div style="margin-top:8px"><a href="/dashboard/trades">約定履歴をすべて見る →</a></div></div>
-      <div>
-        <table><tbody>
-          <tr><th>実行モード</th><td>${dryPill} <span class="muted" style="font-size:11px">(D1 dry_run)</span></td></tr>
-          <tr><th>取引 (effective)</th><td>${tradingPill} <span class="muted" style="font-size:11px">(env override 反映後)</span></td></tr>
-          <tr><th>VIX レジーム</th><td>${renderVixRegimeCell(data.vixRegime)}</td></tr>
-        </tbody></table>
-      </div>
-    </div>
+    <div class="panel-title" style="display:flex;justify-content:space-between;align-items:baseline"><span>直近の約定</span><span style="font-weight:400;font-size:12px"><a href="/dashboard/cron">判定ログ →</a></span></div>
+    ${recentTable}
+    <div style="margin-top:8px"><a href="/dashboard/trades">約定履歴をすべて見る →</a></div>
+    ${activityFooter(data)}
   </div>`
+}
+
+/** 直近 30 日の成績サマリ (勝ち / 負け / 発注エラー)。未取得なら空文字。 */
+function activityFooter(data: OverviewData): string {
+  const st = data.activityStats
+  if (st === null) return ''
+  return `<p class="muted" style="font-size:12px;margin:10px 0 0">直近 30 日 ・ 勝ち ${st.wins} / 負け ${st.losses} ・ 発注エラー ${st.errors}</p>`
 }
 
 /**
@@ -408,12 +509,10 @@ export function overviewBody(data: OverviewData): string {
   // 1. 運転状態 — 常時表示。設定で隠せない。
   sections.push(renderRunStatePanel(data))
 
-  // 2. リスクと建玉
+  // 2. リスクと建玉 — 建玉テーブル 1 枚に集約 (KPI / 資産構成の重複を排除)。
   if (data.panels.has('risk')) {
     sections.push(areaLabel('リスクと建玉'))
-    sections.push(renderKpiPanel(data, open))
-    sections.push(renderHomePositionsSection(data))
-    sections.push(renderCompositionPanel(open))
+    sections.push(renderRiskPanel(data, open))
   }
 
   // 3. 最近の活動
