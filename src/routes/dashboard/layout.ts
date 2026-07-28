@@ -90,9 +90,11 @@ export const STYLE = `
   .subnav-link:hover{background:#f0f0f3}
   .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
   .nav-toggle{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:4px 8px;color:#1d1d1f;line-height:1}
-  /* ワイドモニタで表・カードが横いっぱいに伸びると、桁の少ない数値が
-     スカスカに散って読みづらい。読み幅の上限を切って中央に寄せる。 */
-  .main{min-width:0;padding:24px;overflow-x:auto;max-width:1160px;margin:0 auto;width:100%}
+  .main{min-width:0;padding:24px;overflow-x:auto}
+  /* ワイドモニタで横に間延びするのを止めるが、**ホームだけ**に効かせる。
+     銘柄チャートや判定マトリクスは横に広いほど読みやすく、幅を切ると
+     チャートがはみ出したりヘッダが 1 文字ずつ折り返したりする。 */
+  .main-narrow{max-width:1160px;margin:0 auto;width:100%}
   @media(max-width:780px){
     .main{padding:12px 8px}
     .nav-toggle{display:block}
@@ -151,9 +153,11 @@ export const STYLE = `
   /* 右寄せ数値セル */
   .num{text-align:right;font-variant-numeric:tabular-nums}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
-  /* 列を均等に開かせない: 1 列目 (銘柄 / 時刻) に余りを寄せ、数値列は内容幅。 */
-  table th:first-child,table td:first-child{width:99%}
-  table td.num,table th.num{width:1%;white-space:nowrap}
+  /* 列を均等に開かせない: 1 列目 (銘柄 / 時刻) に余りを寄せ、数値列は内容幅。
+     **ホーム限定**。1 列目がアイコン/ボタン列の表 (判定履歴など) に効かせると
+     他の列が潰れてヘッダが縦に折り返す。 */
+  .main-narrow table th:first-child,.main-narrow table td:first-child{width:99%}
+  .main-narrow table td.num,.main-narrow table th.num{width:1%;white-space:nowrap}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
   tr:last-child td{border-bottom:none}
@@ -501,7 +505,7 @@ export function layout(
     window.addEventListener('resize', set);
   })();
 </script>
-<main class="main">
+<main class="main${activeNav === 'home' ? ' main-narrow' : ''}">
   ${body}
   <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
 </main>
