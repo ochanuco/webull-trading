@@ -42,7 +42,7 @@ export const STYLE = `
   /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
      コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等)。
      header は topnav (1段目) + ページ固有 subnav (2段目、例: チャートの
-     レビューの 約定履歴/取引品質/... など) の最大2段で sticky。 */
+     レビューの 約定履歴/成績/... など) の最大2段で sticky。 */
   .header{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #d0d0d5}
   .topnav{display:flex;align-items:center;gap:4px;padding:6px 16px;flex-wrap:wrap}
   .topnav .brand{font-weight:700;font-size:15px;margin-right:12px;white-space:nowrap;color:#1d1d1f}
@@ -259,7 +259,7 @@ export const NAV_GROUPS: ReadonlyArray<{
 }> = [
   { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (運転状態 / 建玉 / 直近の活動)' },
   { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート (判定 pin / ラダー / 約定マーカー)' },
-  { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 取引品質 / 資産推移' },
+  { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 成績 / 実現損益の推移' },
 ]
 
 /** 管理ドロップダウン内リンク (書き込みを伴う低頻度ページ)。 */
@@ -356,8 +356,12 @@ export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   label: string
 }> = [
   { key: 'trades', href: '/dashboard/trades', label: '約定履歴' },
-  { key: 'quality', href: '/dashboard/charts?tab=quality', label: '取引品質' },
-  { key: 'equity', href: '/dashboard/charts', label: '資産推移' },
+  // #dashboard-ia Phase 4: 中身は勝率 / PF / 期待値 / PnL 分布であって、
+  // スリッページや約定率は含まない。「取引品質」は実態と合わないので「成績」。
+  { key: 'quality', href: '/dashboard/charts?tab=quality', label: '成績' },
+  // 口座資産 (portfolio) と累積 realized PnL は別物なので、どちらの推移かを
+  // ラベルで明示する。
+  { key: 'equity', href: '/dashboard/charts', label: '実現損益の推移' },
 ]
 
 /**

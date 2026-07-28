@@ -100,7 +100,7 @@ export { assignPairColors, computeBudgetUsage, orderRowsByPair, pairRoles, rende
 
 /**
  * /charts の subnav (#remove-grid): チャート専用 subnav は廃止し、overview
- * (資産推移) / quality (取引品質) は約定履歴と同じ「レビュー」
+ * (実現損益の推移) / quality (成績) は約定履歴と同じ「レビュー」
  * subnav に統一する (画面によってメニュー構成が変わる混乱を避ける)。
  * 個別銘柄タブは「銘柄」nav + 銘柄レールが導線なので subnav なし。
  */
