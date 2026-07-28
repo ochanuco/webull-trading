@@ -190,7 +190,7 @@ export function renderTradeStatsTable(s: TradeStats): string {
 
 export function renderQualityTab(args: ChartsBodyQuality): string {
   if (args.pnls.length === 0 && args.decisions.length === 0) {
-    return `<p class="muted">まだ判定ログも実 fill も無いため取引品質を描けません。cron が動き出すと judgement breakdown、SELL が約定すると PnL 分布が出ます。</p>`
+    return `<p class="muted">まだ判定ログも実 fill も無いため成績を描けません。cron が動き出すと judgement breakdown、SELL が約定すると PnL 分布が出ます。</p>`
   }
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {

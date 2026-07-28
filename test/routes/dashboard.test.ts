@@ -181,7 +181,7 @@ describe('dashboard', () => {
     expect(body).not.toContain('page-title')
   })
 
-  // チャートの view 切替 (概要/取引品質/個別銘柄/銘柄グリッド) は本文 tab strip
+  // チャートの view 切替 (概要/成績/個別銘柄) は本文 tab strip
   // ではなく header 2段目の subnav に出す (サブメニュー化)。
   it('charts overview/quality pages share the レビュー subnav (#remove-grid)', async () => {
     const app = createApp()
@@ -193,8 +193,8 @@ describe('dashboard', () => {
     )
     const body = await res.text()
     expect(body).toContain('<nav class="subnav">')
-    // 約定履歴と同じ「レビュー」subnav に統一 (現在地 = 取引品質)
-    expect(body).toContain('>取引品質</span>')
+    // 約定履歴と同じ「レビュー」subnav に統一 (現在地 = 成績)
+    expect(body).toContain('>成績</span>')
     expect(body).toContain('class="subnav-link active"')
     expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('href="/dashboard/cron?view=matrix"')

@@ -13,7 +13,7 @@ import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configF
  *
  * 1. グローバル nav: 日常 3 画面 (ホーム / 銘柄 / レビュー) + 管理 ▾ + 診断 ▾。
  *    判定ログ・アラート・監査・broker 診断・token は診断へ降格 (削除はしない)。
- * 2. レビュー subnav: 約定履歴 / 取引品質 / 資産推移。診断ページは診断 subnav。
+ * 2. レビュー subnav: 約定履歴 / 成績 / 実現損益の推移。診断ページは診断 subnav。
  * 3. ホーム統合: 資産サマリ帯 + スパークライン + 保有ポジション (DO あり /
  *    なしの graceful degrade)。
  */
@@ -251,7 +251,7 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
     for (const href of ['/dashboard/charts?tab=quality', '/dashboard/charts']) {
       expect(body).toContain(`href="${href}"`)
     }
-    expect(body).toContain('資産推移')
+    expect(body).toContain('実現損益の推移')
     // 判定ログ / アラートはレビュー subnav からは外れる (診断側へ)
     expect(body).not.toContain('<a class="subnav-link" href="/dashboard/cron">')
     expect(body).not.toContain('<a class="subnav-link" href="/dashboard/alerts">')
@@ -292,7 +292,7 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
     expect((body.match(/<nav class="subnav">/g) ?? []).length).toBe(1)
     // charts 自前 subnav の active (title 付き span) が出ている
     expect(body).toContain('class="subnav-link active"')
-    expect(body).toContain('>取引品質<')
+    expect(body).toContain('>成績<')
   })
 })
 
