@@ -1315,6 +1315,7 @@ export function symbolsListBody(args: {
     })
     .join('')
   return `${errorBanner}${tabBar}${filterBar}${headerBar}
+  <div class="tablewrap">
   <table>
     <thead><tr>
       <th style="width:28px" title="インバース対のツリー表記"></th>
@@ -1331,6 +1332,7 @@ export function symbolsListBody(args: {
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  </div>
   ${budgetLadderControls()}
   ${safeJsonScript(
     '__budgetBaseline',

@@ -221,6 +221,7 @@ export function tradesBody(
     })
     .join('')
   return `${filterBanner}${pills}
+  <div class="tablewrap">
   <table>
     <thead><tr>
       <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
@@ -228,6 +229,7 @@ export function tradesBody(
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  </div>
   ${renderPaginationNav({
     baseHref: `/dashboard/trades?view=${view}&limit=${limit}${filterQs}`,
     before,
