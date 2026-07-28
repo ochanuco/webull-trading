@@ -6,6 +6,7 @@ import { loadPortfolioEquitySnapshots } from '../../src/infrastructure/db/portfo
 import { loadUsdJpyRate } from '../../src/infrastructure/quotes/fxRate'
 import { loadRecentAlerts } from '../../src/infrastructure/notification/notificationEmitLog'
 import { resolveActiveNavGroup } from '../../src/routes/dashboard/layout'
+import { tradesBody } from '../../src/routes/dashboard/trades'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
 /**
@@ -447,9 +448,9 @@ describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  // 読み幅の上限は全ページ共通 (1160px)。`main-narrow` はホームの表の列ルール
-  // (grow / nowrap) を効かせるための marker で、幅は変えない。
-  it('ホームだけ main-narrow が付く (表の列ルール用の marker)', async () => {
+  // 読み幅の上限は全ページ共通 (1160px)。列幅ルールは table.fit の opt-in なので
+  // main-narrow は現状ホームの marker として残るのみ (幅は変えない)。
+  it('ホームだけ main-narrow が付く (marker、幅は全ページ共通)', async () => {
     const app = createApp()
     const home = await (await app.request('/dashboard', { headers: authHeader }, baseEnv)).text()
     expect(home).toContain('class="main main-narrow"')
@@ -460,5 +461,45 @@ describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
       expect(body, path).toContain('class="main"')
       expect(body, path).not.toContain('class="main main-narrow"')
     }
+  })
+})
+
+// 列幅は「役割」で決める (#dashboard-ia)。1 行 1 レコードで読ませる表は
+// table.fit を付け、余りを吸う列だけ grow を持つ。短い列 (状態 / 数量 / 単価)
+// に幅が回ると値が縦に折り返す。
+describe('table.fit の列ルール (#dashboard-ia)', () => {
+  beforeEach(() => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
+    vi.mocked(loadSymbolUniverse).mockResolvedValue(
+      makeSymbolUniverse({ allowedSymbols: ['SOXL'], symbolCurrency: { SOXL: 'USD' } }),
+    )
+  })
+  afterEach(() => vi.resetAllMocks())
+
+  it('約定履歴は table.fit + 銘柄列が grow', () => {
+    // route ではなく renderer を直接叩く (loader の fake を用意するより堅い)
+    const html = tradesBody(
+      [
+        {
+          id: 1,
+          timestamp: '2026-07-28T00:00:00.000Z',
+          tradeEventType: 'post_submit',
+          symbol: 'SOXL',
+          side: 'BUY',
+          filledQty: 1,
+          filledPrice: 100,
+          limitPrice: 100,
+          notional: 100,
+          realizedPnl: null,
+          brokerStatus: 'FILLED',
+          mode: 'LIVE',
+        } as unknown as Parameters<typeof tradesBody>[0][number],
+      ],
+      50,
+    )
+    expect(html).toContain('<table class="fit">')
+    expect(html).toContain('<th class="grow">銘柄</th>')
+    // 状態 / モードは内容幅で止める (grow を持たない)
+    expect(html).not.toContain('<th class="grow">状態</th>')
   })
 })

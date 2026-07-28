@@ -156,13 +156,13 @@ export const STYLE = `
      スクロールさせる。 */
   .tablewrap{overflow-x:auto}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
-  /* ホームの表: 列幅は内容に任せる (auto)。**1 列目に余りを寄せる指定はしない** —
-     時刻や銘柄に 99% を渡すと、数量・状態のような短い列が 1 文字幅まで潰れて
-     縦に折り返す。代わりに「折り返してはいけない列」だけを nowrap で守り、
-     余りは grow クラスを持つ列が吸う。 */
-  .main-narrow table{table-layout:auto}
-  .main-narrow table th,.main-narrow table td{white-space:nowrap}
-  .main-narrow table th.grow,.main-narrow table td.grow{width:99%;white-space:normal}
+  /* table.fit: 列幅を「役割」で決める表。**1 列目に余りを寄せる指定はしない** —
+     時刻や状態のような短い列に幅が回ると、値が 1 文字ずつ縦に折り返す。
+     既定で全セル nowrap にし、余りは grow を付けた列 (通常は銘柄) だけが吸う。
+     ホーム / 約定履歴のように「1 行 1 レコードで読ませたい」表に付ける。 */
+  table.fit{table-layout:auto}
+  table.fit th,table.fit td{white-space:nowrap}
+  table.fit th.grow,table.fit td.grow{width:99%;white-space:normal}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
   tr:last-child td{border-bottom:none}
