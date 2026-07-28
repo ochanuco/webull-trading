@@ -38,6 +38,7 @@ import {
   type MacroEventGateConfig,
 } from '../risk/macroEventGate'
 import type { VixRegimeFilterDecision } from '../risk/vixRegimeFilter'
+import type { NewsShockGateDecision } from '../risk/newsShockGate'
 import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
@@ -194,6 +195,23 @@ export interface PullbackSchedulerOptions {
    */
   vixDecision?: VixRegimeFilterDecision
   /**
+   * News shock gate decision (issue #196 follow-up, news-shock-gate PR 2)。
+   * caller (`runStrategyCron`) が cron tick 起動時に `attention_observation`
+   * を D1 read して `evaluateNewsShockGate` を呼んで作る。`mode` は
+   * `global_config.news_shock_mode` ('off' は caller がこの option ごと省略する
+   * ので scheduler 側では扱わない):
+   *   - 'enforce': VIX と同じ scaling を適用 (critical で BUY 全 reject /
+   *     warning で `intent.quantity` を縮小)。VIX と乗算チェーンで合成される
+   *     (`vixScale` を先に適用した後の qty に対して news scale を適用)。
+   *   - 'observe': sizeScale を 1.0 に強制 (qty は変えない) しつつ、
+   *     `traceStep('risk.news_shock', ...)` に reason を残すだけ (shadow mode)。
+   * 未注入なら skip (POC 後方互換)。SELL は news shock 関係なく通す。
+   */
+  newsShockGate?: {
+    mode: 'observe' | 'enforce'
+    decision: NewsShockGateDecision
+  }
+  /**
    * Entry 抑止 symbol → 理由 (#452)。role が entry 無効 (cash_parking / 定義のみ
    * の role / enum 外 'unknown') の銘柄の BUY を SKIP する。SELL / HOLD は
    * 対象外 (exit 経路を妨げない)。未注入なら skip (POC 後方互換)。production
@@ -343,6 +361,13 @@ export interface PullbackRunSummary {
    * を可視化するために残す。
    */
   vix?: VixRegimeFilterDecision
+  /**
+   * News shock gate decision applied to this run (news-shock-gate PR 2)。
+   * `newsShockGate` option を渡された時のみ set される (POC 後方互換)。
+   * cron summary log / dashboard で「この run でどの regime で動いていたか」
+   * を可視化するために残す。
+   */
+  newsShock?: NewsShockGateDecision
 }
 
 export interface PullbackDecisionTrace {
@@ -390,6 +415,7 @@ export async function runPullbackScheduler(
     decisions: [],
     entrySnapshots: {},
     ...(options.vixDecision !== undefined ? { vix: options.vixDecision } : {}),
+    ...(options.newsShockGate !== undefined ? { newsShock: options.newsShockGate.decision } : {}),
   }
 
   // Notifier helper: fire-and-forget。Notifier 実装側で silent fallback する
@@ -939,11 +965,9 @@ export async function runPullbackScheduler(
       // lot 丸めで 0 になったら reject (= 部分 entry すらできない小口は見送り)。
       let scaledQuantity = sizing.quantity
       if (positionMultiplier < 1) {
-        const lot = resolvedLotSize
-        const rawScaled = sizing.quantity * positionMultiplier
-        scaledQuantity = lot > 1 ? Math.floor(rawScaled / lot) * lot : Math.floor(rawScaled)
+        scaledQuantity = applySizeScale(sizing.quantity, resolvedLotSize, positionMultiplier)
         if (scaledQuantity <= 0) {
-          const reason = `sizing rejected: half-entry qty rounded to 0 (raw ${sizing.quantity} × ${positionMultiplier}, lot=${lot})`
+          const reason = `sizing rejected: half-entry qty rounded to 0 (raw ${sizing.quantity} × ${positionMultiplier}, lot=${resolvedLotSize})`
           summary.holds += 1
           await emitDecision({
             symbol: upper,
@@ -985,14 +1009,10 @@ export async function runPullbackScheduler(
           // warning: qty を `floor(qty * scale / lot) * lot` で lot に揃える。
           // lot=1 の US 株は単純な floor、lot=100 の JP 株は単元未満で 0 になり得る。
           // 結果が 0 になった場合は次の `scaledQuantity <= 0` reject で拾う。
-          const lot = resolvedLotSize
           // half-entry 適用後の qty を基数にする (#452: 0.5x と VIX scale は乗算)。
-          const rawScaled = scaledQuantity * options.vixDecision.sizeScale
-          scaledQuantity = lot > 1
-            ? Math.floor(rawScaled / lot) * lot
-            : Math.floor(rawScaled)
+          scaledQuantity = applySizeScale(scaledQuantity, resolvedLotSize, options.vixDecision.sizeScale)
           if (scaledQuantity <= 0) {
-            const reason = `risk: ${options.vixDecision.reason} (qty rounded to 0, lot=${lot})`
+            const reason = `risk: ${options.vixDecision.reason} (qty rounded to 0, lot=${resolvedLotSize})`
             summary.holds += 1
             await emitDecision({
               symbol: upper,
@@ -1009,6 +1029,77 @@ export async function runPullbackScheduler(
                   '>',
                   0,
                   `${options.vixDecision.reason}; qty 0 after lot round`,
+                ),
+              ),
+            })
+            continue
+          }
+        }
+      }
+      // News shock gate (news-shock-gate PR 2) — VIX と乗算チェーンで合成
+      // (finalScale = vixScale × newsShockScale)。VIX 適用後の qty を基数にして
+      // 続けて scale するため、既に VIX で 0 に丸まっていればこのブロックへは
+      // 到達しない (上の `continue` で抜けている)。SELL はこのブロックの外
+      // (signal.action === 'BUY' の中) なので関係なく通る。
+      if (options.newsShockGate) {
+        const newsDecision = options.newsShockGate.decision
+        const isObserve = options.newsShockGate.mode === 'observe'
+        // observe は shadow mode — 実際の qty には一切効かせず、trace にだけ
+        // 「enforce だったら何が起きたか」を残す (`pairRegime` observe 分岐と同じ設計)。
+        if (isObserve) {
+          const wouldReduce = newsDecision.sizeScale < 1
+          const observeNote = wouldReduce
+            ? ` [observe: enforce なら size x${newsDecision.sizeScale}]`
+            : ''
+          signal = {
+            ...signal,
+            trace: appendTrace(
+              signal.trace,
+              traceStep(
+                'risk.news_shock',
+                !wouldReduce,
+                newsDecision.ratio ?? null,
+                undefined,
+                undefined,
+                `${newsDecision.reason}${observeNote}`,
+              ),
+            ),
+          }
+        } else if (newsDecision.sizeScale === 0) {
+          const reason = `risk: ${newsDecision.reason}`
+          summary.holds += 1
+          await emitDecision({
+            symbol: upper,
+            decision: 'HOLD',
+            reason,
+            price: indicators.price,
+            indicatorsJson: JSON.stringify(indicators),
+            trace: appendTrace(
+              signal.trace,
+              traceStep('risk.news_shock', false, newsDecision.ratio ?? null, '<=', null, newsDecision.reason),
+            ),
+          })
+          continue
+        } else if (newsDecision.sizeScale < 1) {
+          scaledQuantity = applySizeScale(scaledQuantity, resolvedLotSize, newsDecision.sizeScale)
+          if (scaledQuantity <= 0) {
+            const reason = `risk: ${newsDecision.reason} (qty rounded to 0, lot=${resolvedLotSize})`
+            summary.holds += 1
+            await emitDecision({
+              symbol: upper,
+              decision: 'HOLD',
+              reason,
+              price: indicators.price,
+              indicatorsJson: JSON.stringify(indicators),
+              trace: appendTrace(
+                signal.trace,
+                traceStep(
+                  'risk.news_shock',
+                  false,
+                  scaledQuantity,
+                  '>',
+                  0,
+                  `${newsDecision.reason}; qty 0 after lot round`,
                 ),
               ),
             })
@@ -1629,6 +1720,19 @@ function describeOrderAmount(intent: OrderIntent, fxJpyPerSymbolCcy: number | un
   return `発注内容: ${qty}口 @ ${px} = ${notional} (通貨不明)`
 }
 
+/**
+ * Risk gate (VIX / news shock / half-entry) が共通で使う size scaling
+ * (news-shock-gate PR 2 で抽出、以前は VIX warning ブロックと half-entry ブロックに
+ * 同じ式が二重記述されていた)。`scale` 倍した raw qty を lot 単位に floor する:
+ *   - lot > 1 (JP 単元株等): `floor(raw / lot) * lot`
+ *   - lot === 1 (US 株等): `floor(raw)`
+ * 結果が 0 になれば呼び出し側が reject する (= 部分 entry すらできない小口は見送り)。
+ */
+function applySizeScale(qty: number, lot: number, scale: number): number {
+  const raw = qty * scale
+  return lot > 1 ? Math.floor(raw / lot) * lot : Math.floor(raw)
+}
+
 function appendTrace(
   trace: DecisionTraceStep[] | undefined,
   ...steps: DecisionTraceStep[]
@@ -1673,6 +1777,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
+  'risk.news_shock': 'ニュース過熱ゲート',
   'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
   'entry.half_status': '段階判定 HALF (0.5x、#452)',
   'entry.cash_rebalance': '条件連動配分 cash rebalance (#452)',

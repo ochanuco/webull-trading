@@ -1063,6 +1063,237 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
   })
 })
 
+describe('runPullbackScheduler news shock gate (news-shock-gate PR 2)', () => {
+  async function probeBaseQty(): Promise<number> {
+    const probe = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      now: () => now,
+    })
+    return probe.decisions[0]?.order?.quantity ?? 0
+  }
+
+  it('enforce mode blocks all BUY when regime is critical (sizeScale = 0)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      newsShockGate: {
+        mode: 'enforce',
+        decision: {
+          regime: 'critical',
+          sizeScale: 0,
+          reason: 'news_shock_critical: 5.1x tone-2.3 (block)',
+          ratio: 5.1,
+          toneDrop: 2.3,
+          asOf: now.toISOString(),
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const held = summary.decisions.find(
+      (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('news_shock_critical'),
+    )
+    expect(held?.reason).toContain('risk: news_shock_critical')
+    expect(summary.newsShock?.regime).toBe('critical')
+  })
+
+  it('enforce mode halves BUY quantity in warning regime (sizeScale = 0.5)', async () => {
+    const baseQty = await probeBaseQty()
+    expect(baseQty).toBeGreaterThan(1)
+
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      newsShockGate: {
+        mode: 'enforce',
+        decision: {
+          regime: 'warning',
+          sizeScale: 0.5,
+          reason: 'news_shock_warning: 2.8x (size x0.5)',
+          ratio: 2.8,
+          toneDrop: null,
+          asOf: now.toISOString(),
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(Math.floor(baseQty * 0.5))
+    expect(summary.newsShock?.regime).toBe('warning')
+  })
+
+  it('multiplies with VIX scale (finalScale = vixScale × newsShockScale)', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'warning',
+        sizeScale: 0.5,
+        reason: 'vix_warning: 27.30 (size x0.5)',
+        vix: 27.3,
+      },
+      newsShockGate: {
+        mode: 'enforce',
+        decision: {
+          regime: 'warning',
+          sizeScale: 0.5,
+          reason: 'news_shock_warning: 2.8x (size x0.5)',
+          ratio: 2.8,
+          toneDrop: null,
+          asOf: now.toISOString(),
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    // VIX (0.5x) を先に floor し、その結果へさらに news (0.5x) を floor する
+    // 逐次適用 (既存 half-entry × VIX と同じ流儀)。0.5 × 0.5 = 0.25 相当。
+    expect(intent.quantity).toBe(Math.floor(Math.floor(baseQty * 0.5) * 0.5))
+  })
+
+  it('either gate at zero blocks the BUY (binding gate reason is preserved)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      vixDecision: {
+        regime: 'normal',
+        sizeScale: 1.0,
+        reason: 'vix_normal: 18.50',
+        vix: 18.5,
+      },
+      newsShockGate: {
+        mode: 'enforce',
+        decision: {
+          regime: 'critical',
+          sizeScale: 0,
+          reason: 'news_shock_critical: 5.1x tone-2.3 (block)',
+          ratio: 5.1,
+          toneDrop: 2.3,
+          asOf: now.toISOString(),
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const held = summary.decisions.find(
+      (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('news_shock_critical'),
+    )
+    // binding gate (news) の reason が出て、vix の reason は出ない。
+    expect(held?.reason).toContain('news_shock_critical')
+    expect(held?.reason).not.toContain('vix_')
+  })
+
+  it('observe mode does not change BUY quantity even when regime is critical', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      newsShockGate: {
+        mode: 'observe',
+        decision: {
+          regime: 'critical',
+          sizeScale: 0,
+          reason: 'news_shock_critical: 5.1x tone-2.3 (block)',
+          ratio: 5.1,
+          toneDrop: 2.3,
+          asOf: now.toISOString(),
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(baseQty)
+    const decision = summary.decisions.find((d) => d.decision === 'BUY')
+    const trace = decision?.trace?.find((t) => t.label === 'risk.news_shock')
+    expect(trace).toBeDefined()
+    expect(trace?.message).toContain('news_shock_critical')
+    expect(trace?.message).toContain('observe')
+  })
+
+  it('skips the news shock gate entirely (no trace) when newsShockGate is omitted (off / back-compat)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(summary.newsShock).toBeUndefined()
+    const decision = summary.decisions.find((d) => d.decision === 'BUY')
+    const trace = decision?.trace?.find((t) => t.label === 'risk.news_shock')
+    expect(trace).toBeUndefined()
+  })
+
+  it('does not block SELL even when news shock gate is critical (enforce)', async () => {
+    const sellingState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 100, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: sellingState }),
+      execution,
+      newsShockGate: {
+        mode: 'enforce',
+        decision: {
+          regime: 'critical',
+          sizeScale: 0,
+          reason: 'news_shock_critical: 5.1x tone-2.3 (block)',
+          ratio: 5.1,
+          toneDrop: 2.3,
+          asOf: now.toISOString(),
+        },
+      },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(execution.calls[0]).toMatchObject({ side: 'SELL' })
+    const newsHold = summary.decisions.find(
+      (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('news_shock_critical'),
+    )
+    expect(newsHold).toBeUndefined()
+  })
+})
+
 describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () => {
   /**
    * Down-trend bars that fire a SELL on a held position. PullbackUptrend
