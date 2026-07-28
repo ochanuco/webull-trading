@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.1.0](https://github.com/ochanuco/webull-trading/compare/v1.0.2...v1.1.0) (2026-07-28)
+
+
+### Features
+
+* **news:** add attention observation store and GDELT producer ([db07ed3](https://github.com/ochanuco/webull-trading/commit/db07ed3a964e077e23ff10a655f9b135a3fd0ad8))
+* **news:** add attention observation store and GDELT producer ([da14fc8](https://github.com/ochanuco/webull-trading/commit/da14fc8cea16b78f78e26ea896949a548d2a8c7a))
+* **news:** turn on the GDELT observation producer ([7d52fe2](https://github.com/ochanuco/webull-trading/commit/7d52fe299aac83e82b15222ca6480c7b106a4b48))
+* **news:** turn on the GDELT observation producer ([70903e9](https://github.com/ochanuco/webull-trading/commit/70903e91b554e5cdcb43261a4e9ba0f8bf0759e9))
+* **risk:** add news shock gate behind an off-by-default toggle ([d93222e](https://github.com/ochanuco/webull-trading/commit/d93222e575685ee6c2b68970969b52fa66476a6a))
+* **risk:** add news shock gate behind an off-by-default toggle ([3d7ecb7](https://github.com/ochanuco/webull-trading/commit/3d7ecb77c98b280a860cc26d27ab568456007536))
+
+
+### Bug Fixes
+
+* **ci:** retitle the promotion PR when a newer release supersedes it ([#614](https://github.com/ochanuco/webull-trading/issues/614)) ([7c0ac81](https://github.com/ochanuco/webull-trading/commit/7c0ac815ad6aa8915f7272c4bfea40eb6cdd42a6))
+* **db:** keep bulk inserts within the D1 bound parameter limit ([9a7a665](https://github.com/ochanuco/webull-trading/commit/9a7a665307f9437c39c0ecdfbee1f764533bc41e))
+* **risk:** stop a bad news gate config from halting the strategy cron ([965be50](https://github.com/ochanuco/webull-trading/commit/965be50229d4f0938456b192e4c07a7cb5aa7f99))
+
 ## [1.0.2](https://github.com/ochanuco/webull-trading/compare/v1.0.1...v1.0.2) (2026-07-27)
 
 
