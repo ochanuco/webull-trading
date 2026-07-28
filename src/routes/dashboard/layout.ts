@@ -49,15 +49,17 @@ export const STYLE = `
   .topnav nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap;flex:1;min-width:0}
   /* #dashboard-ia: 運転状態帯のカード。左の色帯で状態を形でも読めるようにする
      (数値だけだと「取引 OFF」を見落とす)。 */
-  .state-band{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin-bottom:4px}
-  .state-card{flex:1 1 150px;border:1px solid #d0d0d5;border-left:3px solid #d0d0d5;border-radius:6px;padding:8px 12px;background:#fff}
+  .state-band{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin-bottom:4px}
+  /* flex-grow を持たせると 5 枚が画面幅いっぱいに引き伸ばされ、ラベルと値の
+     間が間延びする。自然幅で左詰めにし、余りは緊急停止ボタンの前に残す。 */
+  .state-card{flex:0 1 auto;min-width:118px;border:1px solid #d0d0d5;border-left:3px solid #d0d0d5;border-radius:6px;padding:8px 14px;background:#fff}
   .state-card.live{border-left-color:#1a7f37}
   .state-card.hold{border-left-color:#9a6700}
   .state-card.alarm{border-left-color:#c0392b}
   .state-value{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
   .state-value a{color:inherit;text-decoration:none}
   .state-value a:hover{text-decoration:underline}
-  .state-kill{align-self:center;background:#fdecea;color:#c0392b;border:1px solid #f0b3ac;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;text-decoration:none;white-space:nowrap}
+  .state-kill{align-self:center;margin-left:auto;background:#fdecea;color:#c0392b;border:1px solid #f0b3ac;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;text-decoration:none;white-space:nowrap}
   .state-kill:hover{background:#f8d7d3}
   /* #dashboard-ia Phase 3: ホームの領域見出し (運転状態 / リスクと建玉 / 最近の活動)。 */
   .area-label{font-size:11px;letter-spacing:.12em;color:#6e6e73;margin:18px 0 6px;display:flex;align-items:center;gap:8px}
@@ -88,7 +90,9 @@ export const STYLE = `
   .subnav-link:hover{background:#f0f0f3}
   .subnav-link.active{background:#e8f0fe;color:#06c;font-weight:600}
   .nav-toggle{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:4px 8px;color:#1d1d1f;line-height:1}
-  .main{min-width:0;padding:24px;overflow-x:auto}
+  /* ワイドモニタで表・カードが横いっぱいに伸びると、桁の少ない数値が
+     スカスカに散って読みづらい。読み幅の上限を切って中央に寄せる。 */
+  .main{min-width:0;padding:24px;overflow-x:auto;max-width:1160px;margin:0 auto;width:100%}
   @media(max-width:780px){
     .main{padding:12px 8px}
     .nav-toggle{display:block}
@@ -147,6 +151,9 @@ export const STYLE = `
   /* 右寄せ数値セル */
   .num{text-align:right;font-variant-numeric:tabular-nums}
   table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d0d5;border-radius:6px;overflow:hidden}
+  /* 列を均等に開かせない: 1 列目 (銘柄 / 時刻) に余りを寄せ、数値列は内容幅。 */
+  table th:first-child,table td:first-child{width:99%}
+  table td.num,table th.num{width:1%;white-space:nowrap}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e5e5ea;font-size:13px;font-variant-numeric:tabular-nums}
   th{background:#fafafa;font-weight:600}
   tr:last-child td{border-bottom:none}
