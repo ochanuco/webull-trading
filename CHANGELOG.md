@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/ochanuco/webull-trading/compare/v1.1.0...v1.1.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **news:** give GDELT a timeout it can actually meet ([b5a8494](https://github.com/ochanuco/webull-trading/commit/b5a8494aba8528611b5d93c133218cd690c52899))
+* **news:** give GDELT a timeout it can actually meet ([1b317a7](https://github.com/ochanuco/webull-trading/commit/1b317a79e6803db6f08c2779a19db306bad73604))
+
 ## [1.1.0](https://github.com/ochanuco/webull-trading/compare/v1.0.2...v1.1.0) (2026-07-28)
 
 
