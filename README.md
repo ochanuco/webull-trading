@@ -59,6 +59,8 @@ Retail auto-trading system on Cloudflare Workers + Hono + TypeScript, speaking W
 | `spread_limit_pct_{us,jp}` | `0.0025` / `0.006` | spread guard |
 | `fee_pct_of_notional` | `0` | 売買コスト見積りの料率。realized PnL を net 化する (#trade-cost) |
 | `fee_fixed_per_order` | `0` | 同、1 注文あたりの固定費 (銘柄通貨建て) |
+
+> **米国株・ETF の売買手数料は 2026-07-27 17:30 JST 約定分から無料** (ウィブル証券、恒久)。それ以前は 0.20% 税抜 / 片道。残るコストは売却時の SEC ($20.60/$1M) と FINRA TAF ($0.000195/株)、CAT Fee、および両替時の為替スプレッド (15 銭/USD) のみで、$200 の往復なら約 $0.005。**したがって上記 2 列は 0 のままが実態に一致する**。詳細は `src/trading/domain/tradingCost.ts` の冒頭コメント。
 | `atr_baseline_exclude_recent` | `0` | baseline ATR から直近 20 本を除外する (#atr-baseline-window)。`1` にすると `atr20/baseline` が素直な比率になるが、過熱ガード / atr-floor の閾値は再校正が必要 |
 | `gap_reject_pct` | `0.03` | gap 判定 |
 

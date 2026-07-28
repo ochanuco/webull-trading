@@ -106,3 +106,12 @@ DASHBOARD_BASE_URL=
 # FIRST_LIVE_MAX_ORDER_NOTIONAL_USD=
 # FIRST_LIVE_MAX_ORDER_NOTIONAL_JPY=
 # ROLLBACK_REHEARSAL_MAX_AGE_HOURS=
+
+# --- news attention producer (newsShockGate PR 1, optional) ---
+# NEWS_ATTENTION_ENABLED: 'true' のときだけ GDELT DOC 2.0 API を叩いて報道量 /
+# トーンを attention_observation に蓄積する (5 分 cron)。未設定 = 無効。
+# 取引経路からは参照されない observation 専用の producer。
+# GDELT_API_BASE: GDELT のベース URL override (テスト / モック用)。未設定なら
+# https://api.gdeltproject.org を使う。
+# NEWS_ATTENTION_ENABLED=true
+# GDELT_API_BASE=
