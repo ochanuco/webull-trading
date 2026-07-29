@@ -16,6 +16,8 @@ export interface DailyBar {
 const BASELINE_EXCLUDE_RECENT = 20
 /** baseline ATR に使う最大サンプル数 (≈ 3 か月)。 */
 const BASELINE_MAX_SAMPLES = 60
+/** percentile モードで参照する rolling ATR の本数 (≈ 1 年)。 */
+const BASELINE_PERCENTILE_SAMPLES = 250
 
 export interface PullbackIndicatorSnapshot {
   price: number
@@ -74,17 +76,22 @@ export interface PullbackIndicatorSnapshot {
  * reference high lookback を 10d に短縮。フィールド名 (`return50d` /
  * `high20d`) は storage / dashboard 互換のため据え置き。
  */
+/**
+ * baseline ATR の作り方 (#atr-baseline-window)。
+ *
+ * - `overlap` (既定): 直近 60 本平均。**atr20 の窓を内包する**ため比率が鈍り、
+ *   実測では `maxAtrRatio` を何に設定しても発火しなかった (= ガードが死んでいる)
+ * - `exclude-recent`: 直近 20 本を除いた平均。比率は素直になるが、閾値 0.3 の差で
+ *   成績が 4 倍振れる実測結果が出ており、ノイズを拾いやすい
+ * - `percentile`: **その銘柄自身の atr20 分布の p80**。銘柄ごとのボラ水準
+ *   (SOXL 22% vs VUG 1.7%) に依存せず「その銘柄として高ボラか」を測る。
+ *   `maxAtrRatio = 1.0` が「p80 超で見送り」になる
+ */
+export type AtrBaselineMode = 'overlap' | 'exclude-recent' | 'percentile'
+
 export interface PullbackIndicatorOptions {
-  /**
-   * baseline ATR から直近 20 本 (= atr20 の窓) を除外するか (#atr-baseline-window)。
-   *
-   * **既定 false = 従来の重複窓**。true にすると `atr20 / baselineAtr20` は
-   * 「直近 vs それ以前」の素直な比率になるが、**過熱ガード (maxAtrRatio) と
-   * sizing の atr-floor の閾値は旧 baseline 前提で校正されている**ため、
-   * 同じ閾値のままだと押し目 entry (= 直近 ATR が上がった局面) がほぼ全て
-   * blocked になる。切り替えるときは backtest で閾値を測り直すこと。
-   */
-  excludeRecentFromBaseline?: boolean
+  /** baseline の作り方。未指定は 'percentile' (本番既定)。 */
+  baselineMode?: AtrBaselineMode
 }
 
 export function computePullbackIndicators(
@@ -129,11 +136,22 @@ export function computePullbackIndicators(
   // 切り替えは backtest で閾値を測り直してから。
   // bars >= 50 を上で保証しているので TR は 49 本以上あり、直近 20 本を除いても
   // 29 本以上残る (= サンプル不足の分岐は起き得ない)。
-  const baselineSource =
-    options?.excludeRecentFromBaseline === true
-      ? trueRanges.slice(0, -BASELINE_EXCLUDE_RECENT).slice(-BASELINE_MAX_SAMPLES)
-      : trueRanges.slice(-Math.min(trueRanges.length, BASELINE_MAX_SAMPLES))
-  const baselineAtr20 = average(baselineSource)
+  const mode: AtrBaselineMode = options?.baselineMode ?? 'percentile'
+  let baselineAtr20: number
+  if (mode === 'percentile') {
+    // その銘柄自身の atr20 分布の p80。rolling ATR を trailing 窓で作って
+    // 分位点を取る (窓が足りなければ取れる分だけ)。
+    const rolling: number[] = []
+    for (let end = trueRanges.length; end >= 20; end -= 1) {
+      rolling.push(average(trueRanges.slice(end - 20, end)))
+      if (rolling.length >= BASELINE_PERCENTILE_SAMPLES) break
+    }
+    baselineAtr20 = percentile(rolling, 0.8)
+  } else if (mode === 'exclude-recent') {
+    baselineAtr20 = average(trueRanges.slice(0, -BASELINE_EXCLUDE_RECENT).slice(-BASELINE_MAX_SAMPLES))
+  } else {
+    baselineAtr20 = average(trueRanges.slice(-Math.min(trueRanges.length, BASELINE_MAX_SAMPLES)))
+  }
 
   // intradayPrice がきちんと正値の有限数なら採用、そうでなければ daily close。
   // `> 0` で 0 / 負値もはじき、Number.isFinite で NaN / Infinity をはじく。
@@ -167,6 +185,14 @@ function computeTrueRanges(bars: DailyBar[]): number[] {
     )
   }
   return tr
+}
+
+/** 昇順ソート後の線形補間なし分位点。空配列は 0。 */
+function percentile(values: number[], q: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(q * (sorted.length - 1))))
+  return sorted[idx]!
 }
 
 function average(values: number[]): number {

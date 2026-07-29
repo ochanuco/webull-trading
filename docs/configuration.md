@@ -47,7 +47,7 @@
 | `pullback_default_require_above_sma50` | `1` | sma50 超を entry 必須 |
 | `pullback_default_k_atr` | `2.0` | ATR 倍率。`stopDistance = max(k_atr × atr20, pct stop)` |
 | `pullback_default_max_sma50_deviation_pct` | `0.6` | sma50 からの上方乖離が大きすぎる時は entry 見送り |
-| `pullback_default_max_atr_ratio` | `1.5` | ATR 拡大 (ボラ急騰) 時の entry 見送り閾値 |
+| `pullback_default_max_atr_ratio` | `1.1` | 過熱ガードの閾値。`atr20 / baseline` がこれを超えたら entry 見送り |
 | `pullback_default_max_stop_to_tp_ratio` | `2.0` | stop 幅の上限 = `take_profit_pct × これ`。R:R に下限を作る (2.0 = R:R 0.5 以上)。`0` で無効 |
 | `atr_baseline_exclude_recent` | `0` | baseline ATR から直近 20 本を除外。`1` にすると比率が素直になるが**閾値の再校正が必要** ([#598](https://github.com/ochanuco/webull-trading/pull/598)) |
 

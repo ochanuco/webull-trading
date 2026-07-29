@@ -333,7 +333,7 @@ export const globalConfig = sqliteTable(
     /**
      * ボラ過熱ガード: `atr20/baselineAtr20` がこの比率超で BUY 見送り。POC default 1.5。
      */
-    pullbackDefaultMaxAtrRatio: real('pullback_default_max_atr_ratio').notNull().default(1.5),
+    pullbackDefaultMaxAtrRatio: real('pullback_default_max_atr_ratio').notNull().default(1.1),
     /**
      * Stop 幅の上限 = |avgPrice * take_profit_pct| * これ (#stop-rr-cap)。ATR 連動
      * stop が利確幅に対して一方的に広がるのを止め、R:R に下限を作る (2.0 なら
@@ -350,13 +350,19 @@ export const globalConfig = sqliteTable(
     /** 1 注文あたりの固定費 (銘柄通貨建て)。0 で無効。 */
     feeFixedPerOrder: real('fee_fixed_per_order').notNull().default(0),
     /**
-     * baseline ATR から直近 20 本 (atr20 の窓) を除外するか (#atr-baseline-window)。
-     * **既定 false = 従来の重複窓**。true にすると比率が素直になる代わりに
-     * 過熱ガード / atr-floor の閾値を測り直す必要がある。
+     * baseline ATR の作り方 (#atr-baseline-window)。過熱ガード
+     * (`pullback_default_max_atr_ratio`) の分母を決める。
+     *
+     * - `percentile` (既定): その銘柄自身の atr20 分布の p80。銘柄ごとのボラ
+     *   水準に依存せず「その銘柄として高ボラか」を測る。閾値 1.1 が実測の推奨
+     * - `overlap`: 直近 60 本平均。**分母が分子を内包する**ため比率が動かず、
+     *   閾値を何にしても発火しない (実測: 全設定でトレード数が同一だった)
+     * - `exclude-recent`: 直近 20 本を除いた平均。比率は素直だが閾値 0.3 の差で
+     *   成績が 4 倍振れ、ノイズを拾いやすい
+     *
+     * enum 検証は loader 側 (不正値は `percentile` に倒す)。
      */
-    atrBaselineExcludeRecent: integer('atr_baseline_exclude_recent', { mode: 'boolean' })
-      .notNull()
-      .default(false),
+    atrBaselineMode: text('atr_baseline_mode').notNull().default('percentile'),
     /**
      * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
      * pullbackSizing に渡る。#23 Lane 2。

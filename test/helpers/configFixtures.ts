@@ -38,7 +38,7 @@ export function makeGlobalConfigSnapshot(
     pullbackDefaultMaxStopToTpRatio: 2.0,
     feePctOfNotional: 0,
     feeFixedPerOrder: 0,
-    atrBaselineExcludeRecent: false,
+    atrBaselineMode: 'percentile',
     riskBasePerTradePct: 0.004,
     riskDdHalfThreshold: -0.05,
     riskDdHaltThreshold: -0.10,
