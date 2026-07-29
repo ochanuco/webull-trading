@@ -830,7 +830,7 @@ export async function runStrategyCron(
       defaultRule,
       rulesMap,
       entrySuppressedSymbols: effectiveEntrySuppressed,
-      atrBaselineExcludeRecent: global.atrBaselineExcludeRecent,
+      atrBaselineMode: global.atrBaselineMode,
       // #trade-cost: 通知の realized を reconcile と同じ net にする。
       tradeCost: {
         feePctOfNotional: global.feePctOfNotional,
