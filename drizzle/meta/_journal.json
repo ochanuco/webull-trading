@@ -302,6 +302,13 @@
       "when": 1785240368279,
       "tag": "0042_add_news_shock_gate_config",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1785327259911,
+      "tag": "0043_atr_baseline_mode",
+      "breakpoints": true
     }
   ]
 }

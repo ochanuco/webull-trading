@@ -1,3 +1,4 @@
+import type { AtrBaselineMode } from '../../trading/strategy/indicators'
 import { eq } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import { globalConfig, type GlobalConfigRow } from './schema'
@@ -47,8 +48,8 @@ export interface GlobalConfigSnapshot {
   feePctOfNotional: number
   /** 売買コスト見積りの 1 注文固定費 (銘柄通貨建て)。 */
   feeFixedPerOrder: number
-  /** baseline ATR から直近 20 本を除外するか (#atr-baseline-window)。 */
-  atrBaselineExcludeRecent: boolean
+  /** baseline ATR の作り方 (#atr-baseline-window)。不正値は 'percentile'。 */
+  atrBaselineMode: AtrBaselineMode
   /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
   riskBasePerTradePct: number
   /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
@@ -115,6 +116,15 @@ export interface GlobalConfigSnapshot {
  * before the initial seed is applied). Matches the previous env-var defaults
  * so existing deployments keep the same behaviour through the cutover.
  */
+const ATR_BASELINE_MODES = ['overlap', 'exclude-recent', 'percentile'] as const
+
+/** enum 外は 'percentile' (= 実測で最良かつ既定) に倒す。 */
+function sanitizeAtrBaselineMode(value: string | null | undefined): AtrBaselineMode {
+  return (ATR_BASELINE_MODES as readonly string[]).includes(value ?? '')
+    ? (value as AtrBaselineMode)
+    : 'percentile'
+}
+
 export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   dryRun: true,
   tradingEnabled: false,
@@ -144,7 +154,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pullbackDefaultMaxStopToTpRatio: 2.0,
   feePctOfNotional: 0,
   feeFixedPerOrder: 0,
-  atrBaselineExcludeRecent: false,
+  atrBaselineMode: 'percentile',
   riskBasePerTradePct: 0.004,
   riskDdHalfThreshold: -0.05,
   riskDdHaltThreshold: -0.10,
@@ -464,7 +474,7 @@ export async function loadGlobalConfig(
             pullbackDefaultMaxStopToTpRatio: globalConfig.pullbackDefaultMaxStopToTpRatio,
             feePctOfNotional: globalConfig.feePctOfNotional,
             feeFixedPerOrder: globalConfig.feeFixedPerOrder,
-            atrBaselineExcludeRecent: globalConfig.atrBaselineExcludeRecent,
+            atrBaselineMode: globalConfig.atrBaselineMode,
             riskBasePerTradePct: globalConfig.riskBasePerTradePct,
             riskDdHalfThreshold: globalConfig.riskDdHalfThreshold,
             riskDdHaltThreshold: globalConfig.riskDdHaltThreshold,
@@ -504,8 +514,8 @@ export async function loadGlobalConfig(
             // 0039 追加列 (#trade-cost)。legacy path は default (= gross PnL)。
             feePctOfNotional: GLOBAL_CONFIG_DEFAULTS.feePctOfNotional,
             feeFixedPerOrder: GLOBAL_CONFIG_DEFAULTS.feeFixedPerOrder,
-            // 0040 追加列 (#atr-baseline-window)。legacy path は default (従来窓)。
-            atrBaselineExcludeRecent: GLOBAL_CONFIG_DEFAULTS.atrBaselineExcludeRecent,
+            // 0043 追加列 (#atr-baseline-window)。legacy path は default。
+            atrBaselineMode: GLOBAL_CONFIG_DEFAULTS.atrBaselineMode,
             riskBasePerTradePct: legacyRow.riskBasePerTradePct,
             riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
             riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
@@ -583,7 +593,7 @@ export async function loadGlobalConfig(
     pullbackDefaultMaxStopToTpRatio: row.pullbackDefaultMaxStopToTpRatio,
     feePctOfNotional: row.feePctOfNotional,
     feeFixedPerOrder: row.feeFixedPerOrder,
-    atrBaselineExcludeRecent: row.atrBaselineExcludeRecent,
+    atrBaselineMode: sanitizeAtrBaselineMode(row.atrBaselineMode),
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,

@@ -143,16 +143,16 @@ describe('computePullbackIndicators baseline ATR window', () => {
     })
   }
 
-  it('既定では baseline に直近の急騰分が混ざり、比率が鈍る', () => {
-    const r = computePullbackIndicators(volSpikeBars())!
+  it('overlap では baseline に直近の急騰分が混ざり、比率が鈍る', () => {
+    const r = computePullbackIndicators(volSpikeBars(), null, { baselineMode: 'overlap' })!
     const ratio = r.atr20 / r.baselineAtr20
     // 実際のボラ差は 5 倍だが、baseline が直近を含むので比率は大幅に縮む。
     expect(ratio).toBeLessThan(3)
   })
 
-  it('excludeRecentFromBaseline で実際のボラ差 (5 倍) に近い比率になる', () => {
+  it("baselineMode: 'exclude-recent' で実際のボラ差 (5 倍) に近い比率になる", () => {
     const r = computePullbackIndicators(volSpikeBars(), null, {
-      excludeRecentFromBaseline: true,
+      baselineMode: 'exclude-recent',
     })!
     const ratio = r.atr20 / r.baselineAtr20
     expect(ratio).toBeGreaterThan(4)
@@ -161,10 +161,52 @@ describe('computePullbackIndicators baseline ATR window', () => {
   it('最小 bar 数 (50) でも除外後に十分なサンプルが残る', () => {
     const closes = Array.from({ length: 50 }, (_, i) => 100 + i)
     const excluded = computePullbackIndicators(makeBars(closes), null, {
-      excludeRecentFromBaseline: true,
+      baselineMode: 'exclude-recent',
     })!
     // TR 49 本 − 直近 20 本 = 29 本。0 除算や空平均にならないことを固定する。
     expect(excluded.baselineAtr20).toBeGreaterThan(0)
     expect(Number.isFinite(excluded.atr20 / excluded.baselineAtr20)).toBe(true)
+  })
+})
+
+// #atr-baseline-window: 既定の percentile は「その銘柄自身の atr20 分布の p80」。
+// 銘柄ごとのボラ水準 (SOXL 22% vs VUG 1.7%) に依存せず高ボラ局面を検出する。
+describe('percentile baseline (既定)', () => {
+  /** 前半 40 本は静穏、直近 20 本だけボラ 5 倍。 */
+  function volSpikeBars(): DailyBar[] {
+    return Array.from({ length: 61 }, (_, i) => {
+      const spread = i >= 41 ? 0.05 : 0.01
+      return {
+        date: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
+        open: 100,
+        high: 100 * (1 + spread),
+        low: 100 * (1 - spread),
+        close: 100,
+      }
+    })
+  }
+
+  it('急騰局面では atr20 が p80 を超える (比率 > 1)', () => {
+    const r = computePullbackIndicators(volSpikeBars(), null, { baselineMode: 'percentile' })!
+    expect(r.atr20 / r.baselineAtr20).toBeGreaterThan(1)
+  })
+
+  it('平常時は p80 を超えない (比率 <= 1)', () => {
+    const calm = Array.from({ length: 61 }, (_, i) => ({
+      date: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+    }))
+    const r = computePullbackIndicators(calm, null, { baselineMode: 'percentile' })!
+    expect(r.atr20 / r.baselineAtr20).toBeLessThanOrEqual(1)
+  })
+
+  it('未指定なら percentile が既定', () => {
+    const bars = volSpikeBars()
+    const explicit = computePullbackIndicators(bars, null, { baselineMode: 'percentile' })!
+    const implicit = computePullbackIndicators(bars)!
+    expect(implicit.baselineAtr20).toBeCloseTo(explicit.baselineAtr20, 10)
   })
 })
