@@ -60,10 +60,10 @@ export interface BacktestParams {
    */
   strategy?: BacktestStrategy
   /**
-   * baseline ATR から直近 20 本を除外して評価するか (#atr-baseline-window)。
-   * 閾値 (maxAtrRatio / atr-floor) の再校正はここで測る。既定 false = 本番同等。
+   * baseline ATR の作り方 (#atr-baseline-window)。閾値 (`maxAtrRatio`) の
+   * 再校正はここを振って測る。未指定は本番既定の 'percentile'。
    */
-  atrBaselineExcludeRecent?: boolean
+  atrBaselineMode?: 'overlap' | 'exclude-recent' | 'percentile'
 }
 
 export type ExitReason = 'TP' | 'STOP' | 'TIME_STOP' | 'END_OF_DATA'
@@ -160,7 +160,7 @@ export async function runBacktest(
     // intra-day slippage is out of scope.
     const window = bars.slice(Math.max(0, i + 1 - 60), i + 1)
     const indicators = computePullbackIndicators(window, null, {
-      excludeRecentFromBaseline: params.atrBaselineExcludeRecent === true,
+      baselineMode: params.atrBaselineMode ?? 'percentile',
     })
     const today = bars[i]!
     if (!indicators) {

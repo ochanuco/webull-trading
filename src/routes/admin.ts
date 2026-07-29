@@ -399,13 +399,15 @@ export const admin = new Hono<AppBindings>()
       to,
       initialCash,
       rule,
-      // #atr-baseline-window: `?atrBaselineExcludeRecent=1` で baseline から
-      // 直近 20 本を除いた場合の成績を測れる。既定は global_config の値
-      // (= 本番と同じ条件) なので、閾値の再校正はこの 2 通りを比べて行う。
-      atrBaselineExcludeRecent:
-        c.req.query('atrBaselineExcludeRecent') === undefined
-          ? global.atrBaselineExcludeRecent
-          : c.req.query('atrBaselineExcludeRecent') === '1',
+      // #atr-baseline-window: `?atrBaselineMode=overlap|exclude-recent|percentile`
+      // で baseline の作り方を差し替えて成績を比較できる。既定は global_config の
+      // 値 (= 本番と同じ条件)。閾値の再校正はこれと `?maxAtrRatio=` を振って行う。
+      atrBaselineMode: ((): 'overlap' | 'exclude-recent' | 'percentile' => {
+        const q = c.req.query('atrBaselineMode')
+        return q === 'overlap' || q === 'exclude-recent' || q === 'percentile'
+          ? q
+          : global.atrBaselineMode
+      })(),
     }
     const result = await runBacktest(sliced, params)
     return c.json(result)
