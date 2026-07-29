@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/ochanuco/webull-trading/compare/v1.3.1...v1.4.0) (2026-07-29)
+
+
+### Features
+
+* **strategy:** measure volatility against the symbol's own distribution ([125e5eb](https://github.com/ochanuco/webull-trading/commit/125e5eb1c8678f30ff659750e5b20dd7a2b7b182))
+* **strategy:** measure volatility against the symbol's own distribution ([03b8915](https://github.com/ochanuco/webull-trading/commit/03b8915915d26423757ce192c61f519696c168df))
+
 ## [1.3.1](https://github.com/ochanuco/webull-trading/compare/v1.3.0...v1.3.1) (2026-07-28)
 
 
