@@ -775,6 +775,11 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     // #reentry (Change A): 損益符号を問わず全 SELL で cooldown を張る。+40 の
     // 利確でも翌営業日まで park し、同日/次tick の買い戻し whipsaw を止める。
     expect(symbolStub.setCooldown).toHaveBeenCalledTimes(1)
+    // #661: 解除は翌営業日の**寄り** (nextSessionOpen) であって旧
+    // nextTradingDay (24h 刻み・時刻保持) の 2026-04-27T12:00:00.000Z ではない。
+    // now = 2026-04-25T12:00:00.000Z (土) → 翌営業日は 2026-04-27 (月)、
+    // US 開場 09:30 ET = EDT で 13:30Z。
+    expect(symbolStub.setCooldown).toHaveBeenCalledWith('SOXL', '2026-04-27T13:30:00.000Z')
   })
 
   it('repair retry after marker update failure does not double-apply DO state', async () => {
