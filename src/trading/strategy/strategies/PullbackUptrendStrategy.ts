@@ -1,5 +1,6 @@
-import type { DecisionTraceStep, Signal } from '../../domain/Signal'
+import type { DecisionTraceStep, EntryStatusSnapshot, HoldCause, Signal } from '../../domain/Signal'
 import type { PendingOrderLock, PositionState } from '../../state/types'
+import { deriveEntryStatusFromIndicators } from '../entryStatus'
 import { resolveStopDistance } from '../stopDistance'
 
 export interface PullbackIndicators {
@@ -296,17 +297,36 @@ export class PullbackUptrendStrategy {
       trace.push(step('entry.reentry_below_last_exit', true, ind.price, '<=', ind.price, 'guard inactive'))
     }
 
+    // #658: ここから先の 7 gate は entryDistance.ts の EntryGateKey と一対一で
+    // 対応する「setup の質」ゲート (行動可否 guard ではない)。HALF 昇格の検討
+    // 対象になり得るので、HOLD を返す際は holdCause='entry_gate' と 4 段階判定
+    // スナップショットを同梱する。scheduler 側の再導出を廃止した対価として、
+    // HOLD ごとに deriveEntryStatusFromIndicators (7 gate の再評価 1 回) を呼ぶ
+    // (#658)。
+
     if (ind.return50d <= rule.minReturn50d) {
       trace.push(step('entry.trend_50d_return', false, ind.return50d, '>', rule.minReturn50d))
       // #318: lookback は 20 営業日 (フィールド名は historical)。reason は人間
       // 向け表示なので「20d return」と書いて誤読を避ける。
-      return hold(input, `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`, trace)
+      return hold(
+        input,
+        `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.trend_50d_return', true, ind.return50d, '>', rule.minReturn50d))
 
     if (rule.requireAboveSma50 && ind.price <= ind.sma50) {
       trace.push(step('entry.above_sma50', false, ind.price, '>', ind.sma50))
-      return hold(input, `price ${ind.price} <= sma50 ${ind.sma50}`, trace)
+      return hold(
+        input,
+        `price ${ind.price} <= sma50 ${ind.sma50}`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.above_sma50', true, ind.price, '>', ind.sma50, rule.requireAboveSma50 ? undefined : 'disabled by rule'))
 
@@ -319,6 +339,8 @@ export class PullbackUptrendStrategy {
         input,
         `sma50 deviation ${sma50Deviation.toFixed(4)} > ${rule.maxSma50DeviationPct} (overextended)`,
         trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
       )
     }
     trace.push(step('entry.not_overextended', true, sma50Deviation, '<=', rule.maxSma50DeviationPct))
@@ -328,27 +350,45 @@ export class PullbackUptrendStrategy {
     const atrRatio = ind.baselineAtr20 > 0 ? ind.atr20 / ind.baselineAtr20 : 0
     if (atrRatio > rule.maxAtrRatio) {
       trace.push(step('entry.vol_not_elevated', false, atrRatio, '<=', rule.maxAtrRatio))
-      return hold(input, `atr ratio ${atrRatio.toFixed(2)} > ${rule.maxAtrRatio} (volatility elevated)`, trace)
+      return hold(
+        input,
+        `atr ratio ${atrRatio.toFixed(2)} > ${rule.maxAtrRatio} (volatility elevated)`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.vol_not_elevated', true, atrRatio, '<=', rule.maxAtrRatio))
 
     if (ind.high20d <= 0) {
       trace.push(step('entry.high20d_valid', false, ind.high20d, '>', 0))
       // #318: lookback は 10 営業日 (フィールド名は historical)。
-      return hold(input, 'invalid 10d high', trace)
+      return hold(input, 'invalid 10d high', trace, 'entry_gate', deriveEntryStatusFromIndicators(ind, rule))
     }
     trace.push(step('entry.high20d_valid', true, ind.high20d, '>', 0))
 
     const pullback = (ind.price - ind.high20d) / ind.high20d
     if (pullback > rule.pullbackMax) {
       trace.push(step('entry.pullback_not_too_shallow', false, pullback, '<=', rule.pullbackMax))
-      return hold(input, `pullback ${pullback.toFixed(4)} > ${rule.pullbackMax} (not deep enough)`, trace)
+      return hold(
+        input,
+        `pullback ${pullback.toFixed(4)} > ${rule.pullbackMax} (not deep enough)`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.pullback_not_too_shallow', true, pullback, '<=', rule.pullbackMax))
 
     if (pullback < rule.pullbackMin) {
       trace.push(step('entry.pullback_not_too_deep', false, pullback, '>=', rule.pullbackMin))
-      return hold(input, `pullback ${pullback.toFixed(4)} < ${rule.pullbackMin} (too deep)`, trace)
+      return hold(
+        input,
+        `pullback ${pullback.toFixed(4)} < ${rule.pullbackMin} (too deep)`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.pullback_not_too_deep', true, pullback, '>=', rule.pullbackMin))
     trace.push(step('entry.adopt_buy', true, pullback, 'between', [rule.pullbackMin, rule.pullbackMax]))
@@ -356,7 +396,19 @@ export class PullbackUptrendStrategy {
   }
 }
 
-function hold(input: PullbackInput, reason: string, trace: DecisionTraceStep[]): Signal {
+/**
+ * `cause` の既定値は 'guard' (#658, fail-closed)。行動可否 guard
+ * (position / pendingOrder / cooldown / 再エントリー価格ガード) 由来の HOLD は
+ * すべてこの既定に乗る — HALF 昇格は絶対禁止なので、明示的に 'entry_gate' を
+ * 渡した呼び出し元 (setup の質を測る 7 gate) だけが昇格の検討対象になる。
+ */
+function hold(
+  input: PullbackInput,
+  reason: string,
+  trace: DecisionTraceStep[],
+  cause: HoldCause = 'guard',
+  entryStatus?: EntryStatusSnapshot,
+): Signal {
   return {
     action: 'HOLD',
     symbol: input.symbol,
@@ -365,6 +417,8 @@ function hold(input: PullbackInput, reason: string, trace: DecisionTraceStep[]):
     reason,
     generatedAtIso: input.now.toISOString(),
     trace,
+    holdCause: cause,
+    ...(entryStatus !== undefined ? { entryStatus } : {}),
   }
 }
 
