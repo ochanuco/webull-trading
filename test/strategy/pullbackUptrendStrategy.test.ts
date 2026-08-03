@@ -197,6 +197,70 @@ describe('PullbackUptrendStrategy re-entry price guard', () => {
   })
 })
 
+// #658: strategy が HOLD の原因 (holdCause) と、entry_gate 由来なら 4 段階判定
+// スナップショット (entryStatus) を申告する。scheduler の HALF 昇格判定はこれを
+// 再計算せずそのまま使うため、行動可否 guard (cooldown / 再エントリー価格ガード)
+// が誤って 'entry_gate' に分類されると HALF 昇格の絶対 veto が崩れる
+// (実害: 2026-07-29 SQQQ — 再エントリーガード由来の HOLD が指標のみの再導出で
+// BUY 0.5x に昇格した)。
+describe('PullbackUptrendStrategy holdCause (#658)', () => {
+  const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
+
+  it('cooldown HOLD is holdCause=guard with no entryStatus', () => {
+    const input = goodEntryInput()
+    input.cooldownUntil = new Date(now.getTime() + 60_000).toISOString()
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.holdCause).toBe('guard')
+    expect(signal.entryStatus).toBeUndefined()
+  })
+
+  it('re-entry price guard HOLD is holdCause=guard with no entryStatus', () => {
+    const input = goodEntryInput() // price 96, atr20 1.5
+    input.lastExitPrice = 96 // ceiling = 96 - 1*1.5 = 94.5; price 96 > 94.5 → block
+    input.businessDaysSinceExit = 1
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.reason).toMatch(/re-entry guard/)
+    expect(signal.holdCause).toBe('guard')
+    expect(signal.entryStatus).toBeUndefined()
+  })
+
+  it('structural gate HOLD within the HALF tolerance band is holdCause=entry_gate with a HALF entryStatus', () => {
+    // Same fixture as "HOLDs when pullback is deeper than -6%": only
+    // pullback_deep fails (-7% vs -6% threshold), and -7% is within the
+    // ±20% tolerance band (-7.2%) → HALF.
+    const input = goodEntryInput()
+    input.indicators.price = 93 // -7% pullback
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.holdCause).toBe('entry_gate')
+    expect(signal.entryStatus?.status).toBe('HALF')
+    expect(signal.entryStatus?.halfGate?.key).toBe('pullback_deep')
+    expect(signal.entryStatus?.positionMultiplier).toBe(0.5)
+  })
+
+  it('structural gate HOLD outside the HALF tolerance band is holdCause=entry_gate with a WATCH entryStatus', () => {
+    // Same fixture as "HOLDs when pullback is shallower than -3%": only
+    // pullback_shallow fails (-1% vs -3% threshold), and -1% is outside the
+    // ±20% tolerance band (-2.4%) → WATCH, no halfGate.
+    const input = goodEntryInput()
+    input.indicators.price = 99 // -1% pullback
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.holdCause).toBe('entry_gate')
+    expect(signal.entryStatus?.status).toBe('WATCH')
+    expect(signal.entryStatus?.halfGate).toBeNull()
+  })
+
+  it('BUY carries no holdCause / entryStatus', () => {
+    const signal = strategy.decide(goodEntryInput())
+    expect(signal.action).toBe('BUY')
+    expect(signal.holdCause).toBeUndefined()
+    expect(signal.entryStatus).toBeUndefined()
+  })
+})
+
 describe('PullbackUptrendStrategy exit priority', () => {
   const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
 

@@ -2314,6 +2314,38 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
   })
 })
 
+// #658 実害回帰フィクスチャ: 2026-07-29 SQQQ 実害の再現用 bars。TEST_DEFAULT_RULE
+// で評価すると price=47.1187 / atr20=2.35 (実測値と一致するよう bars を逆算)、
+// pullback=-6.5% (pullbackMin=-0.06 の許容バンド [-0.072, -0.06) 内) のみが
+// 未通過で、他の 6 gate は全通過 → deriveEntryStatusFromIndicators は
+// status='HALF' / halfGate.key='pullback_deep' を返す (値は
+// `pnpm exec vitest run` で実行確認済み、下記コメントに実測値を記載)。
+//
+// 旧実装 (scheduler が signal.action==='HOLD' のたびに指標から entry status を
+// 再導出していた) は、この HALF 判定**だけ**を見て BUY 0.5x に昇格させていた。
+// 実際には reentry guard (前回売値 45.8302 に対し price 47.1187 が高すぎる) が
+// entryDecision の最初の早期 return で HOLD を確定させており、7 gate 集合に
+// 存在しない再エントリーガードは再導出では検知できなかった。
+function reentryHalfMissBars(): DailyBar[] {
+  const SPREAD_ABS = 1.175 // high-low per bar -> atr20 = 2.35
+  const start = 43
+  const peak = 47.1187 / (1 - 0.065) - SPREAD_ABS // -> high20d = 47.1187/0.935, pullback = -6.5%
+  const final = 47.1187
+  const synthClose = (i: number, close: number): DailyBar => {
+    const date = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10)
+    return { date, open: close, high: close + SPREAD_ABS, low: close - SPREAD_ABS, close }
+  }
+  const bars: DailyBar[] = []
+  for (let i = 0; i < 40; i += 1) bars.push(synthClose(i, start - 4 + i * 0.1))
+  for (let i = 40; i < 55; i += 1) bars.push(synthClose(i, start + ((peak - start) * (i - 40)) / 14))
+  bars.push(synthClose(55, peak))
+  bars.push(synthClose(56, peak - (peak - final) * 0.25))
+  bars.push(synthClose(57, peak - (peak - final) * 0.5))
+  bars.push(synthClose(58, peak - (peak - final) * 0.8))
+  bars.push(synthClose(59, final))
+  return bars
+}
+
 describe('runPullbackScheduler half entry (#452 段階判定)', () => {
   // uptrendBars() の pullback は (117.5-122)/122 ≈ -3.69%。pullbackMin を
   // -0.035 に絞ると pullback_deep だけが僅差で落ち (許容バンド -0.042 以内)、
@@ -2417,6 +2449,65 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     expect(execution.calls).toHaveLength(0)
     const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('inverse')
+  })
+
+  // #658 実害回帰 (2026-07-29 SQQQ): reentryHalfMissBars() は entry gate 視点で
+  // 見れば HALF (pullback_deep 僅差) だが、reentry guard 由来の HOLD
+  // (holdCause='guard') なので昇格しないこと。
+  it('does not promote a re-entry-guard HOLD even when the underlying gates would derive HALF (#658)', async () => {
+    const execution = mockExecution()
+    const guardedState: SymbolState = {
+      ...emptySymbolState('SQQQ', () => now),
+      lastExecutedPrice: 45.8302,
+      // now (2026-04-20 Mon) の 2 営業日前 (Thu) → businessDaysSinceExit = 2 < 3。
+      lastExitAt: '2026-04-16T14:30:00.000Z',
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SQQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(reentryHalfMissBars()),
+      positionStore: makeStore({ SQQQ: guardedState }),
+      execution,
+      defaultRule: TEST_DEFAULT_RULE,
+      halfEntrySymbols: new Set(['SQQQ']),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SQQQ')
+    expect(decision?.decision).toBe('HOLD')
+    expect(decision?.reason).toMatch(/re-entry guard/)
+    expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
+    expect(decision?.trace?.map((s) => s.label)).not.toContain('entry.half_status')
+  })
+
+  // #658: 再エントリーガードの窓 (既定 3 営業日) を過ぎれば guard は無効化され、
+  // 同じ HALF 相当の gate 状況は通常どおり 0.5x に昇格する (= 昇格ロジック自体は
+  // holdCause='entry_gate' の場合に生きていることの確認)。
+  it('promotes the same HALF-eligible symbol once the re-entry guard window has elapsed (#658)', async () => {
+    const execution = mockExecution()
+    const staleExitState: SymbolState = {
+      ...emptySymbolState('SQQQ', () => now),
+      lastExecutedPrice: 45.8302,
+      // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
+      lastExitAt: '2026-04-10T14:30:00.000Z',
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SQQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(reentryHalfMissBars()),
+      positionStore: makeStore({ SQQQ: staleExitState }),
+      execution,
+      defaultRule: TEST_DEFAULT_RULE,
+      halfEntrySymbols: new Set(['SQQQ']),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { side: string }
+    expect(intent.side).toBe('BUY')
+    const buy = summary.decisions.find((d) => d.decision === 'BUY')
+    expect(buy?.reason).toContain('half entry (0.5x)')
+    expect(buy?.trace?.map((s) => s.label)).toContain('entry.half_status')
   })
 })
 
