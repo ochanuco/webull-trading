@@ -625,10 +625,15 @@ export async function runPullbackScheduler(
     // override) は position だけ null 化するためこの不変条件が壊れ、
     // lastExecutedPrice に古い BUY 価格が残ったままガード基準になり得た。
     // lastExitPrice は recordFill が SELL でクローズしたときだけ明示的に
-    // 刻む専用フィールドなので、それを直接参照する (#660)。旧 state は
-    // lastExitPrice=null → ガード不活性 (= null 時の従来挙動と同じ fail-open)
-    // になり、次の exit から自然に有効化される。lastExecutedPrice への
-    // フォールバックは意図的に入れない (不健全な推論の再導入になるため)。
+    // 刻む専用フィールドなので、それを直接参照する (#660)。lastExecutedPrice
+    // へのフォールバックは意図的に入れない (不健全な推論の再導入になるため)。
+    // lastExitAt (#582 で先行導入済) と lastExitPrice (本フィールド) は導入
+    // 時期が異なるため、旧 state は「lastExitAt はあるが lastExitPrice が
+    // 無い」移行期を経る。その間はガード窓内である限り
+    // PullbackUptrendStrategy.entryDecision 側が fail-closed (価格不明で
+    // entry 保留) する — lastExitAt 由来の businessDaysSinceExit だけは
+    // ここで渡すので、窓経過後は自然に fail-open へ戻る。lastExitAt も無い
+    // (一度も exit していない) 銘柄は従来どおり無条件で通す。
     const reentryLastExitPrice = state.position === null ? state.lastExitPrice : null
     const reentryBusinessDaysSinceExit =
       state.position === null && state.lastExitAt

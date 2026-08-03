@@ -229,11 +229,12 @@ describe('runPullbackScheduler', () => {
   })
 
   // #660: overridePosition (sync-holdings 経由) は position を null にするだけで
-  // lastExecutedPrice は古い BUY 価格のまま残りうる。lastExitPrice が無い旧
-  // (legacy) state では、その stale lastExecutedPrice をガード基準に「推論」
-  // してはいけない — fail-open (ガード不活性) のまま BUY を通す。
-  it('does not fall back to a stale lastExecutedPrice when lastExitPrice is legacy-null', async () => {
-    const legacyFlatState: SymbolState = {
+  // lastExecutedPrice は古い BUY 価格のまま残りうる。lastExitAt も無い
+  // (= 一度も exit していない、または旧 state のまま) 銘柄は未取引扱いなので、
+  // その stale lastExecutedPrice をガード基準に「推論」してはいけない —
+  // 従来どおり無条件で BUY を通す。
+  it('treats a symbol with no lastExitAt as never-exited and does not infer a guard from stale lastExecutedPrice', async () => {
+    const neverExitedState: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
       // sync-holdings 由来の残骸: 古い BUY 価格が居座っている想定。
       lastExecutedPrice: 50,
@@ -245,7 +246,63 @@ describe('runPullbackScheduler', () => {
       symbols: ['SOXL'],
       equity: 100_000,
       barClient: mockBarClient(uptrendBars()),
-      positionStore: makeStore({ SOXL: legacyFlatState }),
+      positionStore: makeStore({ SOXL: neverExitedState }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
+  })
+
+  // #660 (CodeRabbit follow-up): lastExitAt は #582 で先行導入済みだが
+  // lastExitPrice は本フィールドの新規追加。そのため deploy 直前にガード窓内
+  // (reentryGuardBusinessDays 未満) で exit した銘柄は、lastExitAt はあるのに
+  // lastExitPrice が無い移行期の state になりうる。ここを fail-open (無条件
+  // BUY 許可) にすると、まさにガードで守るべき窓内で無防備に買い直せてしまう
+  // (SQQQ 事故と同型のリスク窓)。窓内なら価格不明でも entry を保留する
+  // (fail-closed) べき。
+  it('fail-closes the re-entry guard when lastExitAt exists but lastExitPrice is legacy-null within the guard window', async () => {
+    const migrationWindowState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      lastExitPrice: null,
+      // now (2026-04-20 Mon) の 1 営業日前 (Fri) → businessDaysSinceExit = 1 < 3。
+      lastExitAt: '2026-04-17T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: migrationWindowState }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SOXL')
+    expect(decision?.decision).toBe('HOLD')
+    expect(decision?.reason).toMatch(/re-entry guard/)
+    expect(decision?.reason).toMatch(/unknown|guard window/)
+    expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
+  })
+
+  // 窓経過後は lastExitPrice が無くても自然に fail-open へ戻る (恒久 block ではない)。
+  it('allows the BUY once the guard window elapses even when lastExitPrice is legacy-null', async () => {
+    const pastWindowState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      lastExitPrice: null,
+      // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
+      lastExitAt: '2026-04-10T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: pastWindowState }),
       execution,
       now: () => now,
     })

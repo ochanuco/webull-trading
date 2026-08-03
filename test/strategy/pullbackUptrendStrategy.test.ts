@@ -182,16 +182,46 @@ describe('PullbackUptrendStrategy re-entry price guard', () => {
     expect(strategy.decide(input).action).toBe('BUY')
   })
 
-  it('is fail-open when lastExitPrice is unknown', () => {
+  // #660 (CodeRabbit follow-up): lastExitAt は #582 で先行導入済みだが
+  // lastExitPrice は本フィールドの新規追加なので、deploy 直前のガード窓内に
+  // exit した銘柄は lastExitAt はあるのに lastExitPrice が無い移行期の state
+  // になりうる。ここを fail-open (無条件 BUY 許可) にすると、まさにガードで
+  // 守るべき窓内で無防備に買い直せてしまう。窓内なら価格不明でも entry を
+  // 保留する (fail-closed)。
+  it('fail-closes (HOLDs) when lastExitPrice is unknown but the exit was within the guard window', () => {
     const input = goodEntryInput()
     input.lastExitPrice = null
     input.businessDaysSinceExit = 1
+    const signal = strategy.decide(input)
+    expect(signal.action).toBe('HOLD')
+    expect(signal.reason).toMatch(/re-entry guard/)
+    expect(signal.reason).toMatch(/unknown|guard window/)
+    expect(signal.trace?.at(-1)).toMatchObject({
+      label: 'entry.reentry_below_last_exit',
+      passed: false,
+    })
+  })
+
+  // 窓経過後は lastExitPrice が無くても自然に fail-open へ戻る (恒久 block ではない)。
+  it('BUYs once the guard window elapses even when lastExitPrice is still unknown', () => {
+    const input = goodEntryInput()
+    input.lastExitPrice = null
+    input.businessDaysSinceExit = 3 // >= reentryGuardBusinessDays → guard inactive
     expect(strategy.decide(input).action).toBe('BUY')
   })
 
-  it('is fail-open when businessDaysSinceExit is unknown', () => {
+  // businessDaysSinceExit が無い (= lastExitAt も無い、一度も exit していない
+  // 銘柄) は窓の内外を判定しようがないので、従来どおり無条件で fail-open。
+  it('is fail-open when businessDaysSinceExit is unknown (never exited)', () => {
     const input = goodEntryInput()
     input.lastExitPrice = 96
+    input.businessDaysSinceExit = null
+    expect(strategy.decide(input).action).toBe('BUY')
+  })
+
+  it('is fail-open when both lastExitPrice and businessDaysSinceExit are unknown (never exited)', () => {
+    const input = goodEntryInput()
+    input.lastExitPrice = null
     input.businessDaysSinceExit = null
     expect(strategy.decide(input).action).toBe('BUY')
   })
