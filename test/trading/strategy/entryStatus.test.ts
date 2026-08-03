@@ -32,15 +32,16 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
     expect(result.failedGates).toHaveLength(0)
   })
 
-  it('HALF when the only failing gate is volatility within the ×1.2 tolerance band', () => {
-    // atrRatio 1.65 > max 1.5、ただし 1.5×1.2=1.8 以内 → HALF。
+  it('WATCH when the only failing gate is volatility, even within the ×1.2 tolerance band (regime gate, #659)', () => {
+    // atrRatio 1.65 > max 1.5、閾値の 1.2 倍 (1.8) 以内でも volatility はレジーム
+    // gate なので HALF にせず WATCH のまま (#659)。
     const result = deriveEntryStatusFromIndicators(
       { ...baseIndicators(), atr20: 1.65 },
       rule(),
     )
-    expect(result.status).toBe('HALF')
-    expect(result.positionMultiplier).toBe(0.5)
-    expect(result.halfGate?.key).toBe('volatility')
+    expect(result.status).toBe('WATCH')
+    expect(result.positionMultiplier).toBe(0)
+    expect(result.halfGate).toBeNull()
   })
 
   it('HALF when the only failing gate is pullback depth within the tolerance band', () => {
@@ -54,9 +55,10 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   })
 
   it('WATCH when a single degree gate fails beyond the tolerance band', () => {
-    // atrRatio 2.0 > 1.8 (バンド外) → HALF にせず WATCH (監視のみ、発注なし)。
+    // pullback = (100-110)/110 = -0.0909、min -0.06 の許容バンド -0.072 を
+    // 超えて外れる → HALF にせず WATCH (監視のみ、発注なし)。
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), atr20: 2.0 },
+      { ...baseIndicators(), high20d: 110 },
       rule(),
     )
     expect(result.status).toBe('WATCH')

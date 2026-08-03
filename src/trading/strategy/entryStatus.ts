@@ -33,9 +33,18 @@ export interface EntryStatusResult {
  * 「程度もの」gate (#452)。閾値をわずかに超えているだけなら 0.5x で部分 entry
  * する余地がある連続量の gate。trend / above_sma50 / overextension / high20d は
  * レジーム・構造の条件なので、僅差でも HALF にしない。
+ *
+ * `volatility` (atr20/baselineAtr20 の過熱ガード) は `entryDistance.ts` 自身が
+ * `priceDependent: false` と分類するレジーム条件であり、上の原則と矛盾していた
+ * ため一覧から除外した (#659)。3x レバ ETF ではボラ膨張局面こそギャップ/decay
+ * リスクが集中するので、最も緩めてはいけない gate — 僅差でも HALF にせず WATCH
+ * のまま止める。
+ *
+ * `pullback_shallow` は「10日高値により近い側での妥協」= chase 方向の緩和であり、
+ * 他の 2 gate と性格が異なる。将来的に除外を再検討する余地がある (#659) が、今回
+ * は変更しない。
  */
 const DEGREE_GATE_KEYS: ReadonlySet<string> = new Set([
-  'volatility',
   'pullback_shallow',
   'pullback_deep',
 ])
