@@ -62,16 +62,18 @@ export function recordFill(
 
   const position = applyFillToPosition(state.position, fill, ctx.now)
   const iso = ctx.now().toISOString()
-  // 建玉を閉じた SELL (position が null に落ちた) のときだけ lastExitAt を刻む。
-  // #reentry の価格ガードが「前回手仕舞いからの経過営業日」を測る起点。
-  // 部分 SELL / BUY では更新しない (position !== null)。
+  // 建玉を閉じた SELL (position が null に落ちた) のときだけ lastExitAt /
+  // lastExitPrice を同時に刻む。#reentry の価格ガードが基準にする「前回手仕舞い
+  // 価格」と「そこからの経過営業日」を明示フィールドとして永続化する
+  // (state.position===null な間 lastExecutedPrice=直近 SELL 価格、という推論には
+  // 依存しない。#660)。部分 SELL / BUY では更新しない (position !== null)。
   const closedByExit = fill.side === 'SELL' && position === null
   return {
     ...state,
     position,
     pendingOrder: null,
     lastExecutedPrice: fill.price,
-    ...(closedByExit ? { lastExitAt: iso } : {}),
+    ...(closedByExit ? { lastExitAt: iso, lastExitPrice: fill.price } : {}),
     updatedAt: iso,
   }
 }
@@ -170,6 +172,12 @@ export function addPendingSettlement(
  * Fail-closed on bad inputs (NaN / negative / zero avgPrice when qty>0)
  * because operators paste these values from a CLI; rejecting upfront avoids
  * a malformed position propagating into the strategy loop.
+ *
+ * `lastExitPrice` / `lastExitAt` / `lastExecutedPrice` are **intentionally
+ * left untouched** here — an override via sync-holdings (broker-side
+ * liquidation, manual lot reconciliation) must not contaminate the
+ * re-entry guard's reference price by fabricating an exit that never
+ * happened through `recordFill` (#660).
  */
 export function overridePosition(
   state: SymbolState,
