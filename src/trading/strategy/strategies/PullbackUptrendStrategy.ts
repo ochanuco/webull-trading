@@ -1,5 +1,6 @@
-import type { DecisionTraceStep, Signal } from '../../domain/Signal'
+import type { DecisionTraceStep, EntryStatusSnapshot, HoldCause, Signal } from '../../domain/Signal'
 import type { PendingOrderLock, PositionState } from '../../state/types'
+import { deriveEntryStatusFromIndicators } from '../entryStatus'
 import { resolveStopDistance } from '../stopDistance'
 
 export interface PullbackIndicators {
@@ -232,13 +233,48 @@ export class PullbackUptrendStrategy {
     // 再エントリー価格ガード (#reentry): 前回手仕舞い (前回売値) から
     // reentryGuardBusinessDays 営業日以内は、前回売値より reentryMinAtrBelowLastExit
     // × atr20 以上 安い水準でなければ BUY を見送る。良い利確直後の同水準/高値
-    // 買い戻し (往復で削る whipsaw) を価格軸で止める。窓を過ぎる or 情報欠落
-    // (前回売値 / 経過日数 / atr 不明) は fail-open (通常のトレンド再 entry を妨げない)。
+    // 買い戻し (往復で削る whipsaw) を価格軸で止める。窓を過ぎる or 経過日数
+    // すら不明 (一度も exit していない) は fail-open (通常のトレンド再 entry を
+    // 妨げない)。ただし窓内なのに前回売値だけ不明 (#660 移行期) は例外的に
+    // fail-closed — 下の early block を参照。
     const lastExitPrice = input.lastExitPrice ?? null
     const bdSinceExit = input.businessDaysSinceExit ?? null
+    const reentryWindowConfigured = rule.reentryMinAtrBelowLastExit > 0 && rule.reentryGuardBusinessDays > 0
+
+    // #660: 移行期 fail-closed。lastExitAt は既に本番 DO にあるが lastExitPrice
+    // は新規フィールドなので、deploy 直前の guard 窓内 (reentryGuardBusinessDays
+    // 未満) に exit した銘柄は lastExitAt はあるのに lastExitPrice が無い状態に
+    // なりうる。これを従来通り fail-open (ガード不活性) にすると、まさに
+    // ガードで守るべき窓内で無防備に買い直せてしまう。窓内かどうかは
+    // lastExitAt 由来の bdSinceExit だけで判定できるので、価格不明でも窓内は
+    // entry を保留する。恒久 block ではなく窓経過 (bdSinceExit >=
+    // reentryGuardBusinessDays) で自然解除。lastExitAt も無い (=一度も exit
+    // していない、または旧 state のまま) 銘柄は従来どおり無条件で通す。
+    if (
+      reentryWindowConfigured &&
+      lastExitPrice === null &&
+      bdSinceExit !== null &&
+      bdSinceExit < rule.reentryGuardBusinessDays
+    ) {
+      trace.push(
+        step(
+          'entry.reentry_below_last_exit',
+          false,
+          ind.price,
+          '<=',
+          ind.price,
+          `exit price unknown (legacy state) within guard window (${bdSinceExit}bd since exit)`,
+        ),
+      )
+      return hold(
+        input,
+        `re-entry guard: exit price unknown (legacy state), within ${rule.reentryGuardBusinessDays}bd guard window (${bdSinceExit}bd since exit)`,
+        trace,
+      )
+    }
+
     const reentryGuardActive =
-      rule.reentryMinAtrBelowLastExit > 0 &&
-      rule.reentryGuardBusinessDays > 0 &&
+      reentryWindowConfigured &&
       lastExitPrice !== null &&
       Number.isFinite(lastExitPrice) &&
       lastExitPrice > 0 &&
@@ -261,17 +297,36 @@ export class PullbackUptrendStrategy {
       trace.push(step('entry.reentry_below_last_exit', true, ind.price, '<=', ind.price, 'guard inactive'))
     }
 
+    // #658: ここから先の 7 gate は entryDistance.ts の EntryGateKey と一対一で
+    // 対応する「setup の質」ゲート (行動可否 guard ではない)。HALF 昇格の検討
+    // 対象になり得るので、HOLD を返す際は holdCause='entry_gate' と 4 段階判定
+    // スナップショットを同梱する。scheduler 側の再導出を廃止した対価として、
+    // HOLD ごとに deriveEntryStatusFromIndicators (7 gate の再評価 1 回) を呼ぶ
+    // (#658)。
+
     if (ind.return50d <= rule.minReturn50d) {
       trace.push(step('entry.trend_50d_return', false, ind.return50d, '>', rule.minReturn50d))
       // #318: lookback は 20 営業日 (フィールド名は historical)。reason は人間
       // 向け表示なので「20d return」と書いて誤読を避ける。
-      return hold(input, `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`, trace)
+      return hold(
+        input,
+        `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.trend_50d_return', true, ind.return50d, '>', rule.minReturn50d))
 
     if (rule.requireAboveSma50 && ind.price <= ind.sma50) {
       trace.push(step('entry.above_sma50', false, ind.price, '>', ind.sma50))
-      return hold(input, `price ${ind.price} <= sma50 ${ind.sma50}`, trace)
+      return hold(
+        input,
+        `price ${ind.price} <= sma50 ${ind.sma50}`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.above_sma50', true, ind.price, '>', ind.sma50, rule.requireAboveSma50 ? undefined : 'disabled by rule'))
 
@@ -284,6 +339,8 @@ export class PullbackUptrendStrategy {
         input,
         `sma50 deviation ${sma50Deviation.toFixed(4)} > ${rule.maxSma50DeviationPct} (overextended)`,
         trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
       )
     }
     trace.push(step('entry.not_overextended', true, sma50Deviation, '<=', rule.maxSma50DeviationPct))
@@ -293,27 +350,45 @@ export class PullbackUptrendStrategy {
     const atrRatio = ind.baselineAtr20 > 0 ? ind.atr20 / ind.baselineAtr20 : 0
     if (atrRatio > rule.maxAtrRatio) {
       trace.push(step('entry.vol_not_elevated', false, atrRatio, '<=', rule.maxAtrRatio))
-      return hold(input, `atr ratio ${atrRatio.toFixed(2)} > ${rule.maxAtrRatio} (volatility elevated)`, trace)
+      return hold(
+        input,
+        `atr ratio ${atrRatio.toFixed(2)} > ${rule.maxAtrRatio} (volatility elevated)`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.vol_not_elevated', true, atrRatio, '<=', rule.maxAtrRatio))
 
     if (ind.high20d <= 0) {
       trace.push(step('entry.high20d_valid', false, ind.high20d, '>', 0))
       // #318: lookback は 10 営業日 (フィールド名は historical)。
-      return hold(input, 'invalid 10d high', trace)
+      return hold(input, 'invalid 10d high', trace, 'entry_gate', deriveEntryStatusFromIndicators(ind, rule))
     }
     trace.push(step('entry.high20d_valid', true, ind.high20d, '>', 0))
 
     const pullback = (ind.price - ind.high20d) / ind.high20d
     if (pullback > rule.pullbackMax) {
       trace.push(step('entry.pullback_not_too_shallow', false, pullback, '<=', rule.pullbackMax))
-      return hold(input, `pullback ${pullback.toFixed(4)} > ${rule.pullbackMax} (not deep enough)`, trace)
+      return hold(
+        input,
+        `pullback ${pullback.toFixed(4)} > ${rule.pullbackMax} (not deep enough)`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.pullback_not_too_shallow', true, pullback, '<=', rule.pullbackMax))
 
     if (pullback < rule.pullbackMin) {
       trace.push(step('entry.pullback_not_too_deep', false, pullback, '>=', rule.pullbackMin))
-      return hold(input, `pullback ${pullback.toFixed(4)} < ${rule.pullbackMin} (too deep)`, trace)
+      return hold(
+        input,
+        `pullback ${pullback.toFixed(4)} < ${rule.pullbackMin} (too deep)`,
+        trace,
+        'entry_gate',
+        deriveEntryStatusFromIndicators(ind, rule),
+      )
     }
     trace.push(step('entry.pullback_not_too_deep', true, pullback, '>=', rule.pullbackMin))
     trace.push(step('entry.adopt_buy', true, pullback, 'between', [rule.pullbackMin, rule.pullbackMax]))
@@ -321,7 +396,19 @@ export class PullbackUptrendStrategy {
   }
 }
 
-function hold(input: PullbackInput, reason: string, trace: DecisionTraceStep[]): Signal {
+/**
+ * `cause` の既定値は 'guard' (#658, fail-closed)。行動可否 guard
+ * (position / pendingOrder / cooldown / 再エントリー価格ガード) 由来の HOLD は
+ * すべてこの既定に乗る — HALF 昇格は絶対禁止なので、明示的に 'entry_gate' を
+ * 渡した呼び出し元 (setup の質を測る 7 gate) だけが昇格の検討対象になる。
+ */
+function hold(
+  input: PullbackInput,
+  reason: string,
+  trace: DecisionTraceStep[],
+  cause: HoldCause = 'guard',
+  entryStatus?: EntryStatusSnapshot,
+): Signal {
   return {
     action: 'HOLD',
     symbol: input.symbol,
@@ -330,6 +417,8 @@ function hold(input: PullbackInput, reason: string, trace: DecisionTraceStep[]):
     reason,
     generatedAtIso: input.now.toISOString(),
     trace,
+    holdCause: cause,
+    ...(entryStatus !== undefined ? { entryStatus } : {}),
   }
 }
 

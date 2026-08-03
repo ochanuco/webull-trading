@@ -38,6 +38,12 @@ pnpm dev            # wrangler dev (ローカル D1 自動作成)
 - commit は Conventional Commits (release-please が採番と CHANGELOG 生成に使う)
 - 発注経路は **Strategy → Risk → Execution** の一方向。Risk を迂回する導線は作らない
 
+## ライセンスと免責
+
+MIT License ([LICENSE](LICENSE))。
+
+**このリポジトリは個人が自分の口座で運用している実験的な自動売買システムです。** 実マネーが動くコードを参考にする場合、損失を含むすべての結果は利用者の責任です。投資助言ではありません。ライセンスの定めるとおり無保証で提供されます。
+
 ## AI エージェント / レビュー設定
 
 - `CLAUDE.md` — Claude 用エントリ (skill / agent index)

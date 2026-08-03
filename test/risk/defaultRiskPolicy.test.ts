@@ -334,4 +334,69 @@ describe('DefaultRiskPolicy', () => {
       expect(decision.allowed).toBe(true)
     })
   })
+
+  describe('market hours market-aware handling (#656)', () => {
+    const buyIntent = {
+      symbol: 'SOXL',
+      side: 'BUY' as const,
+      quantity: 2,
+      price: 10,
+      notional: 20,
+      clientOrderId: 'test-coid',
+    }
+    const marketHoursInput = {
+      ...baseInput,
+      orderIntent: buyIntent,
+      marketHoursCheck: true,
+    }
+
+    it('rejects on a US market holiday (2026-07-03, Independence Day observed)', () => {
+      // 2026-07-03 14:00 UTC = 10:00 EDT — would be within the regular session
+      // by clock time alone, but the whole day is a US market holiday.
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-07-03T14:00:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+      expect(decision.reasons.some((r) => r.toLowerCase().includes('market hours'))).toBe(true)
+    })
+
+    it('allows before the early close on a US half-day (2026-11-27, day after Thanksgiving)', () => {
+      // 2026-11-27 17:00 UTC = 12:00 EST — before the 13:00 ET early close.
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-11-27T17:00:00.000Z'),
+      })
+      expect(decision.allowed).toBe(true)
+    })
+
+    it('rejects after the early close on a US half-day (2026-11-27, day after Thanksgiving)', () => {
+      // 2026-11-27 18:30 UTC = 13:30 EST — after the 13:00 ET early close.
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-11-27T18:30:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+    })
+
+    it('allows a JP symbol during the JST regular session', () => {
+      // 2026-08-04 01:00 UTC = 10:00 JST (Tuesday) — within the 09:00-15:30 JST session.
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        orderIntent: { ...buyIntent, symbol: '7203' },
+        now: () => new Date('2026-08-04T01:00:00.000Z'),
+      })
+      expect(decision.reasons.some((r) => r.toLowerCase().includes('market hours'))).toBe(false)
+    })
+
+    it('rejects a US symbol at the same instant a JP symbol would be allowed', () => {
+      // 2026-08-04 01:00 UTC = 08/03 21:00 EDT (Monday) — after the US regular session close.
+      const decision = policy.evaluate({
+        ...marketHoursInput,
+        now: () => new Date('2026-08-04T01:00:00.000Z'),
+      })
+      expect(decision.allowed).toBe(false)
+      expect(decision.reasons.some((r) => r.toLowerCase().includes('market hours'))).toBe(true)
+    })
+  })
 })

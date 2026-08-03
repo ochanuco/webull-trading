@@ -619,10 +619,22 @@ export async function runPullbackScheduler(
     // execution は通常 BUY/SELL と全く同じ経路を通る (= 通常ロールと同じ動き)。
     const useMomentum = !!(options.momentumStrategy && options.momentumSymbols?.has(upper))
     const decider = useMomentum ? options.momentumStrategy! : strategy
-    // #reentry: flat のときだけ前回手仕舞い情報を渡す (position 保有中は
-    // lastExecutedPrice = 直近 BUY 価格になり得るので再エントリーガードに使わない)。
-    // flat 時は建玉を閉じた SELL が最後の fill なので lastExecutedPrice = 前回売値。
-    const reentryLastExitPrice = state.position === null ? state.lastExecutedPrice : null
+    // #reentry: flat のときだけ前回手仕舞い情報を渡す。以前は「flat なら直近
+    // fill は建玉を閉じた SELL のはず」という推論で lastExecutedPrice を流用
+    // していたが、syncHoldings 経由の overridePosition (broker 側清算 / 手動
+    // override) は position だけ null 化するためこの不変条件が壊れ、
+    // lastExecutedPrice に古い BUY 価格が残ったままガード基準になり得た。
+    // lastExitPrice は recordFill が SELL でクローズしたときだけ明示的に
+    // 刻む専用フィールドなので、それを直接参照する (#660)。lastExecutedPrice
+    // へのフォールバックは意図的に入れない (不健全な推論の再導入になるため)。
+    // lastExitAt (#582 で先行導入済) と lastExitPrice (本フィールド) は導入
+    // 時期が異なるため、旧 state は「lastExitAt はあるが lastExitPrice が
+    // 無い」移行期を経る。その間はガード窓内である限り
+    // PullbackUptrendStrategy.entryDecision 側が fail-closed (価格不明で
+    // entry 保留) する — lastExitAt 由来の businessDaysSinceExit だけは
+    // ここで渡すので、窓経過後は自然に fail-open へ戻る。lastExitAt も無い
+    // (一度も exit していない) 銘柄は従来どおり無条件で通す。
+    const reentryLastExitPrice = state.position === null ? state.lastExitPrice : null
     const reentryBusinessDaysSinceExit =
       state.position === null && state.lastExitAt
         ? computeHoldBusinessDays(state.lastExitAt, now(), market)
@@ -742,42 +754,56 @@ export async function runPullbackScheduler(
       }
     }
 
-    // 段階判定 HALF (#452 PR 2)。strategy は全 gate 通過でしか BUY を出さない
-    // (二値)。halfEntrySymbols の銘柄に限り、entry 系 HOLD を 4 段階判定に
-    // かけ直し、HALF (未通過 1 gate が「程度もの」で許容バンド内) なら 0.5x の
-    // BUY に昇格させる。position / pendingOrder / cooldown の guard 起因の HOLD
-    // は昇格対象外 (= 新規 entry の文脈のみ)。WATCH / NG は HOLD のまま。
+    // 段階判定 HALF (#658: strategy 申告 holdCause の一方向フロー)。旧実装は
+    // strategy の HOLD 理由を知らずに deriveEntryStatusFromIndicators で entry
+    // status を再導出して昇格判定していたため、再エントリー価格ガード
+    // (entry.reentry_below_last_exit — entryDistance.ts の EntryGateKey には
+    // 存在しない) 由来の HOLD を指標だけ見て BUY (0.5x) に昇格させてしまった
+    // (実害: 2026-07-29 SQQQ)。再エントリーガードは構造的に 7 gate 集合に無い
+    // ため、再導出では検知不能だった。
+    //
+    // 対処: strategy が HOLD の原因 (`holdCause`) と、entry_gate 由来なら 4 段階
+    // 判定スナップショット (`entryStatus`) を Signal に申告し、scheduler は
+    // **再計算しない** (情報フローの一方向化)。HALF が緩めてよいのは「setup の
+    // 質」を測る entry gate だけ — position / pendingOrder / cooldown / 再エント
+    // リーのような「行動可否」guard は絶対 veto であり、holdCause が
+    // 'entry_gate' でなければこのブロックに入らない。
     let positionMultiplier = 1
+    const entryStatus = signal.entryStatus
     if (
       signal.action === 'HOLD' &&
+      signal.holdCause === 'entry_gate' &&
       options.halfEntrySymbols?.has(upper) &&
+      entryStatus?.status === 'HALF' &&
+      entryStatus.halfGate !== null &&
+      // holdCause==='entry_gate' なら strategy 側で position/pendingOrder/
+      // cooldown が全て非活性であることは既に保証されている (entryDecision は
+      // guard 通過後にしか呼ばれない)。以下 3 条件はその不変条件に対する
+      // belt-and-suspenders アサーション (将来の strategy 実装ミスへの二次防御)
+      // であり、一次判定はあくまで holdCause。
       state.position === null &&
       state.pendingOrder === null &&
       !(state.cooldownUntil && new Date(state.cooldownUntil).getTime() > now().getTime())
     ) {
-      const rule = strategy.resolveRule(upper)
-      const entryStatus = deriveEntryStatusFromIndicators(indicators, rule)
-      if (entryStatus.status === 'HALF' && entryStatus.halfGate !== null) {
-        const gate = entryStatus.halfGate
-        positionMultiplier = entryStatus.positionMultiplier
-        signal = {
-          ...signal,
-          action: 'BUY',
-          reason: `half entry (0.5x): ${gate.key} ${gate.actual.toFixed(4)} near threshold ${gate.threshold} (within tolerance band)`,
-          trace: appendTrace(
-            signal.trace,
-            traceStep(
-              'entry.half_status',
-              true,
-              gate.actual,
-              // EntryGateStatus.operator は人間可読 string だが、ここに来る
-              // degree gate は '<=' / '>=' のみ (DecisionTraceStep の union 内)。
-              gate.operator === '>=' ? '>=' : '<=',
-              gate.threshold,
-              'HALF: single degree-gate miss within tolerance → 0.5x sizing (#452)',
-            ),
+      const gate = entryStatus.halfGate
+      positionMultiplier = entryStatus.positionMultiplier
+      signal = {
+        ...signal,
+        action: 'BUY',
+        reason: `half entry (0.5x): ${gate.key} ${gate.actual.toFixed(4)} near threshold ${gate.threshold} (within tolerance band)`,
+        trace: appendTrace(
+          signal.trace,
+          traceStep(
+            'entry.half_status',
+            true,
+            gate.actual,
+            // EntryGateStatus.operator は人間可読 string だが、ここに来る
+            // degree gate は '<=' / '>=' のみ (DecisionTraceStep の union 内)。
+            gate.operator === '>=' ? '>=' : '<=',
+            gate.threshold,
+            'HALF: single degree-gate miss within tolerance → 0.5x sizing (#452)',
           ),
-        }
+        ),
       }
     }
 
