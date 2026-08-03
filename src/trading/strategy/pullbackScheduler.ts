@@ -619,10 +619,22 @@ export async function runPullbackScheduler(
     // execution は通常 BUY/SELL と全く同じ経路を通る (= 通常ロールと同じ動き)。
     const useMomentum = !!(options.momentumStrategy && options.momentumSymbols?.has(upper))
     const decider = useMomentum ? options.momentumStrategy! : strategy
-    // #reentry: flat のときだけ前回手仕舞い情報を渡す (position 保有中は
-    // lastExecutedPrice = 直近 BUY 価格になり得るので再エントリーガードに使わない)。
-    // flat 時は建玉を閉じた SELL が最後の fill なので lastExecutedPrice = 前回売値。
-    const reentryLastExitPrice = state.position === null ? state.lastExecutedPrice : null
+    // #reentry: flat のときだけ前回手仕舞い情報を渡す。以前は「flat なら直近
+    // fill は建玉を閉じた SELL のはず」という推論で lastExecutedPrice を流用
+    // していたが、syncHoldings 経由の overridePosition (broker 側清算 / 手動
+    // override) は position だけ null 化するためこの不変条件が壊れ、
+    // lastExecutedPrice に古い BUY 価格が残ったままガード基準になり得た。
+    // lastExitPrice は recordFill が SELL でクローズしたときだけ明示的に
+    // 刻む専用フィールドなので、それを直接参照する (#660)。lastExecutedPrice
+    // へのフォールバックは意図的に入れない (不健全な推論の再導入になるため)。
+    // lastExitAt (#582 で先行導入済) と lastExitPrice (本フィールド) は導入
+    // 時期が異なるため、旧 state は「lastExitAt はあるが lastExitPrice が
+    // 無い」移行期を経る。その間はガード窓内である限り
+    // PullbackUptrendStrategy.entryDecision 側が fail-closed (価格不明で
+    // entry 保留) する — lastExitAt 由来の businessDaysSinceExit だけは
+    // ここで渡すので、窓経過後は自然に fail-open へ戻る。lastExitAt も無い
+    // (一度も exit していない) 銘柄は従来どおり無条件で通す。
+    const reentryLastExitPrice = state.position === null ? state.lastExitPrice : null
     const reentryBusinessDaysSinceExit =
       state.position === null && state.lastExitAt
         ? computeHoldBusinessDays(state.lastExitAt, now(), market)
