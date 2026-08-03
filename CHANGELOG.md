@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.1](https://github.com/ochanuco/webull-trading/compare/v1.4.0...v1.4.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* exclude volatility gate from HALF entry relaxation ([a14fb90](https://github.com/ochanuco/webull-trading/commit/a14fb90aa9277902690d1cc0956a95b908fab362))
+* exclude volatility gate from HALF entry relaxation ([3a4ee52](https://github.com/ochanuco/webull-trading/commit/3a4ee520da94942e34fb3d6081edf2c27c02ce29))
+* fail-closed re-entry guard during lastExitPrice migration window ([7d66499](https://github.com/ochanuco/webull-trading/commit/7d66499728266e90691cd0a1ecac986497a95338))
+* make market hours check market- and holiday-aware ([48affa5](https://github.com/ochanuco/webull-trading/commit/48affa5de606332dfae65ffb464270b1d80195ea))
+* make market hours check market- and holiday-aware ([7a6ccde](https://github.com/ochanuco/webull-trading/commit/7a6ccdebd55f325ec8fbe6721ef9d2766babc13f))
+* normalize exit cooldown to next session open ([f05f788](https://github.com/ochanuco/webull-trading/commit/f05f788dad5bc77555919d61f6b34a352641ad9e))
+* normalize exit cooldown to next session open ([2c37996](https://github.com/ochanuco/webull-trading/commit/2c37996c857198d36458436965e3b5d864d81aa8))
+* persist lastExitPrice explicitly instead of inferring from lastExecutedPrice ([3b17345](https://github.com/ochanuco/webull-trading/commit/3b17345ffb01653a10dc75502c9826425407920b))
+* persist lastExitPrice explicitly instead of inferring from lastExecutedPrice ([30badc6](https://github.com/ochanuco/webull-trading/commit/30badc65dba55e1f969684894da7d8c6aef19ecc))
+* point [#658](https://github.com/ochanuco/webull-trading/issues/658) regression fixtures at lastExitPrice after [#660](https://github.com/ochanuco/webull-trading/issues/660) merge ([71d3c91](https://github.com/ochanuco/webull-trading/commit/71d3c911b10b7c14594b048856e45dcc81a701b0))
+* promote HALF entries only from strategy-declared entry-gate holds ([6a57d1e](https://github.com/ochanuco/webull-trading/commit/6a57d1ebde2c8f385736b4598681731e9a7fc327))
+* promote HALF entries only from strategy-declared entry-gate holds ([84ca26a](https://github.com/ochanuco/webull-trading/commit/84ca26ac56e4d2ac7a7a64e25938d12ec74079d8))
+
 ## [1.4.0](https://github.com/ochanuco/webull-trading/compare/v1.3.1...v1.4.0) (2026-07-29)
 
 

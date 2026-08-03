@@ -217,9 +217,21 @@ function isUsMarketEarlyCloseYmd(year: number, month: number, day: number): bool
  * 文字列に依存しないのは #349 と同じ理由)。抽出失敗は null。
  */
 function extractEtYmd(date: Date): { year: number; month: number; day: number } | null {
+  return extractLocalYmd(date, 'America/New_York')
+}
+
+/**
+ * `date` (UTC instant) の `timeZone` 暦日を数値 y/m/d で返す (`extractEtYmd` の
+ * 汎用版、`nextSessionOpen` (#661) が任意市場 timeZone で使う)。
+ * `Intl.DateTimeFormat#formatToParts` ベース (DST 自動解決)。抽出失敗は null。
+ */
+function extractLocalYmd(
+  date: Date,
+  timeZone: string,
+): { year: number; month: number; day: number } | null {
   if (!Number.isFinite(date.getTime())) return null
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
+    timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -455,4 +467,103 @@ export function isWithinStrategyWindow(
   minutesBeforeOpen: number,
 ): boolean {
   return evaluateStrategyWindow(now, market, minutesBeforeOpen) === 'in_window'
+}
+
+/**
+ * 市場ローカル暦日 y/m/d (proleptic Gregorian) に `delta` 日を加減した y/m/d を
+ * 返す。UTC 固定 placeholder Date (`dayOfWeek` と同じ手法) で純粋な暦日カウンタ
+ * として使うだけなので DST の影響を受けない。
+ */
+function addCalendarDays(
+  year: number,
+  month: number,
+  day: number,
+  delta: number,
+): { year: number; month: number; day: number } {
+  const dt = new Date(Date.UTC(year, month - 1, day + delta))
+  return { year: dt.getUTCFullYear(), month: dt.getUTCMonth() + 1, day: dt.getUTCDate() }
+}
+
+/**
+ * 市場ローカル暦日 y/m/d が指定 market の取引日か (`isTradingDay` の市場ローカル
+ * 版)。US はルール計算 (`isUsMarketHolidayYmd`)、JP は `HOLIDAYS.JP` static
+ * テーブル — `evaluateStrategyWindow` と同じ流儀 (市場ローカル日付で祝日判定)。
+ */
+function isTradingDayLocalYmd(market: TradingMarket, year: number, month: number, day: number): boolean {
+  const dow = dayOfWeek(year, month, day)
+  if (dow === 0 || dow === 6) return false
+  if (market === 'US') return !isUsMarketHolidayYmd(year, month, day)
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  return !HOLIDAYS.JP.has(`${year}-${pad2(month)}-${pad2(day)}`)
+}
+
+/**
+ * 「ローカル日付 y-m-d の `minutes` (分換算、0=00:00) を `timeZone` で解釈した
+ * UTC instant」を返す。offset 推測を 2 回反復して収束させる方式
+ * (`Intl.DateTimeFormat` で毎回レンダリングし直し、目標とのズレを補正) — 事前に
+ * offset テーブルを持たずに DST を自動解決できる。
+ *
+ * 収束は 2 回で十分: 1 回目で概ね正しい offset (稀に DST 境界を跨いで再ズレ) に
+ * 収束し、2 回目でその再ズレも解消する。
+ */
+function zonedTimeToUtc(year: number, month: number, day: number, minutes: number, timeZone: string): Date {
+  const targetHour = Math.floor(minutes / 60)
+  const targetMinute = minutes % 60
+  let guessMs = Date.UTC(year, month - 1, day, targetHour, targetMinute)
+  for (let i = 0; i < 2; i += 1) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(guessMs))
+    const get = (type: Intl.DateTimeFormatPartTypes): number =>
+      Number(parts.find((p) => p.type === type)?.value)
+    const py = get('year')
+    const pm = get('month')
+    const pd = get('day')
+    const ph = get('hour') % 24 // hour12:false で稀に '24' を返す Intl quirk 対策
+    const pmin = get('minute')
+    const renderedMs = Date.UTC(py, pm - 1, pd, ph, pmin)
+    guessMs += Date.UTC(year, month - 1, day, targetHour, targetMinute) - renderedMs
+  }
+  return new Date(guessMs)
+}
+
+/**
+ * exit cooldown の解除時刻正規化用 (#661): `date` の**市場ローカル暦日より後**
+ * の、最初の取引日の**セッション開場時刻** (UTC instant) を返す。
+ *
+ * 背景: 旧来は cooldown 解除時刻に `nextTradingDay` (24h ずつ進めて時刻は保持)
+ * を使っていたため、実効長が exit 時刻に依存していた (引け際 exit ≈ 1 セッション
+ * 分の cooldown、寄り直後 exit ≈ ほぼ 0)。本関数は常に「翌営業日の寄り」を返す
+ * ことでこの依存をなくす。
+ *
+ * `date` 当日の寄りは返さない — `date` の市場ローカル日付が取引日かつ寄り前
+ * (例: US 08:00 ET) であっても、必ず翌取引日以降の寄りを返す。
+ *
+ * 祝日・土日 skip は市場ローカル暦日基準 (`evaluateStrategyWindow` と同じ流儀)。
+ * `nextTradingDay`/`isTradingDay` は **UTC 日付基準**なので JP 夜間 (UTC 日付が
+ * 市場ローカル日付とズレる、`evaluateStrategyWindow` の doc comment 参照) には
+ * 使えない — 本関数は市場ローカル暦日で日送りしてから開場時刻を UTC instant に
+ * 変換する (`zonedTimeToUtc`)。
+ *
+ * 探索上限は `nextTradingDay` と同じ 31 iteration + fail-safe (祝日テーブル
+ * 不足 / 連休で無限ループしない)。
+ */
+export function nextSessionOpen(date: Date, market: TradingMarket): Date {
+  const session = MARKET_SESSION[market]
+  const start = extractLocalYmd(date, session.timeZone)
+  if (start === null) return new Date(NaN)
+  let cursor = addCalendarDays(start.year, start.month, start.day, 1)
+  for (let i = 0; i < 31; i += 1) {
+    if (isTradingDayLocalYmd(market, cursor.year, cursor.month, cursor.day)) {
+      return zonedTimeToUtc(cursor.year, cursor.month, cursor.day, session.openMinutes, session.timeZone)
+    }
+    cursor = addCalendarDays(cursor.year, cursor.month, cursor.day, 1)
+  }
+  return zonedTimeToUtc(cursor.year, cursor.month, cursor.day, session.openMinutes, session.timeZone)
 }

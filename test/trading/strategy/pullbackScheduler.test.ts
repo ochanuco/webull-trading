@@ -175,7 +175,7 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions[0]?.trace?.find((step) => step.label === 'broker.submit')?.label_ja).toBe('証券会社への発注送信')
   })
 
-  // #reentry: flat な state に前回手仕舞い (lastExecutedPrice + lastExitAt) が
+  // #reentry: flat な state に前回手仕舞い (lastExitPrice + lastExitAt) が
   // 残っていると、scheduler がそれを strategy に plumb し、窓内 & 値幅不足なら
   // BUY を price 軸ガードで止める (uptrendBars は本来 BUY する fixture)。
   it('blocks a would-be BUY when re-entry price guard is active (recent exit near price)', async () => {
@@ -183,7 +183,7 @@ describe('runPullbackScheduler', () => {
       ...emptySymbolState('SOXL', () => now),
       // 直近 BUY fixture の last close = 117.5。前回売値をそこに置くと
       // ceiling = 117.5 - 1*ATR < 117.5 なので必ずガードに掛かる。
-      lastExecutedPrice: 117.5,
+      lastExitPrice: 117.5,
       // now (2026-04-20 Mon) の 1 営業日前 (Fri) → businessDaysSinceExit = 1 < 3。
       lastExitAt: '2026-04-17T14:30:00.000Z',
     }
@@ -209,7 +209,7 @@ describe('runPullbackScheduler', () => {
   it('allows the BUY once the re-entry guard window has elapsed', async () => {
     const staleExit: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
-      lastExecutedPrice: 117.5,
+      lastExitPrice: 117.5,
       // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
       lastExitAt: '2026-04-10T14:30:00.000Z',
     }
@@ -226,6 +226,117 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
     expect(execution.calls).toHaveLength(1)
     expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
+  })
+
+  // #660: overridePosition (sync-holdings 経由) は position を null にするだけで
+  // lastExecutedPrice は古い BUY 価格のまま残りうる。lastExitAt も無い
+  // (= 一度も exit していない、または旧 state のまま) 銘柄は未取引扱いなので、
+  // その stale lastExecutedPrice をガード基準に「推論」してはいけない —
+  // 従来どおり無条件で BUY を通す。
+  it('treats a symbol with no lastExitAt as never-exited and does not infer a guard from stale lastExecutedPrice', async () => {
+    const neverExitedState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      // sync-holdings 由来の残骸: 古い BUY 価格が居座っている想定。
+      lastExecutedPrice: 50,
+      lastExitPrice: null,
+      lastExitAt: null,
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: neverExitedState }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
+  })
+
+  // #660 (CodeRabbit follow-up): lastExitAt は #582 で先行導入済みだが
+  // lastExitPrice は本フィールドの新規追加。そのため deploy 直前にガード窓内
+  // (reentryGuardBusinessDays 未満) で exit した銘柄は、lastExitAt はあるのに
+  // lastExitPrice が無い移行期の state になりうる。ここを fail-open (無条件
+  // BUY 許可) にすると、まさにガードで守るべき窓内で無防備に買い直せてしまう
+  // (SQQQ 事故と同型のリスク窓)。窓内なら価格不明でも entry を保留する
+  // (fail-closed) べき。
+  it('fail-closes the re-entry guard when lastExitAt exists but lastExitPrice is legacy-null within the guard window', async () => {
+    const migrationWindowState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      lastExitPrice: null,
+      // now (2026-04-20 Mon) の 1 営業日前 (Fri) → businessDaysSinceExit = 1 < 3。
+      lastExitAt: '2026-04-17T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: migrationWindowState }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SOXL')
+    expect(decision?.decision).toBe('HOLD')
+    expect(decision?.reason).toMatch(/re-entry guard/)
+    expect(decision?.reason).toMatch(/unknown|guard window/)
+    expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
+  })
+
+  // 窓経過後は lastExitPrice が無くても自然に fail-open へ戻る (恒久 block ではない)。
+  it('allows the BUY once the guard window elapses even when lastExitPrice is legacy-null', async () => {
+    const pastWindowState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      lastExitPrice: null,
+      // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
+      lastExitAt: '2026-04-10T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: pastWindowState }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
+  })
+
+  // #660: lastExitPrice が明示的に設定されていれば、それを基準にガードが発火
+  // する — lastExecutedPrice の値は無視される (両者を意図的に食い違わせて確認)。
+  it('drives the re-entry guard from lastExitPrice, ignoring a differing lastExecutedPrice', async () => {
+    const explicitExitState: SymbolState = {
+      ...emptySymbolState('SOXL', () => now),
+      // lastExecutedPrice はガードに使われないダミー値 (無関係に高い値)。
+      lastExecutedPrice: 200,
+      lastExitPrice: 45.83,
+      lastExitAt: '2026-04-17T14:30:00.000Z',
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SOXL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SOXL: explicitExitState }),
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SOXL')
+    expect(decision?.decision).toBe('HOLD')
+    expect(decision?.reason).toContain('45.83')
   })
 
   it('HOLDs (and does not submit) when bars are too short for indicators', async () => {
@@ -2314,6 +2425,38 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
   })
 })
 
+// #658 実害回帰フィクスチャ: 2026-07-29 SQQQ 実害の再現用 bars。TEST_DEFAULT_RULE
+// で評価すると price=47.1187 / atr20=2.35 (実測値と一致するよう bars を逆算)、
+// pullback=-6.5% (pullbackMin=-0.06 の許容バンド [-0.072, -0.06) 内) のみが
+// 未通過で、他の 6 gate は全通過 → deriveEntryStatusFromIndicators は
+// status='HALF' / halfGate.key='pullback_deep' を返す (値は
+// `pnpm exec vitest run` で実行確認済み、下記コメントに実測値を記載)。
+//
+// 旧実装 (scheduler が signal.action==='HOLD' のたびに指標から entry status を
+// 再導出していた) は、この HALF 判定**だけ**を見て BUY 0.5x に昇格させていた。
+// 実際には reentry guard (前回売値 45.8302 に対し price 47.1187 が高すぎる) が
+// entryDecision の最初の早期 return で HOLD を確定させており、7 gate 集合に
+// 存在しない再エントリーガードは再導出では検知できなかった。
+function reentryHalfMissBars(): DailyBar[] {
+  const SPREAD_ABS = 1.175 // high-low per bar -> atr20 = 2.35
+  const start = 43
+  const peak = 47.1187 / (1 - 0.065) - SPREAD_ABS // -> high20d = 47.1187/0.935, pullback = -6.5%
+  const final = 47.1187
+  const synthClose = (i: number, close: number): DailyBar => {
+    const date = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10)
+    return { date, open: close, high: close + SPREAD_ABS, low: close - SPREAD_ABS, close }
+  }
+  const bars: DailyBar[] = []
+  for (let i = 0; i < 40; i += 1) bars.push(synthClose(i, start - 4 + i * 0.1))
+  for (let i = 40; i < 55; i += 1) bars.push(synthClose(i, start + ((peak - start) * (i - 40)) / 14))
+  bars.push(synthClose(55, peak))
+  bars.push(synthClose(56, peak - (peak - final) * 0.25))
+  bars.push(synthClose(57, peak - (peak - final) * 0.5))
+  bars.push(synthClose(58, peak - (peak - final) * 0.8))
+  bars.push(synthClose(59, final))
+  return bars
+}
+
 describe('runPullbackScheduler half entry (#452 段階判定)', () => {
   // uptrendBars() の pullback は (117.5-122)/122 ≈ -3.69%。pullbackMin を
   // -0.035 に絞ると pullback_deep だけが僅差で落ち (許容バンド -0.042 以内)、
@@ -2417,6 +2560,74 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     expect(execution.calls).toHaveLength(0)
     const reject = summary.decisions.find((d) => d.decision === 'SKIP')
     expect(reject?.reason).toContain('inverse')
+  })
+
+  // #658 実害回帰 (2026-07-29 SQQQ): reentryHalfMissBars() は entry gate 視点で
+  // 見れば HALF (pullback_deep 僅差) だが、reentry guard 由来の HOLD
+  // (holdCause='guard') なので昇格しないこと。#660 で再エントリーガードの基準が
+  // lastExitPrice (明示フィールド) に変わったので、それを設定して価格比較ガード
+  // (47.1187 > 43.4802 = 45.8302 - 1*2.35) 本来の経路を通す (lastExecutedPrice
+  // のままだと lastExitPrice===null の #660 移行期 fail-closed 経路に落ちてしまい、
+  // 価格ガードそのものは検証できない)。
+  it('does not promote a re-entry-guard HOLD even when the underlying gates would derive HALF (#658)', async () => {
+    const execution = mockExecution()
+    const guardedState: SymbolState = {
+      ...emptySymbolState('SQQQ', () => now),
+      lastExitPrice: 45.8302,
+      // now (2026-04-20 Mon) の 2 営業日前 (Thu) → businessDaysSinceExit = 2 < 3。
+      lastExitAt: '2026-04-16T14:30:00.000Z',
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SQQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(reentryHalfMissBars()),
+      positionStore: makeStore({ SQQQ: guardedState }),
+      execution,
+      defaultRule: TEST_DEFAULT_RULE,
+      halfEntrySymbols: new Set(['SQQQ']),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SQQQ')
+    expect(decision?.decision).toBe('HOLD')
+    expect(decision?.reason).toMatch(/re-entry guard/)
+    // 前回売値 45.8302 由来の ceiling (= 45.8302 - 1*2.35 = 43.48, reason は
+    // toFixed(2) 表示) が出ること = legacy fail-closed 経路 (#660) ではなく
+    // 価格比較ガード本来の経路であること。
+    expect(decision?.reason).toContain('45.8302')
+    expect(decision?.reason).toContain('43.48')
+    expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
+    expect(decision?.trace?.map((s) => s.label)).not.toContain('entry.half_status')
+  })
+
+  // #658: 再エントリーガードの窓 (既定 3 営業日) を過ぎれば guard は無効化され、
+  // 同じ HALF 相当の gate 状況は通常どおり 0.5x に昇格する (= 昇格ロジック自体は
+  // holdCause='entry_gate' の場合に生きていることの確認)。
+  it('promotes the same HALF-eligible symbol once the re-entry guard window has elapsed (#658)', async () => {
+    const execution = mockExecution()
+    const staleExitState: SymbolState = {
+      ...emptySymbolState('SQQQ', () => now),
+      lastExitPrice: 45.8302,
+      // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
+      lastExitAt: '2026-04-10T14:30:00.000Z',
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['SQQQ'],
+      equity: 100_000,
+      barClient: mockBarClient(reentryHalfMissBars()),
+      positionStore: makeStore({ SQQQ: staleExitState }),
+      execution,
+      defaultRule: TEST_DEFAULT_RULE,
+      halfEntrySymbols: new Set(['SQQQ']),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { side: string }
+    expect(intent.side).toBe('BUY')
+    const buy = summary.decisions.find((d) => d.decision === 'BUY')
+    expect(buy?.reason).toContain('half entry (0.5x)')
+    expect(buy?.trace?.map((s) => s.label)).toContain('entry.half_status')
   })
 })
 

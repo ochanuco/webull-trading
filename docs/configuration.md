@@ -10,7 +10,7 @@
 |---|---|---|
 | `dry_run` | `1` | Execution Mock に固定、broker へ送らない |
 | `trading_enabled` | `0` | Risk layer が全注文 reject (**exit も止まる** 唯一の停止) |
-| `market_hours_check` | `0` | UTC 13:30-20:00 Mon-Fri チェック |
+| `market_hours_check` | `0` | 手動 `/trade` 経路の発注ゲート。銘柄の市場別レギュラーセッション (US/JP・祝日・半日取引対応) 外を reject。cron 経路は `session_window_gate_enabled` が担当 (#656) |
 | `session_window_gate_enabled` | `0` | 開場 30 分前〜引けの窓外は戦略 cron の評価自体を skip |
 | `drawdown_kill_threshold` | `-0.02` | 日次 realized_pnl / start_equity 比で自動 kill (**entry のみ停止**、#595) |
 | `stale_quote_ms` | `900000` | halt 判定 (15 min) |
