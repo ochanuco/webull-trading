@@ -233,13 +233,48 @@ export class PullbackUptrendStrategy {
     // 再エントリー価格ガード (#reentry): 前回手仕舞い (前回売値) から
     // reentryGuardBusinessDays 営業日以内は、前回売値より reentryMinAtrBelowLastExit
     // × atr20 以上 安い水準でなければ BUY を見送る。良い利確直後の同水準/高値
-    // 買い戻し (往復で削る whipsaw) を価格軸で止める。窓を過ぎる or 情報欠落
-    // (前回売値 / 経過日数 / atr 不明) は fail-open (通常のトレンド再 entry を妨げない)。
+    // 買い戻し (往復で削る whipsaw) を価格軸で止める。窓を過ぎる or 経過日数
+    // すら不明 (一度も exit していない) は fail-open (通常のトレンド再 entry を
+    // 妨げない)。ただし窓内なのに前回売値だけ不明 (#660 移行期) は例外的に
+    // fail-closed — 下の early block を参照。
     const lastExitPrice = input.lastExitPrice ?? null
     const bdSinceExit = input.businessDaysSinceExit ?? null
+    const reentryWindowConfigured = rule.reentryMinAtrBelowLastExit > 0 && rule.reentryGuardBusinessDays > 0
+
+    // #660: 移行期 fail-closed。lastExitAt は既に本番 DO にあるが lastExitPrice
+    // は新規フィールドなので、deploy 直前の guard 窓内 (reentryGuardBusinessDays
+    // 未満) に exit した銘柄は lastExitAt はあるのに lastExitPrice が無い状態に
+    // なりうる。これを従来通り fail-open (ガード不活性) にすると、まさに
+    // ガードで守るべき窓内で無防備に買い直せてしまう。窓内かどうかは
+    // lastExitAt 由来の bdSinceExit だけで判定できるので、価格不明でも窓内は
+    // entry を保留する。恒久 block ではなく窓経過 (bdSinceExit >=
+    // reentryGuardBusinessDays) で自然解除。lastExitAt も無い (=一度も exit
+    // していない、または旧 state のまま) 銘柄は従来どおり無条件で通す。
+    if (
+      reentryWindowConfigured &&
+      lastExitPrice === null &&
+      bdSinceExit !== null &&
+      bdSinceExit < rule.reentryGuardBusinessDays
+    ) {
+      trace.push(
+        step(
+          'entry.reentry_below_last_exit',
+          false,
+          ind.price,
+          '<=',
+          ind.price,
+          `exit price unknown (legacy state) within guard window (${bdSinceExit}bd since exit)`,
+        ),
+      )
+      return hold(
+        input,
+        `re-entry guard: exit price unknown (legacy state), within ${rule.reentryGuardBusinessDays}bd guard window (${bdSinceExit}bd since exit)`,
+        trace,
+      )
+    }
+
     const reentryGuardActive =
-      rule.reentryMinAtrBelowLastExit > 0 &&
-      rule.reentryGuardBusinessDays > 0 &&
+      reentryWindowConfigured &&
       lastExitPrice !== null &&
       Number.isFinite(lastExitPrice) &&
       lastExitPrice > 0 &&

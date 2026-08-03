@@ -20,6 +20,7 @@ function stateWith(symbol: string, position: PositionState | null, updatedAt = '
     pendingSettlement: [],
     lastExecutedPrice: null,
     lastExitAt: null,
+    lastExitPrice: null,
     lastQuote: null,
     updatedAt,
   }
