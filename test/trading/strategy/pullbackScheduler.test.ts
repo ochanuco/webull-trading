@@ -2564,12 +2564,16 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
 
   // #658 実害回帰 (2026-07-29 SQQQ): reentryHalfMissBars() は entry gate 視点で
   // 見れば HALF (pullback_deep 僅差) だが、reentry guard 由来の HOLD
-  // (holdCause='guard') なので昇格しないこと。
+  // (holdCause='guard') なので昇格しないこと。#660 で再エントリーガードの基準が
+  // lastExitPrice (明示フィールド) に変わったので、それを設定して価格比較ガード
+  // (47.1187 > 43.4802 = 45.8302 - 1*2.35) 本来の経路を通す (lastExecutedPrice
+  // のままだと lastExitPrice===null の #660 移行期 fail-closed 経路に落ちてしまい、
+  // 価格ガードそのものは検証できない)。
   it('does not promote a re-entry-guard HOLD even when the underlying gates would derive HALF (#658)', async () => {
     const execution = mockExecution()
     const guardedState: SymbolState = {
       ...emptySymbolState('SQQQ', () => now),
-      lastExecutedPrice: 45.8302,
+      lastExitPrice: 45.8302,
       // now (2026-04-20 Mon) の 2 営業日前 (Thu) → businessDaysSinceExit = 2 < 3。
       lastExitAt: '2026-04-16T14:30:00.000Z',
     }
@@ -2588,6 +2592,11 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     const decision = summary.decisions.find((d) => d.symbol === 'SQQQ')
     expect(decision?.decision).toBe('HOLD')
     expect(decision?.reason).toMatch(/re-entry guard/)
+    // 前回売値 45.8302 由来の ceiling (= 45.8302 - 1*2.35 = 43.48, reason は
+    // toFixed(2) 表示) が出ること = legacy fail-closed 経路 (#660) ではなく
+    // 価格比較ガード本来の経路であること。
+    expect(decision?.reason).toContain('45.8302')
+    expect(decision?.reason).toContain('43.48')
     expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
     expect(decision?.trace?.map((s) => s.label)).not.toContain('entry.half_status')
   })
@@ -2599,7 +2608,7 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     const execution = mockExecution()
     const staleExitState: SymbolState = {
       ...emptySymbolState('SQQQ', () => now),
-      lastExecutedPrice: 45.8302,
+      lastExitPrice: 45.8302,
       // ~6 営業日前 → businessDaysSinceExit >= 3 → ガード無効化。
       lastExitAt: '2026-04-10T14:30:00.000Z',
     }
