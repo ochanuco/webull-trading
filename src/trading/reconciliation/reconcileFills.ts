@@ -8,7 +8,7 @@ import { resolveAccessToken } from '../../infrastructure/webull/resolveAccessTok
 import { createWebullReadClient } from '../../infrastructure/webull/WebullReadClient'
 import type { WebullOrderDetailDto } from '../../infrastructure/webull/dto'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
-import { inferTradingMarket, nextTradingDay } from '../domain/tradingCalendar'
+import { inferTradingMarket, nextSessionOpen } from '../domain/tradingCalendar'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { loadGlobalConfig } from '../../infrastructure/db/globalConfigRepo'
 import { netRealizedPnl, type TradeCostConfig } from '../domain/tradingCost'
@@ -1166,6 +1166,10 @@ async function applyFillToState(args: {
   // 全 SELL で cooldown を張り、時間軸で買い直しを 1 営業日ブロックする
   // (価格軸のガードは PullbackUptrendStrategy 側 = 前回売値 −1ATR)。
   //
+  // 解除は翌営業日の**寄り** (`nextSessionOpen`, #661) — 旧 `nextTradingDay`
+  // (24h 刻みで時刻保持) だと実効長が exit 時刻に依存していた (引け際 exit ≈
+  // 1 セッション分、寄り直後 exit ≈ ほぼ 0)。寄りに正規化することでこの依存をなくす。
+  //
   // Cooldown failures are intentionally NON-fatal (caught + logged) because
   // the position itself has already been correctly recorded, and a missed
   // cooldown only loosens a re-entry guard rather than producing
@@ -1179,7 +1183,7 @@ async function applyFillToState(args: {
   ) {
     try {
       const market = inferTradingMarket(symbol)
-      const cooldownUntil = nextTradingDay(runNow, market).toISOString()
+      const cooldownUntil = nextSessionOpen(runNow, market).toISOString()
       await new SymbolStateClient(env.SYMBOL_STATE).setCooldown(symbol, cooldownUntil)
     } catch (error) {
       console.error(
@@ -1198,7 +1202,8 @@ async function applyFillToState(args: {
   // **理由問わず** (stop / TP / time-stop / regime_flip、損益符号も問わず)
   // 反対 symbol にも翌営業日まで cooldown を張る — same-day ドテン (whipsaw の
   // 最悪形) の禁止。regime_enabled=0 のペアには適用しない (既存挙動の回帰保証)。
-  // 失敗は non-fatal (上の自 symbol cooldown と同じ理由)。
+  // 解除は翌営業日の**寄り** (`nextSessionOpen`, #661) — 上の自 symbol cooldown
+  // と同じ理由で exit 時刻依存を無くす。失敗は non-fatal (同上)。
   if (
     side === 'SELL' &&
     env.SYMBOL_STATE &&
@@ -1211,7 +1216,7 @@ async function applyFillToState(args: {
       if (pair) {
         const partner = pair.bullSymbol === upper ? pair.bearSymbol : pair.bullSymbol
         const market = inferTradingMarket(partner)
-        const until = nextTradingDay(runNow, market).toISOString()
+        const until = nextSessionOpen(runNow, market).toISOString()
         await new SymbolStateClient(env.SYMBOL_STATE).setCooldown(partner, until)
         console.warn(
           JSON.stringify({

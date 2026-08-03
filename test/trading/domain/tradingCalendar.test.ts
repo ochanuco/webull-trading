@@ -9,6 +9,7 @@ import {
   isUsMarketHoliday,
   isWithinStrategyWindow,
   isWithinUsCloseWindow,
+  nextSessionOpen,
   nextTradingDay,
 } from '../../../src/trading/domain/tradingCalendar'
 
@@ -398,5 +399,74 @@ describe('isTradingDay / nextTradingDay — US ルール計算化で 2028 以降
     expect(
       nextTradingDay(new Date('2027-12-30T10:00:00.000Z'), 'US').toISOString().slice(0, 10),
     ).toBe('2027-12-31')
+  })
+})
+
+describe('nextSessionOpen (#661)', () => {
+  it('US 平日 (EDT): 2026-08-04 (火) 18:00Z exit → 翌日 2026-08-05 09:30 EDT', () => {
+    expect(nextSessionOpen(new Date('2026-08-04T18:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-08-05T13:30:00.000Z',
+    )
+  })
+
+  it('US 平日 (EST / 冬時間): 2026-01-06 (火) exit → 翌日 2026-01-07 09:30 EST', () => {
+    expect(nextSessionOpen(new Date('2026-01-06T20:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-01-07T14:30:00.000Z',
+    )
+  })
+
+  it('DST spring-forward: 2026-03-06 (金, EST) exit → 2026-03-09 (月) は EDT で 09:30=13:30Z', () => {
+    // 2026-03-08 (日) が切替日。金曜は EST、月曜は EDT — offset をまたぐ。
+    expect(nextSessionOpen(new Date('2026-03-06T20:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-03-09T13:30:00.000Z',
+    )
+  })
+
+  it('DST fall-back: 2026-10-30 (金, EDT) exit → 2026-11-02 (月) は EST で 09:30=14:30Z', () => {
+    // 2026-11-01 (日) が切替日。金曜は EDT、月曜は EST — offset をまたぐ。
+    expect(nextSessionOpen(new Date('2026-10-30T20:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-11-02T14:30:00.000Z',
+    )
+  })
+
+  it('金曜 exit → 月曜の寄り (週末 skip)', () => {
+    expect(nextSessionOpen(new Date('2026-04-17T20:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-04-20T13:30:00.000Z',
+    )
+  })
+
+  it('US 祝日 skip: 2025-12-31 (水) exit → 元日 (木) を跳ばして 2026-01-02 (金) 09:30 EST', () => {
+    expect(nextSessionOpen(new Date('2025-12-31T20:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-01-02T14:30:00.000Z',
+    )
+  })
+
+  it('US: 寄り前 exit (08:00 ET) でも当日ではなく翌取引日の寄りを返す', () => {
+    // 2026-08-04T12:00:00.000Z = 08:00 EDT (当日の寄り 13:30Z より前)。
+    expect(nextSessionOpen(new Date('2026-08-04T12:00:00.000Z'), 'US').toISOString()).toBe(
+      '2026-08-05T13:30:00.000Z',
+    )
+  })
+
+  it('JP 平日: 2026-04-15 (水) exit → 翌日 2026-04-16 09:00 JST = 00:00Z', () => {
+    expect(nextSessionOpen(new Date('2026-04-15T10:00:00.000Z'), 'JP').toISOString()).toBe(
+      '2026-04-16T00:00:00.000Z',
+    )
+  })
+
+  it('JP 夜間 (UTC 日付ズレ): 2026-04-19T23:30Z (=月曜 08:30 JST) exit → 当日ではなく翌営業日 (火) の寄り', () => {
+    // JST 暦日は月曜 (2026-04-20) だが UTC 暦日は日曜 (2026-04-19)。UTC 日付基準で
+    // 判定すると誤って月曜を「翌日」扱いしてしまう回帰ケース — JST 暦日で
+    // 月曜を当日とみなし、翌営業日である火曜 (2026-04-21) 09:00 JST を返すべき。
+    expect(nextSessionOpen(new Date('2026-04-19T23:30:00.000Z'), 'JP').toISOString()).toBe(
+      '2026-04-21T00:00:00.000Z',
+    )
+  })
+
+  it('JP 年末年始: 2026-12-30 (水) exit → 2027-01-04 (月) 09:00 JST = 00:00Z', () => {
+    // 12/31 TSE closed, 1/1 元日, 1/2 (土), 1/3 (日) → 翌営業日は 1/4 (月)。
+    expect(nextSessionOpen(new Date('2026-12-30T10:00:00.000Z'), 'JP').toISOString()).toBe(
+      '2027-01-04T00:00:00.000Z',
+    )
   })
 })
