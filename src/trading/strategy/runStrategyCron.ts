@@ -122,7 +122,7 @@ export interface StrategyCronResult {
   /**
    * #exit-only-halt: risk halt により **新規 entry のみ**停止した理由。
    * `skipReason` (= run 全体を skip) とは排他で、こちらが立っている run は
-   * 建玉の exit 判定を通常どおり実行している。
+   * 保有の exit 判定を通常どおり実行している。
    */
   entryHaltReason?: string
 }
@@ -449,14 +449,14 @@ export async function runStrategyCron(
   // - tradingDisabledUntil が有効 & 未来 → entry 停止
   // - drawdown 閾値超過 → entry 停止
   //
-  // いずれも **新規 BUY だけを止め、保有建玉の exit (stop / TP / time-stop) は
+  // いずれも **新規 BUY だけを止め、保有中の exit (stop / TP / time-stop) は
   // 評価し続ける**。stop はブローカー側の逆指値ではなく cron が毎 tick 評価する
-  // ソフト stop なので、ここで全停止すると「一番荒れている時に建玉の唯一の
+  // ソフト stop なので、ここで全停止すると「一番荒れている時に保有銘柄の唯一の
   // 保護が消える」ことになる。特に drawdown kill は **実現損益**基準 = stop が
   // 効いた直後に発火するため、その順序が起きやすい。
   //
   // 全停止のままにするのは operator の明示停止 (`trading_enabled` / env
-  // TRADING_ENABLED) と `no_bridge_state` (SYMBOL_STATE 不在 = 建玉状態が
+  // TRADING_ENABLED) と `no_bridge_state` (SYMBOL_STATE 不在 = 保有状態が
   // そもそも読めない) だけ。
   let entryHaltReason: string | null = null
   const portfolioStore = env.PORTFOLIO_STATE ? new PortfolioStateClient(env.PORTFOLIO_STATE) : null

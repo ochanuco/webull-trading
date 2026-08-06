@@ -97,7 +97,7 @@ describe('pairClosedTrades (BUY→SELL closed pair の突合)', () => {
     ])
   })
 
-  it('末尾のオープン建玉 (BUY のみで未決済) は span に含めない', () => {
+  it('末尾のオープン保有 (BUY のみで未決済) は span に含めない', () => {
     const spans = pairClosedTrades([
       buy('2026-06-01', 100),
       sell('2026-06-05', 107, 7),

@@ -142,9 +142,9 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
-    it('SELL without position → 手仕舞い対象の建玉なし', () => {
+    it('SELL without position → 手仕舞い対象の保有なし', () => {
       expect(localizeReason('SELL without position')).toBe(
-        '発注スキップ: 手仕舞い対象の建玉なし',
+        '発注スキップ: 手仕舞い対象の保有なし',
       )
     })
 
@@ -198,14 +198,14 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
 
     it('news shock warning (qty successfully scaled) → 数値のみ翻訳', () => {
       expect(localizeReason('risk: news_shock_warning: 2.8x (size x0.5)')).toBe(
-        '発注スキップ: ニュース過熱で建玉縮小 (報道量 baseline比 2.8倍、数量 x0.5)',
+        '発注スキップ: ニュース過熱で発注数量縮小 (報道量 baseline比 2.8倍、数量 x0.5)',
       )
     })
 
     it('news shock warning rounded to 0 → lot 情報も翻訳', () => {
       expect(
         localizeReason('risk: news_shock_warning: 2.8x (size x0.5) (qty rounded to 0, lot=100)'),
-      ).toBe('発注スキップ: ニュース過熱で建玉縮小 (報道量 baseline比 2.8倍、数量 x0.5、売買単位 100 未満で見送り)')
+      ).toBe('発注スキップ: ニュース過熱で発注数量縮小 (報道量 baseline比 2.8倍、数量 x0.5、売買単位 100 未満で見送り)')
     })
 
     it('news shock unavailable (block_buy policy) → データ不足', () => {

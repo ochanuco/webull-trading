@@ -8,7 +8,7 @@
  *
  * 含まれる gate:
  *   1. settled cash (BUY only): notional > settledCash で reject
- *   2. inverse pair (BUY only): inverse 銘柄の建玉が残っていれば reject
+ *   2. inverse pair (BUY only): inverse 銘柄の保有が残っていれば reject
  *   3. quote freshness (BUY only / halt fallback): lastQuote.fetchedAt が staleQuoteMs を超えれば reject
  *   4. spread guard (BUY only): 異常 / spread% が limit 超で reject。bid/ask 欠損は
  *      source 次第 — Yahoo 等 bid/ask 非対応 source は適用外で通す、それ以外は fail-closed (issue #411)

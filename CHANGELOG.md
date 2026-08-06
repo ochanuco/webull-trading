@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.2](https://github.com/ochanuco/webull-trading/compare/v1.4.1...v1.4.2) (2026-08-06)
+
+
+### Bug Fixes
+
+* align MCP get_positions description with cash-account wording ([fa8dee0](https://github.com/ochanuco/webull-trading/commit/fa8dee0f9b1e91fb5f2df3f68a23097eff140a17))
+* align MCP get_positions description with cash-account wording ([f666f87](https://github.com/ochanuco/webull-trading/commit/f666f8702b57b3e7819dcc69881dd1ad77e720a7))
+
 ## [1.4.1](https://github.com/ochanuco/webull-trading/compare/v1.4.0...v1.4.1) (2026-08-03)
 
 
