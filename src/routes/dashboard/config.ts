@@ -90,7 +90,7 @@ export function configBody(
  * global_config 列のメタ情報 (label + detail)。
  *
  * - `label`: 短い見出し (単位込み)。IT / 汎用英単語 (dry-run / drawdown / spread
- *   等) は英字のまま、日本株固有語 (押し目 / 建玉 / 利食い / 損切り / 騰落率)
+ *   等) は英字のまま、日本株固有語 (押し目 / 保有 / 利食い / 損切り / 騰落率)
  *   のみ日本語化。
  * - `detail`: 株初心者向け advisory。1-3 文、「何をするか」「大小で何が変わるか」
  *   「目安」の順で記述。技術用語を避け具体的な動作で説明。
@@ -176,7 +176,7 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   pullback_default_time_stop_days: {
     label: '最大保有日数 (営業日)',
-    detail: '建玉を保有する最大日数。この日数を超えても利食い/損切りに達しなければ強制売却。10 = 約 2 週間。',
+    detail: '保有を継続する最大日数。この日数を超えても利食い/損切りに達しなければ強制売却。10 = 約 2 週間。',
   },
   pullback_default_pullback_max: {
     label: '押し目上限 (比率、負)',
@@ -208,7 +208,7 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   risk_base_per_trade_pct: {
     label: '基本リスク率 (比率)',
-    detail: '1 回のトレードで失ってよい割合 (対 総資本)。0.004 = 0.4%。大きくすると 1 回あたりの建玉サイズ↑、連敗時の損失↑。',
+    detail: '1 回のトレードで失ってよい割合 (対 総資本)。0.004 = 0.4%。大きくすると 1 回あたりの買付数量↑、連敗時の損失↑。',
   },
   risk_dd_half_threshold: {
     label: 'risk half 閾値 (比率、負)',
@@ -227,7 +227,7 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     detail: '恐怖指数 (VIX) がこの値を超えたら新規買いを全停止 (売却は通常通り)。30 が標準。下げると守り重視、上げると荒れ相場でも買いに行く。',
   },
   vix_warning_size_scale: {
-    label: 'VIX 警戒時の建玉縮小率 (比率)',
+    label: 'VIX 警戒時の発注数量縮小率 (比率)',
     detail: 'VIX 警戒時 (warning ≤ VIX < critical) の発注数量倍率。0.5 = 半分に縮小。1.0 で縮小なし、0 で停止と同義。',
   },
   news_shock_mode: {
@@ -243,7 +243,7 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     detail: '警戒倍率に加え、この倍率を超え、かつ論調悪化条件も満たすと新規買いを全停止。4.4 が標準 (GDELT 実測 上位1%相当)。',
   },
   news_shock_warn_size_scale: {
-    label: 'ニュース過熱 警戒時の建玉縮小率 (比率)',
+    label: 'ニュース過熱 警戒時の発注数量縮小率 (比率)',
     detail: '警戒時の発注数量倍率。0.5 = 半分に縮小。VIX の縮小率と乗算で合成される。',
   },
   news_shock_tone_drop_threshold: {

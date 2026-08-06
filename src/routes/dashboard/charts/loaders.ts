@@ -53,11 +53,11 @@ export interface SymbolChartMarker {
 /**
  * BUY → SELL で閉じた 1 往復の保有区間 (#chart-markers)。チャート上に
  * 「この期間持っていて、結果 +X / -Y だった」を薄背景 (markArea) で見せる。
- * オープン中の建玉 (BUY のみで未決済) は含めない — 右端まで塗ると
+ * オープン中の保有 (BUY のみで未決済) は含めない — 右端まで塗ると
  * 「そこで決済した」ように誤読されるため、既存の position 線に任せる。
  */
 export interface ClosedTradeSpan {
-  /** 区間開始 = 建玉を開いた BUY fill の timestamp (ISO UTC) */
+  /** 区間開始 = 保有を開いた BUY fill の timestamp (ISO UTC) */
   openTimestamp: string
   /** 区間終了 = 決済 SELL fill の timestamp (ISO UTC) */
   closeTimestamp: string

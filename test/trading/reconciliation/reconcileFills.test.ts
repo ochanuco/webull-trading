@@ -1559,7 +1559,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
   })
 
   // #drift: ack ロストした SELL (submit が例外で記録漏れ) を broker 履歴から拾って
-  // 建玉を close し、実現損益も記録する heal 経路。errored cohort の WHERE は fake db
+  // 保有を close し、実現損益も記録する heal 経路。errored cohort の WHERE は fake db
   // が無視するので、ここでは「候補に入った errored 由来 SELL 行が正しく apply される」
   // ことを検証する (cohort 選択自体は SQL レベルの変更)。
   it('heals a drifted position: applies a found SELL fill (close + realized PnL)', async () => {
