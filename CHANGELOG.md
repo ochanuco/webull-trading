@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/ochanuco/webull-trading/compare/v1.4.2...v1.4.3) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** update dependency vite to v8.2.1 ([2822c05](https://github.com/ochanuco/webull-trading/commit/2822c05f240d4a21befe50dfa8c0809ed528f597))
+
 ## [1.4.2](https://github.com/ochanuco/webull-trading/compare/v1.4.1...v1.4.2) (2026-08-06)
 
 
