@@ -498,6 +498,15 @@ export const TRACE_OPERAND: Record<string, { name: string; unit: 'price' | 'pct'
   'exit.time_stop': { name: '保有日数', unit: 'days' },
 }
 
+// label_ja は判定時に traceJson へ焼き込まれるため、ラベル文言を改名しても
+// 過去行には旧文言が残る (#671 建玉→保有)。改名済みキーだけ表示時に現行文言で
+// 上書きする (未知キーは保存済み label_ja のまま)。
+const TRACE_LABEL_JA_CURRENT: Record<string, string> = {
+  'route.position_open': '保有中',
+  'scheduler.sell_position_exists': '売却対象の保有がある',
+  'scheduler.position_qty_valid': '保有数量が有効',
+}
+
 /**
  * 判定トレース (`DecisionTraceStep[]` JSON) を「入力→ロジック層→出力」のラダーに
  * 描画する (#decision-trace)。各 gate を順に ✅/❌ + 比較式 (左辺名 値 op 閾値) で
@@ -556,7 +565,7 @@ export function renderDecisionLadder(
     .map((s, i) => {
       const ok = s.passed === true
       const mark = ok ? '✅' : '❌'
-      const label = esc(s.label_ja || s.label || '?')
+      const label = esc((s.label && TRACE_LABEL_JA_CURRENT[s.label]) || s.label_ja || s.label || '?')
       // 「<左辺名> <値>(太字) <記号> [<閾値名>] <閾値>」で、左が何の数字かを明示
       // する (#trace-readability)。識別子に表示名が無い step は素の比較式。
       const opSym = s.operator ? (opSymbol[s.operator] ?? s.operator) : ''
