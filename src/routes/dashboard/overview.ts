@@ -14,7 +14,7 @@ import { displaySymbol, esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
  *
  * 旧実装は 6 パネル (status / kpi / equity / positions / composition / recent)
  * だったが、6 種類の情報ではなく **同じ数字の別表現**が並んでいた (status と
- * kpi で開始 equity と実現損益が重複、positions と composition は同じ建玉の
+ * kpi で開始 equity と実現損益が重複、positions と composition は同じ保有銘柄の
  * 別表現)。3 領域に畳んで重複を消した。
  *
  * **運転状態は panel ではない** — 常に最上段に出す。実行モード / 取引 ON-OFF /
@@ -25,7 +25,7 @@ export type OverviewPanel = 'risk' | 'activity'
 export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = ['risk', 'activity']
 
 export const OVERVIEW_PANEL_LABELS: Record<OverviewPanel, string> = {
-  risk: 'リスクと建玉 (保有ポジション + 資産構成 / 含み損益ランキング)',
+  risk: 'リスクと保有銘柄 (保有一覧 + 資産構成 / 含み損益ランキング)',
   activity: '最近の活動 (直近の約定 + 資産推移)',
 }
 
@@ -72,7 +72,7 @@ export interface HomeRunSignals {
   alertWarning: number
 }
 
-/** 建玉 1 件の「あと何 % で損切りか」。実効 stop は ATR / R:R cap で動く。 */
+/** 保有銘柄 1 件の「あと何 % で損切りか」。実効 stop は ATR / R:R cap で動く。 */
 export interface StopDistanceView {
   /** 現在の含み損益 (%)。 */
   pnlPct: number
@@ -122,7 +122,7 @@ export interface OverviewData {
   universe: SymbolUniverse
 }
 
-/** 開いている建玉 (qty != 0) を評価額・含み損益% 付きで抽出。 */
+/** 開いている保有銘柄 (qty != 0) を評価額・含み損益% 付きで抽出。 */
 export interface OpenPositionView {
   sym: string
   qty: number
@@ -287,20 +287,20 @@ export function kpiCard(label: string, value: string, sub?: string, subClass?: s
 }
 
 /**
- * リスクと建玉 (#dashboard-ia): 建玉テーブル + エクスポージャー + 買付余力。
+ * リスクと保有銘柄 (#dashboard-ia): 保有銘柄テーブル + エクスポージャー + 買付余力。
  *
  * 旧ホームは KPI カード / 保有ポジション表 / 資産構成の 3 枚に分かれていたが、
- * 建玉 2-3 件の口座では同じデータを 3 回見せているだけだった。1 枚に畳み、
- * **各建玉が実効 stop からどれだけ離れているか**という、表からは読めなかった
+ * 保有銘柄 2-3 件の口座では同じデータを 3 回見せているだけだった。1 枚に畳み、
+ * **各保有銘柄が実効 stop からどれだけ離れているか**という、表からは読めなかった
  * 情報を状態列として足す。
  */
 export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): string {
   const exposurePill = renderExposurePill(data, open)
   if (!data.symbolStateBound) {
-    return `<div class="panel"><div class="panel-title"><span>建玉</span></div><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。</p></div>`
+    return `<div class="panel"><div class="panel-title"><span>保有銘柄</span></div><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。</p></div>`
   }
   if (open.length === 0) {
-    return `<div class="panel"><div class="panel-title"><span>建玉 0 件</span>${exposurePill}</div><p class="muted" style="margin:0">保有中の建玉はありません。</p></div>`
+    return `<div class="panel"><div class="panel-title"><span>保有銘柄 0 件</span>${exposurePill}</div><p class="muted" style="margin:0">保有中の銘柄はありません。</p></div>`
   }
   const rows = open
     .map((o) => {
@@ -324,7 +324,7 @@ export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): s
     })
     .join('')
   return `<div class="panel">
-    <div class="panel-title"><span>建玉 ${open.length} 件 / エクスポージャー</span>${exposurePill}</div>
+    <div class="panel-title"><span>保有銘柄 ${open.length} 件 / エクスポージャー</span>${exposurePill}</div>
     <table class="fit">
       <thead><tr><th class="grow">銘柄</th><th class="num">数量</th><th class="num">現在値</th><th class="num">損益</th><th>状態</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -333,7 +333,7 @@ export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): s
   </div>`
 }
 
-/** 建玉合計 / total_capital の比率 pill。total_capital 未設定なら件数のみ。 */
+/** 保有銘柄合計 / total_capital の比率 pill。total_capital 未設定なら件数のみ。 */
 function renderExposurePill(data: OverviewData, open: OpenPositionView[]): string {
   const usd = open
     .filter((o) => o.currency === 'USD' && o.marketValue !== null)
@@ -442,9 +442,9 @@ export function overviewBody(data: OverviewData): string {
   // 1. 運転状態 — 常時表示。設定で隠せない。
   sections.push(renderRunStatePanel(data))
 
-  // 2. リスクと建玉 — 建玉テーブル 1 枚に集約 (KPI / 資産構成の重複を排除)。
+  // 2. リスクと保有銘柄 — 保有銘柄テーブル 1 枚に集約 (KPI / 資産構成の重複を排除)。
   if (data.panels.has('risk')) {
-    sections.push(areaLabel('リスクと建玉'))
+    sections.push(areaLabel('リスクと保有銘柄'))
     sections.push(renderRiskPanel(data, open))
   }
 

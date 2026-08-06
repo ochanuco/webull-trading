@@ -37,14 +37,14 @@ export interface SymbolState {
   pendingSettlement: PendingSettlement[]
   lastExecutedPrice: number | null
   /**
-   * 建玉を閉じた最後の SELL fill の時刻 (ISO 8601)。#reentry の再エントリー
+   * 保有を閉じた最後の SELL fill の時刻 (ISO 8601)。#reentry の再エントリー
    * 価格ガードが「前回手仕舞いから何営業日経過したか」の recency 判定に使う。
    * `lastExitPrice` と対で読む。close 以外の fill (BUY / 部分 SELL) では
    * 更新しない。旧 state には無い → undefined は null 相当。
    */
   lastExitAt: string | null
   /**
-   * 建玉を閉じた SELL fill の価格。#reentry ガードの基準価格。
+   * 保有を閉じた SELL fill の価格。#reentry ガードの基準価格。
    * `state.position === null ? state.lastExecutedPrice : null` という推論には
    * 依存しない — flat = 直近 fill が SELL、という不変条件は syncHoldings 等の
    * position override で壊れうるため (#660)。BUY / 部分 SELL では更新しない。

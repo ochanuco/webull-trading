@@ -2387,7 +2387,7 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
   })
 
   it('does not gate the SELL path (exit of a held position still runs)', async () => {
-    // role を後から cash_parking 等に変えた銘柄に建玉が残っていても
+    // role を後から cash_parking 等に変えた銘柄に保有が残っていても
     // stop / time-stop / TP の exit は従来どおり動く (fail-closed は entry 側のみ)。
     const execution = mockExecution()
     const heldState: SymbolState = {
@@ -2800,8 +2800,8 @@ describe('runPullbackScheduler TICKER_IS_DENY hook (#460)', () => {
     expect(hook).not.toHaveBeenCalled()
   })
 
-  it('does not call the hook on the SELL path (建玉 orphan 化を避ける)', async () => {
-    // time stop で SELL が出る建玉を持たせ、SELL submit が deny で落ちても
+  it('does not call the hook on the SELL path (保有 orphan 化を避ける)', async () => {
+    // time stop で SELL が出る保有を持たせ、SELL submit が deny で落ちても
     // hook は呼ばれない (= 銘柄は評価対象に残り、exit は次 tick で再試行)。
     const hook = vi.fn(async () => undefined)
     const heldState: SymbolState = {

@@ -114,7 +114,7 @@ describe('recordFill', () => {
 
     expect(state.position).toBeNull()
     expect(state.lastExecutedPrice).toBe(12)
-    // #reentry: 建玉を閉じた SELL は lastExitAt / lastExitPrice を fill 時刻・価格で刻む。
+    // #reentry: 保有を閉じた SELL は lastExitAt / lastExitPrice を fill 時刻・価格で刻む。
     expect(state.lastExitAt).toBe('2026-04-18T11:00:00.000Z')
     expect(state.lastExitPrice).toBe(12)
   })
