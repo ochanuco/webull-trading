@@ -1270,13 +1270,13 @@ export function symbolsListBody(args: {
         role === 'bottom'
           ? ''
           : role === 'top'
-            ? `<td rowspan="2" style="vertical-align:middle">${sliderHtml}<div class="muted" style="font-size:11px;margin-top:2px">ペア共通 — 建玉は片側のみ、予算消費は1回分</div></td>`
+            ? `<td rowspan="2" style="vertical-align:middle">${sliderHtml}<div class="muted" style="font-size:11px;margin-top:2px">ペア共通 — 保有は片側のみ、予算消費は1回分</div></td>`
             : `<td>${sliderHtml}</td>`
       // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
       // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
       // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
       const treeTitle = inverse
-        ? `インバース対: ${esc(inverse)} (相手に建玉がある間は BUY 見送り #315)`
+        ? `インバース対: ${esc(inverse)} (相手に保有がある間は BUY 見送り #315)`
         : ''
       const connBase =
         'position:absolute;left:11px;width:9px;border-left:2px solid #06c;display:block'
@@ -1369,7 +1369,7 @@ export const BUDGET_LADDER_JS = `
     if (note) note.textContent = Object.keys(window.__budgetDirty).length + ' 銘柄を変更中';
     window.__recomputeBudgetMeter();
   };
-  // 同時建玉ベースの予算使用率を全 slider から再計算してメーターを再描画。
+  // 同時保有ベースの予算使用率を全 slider から再計算してメーターを再描画。
   // インバース対は max を 1 回だけ計上 (片側のみ建つため)。
   window.__recomputeBudgetMeter = function () {
     var barMeter = document.getElementById('symbol-budget-bar-meter');
@@ -1414,7 +1414,7 @@ export const BUDGET_LADDER_JS = `
     if (used <= 0) { barMeter.innerHTML = ''; return; }
     var w = Math.min(100, used);
     var col = used > 100 ? '#c22' : used > 80 ? '#b25000' : '#057a55';
-    barMeter.innerHTML = '<span title="同時建玉ベースの口座(円)予算使用率 (インバース対は max を1回計上)" style="display:flex;align-items:center;gap:6px;font-size:12px;flex:1;min-width:0">'
+    barMeter.innerHTML = '<span title="同時保有ベースの口座(円)予算使用率 (インバース対は max を1回計上)" style="display:flex;align-items:center;gap:6px;font-size:12px;flex:1;min-width:0">'
       + '<span class="muted" style="white-space:nowrap">口座予算</span>'
       + '<span class="bar-track" style="flex:1;min-width:40px;height:8px"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
       + '<span style="font-variant-numeric:tabular-nums;color:' + col + ';white-space:nowrap">' + used.toFixed(0) + '% / 100%' + (used > 100 ? ' ⚠超過' : '') + '</span></span>';
@@ -1434,7 +1434,7 @@ export function budgetLadderControls(): string {
 }
 
 /**
- * #budget-jpy-base-fx: 同時建玉ベースの口座(円)予算使用率 (単一 %)。
+ * #budget-jpy-base-fx: 同時保有ベースの口座(円)予算使用率 (単一 %)。
  * budget_alloc_pct は通貨に関係なく「口座(円)全体に対する割合」なので、通貨で分けず
  * 1 本に合算する。インバース対は同時に片方しか建たないので max(両側) で1回だけ計上、
  * standalone と別ペアは加算 = 「口座に対する最大同時コミット率 (%)」。
@@ -1802,7 +1802,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
            ${
              currentInverse
                ? `<span>↔ <a href="/dashboard/symbols/${encodeURIComponent(currentInverse)}/edit"><strong>${esc(currentInverse)}</strong></a></span>
-                  <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に建玉がある間は BUY を見送ります (#315)。対の変更は一度削除して再登録してください。</p>`
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に保有がある間は BUY を見送ります (#315)。対の変更は一度削除して再登録してください。</p>`
                : `<span class="muted">未設定 (対なし)</span>
                   <p class="muted" style="margin:4px 0 0;font-size:11px">対を組むには、相手銘柄の新規追加時に「インバース対で登録」を選んでください。</p>`
            }

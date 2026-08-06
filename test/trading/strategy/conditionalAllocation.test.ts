@@ -51,7 +51,7 @@ describe('computeConditionalAllocation (#452 Layer 3)', () => {
     expect(view.bySymbol.SGOV!.activeWeight).toBeCloseTo(0.7, 9)
   })
 
-  it('建玉保有中は未通過でも退避しない (exit 経路が管理)', () => {
+  it('保有中は未通過でも退避しない (exit 経路が管理)', () => {
     const input = baseInput()
     input.heldSymbols = new Set(['SOXL'])
     const view = computeConditionalAllocation(input)

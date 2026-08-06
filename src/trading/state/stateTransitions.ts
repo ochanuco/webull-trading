@@ -62,7 +62,7 @@ export function recordFill(
 
   const position = applyFillToPosition(state.position, fill, ctx.now)
   const iso = ctx.now().toISOString()
-  // 建玉を閉じた SELL (position が null に落ちた) のときだけ lastExitAt /
+  // 保有を閉じた SELL (position が null に落ちた) のときだけ lastExitAt /
   // lastExitPrice を同時に刻む。#reentry の価格ガードが基準にする「前回手仕舞い
   // 価格」と「そこからの経過営業日」を明示フィールドとして永続化する
   // (state.position===null な間 lastExecutedPrice=直近 SELL 価格、という推論には

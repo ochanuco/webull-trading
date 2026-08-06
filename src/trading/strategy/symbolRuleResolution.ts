@@ -138,7 +138,7 @@ export function buildMomentumSymbols(symbolRole: Record<string, SymbolRoleValue>
 
 /**
  * strategy cron が BUY を生成してはいけない symbol → 抑止理由、の map を作る
- * (#452)。SELL / HOLD (exit 経路) は対象外 — role を後から変えた銘柄に建玉が
+ * (#452)。SELL / HOLD (exit 経路) は対象外 — role を後から変えた銘柄に保有が
  * 残っていても stop / time-stop / TP は従来どおり動く。
  */
 export function buildEntrySuppressedSymbols(

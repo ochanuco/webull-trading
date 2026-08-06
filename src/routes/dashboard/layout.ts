@@ -61,7 +61,7 @@ export const STYLE = `
   .state-value a:hover{text-decoration:underline}
   .state-kill{align-self:center;margin-left:auto;background:#fdecea;color:#c0392b;border:1px solid #f0b3ac;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;text-decoration:none;white-space:nowrap}
   .state-kill:hover{background:#f8d7d3}
-  /* #dashboard-ia Phase 3: ホームの領域見出し (運転状態 / リスクと建玉 / 最近の活動)。 */
+  /* #dashboard-ia Phase 3: ホームの領域見出し (運転状態 / リスクと保有銘柄 / 最近の活動)。 */
   .area-label{font-size:11px;letter-spacing:.12em;color:#6e6e73;margin:18px 0 6px;display:flex;align-items:center;gap:8px}
   .area-label::after{content:"";flex:1;height:1px;background:#e3e3e8}
   .topnav .nav-sep{width:1px;height:18px;background:#d0d0d5;margin:0 8px;flex:0 0 auto}
@@ -285,7 +285,7 @@ export const NAV_GROUPS: ReadonlyArray<{
   text: string
   title?: string
 }> = [
-  { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (運転状態 / 建玉 / 直近の活動)' },
+  { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (運転状態 / 保有銘柄 / 直近の活動)' },
   { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート (判定 pin / ラダー / 約定マーカー)' },
   { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 成績 / 実現損益の推移' },
 ]

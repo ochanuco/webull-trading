@@ -119,7 +119,7 @@ export interface PullbackInput {
   holdBusinessDays: number
   /**
    * 前回手仕舞い価格 (#reentry)。flat 時の `SymbolState.lastExecutedPrice`
-   * (= 建玉を閉じた SELL の約定価格) を渡す。null / 未設定なら価格ガード素通り。
+   * (= 保有を閉じた SELL の約定価格) を渡す。null / 未設定なら価格ガード素通り。
    */
   lastExitPrice?: number | null
   /**
@@ -479,7 +479,7 @@ function labelJa(label: string): string {
 const TRACE_LABEL_JA: Record<string, string> = {
   'guard.pending_order_absent': '未約定注文がない',
   'guard.cooldown_inactive': 'クールダウン中ではない',
-  'route.position_open': '建玉を保有中',
+  'route.position_open': '保有中',
   'entry.reentry_below_last_exit': '前回売値からの再エントリー間隔・値幅が十分',
   // #318: trace 識別子 (`entry.trend_50d_return` / `entry.high20d_valid`) は
   // 既存 decision_log と互換維持のため据え置き。**表示文字列のみ実 lookback に

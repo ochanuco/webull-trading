@@ -416,7 +416,7 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
       // 保有区間 markArea (#chart-markers): BUY→SELL の closed pair を薄背景で
       // 塗る (server 側 pairClosedTrades の結果 = sc.holdingSpans)。SELL の
       // realizedPnl の符号で緑 (勝ち) / 赤 (負け) 系、欠損 (null) は中立グレー。
-      // オープン中の建玉は server が span に含めない (右端まで塗ると「そこで
+      // オープン中の保有は server が span に含めない (右端まで塗ると「そこで
       // 決済した」と誤読される) — 現保有は avg/stop/TP 線が担う。
       // category mode では xAxis に最近接 ohlc index、time mode では ISO を渡す
       // (markPoint coord と同じ xForTimestamp 流用)。

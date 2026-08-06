@@ -40,7 +40,7 @@
 | `*/15 * * * *` | strategy cron (USD + JPY currency-aware、JP は `lot_size` 丸め) |
 | `0 22 * * *` | portfolio roll (EOD) + Webull token refresh + market data health check + tradable allowlist 更新 |
 
-stop / take-profit / time-stop は**ブローカー側の逆指値ではなく cron が毎 tick 評価するソフト stop**。cron が止まると建玉は無防備になるため、risk halt は entry だけを止めて exit 判定は継続する (`entryHaltReason`、#595)。
+stop / take-profit / time-stop は**ブローカー側の逆指値ではなく cron が毎 tick 評価するソフト stop**。cron が止まると保有銘柄は無防備になるため、risk halt は entry だけを止めて exit 判定は継続する (`entryHaltReason`、#595)。
 
 ## Bindings (wrangler.jsonc)
 
