@@ -6,13 +6,13 @@ import type { EntryStatus } from './entryStatus'
  * (目標配分)** として扱い、実配分 (active weight) を entry 判定に連動させる:
  *
  *   - `always_active` (cash_parking 用): 常時 active = target
- *   - `entry_required`: ENTRY / HALF (発注対象) か建玉保有中のみ active = target。
+ *   - `entry_required`: ENTRY / HALF (発注対象) か保有中のみ active = target。
  *     未通過 (WATCH / NG / 評価データ無し) は active = 0 で、浮いた分は
  *     `cash_fallback_symbol` の active に積み増す (退避)
  *   - どちらでもない: 従来どおり常時 active = target (挙動変更なし)
  *
  * 退避は**同一通貨間のみ** — 通貨が異なる退避先は skip して現金のまま
- * (fail-closed: 為替を跨ぐ自動退避はしない)。建玉保有中の銘柄は entry gate が
+ * (fail-closed: 為替を跨ぐ自動退避はしない)。保有中の銘柄は entry gate が
  * 新規 entry 用の条件なので退避しない (exit は stop / time-stop / TP が管理)。
  *
  * このモジュールは**計算のみ** (pure)。退避先への自動発注は
@@ -36,7 +36,7 @@ export interface AllocationComputeInput {
   policy: ConditionalAllocationPolicy
   /** symbol → 最新の段階判定。評価できなかった銘柄は不在 (= 未通過扱い、fail-closed)。 */
   entryStatuses: Record<string, EntryStatus>
-  /** 建玉保有中 (qty > 0) の symbol 集合。 */
+  /** 保有中 (qty > 0) の symbol 集合。 */
   heldSymbols: ReadonlySet<string>
   /** symbol → 通貨。退避の同一通貨チェックに使う (不在は 'USD' 扱い)。 */
   symbolCurrency: Record<string, SymbolCurrency>
@@ -98,7 +98,7 @@ export function computeConditionalAllocation(input: AllocationComputeInput): All
       continue
     }
     if (input.heldSymbols.has(symbol)) {
-      alloc.reason = '建玉保有中: 配分は使用中 (exit は stop / time-stop / TP が管理)'
+      alloc.reason = '保有中: 配分は使用中 (exit は stop / time-stop / TP が管理)'
       continue
     }
     const status = input.entryStatuses[symbol]
@@ -164,7 +164,7 @@ export interface EntrySnapshot {
   status: EntryStatus
   /** 評価時の価格 (intraday or daily close)。 */
   price: number
-  /** 建玉数量 (未保有は 0)。 */
+  /** 保有数量 (未保有は 0)。 */
   heldQty: number
 }
 

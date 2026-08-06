@@ -205,7 +205,7 @@ async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<s
 }
 
 /**
- * 建玉ごとの「実効 stop までの距離」。cron と同じ `resolveStopDistance` を
+ * 保有銘柄ごとの「実効 stop までの距離」。cron と同じ `resolveStopDistance` を
  * 通すので、表示値と実際に切られる水準がズレない。
  */
 function buildStopDistances(
@@ -319,7 +319,7 @@ export const dashboard = new Hono<DashboardBindings>()
     }
   })
   /**
-   * #dashboard-ia Phase 5: 保有ポジションはホームの「リスクと建玉」に統合済み。
+   * #dashboard-ia Phase 5: 保有ポジションはホームの「リスクと保有銘柄」に統合済み。
    * 旧 URL (ブックマーク / 過去の通知リンク) は 302 で送る。JSON export は
    * AI / スクリプト向けにそのまま残す。
    */
@@ -342,7 +342,7 @@ export const dashboard = new Hono<DashboardBindings>()
     }
   })
   /**
-   * #dashboard-ia Phase 5: 口座サマリはホームの「運転状態」+「リスクと建玉」に
+   * #dashboard-ia Phase 5: 口座サマリはホームの「運転状態」+「リスクと保有銘柄」に
    * 統合済み。累積 realized PnL の推移はレビュー (`/dashboard/charts`)。
    */
   .get('/portfolio', (c) => c.redirect('/dashboard', 302))

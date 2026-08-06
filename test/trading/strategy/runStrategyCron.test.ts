@@ -167,7 +167,7 @@ describe('runStrategyCron', () => {
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithPortfolio)
     // drawdown kill は **実現損益**基準 = stop が効いた直後に発火する。ここで
-    // 全停止すると残りの建玉の stop が消えるので、entry だけを止める。
+    // 全停止すると残りの保有の stop が消えるので、entry だけを止める。
     expect(result.skipReason).toBeUndefined()
     expect(result.entryHaltReason).toMatch(/^drawdown_kill: ratio=/)
     const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
@@ -194,7 +194,7 @@ describe('runStrategyCron', () => {
       makeGlobalConfigSnapshot({ drawdownKillThreshold: -0.02 }),
     )
     await runStrategyCron(envWithPortfolio)
-    // symbols を間引くと建玉が orphan になる (exit 判定が走らない) ので全銘柄渡す。
+    // symbols を間引くと保有が orphan になる (exit 判定が走らない) ので全銘柄渡す。
     expect(lastSchedulerOptions().symbols).toEqual(['SOXL', 'SOXS'])
   })
 

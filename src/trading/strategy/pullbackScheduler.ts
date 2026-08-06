@@ -117,7 +117,7 @@ export interface PullbackSchedulerOptions {
    */
   buyingPower?: BuyingPowerLedger
   /**
-   * intraday-only 銘柄の集合 (#intraday-only)。US 引け前 window 内で建玉があれば
+   * intraday-only 銘柄の集合 (#intraday-only)。US 引け前 window 内で保有があれば
    * strategy 判定を上書きして **強制 SELL**(オーバーナイト持ち越し禁止)。レバ ETF の
    * 寄りギャップ stop-out 回避。未指定/対象外は従来どおりスイング保有。
    */
@@ -267,7 +267,7 @@ export interface PullbackSchedulerOptions {
    * `createTickerDenyGuard` (symbol_config の自動 inactive 化 + audit + 通知)
    * を注入する。未注入なら従来挙動 (毎 tick 再送)。hook 内の失敗は hook 側で
    * 握りつぶす契約 (scheduler は await するだけ)。SELL では呼ばない — 万一
-   * exit 側で deny が出ても銘柄を評価対象から外すと建玉が orphan になるため。
+   * exit 側で deny が出ても銘柄を評価対象から外すと保有が orphan になるため。
    */
   onTickerDeny?: (symbol: string) => Promise<void>
   /**
@@ -352,7 +352,7 @@ export interface PullbackRunSummary {
   /**
    * 条件連動配分 (#452 Layer 3) 用の per-symbol 観測値。評価が成立した
    * symbol のみ (bars 不足 / ERROR は不在 = 下流が fail-closed に扱う)。
-   * 段階判定 / 評価価格 / 建玉数量を runStrategyCron の allocation 計算に渡す。
+   * 段階判定 / 評価価格 / 保有数量を runStrategyCron の allocation 計算に渡す。
    */
   entrySnapshots: Record<string, EntrySnapshot>
   /**
@@ -620,7 +620,7 @@ export async function runPullbackScheduler(
     const useMomentum = !!(options.momentumStrategy && options.momentumSymbols?.has(upper))
     const decider = useMomentum ? options.momentumStrategy! : strategy
     // #reentry: flat のときだけ前回手仕舞い情報を渡す。以前は「flat なら直近
-    // fill は建玉を閉じた SELL のはず」という推論で lastExecutedPrice を流用
+    // fill は保有を閉じた SELL のはず」という推論で lastExecutedPrice を流用
     // していたが、syncHoldings 経由の overridePosition (broker 側清算 / 手動
     // override) は position だけ null 化するためこの不変条件が壊れ、
     // lastExecutedPrice に古い BUY 価格が残ったままガード基準になり得た。
@@ -671,9 +671,9 @@ export async function runPullbackScheduler(
       }
     }
 
-    // #intraday-only: レバ ETF 等は US 引け前 window で建玉があれば strategy 判定を
+    // #intraday-only: レバ ETF 等は US 引け前 window で保有があれば strategy 判定を
     // 上書きして強制 SELL (オーバーナイト持ち越し禁止 = 寄りギャップ stop-out 回避)。
-    // 既存の SELL 経路 (全建玉クローズ) に流れる。US 銘柄のみ対象。
+    // 既存の SELL 経路 (全保有クローズ) に流れる。US 銘柄のみ対象。
     if (
       options.intradayOnlySymbols?.has(upper) &&
       market === 'US' &&
@@ -851,7 +851,7 @@ export async function runPullbackScheduler(
 
     // Entry 抑止 role gate (#452)。cash_parking / 定義のみの role / enum 外の
     // role 値の銘柄は BUY を生成しない (fail-closed)。SELL は対象外 — role を
-    // 後から変えた銘柄の建玉 exit (stop / time-stop / TP) を妨げない。
+    // 後から変えた銘柄の保有 exit (stop / time-stop / TP) を妨げない。
     if (signal.action === 'BUY' && options.entrySuppressedSymbols?.[upper] !== undefined) {
       const reason = options.entrySuppressedSymbols[upper]
       summary.rejected.push({ symbol: upper, reason })
@@ -1474,7 +1474,7 @@ export async function runPullbackScheduler(
         })
         // TICKER_IS_DENY 自動停止 (#460): 銘柄単位の恒久拒否は再送しても解消
         // しないので、BUY のみ hook で fail-closed に停止する (SELL は対象外 —
-        // exit 経路と建玉の orphan 化を避ける)。
+        // exit 経路と保有の orphan 化を避ける)。
         if (intent.side === 'BUY' && options.onTickerDeny && isTickerDenyError(error)) {
           await options.onTickerDeny(upper)
         }
@@ -1796,8 +1796,8 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'exit.intraday_close': 'intraday-only 引け前強制クローズ',
   'scheduler.price_valid': '株価が有効',
   'scheduler.notional_valid': '発注金額が有効',
-  'scheduler.sell_position_exists': '売却対象の建玉がある',
-  'scheduler.position_qty_valid': '建玉数量が有効',
+  'scheduler.sell_position_exists': '売却対象の保有がある',
+  'scheduler.position_qty_valid': '保有数量が有効',
   'scheduler.pending_lock_expiry_valid': '注文ロック期限が有効',
   'scheduler.pending_lock_acquired': '注文ロックを取得できた',
   'risk.earnings_calendar': '決算日カレンダーゲート',

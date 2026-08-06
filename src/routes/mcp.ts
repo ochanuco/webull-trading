@@ -80,7 +80,7 @@ const TOOLS = [
   {
     name: 'get_positions',
     description:
-      '保有ポジション一覧 (dashboard_positions_export.v1)。銘柄ごとの数量・平均取得単価・現在値・評価損益 (%)・未約定注文・クールダウンを返す。現在の建玉状況の確認や損益の相談の起点に使う。',
+      '保有銘柄一覧 (dashboard_positions_export.v1)。銘柄ごとの数量・平均取得単価・現在値・評価損益 (%)・未約定注文・クールダウンを返す。現在の保有状況の確認や損益の相談の起点に使う。',
     inputSchema: {
       type: 'object',
       properties: {},

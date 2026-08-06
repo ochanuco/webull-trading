@@ -23,13 +23,13 @@ import { type TradingMarket, inferTradingMarket, isTradingDay, isWithinStrategyW
  *   - 保有中の exit 系 4 種: 利食い / 損切り / 時間切れ / 保有継続
  *   - 発注不成立系 2 種: 発注スキップ (pre-submit) / 発注失敗 (broker submit 失敗)
  *
- * `発注スキップ` は sizing / 同グループ建玉上限 / 売買単位未満などで
+ * `発注スキップ` は sizing / 同グループ保有上限 / 売買単位未満などで
  * **注文送出前** に止めた場合 (decision=SKIP)。`発注失敗` は broker に送ったが
  * 成立しなかった場合 (broker submit error) — 確定拒否 (REJECT) か一時的失敗
  * (ERROR) かは decision 列が区別する。
  *
  * trading-strategist review に基づき、日本株・信用取引の伝統語 (押し目 /
- * 含み損益 / 建玉 / 単元 / 移動平均線割れ / 日柄 / 手仕舞い / 騰落率 / ロスカット
+ * 含み損益 / 保有 / 単元 / 移動平均線割れ / 日柄 / 手仕舞い / 騰落率 / ロスカット
  * 派生の損切りライン) と証券アプリ準拠の英字 (SMA50, ATR) を混在。
  */
 export function localizeReason(en: string | null | undefined): string {
@@ -154,7 +154,7 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(
     /^risk: news_shock_warning: ([\d.]+)x \(size x([\d.]+)\)(?: \(qty rounded to 0, lot=(\d+)\))?$/,
     (_m, ratio, scale, lot) =>
-      `発注スキップ: ニュース過熱で建玉縮小 (報道量 baseline比 ${ratio}倍、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
+      `発注スキップ: ニュース過熱で発注数量縮小 (報道量 baseline比 ${ratio}倍、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
   )
   s = s.replace(
     /^risk: news_shock_unavailable_fallback_normal$/,
@@ -167,11 +167,11 @@ export function localizeReason(en: string | null | undefined): string {
   )
 
   // === Scheduler inline ===
-  s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の建玉なし')
+  s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の保有なし')
   s = s.replace(/^insufficient bars for indicators$/, 'データ不足: 指標計算に必要な日柄不足')
   s = s.replace(/^invalid price: (\S+)$/, 'データ不足: 株価が無効 ($1)')
   s = s.replace(/^invalid notional:/, 'データ不足: 発注金額が無効:')
-  s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: 建玉数が無効 ($1)')
+  s = s.replace(/^invalid position qty: (\S+)$/, 'データ不足: 保有数量が無効 ($1)')
   s = s.replace(/^invalid expiresAt/, 'データ不足: 注文有効期限が無効')
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
   s = s.replace(/^broker submit error: /, '発注失敗: 証券会社への発注が成立せず — ')
@@ -921,7 +921,7 @@ export const REASON_CATEGORIES = [
   { key: 'overheat', label: '過熱・ボラ過大', color: '#b25000' },
   { key: 'sizing', label: '資金・サイズ制約', color: '#7c3aed' },
   { key: 'spread', label: 'スプレッド過大', color: '#b58a00' },
-  { key: 'no_position', label: '建玉なし', color: '#4a5568' },
+  { key: 'no_position', label: '保有なし', color: '#4a5568' },
   { key: 'data', label: 'データ不足', color: '#86868b' },
   { key: 'cooldown', label: '取引停止・発注中', color: '#c05680' },
   { key: 'broker', label: '発注失敗 (broker)', color: '#c22222' },
