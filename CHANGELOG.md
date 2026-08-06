@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.4](https://github.com/ochanuco/webull-trading/compare/v1.4.3...v1.4.4) (2026-08-06)
+
+
+### Bug Fixes
+
+* normalize renamed trace labels stored in historical traceJson ([8f9a255](https://github.com/ochanuco/webull-trading/commit/8f9a255eb29c1a9a84e1271c26bbb191409dc785))
+* normalize renamed trace labels stored in historical traceJson ([aae7ac2](https://github.com/ochanuco/webull-trading/commit/aae7ac28a47c317e92cffca9c5050b2b9c1fc2a0))
+
 ## [1.4.3](https://github.com/ochanuco/webull-trading/compare/v1.4.2...v1.4.3) (2026-08-06)
 
 
