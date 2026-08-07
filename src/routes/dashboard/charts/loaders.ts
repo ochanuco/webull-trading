@@ -4,6 +4,7 @@ import { type EvalIndicatorPoint } from '../../../trading/strategy/entryDistance
 import type { PullbackIndicators } from '../../../trading/strategy/strategies/PullbackUptrendStrategy'
 import { SymbolStateClient } from '../../../trading/state/SymbolStateClient'
 import { YahooBarClient } from '../../../infrastructure/quotes/YahooBarClient'
+import { cachedDashboardJson } from './dashboardBarsCache'
 import { type DecisionRow, cronDecisionJson, renderChartDecisionTrace } from '../cron'
 import { currencyOfSymbol, exportMeta, messageOf, parseJsonObject } from '../shared'
 
@@ -126,6 +127,14 @@ export interface SymbolChartPosition {
   avgPrice: number
   /** entry timestamp (JST 表示用文字列) */
   openedAt: string
+  /**
+   * 保有数量 (#charts-symbol-redesign Phase C)。additive フィールド — 追加前の
+   * consumer (MCP `get_symbol_chart` / `/dashboard/charts/symbol/json`) は
+   * このフィールドを無視するだけで壊れない。`fetchDoPosition` は DO 由来の
+   * 実 qty、`deriveOpenPosition` は直近 BUY fill の qty を積む。どちらの
+   * ソースも欠測しうるので optional + null 許容 (欠測時は表示側で qty 行を省略)。
+   */
+  qty?: number | null
 }
 
 export interface SymbolChartRules {
@@ -386,11 +395,47 @@ export async function loadSymbolChart(
   // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
 
-  // Yahoo daily bars 60 日: chart 全体の price line + pivot 検出に使う。
-  // Yahoo fetch 失敗時は cron-eval points のみで描画 (短い price line になるが
-  // 致命的ではない)。lastTimestamp が無い (chart 自体空) なら filtering 不要。
-  const yahooBarsRaw = await fetchYahooBarsForChart(symbol, 60)
+  // Yahoo daily bars (60日) と intraday 15m bars は互いに独立した fetch
+  // (どちらも symbol だけが入力で、片方の結果を他方が参照しない) なので
+  // Promise.all で並列化する (#charts-symbol-redesign — 銘柄切替の逐次 await
+  // 2 本を並列化して待ち時間を短縮)。cronLastTs は points (DB 由来、既に
+  // fetch 済み) だけから決まるので、どちらの fetch より先に計算できる。
+  //
+  // dashboard 表示専用の短 TTL キャッシュ (`cachedDashboardJson`, TTL 300秒)
+  // を両方の fetch にかける。取引 cron が使う YahooBarClient / fetchYahoo
+  // BarsForChart 自体には手を入れず、ここ (dashboard loader 層) の呼び出し
+  // だけをラップするので cron の判断データ鮮度には影響しない。
   const cronLastTs = points.length > 0 ? points[points.length - 1]!.timestamp : null
+  const [yahooBarsRaw, intradayFetch] = await Promise.all([
+    // Yahoo daily bars 60 日: chart 全体の price line + pivot 検出に使う。
+    // Yahoo fetch 失敗時は cron-eval points のみで描画 (短い price line になるが
+    // 致命的ではない)。
+    cachedDashboardJson('dailyBars60', { symbol }, () => fetchYahooBarsForChart(symbol, 60), {
+      // fetch 失敗の空配列 fallback は cache しない (outage 中に毎回リトライできる
+      // ようにする — 5分キャッシュで復旧検知を遅らせたくない)。
+      shouldCache: (v) => v.length > 0,
+    }),
+    // candlestick: 15 分足 (intraday) を Yahoo から fetch。旧 1h 足は「1日 ≈ 7本」
+    // でスカスカだった (operator 指摘)。category 軸化で overnight gap は詰まる
+    // ようになり、barWidth も auto にしたため 15m の旧懸念 (gap 後の clustering)
+    // は解消済。Yahoo intraday range 制限 60d は 15m でもカバー可能。
+    // 戦略 cron は従来通り 60m を使う (pullbackScheduler 側、ここは表示専用)。
+    // 失敗 (network 等) なら空配列で fallback (candle 自体スキップ)。RangeError
+    // (caller contract 違反) のみ再送出して呼出元の catch まで伝える。
+    (async (): Promise<Array<{ timestamp: string; open: number; high: number; low: number; close: number }>> => {
+      try {
+        return await cachedDashboardJson(
+          'intraday15m',
+          { symbol },
+          () => new YahooBarClient().getIntradayBars(symbol, '15m'),
+          { shouldCache: (v) => v.length > 0 },
+        )
+      } catch (err) {
+        if (err instanceof RangeError) throw err
+        return []
+      }
+    })(),
+  ])
   const yahooBars =
     cronLastTs == null ? yahooBarsRaw : yahooBarsRaw.filter((b) => b.timestamp <= cronLastTs)
 
@@ -435,31 +480,20 @@ export async function loadSymbolChart(
         lastTimestamp,
       )
     : null
-  // candlestick: 15 分足 (intraday) を Yahoo から fetch。旧 1h 足は「1日 ≈ 7本」
-  // でスカスカだった (operator 指摘)。category 軸化で overnight gap は詰まる
-  // ようになり、barWidth も auto にしたため 15m の旧懸念 (gap 後の clustering)
-  // は解消済。Yahoo intraday range 制限 60d は 15m でもカバー可能。
-  // 戦略 cron は従来通り 60m を使う (pullbackScheduler 側、ここは表示専用)。
-  // 失敗 (network 等) なら空配列で fallback (candle 自体スキップ)。
-  let intradayBars: OhlcBar[] = []
-  try {
-    const intraday = await new YahooBarClient().getIntradayBars(symbol, '15m')
-    // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
-    // を除外。lastTimestamp が無いときは全件採用。
-    intradayBars = (cronLastTs == null
-      ? intraday
-      : intraday.filter((b) => b.timestamp <= cronLastTs)
-    ).map((b) => ({
-      timestamp: b.timestamp,
-      open: b.open,
-      high: b.high,
-      low: b.low,
-      close: b.close,
-    }))
-  } catch (err) {
-    if (err instanceof RangeError) throw err
-    // network / parse error → 空 fallback
-  }
+  // candlestick: 15 分足 (intraday)。上の Promise.all で並列 fetch 済み
+  // (`intradayFetch`、失敗時は既に空配列 fallback 済み / RangeError は
+  // Promise.all の reject 経由で loadSymbolChart 呼出元まで伝播済み)。
+  // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
+  // を除外。lastTimestamp が無いときは全件採用。
+  const intradayBars: OhlcBar[] = (
+    cronLastTs == null ? intradayFetch : intradayFetch.filter((b) => b.timestamp <= cronLastTs)
+  ).map((b) => ({
+    timestamp: b.timestamp,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+  }))
   return {
     symbol,
     points: mergedPoints,
@@ -895,7 +929,11 @@ export async function fetchDoPosition(
   try {
     const state = await new SymbolStateClient(env.SYMBOL_STATE).getState(symbol)
     if (!state.position) return null
-    return { avgPrice: state.position.avgPrice, openedAt: state.position.openedAt }
+    return {
+      avgPrice: state.position.avgPrice,
+      openedAt: state.position.openedAt,
+      qty: state.position.qty,
+    }
   } catch {
     return undefined
   }
@@ -911,7 +949,9 @@ export function deriveOpenPosition(markers: SymbolChartMarker[]): SymbolChartPos
     if (m.side === 'BUY') latestBuy = m
     else if (m.side === 'SELL') latestBuy = null
   }
-  return latestBuy ? { avgPrice: latestBuy.price, openedAt: latestBuy.timestamp } : null
+  return latestBuy
+    ? { avgPrice: latestBuy.price, openedAt: latestBuy.timestamp, qty: latestBuy.qty }
+    : null
 }
 
 export function extractSma50(indicatorsJson: string | null): number | null {

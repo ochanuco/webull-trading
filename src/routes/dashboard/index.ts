@@ -76,12 +76,14 @@ import { configBody } from './config'
 import { cronBody, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
-import { type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, strategyParamsFromGlobal } from './charts/shared'
+import { type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
 import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
+import { cachedDashboardJson } from './charts/dashboardBarsCache'
+import { SYMBOL_CHART_CLIENT_SCRIPT, SYMBOL_CHART_CLIENT_SCRIPT_ETAG } from './charts/symbolChartScript'
 import { type EquityTradeMarker, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers } from './charts/equity'
 import { loadBenchmarkSeries } from './charts/benchmark'
 import { computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
-import { chartsBody } from './charts/symbol'
+import { chartsBody, renderSymbolMainInner, renderSymbolTab } from './charts/symbol'
 import { type SymbolsListFilter, findSymbolConfigForView, loadAllSymbolConfigRows, symbolFormBody, symbolMapEditorBody, symbolsListBody } from './symbols'
 import { type EventsEarningsFormEcho, type EventsMacroFormEcho, eventsBody, eventsDisplayRange, loadEarningsInRange, renderEventsWithError, renderEventsWithNotice, validateEarningsForm, validateMacroForm, writeEventsAuditLog } from './events'
 export { safeJsonScript } from './shared'
@@ -94,8 +96,8 @@ export type { EquityRange } from './portfolio'
 export { localizeReason, renderChartDecisionTrace } from './cron'
 export type { DecisionRow } from './cron'
 export { renderAlertFilterPills } from './alerts'
-export { DEFAULT_ZOOM_WINDOW_MS, computeZoomRange, parseChartsTab, parseIsoTimestamp, renderZoomPresetButtons } from './charts/shared'
-export type { ChartsBodySymbol, ChartsTab, StrategyParamsSnapshot, SymbolPolicySummary } from './charts/shared'
+export { DEFAULT_ZOOM_WINDOW_MS, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseSymbolView, renderZoomPresetButtons } from './charts/shared'
+export type { ChartsBodySymbol, ChartsTab, StrategyParamsSnapshot, SymbolPolicySummary, SymbolTabView } from './charts/shared'
 export { aggregateDailyCloses, anchorJstMidnight, computeChartWindowDays, computeLinearRegressionLine, computeRollingSma, densifyHorizontalLine, densifyTrendLine, deriveOpenPosition, extractSma50, fetchYahooBarsForChart, loadSymbolChart, mergeYahooAndCronPoints, pairClosedTrades, pickDefaultSymbol, resolveFillSide, selectLatestCronSnapshot } from './charts/loaders'
 export type { ClosedTradeSpan, OhlcBar, PivotPoint, SymbolChartData, SymbolChartDecision, SymbolChartMarker, SymbolChartPoint, SymbolChartPosition, SymbolChartRules, TrendLineSegment } from './charts/loaders'
 export { buildOverviewChartData, computeEquitySeries, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers, renderPeriodReturnsTable } from './charts/equity'
@@ -104,7 +106,7 @@ export { EQUITY_BENCHMARK_SYMBOL, loadBenchmarkSeries, toBenchmarkReturns } from
 export type { BenchmarkPoint } from './charts/benchmark'
 export { aggregateDecisionRows, computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
 export type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './charts/quality'
-export { prevDailyClose, renderAllocationLine, renderBuyabilityPanel, renderDecisionPlotCaption, renderPairRegimeLine, renderPriceHeader, renderStrategyParamsPanel, renderSymbolPolicyLine, renderSymbolTab } from './charts/symbol'
+export { prevDailyClose, renderAllocationLine, renderBuyabilityPanel, renderConclusionValue, renderDecisionPlotCaption, renderEffectiveRuleChips, renderJudgmentSummaryGrid, renderLatestDecisionValue, renderPairRegimeLine, renderPositionSummaryValue, renderPriceHeader, renderStrategyParamsPanel, renderSymbolPolicyLine, renderSymbolTab, renderSymbolViewSubnav } from './charts/symbol'
 export type { BuyabilityPanelContext } from './charts/symbol'
 export { assignPairColors, computeBudgetUsage, orderRowsByPair, pairRoles, renderSymbolRoleCell, symbolMapEditorBody } from './symbols'
 
@@ -433,6 +435,30 @@ export const dashboard = new Hono<DashboardBindings>()
     return c.redirect('/dashboard/config', 303)
   })
   /**
+   * 銘柄チャートタブの client 側初期化スクリプト (#charts-symbol-redesign)。
+   * 元は `renderSymbolTab` のインライン `<script>` (約1200行/70KB) だったものを
+   * 静的ファイル化して外出しした実体 (`symbolChartScript.ts`)。銘柄切替の
+   * たびに同一内容を再送していたのを、ブラウザキャッシュ (`Cache-Control` +
+   * `ETag` / `If-None-Match` の 304) に乗せて省く。
+   *
+   * 認証は他 `/dashboard/*` route と同じ (このファイル冒頭の Access 由来
+   * middleware 配下)。内容は request に依存しない定数なので DB / env は不要。
+   */
+  .get('/static/symbol-chart.js', (c) => {
+    const ifNoneMatch = c.req.header('if-none-match')
+    const headers = {
+      'cache-control': 'public, max-age=86400',
+      etag: SYMBOL_CHART_CLIENT_SCRIPT_ETAG,
+    }
+    if (ifNoneMatch === SYMBOL_CHART_CLIENT_SCRIPT_ETAG) {
+      return c.body(null, 304, headers)
+    }
+    return c.body(SYMBOL_CHART_CLIENT_SCRIPT, 200, {
+      ...headers,
+      'content-type': 'text/javascript; charset=utf-8',
+    })
+  })
+  /**
    * チャート銘柄タブの JSON export (#dashboard-json-api)。SSR の symbol タブと
    * 同じ loader (`loadSymbolChart` + `loadDecisionRows`) / 同じ effective rule
    * (`strategyParamsFromGlobal` → `buildSymbolRules`) を通す。
@@ -559,6 +585,9 @@ export const dashboard = new Hono<DashboardBindings>()
       const zoomTo = parseIsoTimestamp(c.req.query('to'))
       // tab === 'symbol'
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
+      // サブビュー (#charts-symbol-redesign): ?view=detail で判定履歴/戦略パラ
+      // メータのサブタブへ、未指定は chart (fold 内サマリ + チャート)。
+      const symbolView = parseSymbolView(c.req.query('view'))
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(c.env),
         loadGlobalConfigFrom(c.env, c.get('requestId')),
@@ -599,9 +628,75 @@ export const dashboard = new Hono<DashboardBindings>()
       // SymbolStateDO の position が ground truth (avgPrice / openedAt が
       // partial fill / position add も反映済)。trade_journal からの derive は
       // 直近 BUY 単体しか拾えないので fallback 専用。
-      const symbolChart = focusSymbol
-        ? await loadSymbolChart(c.env, focusSymbol, rules)
-        : null
+      //
+      // symbolChart (D1 + Yahoo) / ペアレジーム判定 (Yahoo proxy bars) / 判定
+      // 履歴 (D1) は互いに独立 (どれも focusSymbol / universe / global /
+      // entryRule だけが入力で、他の結果を参照しない) なので Promise.all で
+      // 並列化する (#charts-symbol-redesign — 銘柄切替の高速化)。
+      // ペアレジーム対象の pair 検索自体は同期処理なので Promise.all の外で
+      // 先に済ませ、実際に fetch が要るケース (invalidConfig 無し) だけ非同期にする。
+      const pair =
+        focusSymbol && global.pairRegimeMode !== 'off'
+          ? universe.pairRegimes.find(
+              (pr) => pr.bullSymbol === focusSymbol || pr.bearSymbol === focusSymbol,
+            )
+          : undefined
+      const [symbolChart, pairRegimeDecision, decisionRows] = await Promise.all([
+        focusSymbol ? loadSymbolChart(c.env, focusSymbol, rules) : Promise.resolve(null),
+        // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
+        // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
+        // proxy bars fetch は dashboard 表示専用の短 TTL キャッシュ経由
+        // (`cachedDashboardJson`) — cron が使う YahooBarClient 呼び出し自体には
+        // 手を入れていない。
+        pair === undefined
+          ? Promise.resolve<PairRegimeDecision | null>(null)
+          : pair.invalidConfig !== null
+            ? Promise.resolve<PairRegimeDecision>({
+                zone: 'unknown',
+                score: null,
+                proxySymbol: pair.proxySymbol,
+                asOfDate: null,
+                reason: `misconfig: ${pair.invalidConfig}`,
+              })
+            : cachedDashboardJson(
+                'pairRegimeProxyBars80',
+                { symbol: pair.proxySymbol },
+                () => new YahooBarClient().getDailyBars(pair.proxySymbol, 80),
+                { shouldCache: (bars) => bars.length > 0 },
+              )
+                .then((bars) =>
+                  evaluatePairRegime(bars, {
+                    proxySymbol: pair.proxySymbol,
+                    thresholds: {
+                      bullEnter: global.pairRegimeThetaBullEnter,
+                      bullExit: global.pairRegimeThetaBullExit,
+                      bearEnter: global.pairRegimeThetaBearEnter,
+                      bearExit: global.pairRegimeThetaBearExit,
+                    },
+                    now: new Date(),
+                  }),
+                )
+                .catch((err) => ({
+                  zone: 'unknown' as const,
+                  score: null,
+                  proxySymbol: pair.proxySymbol,
+                  asOfDate: null,
+                  reason: `proxy bars fetch failed: ${messageOf(err)}`,
+                })),
+        // 判定履歴 (#decisions-chart-unify): 戦略判定ページと同じ loader を共用。
+        // 失敗 (migration 未適用等) はチャート本体を巻き込まず空表示に落とす。
+        focusSymbol && c.env.DB
+          ? loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(() => [])
+          : Promise.resolve([]),
+      ])
+      const pairRegimeView: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null =
+        pair !== undefined && pairRegimeDecision !== null
+          ? {
+              decision: pairRegimeDecision,
+              side: pair.bullSymbol === focusSymbol ? ('bull' as const) : ('bear' as const),
+              mode: global.pairRegimeMode,
+            }
+          : null
       // zoom range: ?from / ?to が valid (from < to) ならそれを使う、なければ
       // chart の最終 point から逆算で「直近 7 日」をデフォルト。理由:
       // - 60 日全体表示は trend / pin / SMA50 が見えづらい (#15 で指摘)
@@ -613,79 +708,42 @@ export const dashboard = new Hono<DashboardBindings>()
         : null
       // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
-      // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
-      // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
-      let pairRegimeView: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null = null
-      if (focusSymbol && global.pairRegimeMode !== 'off') {
-        const pair = universe.pairRegimes.find(
-          (pr) => pr.bullSymbol === focusSymbol || pr.bearSymbol === focusSymbol,
-        )
-        if (pair) {
-          const side = pair.bullSymbol === focusSymbol ? ('bull' as const) : ('bear' as const)
-          let decision: PairRegimeDecision
-          if (pair.invalidConfig !== null) {
-            decision = { zone: 'unknown', score: null, proxySymbol: pair.proxySymbol, asOfDate: null, reason: `misconfig: ${pair.invalidConfig}` }
-          } else {
-            decision = await new YahooBarClient()
-              .getDailyBars(pair.proxySymbol, 80)
-              .then((bars) =>
-                evaluatePairRegime(bars, {
-                  proxySymbol: pair.proxySymbol,
-                  thresholds: {
-                    bullEnter: global.pairRegimeThetaBullEnter,
-                    bullExit: global.pairRegimeThetaBullExit,
-                    bearEnter: global.pairRegimeThetaBearEnter,
-                    bearExit: global.pairRegimeThetaBearExit,
-                  },
-                  now: new Date(),
-                }),
-              )
-              .catch((err) => ({
-                zone: 'unknown' as const,
-                score: null,
-                proxySymbol: pair.proxySymbol,
-                asOfDate: null,
-                reason: `proxy bars fetch failed: ${messageOf(err)}`,
-              }))
-          }
-          pairRegimeView = { decision, side, mode: global.pairRegimeMode }
-        }
+      const symbolBodyArgs: ChartsBodySymbol = {
+        tab,
+        focusSymbol,
+        symbolChart,
+        availableSymbols: allDisplaySymbols,
+        strategyParams,
+        strategyParamsGlobal: globalParams,
+        zoom,
+        universe,
+        buyability,
+        entryStatus,
+        decisionRows,
+        pairRegime: pairRegimeView,
+        view: symbolView,
+        symbolPolicy: focusSymbol
+          ? {
+              role: universe.symbolRole[focusSymbol] ?? null,
+              targetWeight: universe.symbolBudgetAllocPct[focusSymbol] ?? null,
+              entryRequired: universe.symbolEntryRequired[focusSymbol] === true,
+              alwaysActive: universe.symbolAlwaysActive[focusSymbol] === true,
+              cashFallbackSymbols: universe.symbolCashFallback[focusSymbol] ?? null,
+            }
+          : null,
       }
-      // 判定履歴 (#decisions-chart-unify): 戦略判定ページと同じ loader を共用。
-      // 失敗 (migration 未適用等) はチャート本体を巻き込まず空表示に落とす。
-      const decisionRows =
-        focusSymbol && c.env.DB
-          ? await loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(
-              () => [],
-            )
-          : []
+      // クライアント側銘柄切替 (partial swap, #charts-symbol-redesign Phase C):
+      // `#symbol-main` の内側 HTML だけを返す (レイアウト/レール/echarts CDN・
+      // static script は既にブラウザにロード済み前提で再送しない)。都度
+      // fetch する想定なので cache しない。
+      if (c.req.query('partial') === '1') {
+        return c.html(renderSymbolMainInner(symbolBodyArgs), 200, { 'cache-control': 'no-store' })
+      }
       return c.html(
         renderLayout(
           c,
           'チャート',
-          chartsBody({
-            tab,
-            focusSymbol,
-            symbolChart,
-            availableSymbols: allDisplaySymbols,
-            strategyParams,
-            strategyParamsGlobal: globalParams,
-            zoom,
-            universe,
-            buyability,
-            entryStatus,
-            decisionRows,
-            pairRegime: pairRegimeView,
-            symbolPolicy: focusSymbol
-              ? {
-                  role: universe.symbolRole[focusSymbol] ?? null,
-                  targetWeight: universe.symbolBudgetAllocPct[focusSymbol] ?? null,
-                  entryRequired: universe.symbolEntryRequired[focusSymbol] === true,
-                  alwaysActive: universe.symbolAlwaysActive[focusSymbol] === true,
-                  cashFallbackSymbols: universe.symbolCashFallback[focusSymbol] ?? null,
-                }
-              : null,
-          }),
+          renderSymbolTab(symbolBodyArgs),
           '', // 個別銘柄タブは「銘柄」nav + 銘柄レールが導線 (#remove-grid で charts subnav 廃止)
         ),
       )
