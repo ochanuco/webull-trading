@@ -1,79 +1,58 @@
-import { type ChartsBodyQuality, ECHARTS_CDN } from './shared'
-import { safeJsonScript } from '../shared'
+import { kpiCard } from '../overview'
+import { esc, safeJsonScript } from '../shared'
+import { type ChartsBodyQuality, type QualityPeriod, ECHARTS_CDN, QUALITY_PERIOD_LABELS } from './shared'
 
 /**
- * Decision breakdown chart 用の日次集計 (#158 Phase 2)。
- *
- * strategy_decision_log を JST 日次でグルーピングし、各 decision
- * (BUY/SELL/HOLD/SKIP/REJECT/ERROR) のカウントを返す。トレーダーは
- * 「BUY/SELL が出すぎ・出なさすぎ」「SKIP/REJECT が偏ってないか」を一目で
- * 見たいので、1 日 1 行 × 6 系列の stacked bar 用のデータ形にする。
- *
- * 直近 90 日のみ (それ以上はチャートが詰まって読めない)。
+ * Per-trade realized PnL 行 (#quality-redesign)。symbol / timestamp を持つのは
+ * 銘柄別集計 (`computeSymbolStats`) と期間フィルタ (`filterTradePnlsByPeriod`) の
+ * 両方がこの単位で動くため。trade_journal.realized_pnl は SELL fill に確定
+ * 損益が記録される (BUY は null)。
  */
-export const DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'SKIP', 'REJECT', 'ERROR'] as const
-
-export type DecisionKey = (typeof DECISION_KEYS)[number]
-
-export interface DecisionBreakdownPoint {
-  date: string
-  counts: Record<DecisionKey, number>
+export interface TradePnlRow {
+  realizedPnl: number
+  symbol: string
+  /** ISO timestamp (trade_journal.timestamp、UTC 前提)。 */
+  timestamp: string
 }
 
-export async function loadDecisionBreakdown(db: D1Database): Promise<DecisionBreakdownPoint[]> {
+export async function loadTradePnls(db: D1Database): Promise<TradePnlRow[]> {
   const result = await db
     .prepare(
-      `SELECT date(timestamp, '+9 hours') AS day,
-              decision,
-              COUNT(*) AS n
-       FROM strategy_decision_log
-       WHERE timestamp >= date('now', '-90 days')
-       GROUP BY day, decision
-       ORDER BY day ASC`,
-    )
-    .all<{ day: string; decision: string; n: number }>()
-  return aggregateDecisionRows(result.results ?? [])
-}
-
-export function aggregateDecisionRows(
-  rows: Array<{ day: string; decision: string; n: number }>,
-): DecisionBreakdownPoint[] {
-  const map = new Map<string, Record<DecisionKey, number>>()
-  for (const r of rows) {
-    let bucket = map.get(r.day)
-    if (!bucket) {
-      bucket = { BUY: 0, SELL: 0, HOLD: 0, SKIP: 0, REJECT: 0, ERROR: 0 }
-      map.set(r.day, bucket)
-    }
-    // 想定外 decision (将来追加など) は ERROR バケットに寄せて見落とし防止
-    const key: DecisionKey = (DECISION_KEYS as readonly string[]).includes(r.decision)
-      ? (r.decision as DecisionKey)
-      : 'ERROR'
-    bucket[key] += Number(r.n)
-  }
-  return [...map.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([date, counts]) => ({ date, counts }))
-}
-
-/**
- * Per-trade realized PnL を全件取得 (#158 Phase 3)。
- *
- * trade_journal.realized_pnl は SELL fill に確定損益が記録される (BUY は null)。
- * 戦略のエッジが本物か偽物かを見るために、勝率・profit factor・expectancy を
- * 計算 + 分布を histogram で可視化する。
- */
-export async function loadTradePnls(db: D1Database): Promise<number[]> {
-  const result = await db
-    .prepare(
-      `SELECT realized_pnl AS pnl
+      `SELECT realized_pnl AS pnl, symbol, timestamp
        FROM trade_journal
        WHERE realized_pnl IS NOT NULL
          AND trade_event_type = 'post_submit'
        ORDER BY id ASC`,
     )
-    .all<{ pnl: number }>()
-  return (result.results ?? []).map((r) => Number(r.pnl)).filter((n) => Number.isFinite(n))
+    .all<{ pnl: number; symbol: string | null; timestamp: string }>()
+  const rows: TradePnlRow[] = []
+  for (const r of result.results ?? []) {
+    const realizedPnl = Number(r.pnl)
+    if (!Number.isFinite(realizedPnl) || !r.symbol) continue
+    rows.push({ realizedPnl, symbol: r.symbol, timestamp: r.timestamp })
+  }
+  return rows
+}
+
+const PERIOD_DAYS: Record<'30d' | '90d', number> = { '30d': 30, '90d': 90 }
+
+/**
+ * `?period=` フィルタを行配列に適用 (#quality-redesign)。カレンダー日境界
+ * (JST 日次) ではなく、`now` から遡ったローリングウィンドウ (30日 / 90日) —
+ * 期間切替は「直近どれだけ遡るか」の直感に合わせる。`now` は省略可能 (test
+ * から固定時刻を注入できるように)。
+ */
+export function filterTradePnlsByPeriod(
+  rows: TradePnlRow[],
+  period: QualityPeriod,
+  now: Date = new Date(),
+): TradePnlRow[] {
+  if (period === 'all') return rows
+  const cutoffMs = now.getTime() - PERIOD_DAYS[period] * 86_400_000
+  return rows.filter((r) => {
+    const t = new Date(r.timestamp).getTime()
+    return Number.isFinite(t) && t >= cutoffMs
+  })
 }
 
 export interface TradeStats {
@@ -123,123 +102,282 @@ export function computeTradeStats(pnls: number[]): TradeStats {
   return { count: pnls.length, wins, losses, winRate, avgWin, avgLoss, profitFactor, expectancy, total }
 }
 
-export interface PnlHistogramBin {
-  label: string // "(-5, -3]" など
-  binStart: number
-  binEnd: number
-  binCenter: number
+export interface SymbolStat {
+  symbol: string
   count: number
+  winRate: number
+  totalPnl: number
+  profitFactor: number
 }
 
 /**
- * pnl 値を最大 12 ビンの histogram に。範囲は対称 (max(|min|, max)) で
- * 0 を境に正/負で色分け可能にする。サンプルが少なすぎるとビン数を減らす。
+ * 銘柄別成績 (#quality-redesign)。`computeTradeStats` を銘柄ごとに再利用し、
+ * 合計 PnL 降順で返す (表・横バー両方がこの順序をそのまま使う)。
  */
-export function computePnlHistogram(pnls: number[], maxBins = 12): PnlHistogramBin[] {
-  if (pnls.length === 0) return []
-  const absMax = Math.max(...pnls.map(Math.abs))
-  if (absMax === 0) {
-    return [{ label: '0', binStart: 0, binEnd: 0, binCenter: 0, count: pnls.length }]
+export function computeSymbolStats(rows: TradePnlRow[]): SymbolStat[] {
+  const bySymbol = new Map<string, number[]>()
+  for (const r of rows) {
+    const list = bySymbol.get(r.symbol)
+    if (list) {
+      list.push(r.realizedPnl)
+    } else {
+      bySymbol.set(r.symbol, [r.realizedPnl])
+    }
   }
-  const bins = Math.min(maxBins, Math.max(3, Math.ceil(Math.sqrt(pnls.length))))
-  const range = absMax * 2
-  const width = range / bins
-  const out: PnlHistogramBin[] = []
-  for (let i = 0; i < bins; i += 1) {
-    const start = -absMax + width * i
-    const end = start + width
-    out.push({
-      label: `(${start.toFixed(1)}, ${end.toFixed(1)}]`,
-      binStart: start,
-      binEnd: end,
-      binCenter: (start + end) / 2,
-      count: 0,
-    })
+  const out: SymbolStat[] = []
+  for (const [symbol, pnls] of bySymbol) {
+    const s = computeTradeStats(pnls)
+    out.push({ symbol, count: s.count, winRate: s.winRate, totalPnl: s.total, profitFactor: s.profitFactor })
   }
-  for (const p of pnls) {
-    // 末尾の bin は閉区間 [end, end] を含むよう特別処理
-    let idx = Math.floor((p - -absMax) / width)
-    if (idx >= bins) idx = bins - 1
-    if (idx < 0) idx = 0
-    out[idx]!.count += 1
-  }
-  return out
+  return out.sort((a, b) => b.totalPnl - a.totalPnl)
 }
 
-export function renderTradeStatsTable(s: TradeStats): string {
-  if (s.count === 0) return ''
-  const fmt = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '—')
-  const pct = (n: number) => (Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—')
-  const pf = Number.isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : '∞'
-  const expClass = s.expectancy > 0 ? 'ok' : s.expectancy < 0 ? 'err' : 'muted'
-  return `<table style="margin-top:12px">
-    <thead><tr><th>件数</th><th>勝</th><th>負</th><th>勝率</th><th>平均利益</th><th>平均損失</th><th>profit factor</th><th>expectancy / trade</th><th>合計</th></tr></thead>
-    <tbody><tr>
-      <td>${s.count}</td>
-      <td class="ok">${s.wins}</td>
-      <td class="err">${s.losses}</td>
-      <td>${pct(s.winRate)}</td>
-      <td class="ok">${fmt(s.avgWin)}</td>
-      <td class="err">${fmt(s.avgLoss)}</td>
-      <td>${pf}</td>
-      <td class="${expClass}">${fmt(s.expectancy)}</td>
-      <td class="${s.total > 0 ? 'ok' : s.total < 0 ? 'err' : 'muted'}">${fmt(s.total)}</td>
-    </tr></tbody>
+/**
+ * SKIP reason カテゴリ (#quality-redesign)。`pullbackScheduler.ts` の実際の
+ * emitDecision(SKIP) reason は prefix でおおむね分類できる:
+ *   - `portfolio_halted:` / `drawdown_kill:` — ポートフォリオ全体の entry 停止
+ *   - `role:`             — cash_parking 等、銘柄ロールによる entry 抑止
+ *   - `sizing rejected:`  — lot_size 未設定などサイジング不可
+ *   - `risk:`             — earnings/macro/per-symbol risk/sanity cooldown/pair_regime
+ *                            (`risk: insufficient buying power` / `risk: buying-power
+ *                            unavailable` は資金不足として別カテゴリに分ける)
+ *   - それ以外の internal invariant guard (bar 不足 / 価格・数量・ロック不正 /
+ *     二重発注ガード) — 「システムガード」としてまとめる
+ * 色は dataviz skill の検証済みデフォルト categorical palette (light/dark 両対応、
+ * adjacent CVD/normal-vision gate 通過) の slot 1-7 を順に割り当てる。
+ */
+export const SKIP_REASON_CATEGORIES = [
+  { key: 'halt', label: '取引停止中', color: '#2a78d6' },
+  { key: 'risk_gate', label: 'リスクゲート', color: '#eb6834' },
+  { key: 'role', label: '銘柄ロール抑止', color: '#1baf7a' },
+  { key: 'funds', label: '資金不足', color: '#eda100' },
+  { key: 'sizing', label: 'サイジング不可', color: '#e87ba4' },
+  { key: 'system_guard', label: 'システムガード', color: '#008300' },
+  { key: 'other', label: 'その他', color: '#4a3aa7' },
+] as const
+
+export type SkipReasonCategoryKey = (typeof SKIP_REASON_CATEGORIES)[number]['key']
+
+/**
+ * raw SKIP reason 文字列 → カテゴリ key。未知の形式 (将来追加 / 旧形式) は
+ * 'other' に落として合計が欠けないようにする (`aggregateDecisionRows` の
+ * ERROR フォールバックと同じ考え方)。
+ */
+export function categorizeSkipReason(reason: string | null | undefined): SkipReasonCategoryKey {
+  if (!reason) return 'other'
+  if (/^(?:portfolio_halted|drawdown_kill):/.test(reason)) return 'halt'
+  if (/^role:/.test(reason)) return 'role'
+  if (/^sizing rejected:/.test(reason)) return 'sizing'
+  if (/^risk:/.test(reason)) return /buying[- ]power/.test(reason) ? 'funds' : 'risk_gate'
+  if (/^pair_regime:/.test(reason)) return 'risk_gate'
+  if (
+    /^insufficient bars for indicators$/.test(reason) ||
+    /^invalid (?:price|notional|position qty|expiresAt)/.test(reason) ||
+    /^SELL without position$/.test(reason) ||
+    /^pending order already in flight$/.test(reason)
+  ) {
+    return 'system_guard'
+  }
+  return 'other'
+}
+
+export interface SkipReasonBreakdownPoint {
+  date: string
+  counts: Record<SkipReasonCategoryKey, number>
+}
+
+function emptySkipCounts(): Record<SkipReasonCategoryKey, number> {
+  const counts = {} as Record<SkipReasonCategoryKey, number>
+  for (const c of SKIP_REASON_CATEGORIES) counts[c.key] = 0
+  return counts
+}
+
+export function aggregateSkipReasonRows(
+  rows: Array<{ day: string; reason: string | null; n: number }>,
+): SkipReasonBreakdownPoint[] {
+  const map = new Map<string, Record<SkipReasonCategoryKey, number>>()
+  for (const r of rows) {
+    let bucket = map.get(r.day)
+    if (!bucket) {
+      bucket = emptySkipCounts()
+      map.set(r.day, bucket)
+    }
+    bucket[categorizeSkipReason(r.reason)] += Number(r.n)
+  }
+  return [...map.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([date, counts]) => ({ date, counts }))
+}
+
+/**
+ * 日次 SKIP 理由カテゴリ breakdown (#quality-redesign、旧 `loadDecisionBreakdown`
+ * の置き換え)。直近 90 日固定 (`?period=` の対象外 — この chart は「最近の
+ * ゲート傾向」を見る用途なので、成績カード/表/バーの期間切替とは独立)。
+ */
+export async function loadSkipReasonBreakdown(db: D1Database): Promise<SkipReasonBreakdownPoint[]> {
+  const result = await db
+    .prepare(
+      `SELECT date(timestamp, '+9 hours') AS day,
+              reason,
+              COUNT(*) AS n
+       FROM strategy_decision_log
+       WHERE decision = 'SKIP'
+         AND timestamp >= date('now', '-90 days')
+       GROUP BY day, reason
+       ORDER BY day ASC`,
+    )
+    .all<{ day: string; reason: string | null; n: number }>()
+  return aggregateSkipReasonRows(result.results ?? [])
+}
+
+const NUM_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '—')
+const PCT_FMT = (n: number) => (Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—')
+const PF_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '∞')
+/** 正/負の色分けは既存サイト慣習 (`.ok` = 緑 #057a55 / `.err` = 赤 #c22) に揃える。 */
+const signClass = (n: number) => (n > 0 ? 'ok' : n < 0 ? 'err' : 'muted')
+
+function renderPeriodPills(period: QualityPeriod): string {
+  const periods: QualityPeriod[] = ['30d', '90d', 'all']
+  const links = periods
+    .map((p) => {
+      const active = p === period ? ' active' : ''
+      return `<a class="zoom-preset${active}" style="text-decoration:none" href="/dashboard/charts?tab=quality&period=${p}">${esc(QUALITY_PERIOD_LABELS[p])}</a>`
+    })
+    .join('')
+  return `<div style="margin-bottom:10px">${links}</div>`
+}
+
+/**
+ * X スクショ用の成績サマリカード (#quality-redesign)。固定幅 ~640px、3×3 の
+ * stat タイル。既存 `.kpi-card` (`kpiCard()`、overview タブと同じ部品) を
+ * 敷き詰めて再利用し、値だけ 18px に上書きする (overview の KPI 帯より密な
+ * 3 列グリッドなので既定 22px だと詰まりすぎる)。
+ */
+export function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
+  const tile = (label: string, text: string, cls?: string) =>
+    kpiCard(label, `<span style="font-size:18px" class="${cls ?? ''}">${esc(text)}</span>`)
+  const tiles = [
+    tile('件数', String(stats.count)),
+    tile('勝率', PCT_FMT(stats.winRate)),
+    tile('profit factor', PF_FMT(stats.profitFactor)),
+    tile('勝', String(stats.wins), 'ok'),
+    tile('負', String(stats.losses), 'err'),
+    tile('合計 PnL', NUM_FMT(stats.total), signClass(stats.total)),
+    tile('平均利益', NUM_FMT(stats.avgWin), 'ok'),
+    tile('平均損失', NUM_FMT(stats.avgLoss), 'err'),
+    tile('期待値 (トレード毎)', NUM_FMT(stats.expectancy), signClass(stats.expectancy)),
+  ].join('')
+  return `<div class="panel" style="max-width:640px">
+    <div class="panel-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</div>
+    <p class="muted" style="font-size:11px;margin:-8px 0 12px">as of ${esc(asOfJst)}</p>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">${tiles}</div>
+  </div>`
+}
+
+export function renderSymbolTable(symbolStats: SymbolStat[]): string {
+  if (symbolStats.length === 0) return ''
+  const rows = symbolStats
+    .map(
+      (s) => `<tr>
+        <td>${esc(s.symbol)}</td>
+        <td class="num">${s.count}</td>
+        <td class="num">${PCT_FMT(s.winRate)}</td>
+        <td class="num ${signClass(s.totalPnl)}">${NUM_FMT(s.totalPnl)}</td>
+        <td class="num">${PF_FMT(s.profitFactor)}</td>
+      </tr>`,
+    )
+    .join('')
+  return `<table style="margin-top:16px;max-width:640px">
+    <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計PnL</th><th class="num">PF</th></tr></thead>
+    <tbody>${rows}</tbody>
   </table>`
 }
 
 export function renderQualityTab(args: ChartsBodyQuality): string {
-  if (args.pnls.length === 0 && args.decisions.length === 0) {
-    return `<p class="muted">まだ判定ログも実 fill も無いため成績を描けません。cron が動き出すと judgement breakdown、SELL が約定すると PnL 分布が出ます。</p>`
+  if (!args.hasTradeData && args.skipBreakdown.length === 0) {
+    return `<p class="muted">まだ判定ログも実 fill も無いため成績を描けません。cron が動き出すと SKIP 理由の内訳、SELL が約定すると成績サマリが出ます。</p>`
   }
+  const symbolBarChart =
+    args.symbolStats.length > 0
+      ? `<div id="symbol-pnl-chart" style="width:100%;max-width:640px;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:16px"></div>`
+      : ''
+  const tradeSection = args.hasTradeData
+    ? `${renderPeriodPills(args.period)}
+      ${renderStatsCard(args.stats, args.period, args.asOfJst)}
+      ${renderSymbolTable(args.symbolStats)}
+      ${symbolBarChart}`
+    : ''
+  const skipSection =
+    args.skipBreakdown.length > 0
+      ? `<div id="skip-reason-chart" style="width:100%;height:340px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:20px"></div>`
+      : ''
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
       if (typeof echarts === 'undefined') return;
       var data = window.__chartData;
-      var DECISION_KEYS = ['BUY', 'SELL', 'HOLD', 'SKIP', 'REJECT', 'ERROR'];
-      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', HOLD: '#aaa', SKIP: '#b25000', REJECT: '#7c3aed', ERROR: '#c22' };
-      var dbDates = data.decisions.map(function (p) { return p.date; });
-      var dbEl = document.getElementById('decision-chart');
-      if (dbEl && dbDates.length > 0) {
-        var dbChart = echarts.init(dbEl);
-        dbChart.setOption({
-          title: { text: '日次 Decision breakdown (BUY / SELL / HOLD / SKIP / REJECT / ERROR)', left: 'center', textStyle: { fontSize: 14 } },
+      var barEl = document.getElementById('symbol-pnl-chart');
+      if (barEl && data.symbolStats && data.symbolStats.length > 0) {
+        var barChart = echarts.init(barEl);
+        var symbols = data.symbolStats.map(function (s) { return s.symbol; });
+        barChart.setOption({
+          title: { text: '銘柄別 合計PnL', left: 'center', textStyle: { fontSize: 14 } },
           tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-          legend: { top: 22 },
+          grid: { left: 70, right: 60, top: 40, bottom: 20 },
+          xAxis: { type: 'value', splitLine: { lineStyle: { color: '#eee' } } },
+          yAxis: { type: 'category', data: symbols, inverse: true },
+          series: [{
+            type: 'bar',
+            barWidth: 14,
+            data: data.symbolStats.map(function (s) {
+              var positive = s.totalPnl >= 0;
+              return {
+                value: s.totalPnl,
+                itemStyle: { color: positive ? '#057a55' : '#c22', borderRadius: 3 },
+                label: {
+                  show: true,
+                  position: positive ? 'right' : 'left',
+                  formatter: function () { return s.totalPnl.toFixed(2); },
+                  fontSize: 11,
+                },
+              };
+            }),
+          }],
+        });
+        window.addEventListener('resize', function () { barChart.resize(); });
+      }
+      var skipEl = document.getElementById('skip-reason-chart');
+      if (skipEl && data.skipBreakdown && data.skipBreakdown.length > 0) {
+        var skipChart = echarts.init(skipEl);
+        var dates = data.skipBreakdown.map(function (p) { return p.date; });
+        var categories = data.skipCategories;
+        skipChart.setOption({
+          title: { text: '日次 SKIP 理由内訳', left: 'center', textStyle: { fontSize: 14 } },
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+          legend: { top: 22, data: categories.map(function (c) { return c.label; }) },
           grid: { left: 50, right: 20, top: 60, bottom: 40 },
-          xAxis: { type: 'category', data: dbDates },
-          yAxis: { type: 'value', name: '判定数' },
-          series: DECISION_KEYS.map(function (k) {
-            return { name: k, type: 'bar', stack: 'decisions',
-              data: data.decisions.map(function (p) { return p.counts[k] || 0; }),
-              itemStyle: { color: DECISION_COLORS[k] } };
+          xAxis: { type: 'category', data: dates },
+          yAxis: { type: 'value', name: '件数' },
+          series: categories.map(function (c) {
+            return {
+              name: c.label,
+              type: 'bar',
+              stack: 'skip',
+              itemStyle: { color: c.color, borderWidth: 2, borderColor: '#fff' },
+              data: data.skipBreakdown.map(function (p) { return p.counts[c.key] || 0; }),
+            };
           }),
         });
-        window.addEventListener('resize', function () { dbChart.resize(); });
-      }
-      var pnlHistEl = document.getElementById('pnl-hist-chart');
-      if (pnlHistEl && data.histogram && data.histogram.length > 0) {
-        var pnlHist = echarts.init(pnlHistEl);
-        pnlHist.setOption({
-          title: { text: 'Per-trade realized PnL 分布', left: 'center', textStyle: { fontSize: 14 } },
-          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
-            formatter: function (params) { var p = params[0]; return p.name + ': ' + p.value + ' trades'; } },
-          grid: { left: 50, right: 20, top: 40, bottom: 40 },
-          xAxis: { type: 'category', data: data.histogram.map(function (b) { return b.label; }) },
-          yAxis: { type: 'value', name: 'trades' },
-          series: [{ type: 'bar',
-            data: data.histogram.map(function (b) {
-              return { value: b.count, itemStyle: { color: b.binCenter >= 0 ? '#057a55' : '#c22' } };
-            }) }],
-        });
-        window.addEventListener('resize', function () { pnlHist.resize(); });
+        window.addEventListener('resize', function () { skipChart.resize(); });
       }
     });
   `
-  return `<div id="pnl-hist-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  ${renderTradeStatsTable(args.stats)}
-  <div id="decision-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  ${safeJsonScript('__chartData', { decisions: args.decisions, histogram: args.histogram })}
+  return `${tradeSection}
+  ${skipSection}
+  ${safeJsonScript('__chartData', {
+    symbolStats: args.symbolStats,
+    skipBreakdown: args.skipBreakdown,
+    skipCategories: SKIP_REASON_CATEGORIES,
+  })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
 }

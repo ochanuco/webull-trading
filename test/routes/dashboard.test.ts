@@ -204,6 +204,80 @@ describe('dashboard', () => {
     expect(subnavHtml).not.toContain('tab=symbol')
   })
 
+  /**
+   * `loadTradePnls` / `loadSkipReasonBreakdown` は生 SQL (`db.prepare(sql).all()`)
+   * を直接叩く。SQL 文字列の一部 (`trade_journal` / `strategy_decision_log`) で
+   * どちらのクエリかを判別して別々の fixture 行を返す fake。
+   */
+  function fakeQualityDb(
+    tradeRows: Array<{ pnl: number; symbol: string | null; timestamp: string }>,
+    skipRows: Array<{ day: string; reason: string | null; n: number }>,
+  ): D1Database {
+    return {
+      prepare: (sql: string) => ({
+        all: async () => {
+          if (sql.includes('trade_journal')) return { results: tradeRows }
+          if (sql.includes('strategy_decision_log')) return { results: skipRows }
+          return { results: [] }
+        },
+      }),
+    } as unknown as D1Database
+  }
+
+  describe('GET /dashboard/charts?tab=quality (#quality-redesign)', () => {
+    it('成績カード + 銘柄別表 + SKIP breakdown を描画し、period pill が active を持つ', async () => {
+      const app = createApp()
+      const env = {
+        ...baseEnv,
+        DB: fakeQualityDb(
+          [
+            { pnl: 10, symbol: 'SOXL', timestamp: '2026-08-01T00:00:00.000Z' },
+            { pnl: -4, symbol: 'SOXL', timestamp: '2026-08-02T00:00:00.000Z' },
+            { pnl: 6, symbol: 'TQQQ', timestamp: '2026-08-03T00:00:00.000Z' },
+          ],
+          [{ day: '2026-08-01', reason: 'role: cash_parking entry is not enabled (#452)', n: 4 }],
+        ),
+      }
+      const res = await app.request('/dashboard/charts?tab=quality&period=90d', { headers: authHeader }, env)
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      // stat タイル (件数 / 勝率 / profit factor / 勝 / 負 / 合計PnL / 平均利益 / 平均損失 / 期待値)
+      expect(body).toContain('運用成績 (直近90日)')
+      expect(body).toContain('件数')
+      expect(body).toContain('profit factor')
+      expect(body).toContain('期待値 (トレード毎)')
+      // 銘柄別表
+      expect(body).toContain('SOXL')
+      expect(body).toContain('TQQQ')
+      // period pill: 90d が active
+      expect(body).toMatch(/<a class="zoom-preset active"[^>]*href="\/dashboard\/charts\?tab=quality&period=90d"/)
+      expect(body).toContain('href="/dashboard/charts?tab=quality&period=30d"')
+      expect(body).toContain('href="/dashboard/charts?tab=quality&period=all"')
+      // SKIP breakdown chart のコンテナ + legend 用カテゴリラベル
+      expect(body).toContain('id="skip-reason-chart"')
+      expect(body).toContain('銘柄ロール抑止')
+    })
+
+    it('trade データが無ければ成績カードは省略し、SKIP breakdown のみ出す', async () => {
+      const app = createApp()
+      const env = {
+        ...baseEnv,
+        DB: fakeQualityDb([], [{ day: '2026-08-01', reason: 'insufficient bars for indicators', n: 2 }]),
+      }
+      const res = await app.request('/dashboard/charts?tab=quality', { headers: authHeader }, env)
+      const body = await res.text()
+      expect(body).not.toContain('運用成績')
+      expect(body).toContain('id="skip-reason-chart"')
+    })
+
+    it('trade も SKIP ログも無ければフォールバック文言', async () => {
+      const app = createApp()
+      const env = { ...baseEnv, DB: fakeQualityDb([], []) }
+      const res = await app.request('/dashboard/charts?tab=quality', { headers: authHeader }, env)
+      const body = await res.text()
+      expect(body).toContain('まだ判定ログも実 fill も無いため成績を描けません')
+    })
+  })
 
   it('GET /dashboard/symbols/:symbol redirects to chart symbol tab', async () => {
     const app = createApp()
@@ -758,41 +832,146 @@ describe('safeJsonScript', () => {
   })
 })
 
-import { aggregateDecisionRows, computeTradeStats, computePnlHistogram, extractSma50 } from '../../src/routes/dashboard'
+import {
+  aggregateSkipReasonRows,
+  categorizeSkipReason,
+  computeSymbolStats,
+  computeTradeStats,
+  extractSma50,
+  filterTradePnlsByPeriod,
+  parseQualityPeriod,
+  type TradePnlRow,
+} from '../../src/routes/dashboard'
 
-describe('aggregateDecisionRows', () => {
-  it('日付ごとに decision を集計', () => {
-    const out = aggregateDecisionRows([
-      { day: '2026-04-23', decision: 'BUY', n: 1 },
-      { day: '2026-04-23', decision: 'HOLD', n: 5 },
-      { day: '2026-04-23', decision: 'REJECT', n: 2 },
-      { day: '2026-04-24', decision: 'HOLD', n: 8 },
-      { day: '2026-04-24', decision: 'SELL', n: 1 },
-    ])
-    expect(out).toEqual([
-      { date: '2026-04-23', counts: { BUY: 1, SELL: 0, HOLD: 5, SKIP: 0, REJECT: 2, ERROR: 0 } },
-      { date: '2026-04-24', counts: { BUY: 0, SELL: 1, HOLD: 8, SKIP: 0, REJECT: 0, ERROR: 0 } },
-    ])
+describe('parseQualityPeriod (#quality-redesign)', () => {
+  it('30d / 90d はそのまま', () => {
+    expect(parseQualityPeriod('30d')).toBe('30d')
+    expect(parseQualityPeriod('90d')).toBe('90d')
   })
 
-  it('未知 decision は ERROR バケットに寄せる (将来の追加に備える)', () => {
-    const out = aggregateDecisionRows([
-      { day: '2026-04-23', decision: 'WAT', n: 3 },
+  it('未指定 / 不正値は all', () => {
+    expect(parseQualityPeriod(undefined)).toBe('all')
+    expect(parseQualityPeriod('7d')).toBe('all')
+    expect(parseQualityPeriod('')).toBe('all')
+  })
+})
+
+describe('filterTradePnlsByPeriod (#quality-redesign)', () => {
+  const now = new Date('2026-08-09T00:00:00.000Z')
+  const rows: TradePnlRow[] = [
+    { realizedPnl: 1, symbol: 'SOXL', timestamp: '2026-08-08T00:00:00.000Z' }, // 1日前
+    { realizedPnl: 2, symbol: 'SOXL', timestamp: '2026-07-15T00:00:00.000Z' }, // 25日前
+    { realizedPnl: 3, symbol: 'TQQQ', timestamp: '2026-06-01T00:00:00.000Z' }, // 69日前
+    { realizedPnl: 4, symbol: 'TQQQ', timestamp: '2026-01-01T00:00:00.000Z' }, // 遠い過去
+  ]
+
+  it('all は無フィルタ', () => {
+    expect(filterTradePnlsByPeriod(rows, 'all', now)).toEqual(rows)
+  })
+
+  it('30d は直近30日のみ', () => {
+    const out = filterTradePnlsByPeriod(rows, '30d', now)
+    expect(out.map((r) => r.realizedPnl)).toEqual([1, 2])
+  })
+
+  it('90d は直近90日のみ', () => {
+    const out = filterTradePnlsByPeriod(rows, '90d', now)
+    expect(out.map((r) => r.realizedPnl)).toEqual([1, 2, 3])
+  })
+
+  it('parse 不能な timestamp は除外', () => {
+    const out = filterTradePnlsByPeriod(
+      [{ realizedPnl: 1, symbol: 'SOXL', timestamp: 'not-a-date' }],
+      '30d',
+      now,
+    )
+    expect(out).toEqual([])
+  })
+})
+
+describe('computeSymbolStats (#quality-redesign)', () => {
+  it('銘柄ごとに集計し合計PnL降順で返す', () => {
+    const rows: TradePnlRow[] = [
+      { realizedPnl: 10, symbol: 'SOXL', timestamp: '2026-08-01T00:00:00.000Z' },
+      { realizedPnl: -3, symbol: 'SOXL', timestamp: '2026-08-02T00:00:00.000Z' },
+      { realizedPnl: 5, symbol: 'TQQQ', timestamp: '2026-08-01T00:00:00.000Z' },
+    ]
+    const out = computeSymbolStats(rows)
+    expect(out).toEqual([
+      { symbol: 'SOXL', count: 2, winRate: 0.5, totalPnl: 7, profitFactor: 10 / 3 },
+      { symbol: 'TQQQ', count: 1, winRate: 1, totalPnl: 5, profitFactor: Infinity },
     ])
-    expect(out[0]!.counts.ERROR).toBe(3)
   })
 
   it('空配列は空配列', () => {
-    expect(aggregateDecisionRows([])).toEqual([])
+    expect(computeSymbolStats([])).toEqual([])
+  })
+})
+
+describe('categorizeSkipReason (#quality-redesign)', () => {
+  it('portfolio_halted / drawdown_kill は 取引停止中', () => {
+    expect(categorizeSkipReason('portfolio_halted: PORTFOLIO_STATE binding missing')).toBe('halt')
+    expect(categorizeSkipReason('drawdown_kill: ratio=-0.05 <= threshold=-0.05')).toBe('halt')
   })
 
-  it('日付順にソート', () => {
-    const out = aggregateDecisionRows([
-      { day: '2026-04-25', decision: 'HOLD', n: 1 },
-      { day: '2026-04-23', decision: 'HOLD', n: 1 },
-      { day: '2026-04-24', decision: 'HOLD', n: 1 },
+  it('role: は 銘柄ロール抑止', () => {
+    expect(categorizeSkipReason('role: cash_parking entry is not enabled (#452)')).toBe('role')
+  })
+
+  it('sizing rejected: は サイジング不可', () => {
+    expect(categorizeSkipReason('sizing rejected: missing-lot-size (symbol X has no lot_size configured, entry 100)')).toBe(
+      'sizing',
+    )
+  })
+
+  it('risk: buying power 系は 資金不足', () => {
+    expect(categorizeSkipReason('risk: insufficient buying power (notionalJpy 1000 > remaining 500)')).toBe('funds')
+    expect(categorizeSkipReason('risk: buying-power unavailable (fetch failed)')).toBe('funds')
+  })
+
+  it('risk: (buying power 以外) / pair_regime: は リスクゲート', () => {
+    expect(categorizeSkipReason('risk: sanity_failed cooldown active (recent broker stub fill within 30min)')).toBe(
+      'risk_gate',
+    )
+    expect(categorizeSkipReason('pair_regime: zone=bear blocks bull entry (theta -0.5)')).toBe('risk_gate')
+  })
+
+  it('内部整合性ガード (bar不足 / 価格・数量不正 / 二重発注) は システムガード', () => {
+    expect(categorizeSkipReason('insufficient bars for indicators')).toBe('system_guard')
+    expect(categorizeSkipReason('invalid price: NaN')).toBe('system_guard')
+    expect(categorizeSkipReason('invalid notional: 0 (qty=1, price=0)')).toBe('system_guard')
+    expect(categorizeSkipReason('invalid position qty: 0')).toBe('system_guard')
+    expect(categorizeSkipReason('SELL without position')).toBe('system_guard')
+    expect(categorizeSkipReason('pending order already in flight')).toBe('system_guard')
+  })
+
+  it('null / 未知形式は その他', () => {
+    expect(categorizeSkipReason(null)).toBe('other')
+    expect(categorizeSkipReason(undefined)).toBe('other')
+    expect(categorizeSkipReason('some future reason format')).toBe('other')
+  })
+})
+
+describe('aggregateSkipReasonRows (#quality-redesign)', () => {
+  it('日付 × カテゴリで集計し日付順に返す', () => {
+    const out = aggregateSkipReasonRows([
+      { day: '2026-08-02', reason: 'role: cash_parking entry is not enabled (#452)', n: 3 },
+      { day: '2026-08-01', reason: 'risk: insufficient buying power (notionalJpy 1 > remaining 0)', n: 2 },
+      { day: '2026-08-01', reason: 'insufficient bars for indicators', n: 1 },
     ])
-    expect(out.map((p) => p.date)).toEqual(['2026-04-23', '2026-04-24', '2026-04-25'])
+    expect(out.map((p) => p.date)).toEqual(['2026-08-01', '2026-08-02'])
+    expect(out[0]!.counts.funds).toBe(2)
+    expect(out[0]!.counts.system_guard).toBe(1)
+    expect(out[1]!.counts.role).toBe(3)
+  })
+
+  it('未知 reason は other に寄せる (合計が欠けない)', () => {
+    const out = aggregateSkipReasonRows([{ day: '2026-08-01', reason: 'brand new gate', n: 5 }])
+    expect(out[0]!.counts.other).toBe(5)
+  })
+
+  it('空配列は空配列', () => {
+    expect(aggregateSkipReasonRows([])).toEqual([])
   })
 })
 
@@ -832,33 +1011,6 @@ describe('computeTradeStats', () => {
     expect(s.losses).toBe(0)
     expect(s.winRate).toBe(0)
     expect(s.expectancy).toBe(0)
-  })
-})
-
-describe('computePnlHistogram', () => {
-  it('空は空', () => {
-    expect(computePnlHistogram([])).toEqual([])
-  })
-
-  it('absMax の対称範囲でビン分割し全件分類', () => {
-    const out = computePnlHistogram([1, 2, -1, -2, 0, 3, -3])
-    const total = out.reduce((acc, b) => acc + b.count, 0)
-    expect(total).toBe(7)
-    expect(out.length).toBeGreaterThanOrEqual(3)
-    // 範囲は ±3 で対称
-    expect(out[0]!.binStart).toBeCloseTo(-3)
-    expect(out[out.length - 1]!.binEnd).toBeCloseTo(3)
-  })
-
-  it('全 0 は単一ビン', () => {
-    const out = computePnlHistogram([0, 0])
-    expect(out).toEqual([{ label: '0', binStart: 0, binEnd: 0, binCenter: 0, count: 2 }])
-  })
-
-  it('境界値 (max abs ちょうど) も末尾ビンに入る', () => {
-    const out = computePnlHistogram([5, -5])
-    const total = out.reduce((acc, b) => acc + b.count, 0)
-    expect(total).toBe(2)
   })
 })
 
