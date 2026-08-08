@@ -2052,11 +2052,12 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('INACTIVE: liquidity dropped')
     // 旧 inline picker の「| 切替:」は出ない
     expect(html).not.toContain('切替:')
-    // active な focus はレールの強調で自明なので本文側の見出しは出さない
-    expect(html).not.toContain('銘柄: <strong>')
+    // active な focus も本文側に見出しを出す (注記なし)
+    expect(html).toContain('銘柄: <strong>')
+    expect(html).not.toContain('inactive —')
   })
 
-  it('focus が inactive 銘柄の時だけ本文に注記付き見出しを出す', () => {
+  it('focus が inactive 銘柄の時は見出しに注記を付ける', () => {
     const universe = makeSymbolUniverse({
       allowedSymbols: ['SOXL'],
       inactiveSymbols: ['TQQQ'],
