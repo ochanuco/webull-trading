@@ -828,17 +828,20 @@ export function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): str
 }
 
 /**
- * 表示中銘柄の見出し行。active 銘柄では出さない (左レールの強調表示で自明)。
- * inactive 銘柄の時だけ、注記 (cron 評価対象外) 付きで出す。
+ * 表示中銘柄の見出し行。active / inactive を問わず常に出す (モバイル等で
+ * 左レールが見えない状況でも表示中銘柄が分かるように)。inactive 銘柄には
+ * 注記 (cron 評価対象外) を付ける。
  */
 export function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
-  const focusInactive = args.focusSymbol
-    ? isSymbolInactive(args.focusSymbol, args.universe)
-    : false
-  if (!args.focusSymbol || !focusInactive) return ''
+  if (!args.focusSymbol) return ''
+  const focusInactive = isSymbolInactive(args.focusSymbol, args.universe)
   const focusLabel = displaySymbol(args.focusSymbol, args.universe)
-  const note = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
-  return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong> <span class="muted" style="font-size:11px">(inactive — ${esc(note)})</span></p>`
+  const note = focusInactive
+    ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(
+        args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外',
+      )})</span>`
+    : ''
+  return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong>${note}</p>`
 }
 
 /**
