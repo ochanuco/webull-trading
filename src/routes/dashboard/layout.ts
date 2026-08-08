@@ -232,17 +232,17 @@ export const STYLE = `
      グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
      チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
      page 本文の assertion に使われる日本語 label をそのまま書かないこと。 */
-  /* pin は margin-top:-24px + padding-top:24px で main padding を自前で吸収し、
-     自然位置 (= header 直下) と sticky top を一致させて jump をゼロにする。
-     吸収した 24px は pin の背景になるので、scroll 中に panel が透けて見える
-     隙間も出ない。 */
-  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:#f5f5f7;margin-top:-24px;padding-top:24px;padding-bottom:8px}
+  /* 旧実装は margin-top:-24px + padding-top:24px で main padding を吸収していたが、
+     pin の前にサブナビ / inactive 注記が入った現在は、負 margin が前段要素に
+     被さって文字を隠すため撤去 (#fix-chart-pin-overlap)。前段はスクロールで
+     pin の裏に潜るので、透け防止の背景と z-index だけ残す。 */
+  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:#f5f5f7;padding-bottom:8px}
   @media(max-width:780px){
     .symbol-layout{flex-direction:column}
     .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
     .symbol-rail .rail-head{width:100%}
     /* 小画面では 460px のチャート固定が viewport を食い潰すため解除 */
-    .symbol-chart-pin{position:static;margin-top:0;padding-top:0}
+    .symbol-chart-pin{position:static}
   }
   /* symbol タブ内サブナビ「チャート / 履歴・設定」(#charts-symbol-redesign)。
      header の .subnav (topnav 2段目) と同じ .subnav-link トークンを再利用しつつ、
