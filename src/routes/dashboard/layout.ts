@@ -214,6 +214,7 @@ export const STYLE = `
   .rail-item{display:flex;flex-direction:column;padding:6px 10px;border-radius:6px;text-decoration:none;color:#1d1d1f}
   .rail-item:hover{background:#f0f0f3}
   .rail-item.active{background:#e8f0fe;color:#06c}
+  .rail-item.active .rail-name{color:inherit}
   .rail-item.inactive{opacity:0.55}
   .rail-item.inactive .rail-sym{text-decoration:line-through;font-style:italic}
   .rail-sym{font-weight:600;font-size:13px}
