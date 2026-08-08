@@ -206,17 +206,24 @@ export const STYLE = `
      inline script が実測でセット)。top と自然位置がズレていると、スクロール開始
      直後にズレ分だけ要素が動いてから張り付く微妙な jump が出る。
      rail の自然位置 = header 実高 + main padding 24px。 */
-  .symbol-rail{flex:0 0 172px;position:sticky;top:calc(var(--header-h,86px) + 24px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - var(--header-h,86px) - 40px);overflow-y:auto;box-sizing:border-box}
+  /* レールは白カード枠を持たず page 背景に溶かし、active/hover は header subnav
+     (.subnav-link) と同じトークン (#e8f0fe/#06c, #f0f0f3) を使う — 他ページとの
+     見た目統一 (#symbol-rail-restyle)。 */
+  .symbol-rail{flex:0 0 172px;position:sticky;top:calc(var(--header-h,86px) + 24px);display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - var(--header-h,86px) - 40px);overflow-y:auto;box-sizing:border-box}
   .symbol-rail .rail-head{font-size:11px;color:#86868b;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px 6px}
-  .rail-item{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;text-decoration:none;color:#1d1d1f}
+  .rail-item{display:flex;flex-direction:column;padding:6px 10px;border-radius:6px;text-decoration:none;color:#1d1d1f}
   .rail-item:hover{background:#f0f0f3}
-  .rail-item.active{background:#06c;color:#fff}
-  .rail-item.active .rail-name{color:#dce8ff}
+  .rail-item.active{background:#e8f0fe;color:#06c}
+  .rail-item.active .rail-name{color:inherit}
   .rail-item.inactive{opacity:0.55}
   .rail-item.inactive .rail-sym{text-decoration:line-through;font-style:italic}
   .rail-sym{font-weight:600;font-size:13px}
   .rail-name{font-size:11px;color:#86868b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .symbol-main{flex:1;min-width:0}
+  /* クライアント側銘柄切替 (partial swap) 中の軽い loading フィードバック
+     (#charts-symbol-redesign Phase C)。fetch 中だけ付与し、成功/フォールバック
+     どちらでも解除される。 */
+  .symbol-main.symbol-main-loading{opacity:0.45;transition:opacity 0.15s;pointer-events:none}
   /* Google Finance 風 range ピル (チャート直下)。active はクリックで JS が付替 */
   .zoom-preset{padding:4px 14px;font-size:12.5px;background:#fff;border:1px solid #dadce0;border-radius:16px;cursor:pointer;color:#3c4043;margin-right:6px}
   .zoom-preset:hover{background:#f8f9fa}
@@ -225,18 +232,29 @@ export const STYLE = `
      グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
      チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
      page 本文の assertion に使われる日本語 label をそのまま書かないこと。 */
-  /* pin は margin-top:-24px + padding-top:24px で main padding を自前で吸収し、
-     自然位置 (= header 直下) と sticky top を一致させて jump をゼロにする。
-     吸収した 24px は pin の背景になるので、scroll 中に panel が透けて見える
-     隙間も出ない。 */
-  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:#f5f5f7;margin-top:-24px;padding-top:24px;padding-bottom:8px}
+  /* 旧実装は margin-top:-24px + padding-top:24px で main padding を吸収していたが、
+     pin の前にサブナビ / inactive 注記が入った現在は、負 margin が前段要素に
+     被さって文字を隠すため撤去 (#fix-chart-pin-overlap)。前段はスクロールで
+     pin の裏に潜るので、透け防止の背景と z-index だけ残す。 */
+  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:#f5f5f7;padding-bottom:8px}
   @media(max-width:780px){
     .symbol-layout{flex-direction:column}
     .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
     .symbol-rail .rail-head{width:100%}
     /* 小画面では 460px のチャート固定が viewport を食い潰すため解除 */
-    .symbol-chart-pin{position:static;margin-top:0;padding-top:0}
+    .symbol-chart-pin{position:static}
   }
+  /* symbol タブ内サブナビ「チャート / 履歴・設定」(#charts-symbol-redesign)。
+     header の .subnav (topnav 2段目) と同じ .subnav-link トークンを再利用しつつ、
+     本文 (.symbol-main) 内に埋め込むため padding/border は自前に持つ。 */
+  .symbol-subnav{display:flex;gap:2px;margin:0 0 10px;flex-wrap:wrap}
+  /* fold 内の判断サマリ grid (#charts-symbol-redesign)。1160px 幅で 2×2、
+     780px 以下は縦積み。カードは 13px 基準・.panel と同系統の見た目。 */
+  .judgment-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  @media(max-width:780px){.judgment-grid{grid-template-columns:1fr}}
+  .judgment-card{background:#fff;border:1px solid #d0d0d5;border-radius:10px;padding:12px 14px;font-size:13px}
+  .judgment-card .jc-label{font-size:11px;color:#86868b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em}
+  .judgment-card .jc-value{font-size:13px;line-height:1.5}
 `
 
 export function renderLayout(
