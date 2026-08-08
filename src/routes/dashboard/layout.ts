@@ -206,12 +206,15 @@ export const STYLE = `
      inline script が実測でセット)。top と自然位置がズレていると、スクロール開始
      直後にズレ分だけ要素が動いてから張り付く微妙な jump が出る。
      rail の自然位置 = header 実高 + main padding 24px。 */
-  .symbol-rail{flex:0 0 172px;position:sticky;top:calc(var(--header-h,86px) + 24px);background:#fff;border:1px solid #d0d0d5;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - var(--header-h,86px) - 40px);overflow-y:auto;box-sizing:border-box}
+  /* レールは白カード枠を持たず page 背景に溶かし、active/hover は header subnav
+     (.subnav-link) と同じトークン (#e8f0fe/#06c, #f0f0f3) を使う — 他ページとの
+     見た目統一 (#symbol-rail-restyle)。 */
+  .symbol-rail{flex:0 0 172px;position:sticky;top:calc(var(--header-h,86px) + 24px);display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - var(--header-h,86px) - 40px);overflow-y:auto;box-sizing:border-box}
   .symbol-rail .rail-head{font-size:11px;color:#86868b;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px 6px}
-  .rail-item{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;text-decoration:none;color:#1d1d1f}
+  .rail-item{display:flex;flex-direction:column;padding:6px 10px;border-radius:6px;text-decoration:none;color:#1d1d1f}
   .rail-item:hover{background:#f0f0f3}
-  .rail-item.active{background:#06c;color:#fff}
-  .rail-item.active .rail-name{color:#dce8ff}
+  .rail-item.active{background:#e8f0fe;color:#06c}
+  .rail-item.active .rail-name{color:inherit}
   .rail-item.inactive{opacity:0.55}
   .rail-item.inactive .rail-sym{text-decoration:line-through;font-style:italic}
   .rail-sym{font-weight:600;font-size:13px}
