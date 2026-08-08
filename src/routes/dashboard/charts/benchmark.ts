@@ -1,6 +1,7 @@
 import type { Env } from '../../../config/env'
 import type { DailyBar } from '../../../trading/strategy/indicators'
 import { YahooBarClient } from '../../../infrastructure/quotes/YahooBarClient'
+import { cachedDashboardJson } from './dashboardBarsCache'
 
 /**
  * overview タブの equity curve に重ねるベンチマーク銘柄。
@@ -42,6 +43,9 @@ export function toBenchmarkReturns(bars: DailyBar[]): BenchmarkPoint[] {
  * - `fromDate` (equity curve の先頭日) 以降の bar だけ残し、その先頭を 0% に。
  * - `env` は現状未使用 (YahooBarClient は無認証)。将来ベンチマーク銘柄や
  *   quote source を global_config で切り替える時の口として受けておく。
+ * - fetch は dashboard 表示専用の短 TTL キャッシュ (`cachedDashboardJson`,
+ *   TTL 300秒) 経由。cron が使う YahooBarClient 呼び出し自体には手を入れて
+ *   いないので取引判断のデータ鮮度には影響しない (#charts-symbol-redesign)。
  */
 export async function loadBenchmarkSeries(
   env: Env,
@@ -55,6 +59,11 @@ export async function loadBenchmarkSeries(
   // 受けるので下限 5、Yahoo range 上限 (5y) を考慮して 1830 日で clamp。
   const calendarDays = Math.ceil((now.getTime() - fromMs) / 86_400_000)
   const lookback = Math.min(Math.max(calendarDays + 5, 5), 1830)
-  const bars = await new YahooBarClient().getDailyBars(EQUITY_BENCHMARK_SYMBOL, lookback)
+  const bars = await cachedDashboardJson(
+    'equityBenchmarkDaily',
+    { symbol: EQUITY_BENCHMARK_SYMBOL, lookback: String(lookback) },
+    () => new YahooBarClient().getDailyBars(EQUITY_BENCHMARK_SYMBOL, lookback),
+    { shouldCache: (v) => v.length > 0 },
+  )
   return toBenchmarkReturns(bars.filter((b) => b.date >= fromDate))
 }

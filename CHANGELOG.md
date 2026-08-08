@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.5.0](https://github.com/ochanuco/webull-trading/compare/v1.4.4...v1.5.0) (2026-08-08)
+
+
+### Features
+
+* always show the focus symbol heading on the chart view ([066e706](https://github.com/ochanuco/webull-trading/commit/066e70620cf19a2c650bfec1bb2c52741e6d089c))
+* always show the focus symbol heading on the chart view ([1ffb4f2](https://github.com/ochanuco/webull-trading/commit/1ffb4f239d51cb4869057667ba4481600f16cbcf))
+* redesign symbol chart page for faster switching and compact layout ([8b1992d](https://github.com/ochanuco/webull-trading/commit/8b1992d7674ea0d00cb600280e95ff0db12e927b))
+* redesign symbol chart page for faster switching and compact layout ([702dc1e](https://github.com/ochanuco/webull-trading/commit/702dc1e4d362a9cccd107cb81da9ae222e2275f3))
+
+
+### Bug Fixes
+
+* stop chart pin negative margin from covering preceding content ([07aba64](https://github.com/ochanuco/webull-trading/commit/07aba64251d83a52dcd6cf5e43ee8e2059b3b0ff))
+* stop chart pin negative margin from covering preceding content ([a783c23](https://github.com/ochanuco/webull-trading/commit/a783c23373b2f3693fec17858947d756cbed2808))
+
+## [1.4.4](https://github.com/ochanuco/webull-trading/compare/v1.4.3...v1.4.4) (2026-08-06)
+
+
+### Bug Fixes
+
+* normalize renamed trace labels stored in historical traceJson ([8f9a255](https://github.com/ochanuco/webull-trading/commit/8f9a255eb29c1a9a84e1271c26bbb191409dc785))
+* normalize renamed trace labels stored in historical traceJson ([aae7ac2](https://github.com/ochanuco/webull-trading/commit/aae7ac28a47c317e92cffca9c5050b2b9c1fc2a0))
+
+## [1.4.3](https://github.com/ochanuco/webull-trading/compare/v1.4.2...v1.4.3) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** update dependency vite to v8.2.1 ([2822c05](https://github.com/ochanuco/webull-trading/commit/2822c05f240d4a21befe50dfa8c0809ed528f597))
+
 ## [1.4.2](https://github.com/ochanuco/webull-trading/compare/v1.4.1...v1.4.2) (2026-08-06)
 
 

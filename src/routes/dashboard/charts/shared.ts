@@ -24,6 +24,13 @@ import { esc } from '../shared'
 
 export const ECHARTS_CDN = 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js'
 
+/**
+ * 銘柄チャートタブの client 側初期化スクリプト (`symbolChartScript.ts`) を
+ * 配信する静的 route のパス。`symbol.ts` (`<script src>` 参照) と
+ * `index.ts` (route 登録) の両方から同じ定数を参照し、path の drift を防ぐ。
+ */
+export const SYMBOL_CHART_STATIC_PATH = '/dashboard/static/symbol-chart.js'
+
 export type ChartsTab = 'overview' | 'quality' | 'symbol'
 
 export function parseChartsTab(value: string | undefined): ChartsTab {
@@ -32,6 +39,17 @@ export function parseChartsTab(value: string | undefined): ChartsTab {
   // 個別銘柄タブへ寄せる (銘柄横断の視点は rail で代替)。
   if (value === 'grid') return 'symbol'
   return 'overview'
+}
+
+/**
+ * 銘柄タブ内サブビュー (#charts-symbol-redesign)。
+ * - `chart`: 判断サマリ + チャート (fold 内で完結させたい既定ビュー)
+ * - `detail`: 判定履歴30件 + 戦略パラメータ (長物を分離した別サブタブ)
+ */
+export type SymbolTabView = 'chart' | 'detail'
+
+export function parseSymbolView(value: string | undefined): SymbolTabView {
+  return value === 'detail' ? 'detail' : 'chart'
 }
 
 export interface ChartsBodyOverview {
@@ -189,6 +207,8 @@ export interface ChartsBodySymbol {
   decisionRows?: DecisionRow[]
   /** ペアレジーム表示 (#472)。regime 有効ペアの一員 + mode != off のときのみ。 */
   pairRegime?: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null
+  /** サブビュー (#charts-symbol-redesign)。未指定 (旧 fixture 等) は 'chart' 相当。 */
+  view?: SymbolTabView
 }
 
 export interface SymbolPolicySummary {
