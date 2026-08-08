@@ -65,7 +65,7 @@ export interface TradeStats {
   avgLoss: number // 負値
   /** 総利益 / |総損失|。loss=0 のときは Infinity (UI 側で "—" 表示) */
   profitFactor: number
-  /** 1 trade あたり期待損益 = winRate * avgWin + (1-winRate) * avgLoss */
+  /** 1 trade あたり期待損益 = total / 全トレード数 (break-even 含む) */
   expectancy: number
   total: number
 }
@@ -98,7 +98,10 @@ export function computeTradeStats(pnls: number[]): TradeStats {
   const avgWin = wins > 0 ? sumWin / wins : 0
   const avgLoss = losses > 0 ? sumLoss / losses : 0
   const profitFactor = sumLoss < 0 ? sumWin / Math.abs(sumLoss) : sumWin > 0 ? Infinity : 0
-  const expectancy = winRate * avgWin + (1 - winRate) * avgLoss
+  // break-even (pnl=0) も分母に含めた「全トレード平均」。旧式
+  // (winRate*avgWin + (1-winRate)*avgLoss) は分母が decisive のみで、
+  // break-even 込みの「トレード毎」表示と不整合だった (CodeRabbit PR #684)。
+  const expectancy = total / pnls.length
   return { count: pnls.length, wins, losses, winRate, avgWin, avgLoss, profitFactor, expectancy, total }
 }
 

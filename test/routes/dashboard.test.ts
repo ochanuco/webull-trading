@@ -227,15 +227,18 @@ describe('dashboard', () => {
   describe('GET /dashboard/charts?tab=quality (#quality-redesign)', () => {
     it('成績カード + 銘柄別表 + SKIP breakdown を描画し、period pill が active を持つ', async () => {
       const app = createApp()
+      // period フィルタは実行時刻基準なので、固定日時だと将来 90 日窓の外に
+      // 出てテストが時限で壊れる (CodeRabbit PR #684)。相対日時で生成する。
+      const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString()
       const env = {
         ...baseEnv,
         DB: fakeQualityDb(
           [
-            { pnl: 10, symbol: 'SOXL', timestamp: '2026-08-01T00:00:00.000Z' },
-            { pnl: -4, symbol: 'SOXL', timestamp: '2026-08-02T00:00:00.000Z' },
-            { pnl: 6, symbol: 'TQQQ', timestamp: '2026-08-03T00:00:00.000Z' },
+            { pnl: 10, symbol: 'SOXL', timestamp: daysAgo(3) },
+            { pnl: -4, symbol: 'SOXL', timestamp: daysAgo(2) },
+            { pnl: 6, symbol: 'TQQQ', timestamp: daysAgo(1) },
           ],
-          [{ day: '2026-08-01', reason: 'role: cash_parking entry is not enabled (#452)', n: 4 }],
+          [{ day: daysAgo(3).slice(0, 10), reason: 'role: cash_parking entry is not enabled (#452)', n: 4 }],
         ),
       }
       const res = await app.request('/dashboard/charts?tab=quality&period=90d', { headers: authHeader }, env)
@@ -1011,6 +1014,14 @@ describe('computeTradeStats', () => {
     expect(s.losses).toBe(0)
     expect(s.winRate).toBe(0)
     expect(s.expectancy).toBe(0)
+  })
+
+  // 期待値は break-even も分母に含めた「全トレード平均」(CodeRabbit PR #684)。
+  // 旧式 (decisive のみ分母) だと [10, 0] が 10 になっていた。
+  it('break-even を含む期待値は全トレード数を分母にする', () => {
+    const s = computeTradeStats([10, 0])
+    expect(s.expectancy).toBe(5)
+    expect(s.total).toBe(10)
   })
 })
 
