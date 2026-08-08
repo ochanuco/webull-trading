@@ -27,6 +27,13 @@ import {
   type SymbolChartMarker,
   type SymbolChartRules,
 } from '../../src/routes/dashboard'
+// fetchDoPosition はバレル (src/routes/dashboard/index.ts) から re-export されて
+// いないため loaders.ts から直接 import する (他 test も同じ流儀)。
+import { fetchDoPosition } from '../../src/routes/dashboard/charts/loaders'
+// 銘柄チャートタブの client 側初期化スクリプトは静的ファイル化されている
+// (#charts-symbol-redesign)。html は <script src=...> の参照だけを持つので、
+// JS 内の文字列を検証するテストはこの定数を直接見る。
+import { SYMBOL_CHART_CLIENT_SCRIPT } from '../../src/routes/dashboard/charts/symbolChartScript'
 import type { Env } from '../../src/config/env'
 
 const buy = (ts: string, price: number, clientOrderId: string | null = null): SymbolChartMarker => ({
@@ -207,6 +214,40 @@ describe('loadSymbolChart — fill marker の clientOrderId / holdingSpans', () 
   })
 })
 
+describe('fetchDoPosition — position.qty の伝搬 (#charts-symbol-redesign Phase C)', () => {
+  function fakeSymbolStateNamespace(
+    position: { qty: number; avgPrice: number; openedAt: string } | null,
+  ) {
+    const stub = { async getState() { return { position } } }
+    return { idFromName: () => 'id', get: () => stub } as unknown as Env['SYMBOL_STATE']
+  }
+
+  it('DO の position.qty をそのまま SymbolChartPosition.qty に積む', async () => {
+    const env = {
+      SYMBOL_STATE: fakeSymbolStateNamespace({
+        qty: 7,
+        avgPrice: 124.95,
+        openedAt: '2026-04-20T00:00:00.000Z',
+      }),
+    } as unknown as Env
+    expect(await fetchDoPosition(env, 'SOXL')).toEqual({
+      avgPrice: 124.95,
+      openedAt: '2026-04-20T00:00:00.000Z',
+      qty: 7,
+    })
+  })
+
+  it('DO 上 no position なら null', async () => {
+    const env = { SYMBOL_STATE: fakeSymbolStateNamespace(null) } as unknown as Env
+    expect(await fetchDoPosition(env, 'SOXL')).toBeNull()
+  })
+
+  it('SYMBOL_STATE 未 binding なら undefined (deriveOpenPosition へのフォールバック合図)', async () => {
+    const env = {} as Env
+    expect(await fetchDoPosition(env, 'SOXL')).toBeUndefined()
+  })
+})
+
 describe('renderSymbolTab — fill 詳細パネル + 保有区間 markArea の配線 (SSR smoke)', () => {
   const baseParams = {
     stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10,
@@ -257,19 +298,33 @@ describe('renderSymbolTab — fill 詳細パネル + 保有区間 markArea の�
     expect(html).toContain('"clientOrderId":"ord-sell-1"')
     // markArea 用の閉区間データ
     expect(html).toContain('"holdingSpans":[{"openTimestamp":"2026-06-01T14:05:00.000Z"')
-    // client 側の配線 (fill 詳細パネル + trades への逆リンク + markArea host)
-    expect(html).toContain('showFillDetail')
-    expect(html).toContain('/dashboard/trades?clientOrderId=')
-    expect(html).toContain('保有区間 (確定)')
-    expect(html).toContain('holdingAreaData')
+    // client 側の配線 (fill 詳細パネル + trades への逆リンク + markArea host)。
+    // これらは静的ファイル化された client script 側にある
+    // (#charts-symbol-redesign、html には <script src=...> 参照のみが乗る)。
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('showFillDetail')
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('/dashboard/trades?clientOrderId=')
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('保有区間 (確定)')
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('holdingAreaData')
   })
 
-  it('inline script が構文エラーなく parse できる (#462 系 regression)', () => {
+  // 旧: `__chartData` は実行系の bare <script> だった (safeJsonScript) ので、
+  // ここで抽出して new Function() し構文エラーを検出していた。#charts-symbol-
+  // redesign Phase C で `type="application/json"` の inert script に変えた
+  // (client 側銘柄切替の partial swap 後も同じ読み方で動くようにするため —
+  // innerHTML 経由で挿した実行系 <script> は再実行されないブラウザ仕様がある)。
+  // JS ではなく JSON になったので、検証も「有効な JSON として parse できるか」
+  // に変える。client script 本体 (SYMBOL_CHART_CLIENT_SCRIPT、静的ファイル
+  // 化されている実体) の構文検証は下の別テストで行う。
+  it('__chartData embed は type="application/json" の inert script で、エスケープ済みの有効な JSON として parse できる (#462 系 regression → JSON script 化)', () => {
     const html = renderSymbolTab(args())
-    const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
-    expect(blocks.length).toBeGreaterThan(0)
-    for (const code of blocks) {
-      expect(() => new Function(code)).not.toThrow()
-    }
+    const m = html.match(/<script type="application\/json" id="__chartData">([\s\S]*?)<\/script>/)
+    expect(m).not.toBeNull()
+    const parsed = JSON.parse(m![1]!) as { symbolChart: { markers: Array<{ clientOrderId: string | null }> } }
+    expect(parsed.symbolChart.markers[0]!.clientOrderId).toBe('ord-buy-1')
+    expect(parsed.symbolChart.markers[1]!.clientOrderId).toBe('ord-sell-1')
+  })
+
+  it('SYMBOL_CHART_CLIENT_SCRIPT (静的ファイル本体) は構文エラーなく parse できる (#462 系 regression)', () => {
+    expect(() => new Function(SYMBOL_CHART_CLIENT_SCRIPT)).not.toThrow()
   })
 })

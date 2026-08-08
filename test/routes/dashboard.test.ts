@@ -914,10 +914,11 @@ describe('deriveOpenPosition', () => {
     expect(deriveOpenPosition([])).toBe(null)
   })
 
-  it('BUY のみ → 現保有', () => {
+  it('BUY のみ → 現保有 (qty は直近 BUY fill の qty、#charts-symbol-redesign Phase C)', () => {
     expect(deriveOpenPosition([buy('2026-04-23', 100)])).toEqual({
       avgPrice: 100,
       openedAt: '2026-04-23',
+      qty: 1,
     })
   })
 
@@ -925,9 +926,14 @@ describe('deriveOpenPosition', () => {
     expect(deriveOpenPosition([buy('2026-04-23', 100), sell('2026-04-24', 105, 5)])).toBe(null)
   })
 
-  it('BUY → SELL → BUY → 直近 BUY が現保有', () => {
+  it('BUY → SELL → BUY → 直近 BUY が現保有 (qty も直近 BUY 由来)', () => {
     const ms = [buy('2026-04-20', 100), sell('2026-04-21', 95, -5), buy('2026-04-23', 110)]
-    expect(deriveOpenPosition(ms)).toEqual({ avgPrice: 110, openedAt: '2026-04-23' })
+    expect(deriveOpenPosition(ms)).toEqual({ avgPrice: 110, openedAt: '2026-04-23', qty: 1 })
+  })
+
+  it('直近 BUY fill の qty が null なら position.qty も null', () => {
+    const ms = [{ timestamp: '2026-04-23', side: 'BUY' as const, price: 100, qty: null, realizedPnl: null }]
+    expect(deriveOpenPosition(ms)).toEqual({ avgPrice: 100, openedAt: '2026-04-23', qty: null })
   })
 
   it('SELL のみ (POC で発生しないが defensively) → null', () => {
@@ -1832,13 +1838,26 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
 })
 
 import {
+  parseSymbolView,
   renderBuyabilityPanel,
   renderChartDecisionTrace,
+  renderConclusionValue,
   renderDecisionPlotCaption,
+  renderEffectiveRuleChips,
+  renderJudgmentSummaryGrid,
+  renderLatestDecisionValue,
+  renderPositionSummaryValue,
   renderSymbolTab,
+  renderSymbolViewSubnav,
   type ChartsBodySymbol,
+  type DecisionRow,
   type SymbolChartDecision,
 } from '../../src/routes/dashboard'
+// 銘柄チャートタブの client 側初期化スクリプトは静的ファイル化されている
+// (#charts-symbol-redesign)。`renderSymbolTab` の戻り値 (html) には
+// `<script src=...>` の参照だけが乗るので、JS 内の文字列 (series 名 /
+// click handler 名等) を検証するテストはこの定数を直接見る。
+import { SYMBOL_CHART_CLIENT_SCRIPT } from '../../src/routes/dashboard/charts/symbolChartScript'
 import { buildBuyabilityView, type EvalIndicatorPoint } from '../../src/trading/strategy/entryDistance'
 import {
   TEST_DEFAULT_RULE,
@@ -1966,10 +1985,12 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
         ladderHtml: '<div>LADDER_EMBED_MARKER</div>',
       },
     ]))
-    expect(html).toContain("type: 'scatter'")
-    expect(html).toContain("name: '判定'")
+    // scatter series / click handler は静的ファイル化された client script 側
+    // (#charts-symbol-redesign)。html はその参照 (<script src>) だけを持つ。
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("type: 'scatter'")
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("name: '判定'")
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('showDecisionTrace')
     expect(html).toContain('decision-trace-panel')
-    expect(html).toContain('showDecisionTrace')
     // 各点の ladderHtml が payload に埋め込まれている (safeJsonScript で < は
     // < に escape されるが marker テキストは残る)
     expect(html).toContain('LADDER_EMBED_MARKER')
@@ -1996,8 +2017,9 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     const html = renderSymbolTab(symbolArgs([], view))
     expect(html).toContain('入場まで') // パネル headline
     // 入場ライン独立線は廃止 → 押し目ゾーン端に距離ラベルを載せる
-    expect(html).toContain("bandEdgeLabel('押し目上端'")
-    expect(html).toContain("bandEdgeLabel('押し目下端'")
+    // (bandEdgeLabel の呼び出しは静的ファイル化された client script 側)
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("bandEdgeLabel('押し目上端'")
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("bandEdgeLabel('押し目下端'")
     expect(html).not.toContain('"entryLine"') // 独立 entryLine payload は無い
   })
 
@@ -2086,6 +2108,21 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html.indexOf('id="symbol-chart"')).toBeGreaterThan(pinIdx)
   })
 
+  // client 側初期化スクリプトの静的ファイル化 (#charts-symbol-redesign)。
+  // 巨大インライン <script> (旧: 約1200行/70KB) を外部 route に外出しした
+  // ので、html には <script src> 参照のみが ECharts CDN の後に defer で乗る
+  // ことを確認する (window.__chartData を読む実行順序を壊さない)。
+  it('client script は外部ファイル参照 (<script src> + defer) で、ECharts CDN の後に置く', () => {
+    const html = renderSymbolTab(symbolArgs([]))
+    const echartsIdx = html.indexOf('cdn.jsdelivr.net/npm/echarts')
+    const scriptTagIdx = html.indexOf('<script src="/dashboard/static/symbol-chart.js"')
+    expect(echartsIdx).toBeGreaterThanOrEqual(0)
+    expect(scriptTagIdx).toBeGreaterThan(echartsIdx)
+    expect(html.slice(scriptTagIdx, scriptTagIdx + 80)).toContain('defer')
+    // 旧インライン初期化コードそのものはもう SSR html に埋め込まれない
+    expect(html).not.toContain("document.addEventListener('DOMContentLoaded'")
+  })
+
   it('銘柄レールの link は zoom 範囲 (from/to) を URL で伝搬する', () => {
     const html = renderSymbolTab({
       ...symbolArgs([]),
@@ -2108,7 +2145,285 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     const html = renderSymbolTab(symbolArgs([], view))
     expect(html).toContain('"projection"')
     expect(html).toContain('"slopePerStep"')
-    expect(html).toContain('参考 価格外挿') // 外挿線 series 名 (配線確認)
+    // 外挿線 series 名 (配線確認)。series 定義は静的ファイル化された client
+    // script 側にある (#charts-symbol-redesign)。
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('参考 価格外挿')
+  })
+})
+
+describe('parseSymbolView (#charts-symbol-redesign)', () => {
+  it('detail 指定時のみ detail、それ以外は chart 既定', () => {
+    expect(parseSymbolView('detail')).toBe('detail')
+    expect(parseSymbolView('chart')).toBe('chart')
+    expect(parseSymbolView(undefined)).toBe('chart')
+    expect(parseSymbolView('')).toBe('chart')
+    expect(parseSymbolView('xss')).toBe('chart')
+  })
+})
+
+describe('renderSymbolViewSubnav (#charts-symbol-redesign)', () => {
+  it('active な view は span、非 active は symbol= を維持した <a> を出す', () => {
+    const html = renderSymbolViewSubnav('TQQQ', 'chart')
+    expect(html).toContain('<span class="subnav-link active">チャート</span>')
+    expect(html).toContain(
+      '<a class="subnav-link" href="/dashboard/charts?tab=symbol&symbol=TQQQ&view=detail">履歴・設定</a>',
+    )
+  })
+
+  it('detail が active なら履歴・設定側が span、チャート側が symbol= のみの <a>', () => {
+    const html = renderSymbolViewSubnav('SOXL', 'detail')
+    expect(html).toContain('<span class="subnav-link active">履歴・設定</span>')
+    expect(html).toContain('<a class="subnav-link" href="/dashboard/charts?tab=symbol&symbol=SOXL">チャート</a>')
+  })
+})
+
+describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
+  const baseParams: StrategyParamsSnapshot = {
+    stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10,
+    pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
+    requireAboveSma50: true, kAtr: 2,
+    maxSma50DeviationPct: 0.6, maxAtrRatio: 1.5,
+    maxStopToTpRatio: 2.0,
+    reentryMinAtrBelowLastExit: 1.0, reentryGuardBusinessDays: 3,
+  }
+
+  describe('renderConclusionValue', () => {
+    it('保有中: 現在値起点の stop まで / TP まで距離', () => {
+      const { value, color } = renderConclusionValue(
+        null,
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z' },
+        baseParams,
+        104, // 現在値
+      )
+      // stop=96 → (96-104)/104=-7.69%、TP=107 → (107-104)/104=+2.88%
+      expect(value).toContain('stop まで -7.7%')
+      expect(value).toContain('TP まで +2.9%')
+      expect(color).toBe('#3a3a3c')
+    })
+
+    it('未保有 + buyable: 入場条件充足の結論', () => {
+      // TEST_DEFAULT_RULE: 押し目帯 = high20d(100)×[0.94, 0.97] = [94, 97]、
+      // price=95 は帯内 + sma50(90) 上 + return50d(0.12)≥0.08 で buyable。
+      const view = buildBuyabilityView(
+        [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 95 }) }],
+        TEST_DEFAULT_RULE,
+      )
+      const { value, color } = renderConclusionValue(view, null, baseParams, 95)
+      expect(value).toContain('入場条件 充足')
+      expect(color).toBe('#057a55')
+    })
+
+    it('未保有 + 価格まであと X%: ボトルネックゲート名を併記', () => {
+      const view = buildBuyabilityView(
+        [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 200 }) }],
+        TEST_DEFAULT_RULE,
+      )
+      const { value, color } = renderConclusionValue(view, null, baseParams, 200)
+      expect(value).toContain('入場まで あと 価格')
+      expect(color).toBe('#b25000')
+    })
+
+    it('buyability null: 判定データなし', () => {
+      const { value, color } = renderConclusionValue(null, null, baseParams, null)
+      expect(value).toBe('判定データなし')
+      expect(color).toBe('#86868b')
+    })
+  })
+
+  describe('renderPositionSummaryValue', () => {
+    it('未保有なら 未保有 の 1 語', () => {
+      const html = renderPositionSummaryValue(null, baseParams, null, null)
+      expect(html).toContain('未保有')
+    })
+
+    it('保有中: 平均取得 / 含み損益% / stop・TP 価格を出す (position.qty 欠測時は保有数量行を出さない)', () => {
+      const html = renderPositionSummaryValue(
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z' },
+        baseParams,
+        110,
+        null,
+      )
+      expect(html).toContain('平均取得 $100.00')
+      expect(html).toContain('+10.0%') // 含み益
+      expect(html).toContain('class="ok"')
+      expect(html).toContain('stop $96.00')
+      expect(html).toContain('TP $107.00')
+      expect(html).not.toContain('保有数量')
+    })
+
+    it('position.qty があれば 保有数量 / 含み損益 $ を追加表示する (#charts-symbol-redesign Phase C)', () => {
+      const html = renderPositionSummaryValue(
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z', qty: 5 },
+        baseParams,
+        110,
+        null,
+      )
+      // (110 - 100) * 5 = +50.00
+      expect(html).toContain('保有数量 5')
+      expect(html).toContain('含み損益 $')
+      expect(html).toContain('+$50.00')
+      expect(html).toContain('class="ok"')
+    })
+
+    it('position.qty があっても含み損なら含み損益 $ を err クラス・マイナス表記で出す', () => {
+      const html = renderPositionSummaryValue(
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z', qty: 5 },
+        baseParams,
+        90,
+        null,
+      )
+      // (90 - 100) * 5 = -50.00
+      expect(html).toContain('-$50.00')
+    })
+
+    it('position.qty が 0 以下 / null なら保有数量行を出さない (invalid/欠測を静かに無視)', () => {
+      const htmlNull = renderPositionSummaryValue(
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z', qty: null },
+        baseParams,
+        110,
+        null,
+      )
+      expect(htmlNull).not.toContain('保有数量')
+      const htmlZero = renderPositionSummaryValue(
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z', qty: 0 },
+        baseParams,
+        110,
+        null,
+      )
+      expect(htmlZero).not.toContain('保有数量')
+    })
+
+    it('含み損なら err クラスで色分け', () => {
+      const html = renderPositionSummaryValue(
+        { avgPrice: 100, openedAt: '2026-06-01T00:00:00.000Z' },
+        baseParams,
+        90,
+        null,
+      )
+      expect(html).toContain('class="err"')
+      expect(html).toContain('-10.0%')
+    })
+  })
+
+  describe('renderLatestDecisionValue', () => {
+    function decisionRow(overrides: Partial<DecisionRow> = {}): DecisionRow {
+      return {
+        id: 1, timestamp: '2026-06-06T14:00:00.000Z', requestId: null, symbol: 'TQQQ',
+        decision: 'SKIP', reason: 'overextension', price: 100, indicatorsJson: null,
+        clientOrderId: null, traceJson: null, filledPrice: null, filledQty: null,
+        realizedPnl: null, brokerStatus: null,
+        ...overrides,
+      }
+    }
+
+    it('行が無ければ 判定履歴なし', () => {
+      expect(renderLatestDecisionValue(undefined)).toContain('判定履歴なし')
+      expect(renderLatestDecisionValue([])).toContain('判定履歴なし')
+    })
+
+    it('先頭行 (最新) の decision + 日本語併記 + reason を出す', () => {
+      const html = renderLatestDecisionValue([
+        decisionRow({ decision: 'SKIP', reason: 'overextension' }),
+        decisionRow({ id: 2, decision: 'BUY' }),
+      ])
+      // rows[0] を採用 (呼び出し側は id DESC で渡す契約)
+      expect(html).toContain('SKIP (見送り)')
+      expect(html).not.toContain('BUY (買い)')
+    })
+  })
+
+  describe('renderEffectiveRuleChips', () => {
+    it('stop / TP / time-stop を effective 値の chip で出す', () => {
+      const html = renderEffectiveRuleChips(baseParams)
+      expect(html).toContain('class="chip">stop -4.0%</span>')
+      expect(html).toContain('class="chip">TP +7.0%</span>')
+      expect(html).toContain('class="chip">time-stop 10営業日</span>')
+    })
+  })
+})
+
+describe('renderSymbolTab — fold 内サマリ / サブタブ分離 (#charts-symbol-redesign)', () => {
+  const baseParams: StrategyParamsSnapshot = {
+    stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10,
+    pullbackMax: -0.03, pullbackMin: -0.15, minReturn50d: 0,
+    requireAboveSma50: true, kAtr: 2,
+    maxSma50DeviationPct: 0.6, maxAtrRatio: 1.5,
+    maxStopToTpRatio: 2.0,
+    reentryMinAtrBelowLastExit: 1.0, reentryGuardBusinessDays: 3,
+  }
+  const decisionRows: DecisionRow[] = [
+    {
+      id: 2, timestamp: '2026-06-06T14:00:00.000Z', requestId: null, symbol: 'TQQQ',
+      decision: 'SKIP', reason: 'overextension', price: 80, indicatorsJson: null,
+      clientOrderId: null, traceJson: null, filledPrice: null, filledQty: null,
+      realizedPnl: null, brokerStatus: null,
+    },
+  ]
+  function baseArgs(overrides: Partial<ChartsBodySymbol> = {}): ChartsBodySymbol {
+    return {
+      tab: 'symbol',
+      focusSymbol: 'TQQQ',
+      symbolChart: {
+        symbol: 'TQQQ',
+        points: [{ timestamp: '2026-06-06T14:00:00.000Z', price: 80, sma50: 70, high20d: 90, low20d: 60 }],
+        markers: [], position: null,
+        rules: { pullbackMax: -0.03, pullbackMin: -0.15, stopPct: -0.04, takeProfitPct: 0.07, timeStopDays: 10 },
+        trendLine: null, intradayBars: [],
+        latestCronPrice: 80, latestCronTimestamp: '2026-06-06T14:00:00.000Z',
+        decisions: [],
+      },
+      availableSymbols: ['TQQQ'],
+      strategyParams: baseParams,
+      zoom: null,
+      buyability: null,
+      decisionRows,
+      ...overrides,
+    }
+  }
+
+  it('既定 (view 未指定 / chart): サブナビはチャートが active、判断サマリ grid を出し、判定履歴/戦略パラメータは出さない', () => {
+    const html = renderSymbolTab(baseArgs())
+    expect(html).toContain('<span class="subnav-link active">チャート</span>')
+    expect(html).toContain('href="/dashboard/charts?tab=symbol&symbol=TQQQ&view=detail">履歴・設定</a>')
+    expect(html).toContain('class="judgment-grid"')
+    expect(html).toContain('未保有') // 保有状態カード (position=null)
+    expect(html).toContain('SKIP (見送り)') // 直近判定カード
+    expect(html).not.toContain('判定履歴') // renderSymbolDecisionHistory の見出し
+    expect(html).not.toContain('戦略パラメータ (PullbackUptrendStrategy')
+    // 判定トレースパネルは初期 display:none (プレースホルダ文言は出さない)
+    expect(html).toContain('id="decision-trace-panel" class="reason-panel" style="margin-top:10px;display:none"')
+    expect(html).not.toContain('判定点 (●) をクリックすると')
+    // id="symbol-main" は Phase C の swap 対象 anchor
+    expect(html).toContain('id="symbol-main"')
+  })
+
+  it('view=detail: サブナビは履歴・設定が active、判定履歴 + 戦略パラメータを出しチャート/判断サマリは出さない', () => {
+    const html = renderSymbolTab(baseArgs({ view: 'detail' }))
+    expect(html).toContain('<span class="subnav-link active">履歴・設定</span>')
+    expect(html).toContain('href="/dashboard/charts?tab=symbol&symbol=TQQQ">チャート</a>')
+    expect(html).toContain('判定履歴') // renderSymbolDecisionHistory
+    expect(html).toContain('戦略パラメータ (PullbackUptrendStrategy')
+    expect(html).not.toContain('class="judgment-grid"')
+    expect(html).not.toContain('id="symbol-chart"')
+    expect(html).not.toContain('id="decision-trace-panel"')
+  })
+
+  it('view=chart: 「入場まで」フルパネルは既定で閉じた details に入る', () => {
+    const view = buildBuyabilityView(
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 99 }) }],
+      TEST_DEFAULT_RULE,
+    )
+    const html = renderSymbolTab(baseArgs({ buyability: view }))
+    const detailsIdx = html.indexOf('<details style="margin-top:10px">')
+    const summaryIdx = html.indexOf('入場まで — ゲートチェックリスト・距離推移')
+    const gridIdx = html.indexOf('class="judgment-grid"')
+    expect(detailsIdx).toBeGreaterThanOrEqual(0)
+    expect(summaryIdx).toBeGreaterThan(detailsIdx)
+    // 判断サマリ grid は details より前 (fold 上部)
+    expect(gridIdx).toBeGreaterThanOrEqual(0)
+    expect(gridIdx).toBeLessThan(detailsIdx)
+    // details に open は付かない (既定で閉じる)
+    expect(html).not.toContain('<details open style="margin-top:10px">')
   })
 })
 
