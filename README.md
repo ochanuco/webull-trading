@@ -34,7 +34,7 @@ pnpm dev            # wrangler dev (ローカル D1 自動作成)
 ## 開発の約束
 
 - ブランチは `dev/<topic>`。`main` 直接編集は禁止
-- merge 方式は ruleset で強制済み — `main` は merge commit、`production` は squash
+- merge 方式は repo 設定で強制済み — `main` / `production` とも merge commit のみ
 - commit は Conventional Commits (履歴の可読性のため。採番には使っていない)
 - 発注経路は **Strategy → Risk → Execution** の一方向。Risk を迂回する導線は作らない
 
