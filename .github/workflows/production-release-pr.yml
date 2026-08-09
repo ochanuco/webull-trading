@@ -1,12 +1,12 @@
 name: production release PR
 
-# release-please が publish した Release を production へ昇格させる PR を作る。
-# main への merge では発火しない — 「リリースを切る」= release-please の release PR
-# を merge した時点で初めて昇格 PR が出る。
-# workflow_dispatch は最新 Release に対して手動で作り直したいとき用。
+# main の内容を production へ昇格させる PR を作る・更新する。
+# main への push ごとに release/production を main の snapshot で作り直すので、
+# 昇格 PR は常に main 先端を反映する。「リリースする」判断 = この PR を merge する。
+# workflow_dispatch は手動で作り直したいとき用。
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +28,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # default GITHUB_TOKEN で作った PR は後続の pull_request workflow を発火
+      # させず approval 待ちになり得る。また CODEOWNER が自分自身なので、App bot
+      # を PR 作成者にして self-approve 制限を回避する。
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -36,25 +39,6 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-
-      - name: Resolve release tag
-        id: release
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          EVENT_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          tag="$EVENT_TAG"
-          if [ -z "$tag" ]; then
-            # workflow_dispatch: 最新の (draft でない) Release を対象にする。
-            tag="$(gh release list --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName // empty')"
-          fi
-          if [ -z "$tag" ]; then
-            echo "::error::No published release found. Merge the release-please PR first." >&2
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "url=$(gh release view "$tag" --json url --jq .url)" >> "$GITHUB_OUTPUT"
-          echo "Promoting $tag"
 
       - name: Ensure production branch exists
         env:
@@ -71,9 +55,9 @@ jobs:
           fi
 
       - name: Update release branch
+        id: release_branch
         env:
           PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           remote_release_sha="$(git ls-remote --heads "$remote" release/production | cut -f1)"
@@ -82,9 +66,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # Fetch production so we can build release/production on top of it,
-          # and the release tag which is the content we promote.
+          # and main which is the content we promote.
           git fetch --no-tags "$remote" production:refs/remotes/origin/production
-          git fetch --no-tags "$remote" "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git fetch --no-tags "$remote" main:refs/remotes/origin/main
+
+          main_sha="$(git rev-parse origin/main)"
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
 
           # Snapshot main's tree wholesale on top of production (no 3-way merge).
           # The release intent is "production := current main content", and release
@@ -96,14 +83,12 @@ jobs:
           # conflicts blocked release PR creation. read-tree sidesteps merging
           # entirely: the index becomes exactly main's tree, production history
           # stays linear with one release commit per deploy.
-          # 昇格する内容は **tag の tree**。main の先端ではない — release を切った
-          # 後に main へ入った commit を、そのリリース名で黙って本番に混ぜないため。
           git checkout -B release/production origin/production
-          git read-tree -u --reset "refs/tags/${RELEASE_TAG}"
+          git read-tree -u --reset "origin/main^{tree}"
           if git diff --cached --quiet; then
-            echo "::notice::No changes between production and ${RELEASE_TAG}; nothing to commit."
+            echo "::notice::No changes between production and main; nothing to commit."
           else
-            git commit -m "release: sync production to ${RELEASE_TAG}"
+            git commit -m "release: sync production to main@${main_sha}"
           fi
 
           push_with_retry() {
@@ -139,7 +124,7 @@ jobs:
 
           ahead_count="$(git rev-list --count origin/production..release/production)"
           if [ "$ahead_count" = "0" ]; then
-            echo "::notice::production is already up to date with the release tag; skipping production release PR creation."
+            echo "::notice::production is already up to date with main; skipping production release PR creation."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
@@ -150,30 +135,44 @@ jobs:
         if: steps.production_delta.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_URL: ${{ steps.release.outputs.url }}
+          MAIN_SHA: ${{ steps.release_branch.outputs.main_sha }}
         run: |
-          # リリースノート本体は GitHub Release 側 (release-please 生成) が正。
-          # ここでは重複させず抜粋とリンクだけ置く。
-          notes="$(gh release view "$RELEASE_TAG" --json body --jq .body | head -c 4000)"
-          if [ -z "$notes" ]; then
-            notes="(リリースノートが空です)"
+          # 前回昇格点 = production の tree と一致する main 上の commit。
+          # production の各コミットは main のどこかの tree の snapshot なので、
+          # first-parent を遡って tree が一致した commit が前回昇格した main 位置。
+          production_tree="$(git rev-parse 'origin/production^{tree}')"
+          base_sha=""
+          for sha in $(git rev-list --first-parent origin/main); do
+            if [ "$(git rev-parse "${sha}^{tree}")" = "$production_tree" ]; then
+              base_sha="$sha"
+              break
+            fi
+          done
+
+          if [ -n "$base_sha" ]; then
+            # main は merge commit のみなので first-parent の merge subject から
+            # PR 番号を列挙できる (direct push は subject をそのまま載せる)。
+            changes="$(git log --first-parent --format='- %s' "${base_sha}..origin/main" \
+              | sed -E 's/- Merge pull request (#[0-9]+) from .*/- \1/')"
+            if [ -z "$changes" ]; then
+              changes="(差分コミットなし — tree 差分のみ)"
+            fi
+          else
+            changes="(前回昇格点を main 上で特定できなかったため一覧は省略。diff を確認してください)"
           fi
 
           {
             echo "## 概要"
             echo
-            echo "\`$RELEASE_TAG\` の内容を \`production\` に昇格するリリースPRです。"
+            echo "\`main\` (\`${MAIN_SHA}\`) の内容を \`production\` に昇格するリリースPRです。"
             echo
-            echo "昇格する tree は **tag \`$RELEASE_TAG\` の時点**であり、その後 \`main\` に入った変更は含みません。"
+            echo "\`main\` に新しい PR が merge されるたびに、このPRは main 先端の snapshot に自動更新されます。merge 時点の diff がそのまま本番に deploy される内容です。"
             echo
             echo "このPRは本番昇格の承認ゲートであり、コードの再レビュー用ではありません。通常のコードレビューとCIは \`main\` に入る通常PRで完了済みです。"
             echo
-            echo "## リリースノート"
+            echo "## 含まれる変更"
             echo
-            echo "$RELEASE_URL"
-            echo
-            echo "$notes"
+            echo "$changes"
             echo
             echo "## Merge前チェック"
             echo
@@ -193,14 +192,13 @@ jobs:
             --json number \
             --jq '.[0].number // empty')"
 
-          # PR がすでに開いている間に次の Release が出ることがある (昇格前に
-          # もう 1 本切った等)。body だけ更新すると **タイトルが古い版を指したまま**
-          # になり、承認する側が別物を見て merge しかねないので title も揃える。
-          title="🚀リリース $RELEASE_TAG → production"
+          # title は初回作成時の日時のまま維持する (「いつから昇格待ちか」を表す)。
+          # 内容は body と diff が常に main 先端を示すので title 更新は不要。
           if [ -n "$existing" ]; then
-            gh pr edit "$existing" --title "$title" --body-file release-pr-body.md
+            gh pr edit "$existing" --body-file release-pr-body.md
             echo "Updated PR #$existing"
           else
+            title="🚀リリース $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S')"
             gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
           fi
 
