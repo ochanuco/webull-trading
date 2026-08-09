@@ -15,7 +15,7 @@ production で Pullback / BreakoutMomentum 戦略が 15 分 cron で**実発注�
 | [docs/configuration.md](docs/configuration.md) | `global_config` / `symbol_config` の全パラメタと既定値 |
 | [docs/endpoints.md](docs/endpoints.md) | HTTP endpoint 一覧と認証 |
 | [docs/db-operations.md](docs/db-operations.md) | D1 の初回セットアップ・schema 変更・運用 SQL レシピ |
-| [docs/production-cd.md](docs/production-cd.md) | リリースフロー (release-please → 昇格 PR → Workers Builds) |
+| [docs/production-cd.md](docs/production-cd.md) | リリースフロー (main → 昇格 PR → Workers Builds) |
 | [docs/production-deployment.md](docs/production-deployment.md) | 本番投入の手順とロールバック |
 | [docs/env-separation.md](docs/env-separation.md) | dev / staging / production の分離方針 |
 | [docs/review-queries.md](docs/review-queries.md) | 障害・振り返り用のクエリ集と運用 runbook |
@@ -35,7 +35,7 @@ pnpm dev            # wrangler dev (ローカル D1 自動作成)
 
 - ブランチは `dev/<topic>`。`main` 直接編集は禁止
 - merge 方式は ruleset で強制済み — `main` は merge commit、`production` は squash
-- commit は Conventional Commits (release-please が採番と CHANGELOG 生成に使う)
+- commit は Conventional Commits (履歴の可読性のため。採番には使っていない)
 - 発注経路は **Strategy → Risk → Execution** の一方向。Risk を迂回する導線は作らない
 
 ## ライセンスと免責

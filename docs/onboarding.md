@@ -105,7 +105,7 @@ deploy は Cloudflare Workers Builds の CD 任せで、手動 `wrangler deploy`
 | `main` | staging | `pnpm deploy:staging` |
 | `production` | production | `pnpm deploy:production` |
 
-リリースは release-please が切り、その GitHub Release を起点に production 昇格 PR が作られる。詳細は [`production-cd.md`](production-cd.md)、初回の本番投入手順は [`production-deployment.md`](production-deployment.md)。
+リリースは `main` push ごとに自動更新される production 昇格 PR を merge するだけ。詳細は [`production-cd.md`](production-cd.md)、初回の本番投入手順は [`production-deployment.md`](production-deployment.md)。
 
 ## 迷ったら
 
