@@ -1,5 +1,7 @@
 # Changelog
 
+> v1.6.0 を最後に release-please を撤去したため、このファイルは更新されない (凍結)。以降のリリース単位の変更は production 昇格 PR と `production` branch のコミット履歴を参照。
+
 ## [1.6.0](https://github.com/ochanuco/webull-trading/compare/v1.5.0...v1.6.0) (2026-08-08)
 
 
