@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/ochanuco/webull-trading/compare/v1.5.0...v1.6.0) (2026-08-08)
+
+
+### Features
+
+* redesign quality tab around screenshot card and per-symbol stats ([8277337](https://github.com/ochanuco/webull-trading/commit/827733740151669b107555f6571bcc63bc8c523b))
+* redesign quality tab around screenshot card and per-symbol stats ([89e4dc3](https://github.com/ochanuco/webull-trading/commit/89e4dc3876722d75ac7489c2fc7ca6e230cf63f8))
+
+
+### Bug Fixes
+
+* compute expectancy over all trades and unfreeze quality test dates ([3b04d61](https://github.com/ochanuco/webull-trading/commit/3b04d61b8c4f34f4d20565662fa8a48858bacd12))
+
 ## [1.5.0](https://github.com/ochanuco/webull-trading/compare/v1.4.4...v1.5.0) (2026-08-08)
 
 

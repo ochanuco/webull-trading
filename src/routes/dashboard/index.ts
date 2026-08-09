@@ -54,7 +54,7 @@ import { WebullAuth } from '../../infrastructure/webull/WebullAuth'
 import { WebullTokenClient } from '../../infrastructure/webull/WebullTokenClient'
 import { WebullTokenStateClient } from '../../trading/state/WebullTokenStateClient'
 import type { WebullTokenState } from '../../trading/state/WebullTokenStateDO'
-import { clampLimit, jsonPretty, messageOf, parseCursor, unavailable } from './shared'
+import { clampLimit, fmtJst, jsonPretty, messageOf, parseCursor, unavailable } from './shared'
 import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderDiagSubnav, renderLayout } from './layout'
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
@@ -76,13 +76,13 @@ import { configBody } from './config'
 import { cronBody, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
-import { type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
+import { type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseQualityPeriod, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
 import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
 import { cachedDashboardJson } from './charts/dashboardBarsCache'
 import { SYMBOL_CHART_CLIENT_SCRIPT, SYMBOL_CHART_CLIENT_SCRIPT_ETAG } from './charts/symbolChartScript'
 import { type EquityTradeMarker, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers } from './charts/equity'
 import { loadBenchmarkSeries } from './charts/benchmark'
-import { computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
+import { computeSymbolStats, computeTradeStats, filterTradePnlsByPeriod, loadSkipReasonBreakdown, loadTradePnls } from './charts/quality'
 import { chartsBody, renderSymbolMainInner, renderSymbolTab } from './charts/symbol'
 import { type SymbolsListFilter, findSymbolConfigForView, loadAllSymbolConfigRows, symbolFormBody, symbolMapEditorBody, symbolsListBody } from './symbols'
 import { type EventsEarningsFormEcho, type EventsMacroFormEcho, eventsBody, eventsDisplayRange, loadEarningsInRange, renderEventsWithError, renderEventsWithNotice, validateEarningsForm, validateMacroForm, writeEventsAuditLog } from './events'
@@ -96,7 +96,8 @@ export type { EquityRange } from './portfolio'
 export { localizeReason, renderChartDecisionTrace } from './cron'
 export type { DecisionRow } from './cron'
 export { renderAlertFilterPills } from './alerts'
-export { DEFAULT_ZOOM_WINDOW_MS, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseSymbolView, renderZoomPresetButtons } from './charts/shared'
+export { DEFAULT_ZOOM_WINDOW_MS, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseQualityPeriod, parseSymbolView, renderZoomPresetButtons } from './charts/shared'
+export type { QualityPeriod } from './charts/shared'
 export type { ChartsBodySymbol, ChartsTab, StrategyParamsSnapshot, SymbolPolicySummary, SymbolTabView } from './charts/shared'
 export { aggregateDailyCloses, anchorJstMidnight, computeChartWindowDays, computeLinearRegressionLine, computeRollingSma, densifyHorizontalLine, densifyTrendLine, deriveOpenPosition, extractSma50, fetchYahooBarsForChart, loadSymbolChart, mergeYahooAndCronPoints, pairClosedTrades, pickDefaultSymbol, resolveFillSide, selectLatestCronSnapshot } from './charts/loaders'
 export type { ClosedTradeSpan, OhlcBar, PivotPoint, SymbolChartData, SymbolChartDecision, SymbolChartMarker, SymbolChartPoint, SymbolChartPosition, SymbolChartRules, TrendLineSegment } from './charts/loaders'
@@ -104,8 +105,19 @@ export { buildOverviewChartData, computeEquitySeries, computeMonthlyReturns, com
 export type { EquityPoint, EquityTradeMarker, MonthlyReturn, OverviewChartData, PeriodReturn } from './charts/equity'
 export { EQUITY_BENCHMARK_SYMBOL, loadBenchmarkSeries, toBenchmarkReturns } from './charts/benchmark'
 export type { BenchmarkPoint } from './charts/benchmark'
-export { aggregateDecisionRows, computePnlHistogram, computeTradeStats, loadDecisionBreakdown, loadTradePnls } from './charts/quality'
-export type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './charts/quality'
+export {
+  SKIP_REASON_CATEGORIES,
+  aggregateSkipReasonRows,
+  categorizeSkipReason,
+  computeSymbolStats,
+  computeTradeStats,
+  filterTradePnlsByPeriod,
+  loadSkipReasonBreakdown,
+  loadTradePnls,
+  renderStatsCard,
+  renderSymbolTable,
+} from './charts/quality'
+export type { SkipReasonBreakdownPoint, SkipReasonCategoryKey, SymbolStat, TradeStats, TradePnlRow } from './charts/quality'
 export { prevDailyClose, renderAllocationLine, renderBuyabilityPanel, renderConclusionValue, renderDecisionPlotCaption, renderEffectiveRuleChips, renderJudgmentSummaryGrid, renderLatestDecisionValue, renderPairRegimeLine, renderPositionSummaryValue, renderPriceHeader, renderStrategyParamsPanel, renderSymbolPolicyLine, renderSymbolTab, renderSymbolViewSubnav } from './charts/symbol'
 export type { BuyabilityPanelContext } from './charts/symbol'
 export { assignPairColors, computeBudgetUsage, orderRowsByPair, pairRoles, renderSymbolRoleCell, symbolMapEditorBody } from './symbols'
@@ -560,20 +572,24 @@ export const dashboard = new Hono<DashboardBindings>()
         )
       }
       if (tab === 'quality') {
-        const [decisions, pnls] = await Promise.all([
-          loadDecisionBreakdown(c.env.DB),
+        const period = parseQualityPeriod(c.req.query('period'))
+        const [skipBreakdown, allTradeRows] = await Promise.all([
+          loadSkipReasonBreakdown(c.env.DB),
           loadTradePnls(c.env.DB),
         ])
+        const filteredRows = filterTradePnlsByPeriod(allTradeRows, period)
         return c.html(
           renderLayout(
             c,
             'チャート',
             chartsBody({
               tab,
-              decisions,
-              pnls,
-              stats: computeTradeStats(pnls),
-              histogram: computePnlHistogram(pnls),
+              period,
+              asOfJst: fmtJst(new Date()),
+              hasTradeData: allTradeRows.length > 0,
+              stats: computeTradeStats(filteredRows.map((r) => r.realizedPnl)),
+              symbolStats: computeSymbolStats(filteredRows),
+              skipBreakdown,
             }),
             chartsPageSubnav(tab),
           ),

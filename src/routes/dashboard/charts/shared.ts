@@ -7,7 +7,7 @@ import type { SymbolAllocation } from '../../../trading/strategy/conditionalAllo
 import type { EquityPoint, EquityTradeMarker, MonthlyReturn, PeriodReturn } from './equity'
 import type { BenchmarkPoint } from './benchmark'
 import type { SymbolChartData } from './loaders'
-import type { DecisionBreakdownPoint, PnlHistogramBin, TradeStats } from './quality'
+import type { SkipReasonBreakdownPoint, SymbolStat, TradeStats } from './quality'
 import type { DecisionRow } from '../cron'
 import { esc } from '../shared'
 
@@ -52,6 +52,23 @@ export function parseSymbolView(value: string | undefined): SymbolTabView {
   return value === 'detail' ? 'detail' : 'chart'
 }
 
+/**
+ * 成績タブの期間切替 (#quality-redesign)。SSR リンク (pill) で切り替え、
+ * ページ再読込で反映する (client 側 tab 切替は無し)。
+ */
+export type QualityPeriod = '30d' | '90d' | 'all'
+
+export function parseQualityPeriod(value: string | undefined): QualityPeriod {
+  if (value === '30d' || value === '90d') return value
+  return 'all'
+}
+
+export const QUALITY_PERIOD_LABELS: Record<QualityPeriod, string> = {
+  '30d': '直近30日',
+  '90d': '直近90日',
+  all: '全期間',
+}
+
 export interface ChartsBodyOverview {
   tab: 'overview'
   equity: EquityPoint[]
@@ -73,10 +90,20 @@ export interface ChartsBodyOverview {
 
 export interface ChartsBodyQuality {
   tab: 'quality'
-  decisions: DecisionBreakdownPoint[]
-  pnls: number[]
+  period: QualityPeriod
+  /** カード見出しに出す as-of 時刻 (JST, `fmtJst(new Date())` で SSR 側が埋める)。 */
+  asOfJst: string
+  /**
+   * `?period=` フィルタ適用**前**の trade 件数があるか。false ならまだ実 fill が
+   * 一度も無い (= 選択期間の問題ではない) ので、成績カード/表/バー自体を出さない。
+   */
+  hasTradeData: boolean
+  /** 選択期間でフィルタ済みの統計。 */
   stats: TradeStats
-  histogram: PnlHistogramBin[]
+  /** 選択期間でフィルタ済みの銘柄別統計 (合計PnL 降順)。 */
+  symbolStats: SymbolStat[]
+  /** 直近90日固定 (`?period=` 非依存) の日次 SKIP 理由カテゴリ breakdown。 */
+  skipBreakdown: SkipReasonBreakdownPoint[]
 }
 
 /**
