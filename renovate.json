@@ -1,6 +1,32 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "schedule:weekly"
+  ],
+  "timezone": "Asia/Tokyo",
+  "packageRules": [
+    {
+      "description": "catch-all: tooling 系 (devDependencies / GitHub Actions / pnpm 本体) の non-major。packageRules は後勝ちなので、後続の dependencies ルールが prod を上書きする",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest"],
+      "groupName": "tooling deps (non-major)"
+    },
+    {
+      "description": "catch-all: tooling 系の major",
+      "matchUpdateTypes": ["major"],
+      "groupName": "tooling deps (major)"
+    },
+    {
+      "description": "Worker ランタイムで動く prod deps の non-major。実マネーが動くコードなので tooling と分けてレビューする",
+      "matchDepTypes": ["dependencies"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "runtime deps (non-major)"
+    },
+    {
+      "description": "prod deps の major。breaking change 前提で個別に判断する",
+      "matchDepTypes": ["dependencies"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "runtime deps (major)"
+    }
   ]
 }
