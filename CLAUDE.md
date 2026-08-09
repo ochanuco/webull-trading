@@ -22,7 +22,7 @@
 ## 非自明な慣習 (package.json / tsconfig.json 見れば分かる話は省略)
 
 - ブランチ名: `dev/<topic>` (例: `dev/poc-phase-2-trading`)。 `main` 直接編集禁止
-- **merge 方式は ruleset で強制済み — 選ぶ必要はない**: `main` は **merge commit のみ** (`gh pr merge --merge`)、`production` は **squash のみ** (`gh pr merge --squash`)。他方を指定すると GitHub 側で reject される
+- **merge 方式は repo 設定で強制済み — 選ぶ必要はない**: `main` / `production` とも **merge commit のみ** (`gh pr merge --merge`)。squash / rebase は無効化されている
 - worktree: `git gtr new dev/<topic>` で作成、`git gtr rm` で削除
 - PR title: Conventional Commits 形式 (POC 期は `POC Phase N: <概要> (issue #<n>)` を使っていた)
 - リリース: `main` push ごとに自動更新される昇格 PR (`release/production -> production`) を merge するだけ。tag / semver は使わない (詳細は `docs/production-cd.md`)

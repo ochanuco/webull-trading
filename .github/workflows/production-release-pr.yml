@@ -81,8 +81,8 @@ jobs:
           # time (add/add on files added after the base and later modified on
           # main, lockfile churn) — observed 2026-07-03 when 0037 + pnpm-lock
           # conflicts blocked release PR creation. read-tree sidesteps merging
-          # entirely: the index becomes exactly main's tree, production history
-          # stays linear with one release commit per deploy.
+          # entirely: the index becomes exactly main's tree, and each deploy is
+          # one snapshot commit merged into production.
           git checkout -B release/production origin/production
           git read-tree -u --reset "origin/main^{tree}"
           if git diff --cached --quiet; then
