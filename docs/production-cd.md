@@ -106,16 +106,13 @@ Required checks:
 
 ## Merge 方式
 
-ブランチごとに ruleset の `pull_request.allowed_merge_methods` で**強制**している。手で選ばない (選べない)。
+repo 設定で **merge commit のみ**を許可している (squash / rebase は無効)。`main` も `production` も merge commit で merge する。
 
-| 対象 | 方式 | 理由 |
-|---|---|---|
-| `main` | **merge commit のみ** | フィーチャーブランチの履歴を残す (squash は並列開発でコンフリクト解決や revert の手掛かりを失う) |
-| `production` | **squash のみ** | `release/production` は機械生成の単一コミットブランチ。1 リリース = production の 1 コミットを保ち、ロールバック先を一意にする。`required_linear_history` とも整合 |
+`production` は以前 squash-only + `required_linear_history` だったが、`release/production` が機械生成の単一 snapshot コミットになったため squash に意味がなくなり、2026-08-09 に merge commit へ統一した。1 リリース = 昇格 PR の merge commit 1 つ (親に snapshot コミットがぶら下がる) で、ロールバック先の一意性は保たれる。
 
 ## Rollback
 
-ロールバックの参照点は `production` branch のコミット。1 リリース = 1 squash コミットなので、戻したいリリースの commit を checkout した tree を `production` に流し直せば戻せる (workflow の read-tree と同じ要領で snapshot コミットを作り PR する)。Cloudflare 側でも [versions rollback](https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/) が使えるが、D1 schema 変更を跨ぐ場合は不可。
+ロールバックの参照点は `production` branch の merge commit (`🚀リリース` PR 単位)。戻したいリリースの commit を checkout した tree を `production` に流し直せば戻せる (workflow の read-tree と同じ要領で snapshot コミットを作り PR する)。Cloudflare 側でも [versions rollback](https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/) が使えるが、D1 schema 変更を跨ぐ場合は不可。
 
 ## Versioning
 
