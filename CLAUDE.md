@@ -25,10 +25,8 @@
 - **merge 方式は ruleset で強制済み — 選ぶ必要はない**: `main` は **merge commit のみ** (`gh pr merge --merge`)、`production` は **squash のみ** (`gh pr merge --squash`)。他方を指定すると GitHub 側で reject される
 - worktree: `git gtr new dev/<topic>` で作成、`git gtr rm` で削除
 - PR title: Conventional Commits 形式 (POC 期は `POC Phase N: <概要> (issue #<n>)` を使っていた)
-- リリース: `chore(main): release x.y.z` PR を merge して tag を切る → 生成された Release が production 昇格 PR を作る (詳細は `docs/production-cd.md`)
-- commit: 英文1行 subject、**Conventional Commits** (`feat:` / `fix:` / `chore:` / `docs:` / `refactor:` / `perf:` / `test:` / `ci:`)、body は **why** のみ
-  - squash merge なので **PR title がそのまま commit subject = リリースノートの 1 行**になる。release-please が採番と CHANGELOG 生成に使うので prefix を外さない
-  - 破壊的変更は `feat!:` か body に `BREAKING CHANGE:` (major bump のトリガー)
+- リリース: `main` push ごとに自動更新される昇格 PR (`release/production -> production`) を merge するだけ。tag / semver は使わない (詳細は `docs/production-cd.md`)
+- commit: 英文1行 subject、**Conventional Commits** (`feat:` / `fix:` / `chore:` / `docs:` / `refactor:` / `perf:` / `test:` / `ci:`)、body は **why** のみ (prefix は履歴の可読性のため。採番には使っていない)
 - 並列 PR 共有ファイル (`src/app.ts` / `src/config/env.ts` / `.dev.vars.example`) は **末尾 append のみ** → 後発 PR が rebase で解決
 
 ## ドキュメント
