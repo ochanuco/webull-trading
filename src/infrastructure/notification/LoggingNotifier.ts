@@ -98,10 +98,12 @@ export class LoggingNotifier implements Notifier {
 /**
  * Event の native severity を抽出。TRADE は POC では `info` 扱い (ledger
  * としての行を残す目的)、ERROR は未指定なら `warning`、STATE_CHANGE は
- * 必須なので素直に取る。
+ * 必須なので素直に取る。SUMMARY は定期配信 (regime 変化を表さない) なので
+ * 未指定なら ERROR と違い `info` に倒す。
  */
 export function pickSeverity(event: NotificationEvent): NotificationSeverity {
   if (event.type === 'TRADE') return 'info'
   if (event.type === 'STATE_CHANGE') return event.severity
+  if (event.type === 'SUMMARY') return event.severity ?? 'info'
   return event.severity ?? 'warning'
 }

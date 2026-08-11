@@ -7,6 +7,7 @@ import { checkMarketDataHealth } from './infrastructure/webull/checkMarketDataHe
 import { refreshTradableAllowlist } from './infrastructure/webull/refreshTradableAllowlist'
 import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
 import { runNewsScheduler } from './trading/news/newsScheduler'
+import { runNewsShockDailySummary } from './trading/news/newsShockDailySummary'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
@@ -204,6 +205,12 @@ export default {
           },
         ),
       )
+
+      // news shock gate 日次サマリ (news-shock-gate follow-up)。22:00 UTC =
+      // US 市場close後。GDELT producer (newsScheduler) は 24h 稼働しているので
+      // この時刻でも観測は新鮮。mode=observe の間は regime 変化時の
+      // STATE_CHANGE 通知しか出ないため、閾値校正の材料として現状を毎日配信する。
+      ctx.waitUntil(runNewsShockDailySummary(env, requestId))
       return
     }
 

@@ -4,6 +4,13 @@ import type {
   NotificationSeverity,
 } from './Notifier'
 
+/**
+ * Webhook POST の打ち切り時間。Slack/Discord は通常 1 秒未満で応答するので
+ * 10 秒は十分な余裕。cron の他タスク (portfolio roll 等) と同じ tick に
+ * 相乗りしているため、無応答の webhook で isolate を長く占有しない。
+ */
+const WEBHOOK_TIMEOUT_MS = 10_000
+
 export interface WebhookNotifierOptions {
   /** Slack incoming webhook URL。空 / undefined なら Slack には送らない。 */
   slackUrl?: string
@@ -76,6 +83,10 @@ export class WebhookNotifier implements Notifier {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        // Webhook 先が無応答だと `ctx.waitUntil` 配下のタスクが timeout まで
+        // 残り続ける (CodeRabbit PR #694)。通知は best-effort なので打ち切って
+        // silent fallback (下の catch) に倒す。
+        signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
       })
       if (!response.ok) {
         // 4xx / 5xx は webhook URL 設定ミス / Slack 側の問題。log だけ残して続行。
@@ -120,6 +131,11 @@ export class WebhookNotifier implements Notifier {
       const head = `${severityIcon(event.severity)} state change: ${event.field} ${formatValue(event.from)} → ${formatValue(event.to)}`
       const note = event.note ? `\n${event.note}` : ''
       return `${head}${note}`
+    }
+    if (event.type === 'SUMMARY') {
+      // message は呼び出し側 (例: newsShockDailySummary) が既に組み立て済みの
+      // 複数行本文。ここでは severity icon を先頭に付けるだけ。
+      return `${severityIcon(event.severity ?? 'info')} ${event.message}`
     }
     // ERROR
     const sym = event.symbol ?? 'global'

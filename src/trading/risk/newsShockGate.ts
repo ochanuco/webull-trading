@@ -15,7 +15,8 @@
  *     足さないという安全上の絶対条件の core)。
  *
  * 判定:
- *   ratio = max(直近 windowMin 分の volume) / median(直近 baselineDays 分の volume)
+ *   ratio = max(直近 windowMin 分の volume) / median(直近 baselineDays 分の
+ *   **非ゼロ** volume)
  *   - ratio > blockRatio かつ (tone 条件を満たす、または requireTone=false):
  *     regime='critical', sizeScale=0
  *   - ratio > warnRatio: regime='warning', sizeScale=warnSizeScale
@@ -23,14 +24,25 @@
  *     「報道量が増えただけ (ポジティブなニュース) で BUY を止めない」ため)
  *   - それ以外: regime='normal', sizeScale=1.0
  *
+ * baseline median を非ゼロ値だけで取る理由: `market_selloff` のような sparse
+ * probe は平時ニュースが無い時間帯が大半で volume=0 が 8 割超を占める。全点
+ * (ゼロ込み) で median を取ると常に 0 になり、ratio が発散 → 旧実装では
+ * 「degenerate data」として fail-open (regime='unknown') に倒していたため、
+ * この probe は恒常的に unknown のままだった。ratio の意味は「直近 window
+ * max が、平時の**非ゼロ報道量**の典型値の何倍か」であり、報道が無い時間帯の
+ * ゼロは baseline の代表値計算からは除外するのが正しい (windowMax 側は
+ * ゼロを含めたまま — 直近が静かなら ratio=0 で 'normal' になるのは意図通り)。
+ *
  * tone AND 条件 (`requireTone=true` の時のみ critical に追加で要求):
  *   baselineTone (baseline 窓の median) − latestTone (直近1点) >= toneDropThreshold
  *
  * fail-open (GDELT producer 障害 / baseline 未成熟):
  *   - 観測が無い / 最新観測が maxAgeMin より古い → regime='unknown',
  *     reason='news_shock_unavailable_fallback_normal'
- *   - baseline サンプル数が minSamples 未満 → regime='unknown',
- *     reason='news_shock_insufficient_baseline: <count>/<minSamples>'
+ *   - baseline サンプル数 (ゼロ込み、データ可用性チェック) が minSamples 未満 →
+ *     regime='unknown', reason='news_shock_insufficient_baseline: <count>/<minSamples>'
+ *   - baseline サンプルは十分だが非ゼロ値が 1 点も無い (全点ゼロ) → regime='unknown',
+ *     reason='news_shock_degenerate_baseline: all-zero'
  *   上記いずれも既定 (`attentionStalePolicy='fail_open'`) では sizeScale=1.0。
  *   operator が `attentionStalePolicy='block_buy'` に倒した場合のみ sizeScale=0
  *   (fail-closed escape hatch — `vixRegimeFilter.ts` の fail-open 判断とは
@@ -114,6 +126,7 @@ export interface NewsShockGateDecision {
    *   - `news_shock_critical: 5.1x tone-2.3 (block)`
    *   - `news_shock_unavailable_fallback_normal`
    *   - `news_shock_insufficient_baseline: 84/200`
+   *   - `news_shock_degenerate_baseline: all-zero`
    */
   reason: string
   /** 算出された ratio (直近 max / baseline median)。算出不能時は null。 */
@@ -167,11 +180,15 @@ export function evaluateNewsShockGate(
   if (baselineValues.length < sane.minSamples) {
     return insufficientBaselineDecision(sane, asOf, baselineValues.length)
   }
-  const baselineMedian = median(baselineValues)
-  if (!Number.isFinite(baselineMedian) || baselineMedian <= 0) {
-    // median が 0/非有限 (全点 0 等) だと ratio が発散/無意味になる。degenerate
-    // data として insufficient_baseline と同じ fail-open 経路に倒す。
-    return insufficientBaselineDecision(sane, asOf, baselineValues.length)
+  // 非ゼロ値だけで median を取る (module doc 参照)。sparse probe は平時ゼロが
+  // 大半のため、ゼロ込みの median は常に 0 になり ratio が意味を失う。
+  const positiveBaselineValues = baselineValues.filter((v) => v > 0)
+  const baselineMedian = median(positiveBaselineValues)
+  if (!Number.isFinite(baselineMedian)) {
+    // 非ゼロ値の median の NaN 化は「正の値が 1 点も無い (全点ゼロ)」場合のみ
+    // (median([]) === NaN)。baselineMedian <= 0 は positiveBaselineValues が
+    // 全点 > 0 である以上、理論上到達しない — NaN guard のみ残す。
+    return degenerateBaselineDecision(sane, asOf)
   }
 
   // 3) window 側 (直近 windowMin 分) の max。
@@ -255,6 +272,23 @@ function insufficientBaselineDecision(
     regime: 'unknown',
     sizeScale: sane.attentionStalePolicy === 'block_buy' ? 0 : 1.0,
     reason: `news_shock_insufficient_baseline: ${sampleCount}/${sane.minSamples}`,
+    ratio: null,
+    toneDrop: null,
+    asOf,
+  }
+}
+
+/**
+ * baseline サンプル数は minSamples を満たすが、非ゼロ値が 1 点も無い (全点
+ * ゼロ) 場合の fail-open 決定。`insufficientBaselineDecision` と同じ
+ * fail-open / fail-closed 挙動 (`attentionStalePolicy` 依存) だが、reason を
+ * 分けて「データが少なすぎる」と「データはあるが全部ゼロ」を区別できるようにする。
+ */
+function degenerateBaselineDecision(sane: NewsShockGateConfig, asOf: string): NewsShockGateDecision {
+  return {
+    regime: 'unknown',
+    sizeScale: sane.attentionStalePolicy === 'block_buy' ? 0 : 1.0,
+    reason: 'news_shock_degenerate_baseline: all-zero',
     ratio: null,
     toneDrop: null,
     asOf,

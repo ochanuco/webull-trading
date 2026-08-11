@@ -141,4 +141,17 @@ describe('pickSeverity', () => {
       }),
     ).toBe('critical')
   })
+  it('takes SUMMARY.severity, defaulting to info (news-shock-gate follow-up)', () => {
+    expect(pickSeverity({ type: 'SUMMARY', kind: 'news_shock_daily_summary', message: 'm' })).toBe(
+      'info',
+    )
+    expect(
+      pickSeverity({
+        type: 'SUMMARY',
+        kind: 'news_shock_daily_summary',
+        message: 'm',
+        severity: 'warning',
+      }),
+    ).toBe('warning')
+  })
 })
