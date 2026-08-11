@@ -30,6 +30,7 @@ export type NotificationEvent =
   | TradeNotificationEvent
   | ErrorNotificationEvent
   | StateChangeNotificationEvent
+  | SummaryNotificationEvent
 
 /**
  * Severity tier for ERROR / STATE_CHANGE events (#141)。
@@ -90,4 +91,20 @@ export interface StateChangeNotificationEvent {
    * 補足 (例: `requestId`)。formatter が末尾に付ける。
    */
   note?: string
+}
+
+/**
+ * 定期サマリ配信用イベント (news-shock-gate follow-up)。regime 変化が無くても
+ * 現状を届けたい定期スケジューラ (例: news shock gate の日次サマリ) 向け。
+ * STATE_CHANGE と違い「変化」を表さないので、from/to は持たず自由記述の
+ * `message` を呼び出し側が組み立てる。
+ */
+export interface SummaryNotificationEvent {
+  type: 'SUMMARY'
+  /** emit log の cause 列に入る識別子 (例: 'news_shock_daily_summary')。 */
+  kind: string
+  /** 送信本文 (複数行可)。呼び出し側が組み立てる。 */
+  message: string
+  /** 未指定なら 'info'。 */
+  severity?: NotificationSeverity
 }

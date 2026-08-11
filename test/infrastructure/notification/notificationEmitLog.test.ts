@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { loadRecentAlerts } from '../../../src/infrastructure/notification/notificationEmitLog'
+import { insertNotificationEmit, loadRecentAlerts } from '../../../src/infrastructure/notification/notificationEmitLog'
 import { createDb } from '../../../src/infrastructure/db/tradeJournalRepo'
 import type { AlertRow } from '../../../src/infrastructure/notification/notificationEmitLog'
+import type { NotificationEmitLogInsert } from '../../../src/infrastructure/db/schema'
 
 vi.mock('../../../src/infrastructure/db/tradeJournalRepo', () => ({
   createDb: vi.fn(),
@@ -95,5 +96,48 @@ describe('loadRecentAlerts', () => {
 
     expect(query.orderBy).toHaveBeenCalledTimes(1)
     expect(query.limit).toHaveBeenCalledWith(500)
+  })
+})
+
+/**
+ * `insertNotificationEmit` の event → row マッピング (`pickSymbol` /
+ * `pickCause`) の直接テスト。SUMMARY (news-shock-gate follow-up) は
+ * symbol=null / cause=event.kind になることを固定する。
+ */
+function fakeInsertChain(captured: { row?: NotificationEmitLogInsert }) {
+  const chain = {
+    values: vi.fn(async (row: NotificationEmitLogInsert) => {
+      captured.row = row
+    }),
+  }
+  return {
+    db: {
+      insert: vi.fn(() => chain),
+    },
+  }
+}
+
+describe('insertNotificationEmit — event to row mapping', () => {
+  it('maps a SUMMARY event to symbol=null and cause=event.kind', async () => {
+    const captured: { row?: NotificationEmitLogInsert } = {}
+    const { db } = fakeInsertChain(captured)
+    vi.mocked(createDb).mockReturnValue(db as unknown as ReturnType<typeof createDb>)
+
+    await insertNotificationEmit(fakeD1, {
+      event: {
+        type: 'SUMMARY',
+        kind: 'news_shock_daily_summary',
+        message: 'news shock gate 日次サマリ: 合成 regime=normal',
+        severity: 'info',
+      },
+      message: 'news shock gate 日次サマリ: 合成 regime=normal',
+      severity: 'info',
+      requestId: 'req-1',
+    })
+
+    expect(captured.row?.symbol).toBeNull()
+    expect(captured.row?.cause).toBe('news_shock_daily_summary')
+    expect(captured.row?.eventType).toBe('SUMMARY')
+    expect(captured.row?.severity).toBe('info')
   })
 })

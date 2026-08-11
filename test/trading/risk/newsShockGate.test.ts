@@ -191,7 +191,7 @@ describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', 
     expect(decision.reason).toBe('news_shock_insufficient_baseline: 84/200')
   })
 
-  it('treats a degenerate (zero) baseline median as insufficient/unknown, not a divide-by-zero', () => {
+  it('treats an all-zero baseline (enough samples, but every value is zero) as a distinct degenerate/unknown decision, not a divide-by-zero', () => {
     const input: NewsShockGateInput = {
       volumeObservations: withSpike(makeBaselineVolumes(199, 0), 0),
       toneObservations: [],
@@ -200,8 +200,73 @@ describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', 
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('unknown')
     expect(decision.sizeScale).toBe(1.0)
-    expect(decision.reason).toMatch(/^news_shock_insufficient_baseline:/)
+    expect(decision.reason).toBe('news_shock_degenerate_baseline: all-zero')
     expect(Number.isFinite(decision.ratio)).toBe(false)
+  })
+
+  it('blocks BUY on degenerate (all-zero) baseline too when attentionStalePolicy=block_buy', () => {
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, attentionStalePolicy: 'block_buy' }
+    const input: NewsShockGateInput = {
+      volumeObservations: withSpike(makeBaselineVolumes(199, 0), 0),
+      toneObservations: [],
+      asOf: ASOF,
+    }
+    const decision = evaluateNewsShockGate(input, config)
+    expect(decision.regime).toBe('unknown')
+    expect(decision.sizeScale).toBe(0)
+    expect(decision.reason).toBe('news_shock_degenerate_baseline: all-zero')
+  })
+
+  it('computes ratio from the non-zero baseline median when the baseline is sparse (mostly zero with some real observations)', () => {
+    // 300 点中 250 点が 0、50 点が 0.1 という sparse probe を模す
+    // (market_selloff の典型分布)。非ゼロ median = 0.1、window max = 0.5 → ratio = 5.0
+    const spanMs = 7 * 24 * 60 * 60_000
+    const stepMs = spanMs / 300
+    const baseline: NewsShockVolumeObservation[] = []
+    for (let i = 0; i < 300; i++) {
+      // 古い (i が小さい = asOf から遠い) 50 点だけ非ゼロにする。直近 250 点は
+      // ゼロにして windowMin (2h) 内に非ゼロの baseline 点が紛れ込まないようにする
+      // (window は spike 側の観測専用にしたい)。
+      const value = i < 50 ? 0.1 : 0
+      baseline.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
+    }
+    const tones: NewsShockToneObservation[] = [
+      { bucketAt: new Date(ASOF_MS - 24 * 60 * 60_000).toISOString(), value: 0 },
+      { bucketAt: new Date(ASOF_MS - 12 * 60 * 60_000).toISOString(), value: 0 },
+      { bucketAt: ASOF, value: -2.3 },
+    ]
+    const input: NewsShockGateInput = {
+      volumeObservations: withSpike(baseline, 0.5),
+      toneObservations: tones,
+      asOf: ASOF,
+    }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.ratio).toBeCloseTo(5.0, 5)
+    // ratio 5.0 > blockRatio(4.4) かつ tone drop 条件も満たす → critical に escalate する。
+    expect(decision.regime).toBe('critical')
+    expect(decision.sizeScale).toBe(0)
+  })
+
+  it('returns ratio=0 / normal when the baseline is sparse but the recent window is also quiet (all zero)', () => {
+    const spanMs = 7 * 24 * 60 * 60_000
+    const stepMs = spanMs / 300
+    const baseline: NewsShockVolumeObservation[] = []
+    for (let i = 0; i < 300; i++) {
+      // 古い (i が小さい = asOf から遠い) 50 点だけ非ゼロにする。直近 250 点は
+      // ゼロにして windowMin (2h) 内に非ゼロの baseline 点が紛れ込まないようにする
+      // (window は spike 側の観測専用にしたい)。
+      const value = i < 50 ? 0.1 : 0
+      baseline.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
+    }
+    const input: NewsShockGateInput = {
+      volumeObservations: withSpike(baseline, 0),
+      toneObservations: [],
+      asOf: ASOF,
+    }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.ratio).toBe(0)
+    expect(decision.regime).toBe('normal')
+    expect(decision.sizeScale).toBe(1.0)
   })
 
   it('falls back to unknown when the latest observation passes maxAgeMin but misses the narrower window', () => {

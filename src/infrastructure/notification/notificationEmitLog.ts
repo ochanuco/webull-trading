@@ -60,12 +60,14 @@ function toInsertRow(
 function pickSymbol(event: NotificationEvent): string | null {
   if (event.type === 'TRADE') return event.symbol
   if (event.type === 'ERROR') return event.symbol ?? null
+  // SUMMARY は銘柄非依存の集計通知なので symbol は常に null。
   return null
 }
 
 function pickCause(event: NotificationEvent): string | null {
   if (event.type === 'ERROR') return event.cause ?? null
   if (event.type === 'STATE_CHANGE') return event.field
+  if (event.type === 'SUMMARY') return event.kind
   return null
 }
 

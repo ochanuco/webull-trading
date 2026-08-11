@@ -165,6 +165,10 @@ export function localizeReason(en: string | null | undefined): string {
     (_m, count, min) =>
       `発注スキップ: ニュース baseline サンプル不足 (${count}/${min}件、block_buy 設定により新規買い停止)`,
   )
+  s = s.replace(
+    /^risk: news_shock_degenerate_baseline: all-zero$/,
+    '発注スキップ: ニュース baseline が全点ゼロ (block_buy 設定により新規買い停止)',
+  )
 
   // === Scheduler inline ===
   s = s.replace(/^SELL without position$/, '発注スキップ: 手仕舞い対象の保有なし')
