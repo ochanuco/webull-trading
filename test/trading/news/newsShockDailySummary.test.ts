@@ -51,7 +51,7 @@ function makeRow(bucketAt: string, value: number): AttentionObservationRow {
 /**
  * `trump_macro` を静穏 (ratio=1.0x, normal)、`market_selloff` を warning
  * (ratio=3.0x) にする観測データを配る。asOf は呼び出し時点の `now()`
- * (`vi.setSystemTime` で固定) を基準に、baseline 5点 (6日前〜1日前, value=1) +
+ * (`vi.setSystemTime` で固定) を基準に、baseline 5点 (6日前〜2日前, value=1) +
  * window 内 1点 (asOf ちょうど) を probe ごとに用意する。
  */
 function seedTwoProbeObservations(asOf: Date): void {
