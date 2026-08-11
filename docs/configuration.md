@@ -82,6 +82,17 @@
 | `news_shock_max_age_min` | `90` | 観測値の許容鮮度 (分) |
 | `attention_stale_policy` | `'fail_open'` | 観測が古い時の扱い。`fail_open` / `block_buy` |
 
+baseline median は **非ゼロ値のみ**で算出する。`market_selloff` のような
+sparse probe (平時ニュースが無く volume=0 の時間帯が大半) を全点 (ゼロ込み)
+で median を取ると常に 0 になり ratio が意味を失う — baseline サンプル数
+(`news_shock_min_samples` の判定対象) 自体はゼロ込みのまま、median 計算だけ
+非ゼロ値に絞る。
+
+`news_shock_mode` が `off` 以外の間は、regime 遷移時の STATE_CHANGE 通知
+(Slack/Discord) に加えて、22:00 UTC の日次 cron (portfolio roll と相乗り) が
+合成 regime + probe 別 reason の日次サマリを配信する。regime 変化が無くて
+も毎日届くので、閾値が実データに対して妥当かの校正材料になる。
+
 ## per-symbol / テーブル由来の制御
 
 - `symbol_config.active = 0` にすれば universe から外れて cron から除外される

@@ -121,6 +121,11 @@ export class WebhookNotifier implements Notifier {
       const note = event.note ? `\n${event.note}` : ''
       return `${head}${note}`
     }
+    if (event.type === 'SUMMARY') {
+      // message は呼び出し側 (例: newsShockDailySummary) が既に組み立て済みの
+      // 複数行本文。ここでは severity icon を先頭に付けるだけ。
+      return `${severityIcon(event.severity ?? 'info')} ${event.message}`
+    }
     // ERROR
     const sym = event.symbol ?? 'global'
     const causePart = event.cause ? ` (${event.cause})` : ''

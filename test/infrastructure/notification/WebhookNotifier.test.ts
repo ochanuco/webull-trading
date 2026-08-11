@@ -275,6 +275,39 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('state change: tradingEnabled true → false')
   })
 
+  // news-shock-gate follow-up: SUMMARY 拡張
+  it('renders SUMMARY with the given severity icon and the raw multi-line message', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'SUMMARY',
+      kind: 'news_shock_daily_summary',
+      message: 'news shock gate 日次サマリ (mode=observe): 合成 regime=warning\n- trump_macro: news_shock_normal: 1.0x\n- market_selloff: news_shock_warning: 2.8x (size x0.5)',
+      severity: 'warning',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toContain('⚠️')
+    expect(body.text).toContain('合成 regime=warning')
+    expect(body.text).toContain('market_selloff')
+  })
+
+  it('renders SUMMARY with default severity=info using ℹ️ icon when severity is omitted', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'SUMMARY',
+      kind: 'news_shock_daily_summary',
+      message: '合成 regime=normal',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toContain('ℹ️')
+    expect(body.text).toContain('合成 regime=normal')
+  })
+
   it('formatMessage is exposed for LoggingNotifier reuse (#141)', () => {
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x' })
     const text = notifier.formatMessage({

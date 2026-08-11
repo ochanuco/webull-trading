@@ -55,6 +55,7 @@ export const EVENT_TYPE_VALUES: ReadonlyArray<NotificationEvent['type']> = [
   'TRADE',
   'ERROR',
   'STATE_CHANGE',
+  'SUMMARY',
 ]
 
 export function parseEventTypeFilter(raw: string | undefined): NotificationEvent['type'] | undefined {
@@ -96,6 +97,7 @@ export const ALERT_EVENT_LABELS: Record<string, string> = {
   ERROR: 'エラー',
   TRADE: '売買',
   STATE_CHANGE: '設定変更',
+  SUMMARY: 'サマリ',
 }
 
 /** 長い message は先頭を出して残りを <details> に畳む閾値。 */
@@ -231,6 +233,7 @@ export function renderAlertFilterPills(
       buildHref('eventType', 'STATE_CHANGE'),
       activeEventType === 'STATE_CHANGE',
     ),
+    pill('SUMMARY', buildHref('eventType', 'SUMMARY'), activeEventType === 'SUMMARY'),
   ].join('')
   return `<nav style="margin-bottom:12px">${sev}<span class="muted" style="margin:0 8px">|</span>${ev}</nav>`
 }
