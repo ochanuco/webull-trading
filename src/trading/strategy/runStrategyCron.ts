@@ -45,16 +45,13 @@ import {
 } from '../risk/vixRegimeFilter'
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
 import { detectAndNotifyRegimeChange } from '../../infrastructure/notification/regimeChange'
+import type { NewsShockGateDecision } from '../risk/newsShockGate'
 import {
-  DEFAULT_NEWS_SHOCK_CONFIG,
-  evaluateNewsShockGate,
-  sanitizeNewsShockConfig,
-  type NewsShockGateDecision,
-  type NewsShockGateInput,
-  type NewsShockRegime,
-} from '../risk/newsShockGate'
-import { createAttentionObservationDb, createAttentionObservationRepo } from '../../infrastructure/db/attentionObservationRepo'
-import { NEWS_PROBES } from '../../infrastructure/news/newsProbes'
+  isNewsShockGateReady,
+  isNewsShockRegime,
+  loadNewsShockDecision,
+  NEWS_SHOCK_REGIME_RANK,
+} from '../risk/newsShockDecision'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { evaluateStrategyWindow, type StrategyWindowVerdict } from '../domain/tradingCalendar'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
@@ -669,7 +666,7 @@ export async function runStrategyCron(
   // `detectAndNotifyVixRegimeChange` / `notifyBrokerErrorSurgeIfChanged` 呼び出し)
   // と同じ形: fail-open で gate を注入しない (= undefined、BUY sizing に影響
   // させない) に倒す。
-  const newsShockDecision =
+  const newsShockLoadResult =
     env.DB && newsShockGateReady && global.newsShockMode !== 'off'
       ? await loadNewsShockDecision(env.DB, global, options.requestId, new Date()).catch((err) => {
           console.warn(
@@ -682,6 +679,10 @@ export async function runStrategyCron(
           return undefined
         })
       : undefined
+  // strategy tick は複数 probe の合成 (`combined`) だけを使う。probe 別の
+  // decision (`probes`) は日次サマリ通知 (news-shock-gate follow-up) 向けの
+  // 情報で、tick の BUY sizing には関与しない。
+  const newsShockDecision = newsShockLoadResult?.combined
   if (newsShockDecision) {
     analysis = { ...analysis, newsShock: newsShockDecision }
     // Regime 遷移 (normal → warning, warning → critical 等) を STATE_CHANGE 通知。
@@ -1270,151 +1271,6 @@ async function isMacroEventCalendarReady(db: D1Database): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-/**
- * `attention_observation` (news attention producer, PR 1) が当該 D1 で
- * migrate 済みかを判定する (news-shock-gate PR 2)。`isMacroEventCalendarReady`
- * と同じ理由 — 未 migrate な preview / 新環境では gate を無効化して
- * fail-closed の連鎖 reject / D1 read エラーを回避する。
- */
-async function isNewsShockGateReady(db: D1Database): Promise<boolean> {
-  try {
-    const row = await db
-      .prepare(
-        "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='attention_observation' LIMIT 1",
-      )
-      .first<{ ok: number }>()
-    return row?.ok === 1
-  } catch {
-    return false
-  }
-}
-
-/** severity 判定用の news shock regime ランク (0=normal/unknown, 1=warning, 2=critical)。 */
-const NEWS_SHOCK_REGIME_RANK: Record<NewsShockRegime, number> = {
-  unknown: 0,
-  normal: 0,
-  warning: 1,
-  critical: 2,
-}
-
-/** ratio > severity の観点で「どちらがより保守的 (BUY を絞る側) か」を選ぶための rank。normal/unknown は同格の 0。 */
-const NEWS_SHOCK_SEVERITY_RANK: Record<NewsShockRegime, number> = {
-  normal: 0,
-  unknown: 1,
-  warning: 2,
-  critical: 3,
-}
-
-function isNewsShockRegime(value: unknown): value is NewsShockRegime {
-  return value === 'unknown' || value === 'normal' || value === 'warning' || value === 'critical'
-}
-
-/**
- * 2 つの probe 決定のうち、より保守的 (BUY を絞る側) な方を選ぶ。GDELT probe
- * は `trump_macro` / `market_selloff` の複数本あり (`newsProbes.ts`)、
- * このリポジトリでは「どちらか一方でも過熱を検知したら BUY を絞る」方針
- * (per-symbol gate の AND-of-rejects と同じ layered defense の考え方) を
- * とる。sizeScale が小さい方を優先し、同点なら regime の severity rank
- * (critical > warning > unknown > normal) で決める。
- */
-function moreConservativeNewsShockDecision(
-  a: NewsShockGateDecision,
-  b: NewsShockGateDecision,
-): NewsShockGateDecision {
-  if (a.sizeScale !== b.sizeScale) return a.sizeScale < b.sizeScale ? a : b
-  return NEWS_SHOCK_SEVERITY_RANK[a.regime] >= NEWS_SHOCK_SEVERITY_RANK[b.regime] ? a : b
-}
-
-/**
- * `attention_observation` (GDELT producer, PR 1) から直近観測を D1 read し、
- * `evaluateNewsShockGate` で regime decision を返す (news-shock-gate PR 2)。
- *
- * **D1 read のみ。fetch は一切呼ばない** — 15分間隔の strategy tick cron に
- * 外部 API 呼び出しを足さないという安全上の絶対条件の core。GDELT への実際の
- * fetch は別 cron (`newsScheduler`, 5分間隔) の producer 側の責務。
- *
- * `NEWS_PROBES` (`trump_macro` / `market_selloff`) を両方評価し、より保守的な
- * 方 (`moreConservativeNewsShockDecision`) を tick の decision として返す。
- * D1 read が failure した probe は観測なし (= fail-open) として扱う —
- * D1 障害で strategy tick 全体を落とさないため。
- */
-async function loadNewsShockDecision(
-  db: D1Database,
-  global: {
-    newsShockWarnRatio: number
-    newsShockBlockRatio: number
-    newsShockWarnSizeScale: number
-    newsShockToneDropThreshold: number
-    newsShockRequireTone: boolean
-    newsShockBaselineDays: number
-    newsShockMinSamples: number
-    newsShockWindowMin: number
-    newsShockMaxAgeMin: number
-    attentionStalePolicy: 'fail_open' | 'block_buy'
-  },
-  requestId: string | undefined,
-  now: Date,
-): Promise<NewsShockGateDecision> {
-  const rawConfig = {
-    ...DEFAULT_NEWS_SHOCK_CONFIG,
-    warnRatio: global.newsShockWarnRatio,
-    blockRatio: global.newsShockBlockRatio,
-    warnSizeScale: global.newsShockWarnSizeScale,
-    toneDropThreshold: global.newsShockToneDropThreshold,
-    requireTone: global.newsShockRequireTone,
-    baselineDays: global.newsShockBaselineDays,
-    minSamples: global.newsShockMinSamples,
-    windowMin: global.newsShockWindowMin,
-    maxAgeMin: global.newsShockMaxAgeMin,
-    attentionStalePolicy: global.attentionStalePolicy,
-  }
-  // global_config の生値 (`newsShockBaselineDays` 等) は DB UPDATE の typo で
-  // NaN / 非数になり得る。sanitize 前の値で `sinceIso` を計算すると
-  // `new Date(NaN).toISOString()` が RangeError を throw し、この関数の
-  // 呼び出し元 (strategy tick 全体) まで例外が伝播してしまう (CodeRabbit
-  // PR #619 review)。`evaluateNewsShockGate` 内部でも sanitize されるが、
-  // それより前に行う `sinceIso` 計算はその保護の外にあるため、ここで
-  // sanitize 済みの値を使う (以降 sinceIso 計算・evaluateNewsShockGate への
-  // 引き渡しは sane のみを使う。evaluateNewsShockGate 内部で再度 sanitize
-  // されるが冪等なので問題ない)。
-  const config = sanitizeNewsShockConfig(rawConfig)
-  const asOf = now.toISOString()
-  const sinceIso = new Date(now.getTime() - config.baselineDays * 24 * 60 * 60_000).toISOString()
-  const repo = createAttentionObservationRepo(createAttentionObservationDb(db))
-
-  let combined: NewsShockGateDecision | undefined
-  for (const probe of NEWS_PROBES) {
-    let input: NewsShockGateInput
-    try {
-      const [volumeRows, toneRows] = await Promise.all([
-        repo.fetchRecent({ source: 'gdelt', probeKey: probe.key, metric: 'volume', sinceIso }),
-        repo.fetchRecent({ source: 'gdelt', probeKey: probe.key, metric: 'tone', sinceIso }),
-      ])
-      input = {
-        volumeObservations: volumeRows.map((r) => ({ bucketAt: r.bucketAt, value: r.value })),
-        toneObservations: toneRows.map((r) => ({ bucketAt: r.bucketAt, value: r.value })),
-        asOf,
-      }
-    } catch (err) {
-      // D1 read 失敗は「観測なし」扱い (evaluateNewsShockGate が fail-open で
-      // unknown/unavailable に倒す)。cron 本体には伝播させない。
-      console.warn(
-        JSON.stringify({
-          event: 'news_shock_observation_fetch_failed',
-          requestId,
-          probeKey: probe.key,
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      )
-      input = { volumeObservations: [], toneObservations: [], asOf }
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    combined = combined === undefined ? decision : moreConservativeNewsShockDecision(combined, decision)
-  }
-  // NEWS_PROBES が空 (あり得ないが defensive) なら unavailable 相当を返す。
-  return combined ?? evaluateNewsShockGate({ volumeObservations: [], toneObservations: [], asOf }, config)
 }
 
 /**
