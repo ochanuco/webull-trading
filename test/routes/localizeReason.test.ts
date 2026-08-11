@@ -220,6 +220,12 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
+    it('news shock degenerate baseline (block_buy policy) → 全点ゼロ', () => {
+      expect(localizeReason('risk: news_shock_degenerate_baseline: all-zero')).toBe(
+        '発注スキップ: ニュース baseline が全点ゼロ (block_buy 設定により新規買い停止)',
+      )
+    })
+
     it('insufficient bars → 日柄不足', () => {
       expect(localizeReason('insufficient bars for indicators')).toBe(
         'データ不足: 指標計算に必要な日柄不足',
