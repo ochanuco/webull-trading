@@ -39,6 +39,20 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('DRY_RUN')
   })
 
+  it('passes an abort signal so a hung webhook cannot pin the isolate', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'ERROR',
+      message: 'boom',
+    })
+
+    // timeout の実測 (fake timer で abort を待つ) までは要らない — signal が
+    // fetch に渡っていれば runtime 側が打ち切る。渡し忘れの regression だけ防ぐ。
+    expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal)
+  })
+
   it('POSTs Discord-shape body when only discordUrl is set', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({
