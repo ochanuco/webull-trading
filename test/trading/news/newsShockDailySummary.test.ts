@@ -130,10 +130,45 @@ describe('runNewsShockDailySummary', () => {
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
     expect(event.kind).toBe('news_shock_daily_summary')
-    expect(event.message).toContain('mode=observe')
-    expect(event.message).toContain('合成 regime=warning')
-    expect(event.message).toContain('- trump_macro:')
-    expect(event.message).toContain('- market_selloff:')
+    expect(event.message).toContain('観測のみ・発注に影響なし')
+    expect(event.message).toContain('総合判定: 警戒')
+    expect(event.message).toContain('- トランプ関税報道 (trump_macro): 平常 — 報道量 平時比 1.0倍')
+    expect(event.message).toContain('- 株式急落報道 (market_selloff): 警戒 (報道量スパイク) — 報道量 平時比 3.0倍')
+  })
+
+  it('describes stale observations with their data time instead of raw reason strings', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ newsShockMode: 'observe', newsShockMinSamples: 5 }),
+    )
+    // 観測は揃っているが最新 bucket が 4 時間前 (GDELT 反映遅延の実測形)。
+    // 'latest_observation' 評価なので unavailable にならず、ratio と
+    // 観測時刻 + 遅延が本文に出る。
+    seedTwoProbeObservations(new Date(Date.now() - 4 * 60 * 60_000))
+
+    await runNewsShockDailySummary(makeEnv(), 'req-stale')
+
+    const event = notifyMock.mock.calls[0]![0] as NotificationEvent
+    expect(event.type).toBe('SUMMARY')
+    if (event.type !== 'SUMMARY') throw new Error('unreachable')
+    // 2026-04-25T08:00Z = 17:00 JST。遅延 4.0 時間が併記される。
+    expect(event.message).toContain('[4/25 17:00 JST・4.0時間前 時点]')
+    expect(event.message).toContain('報道量 平時比 3.0倍')
+    expect(event.message).not.toContain('news_shock_')
+  })
+
+  it('explains a probe with no observations as data-missing in Japanese', async () => {
+    vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+      makeGlobalConfigSnapshot({ newsShockMode: 'observe', newsShockMinSamples: 5 }),
+    )
+    // fetchRecentMock は既定で空配列 → 両 probe とも観測ゼロ (unavailable 系)。
+    await runNewsShockDailySummary(makeEnv(), 'req-empty')
+
+    const event = notifyMock.mock.calls[0]![0] as NotificationEvent
+    expect(event.type).toBe('SUMMARY')
+    if (event.type !== 'SUMMARY') throw new Error('unreachable')
+    expect(event.message).toContain('総合判定: 判定不能')
+    expect(event.message).toContain('判定不能 — 直近の観測データなし')
+    expect(event.message).not.toContain('news_shock_unavailable_fallback_normal')
   })
 
   it('uses severity=warning when the combined regime is warning', async () => {
