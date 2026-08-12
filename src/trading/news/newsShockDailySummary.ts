@@ -168,7 +168,10 @@ function describeDecision(decision: NewsShockGateDecision, now: Date): string {
   if (decision.reason.startsWith('news_shock_degenerate_baseline')) {
     return `判定不能 — 過去7日の報道量が全点ゼロ${dataAt}`
   }
-  return `判定不能 — 直近の観測データなし${dataAt}`
+  // unavailable = 観測が 1 点も無い probe。`loadNewsShockDecision` の
+  // 'latest_observation' はこの場合 asOf を now に fallback するため、時刻を
+  // 出すと「now 時点の観測がある」ように誤読される — 時刻は省略する。
+  return '判定不能 — 直近の観測データなし'
 }
 
 /**

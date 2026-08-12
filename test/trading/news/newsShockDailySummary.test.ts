@@ -169,6 +169,9 @@ describe('runNewsShockDailySummary', () => {
     expect(event.message).toContain('総合判定: 判定不能')
     expect(event.message).toContain('判定不能 — 直近の観測データなし')
     expect(event.message).not.toContain('news_shock_unavailable_fallback_normal')
+    // 観測ゼロの probe は asOf が now に fallback するため、時刻を出すと
+    // 「now 時点の観測がある」ように誤読される — 時刻表記が無いことを固定。
+    expect(event.message).not.toContain('時点')
   })
 
   it('uses severity=warning when the combined regime is warning', async () => {
