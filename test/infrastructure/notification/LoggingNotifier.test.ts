@@ -71,6 +71,28 @@ describe('LoggingNotifier', () => {
     expect(inserted).toBe(true)
   })
 
+  it('forwards SUMMARY to inner but skips the D1 emit log (push-only type)', async () => {
+    const inner = fakeInner()
+    let inserted = false
+    const db = fakeD1({ onInsert: () => (inserted = true) })
+    const lg = new LoggingNotifier({
+      inner: inner.notifier,
+      db,
+      formatMessage: () => 'fmt',
+    })
+
+    await lg.notify({
+      type: 'SUMMARY',
+      kind: 'news_shock_daily_summary',
+      message: '日次サマリ本文',
+      severity: 'info',
+    })
+
+    expect(inner.calls).toHaveLength(1)
+    expect(inner.calls[0]?.type).toBe('SUMMARY')
+    expect(inserted).toBe(false)
+  })
+
   it('still resolves when inner Notifier throws (silent fallback)', async () => {
     const innerThrowing: Notifier = {
       async notify() {
