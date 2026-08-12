@@ -67,6 +67,13 @@ export class LoggingNotifier implements Notifier {
         }),
       )
     })
+    // SUMMARY は push 専用 (Slack/Discord のみ)。`notification_emit_log` は
+    // dashboard alerts view (異常・約定の記録) のためのもので、定期サマリの
+    // 相場情報を D1 に蓄積しても読む場所がない (news-shock-gate follow-up)。
+    if (event.type === 'SUMMARY') {
+      await innerP
+      return
+    }
     const dbP = insertNotificationEmit(this.db, {
       event,
       message,
