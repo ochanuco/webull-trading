@@ -67,7 +67,8 @@ function pickSymbol(event: NotificationEvent): string | null {
 function pickCause(event: NotificationEvent): string | null {
   if (event.type === 'ERROR') return event.cause ?? null
   if (event.type === 'STATE_CHANGE') return event.field
-  if (event.type === 'SUMMARY') return event.kind
+  // SUMMARY は LoggingNotifier が D1 INSERT 自体を skip する (push 専用) ので
+  // ここには来ない。防御的に null (TRADE と同じ扱い)。
   return null
 }
 

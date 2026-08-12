@@ -92,6 +92,8 @@ sparse probe (平時ニュースが無く volume=0 の時間帯が大半) を全
 (Slack/Discord) に加えて、22:00 UTC の日次 cron (portfolio roll と相乗り) が
 合成 regime + probe 別の判定を日本語で配信する。regime 変化が無くて
 も毎日届くので、閾値が実データに対して妥当かの校正材料になる。
+サマリは push 専用で `notification_emit_log` には残らない (dashboard の
+alerts view は異常・約定の記録に限る)。
 
 日次サマリは strategy tick と違い **最新観測時点** (`latest_observation`) で
 評価する。GDELT の集計反映は実測 1〜7 時間遅れるため、now 基準だと

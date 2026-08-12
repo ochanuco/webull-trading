@@ -102,7 +102,8 @@ describe('loadRecentAlerts', () => {
 /**
  * `insertNotificationEmit` の event → row マッピング (`pickSymbol` /
  * `pickCause`) の直接テスト。SUMMARY (news-shock-gate follow-up) は
- * symbol=null / cause=event.kind になることを固定する。
+ * LoggingNotifier が INSERT 自体を skip するためここには通常来ないが、
+ * 直接呼ばれた場合に TRADE 同様 symbol/cause=null で壊れないことを固定する。
  */
 function fakeInsertChain(captured: { row?: NotificationEmitLogInsert }) {
   const chain = {
@@ -118,7 +119,7 @@ function fakeInsertChain(captured: { row?: NotificationEmitLogInsert }) {
 }
 
 describe('insertNotificationEmit — event to row mapping', () => {
-  it('maps a SUMMARY event to symbol=null and cause=event.kind', async () => {
+  it('maps a SUMMARY event to symbol=null and cause=null (push-only type)', async () => {
     const captured: { row?: NotificationEmitLogInsert } = {}
     const { db } = fakeInsertChain(captured)
     vi.mocked(createDb).mockReturnValue(db as unknown as ReturnType<typeof createDb>)
@@ -136,7 +137,7 @@ describe('insertNotificationEmit — event to row mapping', () => {
     })
 
     expect(captured.row?.symbol).toBeNull()
-    expect(captured.row?.cause).toBe('news_shock_daily_summary')
+    expect(captured.row?.cause).toBeNull()
     expect(captured.row?.eventType).toBe('SUMMARY')
     expect(captured.row?.severity).toBe('info')
   })
