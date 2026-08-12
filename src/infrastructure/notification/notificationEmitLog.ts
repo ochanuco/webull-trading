@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, lt, type SQL } from 'drizzle-orm'
+import { and, desc, eq, inArray, lt, ne, type SQL } from 'drizzle-orm'
 import {
   notificationEmitLog,
   type NotificationEmitLogInsert,
@@ -67,7 +67,8 @@ function pickSymbol(event: NotificationEvent): string | null {
 function pickCause(event: NotificationEvent): string | null {
   if (event.type === 'ERROR') return event.cause ?? null
   if (event.type === 'STATE_CHANGE') return event.field
-  if (event.type === 'SUMMARY') return event.kind
+  // SUMMARY は LoggingNotifier が D1 INSERT 自体を skip する (push 専用) ので
+  // ここには来ない。防御的に null (TRADE と同じ扱い)。
   return null
 }
 
@@ -101,7 +102,12 @@ export async function loadRecentAlerts(
   const limit = clampLimit(options.limit)
   const drizzle = createDb(db)
   let query = drizzle.select().from(notificationEmitLog).$dynamic()
-  const conditions: SQL[] = []
+  const conditions: SQL[] = [
+    // SUMMARY は push 専用化 (LoggingNotifier が INSERT を skip) したが、
+    // それ以前に書かれた行が D1 に残っている。alerts view は異常・約定・
+    // 設定変更の記録に限るので、既存行も読み出しから恒久除外する。
+    ne(notificationEmitLog.eventType, 'SUMMARY'),
+  ]
   if (options.eventType) {
     conditions.push(eq(notificationEmitLog.eventType, options.eventType))
   }

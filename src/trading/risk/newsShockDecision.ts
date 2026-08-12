@@ -101,6 +101,16 @@ export function moreConservativeNewsShockDecision(
  * (news-shock-gate follow-up) が「どの probe がどう判定したか」を1行ずつ
  * 表示するために必要。D1 read が failure した probe は観測なし (= fail-open)
  * として扱う — D1 障害で strategy tick 全体を落とさないため。
+ *
+ * `evaluateAt`:
+ *   - `'now'` (default): strategy tick 用。asOf = now で評価するため、GDELT の
+ *     反映遅延 (実測 1〜7 時間) が `maxAgeMin` を超えていると unavailable に
+ *     倒れる — リアルタイム判定としてはそれが正しい (古い観測で BUY を絞らない)。
+ *   - `'latest_observation'`: 日次サマリ等の表示用。probe ごとに最新 volume
+ *     観測の bucket 時刻を asOf にして評価する。「データが届いている範囲では
+ *     どう判定されるか」を見るためのもので、staleness check を実質バイパス
+ *     するため **取引経路 (strategy tick) では使わないこと**。probe に観測が
+ *     1 点も無い場合は now で評価する (= unavailable に倒れる)。
  */
 export async function loadNewsShockDecision(
   db: D1Database,
@@ -118,6 +128,7 @@ export async function loadNewsShockDecision(
   },
   requestId: string | undefined,
   now: Date,
+  evaluateAt: 'now' | 'latest_observation' = 'now',
 ): Promise<{ combined: NewsShockGateDecision; probes: Array<{ probeKey: string; decision: NewsShockGateDecision }> }> {
   const rawConfig = {
     ...DEFAULT_NEWS_SHOCK_CONFIG,
@@ -155,10 +166,15 @@ export async function loadNewsShockDecision(
         repo.fetchRecent({ source: 'gdelt', probeKey: probe.key, metric: 'volume', sinceIso }),
         repo.fetchRecent({ source: 'gdelt', probeKey: probe.key, metric: 'tone', sinceIso }),
       ])
+      // 'latest_observation': この probe の最新 volume bucket を評価基準時刻に
+      // する。sinceIso (fetch 窓) は now 起点のままなので、遅延分だけ baseline
+      // 窓の最古側が数時間欠けるが、7 日窓に対して誤差の範囲。
+      const probeAsOf =
+        evaluateAt === 'latest_observation' ? (latestBucketAtOrNull(volumeRows, now) ?? asOf) : asOf
       input = {
         volumeObservations: volumeRows.map((r) => ({ bucketAt: r.bucketAt, value: r.value })),
         toneObservations: toneRows.map((r) => ({ bucketAt: r.bucketAt, value: r.value })),
-        asOf,
+        asOf: probeAsOf,
       }
     } catch (err) {
       // D1 read 失敗は「観測なし」扱い (evaluateNewsShockGate が fail-open で
@@ -182,4 +198,23 @@ export async function loadNewsShockDecision(
     combined: combined ?? evaluateNewsShockGate({ volumeObservations: [], toneObservations: [], asOf }, config),
     probes,
   }
+}
+
+/**
+ * now 以前で最新の bucket_at を返す (無ければ null)。未来時刻の row (時計ずれ /
+ * 汚染データ) は評価基準時刻に採用しない — `evaluateNewsShockGate` 側の
+ * window/baseline フィルタも asOf 以前しか見ないため整合する。
+ */
+function latestBucketAtOrNull(rows: Array<{ bucketAt: string }>, now: Date): string | null {
+  let latest: string | null = null
+  let latestMs = Number.NEGATIVE_INFINITY
+  for (const row of rows) {
+    const t = Date.parse(row.bucketAt)
+    if (!Number.isFinite(t) || t > now.getTime()) continue
+    if (t > latestMs) {
+      latestMs = t
+      latest = row.bucketAt
+    }
+  }
+  return latest
 }

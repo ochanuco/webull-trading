@@ -101,7 +101,12 @@ export interface StateChangeNotificationEvent {
  */
 export interface SummaryNotificationEvent {
   type: 'SUMMARY'
-  /** emit log の cause 列に入る識別子 (例: 'news_shock_daily_summary')。 */
+  /**
+   * サマリの識別子 (例: 'news_shock_daily_summary')。SUMMARY は push 専用
+   * (`LoggingNotifier` が `notification_emit_log` への INSERT を skip する —
+   * 定期配信の相場情報を dashboard alerts の記録に混ぜない) のため、現状は
+   * log/デバッグ用のラベル。
+   */
   kind: string
   /** 送信本文 (複数行可)。呼び出し側が組み立てる。 */
   message: string
