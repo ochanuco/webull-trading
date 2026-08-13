@@ -339,17 +339,17 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
         return { name: name, type: 'scatter', symbolSize: 9, z: 5, itemStyle: { color: color }, data: items };
       }
       var series = [
-        { name: '累積 realized PnL', type: 'line', data: vm.equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } },
+        { name: '確定損益 (累積)', type: 'line', data: vm.equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } },
         markerSeries('売り・益 (SELL)', '#057a55', function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) >= 0; }),
         markerSeries('売り・損 (SELL)', '#c22', function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) < 0; }),
         markerSeries('買い (BUY)', '#86868b', function (m) { return m.side !== 'SELL'; }),
       ];
       if (vm.benchmark) {
-        series.push({ name: 'QQQ 騰落率', type: 'line', yAxisIndex: 1, data: vm.benchmark, showSymbol: false, connectNulls: true, lineStyle: { width: 1, type: 'dashed', color: '#1471a8' }, itemStyle: { color: '#1471a8' } });
+        series.push({ name: '市場に乗るだけ (QQQ)', type: 'line', yAxisIndex: 1, data: vm.benchmark, showSymbol: false, connectNulls: true, lineStyle: { width: 1, type: 'dashed', color: '#1471a8' }, itemStyle: { color: '#1471a8' } });
       }
       var equityChart = echarts.init(document.getElementById('equity-chart'));
       equityChart.setOption({
-        title: { text: vm.benchmark ? '累積 realized PnL ($ 左軸) vs QQQ 騰落率 (% 右軸)' : '累積 realized PnL', left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: vm.benchmark ? 'bot の確定損益 vs 市場に乗るだけ (QQQ)' : 'bot の確定損益の推移', left: 'center', textStyle: { fontSize: 14 } },
         legend: { top: 24, textStyle: { fontSize: 11 } },
         tooltip: {
           trigger: 'axis',
