@@ -39,6 +39,24 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('DRY_RUN')
   })
 
+  it('prefers the STATE_CHANGE headline over the generic from→to text when present', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'STATE_CHANGE',
+      field: 'news_shock_regime',
+      from: 'normal',
+      to: 'warning',
+      severity: 'warning',
+      headline: 'ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    // headline のみの 1 行で完結する (requestId / canonical reason は出さない)。
+    expect(body.text).toBe('⚠️ ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません')
+  })
+
   it('passes an abort signal so a hung webhook cannot pin the isolate', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })

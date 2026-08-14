@@ -327,6 +327,52 @@ describe('detectAndNotifyRegimeChange — dedup / first-run / db-less noop', () 
     }
   })
 
+  it('suppresses the notification but still updates the snapshot when shouldNotify returns false', async () => {
+    const { notifier, calls } = makeNotifier()
+    const { db, getStored } = fakeDb('unknown')
+    const result = await detectAndNotifyRegimeChange<Regime>({
+      db,
+      notifier,
+      key: KEY,
+      current: { regime: 'normal', reason: 'news_shock_normal: 1.3x' },
+      rank: RANK,
+      criticalRegime: 'critical',
+      isValidRegime: isRegime,
+      requestId: 'req-suppress',
+      // unknown→normal (データ欠測の回復) はアクションが取れないため流さない。
+      shouldNotify: (from, to) => !(from === 'unknown' && to === 'normal'),
+    })
+    expect(calls).toHaveLength(0)
+    expect(result.emitted).toBe(false)
+    // snapshot は更新済み — 次 tick の normal は「変化なし」として dedup される。
+    expect(JSON.parse(getStored()!.value)).toBe('normal')
+    expect(result.from).toBe('unknown')
+    expect(result.to).toBe('normal')
+  })
+
+  it('attaches the caller-built headline to the STATE_CHANGE event', async () => {
+    const { notifier, calls } = makeNotifier()
+    const { db } = fakeDb('normal')
+    await detectAndNotifyRegimeChange<Regime>({
+      db,
+      notifier,
+      key: KEY,
+      current: { regime: 'warning', reason: 'news_shock_warning: 2.8x (size x0.5)' },
+      rank: RANK,
+      criticalRegime: 'critical',
+      isValidRegime: isRegime,
+      requestId: 'req-headline',
+      headline: (from, to) => `テスト見出し (${from}→${to})`,
+    })
+    expect(calls).toHaveLength(1)
+    if (calls[0]!.type === 'STATE_CHANGE') {
+      expect(calls[0]!.headline).toBe('テスト見出し (normal→warning)')
+      // headline があれば本文はそれで完結 — requestId / canonical reason の
+      // note は付けない (ユーザーフィードバック)。
+      expect(calls[0]!.note).toBeUndefined()
+    }
+  })
+
   it('still persists snapshot and logs `${key}_change_notify_failed` when notify() throws synchronously', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { db, inserts } = fakeDb('normal')

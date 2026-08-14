@@ -90,7 +90,14 @@ sparse probe (平時ニュースが無く volume=0 の時間帯が大半) を全
 
 `news_shock_mode` が `off` 以外の間は、regime 遷移時の STATE_CHANGE 通知
 (Slack/Discord) に加えて、22:00 UTC の日次 cron (portfolio roll と相乗り) が
-合成 regime + probe 別の判定を日本語で配信する。regime 変化が無くて
+合成 regime + probe 別の判定を日本語で配信する。
+
+regime 遷移通知は **受け手がアクションを取れる遷移だけ** 流す:
+warning / critical への突入と、そこからの解除のみ (日本語見出し付き)。
+'unknown' はデータ欠測 (GDELT 反映遅延・producer 障害) であって市場状態では
+ないため、unknown の間は snapshot 更新ごとスキップし、normal↔unknown の
+フラップや欠測回復 (unknown→normal) は通知しない。データ欠測の状況は
+日次サマリ側で観測時刻・遅延として届く。regime 変化が無くて
 も毎日届くので、閾値が実データに対して妥当かの校正材料になる。
 サマリは push 専用で `notification_emit_log` には残らない (dashboard の
 alerts view は異常・約定・設定変更の記録に限る)。
