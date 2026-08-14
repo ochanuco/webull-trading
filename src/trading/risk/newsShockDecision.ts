@@ -201,6 +201,44 @@ export async function loadNewsShockDecision(
 }
 
 /**
+ * news_shock_regime の STATE_CHANGE 通知に載せる人間向け見出し (ユーザー
+ * フィードバック: 「アクションが取れない通知は流しても無意味」)。
+ *
+ * - warning / critical への突入: 何が起きたか (報道量倍率) + bot が何を
+ *   する/しないか (mode 依存) を 1 文で言う。
+ * - normal への復帰: 解除。from='unknown' からの normal 復帰はデータ欠測の
+ *   回復であって市場シグナルではないため、呼び出し側 (`shouldNotify`) で
+ *   通知ごと抑制する前提 — ここでは見出しを作らない (undefined)。
+ * - 想定外の組は undefined を返し、既定の `state change: ...` 表示に落とす。
+ */
+export function buildNewsShockRegimeHeadline(
+  from: NewsShockRegime,
+  to: NewsShockRegime,
+  decision: NewsShockGateDecision,
+  mode: 'observe' | 'enforce',
+): string | undefined {
+  const ratioText = decision.ratio !== null ? `平時の${decision.ratio.toFixed(1)}倍` : '倍率算出不能'
+  if (to === 'critical') {
+    const action =
+      mode === 'enforce' ? '新規買いを停止します' : '本来は新規買い停止 (observe中: 発注は変更しません)'
+    return `ニュース急落シグナル: 報道量が${ratioText}に急増・論調悪化 — ${action}`
+  }
+  if (to === 'warning') {
+    // 「警戒」等の severity ラベルは書かない — アイコン (⚠️) が伝えるため
+    // 重複する (ユーザーフィードバック)。
+    const action =
+      mode === 'enforce'
+        ? `新規買い数量を縮小します (x${decision.sizeScale})`
+        : 'observe中のため発注は変更しません'
+    return `ニュース報道量が急増 (${ratioText}) — ${action}`
+  }
+  if (to === 'normal' && (from === 'warning' || from === 'critical')) {
+    return `ニュース過熱シグナル解除 — 平常に戻りました (現在${ratioText})`
+  }
+  return undefined
+}
+
+/**
  * now 以前で最新の bucket_at を返す (無ければ null)。未来時刻の row (時計ずれ /
  * 汚染データ) は評価基準時刻に採用しない — `evaluateNewsShockGate` 側の
  * window/baseline フィルタも asOf 以前しか見ないため整合する。

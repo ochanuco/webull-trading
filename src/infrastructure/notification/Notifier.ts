@@ -91,6 +91,14 @@ export interface StateChangeNotificationEvent {
    * 補足 (例: `requestId`)。formatter が末尾に付ける。
    */
   note?: string
+  /**
+   * 人間向けの見出し。指定があると formatter は既定の
+   * `state change: <field> <from> → <to>` の代わりにこの文を出す
+   * (news_shock_regime のような内部 enum 遷移を、受け手のアクションが
+   * 分かる日本語に差し替えるため)。field/from/to は emit log の構造化列と
+   * dedup 判定のためそのまま保持する。
+   */
+  headline?: string
 }
 
 /**

@@ -239,6 +239,18 @@ export async function detectAndNotifyRegimeChange<R extends string>(args: {
   isValidRegime: (value: unknown) => value is R
   requestId?: string
   now?: () => Date
+  /**
+   * 遷移ごとの通知可否。false でも snapshot (CAS) は更新される — 「状態は
+   * 追うが受け手のアクションが無い遷移は流さない」ため (例: news shock の
+   * unknown→normal はデータ欠測の回復であって市場シグナルではない)。
+   * 省略時は全遷移を通知する (従来挙動)。
+   */
+  shouldNotify?: (from: R, to: R) => boolean
+  /**
+   * 人間向け見出し (`StateChangeNotificationEvent.headline`)。undefined を
+   * 返した遷移は既定の `state change: <field> <from> → <to>` 表示に落ちる。
+   */
+  headline?: (from: R, to: R) => string | undefined
 }): Promise<{ from: R | null; to: R; emitted: boolean }> {
   if (!args.db) {
     return { from: null, to: args.current.regime, emitted: false }
@@ -255,9 +267,18 @@ export async function detectAndNotifyRegimeChange<R extends string>(args: {
     args.requestId,
   )
   let emitted = false
-  if (updated && previous !== null && previous !== args.current.regime) {
+  if (
+    updated &&
+    previous !== null &&
+    previous !== args.current.regime &&
+    (args.shouldNotify?.(previous, args.current.regime) ?? true)
+  ) {
     const severity = classifyRegimeSeverity(previous, args.current.regime, args.rank, args.criticalRegime)
-    const note = args.requestId ? `requestId=${args.requestId}` : undefined
+    // requestId は本文に出さない (ユーザーフィードバック — 相関は emit log の
+    // request_id 列で取れる)。headline があれば本文はそれで完結するため
+    // canonical reason の併記もしない。headline の無い遷移 (VIX 等) は従来
+    // 通り reason を note に残す。
+    const headline = args.headline?.(previous, args.current.regime)
     // notify は fire-and-forget。`.catch(...)` は async rejection しか拾えない
     // ため、type error 等の同期 throw が起きると下の snapshot 永続化に到達せず
     // 「次 tick も同じ regime → 再通知 + snapshot 不整合」のリスクがあった。
@@ -269,9 +290,7 @@ export async function detectAndNotifyRegimeChange<R extends string>(args: {
         from: previous,
         to: args.current.regime,
         severity,
-        ...(note !== undefined
-          ? { note: `${note} ${args.current.reason}`.trim() }
-          : { note: args.current.reason }),
+        ...(headline !== undefined ? { headline } : { note: args.current.reason }),
       })
       if (result && typeof (result as Promise<unknown>).catch === 'function') {
         ;(result as Promise<unknown>).catch((err) => {
