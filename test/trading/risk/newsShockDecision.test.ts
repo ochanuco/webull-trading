@@ -86,14 +86,14 @@ describe('buildNewsShockRegimeHeadline', () => {
   it('describes a warning entry with the ratio and the observe no-op note', () => {
     const d = decision({ regime: 'warning', sizeScale: 0.5, ratio: 2.8 })
     expect(buildNewsShockRegimeHeadline('normal', 'warning', d, 'observe')).toBe(
-      'ニュース報道量が急増 (平時の2.8倍) — 警戒。observe中のため発注は変更しません',
+      'ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません',
     )
   })
 
   it('describes a warning entry in enforce mode with the size scale action', () => {
     const d = decision({ regime: 'warning', sizeScale: 0.5, ratio: 2.8 })
     expect(buildNewsShockRegimeHeadline('normal', 'warning', d, 'enforce')).toBe(
-      'ニュース報道量が急増 (平時の2.8倍) — 警戒。新規買い数量を縮小します (x0.5)',
+      'ニュース報道量が急増 (平時の2.8倍) — 新規買い数量を縮小します (x0.5)',
     )
   })
 

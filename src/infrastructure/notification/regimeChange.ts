@@ -274,7 +274,10 @@ export async function detectAndNotifyRegimeChange<R extends string>(args: {
     (args.shouldNotify?.(previous, args.current.regime) ?? true)
   ) {
     const severity = classifyRegimeSeverity(previous, args.current.regime, args.rank, args.criticalRegime)
-    const note = args.requestId ? `requestId=${args.requestId}` : undefined
+    // requestId は本文に出さない (ユーザーフィードバック — 相関は emit log の
+    // request_id 列で取れる)。headline があれば本文はそれで完結するため
+    // canonical reason の併記もしない。headline の無い遷移 (VIX 等) は従来
+    // 通り reason を note に残す。
     const headline = args.headline?.(previous, args.current.regime)
     // notify は fire-and-forget。`.catch(...)` は async rejection しか拾えない
     // ため、type error 等の同期 throw が起きると下の snapshot 永続化に到達せず
@@ -287,10 +290,7 @@ export async function detectAndNotifyRegimeChange<R extends string>(args: {
         from: previous,
         to: args.current.regime,
         severity,
-        ...(headline !== undefined ? { headline } : {}),
-        ...(note !== undefined
-          ? { note: `${note} ${args.current.reason}`.trim() }
-          : { note: args.current.reason }),
+        ...(headline !== undefined ? { headline } : { note: args.current.reason }),
       })
       if (result && typeof (result as Promise<unknown>).catch === 'function') {
         ;(result as Promise<unknown>).catch((err) => {

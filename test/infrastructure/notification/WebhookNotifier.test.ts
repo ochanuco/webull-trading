@@ -49,15 +49,12 @@ describe('WebhookNotifier', () => {
       from: 'normal',
       to: 'warning',
       severity: 'warning',
-      headline: 'ニュース報道量が急増 (平時の2.8倍) — 警戒。observe中のため発注は変更しません',
-      note: 'requestId=req-1 news_shock_warning: 2.8x (size x0.5)',
+      headline: 'ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません',
     })
 
     const body = JSON.parse(String(calls[0]?.init.body))
-    expect(body.text).toContain('⚠️ ニュース報道量が急増')
-    expect(body.text).not.toContain('state change: news_shock_regime')
-    // note (requestId + canonical reason) は相関用に 2 行目へ残る。
-    expect(body.text).toContain('requestId=req-1')
+    // headline のみの 1 行で完結する (requestId / canonical reason は出さない)。
+    expect(body.text).toBe('⚠️ ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません')
   })
 
   it('passes an abort signal so a hung webhook cannot pin the isolate', async () => {

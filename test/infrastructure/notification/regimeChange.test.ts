@@ -367,6 +367,9 @@ describe('detectAndNotifyRegimeChange — dedup / first-run / db-less noop', () 
     expect(calls).toHaveLength(1)
     if (calls[0]!.type === 'STATE_CHANGE') {
       expect(calls[0]!.headline).toBe('テスト見出し (normal→warning)')
+      // headline があれば本文はそれで完結 — requestId / canonical reason の
+      // note は付けない (ユーザーフィードバック)。
+      expect(calls[0]!.note).toBeUndefined()
     }
   })
 

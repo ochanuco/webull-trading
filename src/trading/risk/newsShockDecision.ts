@@ -224,11 +224,13 @@ export function buildNewsShockRegimeHeadline(
     return `ニュース急落シグナル: 報道量が${ratioText}に急増・論調悪化 — ${action}`
   }
   if (to === 'warning') {
+    // 「警戒」等の severity ラベルは書かない — アイコン (⚠️) が伝えるため
+    // 重複する (ユーザーフィードバック)。
     const action =
       mode === 'enforce'
         ? `新規買い数量を縮小します (x${decision.sizeScale})`
         : 'observe中のため発注は変更しません'
-    return `ニュース報道量が急増 (${ratioText}) — 警戒。${action}`
+    return `ニュース報道量が急増 (${ratioText}) — ${action}`
   }
   if (to === 'normal' && (from === 'warning' || from === 'critical')) {
     return `ニュース過熱シグナル解除 — 平常に戻りました (現在${ratioText})`
