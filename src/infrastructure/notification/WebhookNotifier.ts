@@ -127,8 +127,12 @@ export class WebhookNotifier implements Notifier {
       return link ? `${head}\n${link}` : head
     }
     if (event.type === 'STATE_CHANGE') {
-      // `from → to` を表示し、severity icon で実発注に近づく遷移を強調する。
-      const head = `${severityIcon(event.severity)} state change: ${event.field} ${formatValue(event.from)} → ${formatValue(event.to)}`
+      // headline があれば人間向け文言を優先する (news_shock_regime 等の内部
+      // enum を読み手のアクションが分かる文に差し替える)。無ければ従来の
+      // `from → to` 表示。severity icon で実発注に近づく遷移を強調する。
+      const head = event.headline
+        ? `${severityIcon(event.severity)} ${event.headline}`
+        : `${severityIcon(event.severity)} state change: ${event.field} ${formatValue(event.from)} → ${formatValue(event.to)}`
       const note = event.note ? `\n${event.note}` : ''
       return `${head}${note}`
     }
