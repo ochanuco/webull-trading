@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { moreConservativeNewsShockDecision } from '../../../src/trading/risk/newsShockDecision'
+import {
+  buildNewsShockRegimeHeadline,
+  moreConservativeNewsShockDecision,
+} from '../../../src/trading/risk/newsShockDecision'
 import type { NewsShockGateDecision } from '../../../src/trading/risk/newsShockGate'
 
 /**
@@ -76,5 +79,43 @@ describe('moreConservativeNewsShockDecision', () => {
     const normal = decision({ regime: 'normal', sizeScale: 1.0, reason: 'news_shock_normal: 1.0x' })
     expect(moreConservativeNewsShockDecision(blockedUnknown, normal)).toBe(blockedUnknown)
     expect(moreConservativeNewsShockDecision(normal, blockedUnknown)).toBe(blockedUnknown)
+  })
+})
+
+describe('buildNewsShockRegimeHeadline', () => {
+  it('describes a warning entry with the ratio and the observe no-op note', () => {
+    const d = decision({ regime: 'warning', sizeScale: 0.5, ratio: 2.8 })
+    expect(buildNewsShockRegimeHeadline('normal', 'warning', d, 'observe')).toBe(
+      'ニュース報道量が急増 (平時の2.8倍) — 警戒。observe中のため発注は変更しません',
+    )
+  })
+
+  it('describes a warning entry in enforce mode with the size scale action', () => {
+    const d = decision({ regime: 'warning', sizeScale: 0.5, ratio: 2.8 })
+    expect(buildNewsShockRegimeHeadline('normal', 'warning', d, 'enforce')).toBe(
+      'ニュース報道量が急増 (平時の2.8倍) — 警戒。新規買い数量を縮小します (x0.5)',
+    )
+  })
+
+  it('describes a critical entry with tone deterioration and the mode-dependent action', () => {
+    const d = decision({ regime: 'critical', sizeScale: 0, ratio: 5.1, toneDrop: 2.3 })
+    expect(buildNewsShockRegimeHeadline('warning', 'critical', d, 'observe')).toContain(
+      '本来は新規買い停止 (observe中: 発注は変更しません)',
+    )
+    expect(buildNewsShockRegimeHeadline('warning', 'critical', d, 'enforce')).toContain(
+      '新規買いを停止します',
+    )
+  })
+
+  it('describes easing back to normal from warning/critical as 解除', () => {
+    const d = decision({ regime: 'normal', ratio: 1.3 })
+    expect(buildNewsShockRegimeHeadline('warning', 'normal', d, 'observe')).toBe(
+      'ニュース過熱シグナル解除 — 平常に戻りました (現在平時の1.3倍)',
+    )
+  })
+
+  it('returns undefined for unknown→normal (データ欠測回復は通知自体を抑制する前提)', () => {
+    const d = decision({ regime: 'normal', ratio: 1.3 })
+    expect(buildNewsShockRegimeHeadline('unknown', 'normal', d, 'observe')).toBeUndefined()
   })
 })

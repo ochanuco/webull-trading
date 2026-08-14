@@ -47,6 +47,7 @@ import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notificatio
 import { detectAndNotifyRegimeChange } from '../../infrastructure/notification/regimeChange'
 import type { NewsShockGateDecision } from '../risk/newsShockGate'
 import {
+  buildNewsShockRegimeHeadline,
   isNewsShockGateReady,
   isNewsShockRegime,
   loadNewsShockDecision,
@@ -684,9 +685,20 @@ export async function runStrategyCron(
   // 情報で、tick の BUY sizing には関与しない。
   const newsShockDecision = newsShockLoadResult?.combined
   if (newsShockDecision) {
+    // trace には unknown を含む全 decision を残す (通知の抑制とは独立)。
     analysis = { ...analysis, newsShock: newsShockDecision }
+  }
+  if (newsShockDecision && newsShockDecision.regime !== 'unknown') {
     // Regime 遷移 (normal → warning, warning → critical 等) を STATE_CHANGE 通知。
     // VIX と同じ CAS dedup 機構を汎用版 (`regimeChange.ts`) 経由で再利用する。
+    //
+    // 'unknown' はデータ欠測 (GDELT の反映遅延・producer 障害) であって市場
+    // 状態ではないため、snapshot 更新ごとスキップする — 鮮度が 90 分境界を
+    // 跨ぐたびに normal↔unknown がフラップして「アクションの取れない通知」で
+    // Discord を汚していた (ユーザーフィードバック)。これで snapshot は常に
+    // 「最後に観測できた regime」を保持し、warning↔unknown↔warning の再突入
+    // 重複通知も出ない。unknown→normal (欠測回復) も shouldNotify で抑制する。
+    const mode = global.newsShockMode === 'enforce' ? 'enforce' : 'observe'
     await detectAndNotifyRegimeChange({
       db: env.DB,
       notifier,
@@ -696,6 +708,8 @@ export async function runStrategyCron(
       criticalRegime: 'critical',
       isValidRegime: isNewsShockRegime,
       requestId: options.requestId,
+      shouldNotify: (from, to) => !(from === 'unknown' && to === 'normal'),
+      headline: (from, to) => buildNewsShockRegimeHeadline(from, to, newsShockDecision, mode),
     }).catch((err) => {
       console.warn(
         JSON.stringify({
