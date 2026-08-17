@@ -149,7 +149,7 @@ export function computeSymbolStats(rows: TradePnlRow[]): SymbolStat[] {
  * 色は dataviz skill の検証済みデフォルト categorical palette (light/dark 両対応、
  * adjacent CVD/normal-vision gate 通過) の slot 1-7 を順に割り当てる。
  */
-export const SKIP_REASON_CATEGORIES = [
+const SKIP_REASON_CATEGORIES = [
   { key: 'halt', label: '取引停止中', color: '#2a78d6' },
   { key: 'risk_gate', label: 'リスクゲート', color: '#eb6834' },
   { key: 'role', label: '銘柄ロール抑止', color: '#1baf7a' },
@@ -256,7 +256,7 @@ function renderPeriodPills(period: QualityPeriod): string {
  * 敷き詰めて再利用し、値だけ 18px に上書きする (overview の KPI 帯より密な
  * 3 列グリッドなので既定 22px だと詰まりすぎる)。
  */
-export function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
+function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
   const tile = (label: string, text: string, cls?: string) =>
     kpiCard(label, `<span style="font-size:18px" class="${cls ?? ''}">${esc(text)}</span>`)
   const tiles = [
@@ -277,7 +277,7 @@ export function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJs
   </div>`
 }
 
-export function renderSymbolTable(symbolStats: SymbolStat[]): string {
+function renderSymbolTable(symbolStats: SymbolStat[]): string {
   if (symbolStats.length === 0) return ''
   const rows = symbolStats
     .map(

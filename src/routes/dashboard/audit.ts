@@ -100,7 +100,7 @@ export function parseAuditDateFilter(raw: string | undefined, isEnd: boolean): s
  * `before_json` / `after_json` を整形して表示。JSON parse が成功すれば 2-space
  * indent、失敗 (= マイグレ前の raw 文字列など) は原文をそのまま返す。
  */
-export function formatAuditJson(raw: string): string {
+function formatAuditJson(raw: string): string {
   try {
     return JSON.stringify(JSON.parse(raw), null, 2)
   } catch {

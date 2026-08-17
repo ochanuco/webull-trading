@@ -621,7 +621,7 @@ function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, s
  *
  * 旧 flat shape の row はそのまま返す (互換)。
  */
-export function normalizeOrderHistoryRow(
+function normalizeOrderHistoryRow(
   raw: WebullOrderHistoryWrapperDto | WebullOrderDetailDto,
 ): WebullOrderDetailDto {
   if (raw === null || typeof raw !== 'object') return {} as WebullOrderDetailDto

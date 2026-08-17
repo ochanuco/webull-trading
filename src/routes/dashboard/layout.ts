@@ -36,7 +36,7 @@ export async function loadKillSwitchState(env: Env): Promise<KillSwitchBannerSta
   }
 }
 
-export const STYLE = `
+const STYLE = `
   body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#f5f5f7;color:#1d1d1f}
   h1{margin:0 0 16px;font-size:22px}
   /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
@@ -297,7 +297,7 @@ export function renderLayout(
  */
 export type NavGroupKey = 'home' | 'symbol' | 'review' | 'ops' | 'diag'
 
-export const NAV_GROUPS: ReadonlyArray<{
+const NAV_GROUPS: ReadonlyArray<{
   key: NavGroupKey
   href: string
   text: string
@@ -309,7 +309,7 @@ export const NAV_GROUPS: ReadonlyArray<{
 ]
 
 /** 管理ドロップダウン内リンク (書き込みを伴う低頻度ページ)。 */
-export const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
+const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/config', text: '設定' },
   { href: '/dashboard/symbols', text: '銘柄管理' },
   { href: '/dashboard/events', text: 'イベント' },
@@ -319,7 +319,7 @@ export const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: 
  * 診断ドロップダウン内リンク。平常時は開かないが、障害時の一次情報と証跡は
  * ここにしか無い (通知 → アラート → requestId → 判定ログ の導線)。
  */
-export const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
+const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/alerts', text: 'アラート', title: '通知の履歴 (severity / cause で絞り込み)' },
   { href: '/dashboard/cron', text: '判定ログ', title: 'なぜ買った / 買わなかったかを requestId で追う' },
   { href: '/dashboard/audit', text: '監査ログ', title: '設定変更の before/after と実行者' },
@@ -359,7 +359,7 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   return null
 }
 
-export function renderTopNav(active?: NavGroupKey | null): string {
+function renderTopNav(active?: NavGroupKey | null): string {
   const links = NAV_GROUPS.map((g) => {
     const activeCls = active === g.key ? ' active' : ''
     const t = g.title ? ` title="${esc(g.title)}"` : ''
@@ -395,7 +395,7 @@ export function renderTopNav(active?: NavGroupKey | null): string {
  */
 export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts'
 
-export const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
+const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   key: AnalysisSubnavKey
   href: string
   label: string
@@ -447,7 +447,7 @@ export function renderAnalysisSubnav(active: AnalysisSubnavKey): string {
  * (#276 banner → sidebar → topnav と配置変更)。status ラベル / env override 注記 /
  * 停止・再開フォームは従来と同じ文言・action を維持 (テスト・運用の互換)。
  */
-export function killSwitchTopnav(state: KillSwitchBannerState | null): string {
+function killSwitchTopnav(state: KillSwitchBannerState | null): string {
   if (state === null) {
     return `<details class="topnav-killswitch">
       <summary><span class="muted">取引状態: 取得不能</span></summary>
@@ -484,7 +484,7 @@ export function killSwitchTopnav(state: KillSwitchBannerState | null): string {
 
 // ページタイトル h1 は出さない (上部 nav の active 強調で現在地が分かるため
 // 冗長 — operator 要望)。title は <title> にのみ残す。
-export function layout(
+function layout(
   title: string,
   body: string,
   activeNav?: NavGroupKey | null,

@@ -20,7 +20,7 @@ import type { EntryStatus } from './entryStatus'
  * runStrategyCron が別途行う。off の間は判定・表示のみ。
  */
 
-export interface ConditionalAllocationPolicy {
+interface ConditionalAllocationPolicy {
   /** entry_required=true の集合。 */
   entryRequired: ReadonlySet<string>
   /** always_active=true の集合。 */
@@ -184,7 +184,7 @@ export interface CashRebalancePlanInput {
   maxOrderNotional: Record<SymbolCurrency, number>
 }
 
-export interface CashRebalanceOrder {
+interface CashRebalanceOrder {
   symbol: string
   quantity: number
   /** 概算 notional (symbol 通貨)。実際の execution では再計算される。 */

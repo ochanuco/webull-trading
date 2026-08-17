@@ -39,7 +39,7 @@ export function parseAlertsQuery(rawUrl: string): URLSearchParams {
   }
 }
 
-export const SEVERITY_VALUES: ReadonlyArray<NotificationSeverity> = ['critical', 'warning', 'info']
+const SEVERITY_VALUES: ReadonlyArray<NotificationSeverity> = ['critical', 'warning', 'info']
 
 export function parseSeverityFilter(raw: string | undefined): NotificationSeverity[] {
   if (!raw) return []
@@ -53,7 +53,7 @@ export function parseSeverityFilter(raw: string | undefined): NotificationSeveri
 
 // SUMMARY は push 専用 (LoggingNotifier が emit log への INSERT を skip する)
 // ため、この view には出てこない — filter にも並べない。
-export const EVENT_TYPE_VALUES: ReadonlyArray<NotificationEvent['type']> = [
+const EVENT_TYPE_VALUES: ReadonlyArray<NotificationEvent['type']> = [
   'TRADE',
   'ERROR',
   'STATE_CHANGE',
@@ -87,21 +87,21 @@ export interface AlertsBodyArgs {
  *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
  */
 /** severity → 日本語 pill (#alerts-trades-ui)。cls は共通 .pill variant (layout.ts)。 */
-export const ALERT_SEVERITY_PILLS: Record<string, { ja: string; cls: string }> = {
+const ALERT_SEVERITY_PILLS: Record<string, { ja: string; cls: string }> = {
   critical: { ja: '重大', cls: 'err' },
   warning: { ja: '警告', cls: 'warn' },
   info: { ja: '情報', cls: 'info' },
 }
 
 /** event type → 日本語。 */
-export const ALERT_EVENT_LABELS: Record<string, string> = {
+const ALERT_EVENT_LABELS: Record<string, string> = {
   ERROR: 'エラー',
   TRADE: '売買',
   STATE_CHANGE: '設定変更',
 }
 
 /** 長い message は先頭を出して残りを <details> に畳む閾値。 */
-export const ALERT_MESSAGE_FOLD = 160
+const ALERT_MESSAGE_FOLD = 160
 
 export function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore = false } = args
@@ -171,7 +171,7 @@ export function alertsBody(args: AlertsBodyArgs): string {
   ${renderLogCopyScript('__alertsCopy')}`
 }
 
-export function buildAlertBaseHref(
+function buildAlertBaseHref(
   limit: number,
   severityFilter: NotificationSeverity[],
   eventTypeFilter: NotificationEvent['type'] | undefined,

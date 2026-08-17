@@ -292,7 +292,7 @@ function fmtSignedAmount(v: number): string {
  * 期間別リターンの小テーブル (13px 基準、日本語ラベル)。
  * % は出さない (シード資金を保持していない — computePeriodReturns 参照)。
  */
-export function renderPeriodReturnsTable(rows: PeriodReturn[]): string {
+function renderPeriodReturnsTable(rows: PeriodReturn[]): string {
   if (rows.length === 0) return ''
   const cells = rows
     .map((r) => {

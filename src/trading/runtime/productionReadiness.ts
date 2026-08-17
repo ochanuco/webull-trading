@@ -8,16 +8,16 @@ import { resolveAccessTokenWithSource } from '../../infrastructure/webull/resolv
 import { WebullTokenStateClient } from '../state/WebullTokenStateClient'
 import { resolveTradingEnabled } from './killSwitch'
 
-export type ReadinessSeverity = 'pass' | 'warn' | 'fail'
+type ReadinessSeverity = 'pass' | 'warn' | 'fail'
 
-export interface ProductionReadinessCheck {
+interface ProductionReadinessCheck {
   id: string
   severity: ReadinessSeverity
   message: string
   details?: Record<string, unknown>
 }
 
-export interface ProductionReadinessPolicy {
+interface ProductionReadinessPolicy {
   maxActiveSymbols: number
   maxOrderNotionalUsd: number
   maxOrderNotionalJpy: number
@@ -54,7 +54,7 @@ const DEFAULT_POLICY: ProductionReadinessPolicy = Object.freeze({
   rollbackRehearsalMaxAgeHours: 72,
 })
 
-export function parseProductionReadinessPolicy(env: Env): ProductionReadinessPolicy {
+function parseProductionReadinessPolicy(env: Env): ProductionReadinessPolicy {
   return {
     maxActiveSymbols: parsePositiveInt(env.FIRST_LIVE_MAX_ACTIVE_SYMBOLS, DEFAULT_POLICY.maxActiveSymbols),
     maxOrderNotionalUsd: parsePositiveNumber(

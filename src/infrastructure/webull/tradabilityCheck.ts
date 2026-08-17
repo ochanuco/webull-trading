@@ -26,13 +26,13 @@ import { toWebullPlaceOrderRequest } from './mapper'
  *                 発注可否は保証しない (USMV の前例)。登録はブロックしない
  *   - 'unavailable': 設定不足 / broker 不達 (判定プロセス自体が走れず)
  */
-export type TradabilityVerdict = 'denied' | 'unknown' | 'unavailable'
+type TradabilityVerdict = 'denied' | 'unknown' | 'unavailable'
 
 /**
  * 銘柄単位の恒久拒否コード判定。Webull は `OAUTH_OPENAPI_` prefix 付き/なしの
  * 両方の表記が観測されているため suffix で判定する (CodeRabbit #466)。
  */
-export function isTickerDenyCode(errorCode: string | null): boolean {
+function isTickerDenyCode(errorCode: string | null): boolean {
   return errorCode !== null && errorCode.endsWith('TICKER_IS_DENY')
 }
 
@@ -50,7 +50,7 @@ function isInvalidSymbolParamError(r: TradabilityVariantResult): boolean {
   )
 }
 
-export interface TradabilityVariantResult {
+interface TradabilityVariantResult {
   label: string
   status: number | null
   errorCode: string | null

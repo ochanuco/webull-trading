@@ -36,7 +36,7 @@ export interface SymbolsListFilter {
   q: string
 }
 
-export function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): SymbolConfigRow[] {
+function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): SymbolConfigRow[] {
   const needle = f.q.trim().toLowerCase()
   return rows.filter((r) => {
     if (f.status === 'active' && !r.active) return false
@@ -50,7 +50,7 @@ export function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFi
   })
 }
 
-export const ROLE_NODE_COLORS: Record<string, string> = {
+const ROLE_NODE_COLORS: Record<string, string> = {
   cash_parking: '#5b8c5a',
   core_trend: '#1a56db',
   leveraged_trend: '#d97706',
@@ -1351,7 +1351,7 @@ export function symbolsListBody(args: {
 // 保存は確定ボタン押下の form POST のみ (即保存しない = 確定するまで仮)。
 // インバース対は 1 本の共有 slider なので相手 slider の同期は不要 — POST に載らない
 // 相手側は server が同値同期する (#315 regime hedge)。
-export const BUDGET_LADDER_JS = `
+const BUDGET_LADDER_JS = `
   window.__budgetDirty = {};
   window.__fmtBudget = function (v) { return Number(v) <= 0 ? 'risk' : v + '%'; };
   window.onBudgetSlide = function (el) {
@@ -1422,7 +1422,7 @@ export const BUDGET_LADDER_JS = `
 `
 
 /** 予算配分 ladder の確定 / 取消 バー。slider は form attr で此処の form に紐づく。 */
-export function budgetLadderControls(): string {
+function budgetLadderControls(): string {
   return `<form id="symbol-budget-form" method="post" action="/admin/symbol-config/budget-alloc"></form>
   <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,0.06)">
     <strong style="font-size:13px">予算配分の変更（未確定）</strong>
@@ -1544,13 +1544,13 @@ export function pairRoles(
  * /admin/symbol-config 系 form POST が失敗時に redirect で渡してくる
  * `?error=...&symbol=...` を表示する banner。known code 以外は generic msg。
  */
-export function renderSymbolErrorBanner(code: string | null, symbol: string | null): string {
+function renderSymbolErrorBanner(code: string | null, symbol: string | null): string {
   if (!code) return ''
   const msg = symbolErrorMessage(code, symbol)
   return `<p class="err" style="margin:0 0 12px">${esc(msg)}</p>`
 }
 
-export function symbolErrorMessage(code: string, symbol: string | null): string {
+function symbolErrorMessage(code: string, symbol: string | null): string {
   const sym = symbol ?? ''
   switch (code) {
     case 'duplicate':
@@ -1597,7 +1597,7 @@ export interface SymbolFormArgs {
  * 登録/発注は止めない警告レイヤー (ユーザー方針: 警告のみ)。`tradable` は
  * バッジを出さない (ノイズ削減 — 問題のある状態だけ目立たせる)。
  */
-export const TRADABLE_BADGE: Record<
+const TRADABLE_BADGE: Record<
   Exclude<TradableStatus, 'tradable'>,
   { label: string; bg: string; fg: string; title: string }
 > = {
@@ -1618,7 +1618,7 @@ export const TRADABLE_BADGE: Record<
 }
 
 /** allowlist status → 一覧/フォーム用バッジ HTML。tradable は空 (バッジ無し)。 */
-export function tradableBadgeHtml(status: TradableStatus): string {
+function tradableBadgeHtml(status: TradableStatus): string {
   if (status === 'tradable') return ''
   const b = TRADABLE_BADGE[status]
   return `<span title="${esc(b.title)}" style="display:inline-block;padding:1px 6px;border-radius:6px;background:${b.bg};color:${b.fg};font-size:11px;font-weight:600;white-space:nowrap">${b.label}</span>`
@@ -1647,7 +1647,7 @@ export const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
 }
 
 /** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
-export function renderSymbolRoleCell(row: SymbolConfigRow): string {
+function renderSymbolRoleCell(row: SymbolConfigRow): string {
   const role = row.role?.trim() || null
   const known = role !== null && (SYMBOL_ROLES as readonly string[]).includes(role)
   const roleBadge =
