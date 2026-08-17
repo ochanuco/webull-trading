@@ -1,4 +1,3 @@
-import type { Env } from '../../config/env'
 import type { WebullPositionDto } from '../../infrastructure/webull/dto'
 import type { PositionStore } from '../state/PositionStore'
 import type { PositionState, SymbolState } from '../state/types'
@@ -425,13 +424,6 @@ function buildReason(beforeQty: number, afterQty: number): string {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-
-/**
- * Re-export for the route layer — keeps the typed `Env` import close to the
- * call site so the route doesn't need to know about the WebullClient
- * factory.
- */
-export type SyncHoldingsEnv = Env
 
 export const _internal = {
   pickAvgPrice,

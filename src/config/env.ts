@@ -22,25 +22,6 @@ export interface Env {
   PORTFOLIO_STATE?: DurableObjectNamespace<PortfolioStateDO>
 }
 
-/**
- * Optional positive number env parser. Returns `fallback` when undefined or
- * malformed (fail-closed to a sane default rather than throwing — these are
- * risk knobs, not hard dependencies).
- */
-export function parseOptionalPositiveNumber(
-  value: string | undefined,
-  fallback: number,
-  key?: string,
-): number {
-  if (value === undefined || value === '') return fallback
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.warn(`Invalid ${key ?? 'env'} value: '${value}'; using fallback ${fallback}`)
-    return fallback
-  }
-  return parsed
-}
-
 // D1 binding (#68 Phase A append)
 export interface Env {
   /**

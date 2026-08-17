@@ -194,14 +194,6 @@ function collectOpenPositions(data: OverviewData): OpenPositionView[] {
 }
 
 /**
- * セクション見出し (h1 なし方針のまま「詳しく見る」導線を付ける小ヘッダ)。
- * ホームは要約、詳細は各専用ページ (/portfolio /positions /cron /alerts) へ。
- */
-export function sectionHead(title: string, moreHref: string): string {
-  return `<div class="section-head"><span>${esc(title)}</span><a class="sh-more" href="${moreHref}">詳しく見る →</a></div>`
-}
-
-/**
  * 資産サマリ帯 (#dashboard-ia 最上段): /portfolio の要約をカード 1 枚に横並び。
  * PORTFOLIO_STATE DO 不在 (portfolio === null) は帯を省略し、スパークラインも
  * データ無しなら section ごと消える (graceful)。
