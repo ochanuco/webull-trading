@@ -27,6 +27,7 @@
 - PR title: Conventional Commits 形式 (POC 期は `POC Phase N: <概要> (issue #<n>)` を使っていた)
 - リリース: `main` push ごとに自動更新される昇格 PR (`release/production -> production`) を merge するだけ。tag / semver は使わない (詳細は `docs/production-cd.md`)
 - commit: 英文1行 subject、**Conventional Commits** (`feat:` / `fix:` / `chore:` / `docs:` / `refactor:` / `perf:` / `test:` / `ci:`)、body は **why** のみ (prefix は履歴の可読性のため。採番には使っていない)
+- **記述の役割分担 (強い規約)**: コードは **How**、テストは **What** (仕様が読める名前と構造)、コミットログは **Why**、コードコメントは **Why not** (採らなかった選択肢と、なぜ採らなかったか / この防御が無いと何が起きるか) のみ。実装をなぞる How コメント・コミット body に書くべき経緯の Why コメントは書かない
 - 並列 PR 共有ファイル (`src/app.ts` / `src/config/env.ts` / `.dev.vars.example`) は **末尾 append のみ** → 後発 PR が rebase で解決
 
 ## ドキュメント
