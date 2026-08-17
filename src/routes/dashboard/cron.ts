@@ -252,7 +252,7 @@ export async function loadDecisionRows(
  * レールと同じ見た目 (CSS 共用) で、先頭に「ALL (全銘柄)」を置く。
  * limit は URL に伝搬する。
  */
-export function renderCronSymbolRail(
+function renderCronSymbolRail(
   universe: SymbolUniverse | null | undefined,
   activeSymbol: string | undefined,
   limit: number,
@@ -289,7 +289,7 @@ export function renderCronSymbolRail(
  * `?symbol=` フィルタは切替を跨いで URL に伝搬させる (matrix 側は集計に使わない
  * が、一覧へ戻った時に絞り込みが外れないように)。
  */
-export function renderCronViewPills(
+function renderCronViewPills(
   active: 'list' | 'matrix',
   limit: number,
   symbolFilter?: string,
@@ -442,7 +442,7 @@ export function renderDecisionTable(
   ${renderLogCopyScript(opts.copyVarName)}`
 }
 
-export function cronReasonCell(row: {
+function cronReasonCell(row: {
   id: number
   timestamp: string
   requestId: string | null
@@ -485,7 +485,7 @@ export function cronReasonCell(row: {
 // trace 識別子 → 左辺 (変数) の表示名 + 単位、必要なら右辺 (閾値) の名前。
 // 左の値が「何の数字か」を明示するため (#trace-readability)。識別子は
 // decision_log 互換で英語据え置き、ここで表示名と単位を与える。
-export const TRACE_OPERAND: Record<string, { name: string; unit: 'price' | 'pct' | 'mult' | 'days'; thr?: string }> = {
+const TRACE_OPERAND: Record<string, { name: string; unit: 'price' | 'pct' | 'mult' | 'days'; thr?: string }> = {
   'entry.trend_50d_return': { name: '20日騰落率', unit: 'pct' },
   'entry.trend_20d_return': { name: '20日騰落率', unit: 'pct' },
   'entry.above_sma50': { name: '株価', unit: 'price', thr: 'SMA50' },
@@ -518,7 +518,7 @@ const TRACE_LABEL_JA_CURRENT: Record<string, string> = {
  * `currency` は価格系の値に $/¥ を付けるために使う (null なら記号なし)。
  * trace 未保存 (migration 前 / 一部経路) は空文字 (既存表示のまま)。
  */
-export function renderDecisionLadder(
+function renderDecisionLadder(
   traceJson: string | null,
   decision: string,
   outputReason: string,
@@ -768,7 +768,7 @@ export async function runCronJsonExport(
   }
 }
 
-export function describeCronReason(reason: string | null | undefined): string {
+function describeCronReason(reason: string | null | undefined): string {
   if (!reason) return '<p class="muted">詳細理由なし</p>'
 
   const lotSizeRound = reason.match(
@@ -817,7 +817,7 @@ export interface DecisionMatrixSourceRow {
   n: number
 }
 
-export interface DecisionMatrixCell {
+interface DecisionMatrixCell {
   decision: string
   /** 代表 decision 内で最頻の raw reason (同数は集計順の先頭) */
   reason: string | null
@@ -928,7 +928,7 @@ function jstYmdOf(now: Date): string {
   return new Date(now.getTime() + 9 * 3_600_000).toISOString().slice(0, 10)
 }
 
-export const REASON_CATEGORIES = [
+const REASON_CATEGORIES = [
   { key: 'trend', label: 'トレンド不成立', color: '#1471a8' },
   { key: 'pullback', label: '押し目条件', color: '#0e9f9f' },
   { key: 'overheat', label: '過熱・ボラ過大', color: '#b25000' },
@@ -941,7 +941,7 @@ export const REASON_CATEGORIES = [
   { key: 'other', label: 'その他', color: '#aaaaaa' },
 ] as const
 
-export type ReasonCategoryKey = (typeof REASON_CATEGORIES)[number]['key']
+type ReasonCategoryKey = (typeof REASON_CATEGORIES)[number]['key']
 
 /**
  * raw reason 文字列の prefix でカテゴリ化する pure 関数。パターンは

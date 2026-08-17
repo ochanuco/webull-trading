@@ -27,7 +27,7 @@ import type { PositionState, SymbolState } from '../state/types'
  *     else keep the existing DO `avgPrice`. Falling through to `0` would
  *     break realized-PnL math in `recordFill` so we explicitly avoid that.
  */
-export interface SyncHoldingResult {
+interface SyncHoldingResult {
   symbol: string
   /** DO position before the override (null if there was none). */
   before: PositionState | null
@@ -46,7 +46,7 @@ export interface SyncHoldingResult {
   skipped?: 'no_drift' | 'dry_run'
 }
 
-export interface SyncHoldingError {
+interface SyncHoldingError {
   symbol: string
   error: string
 }

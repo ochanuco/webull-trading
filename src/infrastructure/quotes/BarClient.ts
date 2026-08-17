@@ -7,7 +7,7 @@ import { inferWebullMarket } from '../webull/mapper'
 // Python SDK's EasyEnum.__str__ returns `self.name` (the underscored
 // identifier), and Java SDK passes `Category.US_STOCK.name()` the same way.
 // JP_STOCK has no working HK-sandbox path — JP bars need a JP tenant (#89).
-export type BarCategory = 'US_STOCK' | 'US_ETF' | 'JP_STOCK'
+type BarCategory = 'US_STOCK' | 'US_ETF' | 'JP_STOCK'
 
 // Mirrors WebullQuoteClient's US ETF allowlist.
 const US_ETF_SYMBOLS = new Set<string>(['SOXL', 'SOXS'])
@@ -45,7 +45,7 @@ export interface BarClient {
   getIntradayBars?(symbol: string, interval: IntradayInterval): Promise<IntradayBar[]>
 }
 
-export interface WebullBarClientEnv {
+interface WebullBarClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
   /**
@@ -193,7 +193,7 @@ export class WebullBarClient implements BarClient {
  */
 const DEFAULT_QUOTES_API_BASE = 'https://api.webull.co.jp'
 
-export function createWebullBarClient(
+function createWebullBarClient(
   env: WebullBarClientEnv,
   options?: {
     fetchFn?: typeof fetch

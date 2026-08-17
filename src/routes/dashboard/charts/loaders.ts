@@ -155,7 +155,7 @@ export interface SymbolChartRules {
  * timeStopDays が大きくても肥大化を防ぐ。
  * MAX_TIME_STOP_DAYS=365 → 2*365+4 = 734 カレンダー日。
  */
-export const MAX_WINDOW_DAYS = Math.ceil(MAX_TIME_STOP_DAYS * 2 + 4)
+const MAX_WINDOW_DAYS = Math.ceil(MAX_TIME_STOP_DAYS * 2 + 4)
 
 /**
  * Chart SQL の window 日数を timeStopDays から動的に決める。
@@ -176,9 +176,9 @@ export function computeChartWindowDays(timeStopDays: number): number {
 export const MAX_CHART_DECISIONS = 250
 
 /** チャート判定点として描画する decision 種別 (HOLD は定常状態なので除外)。 */
-export const CHART_PLOTTED_DECISIONS: ReadonlySet<string> = new Set(['BUY', 'SELL', 'SKIP', 'REJECT', 'ERROR'])
+const CHART_PLOTTED_DECISIONS: ReadonlySet<string> = new Set(['BUY', 'SELL', 'SKIP', 'REJECT', 'ERROR'])
 
-export interface PivotPoint {
+interface PivotPoint {
   /** ISO UTC timestamp of the daily bar */
   timestamp: string
   price: number
@@ -200,7 +200,7 @@ export interface TrendLineSegment {
 }
 
 /** 15 分足 OHLC (Yahoo intraday bars 由来)、candlestick 描画用 */
-export interface OhlcBar {
+interface OhlcBar {
   /** ISO UTC (Yahoo intraday は秒精度の bar 開始時刻) */
   timestamp: string
   open: number
@@ -958,7 +958,7 @@ export function extractSma50(indicatorsJson: string | null): number | null {
   return parseIndicators(indicatorsJson).sma50
 }
 
-export interface ExtractedIndicators {
+interface ExtractedIndicators {
   sma50: number | null
   high20d: number | null
   low20d: number | null
@@ -969,7 +969,7 @@ export interface ExtractedIndicators {
  * low20d は #158 follow-up で追加されたため、既存の indicators_json には未収録 →
  * 古い行は null fallback で grace 化。新しい cron 実行から徐々に出揃う。
  */
-export function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
+function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
   if (!indicatorsJson) return { sma50: null, high20d: null, low20d: null }
   try {
     const obj = JSON.parse(indicatorsJson) as {
@@ -995,7 +995,7 @@ export function parseIndicators(indicatorsJson: string | null): ExtractedIndicat
  * 入場距離計算は price/sma50/return50d/high20d/atr20/baselineAtr20 の全部が要る。
  * 1 つでも欠けて / 非有限なら null (= その評価日は距離計算に使わない)。
  */
-export function parseFullIndicators(indicatorsJson: string | null): PullbackIndicators | null {
+function parseFullIndicators(indicatorsJson: string | null): PullbackIndicators | null {
   if (!indicatorsJson) return null
   let obj: Record<string, unknown>
   try {
@@ -1025,9 +1025,9 @@ export function parseFullIndicators(indicatorsJson: string | null): PullbackIndi
 }
 
 /** 入場距離計算に残す日次ユニーク評価の最大日数 (直近側)。 */
-export const MAX_EVAL_INDICATOR_DAYS = 20
+const MAX_EVAL_INDICATOR_DAYS = 20
 
-export const JST_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
+const JST_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Tokyo',
   year: 'numeric',
   month: '2-digit',

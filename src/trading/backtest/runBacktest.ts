@@ -15,7 +15,7 @@ import type { PendingOrderLock, PositionState } from '../state/types'
  * `decide` の input は runBacktest が組み立てる形。PullbackUptrendStrategy も
  * BreakoutMomentumStrategy もこれを満たす (indicators は snapshot 全部入り)。
  */
-export interface BacktestStrategy {
+interface BacktestStrategy {
   decide(input: {
     symbol: string
     indicators: PullbackIndicatorSnapshot
@@ -68,7 +68,7 @@ export interface BacktestParams {
 
 export type ExitReason = 'TP' | 'STOP' | 'TIME_STOP' | 'END_OF_DATA'
 
-export interface BacktestTrade {
+interface BacktestTrade {
   entryTimestamp: string
   exitTimestamp: string
   entryPrice: number
@@ -81,7 +81,7 @@ export interface BacktestTrade {
   holdingDays: number
 }
 
-export interface EquityPoint {
+interface EquityPoint {
   date: string
   equity: number
   /** Peak-to-current drawdown (<=0). 0 ならピーク更新中。 */

@@ -123,7 +123,7 @@ export interface OverviewData {
 }
 
 /** 開いている保有銘柄 (qty != 0) を評価額・含み損益% 付きで抽出。 */
-export interface OpenPositionView {
+interface OpenPositionView {
   sym: string
   qty: number
   currency: SymbolCurrency
@@ -169,7 +169,7 @@ export async function loadRecentFills(
   return result.results ?? []
 }
 
-export function collectOpenPositions(data: OverviewData): OpenPositionView[] {
+function collectOpenPositions(data: OverviewData): OpenPositionView[] {
   const out: OpenPositionView[] = []
   for (const r of data.positions) {
     const pos = r.state?.position
@@ -213,7 +213,7 @@ export function sectionHead(title: string, moreHref: string): string {
  * 株価の鮮度は隠せない (設定対象外)。equity 系の数字は下の領域に譲り、ここは
  * 状態表示に徹する。
  */
-export function renderRunStatePanel(data: OverviewData): string {
+function renderRunStatePanel(data: OverviewData): string {
   const mode = data.dryRun
     ? { text: 'DRY-RUN', tone: 'hold' as const }
     : { text: 'LIVE', tone: 'live' as const }
@@ -294,7 +294,7 @@ export function kpiCard(label: string, value: string, sub?: string, subClass?: s
  * **各保有銘柄が実効 stop からどれだけ離れているか**という、表からは読めなかった
  * 情報を状態列として足す。
  */
-export function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): string {
+function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): string {
   const exposurePill = renderExposurePill(data, open)
   if (!data.symbolStateBound) {
     return `<div class="panel"><div class="panel-title"><span>保有銘柄</span></div><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。</p></div>`
@@ -345,7 +345,7 @@ function renderExposurePill(data: OverviewData, open: OpenPositionView[]): strin
   return `<span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span>`
 }
 
-export function renderRecentPanel(data: OverviewData): string {
+function renderRecentPanel(data: OverviewData): string {
   const trades = data.recentTrades
     .map((t) => {
       const sideClass = t.side === 'BUY' ? 'ok' : t.side === 'SELL' ? 'err' : 'muted'
@@ -423,7 +423,7 @@ export function buyingPowerBadge(): string {
  * 必要があるため各自 CDN タグを持つ — 両方 ON のときだけここで 2 個目以降を
  * 落とす (同一 src の二重ロードはキャッシュされるが parse/execute が無駄)。
  */
-export function dedupeEchartsCdnTag(html: string): string {
+function dedupeEchartsCdnTag(html: string): string {
   const tag = `<script src="${ECHARTS_CDN}" defer></script>`
   const parts = html.split(tag)
   if (parts.length <= 2) return html

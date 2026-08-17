@@ -52,7 +52,7 @@
 export type NewsShockRegime = 'normal' | 'warning' | 'critical' | 'unknown'
 
 /** operator が attention データ不可用時の挙動を明示的に選べる escape hatch。 */
-export type AttentionStalePolicy = 'fail_open' | 'block_buy'
+type AttentionStalePolicy = 'fail_open' | 'block_buy'
 
 export interface NewsShockGateConfig {
   /** ratio > これで warning 領域 (size を warnSizeScale 倍に縮小)。default 2.3 (GDELT 12ヶ月実測 p90)。 */

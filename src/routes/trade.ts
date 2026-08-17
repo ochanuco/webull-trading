@@ -77,7 +77,7 @@ async function parseTradeRequest(payload: Promise<unknown>): Promise<TradeReques
   }
 }
 
-export async function createTradingService(
+async function createTradingService(
   request: TradeRequest,
   env: Env & {
     SYMBOL_STATE?: DurableObjectNamespace<SymbolStateDO>

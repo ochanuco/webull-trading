@@ -126,7 +126,7 @@ export async function detectBrokerErrorSurge(
  *
  * 値は JSON.stringify(boolean) で持つ (configStateChange.ts と統一)。
  */
-export async function loadPreviousSurgeState(
+async function loadPreviousSurgeState(
   db: D1Database,
   key: string,
 ): Promise<boolean> {
@@ -154,7 +154,7 @@ export async function loadPreviousSurgeState(
  * 現在の surging 状態を `config_state_snapshot` に永続化。delete + insert で
  * upsert (sqlite portable upsert を avoid)。失敗は throw しない。
  */
-export async function persistSurgeState(
+async function persistSurgeState(
   db: D1Database,
   key: string,
   surging: boolean,

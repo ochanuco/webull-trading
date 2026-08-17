@@ -124,7 +124,7 @@ export async function loadPositionsPageData(env: Env): Promise<PositionsPageData
 }
 
 /** JSON export の 1 銘柄行。SSR テーブルの表示列と同じ情報の機械可読版。 */
-export interface PositionExportRow {
+interface PositionExportRow {
   symbol: string
   displayName: string | null
   qty: number | null

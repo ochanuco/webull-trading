@@ -6,7 +6,7 @@ import { formatRealizedPnl } from './cron'
 import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
 /** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
-export const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
+const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
   decision: { ja: '判定', color: '#86868b' },
   intent: { ja: '注文作成', color: '#46608a' },
   pre_submit: { ja: '送信記録', color: '#46608a' },

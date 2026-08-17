@@ -1,6 +1,6 @@
-export type SignalAction = 'BUY' | 'SELL' | 'HOLD'
+type SignalAction = 'BUY' | 'SELL' | 'HOLD'
 
-export type GeneratedAtIso = string
+type GeneratedAtIso = string
 
 export interface DecisionTraceStep {
   label: string
@@ -21,7 +21,7 @@ export type HoldCause = 'guard' | 'entry_gate'
 /** entry gate 識別子のミラー (#658)。実体は strategy/entryDistance.ts の
  * EntryGateKey。domain → strategy の import は層違反になるためここに複製する
  * (drift したら strategy 側の変更をこちらにも反映すること)。 */
-export type EntryGateKey =
+type EntryGateKey =
   | 'trend'
   | 'above_sma50'
   | 'overextension'
@@ -31,7 +31,7 @@ export type EntryGateKey =
   | 'pullback_deep'
 
 /** entryDistance.ts の EntryGateStatus のミラー (#658)。 */
-export interface EntryGateStatusSnapshot {
+interface EntryGateStatusSnapshot {
   key: EntryGateKey
   labelJa: string
   passed: boolean
@@ -42,7 +42,7 @@ export interface EntryGateStatusSnapshot {
 }
 
 /** entryStatus.ts の EntryStatus のミラー (#658)。 */
-export type EntryStatusLevel = 'ENTRY' | 'HALF' | 'WATCH' | 'NG'
+type EntryStatusLevel = 'ENTRY' | 'HALF' | 'WATCH' | 'NG'
 
 /** entry 4 段階判定のスナップショット (#658)。strategy 側で導出して Signal に
  * 同梱し、scheduler の再導出をなくす。shape は strategy/entryStatus.ts の
