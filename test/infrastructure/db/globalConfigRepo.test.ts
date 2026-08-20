@@ -592,4 +592,22 @@ describe('loadGlobalConfig — news shock validation (CHECK 制約 補完)', () 
     expect(result.attentionStalePolicy).toBe('block_buy')
     warnSpy.mockRestore()
   })
+
+  // 0045 (#709 Phase 6): extendedHoursGateMode は newsShockMode / pairRegimeMode
+  // と同じ enum fallback 規約 (gate 無効 = 'off' が安全側)。
+  it('falls back extendedHoursGateMode to "off" for an enum-invalid DB value', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, extendedHoursGateMode: 'bogus' })
+    const result = await loadGlobalConfig(db)
+    expect(result.extendedHoursGateMode).toBe('off')
+    warnSpy.mockRestore()
+  })
+
+  it('honors extendedHoursGateMode="enforce" when explicitly set', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, extendedHoursGateMode: 'enforce' })
+    const result = await loadGlobalConfig(db)
+    expect(result.extendedHoursGateMode).toBe('enforce')
+    warnSpy.mockRestore()
+  })
 })

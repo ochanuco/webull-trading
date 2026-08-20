@@ -109,6 +109,13 @@ export interface GlobalConfigSnapshot {
    * 切替。'fail_open' (default) | 'block_buy' (operator escape hatch)。
    */
   attentionStalePolicy: 'fail_open' | 'block_buy'
+  /**
+   * Extended-hours (pre-market) gate (issue #709 Phase 6)。`extended_hours_observation`
+   * (Phase 1 producer) の当日 WARNING/STOP_AT_OPEN_CANDIDATE を BUY sizing に
+   * 反映する。'off' (default) / 'observe' (trace のみ) / 'enforce'。enum 外の
+   * DB 値は 'off' に倒す (gate 無効が安全側、newsShockMode と同じ規約)。
+   */
+  extendedHoursGateMode: 'off' | 'observe' | 'enforce'
 }
 
 /**
@@ -178,6 +185,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   newsShockWindowMin: 120,
   newsShockMaxAgeMin: 90,
   attentionStalePolicy: 'fail_open',
+  extendedHoursGateMode: 'off',
 })
 
 /**
@@ -545,6 +553,8 @@ export async function loadGlobalConfig(
             newsShockWindowMin: GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
             newsShockMaxAgeMin: GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
             attentionStalePolicy: GLOBAL_CONFIG_DEFAULTS.attentionStalePolicy,
+            // 0045 追加列 (#709 Phase 6)。legacy path は default ('off' = gate 無効)。
+            extendedHoursGateMode: GLOBAL_CONFIG_DEFAULTS.extendedHoursGateMode,
           }, requestId), requestId)
         }
       } catch (legacyError) {
@@ -644,5 +654,11 @@ export async function loadGlobalConfig(
     // attention_stale_policy は enum 検証。不正値は 'fail_open' (既存 gate 全体と
     // 同じ判断が安全側) に倒す。
     attentionStalePolicy: row.attentionStalePolicy === 'block_buy' ? 'block_buy' : 'fail_open',
+    // 0045 で追加 (#709 Phase 6)。mode は enum 検証して不正値は 'off' (gate 無効
+    // が安全側、newsShockMode と同じ規約)。
+    extendedHoursGateMode:
+      row.extendedHoursGateMode === 'observe' || row.extendedHoursGateMode === 'enforce'
+        ? row.extendedHoursGateMode
+        : 'off',
   }, requestId), requestId)
 }
