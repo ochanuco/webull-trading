@@ -17,19 +17,22 @@ import {
 
 /**
  * Offline backtest harness for staged (probe → confirm → full) entry vs. the
- * current one-shot entry (issue #709 Phase 3), plus a partial-exit + ATR
- * trailing `ExitPolicy` axis on top of the same structure (issue #709 Phase
- * 4). Bar-walk structure (warmup 60, `computePullbackIndicators`, T+0 close
- * fills) mirrors `runBacktest.ts`, but entry/exit are pluggable
+ * current one-shot entry (issue #709 Phase 3), a partial-exit + ATR trailing
+ * `ExitPolicy` axis on top of the same structure (issue #709 Phase 4), and a
+ * `ReentryPolicy` axis gating the flat→open transition by exit reason (issue
+ * #709 Phase 5). Bar-walk structure (warmup 60, `computePullbackIndicators`,
+ * T+0 close fills) mirrors `runBacktest.ts`, but entry/exit are pluggable
  * `EntryPolicy`/`ExitPolicy` + a tranche-aware position model instead of a
  * single `PullbackUptrendStrategy.decide()` call.
  *
  * Entry gating reuses `computeEntryDistance` (not `PullbackUptrendStrategy`)
  * because the strategy's re-entry price guard needs `lastExitPrice` /
- * `businessDaysSinceExit`, which this offline harness — like `runBacktest`,
- * which also omits them — does not track per symbol. `computeEntryDistance`'s
- * 7-gate chain is the setup-quality check with no such guard, so it is the
- * correct equivalent of "current BUY condition" here.
+ * `businessDaysSinceExit`, which this offline harness — unlike `runBacktest`,
+ * which also omits them — now tracks itself (`lastExit`, below) so the
+ * `price-guard`/`reason-aware` `ReentryPolicy` kinds can replicate it.
+ * `computeEntryDistance`'s 7-gate chain remains the setup-quality check with
+ * no such guard, so it is still the correct equivalent of "current BUY
+ * condition" when `reentryPolicy` is `'none'` (the default).
  */
 
 export type EntryPolicy =
@@ -55,8 +58,29 @@ export type ExitPolicy =
     }
 
 /** `runBacktest`'s `ExitReason` plus the partial-trailing engine's trailing-stop exit. Kept as a
- * union widening (not a rename of `ExitReason`) so `runBacktest`'s own callers are untouched. */
+ * union widening (not a rename of `ExitReason`) so `runBacktest`'s own callers are untouched. Not
+ * exported — callers of `evaluateReentry` only ever need to assign literal reason strings (e.g.
+ * `'STOP'`), which are structurally compatible with `LastExitInfo.reason` without naming the type. */
 type LifecycleExitReason = ExitReason | 'TRAIL'
+
+/**
+ * Re-entry gate for the flat→open transition (issue #709 Phase 5). `'none'` is the Phase 3/4
+ * default (no gate — proven by the untouched regression suite). `'price-guard'` replicates the
+ * live `PullbackUptrendStrategy` re-entry ceiling verbatim (see `evaluateReentry`).
+ * `'reason-aware'` branches the gate by the *previous* exit's reason instead of applying the same
+ * price ceiling to every exit kind (a STOP and a TP are different signals about whether the setup
+ * is still good).
+ */
+export type ReentryPolicy =
+  | { kind: 'none' }
+  | { kind: 'price-guard' }
+  | {
+      kind: 'reason-aware'
+      /** STOP exits only: business days below which re-entry is blocked outright, regardless of
+       * trend state — a fresh stop-out needs a cooling-off period before "trend recaptured" is
+       * even evaluated. */
+      slWaitDays: number
+    }
 
 export interface LifecycleBacktestParams {
   symbol: string
@@ -69,6 +93,9 @@ export interface LifecycleBacktestParams {
   /** Defaults to `{kind:'preset'}` (all-quantity TP/stop/time-stop, issue #709 Phase 3 behavior)
    * so existing callers/tests built before Phase 4 keep compiling and behaving unchanged. */
   exitPolicy?: ExitPolicy
+  /** Defaults to `{kind:'none'}` (no re-entry gate, issue #709 Phase 3/4 behavior) so existing
+   * callers/tests built before Phase 5 keep compiling and behaving unchanged. */
+  reentryPolicy?: ReentryPolicy
   feePctOfNotional: number
   feeFixedPerOrder: number
 }
@@ -228,6 +255,99 @@ export function nextStagedEntryStep(
  * against float noise (e.g. 0.1+0.2+0.7) reporting a nonzero remainder. */
 const REMAINING_EPS = 1e-9
 
+/** The exit the flat position is being re-entered *from* — `null` before the first ever exit. Not
+ * exported — only referenced through the exported `ReentryEvalInput`/`runLifecycleBacktest`. */
+interface LastExitInfo {
+  price: number
+  dateYmd: string
+  reason: LifecycleExitReason
+}
+
+export interface ReentryEvalInput {
+  policy: ReentryPolicy
+  lastExit: LastExitInfo | null
+  todayYmd: string
+  /** Today's `indicators.price` (same field the price-dependent gates and pnl% math use). */
+  price: number
+  atr20: number
+  rule: SymbolRule
+  /** = 押し目系 gate 以外の全 gate 通過 (harness の `trendContinues`、hoisted once per bar). */
+  trendContinues: boolean
+  entryPolicyKind: EntryPolicy['kind']
+}
+
+export interface ReentryEvalResult {
+  allowed: boolean
+  /** Only ever `true` for `reason-aware` + `TIME_STOP` + `entryPolicyKind === 'staged'`: the
+   * flat→open transition may only proceed as `fill_probe`, never `fill_full`, this bar. */
+  probeOnly: boolean
+}
+
+/**
+ * Re-entry gate for the flat→open transition (issue #709 Phase 5), evaluated once per bar right
+ * before the harness would otherwise fire `fill_full`/`fill_probe` from `state === null`. Pure
+ * (no bar-walk) so the STOP-wait / trend-recapture branches are table-testable directly.
+ *
+ * `price-guard` reproduces `PullbackUptrendStrategy.entryDecision`'s re-entry ceiling
+ * (`lastExitPrice - reentryMinAtrBelowLastExit * atr20`, active while `businessDaysSinceExit <
+ * reentryGuardBusinessDays`) verbatim, *except* the live strategy's `#660` legacy fail-closed
+ * branch (guard window active but `lastExitPrice` unknown from a pre-migration DO state) — this
+ * harness always knows `lastExit.price` once `lastExit` is non-null, so that branch has no
+ * offline equivalent to replicate.
+ */
+export function evaluateReentry(input: ReentryEvalInput): ReentryEvalResult {
+  const { policy, lastExit, todayYmd, price, atr20, rule, trendContinues, entryPolicyKind } = input
+  const allow: ReentryEvalResult = { allowed: true, probeOnly: false }
+  const block: ReentryEvalResult = { allowed: false, probeOnly: false }
+
+  if (policy.kind === 'none' || lastExit === null) return allow
+
+  const priceGuardAllows = (): boolean => {
+    const windowConfigured = rule.reentryMinAtrBelowLastExit > 0 && rule.reentryGuardBusinessDays > 0
+    if (!windowConfigured) return true
+    const bd = businessDaysBetween(lastExit.dateYmd, todayYmd)
+    if (bd >= rule.reentryGuardBusinessDays) return true
+    // atr20 が finite かつ > 0 でなければライブ guard も非活性 (`reentryGuardActive`
+    // の条件と同一) — Infinity を通すと ceiling が -Infinity になり恒久 block に
+    // 化けるので、有限性まで含めて fail-open に倒す。
+    if (!Number.isFinite(atr20) || !(atr20 > 0)) return true
+    const ceiling = lastExit.price - rule.reentryMinAtrBelowLastExit * atr20
+    return price <= ceiling
+  }
+
+  if (policy.kind === 'price-guard') {
+    return priceGuardAllows() ? allow : block
+  }
+
+  // reason-aware (policy.kind === 'reason-aware')
+  switch (lastExit.reason) {
+    case 'TP':
+    case 'TRAIL':
+      // Same "don't buy back the whipsaw" concern a good exit raises regardless of which engine
+      // (preset TP or partial-trailing) produced it — reuse the live guard formula as-is.
+      return priceGuardAllows() ? allow : block
+    case 'STOP': {
+      const bd = businessDaysBetween(lastExit.dateYmd, todayYmd)
+      if (bd < policy.slWaitDays) return block
+      return trendContinues ? allow : block
+    }
+    case 'TIME_STOP':
+      if (!trendContinues) return block
+      // Staged entry: force the first post-TIME_STOP fill down to a probe leg — a stall exit
+      // isn't evidence the setup is bad (unlike STOP), but jumping straight back to a full
+      // position on the very bar trend-continuation is recognized reintroduces the same
+      // all-at-once risk the staged axis exists to avoid. Full-entry has no probe concept, so it
+      // gets the trend-continuation condition alone.
+      return entryPolicyKind === 'staged' ? { allowed: true, probeOnly: true } : allow
+    case 'END_OF_DATA':
+    default:
+      // Unreachable in practice — END_OF_DATA only fires on the final bar, which has no
+      // subsequent bar to re-evaluate entry on — but fail-open rather than block on an exit
+      // reason this policy doesn't otherwise recognize.
+      return allow
+  }
+}
+
 export async function runLifecycleBacktest(
   bars: DailyBar[],
   params: LifecycleBacktestParams,
@@ -241,6 +361,7 @@ export async function runLifecycleBacktest(
 
   const rule = params.rule
   const exitPolicy: ExitPolicy = params.exitPolicy ?? { kind: 'preset' }
+  const reentryPolicy: ReentryPolicy = params.reentryPolicy ?? { kind: 'none' }
   const feeConfig: TradeCostConfig = {
     feePctOfNotional: params.feePctOfNotional,
     feeFixedPerOrder: params.feeFixedPerOrder,
@@ -251,6 +372,10 @@ export async function runLifecycleBacktest(
   let peakEquity = params.initialCash
   let totalCost = 0
   let turnoverNotional = 0
+  // Survives across round trips (never cleared on a new entry — only ever overwritten by the
+  // *next* closePosition call) because reentryPolicy needs the previous exit for the whole flat
+  // window that follows it, not just the bar it happened on.
+  let lastExit: LastExitInfo | null = null
 
   const investedFraction = (s: OpenPosition): number =>
     s.legs.reduce((sum, leg) => sum + leg.fraction, 0)
@@ -354,6 +479,11 @@ export async function runLifecycleBacktest(
       holdingDays: calendarDaysBetween(s.entryDate, today.date),
       exitLegs,
     })
+    // `price` here (the final leg's own fill, not the trade's qty-weighted `exitPrice`) matches
+    // what the live guard keys off of — `lastExecutedPrice` is the SELL fill itself, and for a
+    // partial-trailing round trip that's the final leg alone, not a blend with the earlier
+    // partial-TP sale.
+    lastExit = { price, dateYmd: today.date, reason }
   }
 
   /**
@@ -567,8 +697,24 @@ export async function runLifecycleBacktest(
     // が矛盾し、比較指標 (保有期間・turnover) の解釈が壊れる。
     const entryFrozenAfterPartialExit = state !== null && state.partialTpDone
     if (!exitedThisBar && !entryFrozenAfterPartialExit) {
+      // #reentry (issue #709 Phase 5): only gates the flat→open transition (`state === null`
+      // right before the fill) — a staged position already open (fill_confirm, or a later
+      // fill_full topping off an existing probe/confirm) isn't a "re-entry", so it runs
+      // ungated exactly as Phase 3/4 did.
+      const reentryAllows = (entryPolicyKind: EntryPolicy['kind']): ReentryEvalResult =>
+        evaluateReentry({
+          policy: reentryPolicy,
+          lastExit,
+          todayYmd: today.date,
+          price: indicators.price,
+          atr20: indicators.atr20,
+          rule,
+          trendContinues,
+          entryPolicyKind,
+        })
+
       if (params.entryPolicy.kind === 'full') {
-        if (state === null && fullEligible) {
+        if (state === null && fullEligible && reentryAllows('full').allowed) {
           state = fillFraction(null, 'full', 1, today, nowIso)
         }
       } else {
@@ -589,9 +735,24 @@ export async function runLifecycleBacktest(
           state = { ...held, probeStreak: step.probeStreak }
         }
         if (step.action === 'fill_full') {
-          state = fillFraction(state, 'full', state === null ? 1 : 1 - investedFraction(state), today, nowIso)
+          if (state === null) {
+            const reentry = reentryAllows('staged')
+            // `probeOnly` (TIME_STOP + staged) は full leg を probe leg に置き換える。
+            // 抑止 (この bar を flat のまま流す) にすると、fullEligible が毎 bar
+            // 続く強トレンド局面で再エントリーが永久に発生しない — 「probe から
+            // 入り直す」という policy の意図と逆になる。
+            if (reentry.allowed) {
+              state = reentry.probeOnly
+                ? fillFraction(null, 'probe', fractions.probe, today, nowIso)
+                : fillFraction(null, 'full', 1, today, nowIso)
+            }
+          } else {
+            state = fillFraction(state, 'full', 1 - investedFraction(state), today, nowIso)
+          }
         } else if (step.action === 'fill_probe') {
-          state = fillFraction(null, 'probe', fractions.probe, today, nowIso)
+          if (reentryAllows('staged').allowed) {
+            state = fillFraction(null, 'probe', fractions.probe, today, nowIso)
+          }
         } else if (step.action === 'fill_confirm' && state !== null) {
           state = fillFraction(state, 'confirm', fractions.confirm, today, nowIso)
         }

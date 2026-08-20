@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  evaluateReentry,
   nextStagedEntryStep,
   runLifecycleBacktest,
   type EntryPolicy,
   type ExitPolicy,
   type LifecycleBacktestParams,
+  type ReentryEvalInput,
   type StagedEntryStepState,
 } from '../../../src/trading/backtest/runLifecycleBacktest'
 import type { DailyBar } from '../../../src/trading/strategy/indicators'
@@ -547,5 +549,253 @@ describe('staged entry × partial-trailing interaction', () => {
       expect(leg.date <= partial!.date).toBe(true)
     }
     expect(trade.entryLegs.map((l) => l.label)).not.toContain('full')
+  })
+})
+
+/**
+ * `evaluateReentry` (issue #709 Phase 5). `TEST_DEFAULT_RULE` sets
+ * `reentryMinAtrBelowLastExit: 1.0` / `reentryGuardBusinessDays: 3`, matched against
+ * `businessDaysBetween` directly-verified date pairs (2025-04-08 is a Tuesday: 1 business day to
+ * 04-09, 3 to 04-11, 4 to 04-14, 5 to 04-15).
+ */
+describe('evaluateReentry (#709 Phase 5)', () => {
+  const rule = TEST_DEFAULT_RULE
+
+  function input(overrides: Partial<ReentryEvalInput>): ReentryEvalInput {
+    return {
+      policy: { kind: 'none' },
+      lastExit: null,
+      todayYmd: '2025-04-09',
+      price: 100,
+      atr20: 2,
+      rule,
+      trendContinues: true,
+      entryPolicyKind: 'full',
+      ...overrides,
+    }
+  }
+
+  it("'none' always allows, even with a recent bad exit", () => {
+    const result = evaluateReentry(
+      input({
+        policy: { kind: 'none' },
+        lastExit: { price: 100, dateYmd: '2025-04-08', reason: 'STOP' },
+        price: 500,
+        trendContinues: false,
+      }),
+    )
+    expect(result).toEqual({ allowed: true, probeOnly: false })
+  })
+
+  it('no prior exit always allows, regardless of policy', () => {
+    const result = evaluateReentry(
+      input({ policy: { kind: 'reason-aware', slWaitDays: 30 }, lastExit: null }),
+    )
+    expect(result).toEqual({ allowed: true, probeOnly: false })
+  })
+
+  describe('price-guard', () => {
+    const lastExit = { price: 100, dateYmd: '2025-04-08', reason: 'TP' as const }
+
+    it('blocks within the guard window when price is above the ceiling (last exit - 1*atr20)', () => {
+      const result = evaluateReentry(
+        input({ policy: { kind: 'price-guard' }, lastExit, todayYmd: '2025-04-09', price: 99, atr20: 2 }),
+      )
+      expect(result).toEqual({ allowed: false, probeOnly: false })
+    })
+
+    it('allows within the guard window once price reaches the ceiling', () => {
+      const result = evaluateReentry(
+        input({ policy: { kind: 'price-guard' }, lastExit, todayYmd: '2025-04-09', price: 98, atr20: 2 }),
+      )
+      expect(result).toEqual({ allowed: true, probeOnly: false })
+    })
+
+    it('allows unconditionally once the guard window (businessDaysBetween >= reentryGuardBusinessDays) has passed', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'price-guard' },
+          lastExit,
+          todayYmd: '2025-04-11', // 3 business days since 04-08 == reentryGuardBusinessDays
+          price: 150, // well above the ceiling — would block if the window were still active
+          atr20: 2,
+        }),
+      )
+      expect(result).toEqual({ allowed: true, probeOnly: false })
+    })
+  })
+
+  describe("'reason-aware' — STOP", () => {
+    it('blocks unconditionally while businessDays < slWaitDays, even if trend has recaptured', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit: { price: 100, dateYmd: '2025-04-08', reason: 'STOP' },
+          todayYmd: '2025-04-14', // 4 business days < slWaitDays 5
+          trendContinues: true,
+        }),
+      )
+      expect(result).toEqual({ allowed: false, probeOnly: false })
+    })
+
+    it('blocks past the wait window if the trend has not recaptured', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit: { price: 100, dateYmd: '2025-04-08', reason: 'STOP' },
+          todayYmd: '2025-04-15', // 5 business days >= slWaitDays 5
+          trendContinues: false,
+        }),
+      )
+      expect(result).toEqual({ allowed: false, probeOnly: false })
+    })
+
+    it('allows past the wait window once the trend gate chain has recaptured', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit: { price: 100, dateYmd: '2025-04-08', reason: 'STOP' },
+          todayYmd: '2025-04-15', // 5 business days >= slWaitDays 5
+          trendContinues: true,
+        }),
+      )
+      expect(result).toEqual({ allowed: true, probeOnly: false })
+    })
+  })
+
+  describe("'reason-aware' — TP / TRAIL", () => {
+    it('applies the same price-guard ceiling as the guard-only policy', () => {
+      const lastExit = { price: 100, dateYmd: '2025-04-08', reason: 'TP' as const }
+      const blocked = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit,
+          todayYmd: '2025-04-09',
+          price: 99,
+          atr20: 2,
+        }),
+      )
+      expect(blocked).toEqual({ allowed: false, probeOnly: false })
+
+      const allowedByPrice = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit: { ...lastExit, reason: 'TRAIL' },
+          todayYmd: '2025-04-09',
+          price: 98,
+          atr20: 2,
+        }),
+      )
+      expect(allowedByPrice).toEqual({ allowed: true, probeOnly: false })
+    })
+  })
+
+  describe("'reason-aware' — TIME_STOP", () => {
+    const lastExit = { price: 100, dateYmd: '2025-04-08', reason: 'TIME_STOP' as const }
+
+    it('blocks when the trend gate chain has not recaptured', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit,
+          trendContinues: false,
+          entryPolicyKind: 'full',
+        }),
+      )
+      expect(result).toEqual({ allowed: false, probeOnly: false })
+    })
+
+    it('allows a full-entry policy unrestricted once the trend has recaptured (no probe concept)', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit,
+          trendContinues: true,
+          entryPolicyKind: 'full',
+        }),
+      )
+      expect(result).toEqual({ allowed: true, probeOnly: false })
+    })
+
+    it('demotes a staged-entry policy to probe-only once the trend has recaptured', () => {
+      const result = evaluateReentry(
+        input({
+          policy: { kind: 'reason-aware', slWaitDays: 5 },
+          lastExit,
+          trendContinues: true,
+          entryPolicyKind: 'staged',
+        }),
+      )
+      expect(result).toEqual({ allowed: true, probeOnly: true })
+    })
+  })
+})
+
+/**
+ * Harness integration (#709 Phase 5): `reentryPolicy: 'reason-aware'` blocks a would-be re-entry
+ * after a STOP that `reentryPolicy: 'none'` (Phase 3/4 behavior) takes, on the identical bars.
+ *
+ * A single sharp crash (-20% one day) after the initial entry both triggers the STOP and wrecks
+ * the 50d-return trend gate — `distance.buyable`/`trendContinues` stay false for weeks while the
+ * gate recovers. The +2%/day rebound restores `trendContinues` (all non-pullback gates pass) on
+ * 2025-04-20, at which point the position is still flat and (staged) `probeEligible` — the first
+ * bar either policy could actually re-enter on. `businessDaysBetween('2025-04-02', '2025-04-20')`
+ * (the STOP date to that bar) is 12; `slWaitDays: 15` keeps the STOP-wait block active there, so
+ * `'reason-aware'` still blocks while `'none'` fires the probe fill — proving the gate, not
+ * happenstance, is what's different between the two runs.
+ */
+describe('runLifecycleBacktest — reason-aware reentryPolicy blocks a re-entry `none` takes (#709 Phase 5)', () => {
+  it('does not re-enter after a STOP within slWaitDays, while `none` does on the identical bars', async () => {
+    const warmup = uptrendWarmup(100)
+    const last = warmup[warmup.length - 1]!.close
+    const pullbackDay: DailyBar = {
+      date: '2025-04-01',
+      open: last,
+      high: last,
+      low: last * 0.94,
+      close: last * 0.95,
+    }
+    const crash: DailyBar = {
+      date: '2025-04-02',
+      open: pullbackDay.close,
+      high: pullbackDay.close,
+      low: pullbackDay.close * 0.8,
+      close: pullbackDay.close * 0.8,
+    }
+    const rebound = buildBars(crash.close, Array(20).fill(1.02), '2025-04-03')
+    const bars = [...warmup, pullbackDay, crash, ...rebound]
+    const staged: EntryPolicy = {
+      kind: 'staged',
+      fractions: { probe: 0.25, confirm: 0.25, full: 0.5 },
+      confirmDays: 3,
+    }
+    const base = {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: TEST_DEFAULT_RULE,
+      entryPolicy: staged,
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    } as const
+
+    const withoutGate = await runLifecycleBacktest(bars, { ...base, reentryPolicy: { kind: 'none' } })
+    const withGate = await runLifecycleBacktest(bars, {
+      ...base,
+      reentryPolicy: { kind: 'reason-aware', slWaitDays: 15 },
+    })
+
+    // `none`: STOP exit, then a second round trip re-entering once the trend gate recovers
+    // (forced closed at end-of-data — the window doesn't run long enough for a real exit signal).
+    expect(withoutGate.trades).toHaveLength(2)
+    expect(withoutGate.trades[0]!.exitReason).toBe('STOP')
+    expect(withoutGate.trades[1]!.entryLegs[0]!.label).toBe('probe')
+    expect(withoutGate.trades[1]!.entryLegs[0]!.date).toBe('2025-04-20')
+
+    // `reason-aware` (slWaitDays: 15 > the 12 business days from the STOP to 2025-04-20): the
+    // exact same re-entry opportunity is blocked outright — only the original STOP round trip.
+    expect(withGate.trades).toHaveLength(1)
+    expect(withGate.trades[0]!.exitReason).toBe('STOP')
   })
 })

@@ -300,10 +300,18 @@ describe('GET /admin/backtest/compare', () => {
     }
     expect(body.params).toBeDefined()
     expect(typeof body.barCount).toBe('number')
-    // Default variants: full, staged:25/25/50, full+trail:50/2/0, full+trail:50/2/5 (#709 Phase 4).
-    expect(body.variants).toHaveLength(4)
+    // Default variants: full, staged:25/25/50, full+trail:50/2/0, full+trail:50/2/5 (#709 Phase
+    // 4), full+preset+reentry:guard, full+preset+reentry:aware:5 (#709 Phase 5).
+    expect(body.variants).toHaveLength(6)
     const names = body.variants.map((v) => v.name)
-    expect(names).toEqual(['full', 'staged:25/25/50', 'full+trail:50/2/0', 'full+trail:50/2/5'])
+    expect(names).toEqual([
+      'full',
+      'staged:25/25/50',
+      'full+trail:50/2/0',
+      'full+trail:50/2/5',
+      'full+preset+reentry:guard',
+      'full+preset+reentry:aware:5',
+    ])
     for (const variant of body.variants) {
       expect(variant.entryPolicy).toBeDefined()
       expect(variant.exitPolicy).toBeDefined()
@@ -408,6 +416,101 @@ describe('GET /admin/backtest/compare', () => {
     const app = createApp()
     const res = await app.request(
       '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Btrail:0/2/0',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  /** `+reentry:<spec>` variant format (#709 Phase 5). */
+  it('parses `<entry>+reentry:<spec>` (exit omitted) into exitPolicy preset + the reentryPolicy', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Breentry:guard,full%2Breentry:none',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { variants: Array<Record<string, unknown>> }
+    expect(body.variants.map((v) => v.name)).toEqual(['full+reentry:guard', 'full+reentry:none'])
+    expect(body.variants[0]!.exitPolicy).toEqual({ kind: 'preset' })
+    expect(body.variants[0]!.reentryPolicy).toEqual({ kind: 'price-guard' })
+    expect(body.variants[1]!.reentryPolicy).toEqual({ kind: 'none' })
+  })
+
+  it('parses `<entry>+<exit>+reentry:<spec>` into the full EntryPolicy/ExitPolicy/ReentryPolicy triple', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Bpreset%2Breentry:aware:5',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { variants: Array<Record<string, unknown>> }
+    expect(body.variants.map((v) => v.name)).toEqual(['full+preset+reentry:aware:5'])
+    expect(body.variants[0]!.exitPolicy).toEqual({ kind: 'preset' })
+    expect(body.variants[0]!.reentryPolicy).toEqual({ kind: 'reason-aware', slWaitDays: 5 })
+  })
+
+  it('400s on an invalid reentry segment', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Breentry:bogus',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('400s when a reentry segment appears before the exit segment', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Breentry:guard%2Bpreset',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('400s on a duplicate reentry segment', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Breentry:guard%2Breentry:none',
       { headers: { ...authHeader } },
       baseEnv,
     )
