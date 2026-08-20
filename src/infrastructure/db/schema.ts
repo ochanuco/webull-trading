@@ -1010,3 +1010,41 @@ export const attentionObservation = sqliteTable(
 
 export type AttentionObservationRow = typeof attentionObservation.$inferSelect
 export type AttentionObservationInsert = typeof attentionObservation.$inferInsert
+
+/**
+ * Extended-hours (pre-market) reference observation table (issue #709 Phase 1).
+ *
+ * `extendedHoursScheduler` writes this on the US pre-market cron window
+ * ([open-90min, open)) from Yahoo's `/v8/finance/chart` extended-hours bars.
+ * This table is **producer-only** — strategy/risk/execution never read it,
+ * and the producer never writes `lastQuote` / `QuoteSnapshot` / SymbolStateDO.
+ * The values are a reference line for operators only (see dashboard note).
+ */
+export const extendedHoursObservation = sqliteTable(
+  'extended_hours_observation',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    symbol: text('symbol').notNull(),
+    /** 観測実行時刻 (ISO UTC)。 */
+    capturedAt: text('captured_at').notNull(),
+    /** NY ローカル日付 (YYYY-MM-DD)。当日 session の絞り込みに使う。 */
+    sessionYmd: text('session_ymd').notNull(),
+    status: text('status').notNull(),
+    preMarketLast: real('pre_market_last'),
+    preMarketLow: real('pre_market_low'),
+    prevClose: real('prev_close'),
+    gapPct: real('gap_pct'),
+    direction15mPct: real('direction_15m_pct'),
+    /** 保有時のみ算出。pnlPct(プレマ値基準) - effectiveStopPct。 */
+    toStopPct: real('to_stop_pct'),
+    lastBarAt: text('last_bar_at'),
+    freshnessSec: integer('freshness_sec'),
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    symbolIdIndex: index('extended_hours_observation_symbol_id_idx').on(t.symbol, t.id),
+  }),
+)
+
+export type ExtendedHoursObservationRow = typeof extendedHoursObservation.$inferSelect
+export type ExtendedHoursObservationInsert = typeof extendedHoursObservation.$inferInsert
