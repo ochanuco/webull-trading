@@ -333,6 +333,11 @@ const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string
     text: 'Webull token',
     title: 'Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)',
   },
+  {
+    href: '/dashboard/extended-hours',
+    text: '時間外参考',
+    title: 'US プレマーケット帯の Yahoo 時間外値の参考観測 (#709、売買判断には未接続)',
+  },
 ]
 
 /**
@@ -350,7 +355,7 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   if (activePath === '/dashboard/trades' || activePath.startsWith('/dashboard/trades/')) {
     return 'review'
   }
-  for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token']) {
+  for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token', '/dashboard/extended-hours']) {
     if (activePath === p || activePath.startsWith(`${p}/`)) return 'diag'
   }
   for (const l of OPS_NAV_LINKS) {
@@ -413,7 +418,7 @@ const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
  * 診断ページ間の subnav。アラート → 判定ログ → 監査の横移動は障害対応で
  * 実際に使うので、診断側にも subnav を出す (レビュー subnav には出さない)。
  */
-export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token'
+export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token' | 'extendedHours'
 
 const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
   '/dashboard/alerts': 'alerts',
@@ -421,6 +426,7 @@ const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
   '/dashboard/audit': 'audit',
   '/dashboard/broker-probe': 'probe',
   '/dashboard/webull-token': 'token',
+  '/dashboard/extended-hours': 'extendedHours',
 }
 
 export function renderDiagSubnav(active: DiagSubnavKey): string {

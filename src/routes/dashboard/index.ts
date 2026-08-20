@@ -86,6 +86,12 @@ import { computeSymbolStats, computeTradeStats, filterTradePnlsByPeriod, loadSki
 import { chartsBody, renderSymbolMainInner, renderSymbolTab } from './charts/symbol'
 import { type SymbolsListFilter, findSymbolConfigForView, loadAllSymbolConfigRows, symbolFormBody, symbolMapEditorBody, symbolsListBody } from './symbols'
 import { type EventsEarningsFormEcho, type EventsMacroFormEcho, eventsBody, eventsDisplayRange, loadEarningsInRange, renderEventsWithError, renderEventsWithNotice, validateEarningsForm, validateMacroForm, writeEventsAuditLog } from './events'
+import { extendedHoursBody } from './extendedHours'
+import { formatNyYmd } from '../../infrastructure/calendar/usMarketCalendar'
+import {
+  createExtendedHoursObservationDb,
+  createExtendedHoursObservationRepo,
+} from '../../infrastructure/db/extendedHoursObservationRepo'
 export { safeJsonScript } from './shared'
 export { extractTokenFromPaste } from './webullToken'
 export { ALL_OVERVIEW_PANELS, parseOverviewPanels } from './overview'
@@ -1512,4 +1518,29 @@ export const dashboard = new Hono<DashboardBindings>()
     // skip は正常系 (期限まで余裕あり等)。緑 notice で OK。
     const why = summary.skippedReason ?? 'no change'
     return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`refresh: ${why}`)}`, 303)
+  })
+  /**
+   * 時間外参考観測 (#709 Phase 1)。`extendedHoursScheduler` (producer) が
+   * 書いた `extended_hours_observation` を読むだけの read-only view。
+   */
+  .get('/extended-hours', async (c) => {
+    const subnav = renderDiagSubnav('extendedHours')
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '時間外参考', unavailable('DB not bound'), subnav))
+    }
+    try {
+      const repo = createExtendedHoursObservationRepo(createExtendedHoursObservationDb(c.env.DB))
+      const sessionYmd = formatNyYmd(new Date())
+      const [latest, recent] = await Promise.all([
+        repo.latestPerSymbol(sessionYmd),
+        repo.recent(50),
+      ])
+      return c.html(
+        renderLayout(c, '時間外参考', extendedHoursBody({ sessionYmd, latest, recent }), subnav),
+      )
+    } catch (err) {
+      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
+      // (他 dashboard page と同じ defensive 姿勢)。
+      return c.html(renderLayout(c, '時間外参考', unavailable(messageOf(err)), subnav))
+    }
   })
