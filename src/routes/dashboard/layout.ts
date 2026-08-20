@@ -355,6 +355,9 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   if (activePath === '/dashboard/trades' || activePath.startsWith('/dashboard/trades/')) {
     return 'review'
   }
+  if (activePath === '/dashboard/lifecycle') {
+    return 'review'
+  }
   for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token', '/dashboard/extended-hours']) {
     if (activePath === p || activePath.startsWith(`${p}/`)) return 'diag'
   }
@@ -398,7 +401,7 @@ function renderTopNav(active?: NavGroupKey | null): string {
  * ここには出さないが、**個別ページ側は同じ subnav を出して迷子を防ぐ**ため
  * key 自体は残す (active にならないだけ)。
  */
-export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts'
+export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts' | 'lifecycle'
 
 const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   key: AnalysisSubnavKey
@@ -412,6 +415,9 @@ const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   // 口座資産 (portfolio) と累積 realized PnL は別物なので、どちらの推移かを
   // ラベルで明示する。
   { key: 'equity', href: '/dashboard/charts', label: '実現損益の推移' },
+  // #709 Phase 2: exit reason 別成績 / フォワードリターン / SKIP 後の
+  // MFE-MAE 等、単発の成績表 (quality) より粒度の細かいライフサイクル分析。
+  { key: 'lifecycle', href: '/dashboard/lifecycle', label: 'ライフサイクル' },
 ]
 
 /**

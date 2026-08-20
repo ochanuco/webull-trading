@@ -20,8 +20,8 @@ auth 列の `Access` は Cloudflare Access JWT (`Cf-Access-Jwt-Assertion` 検証
 | GET/POST/DELETE | `/admin/{earnings,macro-events}` | Access | イベントカレンダーの参照 / 投入 / 削除 |
 | GET | `/admin/backtest` | Access | offline backtest (Yahoo daily bars + 戦略 rule、実発注なし) |
 | GET | `/dashboard` | Access | read-only ランディング (資産サマリ / KPI / equity / 保有 / 直近取引) |
-| GET | `/dashboard/{positions,portfolio,trades,config,cron,charts,symbols,events,alerts,audit,broker-probe,webull-token,extended-hours}` | Access | DO / D1 snapshot を HTML で可視化 |
-| GET | `/dashboard/{positions,trades,cron,charts/symbol}/json` | Access | 同 packet の JSON 版 |
+| GET | `/dashboard/{positions,portfolio,trades,config,cron,charts,symbols,events,alerts,audit,broker-probe,webull-token,extended-hours,lifecycle}` | Access | DO / D1 snapshot を HTML で可視化 |
+| GET | `/dashboard/{positions,trades,cron,charts/symbol,lifecycle}/json` | Access | 同 packet の JSON 版 |
 | GET/POST/DELETE | `/mcp` | Access (service token) | read-only MCP server。dashboard と同一 packet を tool として公開 (#553) |
 
 ブラウザ外から叩くときは `cloudflared access curl` を使う (Access のログインセッションを流用する。service token は本体 application 側で 302 になるため不可)。調査用クエリ集は [`review-queries.md`](review-queries.md)。
