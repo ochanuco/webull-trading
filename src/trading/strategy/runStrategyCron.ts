@@ -53,6 +53,7 @@ import {
   loadNewsShockDecision,
   NEWS_SHOCK_REGIME_RANK,
 } from '../risk/newsShockDecision'
+import { isExtendedHoursGateReady, loadExtendedHoursGateDecisions } from '../risk/extendedHoursGate'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import { evaluateStrategyWindow, type StrategyWindowVerdict } from '../domain/tradingCalendar'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
@@ -728,6 +729,44 @@ export async function runStrategyCron(
       ? { mode: global.newsShockMode, decision: newsShockDecision }
       : undefined
 
+  // Extended-hours (pre-market) gate (issue #709 Phase 6)。0045 未 migrate な
+  // preview / 新環境では `extended_hours_observation` が無いので gate を注入
+  // しない (`isNewsShockGateReady` と同じ理由)。`extended_hours_gate_mode='off'`
+  // (default) の間も評価自体をスキップし、15分間隔の strategy tick に無駄な
+  // D1 read を足さない。**D1 read のみ、fetch は一切しない**
+  // (`loadExtendedHoursGateDecisions` の doc comment 参照)。
+  const extendedHoursGateReady = env.DB ? await isExtendedHoursGateReady(env.DB) : false
+  if (env.DB && !extendedHoursGateReady && global.extendedHoursGateMode !== 'off') {
+    console.warn(
+      JSON.stringify({
+        event: 'extended_hours_gate_disabled_table_missing',
+        requestId: options.requestId,
+      }),
+    )
+  }
+  // fail-open の最終防波堤 (news shock と同じ層防御): `loadExtendedHoursGateDecisions`
+  // 内部で想定外の例外が出ても strategy tick 全体を落とさない。gate を注入しない
+  // (= undefined、BUY sizing に影響させない) に倒す。
+  const extendedHoursDecisions =
+    env.DB && extendedHoursGateReady && global.extendedHoursGateMode !== 'off'
+      ? await loadExtendedHoursGateDecisions(env.DB, new Date()).catch((err) => {
+          console.warn(
+            JSON.stringify({
+              event: 'extended_hours_gate_load_failed',
+              requestId: options.requestId,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          )
+          return undefined
+        })
+      : undefined
+  // mode: gate の適用強度を scheduler に伝える。'off' / 未 migrate / 有効時間窓外
+  // (decisions が空 Map) なら option ごと省略する (= 評価スキップ、trace にも出ない)。
+  const extendedHoursGateOption =
+    extendedHoursDecisions && extendedHoursDecisions.size > 0 && global.extendedHoursGateMode !== 'off'
+      ? { mode: global.extendedHoursGateMode, decisions: extendedHoursDecisions }
+      : undefined
+
   // Pullback デフォルト rule は D1 global_config に寄せた (#118)。
   // 実運用中の tuning は `UPDATE global_config SET ...` で即反映可能。
   // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
@@ -915,6 +954,10 @@ export async function runStrategyCron(
       // 'off' / 未 migrate なら newsShockGateOption 自体が undefined なので
       // option ごと省略 (= scheduler 側は評価をスキップ)。
       ...(newsShockGateOption ? { newsShockGate: newsShockGateOption } : {}),
+      // Extended-hours (pre-market) gate (issue #709 Phase 6)。per-symbol の
+      // decision Map なので 'off' / 未 migrate / 有効時間窓外 (decisions 空)
+      // なら extendedHoursGateOption 自体が undefined → option ごと省略。
+      ...(extendedHoursGateOption ? { extendedHoursGate: extendedHoursGateOption } : {}),
       // sanity_failed cooldown (9697 04/28 incident: broker stub fill 30 min /
       // 6 BUY 累積)。env.DB がある時だけ有効化 — D1 が無いと journal 検査
       // できないので skip (= 過去挙動)。fail-closed: check throw 時は scheduler
@@ -1029,6 +1072,7 @@ export async function runStrategyCron(
           },
           vixDecision,
           ...(newsShockGateOption ? { newsShockGate: newsShockGateOption } : {}),
+          ...(extendedHoursGateOption ? { extendedHoursGate: extendedHoursGateOption } : {}),
           onDecision: ({ trace, ...record }) =>
             logStrategyDecision(decisionDb, {
               timestamp: new Date().toISOString(),
