@@ -38,7 +38,7 @@ import {
   type EntrySnapshot,
 } from '../trading/strategy/conditionalAllocation'
 import { deriveEntryStatusFromIndicators } from '../trading/strategy/entryStatus'
-import { computePullbackIndicators } from '../trading/strategy/indicators'
+import { computePullbackIndicators, type DailyBar } from '../trading/strategy/indicators'
 import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
 import { YahooBarClient, toYahooSymbol } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
@@ -83,6 +83,11 @@ import {
   type MacroEventCalendarSeedInput,
 } from '../infrastructure/calendar/macroEventCalendarRepo'
 import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
+import {
+  runLifecycleBacktest,
+  type EntryPolicy,
+  type LifecycleBacktestParams,
+} from '../trading/backtest/runLifecycleBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
 /**
@@ -293,124 +298,110 @@ export const admin = new Hono<AppBindings>()
    * D1 永続化は別 PR (issue #198 の `backtest_run` / `backtest_trade`)。
    */
   .get('/backtest', async (c) => {
-    const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
-    const from = readRequiredParam(c.req.query('from'), 'from')
-    const to = readRequiredParam(c.req.query('to'), 'to')
-    if (!isYmd(from)) throw new ValidationError("'from' must be YYYY-MM-DD", { field: 'from' })
-    if (!isYmd(to)) throw new ValidationError("'to' must be YYYY-MM-DD", { field: 'to' })
-    if (from > to) {
-      throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
+    const setup = await buildBacktestSetup(c)
+    const params: BacktestParams = {
+      symbol: setup.symbol,
+      from: setup.from,
+      to: setup.to,
+      initialCash: setup.initialCash,
+      rule: setup.rule,
+      atrBaselineMode: setup.atrBaselineMode,
     }
-    const initialCash = readOptionalNumber(c.req.query('initialCash'), 'initialCash', 10_000, {
+    const result = await runBacktest(setup.sliced, params)
+    return c.json(result)
+  })
+  /**
+   * 現行一括投入 vs 段階エントリー (Probe→確認→押し目) の比較 backtest
+   * (issue #709 Phase 3)。`/backtest` と同一 bars・rule・コスト条件で複数
+   * `EntryPolicy` variant を走らせ、`runLifecycleBacktest` の結果を並べて返す。
+   * Exit engine は 'preset' (現行 strategy の SELL 判定を複製) のみ — ExitPolicy
+   * 軸の比較は Phase 4。実発注は **しない**。
+   *
+   * Query:
+   *   - `symbol`, `from`, `to`, `initialCash`, rule override 群は `/backtest` と共通
+   *   - `variants` (optional) カンマ区切り。既定
+   *     `full,staged:25/25/50,staged:10/20/70,staged:50/0/50`。
+   *     書式は `full` または `staged:<probe>/<confirm>/<full>` (% 整数、合計 100)
+   *   - `confirmDays` (optional, default 3) staged variant 共通の confirm streak 日数
+   *   - `feePctOfNotional`, `feeFixedPerOrder` (optional) 既定は global_config
+   */
+  .get('/backtest/compare', async (c) => {
+    const setup = await buildBacktestSetup(c)
+    const confirmDays = readOptionalNumber(c.req.query('confirmDays'), 'confirmDays', 3, {
       mustBePositive: true,
     })
+    // 小数の confirmDays は「probeStreak >= 0.5」が初日で成立して確認 leg の
+    // 意味が消えるので整数のみ受ける。
+    if (!Number.isInteger(confirmDays)) {
+      throw new ValidationError("'confirmDays' must be a positive integer", { field: 'confirmDays' })
+    }
+    const feePctOfNotional = readOptionalNumber(
+      c.req.query('feePctOfNotional'),
+      'feePctOfNotional',
+      setup.global.feePctOfNotional,
+      {},
+    )
+    const feeFixedPerOrder = readOptionalNumber(
+      c.req.query('feeFixedPerOrder'),
+      'feeFixedPerOrder',
+      setup.global.feeFixedPerOrder,
+      {},
+    )
+    // 負の手数料は estimateOrderCost が負になりコストが利益として計上される。
+    for (const [field, v] of [
+      ['feePctOfNotional', feePctOfNotional],
+      ['feeFixedPerOrder', feeFixedPerOrder],
+    ] as const) {
+      if (v < 0) throw new ValidationError(`'${field}' must be >= 0`, { field })
+    }
+    const variantsQuery = c.req.query('variants')
+    const specs = (
+      variantsQuery && variantsQuery.trim().length > 0
+        ? variantsQuery.split(',')
+        : DEFAULT_COMPARE_VARIANTS
+    )
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    const variants = specs.map((spec) => parseVariantSpec(spec, confirmDays))
 
-    const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
-    const rule: SymbolRule = {
-      stopPct: readOptionalNumber(
-        c.req.query('stopPct'),
-        'stopPct',
-        global.pullbackDefaultStopPct,
-        {},
-      ),
-      takeProfitPct: readOptionalNumber(
-        c.req.query('takeProfitPct'),
-        'takeProfitPct',
-        global.pullbackDefaultTakeProfitPct,
-        {},
-      ),
-      timeStopDays: readOptionalNumber(
-        c.req.query('timeStopDays'),
-        'timeStopDays',
-        global.pullbackDefaultTimeStopDays,
-        { mustBePositive: true },
-      ),
-      pullbackMax: readOptionalNumber(
-        c.req.query('pullbackMax'),
-        'pullbackMax',
-        global.pullbackDefaultPullbackMax,
-        {},
-      ),
-      pullbackMin: readOptionalNumber(
-        c.req.query('pullbackMin'),
-        'pullbackMin',
-        global.pullbackDefaultPullbackMin,
-        {},
-      ),
-      minReturn50d: readOptionalNumber(
-        c.req.query('minReturn50d'),
-        'minReturn50d',
-        global.pullbackDefaultMinReturn50d,
-        {},
-      ),
-      requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
-      kAtr: readOptionalNumber(c.req.query('kAtr'), 'kAtr', global.pullbackDefaultKAtr, {
-        mustBePositive: true,
+    const results = await Promise.all(
+      variants.map(async (variant) => {
+        const params: LifecycleBacktestParams = {
+          symbol: setup.symbol,
+          from: setup.from,
+          to: setup.to,
+          initialCash: setup.initialCash,
+          rule: setup.rule,
+          atrBaselineMode: setup.atrBaselineMode,
+          entryPolicy: variant.entryPolicy,
+          feePctOfNotional,
+          feeFixedPerOrder,
+        }
+        const result = await runLifecycleBacktest(setup.sliced, params)
+        const { trades, ...metrics } = result
+        return {
+          name: variant.name,
+          entryPolicy: variant.entryPolicy,
+          ...metrics,
+          tradeCount: trades.length,
+          trades: trades.slice(0, 20),
+        }
       }),
-      maxSma50DeviationPct: readOptionalNumber(
-        c.req.query('maxSma50DeviationPct'),
-        'maxSma50DeviationPct',
-        global.pullbackDefaultMaxSma50DeviationPct,
-        { mustBePositive: true },
-      ),
-      maxAtrRatio: readOptionalNumber(
-        c.req.query('maxAtrRatio'),
-        'maxAtrRatio',
-        global.pullbackDefaultMaxAtrRatio,
-        { mustBePositive: true },
-      ),
-      maxStopToTpRatio: readOptionalNumber(
-        c.req.query('maxStopToTpRatio'),
-        'maxStopToTpRatio',
-        global.pullbackDefaultMaxStopToTpRatio,
-        {},
-      ),
-      // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
-      // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
-      reentryMinAtrBelowLastExit: 1.0,
-      reentryGuardBusinessDays: 3,
-    }
+    )
 
-    // Need at least 50 warmup bars before `from` for SMA50; estimate generous
-    // lookback in calendar days then trim with `from`/`to`. ~1.6× fudge to
-    // cover holidays.
-    const lookbackDays = estimateLookbackDays(from, to)
-    const barClient = new YahooBarClient()
-    const allBars = await barClient.getDailyBars(symbol, lookbackDays)
-    const bars = allBars.filter((b) => b.date <= to)
-    // Keep at least the first 60 bars before `from` as warmup; if available
-    // we slice to (from - warmup_buffer)..to. Yahoo already returned them
-    // oldest-first.
-    const liveStartIdx = bars.findIndex((b) => b.date >= from)
-    if (liveStartIdx === -1) {
-      // No bars within [from, to]: Yahoo had no daily data for the requested
-      // window (e.g. `from` is in the future, or symbol delisted before
-      // `from`). Reject with 400 instead of silently running on the entire
-      // pre-`from` history (which would compute against an unrelated window
-      // and return a misleading 200).
-      throw new ValidationError('no bars found in requested range', { field: 'from' })
-    }
-    const warmupKeep = 60
-    const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
-
-    const params: BacktestParams = {
-      symbol,
-      from,
-      to,
-      initialCash,
-      rule,
-      // #atr-baseline-window: `?atrBaselineMode=overlap|exclude-recent|percentile`
-      // で baseline の作り方を差し替えて成績を比較できる。既定は global_config の
-      // 値 (= 本番と同じ条件)。閾値の再校正はこれと `?maxAtrRatio=` を振って行う。
-      atrBaselineMode: ((): 'overlap' | 'exclude-recent' | 'percentile' => {
-        const q = c.req.query('atrBaselineMode')
-        return q === 'overlap' || q === 'exclude-recent' || q === 'percentile'
-          ? q
-          : global.atrBaselineMode
-      })(),
-    }
-    const result = await runBacktest(sliced, params)
-    return c.json(result)
+    return c.json({
+      params: {
+        symbol: setup.symbol,
+        from: setup.from,
+        to: setup.to,
+        initialCash: setup.initialCash,
+        confirmDays,
+        feePctOfNotional,
+        feeFixedPerOrder,
+      },
+      barCount: setup.sliced.length,
+      variants: results,
+    })
   })
   /**
    * Lookup the Webull-side status of an order by client_order_id.
@@ -3294,4 +3285,172 @@ function estimateLookbackDays(fromYmd: string, toYmd: string): number {
   // Trading days ≈ calendar * 5/7. Add 60 warmup + 20 buffer.
   const tradingDays = Math.ceil(calendarDays * (5 / 7)) + 60 + 20
   return Math.min(1300, Math.max(80, tradingDays))
+}
+
+interface BacktestSetup {
+  symbol: string
+  from: string
+  to: string
+  initialCash: number
+  rule: SymbolRule
+  atrBaselineMode: 'overlap' | 'exclude-recent' | 'percentile'
+  sliced: DailyBar[]
+  global: Awaited<ReturnType<typeof loadGlobalConfigFrom>>
+}
+
+/**
+ * Shared query parsing + rule construction + Yahoo bar fetch/slice for
+ * `/backtest` and `/backtest/compare` (#709 Phase 3) — both must see
+ * identical bars/rule so their results are comparable. Extracted verbatim
+ * from the original `/backtest` handler; behavior covered by the existing
+ * `test/routes/adminBacktest.test.ts` suite.
+ */
+async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetup> {
+  const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
+  const from = readRequiredParam(c.req.query('from'), 'from')
+  const to = readRequiredParam(c.req.query('to'), 'to')
+  if (!isYmd(from)) throw new ValidationError("'from' must be YYYY-MM-DD", { field: 'from' })
+  if (!isYmd(to)) throw new ValidationError("'to' must be YYYY-MM-DD", { field: 'to' })
+  if (from > to) {
+    throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
+  }
+  const initialCash = readOptionalNumber(c.req.query('initialCash'), 'initialCash', 10_000, {
+    mustBePositive: true,
+  })
+
+  const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
+  const rule: SymbolRule = {
+    stopPct: readOptionalNumber(c.req.query('stopPct'), 'stopPct', global.pullbackDefaultStopPct, {}),
+    takeProfitPct: readOptionalNumber(
+      c.req.query('takeProfitPct'),
+      'takeProfitPct',
+      global.pullbackDefaultTakeProfitPct,
+      {},
+    ),
+    timeStopDays: readOptionalNumber(
+      c.req.query('timeStopDays'),
+      'timeStopDays',
+      global.pullbackDefaultTimeStopDays,
+      { mustBePositive: true },
+    ),
+    pullbackMax: readOptionalNumber(
+      c.req.query('pullbackMax'),
+      'pullbackMax',
+      global.pullbackDefaultPullbackMax,
+      {},
+    ),
+    pullbackMin: readOptionalNumber(
+      c.req.query('pullbackMin'),
+      'pullbackMin',
+      global.pullbackDefaultPullbackMin,
+      {},
+    ),
+    minReturn50d: readOptionalNumber(
+      c.req.query('minReturn50d'),
+      'minReturn50d',
+      global.pullbackDefaultMinReturn50d,
+      {},
+    ),
+    requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+    kAtr: readOptionalNumber(c.req.query('kAtr'), 'kAtr', global.pullbackDefaultKAtr, {
+      mustBePositive: true,
+    }),
+    maxSma50DeviationPct: readOptionalNumber(
+      c.req.query('maxSma50DeviationPct'),
+      'maxSma50DeviationPct',
+      global.pullbackDefaultMaxSma50DeviationPct,
+      { mustBePositive: true },
+    ),
+    maxAtrRatio: readOptionalNumber(
+      c.req.query('maxAtrRatio'),
+      'maxAtrRatio',
+      global.pullbackDefaultMaxAtrRatio,
+      { mustBePositive: true },
+    ),
+    maxStopToTpRatio: readOptionalNumber(
+      c.req.query('maxStopToTpRatio'),
+      'maxStopToTpRatio',
+      global.pullbackDefaultMaxStopToTpRatio,
+      {},
+    ),
+    // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
+    // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
+    reentryMinAtrBelowLastExit: 1.0,
+    reentryGuardBusinessDays: 3,
+  }
+
+  // Need at least 50 warmup bars before `from` for SMA50; estimate generous
+  // lookback in calendar days then trim with `from`/`to`. ~1.6× fudge to
+  // cover holidays.
+  const lookbackDays = estimateLookbackDays(from, to)
+  const barClient = new YahooBarClient()
+  const allBars = await barClient.getDailyBars(symbol, lookbackDays)
+  const bars = allBars.filter((b) => b.date <= to)
+  // Keep at least the first 60 bars before `from` as warmup; if available
+  // we slice to (from - warmup_buffer)..to. Yahoo already returned them
+  // oldest-first.
+  const liveStartIdx = bars.findIndex((b) => b.date >= from)
+  if (liveStartIdx === -1) {
+    // No bars within [from, to]: Yahoo had no daily data for the requested
+    // window (e.g. `from` is in the future, or symbol delisted before
+    // `from`). Reject with 400 instead of silently running on the entire
+    // pre-`from` history (which would compute against an unrelated window
+    // and return a misleading 200).
+    throw new ValidationError('no bars found in requested range', { field: 'from' })
+  }
+  const warmupKeep = 60
+  const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
+
+  // #atr-baseline-window: `?atrBaselineMode=overlap|exclude-recent|percentile`
+  // で baseline の作り方を差し替えて成績を比較できる。既定は global_config の
+  // 値 (= 本番と同じ条件)。閾値の再校正はこれと `?maxAtrRatio=` を振って行う。
+  const atrBaselineModeQuery = c.req.query('atrBaselineMode')
+  const atrBaselineMode: BacktestSetup['atrBaselineMode'] =
+    atrBaselineModeQuery === 'overlap' ||
+    atrBaselineModeQuery === 'exclude-recent' ||
+    atrBaselineModeQuery === 'percentile'
+      ? atrBaselineModeQuery
+      : global.atrBaselineMode
+
+  return { symbol, from, to, initialCash, rule, atrBaselineMode, sliced, global }
+}
+
+/** `/backtest/compare` default variant set (#709 Phase 3): current one-shot
+ * entry vs. three staged splits spanning a small/even/back-loaded probe. */
+const DEFAULT_COMPARE_VARIANTS = ['full', 'staged:25/25/50', 'staged:10/20/70', 'staged:50/0/50']
+
+/**
+ * Parse one `/backtest/compare` `variants` entry into an `EntryPolicy`.
+ * `full` = current one-shot entry. `staged:<probe>/<confirm>/<full>` = 3
+ * integer percentages (must sum to 100) mapped to fractions of `initialCash`.
+ */
+function parseVariantSpec(
+  spec: string,
+  confirmDays: number,
+): { name: string; entryPolicy: EntryPolicy } {
+  if (spec === 'full') return { name: 'full', entryPolicy: { kind: 'full' } }
+  const match = /^staged:(\d{1,3})\/(\d{1,3})\/(\d{1,3})$/.exec(spec)
+  if (!match) {
+    throw new ValidationError(
+      `'variants' entry '${spec}' must be 'full' or 'staged:<probe>/<confirm>/<full>' (integer %)`,
+      { field: 'variants' },
+    )
+  }
+  const probe = Number(match[1])
+  const confirm = Number(match[2])
+  const full = Number(match[3])
+  if (probe + confirm + full !== 100) {
+    throw new ValidationError(
+      `'variants' entry '${spec}': probe+confirm+full must sum to 100 (got ${probe + confirm + full})`,
+      { field: 'variants' },
+    )
+  }
+  return {
+    name: spec,
+    entryPolicy: {
+      kind: 'staged',
+      fractions: { probe: probe / 100, confirm: confirm / 100, full: full / 100 },
+      confirmDays,
+    },
+  }
 }

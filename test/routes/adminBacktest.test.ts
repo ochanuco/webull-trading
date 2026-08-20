@@ -192,3 +192,145 @@ describe('GET /admin/backtest', () => {
     expect(typeof body.maxDrawdown).toBe('number')
   })
 })
+
+describe('GET /admin/backtest/compare', () => {
+  let originalFetch: typeof fetch
+  beforeEach(() => {
+    originalFetch = globalThis.fetch
+  })
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  function mockUptrendPullbackBars(): DailyBar[] {
+    // Same synthetic shape as the '200s' /backtest test: warmup uptrend, a
+    // deep single-day pullback (in-band for a one-shot BUY), then a rally.
+    const warmup = buildBars(100, Array(80).fill(1.005), '2024-01-01')
+    const last = warmup[warmup.length - 1]!.close
+    const pullback: DailyBar = {
+      date: '2024-04-01',
+      open: last,
+      high: last,
+      low: last * 0.94,
+      close: last * 0.95,
+    }
+    const tail = buildBars(pullback.close, [1.05, 1.05, 1.02, 1.02], '2024-04-02')
+    return [...warmup, pullback, ...tail]
+  }
+
+  it('401s without Access JWT', async () => {
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-01-01&to=2024-06-30',
+      {},
+      unauthEnv,
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('400s on fractional confirmDays and negative fees (#713 review)', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const base = '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10'
+    for (const query of ['&confirmDays=0.5', '&feePctOfNotional=-0.01', '&feeFixedPerOrder=-1']) {
+      const res = await app.request(`${base}${query}`, { headers: { ...authHeader } }, baseEnv)
+      expect(res.status).toBe(400)
+    }
+  })
+
+  it('400s on an invalid variant spec', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=bogus',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('400s when a staged variant percentages do not sum to 100', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=staged:25/25/40',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('200s and returns one result per requested variant', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&initialCash=10000',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      params: Record<string, unknown>
+      barCount: number
+      variants: Array<Record<string, unknown>>
+    }
+    expect(body.params).toBeDefined()
+    expect(typeof body.barCount).toBe('number')
+    // Default variants: full, staged:25/25/50, staged:10/20/70, staged:50/0/50.
+    expect(body.variants).toHaveLength(4)
+    const names = body.variants.map((v) => v.name)
+    expect(names).toEqual(['full', 'staged:25/25/50', 'staged:10/20/70', 'staged:50/0/50'])
+    for (const variant of body.variants) {
+      expect(variant.entryPolicy).toBeDefined()
+      expect(typeof variant.totalPnl).toBe('number')
+      expect(typeof variant.cagr).toBe('number')
+      expect(typeof variant.turnover).toBe('number')
+      expect(typeof variant.totalCost).toBe('number')
+      expect(typeof variant.tradeCount).toBe('number')
+      expect(Array.isArray(variant.trades)).toBe(true)
+    }
+  })
+
+  it('honors an explicit variants list', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full,staged:50/0/50',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { variants: Array<Record<string, unknown>> }
+    expect(body.variants.map((v) => v.name)).toEqual(['full', 'staged:50/0/50'])
+  })
+})
