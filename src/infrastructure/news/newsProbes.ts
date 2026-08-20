@@ -10,7 +10,7 @@
  * query 変更は必ず deploy (= コードレビュー + git 履歴に残る意図表明) を
  * 経由させるため、ここに定数として固定する。
  */
-export type NewsProbeMetric = 'volume' | 'tone'
+type NewsProbeMetric = 'volume' | 'tone'
 
 export interface NewsProbe {
   /** コード側定数キー。D1 の `attention_observation.probe_key` と一致させる。 */

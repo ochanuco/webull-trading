@@ -1,4 +1,3 @@
-import type { Env } from '../../config/env'
 import type { WebullPositionDto } from '../../infrastructure/webull/dto'
 import type { PositionStore } from '../state/PositionStore'
 import type { PositionState, SymbolState } from '../state/types'
@@ -27,7 +26,7 @@ import type { PositionState, SymbolState } from '../state/types'
  *     else keep the existing DO `avgPrice`. Falling through to `0` would
  *     break realized-PnL math in `recordFill` so we explicitly avoid that.
  */
-export interface SyncHoldingResult {
+interface SyncHoldingResult {
   symbol: string
   /** DO position before the override (null if there was none). */
   before: PositionState | null
@@ -46,7 +45,7 @@ export interface SyncHoldingResult {
   skipped?: 'no_drift' | 'dry_run'
 }
 
-export interface SyncHoldingError {
+interface SyncHoldingError {
   symbol: string
   error: string
 }
@@ -425,13 +424,6 @@ function buildReason(beforeQty: number, afterQty: number): string {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-
-/**
- * Re-export for the route layer — keeps the typed `Env` import close to the
- * call site so the route doesn't need to know about the WebullClient
- * factory.
- */
-export type SyncHoldingsEnv = Env
 
 export const _internal = {
   pickAvgPrice,

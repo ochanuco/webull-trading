@@ -1,4 +1,4 @@
-export type ExecutionMode = 'DRY_RUN' | 'LIVE'
+type ExecutionMode = 'DRY_RUN' | 'LIVE'
 
 export interface ExecutionResult {
   mode: ExecutionMode

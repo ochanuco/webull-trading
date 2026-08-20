@@ -9,7 +9,7 @@ import { ECHARTS_CDN } from './charts/shared'
 // マトリクスの休場セル判定 (#matrix-closed)。domain 層の純粋関数を表示時に
 // 評価する — 休場 tick は strategy_decision_log に行が残らない設計 (skip 早期
 // return) のため、記録側でなく表示側で暦から区別する。
-import { type TradingMarket, inferTradingMarket, isTradingDay, isWithinStrategyWindow } from '../../trading/domain/tradingCalendar'
+import { inferTradingMarket, isWithinStrategyWindow } from '../../trading/domain/tradingCalendar'
 
 /**
  * Strategy / sizing が出力する英語 reason を **初心者にも分かる日本語** に翻訳
@@ -252,7 +252,7 @@ export async function loadDecisionRows(
  * レールと同じ見た目 (CSS 共用) で、先頭に「ALL (全銘柄)」を置く。
  * limit は URL に伝搬する。
  */
-export function renderCronSymbolRail(
+function renderCronSymbolRail(
   universe: SymbolUniverse | null | undefined,
   activeSymbol: string | undefined,
   limit: number,
@@ -289,7 +289,7 @@ export function renderCronSymbolRail(
  * `?symbol=` フィルタは切替を跨いで URL に伝搬させる (matrix 側は集計に使わない
  * が、一覧へ戻った時に絞り込みが外れないように)。
  */
-export function renderCronViewPills(
+function renderCronViewPills(
   active: 'list' | 'matrix',
   limit: number,
   symbolFilter?: string,
@@ -442,7 +442,7 @@ export function renderDecisionTable(
   ${renderLogCopyScript(opts.copyVarName)}`
 }
 
-export function cronReasonCell(row: {
+function cronReasonCell(row: {
   id: number
   timestamp: string
   requestId: string | null
@@ -485,7 +485,7 @@ export function cronReasonCell(row: {
 // trace 識別子 → 左辺 (変数) の表示名 + 単位、必要なら右辺 (閾値) の名前。
 // 左の値が「何の数字か」を明示するため (#trace-readability)。識別子は
 // decision_log 互換で英語据え置き、ここで表示名と単位を与える。
-export const TRACE_OPERAND: Record<string, { name: string; unit: 'price' | 'pct' | 'mult' | 'days'; thr?: string }> = {
+const TRACE_OPERAND: Record<string, { name: string; unit: 'price' | 'pct' | 'mult' | 'days'; thr?: string }> = {
   'entry.trend_50d_return': { name: '20日騰落率', unit: 'pct' },
   'entry.trend_20d_return': { name: '20日騰落率', unit: 'pct' },
   'entry.above_sma50': { name: '株価', unit: 'price', thr: 'SMA50' },
@@ -518,7 +518,7 @@ const TRACE_LABEL_JA_CURRENT: Record<string, string> = {
  * `currency` は価格系の値に $/¥ を付けるために使う (null なら記号なし)。
  * trace 未保存 (migration 前 / 一部経路) は空文字 (既存表示のまま)。
  */
-export function renderDecisionLadder(
+function renderDecisionLadder(
   traceJson: string | null,
   decision: string,
   outputReason: string,
@@ -768,7 +768,7 @@ export async function runCronJsonExport(
   }
 }
 
-export function describeCronReason(reason: string | null | undefined): string {
+function describeCronReason(reason: string | null | undefined): string {
   if (!reason) return '<p class="muted">詳細理由なし</p>'
 
   const lotSizeRound = reason.match(
@@ -793,67 +793,6 @@ export function formatRealizedPnl(value: number): string {
   const sign = value > 0 ? '+' : ''
   const cls = value > 0 ? 'ok' : value < 0 ? 'err' : 'muted'
   return `<span class="${cls}">${sign}${value.toLocaleString('ja-JP', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>`
-}
-
-// ============================================================================
-// 判断トレースマトリクス (#PR-5): 銘柄 × 日付 の代表判定を一望する SSR ビュー
-// ============================================================================
-
-/**
- * セルの代表判定を選ぶ優先度 (高い順)。「その日いちばん重要な出来事」を出す:
- * 実際に動いた BUY / SELL が最優先、次に対処が必要な ERROR / REJECT / SKIP、
- * 何も起きなかった HOLD は最後。decision enum は strategy_decision_log の
- * 'BUY' / 'SELL' / 'HOLD' / 'SKIP' / 'REJECT' / 'ERROR' (schema.ts) に一致させる。
- */
-export const MATRIX_DECISION_PRIORITY = ['BUY', 'SELL', 'ERROR', 'REJECT', 'SKIP', 'HOLD'] as const
-
-/** loadDecisionMatrix が返す日次集計 1 行 (日付 × symbol × decision × reason)。 */
-export interface DecisionMatrixSourceRow {
-  /** JST 日付 (YYYY-MM-DD) */
-  day: string
-  symbol: string
-  decision: string
-  reason: string | null
-  n: number
-}
-
-export interface DecisionMatrixCell {
-  decision: string
-  /** 代表 decision 内で最頻の raw reason (同数は集計順の先頭) */
-  reason: string | null
-  /** 代表 decision の件数 */
-  count: number
-  /** その日・その銘柄の全判定件数 */
-  total: number
-}
-
-export interface DecisionMatrix {
-  /** JST 日付 (昇順) */
-  dates: string[]
-  /**
-   * 銘柄昇順。cells は日付キー (判定が無い日はキーなし)。
-   * closedDates はその銘柄の市場が休場 (週末/祝日) の日付 — 「休場だから
-   * 判定なし」と「開場していたのにログなし (cron 停止等)」を区別する
-   * (#matrix-closed、opts 付き buildDecisionMatrix でのみ算出)。
-   */
-  rows: Array<{ symbol: string; cells: Record<string, DecisionMatrixCell>; closedDates?: string[] }>
-}
-
-/**
- * JST 日付 X に「その市場のセッション由来の判定ログが乗り得ない」= 休場か。
- *
- * マトリクスの日付キーは JST だが、US セッション (ET 09:30-16:00) は JST では
- * 同日 22:30〜翌日 06:00 にまたがる。つまり JST 日 X には ET 日 X の前半と
- * ET 日 X-1 の後半が乗る → US は X と X-1 の両方が非営業日のときだけ休場。
- * JP はセッションが JST 日内に収まるので暦日そのまま。
- * `isTradingDay` は UTC 暦日基準なので T12:00:00Z 固定で ymd を評価する
- * (DST の影響を受けない)。
- */
-export function isJstDateClosedForMarket(jstYmd: string, market: TradingMarket): boolean {
-  const noon = new Date(`${jstYmd}T12:00:00Z`)
-  if (market === 'JP') return !isTradingDay(noon, 'JP')
-  const prev = new Date(noon.getTime() - 86_400_000)
-  return !isTradingDay(noon, 'US') && !isTradingDay(prev, 'US')
 }
 
 /**
@@ -928,43 +867,4 @@ function jstYmdOf(now: Date): string {
   return new Date(now.getTime() + 9 * 3_600_000).toISOString().slice(0, 10)
 }
 
-export const REASON_CATEGORIES = [
-  { key: 'trend', label: 'トレンド不成立', color: '#1471a8' },
-  { key: 'pullback', label: '押し目条件', color: '#0e9f9f' },
-  { key: 'overheat', label: '過熱・ボラ過大', color: '#b25000' },
-  { key: 'sizing', label: '資金・サイズ制約', color: '#7c3aed' },
-  { key: 'spread', label: 'スプレッド過大', color: '#b58a00' },
-  { key: 'no_position', label: '保有なし', color: '#4a5568' },
-  { key: 'data', label: 'データ不足', color: '#86868b' },
-  { key: 'cooldown', label: '取引停止・発注中', color: '#c05680' },
-  { key: 'broker', label: '発注失敗 (broker)', color: '#c22222' },
-  { key: 'other', label: 'その他', color: '#aaaaaa' },
-] as const
-
-export type ReasonCategoryKey = (typeof REASON_CATEGORIES)[number]['key']
-
-/**
- * raw reason 文字列の prefix でカテゴリ化する pure 関数。パターンは
- * localizeReason / describeCronReason が受ける canonical reason 一覧に対応
- * させる。未知の形式 (将来追加 / 旧形式) は 'other' に落として合計が欠けない
- * ようにする。
- */
-export function categorizeReason(reason: string | null | undefined): ReasonCategoryKey {
-  if (!reason) return 'other'
-  if (/^(?:cooldown active|pending order)/.test(reason)) return 'cooldown'
-  if (/^(?:20d|50d) return /.test(reason) || /^price \S+ <= sma50/.test(reason)) return 'trend'
-  if (/^pullback /.test(reason) || /^invalid (?:10d|20d) high$/.test(reason)) return 'pullback'
-  if (/^(?:sma50 deviation|atr ratio) /.test(reason)) return 'overheat'
-  if (/^sizing rejected/.test(reason)) return 'sizing'
-  if (/^spread /.test(reason)) return 'spread'
-  if (/^SELL without position$/.test(reason)) return 'no_position'
-  if (/^(?:insufficient bars|invalid |bar fetch)/.test(reason)) return 'data'
-  if (/^broker submit error/.test(reason)) return 'broker'
-  return 'other'
-}
-
-export interface ReasonTrendPoint {
-  date: string
-  counts: Record<ReasonCategoryKey, number>
-}
 

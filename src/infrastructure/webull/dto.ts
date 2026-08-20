@@ -15,7 +15,7 @@ export interface WebullAccountDto {
  * 数値は全て string-encoded (OpenAPI 共通)。buying_power は **通貨別** に
  * `account_currency_assets[]` に入る。mapper/reader 側で数値化する。
  */
-export interface WebullAccountCurrencyAssetDto {
+interface WebullAccountCurrencyAssetDto {
   currency?: string
   cash_balance?: string
   buying_power?: string
@@ -61,7 +61,7 @@ export type WebullMarket = 'US' | 'JP'
  *   - combo_type 必須 (\`'NORMAL'\` for non-combo single-leg)
  *   - account_id は body へ
  */
-export interface WebullV2OrderEntry {
+interface WebullV2OrderEntry {
   client_order_id: string
   symbol: string
   instrument_type: 'EQUITY'
@@ -146,7 +146,7 @@ export interface WebullPositionDto {
  * orders (see `webull_order_detail_raw` log in reconcileFills) — that is
  * the trigger for the sanity-ratio guard in `resolveFilledPrice`.
  */
-export interface WebullOrderItemDto {
+interface WebullOrderItemDto {
   order_id?: string
   symbol?: string
   side?: 'BUY' | 'SELL'

@@ -8,7 +8,7 @@ import { cachedDashboardJson } from './dashboardBarsCache'
  * 現行 universe はレバレッジ NASDAQ 系 (TQQQ/SOXL 等) が主力なので、
  * 「市場に乗っているだけ」との比較対象は QQQ (NASDAQ-100 1x) が最も素直。
  */
-export const EQUITY_BENCHMARK_SYMBOL = 'QQQ'
+const EQUITY_BENCHMARK_SYMBOL = 'QQQ'
 
 export interface BenchmarkPoint {
   /** YYYY-MM-DD (Yahoo daily bar の UTC 日付) */

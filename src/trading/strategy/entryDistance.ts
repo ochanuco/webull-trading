@@ -17,7 +17,7 @@ import type { PullbackIndicators, SymbolRule } from './strategies/PullbackUptren
  * 既定値を一致させること (drift したら誤った入場ラインを描く)。
  */
 
-export type EntryGateKey =
+type EntryGateKey =
   | 'trend'
   | 'above_sma50'
   | 'overextension'
@@ -193,14 +193,14 @@ function resolveNearestEntryPrice(
   return Number.isFinite(clamped) ? clamped : null
 }
 
-export interface BuyabilityDistancePoint {
+interface BuyabilityDistancePoint {
   timestamp: string
   /** 現価格→最寄り入場価格の符号付き変化率。価格非依存ゲートが塞ぐ評価日は null。 */
   priceMove: number | null
   buyable: boolean
 }
 
-export type BuyabilityTrend = 'closing' | 'widening' | 'flat' | 'unknown'
+type BuyabilityTrend = 'closing' | 'widening' | 'flat' | 'unknown'
 
 export interface BuyabilityView {
   /** 最新評価の入場距離。評価ログが無ければ null。 */

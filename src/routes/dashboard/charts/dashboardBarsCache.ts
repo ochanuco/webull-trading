@@ -19,7 +19,7 @@
 const CACHE_KEY_ORIGIN = 'https://dashboard-bars-cache.internal'
 
 /** dashboard bars キャッシュの TTL (秒)。表示専用の緩衝であり取引判断には使わない。 */
-export const DASHBOARD_BARS_CACHE_TTL_SECONDS = 300
+const DASHBOARD_BARS_CACHE_TTL_SECONDS = 300
 
 /** `caches.default` が実装すべき最小 interface (テストでは fake を注入できるように)。 */
 export interface DashboardCacheLike {

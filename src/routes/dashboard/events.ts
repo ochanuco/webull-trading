@@ -204,7 +204,7 @@ export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro 
 }
 
 /** `YYYY-MM-DD` の文法 + 実在日付チェック (admin route の isYmd と同じ)。 */
-export function isYmdRoundTrip(value: string): boolean {
+function isYmdRoundTrip(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const ms = Date.parse(`${value}T00:00:00.000Z`)
   if (!Number.isFinite(ms)) return false
@@ -218,7 +218,7 @@ export function isYmdRoundTrip(value: string): boolean {
  * 上で ±90d / ±365d する。`+ 86_400_000` の slack を付けると 91d / 366d も
  * 通ってしまうので、UTC YMD epoch ms で純粋に inclusive 比較する。
  */
-export function withinClampRange(ymd: string, now: Date): boolean {
+function withinClampRange(ymd: string, now: Date): boolean {
   const t = Date.parse(`${ymd}T00:00:00.000Z`)
   if (!Number.isFinite(t)) return false
   const nowYmd = now.toISOString().slice(0, 10)

@@ -3,7 +3,7 @@ import type { OrderIntent } from '../../trading/domain/OrderIntent'
 import type { RiskDecision } from '../../trading/domain/RiskDecision'
 import type { Signal } from '../../trading/domain/Signal'
 
-export type TradeEventType =
+type TradeEventType =
   | 'decision'
   | 'intent'
   | 'pre_submit'

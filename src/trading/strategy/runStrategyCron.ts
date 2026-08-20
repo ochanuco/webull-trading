@@ -125,7 +125,7 @@ export interface StrategyCronResult {
   entryHaltReason?: string
 }
 
-export interface StrategyCronAnalysis {
+interface StrategyCronAnalysis {
   schema: 'strategy_cron_analysis.v1'
   generatedAt: string
   requestId?: string

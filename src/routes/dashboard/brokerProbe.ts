@@ -22,7 +22,7 @@ import { displaySymbol, esc } from './shared'
  * - 4 桁数字 = JP_STOCK (`1570` だけ既知 ETF)
  * - US は `SOXL/SOXS/SPY/QQQ` を ETF 扱い、それ以外 STOCK
  */
-export function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_STOCK' | 'US_ETF' {
+function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_STOCK' | 'US_ETF' {
   const upper = symbol.toUpperCase()
   if (/^\d{4}$/.test(upper)) {
     if (upper === '1570') return 'JP_ETF'
@@ -40,7 +40,7 @@ export function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_
  * universe=null (DB 未設定 / load 失敗) は空文字 (UI から登録銘柄セクションは
  * 隠れず空のまま表示)。
  */
-export function renderUniverseLinks(universe: SymbolUniverse | null): string {
+function renderUniverseLinks(universe: SymbolUniverse | null): string {
   if (!universe) {
     return '<span class="muted" style="font-size:12px">universe ロード失敗 (DB 未設定 / 接続失敗)</span>'
   }
