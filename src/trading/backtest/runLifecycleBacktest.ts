@@ -17,11 +17,12 @@ import {
 
 /**
  * Offline backtest harness for staged (probe → confirm → full) entry vs. the
- * current one-shot entry (issue #709 Phase 3). Bar-walk structure (warmup 60,
- * `computePullbackIndicators`, T+0 close fills) mirrors `runBacktest.ts`, but
- * the entry side is a pluggable `EntryPolicy` + tranche-aware position model
- * instead of a single `PullbackUptrendStrategy.decide()` call — Phase 4 will
- * add an `ExitPolicy` axis on top of this same structure (today: 'preset' only).
+ * current one-shot entry (issue #709 Phase 3), plus a partial-exit + ATR
+ * trailing `ExitPolicy` axis on top of the same structure (issue #709 Phase
+ * 4). Bar-walk structure (warmup 60, `computePullbackIndicators`, T+0 close
+ * fills) mirrors `runBacktest.ts`, but entry/exit are pluggable
+ * `EntryPolicy`/`ExitPolicy` + a tranche-aware position model instead of a
+ * single `PullbackUptrendStrategy.decide()` call.
  *
  * Entry gating reuses `computeEntryDistance` (not `PullbackUptrendStrategy`)
  * because the strategy's re-entry price guard needs `lastExitPrice` /
@@ -41,6 +42,22 @@ export type EntryPolicy =
       confirmDays: number
     }
 
+export type ExitPolicy =
+  | { kind: 'preset' }
+  | {
+      kind: 'partial-trailing'
+      /** Fraction (0..1) of the open qty sold when TP is first reached; the rest rides the trail. */
+      tpFraction: number
+      /** Trailing stop width in ATR units: highest close since entry minus `trailKAtr * atr20`. */
+      trailKAtr: number
+      /** Business-day time-stop extension while the trend gate chain still holds (0 = no extension). */
+      timeStopExtensionDays: number
+    }
+
+/** `runBacktest`'s `ExitReason` plus the partial-trailing engine's trailing-stop exit. Kept as a
+ * union widening (not a rename of `ExitReason`) so `runBacktest`'s own callers are untouched. */
+type LifecycleExitReason = ExitReason | 'TRAIL'
+
 export interface LifecycleBacktestParams {
   symbol: string
   from: string
@@ -49,6 +66,9 @@ export interface LifecycleBacktestParams {
   rule: SymbolRule
   atrBaselineMode?: AtrBaselineMode
   entryPolicy: EntryPolicy
+  /** Defaults to `{kind:'preset'}` (all-quantity TP/stop/time-stop, issue #709 Phase 3 behavior)
+   * so existing callers/tests built before Phase 4 keep compiling and behaving unchanged. */
+  exitPolicy?: ExitPolicy
   feePctOfNotional: number
   feeFixedPerOrder: number
 }
@@ -64,21 +84,36 @@ interface LifecycleEntryLeg {
   cost: number
 }
 
+interface LifecycleExitLeg {
+  /** 'partial_tp' = the TP-triggered partial sale in a `partial-trailing` round trip; 'final' =
+   * the leg that actually emptied the position (== the whole exit for a `preset` round trip). */
+  label: 'partial_tp' | 'final'
+  date: string
+  price: number
+  qty: number
+  /** Fee estimate charged on this leg's fill. */
+  cost: number
+}
+
 interface LifecycleTrade {
   entryLegs: LifecycleEntryLeg[]
   entryTimestamp: string
   exitTimestamp: string
   /** Quantity-weighted average entry price across all legs. */
   entryPrice: number
+  /** Quantity-weighted average price across all `exitLegs` (== the single leg's price for `preset`). */
   exitPrice: number
   qty: number
-  /** Net of estimated round-trip cost (all entry legs + exit). */
+  /** Net of estimated round-trip cost (all entry legs + all exit legs). */
   realizedPnl: number
-  /** Round-trip cost estimate (all entry legs + exit) subtracted from `realizedPnl`. */
+  /** Round-trip cost estimate (all entry legs + all exit legs) subtracted from `realizedPnl`. */
   cost: number
-  exitReason: ExitReason
+  exitReason: LifecycleExitReason
   exitDetail: string
   holdingDays: number
+  /** Always non-empty. `preset` round trips have exactly one `'final'` leg; `partial-trailing`
+   * round trips may additionally have a leading `'partial_tp'` leg. */
+  exitLegs: LifecycleExitLeg[]
 }
 
 interface EquityPoint {
@@ -113,7 +148,9 @@ export interface LifecycleBacktestResult {
 
 /** Internal open-position state. `qty === 0` cannot occur once non-null — a
  * fill that floors to 0 shares never creates or extends the position (see
- * `fillFraction`), so `state !== null` always means real shares are held. */
+ * `fillFraction`), and a partial-TP sale that would leave qty at 0 takes the
+ * full-close branch instead (see the `partial-trailing` bar loop), so
+ * `state !== null` always means real shares are held. */
 interface OpenPosition {
   qty: number
   avgPrice: number
@@ -121,6 +158,22 @@ interface OpenPosition {
   entryTimestampIso: string
   legs: LifecycleEntryLeg[]
   probeStreak: number
+  /** Highest close seen since the position first opened — tracked from the very first entry fill
+   * (including any pre-partial-exit closes), not reset when a partial TP sale happens, since the
+   * trail should reflect the whole run-up the position rode, not just the post-partial slice.
+   * Unused by `preset`. */
+  highestClose: number
+  /** `partial-trailing` only: has the TP-triggered partial sale already happened this round trip?
+   * Gates both "no repeat TP" and "trailing only engages after a partial exit". */
+  partialTpDone: boolean
+  /** Exit legs booked before the position fully closes (currently only the `partial_tp` leg).
+   * `closePosition` appends the final leg and moves this into the trade record. */
+  exitLegs: LifecycleExitLeg[]
+  /** `partial-trailing` only: business-day time-stop threshold in effect right now (starts at
+   * `rule.timeStopDays`, bumped once to `+ timeStopExtensionDays` if the trend gate chain holds). */
+  timeStopDeadlineDays: number
+  /** `partial-trailing` only: has the one-shot time-stop extension already been used? */
+  timeStopExtended: boolean
 }
 
 const WARMUP = 60
@@ -187,6 +240,7 @@ export async function runLifecycleBacktest(
   }
 
   const rule = params.rule
+  const exitPolicy: ExitPolicy = params.exitPolicy ?? { kind: 'preset' }
   const feeConfig: TradeCostConfig = {
     feePctOfNotional: params.feePctOfNotional,
     feeFixedPerOrder: params.feeFixedPerOrder,
@@ -245,6 +299,11 @@ export async function runLifecycleBacktest(
         entryTimestampIso: nowIso,
         legs: [leg],
         probeStreak: label === 'probe' ? 1 : 0,
+        highestClose: price,
+        partialTpDone: false,
+        exitLegs: [],
+        timeStopDeadlineDays: rule.timeStopDays,
+        timeStopExtended: false,
       }
     }
     const newQty = existing.qty + qty
@@ -257,7 +316,7 @@ export async function runLifecycleBacktest(
     price: number,
     today: DailyBar,
     nowIso: string,
-    reason: ExitReason,
+    reason: LifecycleExitReason,
     detail: string,
   ): void => {
     const exitNotional = s.qty * price
@@ -265,21 +324,62 @@ export async function runLifecycleBacktest(
     cash += exitNotional - exitCost
     totalCost += exitCost
     turnoverNotional += exitNotional
+    const finalLeg: LifecycleExitLeg = {
+      label: 'final',
+      date: today.date,
+      price,
+      qty: s.qty,
+      cost: exitCost,
+    }
+    // `s.exitLegs` is [] for every `preset` round trip (and for `partial-trailing`
+    // round trips that never partially filled), so this degenerates to the single
+    // `finalLeg` — same qty/price/cost the pre-Phase-4 code booked directly.
+    const exitLegs = [...s.exitLegs, finalLeg]
     const legsCost = s.legs.reduce((sum, leg) => sum + leg.cost, 0)
-    const grossPnl = (price - s.avgPrice) * s.qty
+    const exitLegsCost = exitLegs.reduce((sum, leg) => sum + leg.cost, 0)
+    const exitQty = exitLegs.reduce((sum, leg) => sum + leg.qty, 0)
+    const exitPrice = exitLegs.reduce((sum, leg) => sum + leg.qty * leg.price, 0) / exitQty
+    const grossPnl = exitLegs.reduce((sum, leg) => sum + (leg.price - s.avgPrice) * leg.qty, 0)
     trades.push({
       entryLegs: s.legs,
       entryTimestamp: s.entryTimestampIso,
       exitTimestamp: nowIso,
       entryPrice: s.avgPrice,
-      exitPrice: price,
-      qty: s.qty,
-      realizedPnl: grossPnl - legsCost - exitCost,
-      cost: legsCost + exitCost,
+      exitPrice,
+      qty: exitQty,
+      realizedPnl: grossPnl - legsCost - exitLegsCost,
+      cost: legsCost + exitLegsCost,
       exitReason: reason,
       exitDetail: detail,
       holdingDays: calendarDaysBetween(s.entryDate, today.date),
+      exitLegs,
     })
+  }
+
+  /**
+   * `partial-trailing` only: sell `qty` shares (< `s.qty`, caller-checked) at `price` without
+   * closing the round trip. `s.avgPrice` is deliberately left untouched — the remaining shares
+   * keep the original blended cost basis, so the hard-stop/TP checks on the residual position
+   * stay correct without re-deriving a new average.
+   */
+  const applyPartialExit = (
+    s: OpenPosition,
+    qty: number,
+    price: number,
+    today: DailyBar,
+  ): OpenPosition => {
+    const notional = qty * price
+    const cost = estimateOrderCost(notional, feeConfig)
+    cash += notional - cost
+    totalCost += cost
+    turnoverNotional += notional
+    const leg: LifecycleExitLeg = { label: 'partial_tp', date: today.date, price, qty, cost }
+    return {
+      ...s,
+      qty: s.qty - qty,
+      exitLegs: [...s.exitLegs, leg],
+      partialTpDone: true,
+    }
   }
 
   for (let i = WARMUP; i < bars.length; i += 1) {
@@ -299,22 +399,86 @@ export async function runLifecycleBacktest(
 
     let exitedThisBar = false
 
+    // Hoisted above the exit check (Phase 3 only ran this inside `!exitedThisBar` below) because
+    // Phase 4's `partial-trailing` time-stop extension needs the same trend-gate read the entry
+    // side uses — computing it twice per bar would risk the two readings drifting apart.
+    const distance = computeEntryDistance(indicators, rule)
+    const fullEligible = distance.buyable
+    // トレンド継続 = 押し目系以外の全 gate 通過 (gate 配列の並び順に依存させない
+    // — entryDistance 側で gate が追加/並べ替えされたとき、probe 条件と
+    // time-stop 延長条件が静かにズレる事故を防ぐ)。
+    const trendContinues = distance.gates.every((g) => PULLBACK_GATE_KEYS.has(g.key) || g.passed)
+    const probeEligible = !fullEligible && trendContinues
+
     if (state !== null) {
-      const pnlPct = (indicators.price - state.avgPrice) / state.avgPrice
-      if (pnlPct >= rule.takeProfitPct) {
-        closePosition(
-          state,
-          indicators.price,
-          today,
-          nowIso,
-          'TP',
-          `take-profit hit: pnl ${pnlPct.toFixed(4)} >= ${rule.takeProfitPct}`,
-        )
-        state = null
-        exitedThisBar = true
+      if (exitPolicy.kind === 'preset') {
+        const pnlPct = (indicators.price - state.avgPrice) / state.avgPrice
+        if (pnlPct >= rule.takeProfitPct) {
+          closePosition(
+            state,
+            indicators.price,
+            today,
+            nowIso,
+            'TP',
+            `take-profit hit: pnl ${pnlPct.toFixed(4)} >= ${rule.takeProfitPct}`,
+          )
+          state = null
+          exitedThisBar = true
+        } else {
+          const stop = resolveStopDistance({
+            price: state.avgPrice,
+            stopPct: rule.stopPct,
+            takeProfitPct: rule.takeProfitPct,
+            atr20: indicators.atr20,
+            kAtr: rule.kAtr,
+            maxStopToTpRatio: rule.maxStopToTpRatio,
+          })
+          if (pnlPct <= stop.effectiveStopPct) {
+            closePosition(
+              state,
+              indicators.price,
+              today,
+              nowIso,
+              'STOP',
+              `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${stop.effectiveStopPct.toFixed(4)} (${stop.dominant}, dist ${stop.distance.toFixed(2)})`,
+            )
+            state = null
+            exitedThisBar = true
+          } else {
+            const holdBusinessDays = businessDaysBetween(state.entryDate, today.date)
+            if (holdBusinessDays >= rule.timeStopDays) {
+              closePosition(
+                state,
+                indicators.price,
+                today,
+                nowIso,
+                'TIME_STOP',
+                `time-stop hit: held ${holdBusinessDays}d >= ${rule.timeStopDays}d`,
+              )
+              state = null
+              exitedThisBar = true
+            }
+          }
+        }
       } else {
+        // partial-trailing (#709 Phase 4). Checked as a priority cascade (hard stop → TP-partial
+        // → trailing → time-stop) against a local `pos` (rather than reassigning the outer `let
+        // state` mid-cascade) — a partial TP sale doesn't end the round trip, so a later step in
+        // the same cascade (trailing, time-stop) can still fire on the very bar the partial sale
+        // happened, and threading a plain non-null local through each step keeps that easy to
+        // follow without re-deriving `state !== null` at every step.
+        let pos: OpenPosition = {
+          ...state,
+          highestClose: Math.max(state.highestClose, indicators.price),
+        }
+        const pnlPct = (indicators.price - pos.avgPrice) / pos.avgPrice
+        let closed = false
+
+        // 1. Hard stop — always sized off `avgPrice`, same basis pre- and post-partial-exit
+        // (the residual shares keep the original blended cost, so this check doesn't need to
+        // change when qty shrinks).
         const stop = resolveStopDistance({
-          price: state.avgPrice,
+          price: pos.avgPrice,
           stopPct: rule.stopPct,
           takeProfitPct: rule.takeProfitPct,
           atr20: indicators.atr20,
@@ -323,43 +487,86 @@ export async function runLifecycleBacktest(
         })
         if (pnlPct <= stop.effectiveStopPct) {
           closePosition(
-            state,
+            pos,
             indicators.price,
             today,
             nowIso,
             'STOP',
             `stop-loss hit: pnl ${pnlPct.toFixed(4)} <= ${stop.effectiveStopPct.toFixed(4)} (${stop.dominant}, dist ${stop.distance.toFixed(2)})`,
           )
-          state = null
-          exitedThisBar = true
-        } else {
-          const holdBusinessDays = businessDaysBetween(state.entryDate, today.date)
-          if (holdBusinessDays >= rule.timeStopDays) {
+          closed = true
+        }
+
+        // 2. TP partial sale (once per round trip).
+        if (!closed && !pos.partialTpDone && pnlPct >= rule.takeProfitPct) {
+          const tpQty = Math.floor(pos.qty * exitPolicy.tpFraction)
+          if (tpQty <= 0 || tpQty >= pos.qty) {
+            // Floor collapsed the partial to nothing, or to the whole position — same fallback
+            // as Phase 3 `preset`: take the full quantity off at TP instead of a 0-share leg.
             closePosition(
-              state,
+              pos,
               indicators.price,
               today,
               nowIso,
-              'TIME_STOP',
-              `time-stop hit: held ${holdBusinessDays}d >= ${rule.timeStopDays}d`,
+              'TP',
+              `take-profit hit (full, tpFraction floor left no residual): pnl ${pnlPct.toFixed(4)} >= ${rule.takeProfitPct}`,
             )
-            state = null
-            exitedThisBar = true
+            closed = true
+          } else {
+            pos = applyPartialExit(pos, tpQty, indicators.price, today)
           }
         }
+
+        // 3. ATR trailing stop on the residual — only armed once a partial TP has actually fired.
+        if (!closed && pos.partialTpDone) {
+          const trailLevel = pos.highestClose - exitPolicy.trailKAtr * indicators.atr20
+          if (indicators.price < trailLevel) {
+            closePosition(
+              pos,
+              indicators.price,
+              today,
+              nowIso,
+              'TRAIL',
+              `trailing-stop hit: close ${indicators.price.toFixed(2)} < ${trailLevel.toFixed(2)} (high ${pos.highestClose.toFixed(2)} - ${exitPolicy.trailKAtr} * atr20 ${indicators.atr20.toFixed(2)})`,
+            )
+            closed = true
+          }
+        }
+
+        // 4. Time-stop, with a one-shot extension while the trend gate chain still holds.
+        if (!closed) {
+          const holdBusinessDays = businessDaysBetween(pos.entryDate, today.date)
+          if (holdBusinessDays >= pos.timeStopDeadlineDays) {
+            if (!pos.timeStopExtended && exitPolicy.timeStopExtensionDays > 0 && trendContinues) {
+              pos = {
+                ...pos,
+                timeStopDeadlineDays: rule.timeStopDays + exitPolicy.timeStopExtensionDays,
+                timeStopExtended: true,
+              }
+            } else {
+              closePosition(
+                pos,
+                indicators.price,
+                today,
+                nowIso,
+                'TIME_STOP',
+                `time-stop hit: held ${holdBusinessDays}d >= ${pos.timeStopDeadlineDays}d`,
+              )
+              closed = true
+            }
+          }
+        }
+
+        state = closed ? null : pos
       }
+      exitedThisBar = state === null
     }
 
-    if (!exitedThisBar) {
-      const distance = computeEntryDistance(indicators, rule)
-      const fullEligible = distance.buyable
-      // Probe = 押し目系以外の全 gate が通過 (トレンドは立っているが押し目
-      // 未成立)。gate 配列の並び順 (slice) に依存させない — entryDistance 側で
-      // gate が追加/並べ替えされたとき、静かに probe 条件が変わる事故を防ぐ。
-      const probeEligible =
-        !fullEligible &&
-        distance.gates.every((g) => PULLBACK_GATE_KEYS.has(g.key) || g.passed)
-
+    // 部分利確が済んだ建玉には entry leg を追加しない — 利確で縮めた玉に段階
+    // entry が積み増しで逆行すると、1 round trip の中で「出口方針」と「入口方針」
+    // が矛盾し、比較指標 (保有期間・turnover) の解釈が壊れる。
+    const entryFrozenAfterPartialExit = state !== null && state.partialTpDone
+    if (!exitedThisBar && !entryFrozenAfterPartialExit) {
       if (params.entryPolicy.kind === 'full') {
         if (state === null && fullEligible) {
           state = fillFraction(null, 'full', 1, today, nowIso)

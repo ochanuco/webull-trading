@@ -86,6 +86,7 @@ import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktes
 import {
   runLifecycleBacktest,
   type EntryPolicy,
+  type ExitPolicy,
   type LifecycleBacktestParams,
 } from '../trading/backtest/runLifecycleBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
@@ -312,16 +313,24 @@ export const admin = new Hono<AppBindings>()
   })
   /**
    * 現行一括投入 vs 段階エントリー (Probe→確認→押し目) の比較 backtest
-   * (issue #709 Phase 3)。`/backtest` と同一 bars・rule・コスト条件で複数
-   * `EntryPolicy` variant を走らせ、`runLifecycleBacktest` の結果を並べて返す。
-   * Exit engine は 'preset' (現行 strategy の SELL 判定を複製) のみ — ExitPolicy
-   * 軸の比較は Phase 4。実発注は **しない**。
+   * (issue #709 Phase 3)、および全量利確 (preset) vs 部分利確+ATRトレーリング
+   * (issue #709 Phase 4) の比較。`/backtest` と同一 bars・rule・コスト条件で
+   * 複数 `EntryPolicy` × `ExitPolicy` variant を走らせ、`runLifecycleBacktest`
+   * の結果を並べて返す。実発注は **しない**。
    *
    * Query:
    *   - `symbol`, `from`, `to`, `initialCash`, rule override 群は `/backtest` と共通
    *   - `variants` (optional) カンマ区切り。既定
-   *     `full,staged:25/25/50,staged:10/20/70,staged:50/0/50`。
-   *     書式は `full` または `staged:<probe>/<confirm>/<full>` (% 整数、合計 100)
+   *     `full,staged:25/25/50,full+trail:50/2/0,full+trail:50/2/5`。
+   *     書式は `<entry>` または `<entry>+<exit>` (`+<exit>` 省略時は `preset` 扱い
+   *     — Phase 3 時点の書式 (`full` / `staged:<probe>/<confirm>/<full>`) はそのまま
+   *     引き続き有効):
+   *       - `<entry>` = `full` | `staged:<probe>/<confirm>/<full>` (% 整数、合計 100)
+   *       - `<exit>`  = `preset` | `trail:<tpFraction%>/<trailKAtr>/<extDays>`
+   *         (例 `full+trail:50/2/5` = TP到達で半分利確・残りをATR2σトレーリング・
+   *         トレンド継続時 time-stop を5営業日延長)
+   *     URL クエリ内の `+` は form-decode で空白になる (HTML form 送信と同じ) ので、
+   *     ブラウザ / curl から直接叩く場合は `%2B` に percent-encode すること。
    *   - `confirmDays` (optional, default 3) staged variant 共通の confirm streak 日数
    *   - `feePctOfNotional`, `feeFixedPerOrder` (optional) 既定は global_config
    */
@@ -374,6 +383,7 @@ export const admin = new Hono<AppBindings>()
           rule: setup.rule,
           atrBaselineMode: setup.atrBaselineMode,
           entryPolicy: variant.entryPolicy,
+          exitPolicy: variant.exitPolicy,
           feePctOfNotional,
           feeFixedPerOrder,
         }
@@ -382,6 +392,7 @@ export const admin = new Hono<AppBindings>()
         return {
           name: variant.name,
           entryPolicy: variant.entryPolicy,
+          exitPolicy: variant.exitPolicy,
           ...metrics,
           tradeCount: trades.length,
           trades: trades.slice(0, 20),
@@ -3415,24 +3426,45 @@ async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetu
   return { symbol, from, to, initialCash, rule, atrBaselineMode, sliced, global }
 }
 
-/** `/backtest/compare` default variant set (#709 Phase 3): current one-shot
- * entry vs. three staged splits spanning a small/even/back-loaded probe. */
-const DEFAULT_COMPARE_VARIANTS = ['full', 'staged:25/25/50', 'staged:10/20/70', 'staged:50/0/50']
+/** `/backtest/compare` default variant set: current one-shot entry, a staged-entry split
+ * (#709 Phase 3), and two partial-exit + ATR trailing variants — with and without the
+ * trend-continuation time-stop extension (#709 Phase 4) — all against the one-shot entry so the
+ * exit-side comparison isn't confounded by the entry-side one. */
+const DEFAULT_COMPARE_VARIANTS = ['full', 'staged:25/25/50', 'full+trail:50/2/0', 'full+trail:50/2/5']
 
 /**
- * Parse one `/backtest/compare` `variants` entry into an `EntryPolicy`.
- * `full` = current one-shot entry. `staged:<probe>/<confirm>/<full>` = 3
- * integer percentages (must sum to 100) mapped to fractions of `initialCash`.
+ * Parse one `/backtest/compare` `variants` entry (`<entry>` or `<entry>+<exit>`) into an
+ * `EntryPolicy` + `ExitPolicy` pair. A bare entry spec (no `+<exit>`) is `+preset` — this keeps
+ * every Phase 3 spec string (`full`, `staged:25/25/50`, ...) parsing to the exact same
+ * `EntryPolicy` it always did, with `exitPolicy: {kind:'preset'}` alongside it.
  */
 function parseVariantSpec(
   spec: string,
   confirmDays: number,
-): { name: string; entryPolicy: EntryPolicy } {
-  if (spec === 'full') return { name: 'full', entryPolicy: { kind: 'full' } }
-  const match = /^staged:(\d{1,3})\/(\d{1,3})\/(\d{1,3})$/.exec(spec)
+): { name: string; entryPolicy: EntryPolicy; exitPolicy: ExitPolicy } {
+  const segments = spec.split('+')
+  if (segments.length > 2 || segments.some((s) => s.length === 0)) {
+    throw new ValidationError(
+      `'variants' entry '${spec}' must be '<entry>' or '<entry>+<exit>'`,
+      { field: 'variants' },
+    )
+  }
+  const [entrySpec, exitSpec] = segments as [string, string | undefined]
+  return {
+    name: spec,
+    entryPolicy: parseEntrySpec(entrySpec, spec, confirmDays),
+    exitPolicy: parseExitSpec(exitSpec ?? 'preset', spec),
+  }
+}
+
+/** `full` = current one-shot entry. `staged:<probe>/<confirm>/<full>` = 3 integer percentages
+ * (must sum to 100) mapped to fractions of `initialCash`. */
+function parseEntrySpec(entrySpec: string, fullSpec: string, confirmDays: number): EntryPolicy {
+  if (entrySpec === 'full') return { kind: 'full' }
+  const match = /^staged:(\d{1,3})\/(\d{1,3})\/(\d{1,3})$/.exec(entrySpec)
   if (!match) {
     throw new ValidationError(
-      `'variants' entry '${spec}' must be 'full' or 'staged:<probe>/<confirm>/<full>' (integer %)`,
+      `'variants' entry '${fullSpec}': entry segment '${entrySpec}' must be 'full' or 'staged:<probe>/<confirm>/<full>' (integer %)`,
       { field: 'variants' },
     )
   }
@@ -3441,16 +3473,47 @@ function parseVariantSpec(
   const full = Number(match[3])
   if (probe + confirm + full !== 100) {
     throw new ValidationError(
-      `'variants' entry '${spec}': probe+confirm+full must sum to 100 (got ${probe + confirm + full})`,
+      `'variants' entry '${fullSpec}': probe+confirm+full must sum to 100 (got ${probe + confirm + full})`,
       { field: 'variants' },
     )
   }
   return {
-    name: spec,
-    entryPolicy: {
-      kind: 'staged',
-      fractions: { probe: probe / 100, confirm: confirm / 100, full: full / 100 },
-      confirmDays,
-    },
+    kind: 'staged',
+    fractions: { probe: probe / 100, confirm: confirm / 100, full: full / 100 },
+    confirmDays,
+  }
+}
+
+/** `preset` = current all-quantity TP/stop/time-stop (Phase 3 behavior, unchanged).
+ * `trail:<tpFraction%>/<trailKAtr>/<extDays>` = partial-exit + ATR trailing (#709 Phase 4). */
+function parseExitSpec(exitSpec: string, fullSpec: string): ExitPolicy {
+  if (exitSpec === 'preset') return { kind: 'preset' }
+  const match = /^trail:(\d{1,3})\/(\d+(?:\.\d+)?)\/(\d+)$/.exec(exitSpec)
+  if (!match) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': exit segment '${exitSpec}' must be 'preset' or 'trail:<tpFraction%>/<trailKAtr>/<extDays>'`,
+      { field: 'variants' },
+    )
+  }
+  const tpFractionPct = Number(match[1])
+  const trailKAtr = Number(match[2])
+  const timeStopExtensionDays = Number(match[3])
+  if (tpFractionPct <= 0 || tpFractionPct > 100) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': tpFraction% must be in (0, 100] (got ${tpFractionPct})`,
+      { field: 'variants' },
+    )
+  }
+  if (!(trailKAtr > 0)) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': trailKAtr must be > 0 (got ${trailKAtr})`,
+      { field: 'variants' },
+    )
+  }
+  return {
+    kind: 'partial-trailing',
+    tpFraction: tpFractionPct / 100,
+    trailKAtr,
+    timeStopExtensionDays,
   }
 }

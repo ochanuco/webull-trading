@@ -300,12 +300,13 @@ describe('GET /admin/backtest/compare', () => {
     }
     expect(body.params).toBeDefined()
     expect(typeof body.barCount).toBe('number')
-    // Default variants: full, staged:25/25/50, staged:10/20/70, staged:50/0/50.
+    // Default variants: full, staged:25/25/50, full+trail:50/2/0, full+trail:50/2/5 (#709 Phase 4).
     expect(body.variants).toHaveLength(4)
     const names = body.variants.map((v) => v.name)
-    expect(names).toEqual(['full', 'staged:25/25/50', 'staged:10/20/70', 'staged:50/0/50'])
+    expect(names).toEqual(['full', 'staged:25/25/50', 'full+trail:50/2/0', 'full+trail:50/2/5'])
     for (const variant of body.variants) {
       expect(variant.entryPolicy).toBeDefined()
+      expect(variant.exitPolicy).toBeDefined()
       expect(typeof variant.totalPnl).toBe('number')
       expect(typeof variant.cagr).toBe('number')
       expect(typeof variant.turnover).toBe('number')
@@ -313,6 +314,22 @@ describe('GET /admin/backtest/compare', () => {
       expect(typeof variant.tradeCount).toBe('number')
       expect(Array.isArray(variant.trades)).toBe(true)
     }
+    // Bare entry specs (no `+<exit>`) stay backward compatible with Phase 3: they parse to
+    // exitPolicy {kind:'preset'}.
+    expect(body.variants[0]!.exitPolicy).toEqual({ kind: 'preset' })
+    expect(body.variants[1]!.exitPolicy).toEqual({ kind: 'preset' })
+    expect(body.variants[2]!.exitPolicy).toEqual({
+      kind: 'partial-trailing',
+      tpFraction: 0.5,
+      trailKAtr: 2,
+      timeStopExtensionDays: 0,
+    })
+    expect(body.variants[3]!.exitPolicy).toEqual({
+      kind: 'partial-trailing',
+      tpFraction: 0.5,
+      trailKAtr: 2,
+      timeStopExtensionDays: 5,
+    })
   })
 
   it('honors an explicit variants list', async () => {
@@ -332,5 +349,68 @@ describe('GET /admin/backtest/compare', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as { variants: Array<Record<string, unknown>> }
     expect(body.variants.map((v) => v.name)).toEqual(['full', 'staged:50/0/50'])
+  })
+
+  it('parses an `<entry>+<exit>` variant into a partial-trailing exitPolicy (#709 Phase 4)', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    // `+` is form-decoded to a space in a URL query string (same as an HTML form submit), so a
+    // literal `+` in `variants` must be percent-encoded (`%2B`) here — exactly as an operator
+    // typing this into a browser/curl would need to.
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Bpreset,full%2Btrail:30/1.5/3',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { variants: Array<Record<string, unknown>> }
+    expect(body.variants.map((v) => v.name)).toEqual(['full+preset', 'full+trail:30/1.5/3'])
+    expect(body.variants[0]!.exitPolicy).toEqual({ kind: 'preset' })
+    expect(body.variants[1]!.exitPolicy).toEqual({
+      kind: 'partial-trailing',
+      tpFraction: 0.3,
+      trailKAtr: 1.5,
+      timeStopExtensionDays: 3,
+    })
+  })
+
+  it('400s on an invalid exit segment', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Bbogus',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('400s when a trail exit segment has a tpFraction outside (0, 100]', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const res = await app.request(
+      '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Btrail:0/2/0',
+      { headers: { ...authHeader } },
+      baseEnv,
+    )
+    expect(res.status).toBe(400)
   })
 })
