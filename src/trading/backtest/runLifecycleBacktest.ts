@@ -124,6 +124,8 @@ interface OpenPosition {
 }
 
 const WARMUP = 60
+/** 押し目系 gate。probe 判定ではこの 2 つだけ未成立を許容する。 */
+const PULLBACK_GATE_KEYS: ReadonlySet<string> = new Set(['pullback_shallow', 'pullback_deep'])
 /** Below this, a leg's target fraction is treated as fully consumed — guards
  * against float noise (e.g. 0.1+0.2+0.7) reporting a nonzero remainder. */
 const REMAINING_EPS = 1e-9
@@ -297,8 +299,12 @@ export async function runLifecycleBacktest(
     if (!exitedThisBar) {
       const distance = computeEntryDistance(indicators, rule)
       const fullEligible = distance.buyable
+      // Probe = 押し目系以外の全 gate が通過 (トレンドは立っているが押し目
+      // 未成立)。gate 配列の並び順 (slice) に依存させない — entryDistance 側で
+      // gate が追加/並べ替えされたとき、静かに probe 条件が変わる事故を防ぐ。
       const probeEligible =
-        !fullEligible && distance.gates.slice(0, 5).every((g) => g.passed)
+        !fullEligible &&
+        distance.gates.every((g) => PULLBACK_GATE_KEYS.has(g.key) || g.passed)
 
       if (params.entryPolicy.kind === 'full') {
         if (state === null && fullEligible) {
