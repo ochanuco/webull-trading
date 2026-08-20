@@ -7,14 +7,6 @@ import type { Env } from '../../../src/config/env'
 import type { Notifier, NotificationEvent } from '../../../src/infrastructure/notification/Notifier'
 import type { AttentionObservationRow } from '../../../src/infrastructure/db/schema'
 
-/**
- * news shock gate 日次サマリ通知 (news-shock-gate follow-up) のテスト。
- *
- * `runPortfolioRoll` / `newsScheduler` 系と同じ「D1 read を drizzle plumbing
- * ごと fake するのは重い」判断で、`attentionObservationRepo` はモジュール
- * ごと mock する (`runStrategyCron.test.ts` と同パターン)。
- */
-
 vi.mock('../../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
 }))
@@ -35,7 +27,6 @@ vi.mock('../../../src/infrastructure/db/attentionObservationRepo', () => ({
   })),
 }))
 
-/** `sqlite_master` probe で `attention_observation` だけ ready 扱いの fake D1。 */
 function fakeDbWithAttentionReady(): D1Database {
   return {
     prepare: vi.fn((sql: string) => ({
@@ -48,12 +39,6 @@ function makeRow(bucketAt: string, value: number): AttentionObservationRow {
   return { bucketAt, value } as AttentionObservationRow
 }
 
-/**
- * `trump_macro` を静穏 (ratio=1.0x, normal)、`market_selloff` を warning
- * (ratio=3.0x) にする観測データを配る。asOf は呼び出し時点の `now()`
- * (`vi.setSystemTime` で固定) を基準に、baseline 5点 (6日前〜2日前, value=1) +
- * window 内 1点 (asOf ちょうど) を probe ごとに用意する。
- */
 function seedTwoProbeObservations(asOf: Date): void {
   const baseline = (spikeValue: number): AttentionObservationRow[] => {
     const points: AttentionObservationRow[] = []
@@ -65,8 +50,8 @@ function seedTwoProbeObservations(asOf: Date): void {
   }
   fetchRecentMock.mockImplementation(async (filter: FetchRecentFilter) => {
     if (filter.metric !== 'volume') return []
-    if (filter.probeKey === 'trump_macro') return baseline(1) // ratio = 1/1 = 1.0x → normal
-    if (filter.probeKey === 'market_selloff') return baseline(3) // ratio = 3/1 = 3.0x → warning
+    if (filter.probeKey === 'trump_macro') return baseline(1)
+    if (filter.probeKey === 'market_selloff') return baseline(3)
     return []
   })
 }
@@ -117,7 +102,7 @@ describe('runNewsShockDailySummary', () => {
     expect(loadGlobalConfigFrom).not.toHaveBeenCalled()
   })
 
-  it('sends one SUMMARY notification with both probe lines and the combined regime (observe mode)', async () => {
+  it('sends a readable SUMMARY notification with both probes and the combined regime', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ newsShockMode: 'observe', newsShockMinSamples: 5 }),
     )
@@ -130,19 +115,18 @@ describe('runNewsShockDailySummary', () => {
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
     expect(event.kind).toBe('news_shock_daily_summary')
-    expect(event.message).toContain('観測のみ・発注に影響なし')
-    expect(event.message).toContain('総合判定: 警戒')
-    expect(event.message).toContain('- トランプ関税報道 (trump_macro): 平常 — 報道量 平時比 1.0倍')
-    expect(event.message).toContain('- 株式急落報道 (market_selloff): 警戒 (報道量スパイク) — 報道量 平時比 3.0倍')
+    expect(event.message).toContain('⚠️ **ニュース過熱ゲート：警戒**')
+    expect(event.message).toContain('観測モード / 発注には影響しません')
+    expect(event.message).toContain('**トランプ関税報道**\n✅ 平常 ｜ 平時比 **1.0倍**')
+    expect(event.message).toContain('**株式急落報道**\n⚠️ 警戒 ｜ 平時比 **3.0倍**')
+    expect(event.message).not.toContain('(trump_macro)')
+    expect(event.message).not.toContain('(market_selloff)')
   })
 
-  it('describes stale observations with their data time instead of raw reason strings', async () => {
+  it('describes stale observations on a separate data line', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ newsShockMode: 'observe', newsShockMinSamples: 5 }),
     )
-    // 観測は揃っているが最新 bucket が 4 時間前 (GDELT 反映遅延の実測形)。
-    // 'latest_observation' 評価なので unavailable にならず、ratio と
-    // 観測時刻 + 遅延が本文に出る。
     seedTwoProbeObservations(new Date(Date.now() - 4 * 60 * 60_000))
 
     await runNewsShockDailySummary(makeEnv(), 'req-stale')
@@ -150,28 +134,25 @@ describe('runNewsShockDailySummary', () => {
     const event = notifyMock.mock.calls[0]![0] as NotificationEvent
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
-    // 2026-04-25T08:00Z = 17:00 JST。遅延 4.0 時間が併記される。
-    expect(event.message).toContain('[4/25 17:00 JST・4.0時間前 時点]')
-    expect(event.message).toContain('報道量 平時比 3.0倍')
+    expect(event.message).toContain('データ: 4/25 17:00 JST（4.0時間前）')
+    expect(event.message).toContain('平時比 **3.0倍**')
     expect(event.message).not.toContain('news_shock_')
   })
 
-  it('explains a probe with no observations as data-missing in Japanese', async () => {
+  it('explains a probe with no observations without showing a misleading data time', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ newsShockMode: 'observe', newsShockMinSamples: 5 }),
     )
-    // fetchRecentMock は既定で空配列 → 両 probe とも観測ゼロ (unavailable 系)。
+
     await runNewsShockDailySummary(makeEnv(), 'req-empty')
 
     const event = notifyMock.mock.calls[0]![0] as NotificationEvent
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
-    expect(event.message).toContain('総合判定: 判定不能')
-    expect(event.message).toContain('判定不能 — 直近の観測データなし')
+    expect(event.message).toContain('❔ **ニュース過熱ゲート：判定不能**')
+    expect(event.message).toContain('❔ 判定不能 ｜ 直近の観測データなし')
     expect(event.message).not.toContain('news_shock_unavailable_fallback_normal')
-    // 観測ゼロの probe は asOf が now に fallback するため、時刻を出すと
-    // 「now 時点の観測がある」ように誤読される — 時刻表記が無いことを固定。
-    expect(event.message).not.toContain('時点')
+    expect(event.message).not.toContain('データ:')
   })
 
   it('uses severity=warning when the combined regime is warning', async () => {
