@@ -126,6 +126,51 @@ interface OpenPosition {
 const WARMUP = 60
 /** 押し目系 gate。probe 判定ではこの 2 つだけ未成立を許容する。 */
 const PULLBACK_GATE_KEYS: ReadonlySet<string> = new Set(['pullback_shallow', 'pullback_deep'])
+
+export interface StagedEntryStepState {
+  hasConfirmLeg: boolean
+  probeStreak: number
+  remainingFraction: number
+}
+
+export interface StagedEntryStep {
+  action: 'fill_full' | 'fill_probe' | 'fill_confirm' | 'none'
+  /** この bar 処理後の streak 値 (保有中のみ意味を持つ)。 */
+  probeStreak: number
+}
+
+/**
+ * 段階 entry の 1 bar 分の状態遷移 (pure)。ハーネス本体から切り出しているのは
+ * eligibility の一過性 break (streak リセット) が実 bar からは再現しづらく
+ * (ATR gate は 20-bar 窓で 20 本 sticky)、遷移表をここで直接テストするしか
+ * ないため。cash / fill の副作用は呼び出し側 (`fillFraction`) に残す。
+ */
+export function nextStagedEntryStep(
+  state: StagedEntryStepState | null,
+  eligibility: { fullEligible: boolean; probeEligible: boolean },
+  policy: Extract<EntryPolicy, { kind: 'staged' }>,
+): StagedEntryStep {
+  const { fullEligible, probeEligible } = eligibility
+  if (state === null) {
+    if (fullEligible) return { action: 'fill_full', probeStreak: 0 }
+    if (probeEligible) return { action: 'fill_probe', probeStreak: 1 }
+    return { action: 'none', probeStreak: 0 }
+  }
+  if (state.remainingFraction <= REMAINING_EPS) {
+    return { action: 'none', probeStreak: state.probeStreak }
+  }
+  if (fullEligible) return { action: 'fill_full', probeStreak: state.probeStreak }
+  if (state.hasConfirmLeg) return { action: 'none', probeStreak: state.probeStreak }
+  if (probeEligible) {
+    const streak = state.probeStreak + 1
+    return streak >= policy.confirmDays && policy.fractions.confirm > 0
+      ? { action: 'fill_confirm', probeStreak: streak }
+      : { action: 'none', probeStreak: streak }
+  }
+  // eligible が途切れた bar で streak を捨てる — 「confirmDays 営業 bar 連続」
+  // の定義どおり。捨てないと断続的な eligible の累計で confirm leg が発火する。
+  return { action: 'none', probeStreak: 0 }
+}
 /** Below this, a leg's target fraction is treated as fully consumed — guards
  * against float noise (e.g. 0.1+0.2+0.7) reporting a nonzero remainder. */
 const REMAINING_EPS = 1e-9
@@ -175,10 +220,19 @@ export async function runLifecycleBacktest(
     const price = today.close
     if (!(price > 0) || !(cash > 0)) return existing
     const amount = Math.max(0, Math.min(params.initialCash * fraction, cash))
-    const qty = Math.floor(amount / price)
+    let qty = Math.floor(amount / price)
+    let notional = qty * price
+    let cost = estimateOrderCost(notional, feeConfig)
+    // amount は cash でクランプ済みでも手数料は含まれていない — fee > 0 で
+    // notional + cost が cash を超えると cash が負 (= 暗黙の借入) になり
+    // equity / turnover / CAGR が全部過大評価される。手数料込みで収まるまで
+    // 1 株ずつ落とす。
+    while (qty > 0 && notional + cost > cash) {
+      qty -= 1
+      notional = qty * price
+      cost = estimateOrderCost(notional, feeConfig)
+    }
     if (qty <= 0) return existing
-    const notional = qty * price
-    const cost = estimateOrderCost(notional, feeConfig)
     cash -= notional + cost
     totalCost += cost
     turnoverNotional += notional
@@ -311,26 +365,28 @@ export async function runLifecycleBacktest(
           state = fillFraction(null, 'full', 1, today, nowIso)
         }
       } else {
-        const { fractions, confirmDays } = params.entryPolicy
-        if (state === null) {
-          if (fullEligible) {
-            state = fillFraction(null, 'full', 1, today, nowIso)
-          } else if (probeEligible) {
-            state = fillFraction(null, 'probe', fractions.probe, today, nowIso)
-          }
-        } else {
-          const remaining = 1 - investedFraction(state)
-          if (remaining > REMAINING_EPS) {
-            if (fullEligible) {
-              state = fillFraction(state, 'full', remaining, today, nowIso)
-            } else if (!hasLeg(state, 'confirm') && probeEligible) {
-              const bumped: OpenPosition = { ...state, probeStreak: state.probeStreak + 1 }
-              state =
-                bumped.probeStreak >= confirmDays && fractions.confirm > 0
-                  ? fillFraction(bumped, 'confirm', fractions.confirm, today, nowIso)
-                  : bumped
-            }
-          }
+        const { fractions } = params.entryPolicy
+        const step = nextStagedEntryStep(
+          state === null
+            ? null
+            : {
+                hasConfirmLeg: hasLeg(state, 'confirm'),
+                probeStreak: state.probeStreak,
+                remainingFraction: 1 - investedFraction(state),
+              },
+          { fullEligible, probeEligible },
+          params.entryPolicy,
+        )
+        if (state !== null) {
+          const held: OpenPosition = state
+          state = { ...held, probeStreak: step.probeStreak }
+        }
+        if (step.action === 'fill_full') {
+          state = fillFraction(state, 'full', state === null ? 1 : 1 - investedFraction(state), today, nowIso)
+        } else if (step.action === 'fill_probe') {
+          state = fillFraction(null, 'probe', fractions.probe, today, nowIso)
+        } else if (step.action === 'fill_confirm' && state !== null) {
+          state = fillFraction(state, 'confirm', fractions.confirm, today, nowIso)
         }
       }
     }

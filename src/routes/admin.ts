@@ -330,6 +330,11 @@ export const admin = new Hono<AppBindings>()
     const confirmDays = readOptionalNumber(c.req.query('confirmDays'), 'confirmDays', 3, {
       mustBePositive: true,
     })
+    // 小数の confirmDays は「probeStreak >= 0.5」が初日で成立して確認 leg の
+    // 意味が消えるので整数のみ受ける。
+    if (!Number.isInteger(confirmDays)) {
+      throw new ValidationError("'confirmDays' must be a positive integer", { field: 'confirmDays' })
+    }
     const feePctOfNotional = readOptionalNumber(
       c.req.query('feePctOfNotional'),
       'feePctOfNotional',
@@ -342,6 +347,13 @@ export const admin = new Hono<AppBindings>()
       setup.global.feeFixedPerOrder,
       {},
     )
+    // 負の手数料は estimateOrderCost が負になりコストが利益として計上される。
+    for (const [field, v] of [
+      ['feePctOfNotional', feePctOfNotional],
+      ['feeFixedPerOrder', feeFixedPerOrder],
+    ] as const) {
+      if (v < 0) throw new ValidationError(`'${field}' must be >= 0`, { field })
+    }
     const variantsQuery = c.req.query('variants')
     const specs = (
       variantsQuery && variantsQuery.trim().length > 0

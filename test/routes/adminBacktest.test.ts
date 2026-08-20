@@ -228,6 +228,22 @@ describe('GET /admin/backtest/compare', () => {
     expect(res.status).toBe(401)
   })
 
+  it('400s on fractional confirmDays and negative fees (#713 review)', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const app = createApp()
+    const base = '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10'
+    for (const query of ['&confirmDays=0.5', '&feePctOfNotional=-0.01', '&feeFixedPerOrder=-1']) {
+      const res = await app.request(`${base}${query}`, { headers: { ...authHeader } }, baseEnv)
+      expect(res.status).toBe(400)
+    }
+  })
+
   it('400s on an invalid variant spec', async () => {
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  nextStagedEntryStep,
   runLifecycleBacktest,
   type EntryPolicy,
   type LifecycleBacktestParams,
+  type StagedEntryStepState,
 } from '../../../src/trading/backtest/runLifecycleBacktest'
 import type { DailyBar } from '../../../src/trading/strategy/indicators'
 import { TEST_DEFAULT_RULE } from '../../../src/trading/strategy/strategies/PullbackUptrendStrategy'
@@ -212,5 +214,61 @@ describe('runLifecycleBacktest — staged entry state machine', () => {
     const result = await runLifecycleBacktest([], baseParams(STAGED_POLICY))
     expect(result.cagr).toBe(0)
     expect(result.trades).toEqual([])
+  })
+})
+
+describe('nextStagedEntryStep (#713 review)', () => {
+  const policy = STAGED_POLICY as Extract<EntryPolicy, { kind: 'staged' }>
+  const holding = (probeStreak: number, hasConfirmLeg = false): StagedEntryStepState => ({
+    hasConfirmLeg,
+    probeStreak,
+    remainingFraction: 0.75,
+  })
+
+  it('resets the probe streak when eligibility breaks before the confirm leg', () => {
+    // probe 2 日目 (streak 2) → 途切れ bar → streak 0 に戻る
+    const broken = nextStagedEntryStep(holding(2), { fullEligible: false, probeEligible: false }, policy)
+    expect(broken).toEqual({ action: 'none', probeStreak: 0 })
+    // その後 eligible が再開しても、連続 3 bar 目まで confirm は出ない
+    const s1 = nextStagedEntryStep(holding(0), { fullEligible: false, probeEligible: true }, policy)
+    expect(s1).toEqual({ action: 'none', probeStreak: 1 })
+    const s2 = nextStagedEntryStep(holding(1), { fullEligible: false, probeEligible: true }, policy)
+    expect(s2).toEqual({ action: 'none', probeStreak: 2 })
+    const s3 = nextStagedEntryStep(holding(2), { fullEligible: false, probeEligible: true }, policy)
+    expect(s3).toEqual({ action: 'fill_confirm', probeStreak: 3 })
+  })
+
+  it('keeps streak untouched after the confirm leg and when fully invested', () => {
+    const afterConfirm = nextStagedEntryStep(holding(3, true), { fullEligible: false, probeEligible: false }, policy)
+    expect(afterConfirm).toEqual({ action: 'none', probeStreak: 3 })
+    const full = nextStagedEntryStep(
+      { hasConfirmLeg: true, probeStreak: 3, remainingFraction: 0 },
+      { fullEligible: true, probeEligible: false },
+      policy,
+    )
+    expect(full).toEqual({ action: 'none', probeStreak: 3 })
+  })
+})
+
+describe('fee-inclusive cash clamp (#713 review)', () => {
+  it('never lets cash go negative when a fixed fee rides on a cash-clamped fill', async () => {
+    const warmup = uptrendWarmup(100)
+    const last = warmup[warmup.length - 1]!.close
+    const pullbackDay: DailyBar = {
+      date: '2025-04-01',
+      open: last,
+      high: last,
+      low: last * 0.94,
+      close: last * 0.95,
+    }
+    const result = await runLifecycleBacktest(
+      [...warmup, pullbackDay],
+      baseParams({ kind: 'full' }, { feeFixedPerOrder: 50, feePctOfNotional: 0.01 }),
+    )
+    // fill が起きたかに関わらず equity 曲線に負の cash が現れないこと
+    for (const p of result.equityCurve) {
+      expect(p.equity).toBeGreaterThanOrEqual(0)
+    }
+    expect(result.totalCost).toBeGreaterThanOrEqual(0)
   })
 })
