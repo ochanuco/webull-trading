@@ -256,3 +256,14 @@ export interface Env {
   NEWS_ATTENTION_ENABLED?: string
   GDELT_API_BASE?: string
 }
+
+
+// extended-hours (pre-market) reference observation (issue #709 Phase 1)。
+// EXTENDED_HOURS_OBSERVATION_ENABLED: `extendedHoursScheduler` の opt-in flag。
+// 値が 'true' (大小文字問わず、前後空白 trim) のときだけ US プレマーケット帯
+// (開場 90 分前〜開場) で Yahoo 時間外 1 分足を取得する。未設定 / それ以外は
+// 無効 — NEWS_ATTENTION_ENABLED と同じ「未設定は安全側 default」規約。
+// 取引経路 (strategy/risk/execution) からは一切参照されない参考観測。
+export interface Env {
+  EXTENDED_HOURS_OBSERVATION_ENABLED?: string
+}
