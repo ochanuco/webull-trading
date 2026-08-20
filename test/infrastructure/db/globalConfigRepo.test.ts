@@ -139,6 +139,18 @@ describe('loadGlobalConfig — pre-0015 fallback', () => {
     warnSpy.mockRestore()
   })
 
+  it('falls back to defaults when 0045 (extended_hours_gate_mode) is missing (#714 review)', async () => {
+    // 0045 未適用の D1 では全列 SELECT が extended_hours_gate_mode で落ちる。
+    // MISSING_COLUMN_PATTERN が拾わないと loadGlobalConfig ごと throw して
+    // strategy cron が止まる regression の guard。
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbAllThrowing('no such column: extended_hours_gate_mode')
+    const result = await loadGlobalConfig(db, 'req-abc-123')
+    expect(result.extendedHoursGateMode).toBe(GLOBAL_CONFIG_DEFAULTS.extendedHoursGateMode)
+    expect(result.dryRun).toBe(GLOBAL_CONFIG_DEFAULTS.dryRun)
+    warnSpy.mockRestore()
+  })
+
   it('returns full defaults and emits 2 warnings when legacy fetch also fails', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const db = fakeDbAllThrowing('no such column: vix_warning_threshold')

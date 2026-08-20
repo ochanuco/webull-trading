@@ -429,7 +429,11 @@ export async function loadGlobalConfig(
   // 拾う (単純な `news_shock` 部分一致は他エラーに偶然含まれた場合の fail-open
   // リスクがあるため避け、`no such column:` / `not found|does not exist|unknown
   // column` 形式に絞る — vix と同じ規約)。
-  const MISSING_COLUMN_PATTERN = '(?:vix_[a-z_]*|news_shock_[a-z_]*|attention_stale_policy)'
+  // #709 Phase 6: 0045 (`extended_hours_gate_mode`) 未適用の環境でも同じ罠を
+  // 踏むため列名を追加 — 漏らすと legacy fallback に到達せず loadGlobalConfig
+  // ごと落ち、strategy cron 全体が止まる。
+  const MISSING_COLUMN_PATTERN =
+    '(?:vix_[a-z_]*|news_shock_[a-z_]*|attention_stale_policy|extended_hours_gate_mode)'
   let rows: GlobalConfigRow[]
   try {
     rows = await db.select().from(globalConfig).where(eq(globalConfig.id, 'default')).limit(1)

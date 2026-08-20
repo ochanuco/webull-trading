@@ -735,7 +735,10 @@ export async function runStrategyCron(
   // (default) の間も評価自体をスキップし、15分間隔の strategy tick に無駄な
   // D1 read を足さない。**D1 read のみ、fetch は一切しない**
   // (`loadExtendedHoursGateDecisions` の doc comment 参照)。
-  const extendedHoursGateReady = env.DB ? await isExtendedHoursGateReady(env.DB) : false
+  // 'off' (既定) では readiness query 自体を発行しない — 15分 tick に恒常的な
+  // 余分 D1 read を足さない (mode check → ready check の順)。
+  const extendedHoursGateReady =
+    env.DB && global.extendedHoursGateMode !== 'off' ? await isExtendedHoursGateReady(env.DB) : false
   if (env.DB && !extendedHoursGateReady && global.extendedHoursGateMode !== 'off') {
     console.warn(
       JSON.stringify({
