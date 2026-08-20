@@ -3,6 +3,7 @@ import {
   nextStagedEntryStep,
   runLifecycleBacktest,
   type EntryPolicy,
+  type ExitPolicy,
   type LifecycleBacktestParams,
   type StagedEntryStepState,
 } from '../../../src/trading/backtest/runLifecycleBacktest'
@@ -217,6 +218,253 @@ describe('runLifecycleBacktest — staged entry state machine', () => {
   })
 })
 
+/**
+ * `partial-trailing` ExitPolicy (issue #709 Phase 4). All cases use `entryPolicy: {kind:'full'}`
+ * so `entryPrice` is a single fill and pnl% math is easy to hand-check; the `preset` exit engine
+ * is unaffected by any of this (proven separately by the untouched Phase 3 regression suite).
+ */
+describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)', () => {
+  const PARTIAL_TRAILING: ExitPolicy = {
+    kind: 'partial-trailing',
+    tpFraction: 0.5,
+    trailKAtr: 2,
+    timeStopExtensionDays: 0,
+  }
+
+  function fullEntryPullbackBars(rallyFactors: number[], tailFactors: number[] = []): {
+    bars: DailyBar[]
+    pullbackDay: DailyBar
+  } {
+    const warmup = uptrendWarmup(100)
+    const last = warmup[warmup.length - 1]!.close
+    const pullbackDay: DailyBar = {
+      date: '2025-04-01',
+      open: last,
+      high: last,
+      low: last * 0.94,
+      close: last * 0.95,
+    }
+    const rally = buildBars(pullbackDay.close, rallyFactors, '2025-04-02')
+    const tail =
+      tailFactors.length > 0
+        ? buildBars(rally[rally.length - 1]!.close, tailFactors, '2025-04-07')
+        : []
+    return { bars: [...warmup, pullbackDay, ...rally, ...tail], pullbackDay }
+  }
+
+  it('sells floor(qty * tpFraction) on the TP bar, keeps the residual open, and books entry/exit cash+cost correctly', async () => {
+    const { bars } = fullEntryPullbackBars([1.04, 1.04, 1.04])
+    const feeConfig = { feePctOfNotional: 0.001, feeFixedPerOrder: 0.5 }
+    const result = await runLifecycleBacktest(bars, {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: TEST_DEFAULT_RULE,
+      entryPolicy: { kind: 'full' },
+      exitPolicy: PARTIAL_TRAILING,
+      ...feeConfig,
+    })
+
+    expect(result.trades).toHaveLength(1)
+    const trade = result.trades[0]!
+    const fullQty = trade.entryLegs[0]!.qty
+    expect(trade.exitLegs.map((l) => l.label)).toEqual(['partial_tp', 'final'])
+    const [partialLeg, finalLeg] = trade.exitLegs as [
+      (typeof trade.exitLegs)[0],
+      (typeof trade.exitLegs)[1],
+    ]
+    expect(partialLeg.qty).toBe(Math.floor(fullQty * 0.5))
+    expect(finalLeg.qty).toBe(fullQty - partialLeg.qty)
+    expect(trade.qty).toBe(fullQty)
+    // exitPrice is the qty-weighted average across both exit legs, not either leg's own price.
+    const weightedExit =
+      (partialLeg.qty * partialLeg.price + finalLeg.qty * finalLeg.price) / trade.qty
+    expect(trade.exitPrice).toBeCloseTo(weightedExit, 9)
+
+    const entryLeg = trade.entryLegs[0]!
+    const expectedEntryCost =
+      entryLeg.qty * entryLeg.price * feeConfig.feePctOfNotional + feeConfig.feeFixedPerOrder
+    const expectedPartialCost =
+      partialLeg.qty * partialLeg.price * feeConfig.feePctOfNotional + feeConfig.feeFixedPerOrder
+    const expectedFinalCost =
+      finalLeg.qty * finalLeg.price * feeConfig.feePctOfNotional + feeConfig.feeFixedPerOrder
+    expect(entryLeg.cost).toBeCloseTo(expectedEntryCost, 9)
+    expect(partialLeg.cost).toBeCloseTo(expectedPartialCost, 9)
+    expect(finalLeg.cost).toBeCloseTo(expectedFinalCost, 9)
+    expect(result.totalCost).toBeCloseTo(expectedEntryCost + expectedPartialCost + expectedFinalCost, 6)
+    // Cash conservation: ending equity always reconciles to initialCash + totalPnl regardless of
+    // how many legs the round trip took to close.
+    expect(result.equityCurve.at(-1)?.equity).toBeCloseTo(result.params.initialCash + result.totalPnl, 4)
+  })
+
+  it('falls back to a full TP exit (single "final" leg) when the tpFraction floor leaves no residual', async () => {
+    const { bars } = fullEntryPullbackBars([1.04, 1.04, 1.04])
+    // initialCash sized so the entry fills exactly 1 share — floor(1 * 0.5) = 0, so the partial
+    // sale would be a 0-share leg; the engine must fall back to a full TP close instead.
+    const result = await runLifecycleBacktest(bars, {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 200,
+      rule: TEST_DEFAULT_RULE,
+      entryPolicy: { kind: 'full' },
+      exitPolicy: PARTIAL_TRAILING,
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    })
+
+    expect(result.trades).toHaveLength(1)
+    const trade = result.trades[0]!
+    expect(trade.entryLegs[0]!.qty).toBe(1)
+    expect(trade.exitReason).toBe('TP')
+    expect(trade.exitLegs.map((l) => l.label)).toEqual(['final'])
+    expect(trade.qty).toBe(1)
+  })
+
+  it('arms the ATR trailing stop only after a partial TP, and exits the residual once close breaks the trail', async () => {
+    const { bars } = fullEntryPullbackBars([1.04, 1.04, 1.04, 1.03, 1.03], [0.9])
+    const result = await runLifecycleBacktest(bars, {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: TEST_DEFAULT_RULE,
+      entryPolicy: { kind: 'full' },
+      exitPolicy: { ...PARTIAL_TRAILING, trailKAtr: 1.5 },
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    })
+
+    expect(result.trades).toHaveLength(1)
+    const trade = result.trades[0]!
+    expect(trade.exitReason).toBe('TRAIL')
+    expect(trade.exitLegs.map((l) => l.label)).toEqual(['partial_tp', 'final'])
+    // The trail exit still nets a profit — the residual rode a big chunk of the rally before
+    // giving it back, it wasn't stopped out at a loss.
+    expect(trade.realizedPnl).toBeGreaterThan(0)
+  })
+
+  it('still applies the hard stop (avgPrice basis) to the residual after a partial TP, even though a smaller drop would also breach the trail', async () => {
+    const { bars } = fullEntryPullbackBars([1.04, 1.04, 1.04], [0.75])
+    const result = await runLifecycleBacktest(bars, {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: TEST_DEFAULT_RULE,
+      entryPolicy: { kind: 'full' },
+      exitPolicy: PARTIAL_TRAILING,
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    })
+
+    expect(result.trades).toHaveLength(1)
+    const trade = result.trades[0]!
+    expect(trade.exitReason).toBe('STOP')
+    expect(trade.exitLegs.map((l) => l.label)).toEqual(['partial_tp', 'final'])
+    // A crash steep enough to blow through the hard stop wipes out the gain the partial TP
+    // locked in — net pnl goes negative even though the first leg sold at a profit.
+    expect(trade.realizedPnl).toBeLessThan(0)
+  })
+
+  function timeStopExtensionBars(contDays: number): DailyBar[] {
+    const warmup = uptrendWarmup(100)
+    const last = warmup[warmup.length - 1]!.close
+    const pullbackDay: DailyBar = {
+      date: '2025-04-01',
+      open: last,
+      high: last,
+      low: last * 0.94,
+      close: last * 0.95,
+    }
+    // A mild +0.3%/day continuation (not a sharp rally, not a decline): keeps pnl well under TP
+    // and the hard-stop distance the whole window, so time-stop is the only thing that can fire.
+    // Empirically (verified directly against `computeEntryDistance`): the trend gate chain holds
+    // through business-day 5 (2025-04-08) and has failed (trend gate) by business-day 6
+    // (2025-04-09) — chosen so one scenario's extended deadline lands inside the "still holds"
+    // window and the other's original deadline lands after the gate has already failed.
+    const cont = buildBars(pullbackDay.close, Array(contDays).fill(1.003), '2025-04-02')
+    return [...warmup, pullbackDay, ...cont]
+  }
+
+  it('extends the time-stop deadline once while the trend gate chain still holds, then force-exits at the extended deadline', async () => {
+    const bars = timeStopExtensionBars(7) // ends exactly at business-day 5 (2025-04-08)
+    const result = await runLifecycleBacktest(bars, {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: { ...TEST_DEFAULT_RULE, timeStopDays: 2 },
+      entryPolicy: { kind: 'full' },
+      exitPolicy: { ...PARTIAL_TRAILING, timeStopExtensionDays: 3 },
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    })
+
+    // Without the extension this would have closed on 2025-04-03 (business-day 2). Closing on
+    // 2025-04-08 instead (business-day 5 = 2 + 3) proves the one-shot extension fired — and since
+    // the trend gate chain is still intact on 2025-04-08 (see `timeStopExtensionBars`), the exit
+    // there also proves the extension is a hard cap, not something that re-extends indefinitely
+    // while the trend keeps holding.
+    expect(result.trades).toHaveLength(1)
+    const trade = result.trades[0]!
+    expect(trade.exitReason).toBe('TIME_STOP')
+    expect(trade.exitTimestamp.slice(0, 10)).toBe('2025-04-08')
+  })
+
+  it('does not extend the time-stop when the trend gate chain has already failed by the original deadline', async () => {
+    const bars = timeStopExtensionBars(8) // ends exactly at business-day 6 (2025-04-09)
+    const result = await runLifecycleBacktest(bars, {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: { ...TEST_DEFAULT_RULE, timeStopDays: 6 },
+      entryPolicy: { kind: 'full' },
+      exitPolicy: { ...PARTIAL_TRAILING, timeStopExtensionDays: 3 },
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    })
+
+    // The trend gate has already failed by business-day 6 (2025-04-09, see
+    // `timeStopExtensionBars`), so the extension condition never fires — the exit lands on the
+    // *original* deadline (2025-04-09), not the would-be-extended 2025-04-14.
+    expect(result.trades).toHaveLength(1)
+    const trade = result.trades[0]!
+    expect(trade.exitReason).toBe('TIME_STOP')
+    expect(trade.exitTimestamp.slice(0, 10)).toBe('2025-04-09')
+  })
+
+  it('preset exitPolicy (default when omitted) is unaffected by the partial-trailing engine', async () => {
+    const { bars } = fullEntryPullbackBars([1.04, 1.04, 1.04])
+    const withoutExitPolicy: LifecycleBacktestParams = {
+      symbol: 'TEST',
+      from: '2025-01-01',
+      to: '2025-12-31',
+      initialCash: 10_000,
+      rule: TEST_DEFAULT_RULE,
+      entryPolicy: { kind: 'full' },
+      feePctOfNotional: 0,
+      feeFixedPerOrder: 0,
+    }
+    const explicitPreset: LifecycleBacktestParams = {
+      ...withoutExitPolicy,
+      exitPolicy: { kind: 'preset' },
+    }
+    const [implicit, explicit] = await Promise.all([
+      runLifecycleBacktest(bars, withoutExitPolicy),
+      runLifecycleBacktest(bars, explicitPreset),
+    ])
+
+    expect(implicit.trades).toHaveLength(1)
+    // preset always closes in one leg — no partial_tp, whole qty at once.
+    expect(implicit.trades[0]!.exitLegs.map((l) => l.label)).toEqual(['final'])
+    expect(implicit.trades[0]!.exitReason).toBe('TP')
+    expect(implicit.totalPnl).toBeCloseTo(explicit.totalPnl, 9)
+    expect(implicit.trades[0]!.qty).toBe(explicit.trades[0]!.qty)
+  })
+})
 describe('nextStagedEntryStep (#713 review)', () => {
   const policy = STAGED_POLICY as Extract<EntryPolicy, { kind: 'staged' }>
   const holding = (probeStreak: number, hasConfirmLeg = false): StagedEntryStepState => ({
@@ -270,5 +518,34 @@ describe('fee-inclusive cash clamp (#713 review)', () => {
       expect(p.equity).toBeGreaterThanOrEqual(0)
     }
     expect(result.totalCost).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('staged entry × partial-trailing interaction', () => {
+  it('freezes entry-leg additions once a partial TP has fired on the round trip', async () => {
+    // probe/confirm (0.5 投入) → rally で partial TP → 再度押し目圏に入っても
+    // 残り fraction の追加建てをしないこと。trail/hard-stop/time-stop を遠ざけて
+    // 「open のまま押し目再来」を作る。
+    const warmup = uptrendWarmup(100)
+    const decline = gentleDecline(warmup[warmup.length - 1]!.close)
+    const probePhase = decline.slice(0, 4) // 04-01..04-04: probe→confirm (streak 3)
+    const rally = buildBars(probePhase[probePhase.length - 1]!.close, [1.03, 1.03, 1.03], '2025-04-05')
+    const pullback2 = buildBars(rally[rally.length - 1]!.close, Array(6).fill(0.99), '2025-04-08')
+    const bars = [...warmup, ...probePhase, ...rally, ...pullback2]
+    const result = await runLifecycleBacktest(bars, {
+      ...baseParams(STAGED_POLICY),
+      rule: { ...TEST_DEFAULT_RULE, timeStopDays: 60 },
+      exitPolicy: { kind: 'partial-trailing', tpFraction: 0.5, trailKAtr: 10, timeStopExtensionDays: 0 },
+    })
+
+    expect(result.trades.length).toBeGreaterThanOrEqual(1)
+    const trade = result.trades[0]!
+    const partial = trade.exitLegs.find((l) => l.label === 'partial_tp')
+    expect(partial).toBeDefined()
+    // entry leg は partial TP の日以降に 1 本も増えていない
+    for (const leg of trade.entryLegs) {
+      expect(leg.date <= partial!.date).toBe(true)
+    }
+    expect(trade.entryLegs.map((l) => l.label)).not.toContain('full')
   })
 })

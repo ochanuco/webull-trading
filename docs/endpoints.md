@@ -19,7 +19,7 @@ auth 列の `Access` は Cloudflare Access JWT (`Cf-Access-Jwt-Assertion` 検証
 | POST | `/admin/webull-token/{seed,refresh}` | Access | `x-access-token` の DO への投入 / 更新 |
 | GET/POST/DELETE | `/admin/{earnings,macro-events}` | Access | イベントカレンダーの参照 / 投入 / 削除 |
 | GET | `/admin/backtest` | Access | offline backtest (Yahoo daily bars + 戦略 rule、実発注なし) |
-| GET | `/admin/backtest/compare` | Access | 一括投入 vs 段階エントリーの比較 backtest (同一 bars/rule/コスト、実発注なし) |
+| GET | `/admin/backtest/compare` | Access | 一括投入 vs 段階エントリー (entry 軸) / 全量利確 vs 部分利確+ATRトレーリング (exit 軸) の比較 backtest (同一 bars/rule/コスト、実発注なし)。`variants` は `<entry>[+<exit>]` 形式 (`+<exit>` 省略時は `preset`) |
 | GET | `/dashboard` | Access | read-only ランディング (資産サマリ / KPI / equity / 保有 / 直近取引) |
 | GET | `/dashboard/{positions,portfolio,trades,config,cron,charts,symbols,events,alerts,audit,broker-probe,webull-token,extended-hours,lifecycle}` | Access | DO / D1 snapshot を HTML で可視化 |
 | GET | `/dashboard/{positions,trades,cron,charts/symbol,lifecycle}/json` | Access | 同 packet の JSON 版 |
