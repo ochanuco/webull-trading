@@ -146,11 +146,17 @@ async function loadAllFills(db: D1Database): Promise<LifecycleFill[]> {
   const fills: LifecycleFill[] = []
   for (const r of result.results ?? []) {
     if (!r.symbol || r.filled_price === null) continue
+    const price = Number(r.filled_price)
+    const qty = r.filled_qty === null ? Number.NaN : Number(r.filled_qty)
+    // 0 株・負値・非有限の行はここで落とす — round trip のペアリングや
+    // turnover に混ざると件数・金額が静かに歪む (broker の異常応答が
+    // reconcile で書かれた場合の防御)。
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(qty) || qty <= 0) continue
     fills.push({
       symbol: r.symbol.toUpperCase(),
       side: resolveFillSide(r.pre_side, r.realized_pnl),
-      qty: r.filled_qty === null ? 0 : Number(r.filled_qty),
-      price: Number(r.filled_price),
+      qty,
+      price,
       at: r.timestamp,
       clientOrderId: r.client_order_id ?? null,
       realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),

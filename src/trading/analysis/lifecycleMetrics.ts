@@ -99,6 +99,10 @@ export function pairRoundTrips(fills: readonly LifecycleFill[]): RoundTrip[] {
   }
   const trips: RoundTrip[] = []
   for (const [symbol, symbolFills] of bySymbol) {
+    // 呼び出し側の SELECT 順 (id ASC) に依存しない — id 順と timestamp 順が
+    // 食い違う行があると BUY/SELL の対応がねじれ、全指標が静かに壊れるため
+    // ここで必ず at 昇順に揃える。
+    symbolFills.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
     let open: LifecycleFill | null = null
     for (const f of symbolFills) {
       if (f.side === 'BUY') {
@@ -444,8 +448,11 @@ export function computeTurnover(
   let buyNotionalUsd = 0
   let sellNotionalUsd = 0
   for (const f of fills) {
+    // price/qty どちらかが 0・負値・非有限だと notional が意味を失う (負×負で
+    // 正になるケースも通ってしまう) ので、有限かつ > 0 の組だけ集計する。
+    if (!Number.isFinite(f.price) || f.price <= 0 || !Number.isFinite(f.qty) || f.qty <= 0) continue
     const notional = f.price * f.qty
-    if (!Number.isFinite(notional)) continue
+    if (!Number.isFinite(notional) || notional <= 0) continue
     if (f.side === 'BUY') buyNotionalUsd += notional
     else sellNotionalUsd += notional
   }

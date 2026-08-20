@@ -196,4 +196,64 @@ describe('loadLifecycleReport', () => {
     const env = {} as Env
     await expect(loadLifecycleReport(env)).rejects.toThrow('DB binding not available')
   })
+
+  it('price/qty が 0・負値・null の fill 行は集計から除外する (#712 review)', async () => {
+    const fills = [
+      {
+        timestamp: '2026-06-01T14:00:00.000Z',
+        symbol: 'SOXL',
+        pre_side: 'BUY',
+        filled_price: 108,
+        filled_qty: 1,
+        realized_pnl: null,
+        estimated_cost: null,
+        client_order_id: 'buy-1',
+      },
+      // 以下 3 行は不正値 (qty null / price 0 / qty 負) — fillCount にも
+      // turnover にも入らないこと
+      {
+        timestamp: '2026-06-02T14:00:00.000Z',
+        symbol: 'SOXL',
+        pre_side: 'BUY',
+        filled_price: 100,
+        filled_qty: null,
+        realized_pnl: null,
+        estimated_cost: null,
+        client_order_id: 'bad-1',
+      },
+      {
+        timestamp: '2026-06-03T14:00:00.000Z',
+        symbol: 'SOXL',
+        pre_side: 'SELL',
+        filled_price: 0,
+        filled_qty: 1,
+        realized_pnl: 0,
+        estimated_cost: null,
+        client_order_id: 'bad-2',
+      },
+      {
+        timestamp: '2026-06-04T14:00:00.000Z',
+        symbol: 'SOXL',
+        pre_side: 'SELL',
+        filled_price: 110,
+        filled_qty: -1,
+        realized_pnl: 2,
+        estimated_cost: null,
+        client_order_id: 'bad-3',
+      },
+    ]
+    const db = fakeDb({ fills, sellReasons: [], skips: [], avgEquity: null, extendedHours: [] })
+    const env = { DB: db } as unknown as Env
+    const client: LifecycleBarClient = {
+      async getDailyBars(symbol: string) {
+        return makeBars(symbol)
+      },
+    }
+    const report = await loadLifecycleReport(env, { client, now: () => NOW })
+
+    expect(report.meta.fillCount).toBe(1)
+    expect(report.meta.roundTripCount).toBe(0)
+    expect(report.turnover.buyNotionalUsd).toBe(108)
+    expect(report.turnover.sellNotionalUsd).toBe(0)
+  })
 })

@@ -390,3 +390,33 @@ describe('crossTabSlExitsWithExtendedHours', () => {
     expect(result).toEqual({ WARNING: 2, NO_OBSERVATION: 1 })
   })
 })
+
+describe('pairRoundTrips input-order robustness (#712 review)', () => {
+  it('sorts fills by at per symbol so out-of-order input pairs correctly', () => {
+    // SELL 行が入力配列で BUY より先に来ても、at 順に並べ直してペアになる
+    const fills: LifecycleFill[] = [
+      fill({ side: 'SELL', price: 110, at: '2026-06-05T14:00:00.000Z', realizedPnl: 10 }),
+      fill({ side: 'BUY', price: 100, at: '2026-06-01T14:00:00.000Z' }),
+    ]
+    const trips = pairRoundTrips(fills)
+    expect(trips).toHaveLength(1)
+    expect(trips[0]!.entryPrice).toBe(100)
+    expect(trips[0]!.exitPrice).toBe(110)
+  })
+})
+
+describe('computeTurnover invalid-value guard (#712 review)', () => {
+  it('excludes fills with non-positive or non-finite price/qty', () => {
+    const fills: LifecycleFill[] = [
+      fill({ side: 'BUY', price: 100, qty: 2 }),
+      fill({ side: 'BUY', price: 0, qty: 5 }),
+      fill({ side: 'BUY', price: -100, qty: -5 }),
+      fill({ side: 'SELL', price: Number.NaN, qty: 1 }),
+      fill({ side: 'SELL', price: 110, qty: 0 }),
+    ]
+    const result = computeTurnover(fills, null)
+    expect(result.buyNotionalUsd).toBe(200)
+    expect(result.sellNotionalUsd).toBe(0)
+    expect(result.totalNotionalUsd).toBe(200)
+  })
+})
