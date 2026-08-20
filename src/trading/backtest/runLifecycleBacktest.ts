@@ -307,10 +307,10 @@ export function evaluateReentry(input: ReentryEvalInput): ReentryEvalResult {
     if (!windowConfigured) return true
     const bd = businessDaysBetween(lastExit.dateYmd, todayYmd)
     if (bd >= rule.reentryGuardBusinessDays) return true
-    // atr20 <= 0 disarms the live guard too (`reentryGuardActive` requires it finite and > 0) —
-    // without it the ceiling itself is undefined, so fail-open rather than block on a NaN/negative
-    // comparison.
-    if (!(atr20 > 0)) return true
+    // atr20 が finite かつ > 0 でなければライブ guard も非活性 (`reentryGuardActive`
+    // の条件と同一) — Infinity を通すと ceiling が -Infinity になり恒久 block に
+    // 化けるので、有限性まで含めて fail-open に倒す。
+    if (!Number.isFinite(atr20) || !(atr20 > 0)) return true
     const ceiling = lastExit.price - rule.reentryMinAtrBelowLastExit * atr20
     return price <= ceiling
   }
@@ -737,12 +737,14 @@ export async function runLifecycleBacktest(
         if (step.action === 'fill_full') {
           if (state === null) {
             const reentry = reentryAllows('staged')
-            // `probeOnly` blocks fill_full specifically (TIME_STOP + staged demotion) — since
-            // fullEligible/probeEligible are mutually exclusive per bar, this bar simply stays
-            // flat rather than falling back to a probe fill; the harness waits for a later
-            // probeEligible bar to actually re-enter.
-            if (reentry.allowed && !reentry.probeOnly) {
-              state = fillFraction(null, 'full', 1, today, nowIso)
+            // `probeOnly` (TIME_STOP + staged) は full leg を probe leg に置き換える。
+            // 抑止 (この bar を flat のまま流す) にすると、fullEligible が毎 bar
+            // 続く強トレンド局面で再エントリーが永久に発生しない — 「probe から
+            // 入り直す」という policy の意図と逆になる。
+            if (reentry.allowed) {
+              state = reentry.probeOnly
+                ? fillFraction(null, 'probe', fractions.probe, today, nowIso)
+                : fillFraction(null, 'full', 1, today, nowIso)
             }
           } else {
             state = fillFraction(state, 'full', 1 - investedFraction(state), today, nowIso)
