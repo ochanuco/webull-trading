@@ -1405,6 +1405,189 @@ describe('runPullbackScheduler news shock gate (news-shock-gate PR 2)', () => {
   })
 })
 
+describe('runPullbackScheduler extended hours gate (issue #709 Phase 6)', () => {
+  async function probeBaseQty(): Promise<number> {
+    const probe = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      now: () => now,
+    })
+    return probe.decisions[0]?.order?.quantity ?? 0
+  }
+
+  it('option omitted (off / back-compat): no trace, qty unaffected', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(baseQty)
+    const decision = summary.decisions.find((d) => d.decision === 'BUY')
+    const trace = decision?.trace?.find((t) => t.label === 'risk.extended_hours')
+    expect(trace).toBeUndefined()
+  })
+
+  it('observe mode traces the WARNING decision but does not change BUY quantity', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const decisions = new Map([
+      [
+        'AAPL',
+        {
+          action: 'reduce_entry' as const,
+          multiplier: 0.5,
+          reason: 'extended_hours: WARNING (premarket gap/stop proximity)',
+        },
+      ],
+    ])
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      extendedHoursGate: { mode: 'observe', decisions },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(baseQty)
+    const decision = summary.decisions.find((d) => d.decision === 'BUY')
+    const trace = decision?.trace?.find((t) => t.label === 'risk.extended_hours')
+    expect(trace).toBeDefined()
+    expect(trace?.message).toContain('WARNING')
+    expect(trace?.message).toContain('observe')
+  })
+
+  it('enforce mode halves BUY quantity on WARNING (reduce_entry, multiplier 0.5)', async () => {
+    const baseQty = await probeBaseQty()
+    expect(baseQty).toBeGreaterThan(1)
+    const execution = mockExecution()
+    const decisions = new Map([
+      [
+        'AAPL',
+        {
+          action: 'reduce_entry' as const,
+          multiplier: 0.5,
+          reason: 'extended_hours: WARNING (premarket gap/stop proximity)',
+        },
+      ],
+    ])
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      extendedHoursGate: { mode: 'enforce', decisions },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(Math.floor(baseQty * 0.5))
+  })
+
+  it('enforce mode blocks the BUY on STOP_AT_OPEN_CANDIDATE (block_entry, multiplier 0)', async () => {
+    const execution = mockExecution()
+    const decisions = new Map([
+      [
+        'AAPL',
+        {
+          action: 'block_entry' as const,
+          multiplier: 0,
+          reason: 'extended_hours: STOP_AT_OPEN_CANDIDATE (premarket below effective stop)',
+        },
+      ],
+    ])
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      extendedHoursGate: { mode: 'enforce', decisions },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const held = summary.decisions.find(
+      (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('STOP_AT_OPEN_CANDIDATE'),
+    )
+    expect(held?.reason).toContain('risk: extended_hours: STOP_AT_OPEN_CANDIDATE')
+  })
+
+  it('does not block SELL even when extended hours gate is enforce + block_entry', async () => {
+    const sellingState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 100, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const decisions = new Map([
+      [
+        'AAPL',
+        {
+          action: 'block_entry' as const,
+          multiplier: 0,
+          reason: 'extended_hours: STOP_AT_OPEN_CANDIDATE (premarket below effective stop)',
+        },
+      ],
+    ])
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: sellingState }),
+      execution,
+      extendedHoursGate: { mode: 'enforce', decisions },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(execution.calls[0]).toMatchObject({ side: 'SELL' })
+  })
+
+  it('a symbol absent from the decisions map is unaffected (per-symbol no-op)', async () => {
+    const baseQty = await probeBaseQty()
+    const execution = mockExecution()
+    const decisions = new Map([
+      [
+        'MSFT',
+        {
+          action: 'block_entry' as const,
+          multiplier: 0,
+          reason: 'extended_hours: STOP_AT_OPEN_CANDIDATE (premarket below effective stop)',
+        },
+      ],
+    ])
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      extendedHoursGate: { mode: 'enforce', decisions },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(baseQty)
+    const decision = summary.decisions.find((d) => d.decision === 'BUY')
+    const trace = decision?.trace?.find((t) => t.label === 'risk.extended_hours')
+    expect(trace).toBeUndefined()
+  })
+})
+
 describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () => {
   /**
    * Down-trend bars that fire a SELL on a held position. PullbackUptrend

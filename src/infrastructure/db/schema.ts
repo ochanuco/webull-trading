@@ -470,6 +470,15 @@ export const globalConfig = sqliteTable(
      * (operator が明示的に fail-closed へ倒す escape hatch)。
      */
     attentionStalePolicy: text('attention_stale_policy').notNull().default('fail_open'),
+    /**
+     * Extended-hours (pre-market) gate (issue #709 Phase 6)。`extended_hours_observation`
+     * (Phase 1 producer) の当日 WARNING/STOP_AT_OPEN_CANDIDATE を BUY sizing に
+     * 反映する。'off' (default) | 'observe' (trace のみ) | 'enforce'。enum 外の
+     * DB 値は 'off' に倒す (gate 無効が安全側、newsShockMode と同じ規約)。
+     * ALTER ADD COLUMN で追加するため DB CHECK は付けない (news_shock_mode 等と
+     * 同じ方針 — 検証は `globalConfigRepo` の runtime sanitize に寄せる)。
+     */
+    extendedHoursGateMode: text('extended_hours_gate_mode').notNull().default('off'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

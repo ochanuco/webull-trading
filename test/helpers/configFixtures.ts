@@ -62,6 +62,7 @@ export function makeGlobalConfigSnapshot(
     newsShockWindowMin: 120,
     newsShockMaxAgeMin: 90,
     attentionStalePolicy: 'fail_open',
+    extendedHoursGateMode: 'off',
     source: 'd1',
     ...overrides,
   }
