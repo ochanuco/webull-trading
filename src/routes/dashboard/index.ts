@@ -92,6 +92,8 @@ import {
   createExtendedHoursObservationDb,
   createExtendedHoursObservationRepo,
 } from '../../infrastructure/db/extendedHoursObservationRepo'
+import { lifecycleBody } from './lifecycle'
+import { loadLifecycleReport } from '../../trading/analysis/lifecycleReport'
 export { safeJsonScript } from './shared'
 export { extractTokenFromPaste } from './webullToken'
 export { ALL_OVERVIEW_PANELS, parseOverviewPanels } from './overview'
@@ -398,6 +400,38 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty(buildTradesPacket(rows, q))
     } catch (err) {
       return jsonPretty({ error: 'trades_json_export_failed', message: messageOf(err) }, 500)
+    }
+  })
+  /**
+   * 売買ライフサイクル計測 (#709 Phase 2)。exit reason 別成績 / フォワード
+   * リターン / SKIP 後の MFE-MAE / 時間外警戒 × SL 突合 / コスト・DD・turnover
+   * を過去 decision / fill から再現可能に集計する read-only 分析ページ。
+   * `loadLifecycleReport` は Yahoo fetch も含むため、他 JSON export より
+   * レイテンシが乗る (symbol 数 × 1 fetch、並列)。
+   */
+  .get('/lifecycle', async (c) => {
+    const subnav = renderAnalysisSubnav('lifecycle')
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'ライフサイクル', unavailable('DB not bound'), subnav))
+    }
+    try {
+      const report = await loadLifecycleReport(c.env)
+      return c.html(renderLayout(c, 'ライフサイクル', lifecycleBody(report), subnav))
+    } catch (err) {
+      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
+      // (cron / alerts と同じ自己保護パターン)。
+      return c.html(renderLayout(c, 'ライフサイクル', unavailable(messageOf(err)), subnav))
+    }
+  })
+  .get('/lifecycle/json', async (c) => {
+    if (!c.env.DB) {
+      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
+    }
+    try {
+      const report = await loadLifecycleReport(c.env)
+      return jsonPretty(report)
+    } catch (err) {
+      return jsonPretty({ error: 'lifecycle_json_export_failed', message: messageOf(err) }, 500)
     }
   })
   .get('/config', async (c) => {
