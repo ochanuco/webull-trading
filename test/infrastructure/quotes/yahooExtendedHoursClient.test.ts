@@ -8,9 +8,9 @@ function mockJson(body: unknown, status = 200): Response {
   })
 }
 
-/** pre 09:00-09:30 ET を UTC epoch秒に固定した fixture (2026-05-20)。 */
-const PRE_START = 1747738800 // 2026-05-20T09:00:00-04:00 (ET) -> 13:00Z
-const PRE_END = 1747740600 // 2026-05-20T09:30:00-04:00 (ET) -> 13:30Z
+/** pre 07:00-07:30 ET (EDT) を UTC epoch秒に固定した fixture (2025-05-20)。 */
+const PRE_START = 1747738800 // 2025-05-20T07:00:00-04:00 (ET) -> 11:00Z
+const PRE_END = 1747740600 // 2025-05-20T07:30:00-04:00 (ET) -> 11:30Z
 const REGULAR_START = PRE_END
 
 describe('YahooExtendedHoursClient', () => {
@@ -70,7 +70,10 @@ describe('YahooExtendedHoursClient', () => {
     expect(series?.bars.map((b) => b.close)).toEqual([99, 100])
   })
 
-  it('falls back to ts < regular.start when currentTradingPeriod.pre is missing', async () => {
+  it('falls back to [regular.start - 6h, regular.start) when currentTradingPeriod.pre is missing', async () => {
+    // 1つ目: 6h lookback より古い前セッション bar (除外) / 2つ目: 窓内 /
+    // 3つ目: regular.start ちょうど (除外)
+    const STALE = REGULAR_START - 7 * 60 * 60
     const fetchFn = vi.fn(async () =>
       mockJson({
         chart: {
@@ -80,8 +83,8 @@ describe('YahooExtendedHoursClient', () => {
                 previousClose: 100,
                 currentTradingPeriod: { regular: { start: REGULAR_START } },
               },
-              timestamp: [PRE_START, REGULAR_START],
-              indicators: { quote: [{ close: [99, 101], low: [98, 100] }] },
+              timestamp: [STALE, PRE_START, REGULAR_START],
+              indicators: { quote: [{ close: [90, 99, 101], low: [89, 98, 100] }] },
             },
           ],
         },

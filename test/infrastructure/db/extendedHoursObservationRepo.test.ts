@@ -64,53 +64,31 @@ describe('createExtendedHoursObservationRepo.insertMany', () => {
 })
 
 describe('createExtendedHoursObservationRepo.latestPerSymbol / recent', () => {
-  it('latestPerSymbol resolves MAX(id) per symbol then fetches those rows', async () => {
-    const groupByResult = [{ maxId: 5 }, { maxId: 9 }]
+  it('latestPerSymbol issues a single query (bound params must not scale with symbol count)', async () => {
+    // MAX(id) 抽出を別クエリにすると ids が銘柄数ぶん bound parameter を消費し
+    // D1 の 100 個上限を超え得る — サブクエリ 1 本 (= select 呼び出し 1 回) で
+    // あることを回帰保証する。
     const rows = [{ id: 5, symbol: 'AAPL' }, { id: 9, symbol: 'SOXL' }]
-    const whereArgs: unknown[] = []
-    let selectCall = 0
-    const select = vi.fn(() => {
-      selectCall += 1
-      if (selectCall === 1) {
-        // first call: select({ maxId: max(id) }).from().where().groupBy()
-        return {
-          from: vi.fn(() => ({
-            where: vi.fn((arg: unknown) => {
-              whereArgs.push(arg)
-              return { groupBy: vi.fn(() => Promise.resolve(groupByResult)) }
-            }),
-          })),
-        }
-      }
-      // second call: select().from().where(inArray).orderBy()
-      return {
-        from: vi.fn(() => ({
-          where: vi.fn((arg: unknown) => {
-            whereArgs.push(arg)
-            return { orderBy: vi.fn(() => Promise.resolve(rows)) }
-          }),
-        })),
-      }
-    })
+    const whereFn = vi.fn(() => ({ orderBy: vi.fn(() => Promise.resolve(rows)) }))
+    const select = vi.fn(() => ({ from: vi.fn(() => ({ where: whereFn })) }))
     const db = { select } as unknown as ExtendedHoursObservationDb
     const repo = createExtendedHoursObservationRepo(db)
     const result = await repo.latestPerSymbol('2026-05-20')
     expect(result).toBe(rows)
-    expect(select).toHaveBeenCalledTimes(2)
-    expect(whereArgs).toHaveLength(2)
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(whereFn).toHaveBeenCalledTimes(1)
   })
 
-  it('latestPerSymbol returns [] without a second query when no rows for the session', async () => {
+  it('latestPerSymbol returns [] when the session has no rows', async () => {
     const select = vi.fn(() => ({
       from: vi.fn(() => ({
-        where: vi.fn(() => ({ groupBy: vi.fn(() => Promise.resolve([])) })),
+        where: vi.fn(() => ({ orderBy: vi.fn(() => Promise.resolve([])) })),
       })),
     }))
     const db = { select } as unknown as ExtendedHoursObservationDb
     const repo = createExtendedHoursObservationRepo(db)
     const result = await repo.latestPerSymbol('2026-05-20')
     expect(result).toEqual([])
-    expect(select).toHaveBeenCalledTimes(1)
   })
 
   it('recent orders by id desc and applies limit', async () => {

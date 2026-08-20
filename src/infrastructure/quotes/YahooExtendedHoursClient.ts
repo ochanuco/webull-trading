@@ -15,6 +15,12 @@ const DEFAULT_TIMEOUT_MS = 5_000
 // Yahoo は anonymous request を 429 で弾くので browser-like UA を付ける
 // (YahooBarClient / YahooQuoteClient と同じ pattern)。
 const DEFAULT_USER_AGENT = 'Mozilla/5.0'
+// `currentTradingPeriod.pre` が欠けたときの fallback 下限。`ts < regular.start`
+// だけだと `range=1d` レスポンスに前セッションの bar (regular/post) が混ざった
+// 場合に全部プレマーケット扱いになり `preMarketLow` が前日安値で汚染される。
+// US プレマーケットは 04:00 ET 開始 (開場 5.5h 前) なので 6h より古い bar は
+// 前セッション残りとみなして捨てる。
+const PREMARKET_FALLBACK_LOOKBACK_SEC = 6 * 60 * 60
 
 export interface YahooExtendedHoursClientOptions {
   baseUrl?: string
@@ -94,7 +100,7 @@ export class YahooExtendedHoursClient {
    * `/v8/finance/chart/{symbol}?interval=1m&range=1d&includePrePost=true` を
    * 叩き、当日のプレマーケット bar 列を返す。`currentTradingPeriod.pre` が
    * あればその窓 `[start, end)` で bar を絞り込み、無ければ
-   * `currentTradingPeriod.regular.start` より前の bar を pre-market とみなす
+   * `[regular.start - 6h, regular.start)` の bar を pre-market とみなす
    * フォールバックを使う。レスポンス欠損 (`result` 無し等) は null。
    * fetch / HTTP / parse 失敗のみ throw する (`YahooQuoteClient` と同じ)。
    */
@@ -163,7 +169,7 @@ export class YahooExtendedHoursClient {
       const inPreWindow = hasPreWindow
         ? ts >= pre!.start! && ts < pre!.end!
         : typeof regularStart === 'number'
-          ? ts < regularStart
+          ? ts < regularStart && ts >= regularStart - PREMARKET_FALLBACK_LOOKBACK_SEC
           : false
       if (!inPreWindow) continue
       const close = closes[i]

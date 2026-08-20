@@ -5,7 +5,7 @@
  * read のみ持つ。`attentionObservationRepo` と同じく、このテーブル自体は
  * strategy/risk/execution から read されない (producer-only、参考観測)。
  */
-import { desc, eq, inArray, max } from 'drizzle-orm'
+import { desc, sql } from 'drizzle-orm'
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'
 import { extendedHoursObservation, type ExtendedHoursObservationRow } from './schema'
 
@@ -77,22 +77,16 @@ export function createExtendedHoursObservationRepo(
     },
 
     async latestPerSymbol(sessionYmd) {
-      // symbol ごとの最新 id を 2 段階で求める (attentionObservation の冪等
-      // unique index と違いこのテーブルは append-only なので MAX(id) 抽出)。
-      // 1) symbol ごとの MAX(id)、2) その id 集合で本体行を取得。
-      const maxIdRows = await db
-        .select({ maxId: max(extendedHoursObservation.id) })
-        .from(extendedHoursObservation)
-        .where(eq(extendedHoursObservation.sessionYmd, sessionYmd))
-        .groupBy(extendedHoursObservation.symbol)
-      const ids = maxIdRows
-        .map((r) => r.maxId)
-        .filter((id): id is number => typeof id === 'number')
-      if (ids.length === 0) return []
+      // symbol ごとの最新 id はサブクエリで畳む。2 段階 SELECT (MAX(id) 抽出 →
+      // `inArray(ids)`) にしないのは、ids が銘柄数ぶん bound parameter を消費し、
+      // D1 の上限 (1 クエリ 100 個) を 101 銘柄以上で超えて read ごと失敗する
+      // ため。この形なら bound param は `sessionYmd` の 1 個で銘柄数に依存しない。
       return db
         .select()
         .from(extendedHoursObservation)
-        .where(inArray(extendedHoursObservation.id, ids))
+        .where(
+          sql`${extendedHoursObservation.id} IN (SELECT MAX(${extendedHoursObservation.id}) FROM ${extendedHoursObservation} WHERE ${extendedHoursObservation.sessionYmd} = ${sessionYmd} GROUP BY ${extendedHoursObservation.symbol})`,
+        )
         .orderBy(extendedHoursObservation.symbol)
     },
 
