@@ -11,7 +11,7 @@ export function parseEquityRange(value: string | undefined): EquityRange {
   return '90d'
 }
 
-export function equityRangeLimit(range: EquityRange): number {
+function equityRangeLimit(range: EquityRange): number {
   if (range === '30d') return 30
   if (range === '90d') return 90
   if (range === '365d') return 365
@@ -140,7 +140,7 @@ export function renderPortfolioEquityChart(
   <script>${initScript}</script>`
 }
 
-export function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portfolio'): string {
+function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portfolio'): string {
   const options: Array<{ id: EquityRange; label: string }> = [
     { id: '30d', label: '30 日' },
     { id: '90d', label: '90 日' },

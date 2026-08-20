@@ -71,9 +71,14 @@ export async function runNewsShockDailySummary(env: Env, requestId: string): Pro
     )
 
     const lines = [
-      `ニュース過熱ゲート 日次サマリ (観測のみ・発注に影響なし)`,
-      `総合判定: ${describeRegime(combined.regime)}`,
-      ...probes.map((p) => `- ${probeLabel(p.probeKey)}: ${describeDecision(p.decision, now)}`),
+      `${regimeIcon(combined.regime)} **ニュース過熱ゲート：${describeRegime(combined.regime)}**`,
+      '観測モード / 発注には影響しません',
+      '',
+      ...probes.flatMap((p, index) => [
+        ...(index > 0 ? [''] : []),
+        `**${probeLabel(p.probeKey)}**`,
+        ...describeDecisionLines(p.decision, now),
+      ]),
     ]
     const message = lines.join('\n')
     const severity = combined.regime === 'critical' ? 'critical' : combined.regime === 'warning' ? 'warning' : 'info'
@@ -113,17 +118,12 @@ export async function runNewsShockDailySummary(env: Env, requestId: string): Pro
   }
 }
 
-/**
- * probe key → 通知に出す日本語ラベル。query の意味 (`newsProbes.ts`) を人が
- * 読める形にしたもの。未知の key (probe 追加時のラベル漏れ) は key をそのまま
- * 出す — 表示が英語に落ちるだけで通知自体は壊さない。
- */
 function probeLabel(probeKey: string): string {
   switch (probeKey) {
     case 'trump_macro':
-      return 'トランプ関税報道 (trump_macro)'
+      return 'トランプ関税報道'
     case 'market_selloff':
-      return '株式急落報道 (market_selloff)'
+      return '株式急落報道'
     default:
       return probeKey
   }
@@ -134,59 +134,66 @@ function describeRegime(regime: NewsShockRegime): string {
     case 'normal':
       return '平常'
     case 'warning':
-      return '警戒 (報道量スパイク)'
+      return '警戒'
     case 'critical':
-      return '過熱 (報道量スパイク + 論調悪化)'
+      return '過熱'
     case 'unknown':
     default:
       return '判定不能'
   }
 }
 
-/**
- * probe 1 本分の decision を 1 行の日本語にする。ratio が取れている場合は
- * 数値で状況を、unknown 系は canonical reason (`newsShockGate.ts` の形式) を
- * prefix で判別して理由を書く。観測時刻 (decision.asOf = 最新 volume bucket)
- * と now からの遅延も併記する — GDELT の反映遅延で「なぜ今の話ではないのか」
- * が読み手に伝わるようにする。
- */
-function describeDecision(decision: NewsShockGateDecision, now: Date): string {
-  const dataAt = formatDataTime(decision.asOf, now)
-  if (decision.ratio !== null) {
-    const ratioPart = `報道量 平時比 ${decision.ratio.toFixed(1)}倍`
-    const tonePart =
-      decision.regime === 'critical' && decision.toneDrop !== null
-        ? `、論調悪化 ${decision.toneDrop.toFixed(1)}`
-        : ''
-    return `${describeRegime(decision.regime)} — ${ratioPart}${tonePart}${dataAt}`
+function regimeIcon(regime: NewsShockRegime): string {
+  switch (regime) {
+    case 'normal':
+      return '✅'
+    case 'warning':
+      return '⚠️'
+    case 'critical':
+      return '🔴'
+    case 'unknown':
+    default:
+      return '❔'
   }
-  // ratio が無い = unknown 系。reason prefix で理由を日本語化する。
-  if (decision.reason.startsWith('news_shock_insufficient_baseline')) {
-    const counts = decision.reason.match(/(\d+)\/(\d+)/)
-    return `判定不能 — 比較基準のサンプル不足${counts ? ` (${counts[1]}/${counts[2]}件)` : ''}${dataAt}`
-  }
-  if (decision.reason.startsWith('news_shock_degenerate_baseline')) {
-    return `判定不能 — 過去7日の報道量が全点ゼロ${dataAt}`
-  }
-  // unavailable = 観測が 1 点も無い probe。`loadNewsShockDecision` の
-  // 'latest_observation' はこの場合 asOf を now に fallback するため、時刻を
-  // 出すと「now 時点の観測がある」ように誤読される — 時刻は省略する。
-  return '判定不能 — 直近の観測データなし'
 }
 
-/**
- * `[8/12 18:15 JST 時点]`、now から 1 時間以上古ければ `・x.x時間前` を併記。
- * epoch は UTC ISO 前提 (`attention_observation.bucket_at`)。parse 不能なら
- * 時刻部分を出さない (表示だけの問題なので throw しない)。
- */
+function describeDecisionLines(decision: NewsShockGateDecision, now: Date): string[] {
+  if (decision.ratio !== null) {
+    const tonePart =
+      decision.regime === 'critical' && decision.toneDrop !== null
+        ? ` ｜ 論調悪化 **${decision.toneDrop.toFixed(1)}**`
+        : ''
+    return [
+      `${regimeIcon(decision.regime)} ${describeRegime(decision.regime)} ｜ 平時比 **${decision.ratio.toFixed(1)}倍**${tonePart}`,
+      `データ: ${formatDataTime(decision.asOf, now)}`,
+    ]
+  }
+
+  if (decision.reason.startsWith('news_shock_insufficient_baseline')) {
+    const counts = decision.reason.match(/(\d+)\/(\d+)/)
+    return [
+      `${regimeIcon(decision.regime)} 判定不能 ｜ 比較基準のサンプル不足${counts ? ` (${counts[1]}/${counts[2]}件)` : ''}`,
+      `データ: ${formatDataTime(decision.asOf, now)}`,
+    ]
+  }
+  if (decision.reason.startsWith('news_shock_degenerate_baseline')) {
+    return [
+      `${regimeIcon(decision.regime)} 判定不能 ｜ 過去7日の報道量が全点ゼロ`,
+      `データ: ${formatDataTime(decision.asOf, now)}`,
+    ]
+  }
+
+  return [`${regimeIcon(decision.regime)} 判定不能 ｜ 直近の観測データなし`]
+}
+
 function formatDataTime(asOfIso: string, now: Date): string {
   const t = Date.parse(asOfIso)
-  if (!Number.isFinite(t)) return ''
+  if (!Number.isFinite(t)) return '時刻不明'
   const jst = new Date(t + 9 * 60 * 60_000)
   const hh = String(jst.getUTCHours()).padStart(2, '0')
   const mm = String(jst.getUTCMinutes()).padStart(2, '0')
   const stamp = `${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${hh}:${mm} JST`
   const lagHours = (now.getTime() - t) / (60 * 60_000)
-  const lagPart = lagHours >= 1 ? `・${lagHours.toFixed(1)}時間前` : ''
-  return ` [${stamp}${lagPart} 時点]`
+  const lagPart = lagHours >= 1 ? `（${lagHours.toFixed(1)}時間前）` : ''
+  return `${stamp}${lagPart}`
 }

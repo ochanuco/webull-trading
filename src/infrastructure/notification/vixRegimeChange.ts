@@ -31,7 +31,7 @@ import type { Notifier, NotificationSeverity } from './Notifier'
 import type { VixRegime, VixRegimeFilterDecision } from '../../trading/risk/vixRegimeFilter'
 
 /** snapshot table の key 値。`config_state_snapshot.key` の他 watched-config 群と衝突しない短名。 */
-export const VIX_REGIME_SNAPSHOT_KEY = 'vix_regime'
+const VIX_REGIME_SNAPSHOT_KEY = 'vix_regime'
 
 /**
  * regime のランク (低 → 高)。「critical 方向への遷移は警告強め、緩和方向は info」

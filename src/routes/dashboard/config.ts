@@ -97,12 +97,12 @@ export function configBody(
  *
  * 未登録 key の fallback は em-dash。
  */
-export interface ConfigKeyMeta {
+interface ConfigKeyMeta {
   label: string
   detail: string
 }
 
-export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
+const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   dry_run: {
     label: 'dry-run (bool)',
     detail: 'true にすると実際には注文せず動作確認だけ。false で証券会社へ本当に注文します。テスト中は true、本番のみ false に。',
@@ -276,7 +276,7 @@ export const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
 }
 
-export function formatConfigValue(v: unknown): string {
+function formatConfigValue(v: unknown): string {
   // null placeholder は他ページと同じ em-dash (—) に統一。"null" 文字列は
   // 運用者が誤って "null" という string 値と混同するリスクがあるので避ける。
   if (v === null || v === undefined) return '—'

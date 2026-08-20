@@ -283,7 +283,7 @@ export interface PullbackSchedulerOptions {
   now?: () => Date
 }
 
-export interface SanityFailedCooldownConfig {
+interface SanityFailedCooldownConfig {
   /**
    * `symbol` (大文字) について、直近 `withinMs` 内に sanity_failed 系の
    * trade_journal row があるかを返す predicate。production は
@@ -305,17 +305,17 @@ export interface SanityFailedCooldownConfig {
  * — the fallback is best-effort and never converts a SELL reject into a
  * different reject (the original SELL_QTY_EXCEED error is re-thrown).
  */
-export interface SellFallbackConfig {
+interface SellFallbackConfig {
   getAvailableQty: (symbol: string) => Promise<number | null>
 }
 
-export interface EarningsScheduleConfig {
+interface EarningsScheduleConfig {
   repo: EarningsCalendarRepo
   /** ±N 営業日。default 1。 */
   freezeBusinessDays?: number
 }
 
-export interface MacroEventScheduleConfig {
+interface MacroEventScheduleConfig {
   repo: MacroEventCalendarRepo
   /**
    * Gate config (freeze hours / full-day fallback)。Partial で渡せて、
@@ -325,7 +325,7 @@ export interface MacroEventScheduleConfig {
   config?: Partial<MacroEventGateConfig>
 }
 
-export interface PerSymbolRiskScheduleConfig {
+interface PerSymbolRiskScheduleConfig {
   /**
    * BUY symbol → inverse symbol map。production は symbol_universe.inversePairs。
    * 大文字 key 前提で渡す。

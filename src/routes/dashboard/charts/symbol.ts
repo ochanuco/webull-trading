@@ -18,7 +18,7 @@ import { SYMBOL_ROLE_LABELS, SYMBOL_ROLE_LABELS_SHORT } from '../symbols'
  * renderer を共用し、チャート上の判定 pin と同じデータを表でも読めるようにする
  * (pin はクリックで 1 件ずつ、表はラダー・実 fill・AI コピーまで一覧)。
  */
-export function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
+function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
   const rows = args.decisionRows ?? []
   if (rows.length === 0 || !args.focusSymbol) return ''
   const symbolCronHref = `/dashboard/cron?symbol=${encodeURIComponent(args.focusSymbol)}`
@@ -41,7 +41,7 @@ export function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
  * ペアレジーム行 (#472)。zone を日本語で表示し、score / proxy / 判定日を併記。
  * observe mode はその旨を明示 (gate していないことが分かるように)。
  */
-export function renderPairRegimeLine(
+function renderPairRegimeLine(
   view: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null,
 ): string {
   if (!view) return ''
@@ -339,14 +339,14 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
 }
 
 /** 段階判定 badge の配色 (#452 PR 2)。 */
-export const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
+const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
   ENTRY: { label: 'ENTRY', bg: '#e6f6ec', fg: '#057a55' },
   HALF: { label: 'HALF 0.5x', bg: '#fff4e6', fg: '#b25000' },
   WATCH: { label: 'WATCH', bg: '#eef2f8', fg: '#46608a' },
   NG: { label: 'NG', bg: '#fdecec', fg: '#c22' },
 }
 
-export function entryStatusBadgeHtml(status: EntryStatus): string {
+function entryStatusBadgeHtml(status: EntryStatus): string {
   const b = ENTRY_STATUS_BADGE[status]
   return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${b.bg};color:${b.fg};font-weight:700;font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
 }
@@ -412,7 +412,7 @@ export function renderSymbolPolicyLine(
  * チャートパネルで「default 値から変更されている項目」を ⚠ で flag するための
  * 比較対象。schema 側の default も同値 (pullback_default_*)。
  */
-export const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
+const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
   stopPct: -0.04,
   takeProfitPct: 0.07,
   timeStopDays: 10,
@@ -535,7 +535,7 @@ export function renderStrategyParamsPanel(
  * 撤去 (15m chart の y軸を引き伸ばさないため) した代替表示。最新の cron-eval
  * point から取得し、null は em-dash (—) で fallback。
  */
-export const JST_MD_FMT = new Intl.DateTimeFormat('ja-JP', {
+const JST_MD_FMT = new Intl.DateTimeFormat('ja-JP', {
   timeZone: 'Asia/Tokyo',
   month: 'numeric',
   day: 'numeric',
@@ -546,7 +546,7 @@ export const JST_MD_FMT = new Intl.DateTimeFormat('ja-JP', {
  * #trace-readability)。左の値が何の数字かを名前で明示する。価格系は通貨記号 ($/¥)
  * 付き (currency 未指定なら $)。
  */
-export function fmtGateValue(g: EntryGateStatus, currency: string | null = null): string {
+function fmtGateValue(g: EntryGateStatus, currency: string | null = null): string {
   const sym = ({ '>': '>', '>=': '≥', '<': '<', '<=': '≤' } as Record<string, string>)[g.operator] ?? g.operator
   const price = (v: number): string => fmtPriceCcy(v, currency)
   switch (g.key) {
@@ -790,7 +790,7 @@ export function renderPriceHeader(
  * は full name の link が折り返して読みづらかったため、ticker + 小さい銘柄名の
  * 縦リストに変更。zoom 範囲は従来通り URL で伝搬する。
  */
-export function renderSymbolRail(args: ChartsBodySymbol): string {
+function renderSymbolRail(args: ChartsBodySymbol): string {
   if (args.availableSymbols.length === 0) return ''
   // 銘柄切替時にズーム範囲を維持するため、現在の from/to をレール URL に伝搬
   const zoomQs = args.zoom
@@ -818,7 +818,7 @@ export function renderSymbolRail(args: ChartsBodySymbol): string {
 }
 
 /** レール + 本文の 2 カラム。レールが空 (銘柄ゼロ) なら本文のみ。 */
-export function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
+function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
   const rail = renderSymbolRail(args)
   // id="symbol-main" は Phase C (client 側銘柄切替) が innerHTML を差し替える
   // 対象の安定 anchor (#charts-symbol-redesign)。rail 無し (銘柄ゼロ) の本文
@@ -832,7 +832,7 @@ export function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): str
  * 左レールが見えない状況でも表示中銘柄が分かるように)。inactive 銘柄には
  * 注記 (cron 評価対象外) を付ける。
  */
-export function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
+function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   if (!args.focusSymbol) return ''
   const focusInactive = isSymbolInactive(args.focusSymbol, args.universe)
   const focusLabel = displaySymbol(args.focusSymbol, args.universe)

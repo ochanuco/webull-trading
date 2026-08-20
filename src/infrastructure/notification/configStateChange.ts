@@ -29,7 +29,7 @@ export interface WatchedConfig {
   drawdownKillThreshold: number
 }
 
-export const WATCHED_KEYS: ReadonlyArray<keyof WatchedConfig> = [
+const WATCHED_KEYS: ReadonlyArray<keyof WatchedConfig> = [
   'dryRun',
   'tradingEnabled',
   'marketHoursCheck',
@@ -48,7 +48,7 @@ export interface DetectedStateChange {
  * D1 から前回 snapshot を読む。table 未 migration 等で落ちても caller を
  * 落とさないよう、空 Map を返して「初回扱い」にフォールバックする。
  */
-export async function loadConfigSnapshots(
+async function loadConfigSnapshots(
   db: D1Database,
 ): Promise<Map<string, string>> {
   try {
@@ -148,7 +148,7 @@ export function classifySeverity(
  * 失敗は throw しない (caller が握りつぶす)。snapshot 書き込みが落ちても
  * 次 tick で「変わらなかった」誤検知が増えるだけで実害は小さい。
  */
-export async function persistSnapshots(
+async function persistSnapshots(
   db: D1Database,
   current: WatchedConfig,
   requestId: string | undefined,

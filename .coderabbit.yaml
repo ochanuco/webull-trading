@@ -38,6 +38,12 @@ reviews:
 
         Phase map: Phase 1 = merged PR #2. Phase 2 = #3. Phase 3 = #4. Phase 4 = #5. Phase 5 = #6.
 
+        Documentation role convention (STRICT):
+        - Code expresses HOW, tests express WHAT, commit messages express WHY,
+          code comments express WHY NOT (rejected alternatives / what breaks without this guard).
+        - Flag comments that merely restate the implementation (HOW) or narrate history (WHY);
+          do not request explanatory comments for readable code.
+
         Safety invariants that MUST NOT be weakened:
         - DRY_RUN default true, TRADING_ENABLED default false.
         - Strategy → Risk → Execution ordering; Risk must be able to reject.

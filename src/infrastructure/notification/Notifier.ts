@@ -42,7 +42,7 @@ export type NotificationEvent =
  */
 export type NotificationSeverity = 'critical' | 'warning' | 'info'
 
-export interface TradeNotificationEvent {
+interface TradeNotificationEvent {
   type: 'TRADE'
   side: 'BUY' | 'SELL'
   symbol: string
@@ -53,7 +53,7 @@ export interface TradeNotificationEvent {
   mode: 'DRY_RUN' | 'LIVE'
 }
 
-export interface ErrorNotificationEvent {
+interface ErrorNotificationEvent {
   type: 'ERROR'
   /** symbol 単位で失敗した時のみ。global 失敗 (D1 等) は undefined。 */
   symbol?: string
@@ -76,7 +76,7 @@ export interface ErrorNotificationEvent {
  * `from` / `to` は arbitrary primitive を取れるよう unknown だが、JSON
  * stringify 可能であること (Slack/Discord に表示するため)。
  */
-export interface StateChangeNotificationEvent {
+interface StateChangeNotificationEvent {
   type: 'STATE_CHANGE'
   /** 変化した config field 名 (例: `dry_run`, `trading_enabled`). */
   field: string
@@ -107,7 +107,7 @@ export interface StateChangeNotificationEvent {
  * STATE_CHANGE と違い「変化」を表さないので、from/to は持たず自由記述の
  * `message` を呼び出し側が組み立てる。
  */
-export interface SummaryNotificationEvent {
+interface SummaryNotificationEvent {
   type: 'SUMMARY'
   /**
    * サマリの識別子 (例: 'news_shock_daily_summary')。SUMMARY は push 専用

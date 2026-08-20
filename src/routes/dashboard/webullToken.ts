@@ -120,7 +120,7 @@ export function renderWebullTokenBody(args: {
 </section>`
 }
 
-export function renderWebullTokenStateTable(state: WebullTokenState): string {
+function renderWebullTokenStateTable(state: WebullTokenState): string {
   const statusClass = state.status === 'NORMAL' ? 'ok' : 'warn'
   // expires は ms / sec 両対応 (Webull docs 未明示)。10^12 以上を ms 扱い。
   const expiresMs = state.expires >= 1e12 ? state.expires : state.expires * 1000

@@ -2,7 +2,7 @@ import type { MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { TradingError } from '../../shared/errors'
 
-export interface AuditRecord {
+interface AuditRecord {
   requestId: string
   timestamp: string
   method: string

@@ -23,7 +23,7 @@ export type TradableStatus =
   /** allowlist に一度も観測されていない。OpenAPI で発注できない可能性。 */
   | 'unknown'
 
-export interface TradableAllowlistEntry {
+interface TradableAllowlistEntry {
   symbol: string
   status: TradableStatus
   name: string | null
