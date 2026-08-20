@@ -88,6 +88,7 @@ import {
   type EntryPolicy,
   type ExitPolicy,
   type LifecycleBacktestParams,
+  type ReentryPolicy,
 } from '../trading/backtest/runLifecycleBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
@@ -313,22 +314,27 @@ export const admin = new Hono<AppBindings>()
   })
   /**
    * 現行一括投入 vs 段階エントリー (Probe→確認→押し目) の比較 backtest
-   * (issue #709 Phase 3)、および全量利確 (preset) vs 部分利確+ATRトレーリング
-   * (issue #709 Phase 4) の比較。`/backtest` と同一 bars・rule・コスト条件で
-   * 複数 `EntryPolicy` × `ExitPolicy` variant を走らせ、`runLifecycleBacktest`
-   * の結果を並べて返す。実発注は **しない**。
+   * (issue #709 Phase 3)、全量利確 (preset) vs 部分利確+ATRトレーリング
+   * (issue #709 Phase 4)、および exit reason 別の再エントリー条件比較
+   * (issue #709 Phase 5) の比較。`/backtest` と同一 bars・rule・コスト条件で
+   * 複数 `EntryPolicy` × `ExitPolicy` × `ReentryPolicy` variant を走らせ、
+   * `runLifecycleBacktest` の結果を並べて返す。実発注は **しない**。
    *
    * Query:
    *   - `symbol`, `from`, `to`, `initialCash`, rule override 群は `/backtest` と共通
    *   - `variants` (optional) カンマ区切り。既定
-   *     `full,staged:25/25/50,full+trail:50/2/0,full+trail:50/2/5`。
-   *     書式は `<entry>` または `<entry>+<exit>` (`+<exit>` 省略時は `preset` 扱い
-   *     — Phase 3 時点の書式 (`full` / `staged:<probe>/<confirm>/<full>`) はそのまま
+   *     `full,staged:25/25/50,full+trail:50/2/0,full+trail:50/2/5,full+preset+reentry:guard,full+preset+reentry:aware:5`。
+   *     書式は `<entry>[+<exit>][+reentry:<spec>]` (`+<exit>` 省略時は `preset`、
+   *     `+reentry:<spec>` 省略時は `none` 扱い — Phase 3/4 時点の書式はそのまま
    *     引き続き有効):
    *       - `<entry>` = `full` | `staged:<probe>/<confirm>/<full>` (% 整数、合計 100)
    *       - `<exit>`  = `preset` | `trail:<tpFraction%>/<trailKAtr>/<extDays>`
    *         (例 `full+trail:50/2/5` = TP到達で半分利確・残りをATR2σトレーリング・
    *         トレンド継続時 time-stop を5営業日延長)
+   *       - `reentry:<spec>` = `reentry:none` | `reentry:guard` | `reentry:aware:<slWaitDays>`
+   *         (順序は exit の後。`guard` = 現行ライブ再エントリー価格ガードの複製、
+   *         `aware:<slWaitDays>` = exit reason 別の再エントリー条件 — 詳細は
+   *         `runLifecycleBacktest.ts` の `evaluateReentry`)
    *     URL クエリ内の `+` は form-decode で空白になる (HTML form 送信と同じ) ので、
    *     ブラウザ / curl から直接叩く場合は `%2B` に percent-encode すること。
    *   - `confirmDays` (optional, default 3) staged variant 共通の confirm streak 日数
@@ -384,6 +390,7 @@ export const admin = new Hono<AppBindings>()
           atrBaselineMode: setup.atrBaselineMode,
           entryPolicy: variant.entryPolicy,
           exitPolicy: variant.exitPolicy,
+          reentryPolicy: variant.reentryPolicy,
           feePctOfNotional,
           feeFixedPerOrder,
         }
@@ -393,6 +400,7 @@ export const admin = new Hono<AppBindings>()
           name: variant.name,
           entryPolicy: variant.entryPolicy,
           exitPolicy: variant.exitPolicy,
+          reentryPolicy: variant.reentryPolicy,
           ...metrics,
           tradeCount: trades.length,
           trades: trades.slice(0, 20),
@@ -3384,8 +3392,11 @@ async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetu
       global.pullbackDefaultMaxStopToTpRatio,
       {},
     ),
-    // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
-    // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
+    // #reentry: 再エントリー価格ガードの係数。`/backtest` (runBacktest, entry 軸なし) では
+    // 未使用のまま既定値保持のみ。`/backtest/compare` の `reentry:guard` / `reentry:aware:<n>`
+    // variant (issue #709 Phase 5) はこの係数を `runLifecycleBacktest` の `lastExit` 追跡と
+    // 併せて実際に使う — 係数自体は `?reentryMinAtrBelowLastExit=` 等の query override を
+    // まだ持たない (対応 issue が来たら追加、今は out of scope)。
     reentryMinAtrBelowLastExit: 1.0,
     reentryGuardBusinessDays: 3,
   }
@@ -3427,33 +3438,69 @@ async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetu
 }
 
 /** `/backtest/compare` default variant set: current one-shot entry, a staged-entry split
- * (#709 Phase 3), and two partial-exit + ATR trailing variants — with and without the
- * trend-continuation time-stop extension (#709 Phase 4) — all against the one-shot entry so the
- * exit-side comparison isn't confounded by the entry-side one. */
-const DEFAULT_COMPARE_VARIANTS = ['full', 'staged:25/25/50', 'full+trail:50/2/0', 'full+trail:50/2/5']
+ * (#709 Phase 3), two partial-exit + ATR trailing variants — with and without the
+ * trend-continuation time-stop extension (#709 Phase 4) — and two re-entry-gated one-shot-entry
+ * variants — the live price-guard replica and the exit-reason-aware policy (#709 Phase 5) — all
+ * against the one-shot entry / preset exit baseline so each axis's comparison isn't confounded by
+ * the others. */
+const DEFAULT_COMPARE_VARIANTS = [
+  'full',
+  'staged:25/25/50',
+  'full+trail:50/2/0',
+  'full+trail:50/2/5',
+  'full+preset+reentry:guard',
+  'full+preset+reentry:aware:5',
+]
 
 /**
- * Parse one `/backtest/compare` `variants` entry (`<entry>` or `<entry>+<exit>`) into an
- * `EntryPolicy` + `ExitPolicy` pair. A bare entry spec (no `+<exit>`) is `+preset` — this keeps
- * every Phase 3 spec string (`full`, `staged:25/25/50`, ...) parsing to the exact same
- * `EntryPolicy` it always did, with `exitPolicy: {kind:'preset'}` alongside it.
+ * Parse one `/backtest/compare` `variants` entry (`<entry>`, `<entry>+<exit>`, or
+ * `<entry>+<exit>+reentry:<spec>` — the `reentry:` segment may also follow a bare `<entry>` with
+ * `<exit>` omitted) into an `EntryPolicy` + `ExitPolicy` + `ReentryPolicy` triple. Omitting
+ * `+<exit>` is `+preset` and omitting `+reentry:<spec>` is `+reentry:none` — this keeps every
+ * pre-Phase-5 spec string (`full`, `staged:25/25/50`, `full+trail:...`) parsing to the exact same
+ * `EntryPolicy`/`ExitPolicy` it always did, with `reentryPolicy: {kind:'none'}` alongside it.
  */
 function parseVariantSpec(
   spec: string,
   confirmDays: number,
-): { name: string; entryPolicy: EntryPolicy; exitPolicy: ExitPolicy } {
+): { name: string; entryPolicy: EntryPolicy; exitPolicy: ExitPolicy; reentryPolicy: ReentryPolicy } {
   const segments = spec.split('+')
-  if (segments.length > 2 || segments.some((s) => s.length === 0)) {
+  if (segments.length > 3 || segments.length < 1 || segments.some((s) => s.length === 0)) {
     throw new ValidationError(
-      `'variants' entry '${spec}' must be '<entry>' or '<entry>+<exit>'`,
+      `'variants' entry '${spec}' must be '<entry>', '<entry>+<exit>', or '<entry>[+<exit>]+reentry:<spec>'`,
       { field: 'variants' },
     )
   }
-  const [entrySpec, exitSpec] = segments as [string, string | undefined]
+  const [entrySpec, ...rest] = segments as [string, ...string[]]
+  // Segments after the entry are order-sensitive: a `reentry:`-prefixed one is always reentry, a
+  // bare one is always exit, and exit (if present) must come before reentry — mirrors the
+  // documented `<entry>[+<exit>][+reentry:<spec>]` grammar instead of accepting either order.
+  let exitSpec: string | undefined
+  let reentrySpec: string | undefined
+  for (const seg of rest) {
+    if (seg.startsWith('reentry:')) {
+      if (reentrySpec !== undefined) {
+        throw new ValidationError(
+          `'variants' entry '${spec}' must have at most one 'reentry:' segment`,
+          { field: 'variants' },
+        )
+      }
+      reentrySpec = seg.slice('reentry:'.length)
+    } else {
+      if (exitSpec !== undefined || reentrySpec !== undefined) {
+        throw new ValidationError(
+          `'variants' entry '${spec}': exit segment '${seg}' must come before 'reentry:...' and appear at most once`,
+          { field: 'variants' },
+        )
+      }
+      exitSpec = seg
+    }
+  }
   return {
     name: spec,
     entryPolicy: parseEntrySpec(entrySpec, spec, confirmDays),
     exitPolicy: parseExitSpec(exitSpec ?? 'preset', spec),
+    reentryPolicy: parseReentrySpec(reentrySpec ?? 'none', spec),
   }
 }
 
@@ -3516,4 +3563,28 @@ function parseExitSpec(exitSpec: string, fullSpec: string): ExitPolicy {
     trailKAtr,
     timeStopExtensionDays,
   }
+}
+
+/** `none` = no re-entry gate (Phase 3/4 behavior, unchanged). `guard` = replica of the live
+ * `PullbackUptrendStrategy` re-entry price ceiling. `aware:<slWaitDays>` = exit-reason-aware
+ * re-entry (#709 Phase 5) — see `evaluateReentry` in `runLifecycleBacktest.ts` for the exact
+ * per-reason rules. */
+function parseReentrySpec(reentrySpec: string, fullSpec: string): ReentryPolicy {
+  if (reentrySpec === 'none') return { kind: 'none' }
+  if (reentrySpec === 'guard') return { kind: 'price-guard' }
+  const match = /^aware:(\d+)$/.exec(reentrySpec)
+  if (!match) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': reentry segment 'reentry:${reentrySpec}' must be 'reentry:none', 'reentry:guard', or 'reentry:aware:<slWaitDays>'`,
+      { field: 'variants' },
+    )
+  }
+  const slWaitDays = Number(match[1])
+  if (!(slWaitDays >= 0)) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': reentry slWaitDays must be >= 0 (got ${slWaitDays})`,
+      { field: 'variants' },
+    )
+  }
+  return { kind: 'reason-aware', slWaitDays }
 }
