@@ -6,6 +6,7 @@ import { createNotifier } from './infrastructure/notification/createNotifier'
 import { checkMarketDataHealth } from './infrastructure/webull/checkMarketDataHealth'
 import { refreshTradableAllowlist } from './infrastructure/webull/refreshTradableAllowlist'
 import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
+import { runExtendedHoursObservation } from './trading/quotes/extendedHoursScheduler'
 import { runNewsScheduler } from './trading/news/newsScheduler'
 import { runNewsShockDailySummary } from './trading/news/newsShockDailySummary'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
@@ -412,6 +413,27 @@ export default {
               fetched: summary.fetched,
               inserted: summary.inserted,
               skipped: summary.skipped,
+            }),
+          )
+        })
+        .catch(() => undefined),
+    )
+    // Extended-hours (pre-market) reference observation producer (issue #709
+    // Phase 1)。quote/reconcile/strategy とは完全に独立 — Yahoo 障害が取引経路に
+    // 伝播しないことを物理的に保証する配線 (runExtendedHoursObservation 自体も
+    // 内部で fetch/DB 失敗を throw せず握りつぶすが、ここでも二重に .catch する)。
+    ctx.waitUntil(
+      runExtendedHoursObservation({ env, requestId })
+        .then((summary) => {
+          if (!summary.ran) return
+          console.log(
+            JSON.stringify({
+              event: 'extended_hours_observation_run',
+              requestId,
+              symbols: summary.symbols,
+              persisted: summary.persisted,
+              statuses: summary.statuses,
+              errors: summary.errors,
             }),
           )
         })
