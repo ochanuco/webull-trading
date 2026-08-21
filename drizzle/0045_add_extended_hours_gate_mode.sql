@@ -1,0 +1,1 @@
+ALTER TABLE `global_config` ADD `extended_hours_gate_mode` text DEFAULT 'off' NOT NULL;

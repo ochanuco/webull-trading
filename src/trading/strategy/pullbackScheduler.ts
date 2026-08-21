@@ -40,6 +40,7 @@ import {
 } from '../risk/macroEventGate'
 import type { VixRegimeFilterDecision } from '../risk/vixRegimeFilter'
 import type { NewsShockGateDecision } from '../risk/newsShockGate'
+import type { ExtendedHoursGateDecision } from '../risk/extendedHoursGate'
 import type { EarningsCalendarRepo } from '../../infrastructure/calendar/earningsCalendarRepo'
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { evaluatePerSymbolRisk } from '../risk/perSymbolRiskGate'
@@ -211,6 +212,27 @@ export interface PullbackSchedulerOptions {
   newsShockGate?: {
     mode: 'observe' | 'enforce'
     decision: NewsShockGateDecision
+  }
+  /**
+   * Extended-hours (pre-market) gate (issue #709 Phase 6)。caller
+   * (`runStrategyCron`) が cron tick 起動時に `extended_hours_observation`
+   * (Phase 1 producer) を D1 read し `loadExtendedHoursGateDecisions` を呼んで
+   * 作る、symbol (大文字) → decision の Map。VIX / news shock と異なり
+   * **symbol ごと**の decision であり、Map に無い symbol は no-op (= 従来挙動、
+   * trace にも出ない)。`mode` は `global_config.extended_hours_gate_mode`
+   * ('off' は caller がこの option ごと省略するので scheduler 側では扱わない):
+   *   - 'enforce': `action='block_entry'` で BUY 全 reject / `action='reduce_entry'`
+   *     で `intent.quantity` を `multiplier` 倍に縮小 (VIX / news shock と同じ
+   *     乗算チェーンの最後に適用)。
+   *   - 'observe': qty は変えず、`traceStep('risk.extended_hours', ...)` に
+   *     reason を残すだけ (shadow mode)。
+   * 未注入 / 対象 symbol の decision なしなら skip (POC 後方互換)。SELL は
+   * extended hours gate 関係なく通す (issue #709: Yahoo 時間外データ単独では
+   * SELL しない)。
+   */
+  extendedHoursGate?: {
+    mode: 'observe' | 'enforce'
+    decisions: Map<string, ExtendedHoursGateDecision>
   }
   /**
    * Entry 抑止 symbol → 理由 (#452)。role が entry 無効 (cash_parking / 定義のみ
@@ -1134,6 +1156,76 @@ export async function runPullbackScheduler(
           }
         }
       }
+      // Extended-hours (pre-market) gate (issue #709 Phase 6) — VIX / news shock
+      // と同じ乗算チェーンの最後に適用。symbol ごとの Map なので対象銘柄の
+      // decision が無ければ no-op (trace にも出ない)。decision が Map にある
+      // 時点で WARNING/STOP_AT_OPEN_CANDIDATE 確定 (NORMAL/UNKNOWN は呼び出し側
+      // `loadExtendedHoursGateDecisions` が含めない) なので **observe / enforce
+      // 問わず常に trace を残す** — news shock の enforce-reduce 成功時 (qty>0
+      // まで縮小できた) には trace を残さない既存挙動とは異なり、この gate は
+      // 「今朝この銘柄に警戒シグナルがあった」という運用可視性を optional
+      // narrowing なしで一貫させる (#709 Phase 6 設計)。
+      const extendedHoursGateOpt = options.extendedHoursGate
+      const extendedHoursDecision = extendedHoursGateOpt?.decisions.get(upper)
+      if (extendedHoursGateOpt && extendedHoursDecision) {
+        const isObserve = extendedHoursGateOpt.mode === 'observe'
+        const observeNote = isObserve
+          ? ` [observe: enforce なら ${extendedHoursDecision.action === 'block_entry' ? 'BUY 停止' : `size x${extendedHoursDecision.multiplier}`}]`
+          : ''
+        signal = {
+          ...signal,
+          trace: appendTrace(
+            signal.trace,
+            traceStep(
+              'risk.extended_hours',
+              false,
+              extendedHoursDecision.multiplier,
+              undefined,
+              undefined,
+              `${extendedHoursDecision.reason}${observeNote}`,
+            ),
+          ),
+        }
+        if (!isObserve && extendedHoursDecision.action === 'block_entry') {
+          const reason = `risk: ${extendedHoursDecision.reason}`
+          summary.holds += 1
+          await emitDecision({
+            symbol: upper,
+            decision: 'HOLD',
+            reason,
+            price: indicators.price,
+            indicatorsJson: JSON.stringify(indicators),
+            trace: signal.trace,
+          })
+          continue
+        }
+        if (!isObserve && extendedHoursDecision.action === 'reduce_entry') {
+          scaledQuantity = applySizeScale(scaledQuantity, resolvedLotSize, extendedHoursDecision.multiplier)
+          if (scaledQuantity <= 0) {
+            const reason = `risk: ${extendedHoursDecision.reason} (qty rounded to 0, lot=${resolvedLotSize})`
+            summary.holds += 1
+            await emitDecision({
+              symbol: upper,
+              decision: 'HOLD',
+              reason,
+              price: indicators.price,
+              indicatorsJson: JSON.stringify(indicators),
+              trace: appendTrace(
+                signal.trace,
+                traceStep(
+                  'risk.extended_hours',
+                  false,
+                  scaledQuantity,
+                  '>',
+                  0,
+                  `${extendedHoursDecision.reason}; qty 0 after lot round`,
+                ),
+              ),
+            })
+            continue
+          }
+        }
+      }
       if (!Number.isFinite(indicators.price) || indicators.price <= 0) {
         const reason = `invalid price: ${indicators.price}`
         summary.rejected.push({ symbol: upper, reason })
@@ -1805,6 +1897,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
   'risk.news_shock': 'ニュース過熱ゲート',
+  'risk.extended_hours': '時間外 (プレマーケット) 警戒ゲート',
   'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
   'entry.half_status': '段階判定 HALF (0.5x、#452)',
   'entry.cash_rebalance': '条件連動配分 cash rebalance (#452)',

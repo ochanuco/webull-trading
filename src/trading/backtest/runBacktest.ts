@@ -356,7 +356,7 @@ function classifyExitReason(reason: string): ExitReason {
   return 'END_OF_DATA'
 }
 
-function calendarDaysBetween(fromYmd: string, toYmd: string): number {
+export function calendarDaysBetween(fromYmd: string, toYmd: string): number {
   const a = Date.parse(`${fromYmd}T00:00:00.000Z`)
   const b = Date.parse(`${toYmd}T00:00:00.000Z`)
   if (!Number.isFinite(a) || !Number.isFinite(b)) return 0
@@ -369,7 +369,7 @@ function calendarDaysBetween(fromYmd: string, toYmd: string): number {
  * Strategy` の time-stop 判定は holdBusinessDays で動くので、ここでの近似
  * は exit timing に若干影響するが POC tuning には十分。
  */
-function businessDaysBetween(fromYmd: string, toYmd: string): number {
+export function businessDaysBetween(fromYmd: string, toYmd: string): number {
   const a = Date.parse(`${fromYmd}T00:00:00.000Z`)
   const b = Date.parse(`${toYmd}T00:00:00.000Z`)
   if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return 0

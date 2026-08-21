@@ -63,6 +63,7 @@
 | `vix_warning_size_scale` | `0.5` | warning 帯での size 倍率 |
 | `pair_regime_mode` | `'off'` | ペアレジーム layer (#472)。`off` / `observe` (log のみ) / `enforce` |
 | `cash_fallback_orders_enabled` | `0` | 余剰現金の退避先 (SGOV 等) への自動 BUY を許可 (#452) |
+| `extended_hours_gate_mode` | `'off'` | 時間外 (プレマーケット) 警戒 gate (#709 Phase 6)。`off` / `observe` (trace のみ) / `enforce`。`extended_hours_observation` (Phase 1 producer) の当日 WARNING/STOP_AT_OPEN_CANDIDATE を BUY sizing に反映 (WARNING→size x0.5 / STOP_AT_OPEN_CANDIDATE→BUY 停止)。SELL には作用しない。開場後 120 分を過ぎると評価しない (午前の警戒を午後に引きずらない) |
 
 ## ニュースショック gate
 
