@@ -38,7 +38,7 @@ import {
   type EntrySnapshot,
 } from '../trading/strategy/conditionalAllocation'
 import { deriveEntryStatusFromIndicators } from '../trading/strategy/entryStatus'
-import { computePullbackIndicators } from '../trading/strategy/indicators'
+import { computePullbackIndicators, type DailyBar } from '../trading/strategy/indicators'
 import { buildSymbolRules } from '../trading/strategy/symbolRuleResolution'
 import { YahooBarClient, toYahooSymbol } from '../infrastructure/quotes/YahooBarClient'
 import { loadGlobalConfigFrom } from '../infrastructure/db/globalConfigLoader'
@@ -83,6 +83,13 @@ import {
   type MacroEventCalendarSeedInput,
 } from '../infrastructure/calendar/macroEventCalendarRepo'
 import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
+import {
+  runLifecycleBacktest,
+  type EntryPolicy,
+  type ExitPolicy,
+  type LifecycleBacktestParams,
+  type ReentryPolicy,
+} from '../trading/backtest/runLifecycleBacktest'
 import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendStrategy'
 
 /**
@@ -293,124 +300,127 @@ export const admin = new Hono<AppBindings>()
    * D1 永続化は別 PR (issue #198 の `backtest_run` / `backtest_trade`)。
    */
   .get('/backtest', async (c) => {
-    const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
-    const from = readRequiredParam(c.req.query('from'), 'from')
-    const to = readRequiredParam(c.req.query('to'), 'to')
-    if (!isYmd(from)) throw new ValidationError("'from' must be YYYY-MM-DD", { field: 'from' })
-    if (!isYmd(to)) throw new ValidationError("'to' must be YYYY-MM-DD", { field: 'to' })
-    if (from > to) {
-      throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
+    const setup = await buildBacktestSetup(c)
+    const params: BacktestParams = {
+      symbol: setup.symbol,
+      from: setup.from,
+      to: setup.to,
+      initialCash: setup.initialCash,
+      rule: setup.rule,
+      atrBaselineMode: setup.atrBaselineMode,
     }
-    const initialCash = readOptionalNumber(c.req.query('initialCash'), 'initialCash', 10_000, {
+    const result = await runBacktest(setup.sliced, params)
+    return c.json(result)
+  })
+  /**
+   * 現行一括投入 vs 段階エントリー (Probe→確認→押し目) の比較 backtest
+   * (issue #709 Phase 3)、全量利確 (preset) vs 部分利確+ATRトレーリング
+   * (issue #709 Phase 4)、および exit reason 別の再エントリー条件比較
+   * (issue #709 Phase 5) の比較。`/backtest` と同一 bars・rule・コスト条件で
+   * 複数 `EntryPolicy` × `ExitPolicy` × `ReentryPolicy` variant を走らせ、
+   * `runLifecycleBacktest` の結果を並べて返す。実発注は **しない**。
+   *
+   * Query:
+   *   - `symbol`, `from`, `to`, `initialCash`, rule override 群は `/backtest` と共通
+   *   - `variants` (optional) カンマ区切り。既定
+   *     `full,staged:25/25/50,full+trail:50/2/0,full+trail:50/2/5,full+preset+reentry:guard,full+preset+reentry:aware:5`。
+   *     書式は `<entry>[+<exit>][+reentry:<spec>]` (`+<exit>` 省略時は `preset`、
+   *     `+reentry:<spec>` 省略時は `none` 扱い — Phase 3/4 時点の書式はそのまま
+   *     引き続き有効):
+   *       - `<entry>` = `full` | `staged:<probe>/<confirm>/<full>` (% 整数、合計 100)
+   *       - `<exit>`  = `preset` | `trail:<tpFraction%>/<trailKAtr>/<extDays>`
+   *         (例 `full+trail:50/2/5` = TP到達で半分利確・残りをATR2σトレーリング・
+   *         トレンド継続時 time-stop を5営業日延長)
+   *       - `reentry:<spec>` = `reentry:none` | `reentry:guard` | `reentry:aware:<slWaitDays>`
+   *         (順序は exit の後。`guard` = 現行ライブ再エントリー価格ガードの複製、
+   *         `aware:<slWaitDays>` = exit reason 別の再エントリー条件 — 詳細は
+   *         `runLifecycleBacktest.ts` の `evaluateReentry`)
+   *     URL クエリ内の `+` は form-decode で空白になる (HTML form 送信と同じ) ので、
+   *     ブラウザ / curl から直接叩く場合は `%2B` に percent-encode すること。
+   *   - `confirmDays` (optional, default 3) staged variant 共通の confirm streak 日数
+   *   - `feePctOfNotional`, `feeFixedPerOrder` (optional) 既定は global_config
+   */
+  .get('/backtest/compare', async (c) => {
+    const setup = await buildBacktestSetup(c)
+    const confirmDays = readOptionalNumber(c.req.query('confirmDays'), 'confirmDays', 3, {
       mustBePositive: true,
     })
+    // 小数の confirmDays は「probeStreak >= 0.5」が初日で成立して確認 leg の
+    // 意味が消えるので整数のみ受ける。
+    if (!Number.isInteger(confirmDays)) {
+      throw new ValidationError("'confirmDays' must be a positive integer", { field: 'confirmDays' })
+    }
+    const feePctOfNotional = readOptionalNumber(
+      c.req.query('feePctOfNotional'),
+      'feePctOfNotional',
+      setup.global.feePctOfNotional,
+      {},
+    )
+    const feeFixedPerOrder = readOptionalNumber(
+      c.req.query('feeFixedPerOrder'),
+      'feeFixedPerOrder',
+      setup.global.feeFixedPerOrder,
+      {},
+    )
+    // 負の手数料は estimateOrderCost が負になりコストが利益として計上される。
+    for (const [field, v] of [
+      ['feePctOfNotional', feePctOfNotional],
+      ['feeFixedPerOrder', feeFixedPerOrder],
+    ] as const) {
+      if (v < 0) throw new ValidationError(`'${field}' must be >= 0`, { field })
+    }
+    const variantsQuery = c.req.query('variants')
+    const specs = (
+      variantsQuery && variantsQuery.trim().length > 0
+        ? variantsQuery.split(',')
+        : DEFAULT_COMPARE_VARIANTS
+    )
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    const variants = specs.map((spec) => parseVariantSpec(spec, confirmDays))
 
-    const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
-    const rule: SymbolRule = {
-      stopPct: readOptionalNumber(
-        c.req.query('stopPct'),
-        'stopPct',
-        global.pullbackDefaultStopPct,
-        {},
-      ),
-      takeProfitPct: readOptionalNumber(
-        c.req.query('takeProfitPct'),
-        'takeProfitPct',
-        global.pullbackDefaultTakeProfitPct,
-        {},
-      ),
-      timeStopDays: readOptionalNumber(
-        c.req.query('timeStopDays'),
-        'timeStopDays',
-        global.pullbackDefaultTimeStopDays,
-        { mustBePositive: true },
-      ),
-      pullbackMax: readOptionalNumber(
-        c.req.query('pullbackMax'),
-        'pullbackMax',
-        global.pullbackDefaultPullbackMax,
-        {},
-      ),
-      pullbackMin: readOptionalNumber(
-        c.req.query('pullbackMin'),
-        'pullbackMin',
-        global.pullbackDefaultPullbackMin,
-        {},
-      ),
-      minReturn50d: readOptionalNumber(
-        c.req.query('minReturn50d'),
-        'minReturn50d',
-        global.pullbackDefaultMinReturn50d,
-        {},
-      ),
-      requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
-      kAtr: readOptionalNumber(c.req.query('kAtr'), 'kAtr', global.pullbackDefaultKAtr, {
-        mustBePositive: true,
+    const results = await Promise.all(
+      variants.map(async (variant) => {
+        const params: LifecycleBacktestParams = {
+          symbol: setup.symbol,
+          from: setup.from,
+          to: setup.to,
+          initialCash: setup.initialCash,
+          rule: setup.rule,
+          atrBaselineMode: setup.atrBaselineMode,
+          entryPolicy: variant.entryPolicy,
+          exitPolicy: variant.exitPolicy,
+          reentryPolicy: variant.reentryPolicy,
+          feePctOfNotional,
+          feeFixedPerOrder,
+        }
+        const result = await runLifecycleBacktest(setup.sliced, params)
+        const { trades, ...metrics } = result
+        return {
+          name: variant.name,
+          entryPolicy: variant.entryPolicy,
+          exitPolicy: variant.exitPolicy,
+          reentryPolicy: variant.reentryPolicy,
+          ...metrics,
+          tradeCount: trades.length,
+          trades: trades.slice(0, 20),
+        }
       }),
-      maxSma50DeviationPct: readOptionalNumber(
-        c.req.query('maxSma50DeviationPct'),
-        'maxSma50DeviationPct',
-        global.pullbackDefaultMaxSma50DeviationPct,
-        { mustBePositive: true },
-      ),
-      maxAtrRatio: readOptionalNumber(
-        c.req.query('maxAtrRatio'),
-        'maxAtrRatio',
-        global.pullbackDefaultMaxAtrRatio,
-        { mustBePositive: true },
-      ),
-      maxStopToTpRatio: readOptionalNumber(
-        c.req.query('maxStopToTpRatio'),
-        'maxStopToTpRatio',
-        global.pullbackDefaultMaxStopToTpRatio,
-        {},
-      ),
-      // #reentry: 再エントリー価格ガード。backtest preview は per-symbol の
-      // lastExit 状態を持たないので実際には fail-open (この rule 上は既定値だけ保持)。
-      reentryMinAtrBelowLastExit: 1.0,
-      reentryGuardBusinessDays: 3,
-    }
+    )
 
-    // Need at least 50 warmup bars before `from` for SMA50; estimate generous
-    // lookback in calendar days then trim with `from`/`to`. ~1.6× fudge to
-    // cover holidays.
-    const lookbackDays = estimateLookbackDays(from, to)
-    const barClient = new YahooBarClient()
-    const allBars = await barClient.getDailyBars(symbol, lookbackDays)
-    const bars = allBars.filter((b) => b.date <= to)
-    // Keep at least the first 60 bars before `from` as warmup; if available
-    // we slice to (from - warmup_buffer)..to. Yahoo already returned them
-    // oldest-first.
-    const liveStartIdx = bars.findIndex((b) => b.date >= from)
-    if (liveStartIdx === -1) {
-      // No bars within [from, to]: Yahoo had no daily data for the requested
-      // window (e.g. `from` is in the future, or symbol delisted before
-      // `from`). Reject with 400 instead of silently running on the entire
-      // pre-`from` history (which would compute against an unrelated window
-      // and return a misleading 200).
-      throw new ValidationError('no bars found in requested range', { field: 'from' })
-    }
-    const warmupKeep = 60
-    const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
-
-    const params: BacktestParams = {
-      symbol,
-      from,
-      to,
-      initialCash,
-      rule,
-      // #atr-baseline-window: `?atrBaselineMode=overlap|exclude-recent|percentile`
-      // で baseline の作り方を差し替えて成績を比較できる。既定は global_config の
-      // 値 (= 本番と同じ条件)。閾値の再校正はこれと `?maxAtrRatio=` を振って行う。
-      atrBaselineMode: ((): 'overlap' | 'exclude-recent' | 'percentile' => {
-        const q = c.req.query('atrBaselineMode')
-        return q === 'overlap' || q === 'exclude-recent' || q === 'percentile'
-          ? q
-          : global.atrBaselineMode
-      })(),
-    }
-    const result = await runBacktest(sliced, params)
-    return c.json(result)
+    return c.json({
+      params: {
+        symbol: setup.symbol,
+        from: setup.from,
+        to: setup.to,
+        initialCash: setup.initialCash,
+        confirmDays,
+        feePctOfNotional,
+        feeFixedPerOrder,
+      },
+      barCount: setup.sliced.length,
+      variants: results,
+    })
   })
   /**
    * Lookup the Webull-side status of an order by client_order_id.
@@ -3294,4 +3304,287 @@ function estimateLookbackDays(fromYmd: string, toYmd: string): number {
   // Trading days ≈ calendar * 5/7. Add 60 warmup + 20 buffer.
   const tradingDays = Math.ceil(calendarDays * (5 / 7)) + 60 + 20
   return Math.min(1300, Math.max(80, tradingDays))
+}
+
+interface BacktestSetup {
+  symbol: string
+  from: string
+  to: string
+  initialCash: number
+  rule: SymbolRule
+  atrBaselineMode: 'overlap' | 'exclude-recent' | 'percentile'
+  sliced: DailyBar[]
+  global: Awaited<ReturnType<typeof loadGlobalConfigFrom>>
+}
+
+/**
+ * Shared query parsing + rule construction + Yahoo bar fetch/slice for
+ * `/backtest` and `/backtest/compare` (#709 Phase 3) — both must see
+ * identical bars/rule so their results are comparable. Extracted verbatim
+ * from the original `/backtest` handler; behavior covered by the existing
+ * `test/routes/adminBacktest.test.ts` suite.
+ */
+async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetup> {
+  const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
+  const from = readRequiredParam(c.req.query('from'), 'from')
+  const to = readRequiredParam(c.req.query('to'), 'to')
+  if (!isYmd(from)) throw new ValidationError("'from' must be YYYY-MM-DD", { field: 'from' })
+  if (!isYmd(to)) throw new ValidationError("'to' must be YYYY-MM-DD", { field: 'to' })
+  if (from > to) {
+    throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
+  }
+  const initialCash = readOptionalNumber(c.req.query('initialCash'), 'initialCash', 10_000, {
+    mustBePositive: true,
+  })
+
+  const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
+  const rule: SymbolRule = {
+    stopPct: readOptionalNumber(c.req.query('stopPct'), 'stopPct', global.pullbackDefaultStopPct, {}),
+    takeProfitPct: readOptionalNumber(
+      c.req.query('takeProfitPct'),
+      'takeProfitPct',
+      global.pullbackDefaultTakeProfitPct,
+      {},
+    ),
+    timeStopDays: readOptionalNumber(
+      c.req.query('timeStopDays'),
+      'timeStopDays',
+      global.pullbackDefaultTimeStopDays,
+      { mustBePositive: true },
+    ),
+    pullbackMax: readOptionalNumber(
+      c.req.query('pullbackMax'),
+      'pullbackMax',
+      global.pullbackDefaultPullbackMax,
+      {},
+    ),
+    pullbackMin: readOptionalNumber(
+      c.req.query('pullbackMin'),
+      'pullbackMin',
+      global.pullbackDefaultPullbackMin,
+      {},
+    ),
+    minReturn50d: readOptionalNumber(
+      c.req.query('minReturn50d'),
+      'minReturn50d',
+      global.pullbackDefaultMinReturn50d,
+      {},
+    ),
+    requireAboveSma50: global.pullbackDefaultRequireAboveSma50,
+    kAtr: readOptionalNumber(c.req.query('kAtr'), 'kAtr', global.pullbackDefaultKAtr, {
+      mustBePositive: true,
+    }),
+    maxSma50DeviationPct: readOptionalNumber(
+      c.req.query('maxSma50DeviationPct'),
+      'maxSma50DeviationPct',
+      global.pullbackDefaultMaxSma50DeviationPct,
+      { mustBePositive: true },
+    ),
+    maxAtrRatio: readOptionalNumber(
+      c.req.query('maxAtrRatio'),
+      'maxAtrRatio',
+      global.pullbackDefaultMaxAtrRatio,
+      { mustBePositive: true },
+    ),
+    maxStopToTpRatio: readOptionalNumber(
+      c.req.query('maxStopToTpRatio'),
+      'maxStopToTpRatio',
+      global.pullbackDefaultMaxStopToTpRatio,
+      {},
+    ),
+    // #reentry: 再エントリー価格ガードの係数。`/backtest` (runBacktest, entry 軸なし) では
+    // 未使用のまま既定値保持のみ。`/backtest/compare` の `reentry:guard` / `reentry:aware:<n>`
+    // variant (issue #709 Phase 5) はこの係数を `runLifecycleBacktest` の `lastExit` 追跡と
+    // 併せて実際に使う — 係数自体は `?reentryMinAtrBelowLastExit=` 等の query override を
+    // まだ持たない (対応 issue が来たら追加、今は out of scope)。
+    reentryMinAtrBelowLastExit: 1.0,
+    reentryGuardBusinessDays: 3,
+  }
+
+  // Need at least 50 warmup bars before `from` for SMA50; estimate generous
+  // lookback in calendar days then trim with `from`/`to`. ~1.6× fudge to
+  // cover holidays.
+  const lookbackDays = estimateLookbackDays(from, to)
+  const barClient = new YahooBarClient()
+  const allBars = await barClient.getDailyBars(symbol, lookbackDays)
+  const bars = allBars.filter((b) => b.date <= to)
+  // Keep at least the first 60 bars before `from` as warmup; if available
+  // we slice to (from - warmup_buffer)..to. Yahoo already returned them
+  // oldest-first.
+  const liveStartIdx = bars.findIndex((b) => b.date >= from)
+  if (liveStartIdx === -1) {
+    // No bars within [from, to]: Yahoo had no daily data for the requested
+    // window (e.g. `from` is in the future, or symbol delisted before
+    // `from`). Reject with 400 instead of silently running on the entire
+    // pre-`from` history (which would compute against an unrelated window
+    // and return a misleading 200).
+    throw new ValidationError('no bars found in requested range', { field: 'from' })
+  }
+  const warmupKeep = 60
+  const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
+
+  // #atr-baseline-window: `?atrBaselineMode=overlap|exclude-recent|percentile`
+  // で baseline の作り方を差し替えて成績を比較できる。既定は global_config の
+  // 値 (= 本番と同じ条件)。閾値の再校正はこれと `?maxAtrRatio=` を振って行う。
+  const atrBaselineModeQuery = c.req.query('atrBaselineMode')
+  const atrBaselineMode: BacktestSetup['atrBaselineMode'] =
+    atrBaselineModeQuery === 'overlap' ||
+    atrBaselineModeQuery === 'exclude-recent' ||
+    atrBaselineModeQuery === 'percentile'
+      ? atrBaselineModeQuery
+      : global.atrBaselineMode
+
+  return { symbol, from, to, initialCash, rule, atrBaselineMode, sliced, global }
+}
+
+/** `/backtest/compare` default variant set: current one-shot entry, a staged-entry split
+ * (#709 Phase 3), two partial-exit + ATR trailing variants — with and without the
+ * trend-continuation time-stop extension (#709 Phase 4) — and two re-entry-gated one-shot-entry
+ * variants — the live price-guard replica and the exit-reason-aware policy (#709 Phase 5) — all
+ * against the one-shot entry / preset exit baseline so each axis's comparison isn't confounded by
+ * the others. */
+const DEFAULT_COMPARE_VARIANTS = [
+  'full',
+  'staged:25/25/50',
+  'full+trail:50/2/0',
+  'full+trail:50/2/5',
+  'full+preset+reentry:guard',
+  'full+preset+reentry:aware:5',
+]
+
+/**
+ * Parse one `/backtest/compare` `variants` entry (`<entry>`, `<entry>+<exit>`, or
+ * `<entry>+<exit>+reentry:<spec>` — the `reentry:` segment may also follow a bare `<entry>` with
+ * `<exit>` omitted) into an `EntryPolicy` + `ExitPolicy` + `ReentryPolicy` triple. Omitting
+ * `+<exit>` is `+preset` and omitting `+reentry:<spec>` is `+reentry:none` — this keeps every
+ * pre-Phase-5 spec string (`full`, `staged:25/25/50`, `full+trail:...`) parsing to the exact same
+ * `EntryPolicy`/`ExitPolicy` it always did, with `reentryPolicy: {kind:'none'}` alongside it.
+ */
+function parseVariantSpec(
+  spec: string,
+  confirmDays: number,
+): { name: string; entryPolicy: EntryPolicy; exitPolicy: ExitPolicy; reentryPolicy: ReentryPolicy } {
+  const segments = spec.split('+')
+  if (segments.length > 3 || segments.length < 1 || segments.some((s) => s.length === 0)) {
+    throw new ValidationError(
+      `'variants' entry '${spec}' must be '<entry>', '<entry>+<exit>', or '<entry>[+<exit>]+reentry:<spec>'`,
+      { field: 'variants' },
+    )
+  }
+  const [entrySpec, ...rest] = segments as [string, ...string[]]
+  // Segments after the entry are order-sensitive: a `reentry:`-prefixed one is always reentry, a
+  // bare one is always exit, and exit (if present) must come before reentry — mirrors the
+  // documented `<entry>[+<exit>][+reentry:<spec>]` grammar instead of accepting either order.
+  let exitSpec: string | undefined
+  let reentrySpec: string | undefined
+  for (const seg of rest) {
+    if (seg.startsWith('reentry:')) {
+      if (reentrySpec !== undefined) {
+        throw new ValidationError(
+          `'variants' entry '${spec}' must have at most one 'reentry:' segment`,
+          { field: 'variants' },
+        )
+      }
+      reentrySpec = seg.slice('reentry:'.length)
+    } else {
+      if (exitSpec !== undefined || reentrySpec !== undefined) {
+        throw new ValidationError(
+          `'variants' entry '${spec}': exit segment '${seg}' must come before 'reentry:...' and appear at most once`,
+          { field: 'variants' },
+        )
+      }
+      exitSpec = seg
+    }
+  }
+  return {
+    name: spec,
+    entryPolicy: parseEntrySpec(entrySpec, spec, confirmDays),
+    exitPolicy: parseExitSpec(exitSpec ?? 'preset', spec),
+    reentryPolicy: parseReentrySpec(reentrySpec ?? 'none', spec),
+  }
+}
+
+/** `full` = current one-shot entry. `staged:<probe>/<confirm>/<full>` = 3 integer percentages
+ * (must sum to 100) mapped to fractions of `initialCash`. */
+function parseEntrySpec(entrySpec: string, fullSpec: string, confirmDays: number): EntryPolicy {
+  if (entrySpec === 'full') return { kind: 'full' }
+  const match = /^staged:(\d{1,3})\/(\d{1,3})\/(\d{1,3})$/.exec(entrySpec)
+  if (!match) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': entry segment '${entrySpec}' must be 'full' or 'staged:<probe>/<confirm>/<full>' (integer %)`,
+      { field: 'variants' },
+    )
+  }
+  const probe = Number(match[1])
+  const confirm = Number(match[2])
+  const full = Number(match[3])
+  if (probe + confirm + full !== 100) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': probe+confirm+full must sum to 100 (got ${probe + confirm + full})`,
+      { field: 'variants' },
+    )
+  }
+  return {
+    kind: 'staged',
+    fractions: { probe: probe / 100, confirm: confirm / 100, full: full / 100 },
+    confirmDays,
+  }
+}
+
+/** `preset` = current all-quantity TP/stop/time-stop (Phase 3 behavior, unchanged).
+ * `trail:<tpFraction%>/<trailKAtr>/<extDays>` = partial-exit + ATR trailing (#709 Phase 4). */
+function parseExitSpec(exitSpec: string, fullSpec: string): ExitPolicy {
+  if (exitSpec === 'preset') return { kind: 'preset' }
+  const match = /^trail:(\d{1,3})\/(\d+(?:\.\d+)?)\/(\d+)$/.exec(exitSpec)
+  if (!match) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': exit segment '${exitSpec}' must be 'preset' or 'trail:<tpFraction%>/<trailKAtr>/<extDays>'`,
+      { field: 'variants' },
+    )
+  }
+  const tpFractionPct = Number(match[1])
+  const trailKAtr = Number(match[2])
+  const timeStopExtensionDays = Number(match[3])
+  if (tpFractionPct <= 0 || tpFractionPct > 100) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': tpFraction% must be in (0, 100] (got ${tpFractionPct})`,
+      { field: 'variants' },
+    )
+  }
+  if (!(trailKAtr > 0)) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': trailKAtr must be > 0 (got ${trailKAtr})`,
+      { field: 'variants' },
+    )
+  }
+  return {
+    kind: 'partial-trailing',
+    tpFraction: tpFractionPct / 100,
+    trailKAtr,
+    timeStopExtensionDays,
+  }
+}
+
+/** `none` = no re-entry gate (Phase 3/4 behavior, unchanged). `guard` = replica of the live
+ * `PullbackUptrendStrategy` re-entry price ceiling. `aware:<slWaitDays>` = exit-reason-aware
+ * re-entry (#709 Phase 5) — see `evaluateReentry` in `runLifecycleBacktest.ts` for the exact
+ * per-reason rules. */
+function parseReentrySpec(reentrySpec: string, fullSpec: string): ReentryPolicy {
+  if (reentrySpec === 'none') return { kind: 'none' }
+  if (reentrySpec === 'guard') return { kind: 'price-guard' }
+  const match = /^aware:(\d+)$/.exec(reentrySpec)
+  if (!match) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': reentry segment 'reentry:${reentrySpec}' must be 'reentry:none', 'reentry:guard', or 'reentry:aware:<slWaitDays>'`,
+      { field: 'variants' },
+    )
+  }
+  const slWaitDays = Number(match[1])
+  if (!(slWaitDays >= 0)) {
+    throw new ValidationError(
+      `'variants' entry '${fullSpec}': reentry slWaitDays must be >= 0 (got ${slWaitDays})`,
+      { field: 'variants' },
+    )
+  }
+  return { kind: 'reason-aware', slWaitDays }
 }

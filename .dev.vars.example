@@ -115,3 +115,9 @@ DASHBOARD_BASE_URL=
 # https://api.gdeltproject.org を使う。
 # NEWS_ATTENTION_ENABLED=true
 # GDELT_API_BASE=
+
+# --- extended hours observation (#709, optional) ---
+# EXTENDED_HOURS_OBSERVATION_ENABLED: 'true' のときだけ US プレマーケット帯
+# (開場 90 分前〜開場) に Yahoo 時間外 1 分足を extended_hours_observation に
+# 蓄積する。未設定 = 無効。取引経路からは参照されない参考観測専用の producer。
+# EXTENDED_HOURS_OBSERVATION_ENABLED=true

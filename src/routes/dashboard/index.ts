@@ -86,6 +86,14 @@ import { computeSymbolStats, computeTradeStats, filterTradePnlsByPeriod, loadSki
 import { chartsBody, renderSymbolMainInner, renderSymbolTab } from './charts/symbol'
 import { type SymbolsListFilter, findSymbolConfigForView, loadAllSymbolConfigRows, symbolFormBody, symbolMapEditorBody, symbolsListBody } from './symbols'
 import { type EventsEarningsFormEcho, type EventsMacroFormEcho, eventsBody, eventsDisplayRange, loadEarningsInRange, renderEventsWithError, renderEventsWithNotice, validateEarningsForm, validateMacroForm, writeEventsAuditLog } from './events'
+import { extendedHoursBody } from './extendedHours'
+import { formatNyYmd } from '../../infrastructure/calendar/usMarketCalendar'
+import {
+  createExtendedHoursObservationDb,
+  createExtendedHoursObservationRepo,
+} from '../../infrastructure/db/extendedHoursObservationRepo'
+import { lifecycleBody } from './lifecycle'
+import { loadLifecycleReport } from '../../trading/analysis/lifecycleReport'
 export { safeJsonScript } from './shared'
 export { extractTokenFromPaste } from './webullToken'
 export { ALL_OVERVIEW_PANELS, parseOverviewPanels } from './overview'
@@ -392,6 +400,38 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty(buildTradesPacket(rows, q))
     } catch (err) {
       return jsonPretty({ error: 'trades_json_export_failed', message: messageOf(err) }, 500)
+    }
+  })
+  /**
+   * 売買ライフサイクル計測 (#709 Phase 2)。exit reason 別成績 / フォワード
+   * リターン / SKIP 後の MFE-MAE / 時間外警戒 × SL 突合 / コスト・DD・turnover
+   * を過去 decision / fill から再現可能に集計する read-only 分析ページ。
+   * `loadLifecycleReport` は Yahoo fetch も含むため、他 JSON export より
+   * レイテンシが乗る (symbol 数 × 1 fetch、並列)。
+   */
+  .get('/lifecycle', async (c) => {
+    const subnav = renderAnalysisSubnav('lifecycle')
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'ライフサイクル', unavailable('DB not bound'), subnav))
+    }
+    try {
+      const report = await loadLifecycleReport(c.env)
+      return c.html(renderLayout(c, 'ライフサイクル', lifecycleBody(report), subnav))
+    } catch (err) {
+      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
+      // (cron / alerts と同じ自己保護パターン)。
+      return c.html(renderLayout(c, 'ライフサイクル', unavailable(messageOf(err)), subnav))
+    }
+  })
+  .get('/lifecycle/json', async (c) => {
+    if (!c.env.DB) {
+      return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
+    }
+    try {
+      const report = await loadLifecycleReport(c.env)
+      return jsonPretty(report)
+    } catch (err) {
+      return jsonPretty({ error: 'lifecycle_json_export_failed', message: messageOf(err) }, 500)
     }
   })
   .get('/config', async (c) => {
@@ -1512,4 +1552,29 @@ export const dashboard = new Hono<DashboardBindings>()
     // skip は正常系 (期限まで余裕あり等)。緑 notice で OK。
     const why = summary.skippedReason ?? 'no change'
     return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`refresh: ${why}`)}`, 303)
+  })
+  /**
+   * 時間外参考観測 (#709 Phase 1)。`extendedHoursScheduler` (producer) が
+   * 書いた `extended_hours_observation` を読むだけの read-only view。
+   */
+  .get('/extended-hours', async (c) => {
+    const subnav = renderDiagSubnav('extendedHours')
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, '時間外参考', unavailable('DB not bound'), subnav))
+    }
+    try {
+      const repo = createExtendedHoursObservationRepo(createExtendedHoursObservationDb(c.env.DB))
+      const sessionYmd = formatNyYmd(new Date())
+      const [latest, recent] = await Promise.all([
+        repo.latestPerSymbol(sessionYmd),
+        repo.recent(50),
+      ])
+      return c.html(
+        renderLayout(c, '時間外参考', extendedHoursBody({ sessionYmd, latest, recent }), subnav),
+      )
+    } catch (err) {
+      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
+      // (他 dashboard page と同じ defensive 姿勢)。
+      return c.html(renderLayout(c, '時間外参考', unavailable(messageOf(err)), subnav))
+    }
   })

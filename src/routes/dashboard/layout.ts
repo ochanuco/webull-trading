@@ -333,6 +333,11 @@ const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string
     text: 'Webull token',
     title: 'Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)',
   },
+  {
+    href: '/dashboard/extended-hours',
+    text: '時間外参考',
+    title: 'US プレマーケット帯の Yahoo 時間外値の参考観測 (#709、売買判断には未接続)',
+  },
 ]
 
 /**
@@ -350,7 +355,10 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   if (activePath === '/dashboard/trades' || activePath.startsWith('/dashboard/trades/')) {
     return 'review'
   }
-  for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token']) {
+  if (activePath === '/dashboard/lifecycle') {
+    return 'review'
+  }
+  for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token', '/dashboard/extended-hours']) {
     if (activePath === p || activePath.startsWith(`${p}/`)) return 'diag'
   }
   for (const l of OPS_NAV_LINKS) {
@@ -393,7 +401,7 @@ function renderTopNav(active?: NavGroupKey | null): string {
  * ここには出さないが、**個別ページ側は同じ subnav を出して迷子を防ぐ**ため
  * key 自体は残す (active にならないだけ)。
  */
-export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts'
+export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts' | 'lifecycle'
 
 const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   key: AnalysisSubnavKey
@@ -407,13 +415,16 @@ const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   // 口座資産 (portfolio) と累積 realized PnL は別物なので、どちらの推移かを
   // ラベルで明示する。
   { key: 'equity', href: '/dashboard/charts', label: '実現損益の推移' },
+  // #709 Phase 2: exit reason 別成績 / フォワードリターン / SKIP 後の
+  // MFE-MAE 等、単発の成績表 (quality) より粒度の細かいライフサイクル分析。
+  { key: 'lifecycle', href: '/dashboard/lifecycle', label: 'ライフサイクル' },
 ]
 
 /**
  * 診断ページ間の subnav。アラート → 判定ログ → 監査の横移動は障害対応で
  * 実際に使うので、診断側にも subnav を出す (レビュー subnav には出さない)。
  */
-export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token'
+export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token' | 'extendedHours'
 
 const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
   '/dashboard/alerts': 'alerts',
@@ -421,6 +432,7 @@ const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
   '/dashboard/audit': 'audit',
   '/dashboard/broker-probe': 'probe',
   '/dashboard/webull-token': 'token',
+  '/dashboard/extended-hours': 'extendedHours',
 }
 
 export function renderDiagSubnav(active: DiagSubnavKey): string {

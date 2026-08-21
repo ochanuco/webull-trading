@@ -309,6 +309,20 @@
       "when": 1785327259911,
       "tag": "0043_atr_baseline_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1787225843684,
+      "tag": "0044_add_extended_hours_observation",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1787230368682,
+      "tag": "0045_add_extended_hours_gate_mode",
+      "breakpoints": true
     }
   ]
 }

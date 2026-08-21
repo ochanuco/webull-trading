@@ -77,12 +77,12 @@ src/
     portfolio/                runPortfolioRoll (EOD rollover)
     news/                     newsScheduler (attention observation の収集)
     runtime/                  killSwitch + productionReadiness
-    quotes/                   quoteScheduler
+    quotes/                   quoteScheduler + extendedHoursScheduler (時間外参考観測、#709)
     backtest/                 runBacktest
   infrastructure/
     webull/                   WebullReadClient / WebullTradeClient (facade) + WebullHttpClient / WebullAuth
                               + mapper + token flow + tradability / instrument lookup / allowlist refresh
-    quotes/                   BarClient / YahooBarClient / YahooQuoteClient / WebullQuoteClient / fxRate
+    quotes/                   BarClient / YahooBarClient / YahooQuoteClient / YahooExtendedHoursClient / WebullQuoteClient / fxRate
     news/                     GdeltDocClient + newsProbes
     calendar/                 us・jp market calendar + earnings / macro event repo
     notification/             Notifier 実装 + Slack/Discord webhook + 状態変化検知
