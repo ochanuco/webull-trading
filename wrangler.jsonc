@@ -124,7 +124,13 @@
         // 蓄積する producer の opt-in flag。取引経路からは参照されない観測専用で、
         // gate 本体は `global_config.news_shock_mode` (既定 off) が別途握る。
         // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
-        "NEWS_ATTENTION_ENABLED": "true"
+        "NEWS_ATTENTION_ENABLED": "true",
+        // #709 Phase 1: US プレマーケット帯に Yahoo 時間外 1 分足を
+        // extended_hours_observation に蓄積する producer の opt-in flag。
+        // 取引経路からは参照されない観測専用 — gate 本体は
+        // `global_config.extended_hours_gate_mode` (既定 off) が別途握る。
+        // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
+        "EXTENDED_HOURS_OBSERVATION_ENABLED": "true"
       },
       "routes": [
         { "pattern": "trading-staging.chanu.co", "custom_domain": true }
@@ -184,7 +190,13 @@
         // attention_observation に蓄積する producer の opt-in flag。
         // これ自体は取引判断に影響しない — gate は `global_config.news_shock_mode`
         // (既定 off) で別に握っており、閾値を実データで校正するまで off のまま。
-        "NEWS_ATTENTION_ENABLED": "true"
+        "NEWS_ATTENTION_ENABLED": "true",
+        // #709 Phase 1: 5分 cron の US プレマーケット帯 (開場90分前〜開場) だけ
+        // Yahoo 時間外 1 分足を extended_hours_observation に蓄積する producer の
+        // opt-in flag。これ自体は取引判断に影響しない — gate は
+        // `global_config.extended_hours_gate_mode` (既定 off) で別に握っており、
+        // observe (shadow) で妥当性を見てから enforce に上げる。
+        "EXTENDED_HOURS_OBSERVATION_ENABLED": "true"
       },
       "routes": [
         { "pattern": "trading.chanu.co", "custom_domain": true }
