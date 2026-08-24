@@ -15,7 +15,7 @@ function makeFetch() {
 }
 
 describe('WebhookNotifier', () => {
-  it('POSTs Slack-shape body when only slackUrl is set', async () => {
+  it('renders BUY as a neutral trade and marks DRY_RUN explicitly', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
 
@@ -33,45 +33,10 @@ describe('WebhookNotifier', () => {
     expect(calls[0]?.init.method).toBe('POST')
     const body = JSON.parse(String(calls[0]?.init.body))
     expect(body).toHaveProperty('text')
-    expect(body.text).toContain('BUY AAPL')
-    expect(body.text).toContain('qty=5')
-    expect(body.text).toContain('200.12')
-    expect(body.text).toContain('DRY_RUN')
+    expect(body.text).toBe('⚪ AAPL 買付\n5株 @ $200.12\n\n🧪 DRY RUN')
   })
 
-  it('prefers the STATE_CHANGE headline over the generic from→to text when present', async () => {
-    const { fn, calls } = makeFetch()
-    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
-
-    await notifier.notify({
-      type: 'STATE_CHANGE',
-      field: 'news_shock_regime',
-      from: 'normal',
-      to: 'warning',
-      severity: 'warning',
-      headline: 'ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません',
-    })
-
-    const body = JSON.parse(String(calls[0]?.init.body))
-    // headline のみの 1 行で完結する (requestId / canonical reason は出さない)。
-    expect(body.text).toBe('⚠️ ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません')
-  })
-
-  it('passes an abort signal so a hung webhook cannot pin the isolate', async () => {
-    const { fn, calls } = makeFetch()
-    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
-
-    await notifier.notify({
-      type: 'ERROR',
-      message: 'boom',
-    })
-
-    // timeout の実測 (fake timer で abort を待つ) までは要らない — signal が
-    // fetch に渡っていれば runtime 側が打ち切る。渡し忘れの regression だけ防ぐ。
-    expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal)
-  })
-
-  it('POSTs Discord-shape body when only discordUrl is set', async () => {
+  it('renders profitable SELL in green with realized PnL and net return', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({
       discordUrl: 'https://discord.test/webhooks/abc',
@@ -88,14 +53,82 @@ describe('WebhookNotifier', () => {
       mode: 'DRY_RUN',
     })
 
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe('https://discord.test/webhooks/abc')
     const body = JSON.parse(String(calls[0]?.init.body))
-    // Discord uses `content` (not `text`).
     expect(body).toHaveProperty('content')
     expect(body).not.toHaveProperty('text')
-    expect(body.content).toContain('SELL SOXL')
-    expect(body.content).toContain('pnl=+12.50')
+    expect(body.content).toBe('🟢 SOXL 売却\n10株 @ $30.00\n\n実現損益: $+12.50 (+4.3%)\n\n🧪 DRY RUN')
+  })
+
+  it('renders losing LIVE SELL in red without LIVE label', () => {
+    const notifier = new WebhookNotifier({})
+    const text = notifier.formatMessage({
+      type: 'TRADE',
+      side: 'SELL',
+      symbol: 'TQQQ',
+      qty: 2,
+      price: 68.06,
+      realizedPnl: -13.77,
+      mode: 'LIVE',
+    })
+
+    expect(text).toBe('🔴 TQQQ 売却\n2株 @ $68.06\n\n実現損益: $-13.77 (-9.2%)')
+    expect(text).not.toContain('LIVE')
+  })
+
+  it('renders break-even SELL with a neutral icon', () => {
+    const notifier = new WebhookNotifier({})
+    const text = notifier.formatMessage({
+      type: 'TRADE',
+      side: 'SELL',
+      symbol: 'QQQ',
+      qty: 1,
+      price: 500,
+      realizedPnl: 0,
+      mode: 'LIVE',
+    })
+
+    expect(text).toContain('⚪ QQQ 売却')
+    expect(text).toContain('実現損益: $0.00 (0.0%)')
+  })
+
+  it('does not append dashboard links to TRADE notifications', () => {
+    const notifier = new WebhookNotifier({ dashboardBaseUrl: 'https://dash.example.com/' })
+    const text = notifier.formatMessage({
+      type: 'TRADE',
+      side: 'BUY',
+      symbol: 'AAPL',
+      qty: 1,
+      price: 100,
+      mode: 'LIVE',
+    })
+
+    expect(text).not.toContain('/dashboard/charts')
+  })
+
+  it('prefers the STATE_CHANGE headline over the generic from→to text when present', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({
+      type: 'STATE_CHANGE',
+      field: 'news_shock_regime',
+      from: 'normal',
+      to: 'warning',
+      severity: 'warning',
+      headline: 'ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません',
+    })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.text).toBe('⚠️ ニュース報道量が急増 (平時の2.8倍) — observe中のため発注は変更しません')
+  })
+
+  it('passes an abort signal so a hung webhook cannot pin the isolate', async () => {
+    const { fn, calls } = makeFetch()
+    const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
+
+    await notifier.notify({ type: 'ERROR', message: 'boom' })
+
+    expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal)
   })
 
   it('POSTs to both targets when both URLs are set', async () => {
@@ -120,14 +153,14 @@ describe('WebhookNotifier', () => {
     ])
   })
 
-  it('does nothing (no fetch) when both URLs are missing/empty', async () => {
+  it('does nothing when both webhook URLs are missing', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: '', discordUrl: undefined, fetchImpl: fn })
     await notifier.notify({ type: 'ERROR', message: 'oops' })
     expect(calls).toHaveLength(0)
   })
 
-  it('resolves silently when fetch rejects (network failure)', async () => {
+  it('resolves silently when fetch rejects', async () => {
     const fetchImpl = vi.fn(async () => {
       throw new Error('network down')
     }) as unknown as typeof fetch
@@ -149,45 +182,29 @@ describe('WebhookNotifier', () => {
     warnSpy.mockRestore()
   })
 
-  it('resolves silently on non-OK HTTP status (4xx/5xx)', async () => {
+  it('resolves silently on non-OK HTTP status', async () => {
     const fetchImpl = vi.fn(async () => new Response('bad', { status: 500 })) as unknown as typeof fetch
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const notifier = new WebhookNotifier({
-      discordUrl: 'https://discord.test/webhooks/abc',
-      fetchImpl,
-    })
+    const notifier = new WebhookNotifier({ discordUrl: 'https://discord.test/webhooks/abc', fetchImpl })
 
-    await expect(
-      notifier.notify({ type: 'ERROR', symbol: 'AAPL', message: 'boom' }),
-    ).resolves.toBeUndefined()
+    await expect(notifier.notify({ type: 'ERROR', symbol: 'AAPL', message: 'boom' })).resolves.toBeUndefined()
 
     expect(warnSpy).toHaveBeenCalled()
     warnSpy.mockRestore()
   })
 
-  it('appends dashboard link when DASHBOARD_BASE_URL is set', async () => {
-    const { fn, calls } = makeFetch()
-    const notifier = new WebhookNotifier({
-      slackUrl: 'https://hooks.slack.test/x',
-      dashboardBaseUrl: 'https://dash.example.com/',
-      fetchImpl: fn,
-    })
-
-    await notifier.notify({
-      type: 'TRADE',
-      side: 'BUY',
+  it('keeps dashboard links for symbol-specific ERROR notifications', () => {
+    const notifier = new WebhookNotifier({ dashboardBaseUrl: 'https://dash.example.com/' })
+    const text = notifier.formatMessage({
+      type: 'ERROR',
       symbol: 'AAPL',
-      qty: 1,
-      price: 100,
-      mode: 'DRY_RUN',
+      message: 'boom',
     })
 
-    const body = JSON.parse(String(calls[0]?.init.body))
-    // trailing slash should be stripped, link should target chart UI.
-    expect(body.text).toContain('https://dash.example.com/dashboard/charts?tab=symbol&symbol=AAPL')
+    expect(text).toContain('https://dash.example.com/dashboard/charts?tab=symbol&symbol=AAPL')
   })
 
-  it('trims leading/trailing whitespace from URLs before POSTing', async () => {
+  it('trims leading/trailing whitespace from webhook URLs', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({
       slackUrl: '  https://hooks.slack.test/x  \n',
@@ -196,47 +213,18 @@ describe('WebhookNotifier', () => {
       fetchImpl: fn,
     })
 
-    await notifier.notify({
-      type: 'TRADE',
-      side: 'BUY',
-      symbol: 'AAPL',
-      qty: 1,
-      price: 100,
-      mode: 'DRY_RUN',
-    })
+    await notifier.notify({ type: 'ERROR', symbol: 'AAPL', message: 'boom' })
 
     const urls = calls.map((c) => c.url).sort()
     expect(urls).toEqual([
       'https://discord.test/webhooks/abc',
       'https://hooks.slack.test/x',
     ])
-    // dashboard link も trim 済みの base から組み立てられること。
     const slackCall = calls.find((c) => c.url === 'https://hooks.slack.test/x')
     const slackBody = JSON.parse(String(slackCall?.init.body))
     expect(slackBody.text).toContain('https://dash.example.com/dashboard/charts?tab=symbol&symbol=AAPL')
   })
 
-  it('omits dashboard link when DASHBOARD_BASE_URL is unset', async () => {
-    const { fn, calls } = makeFetch()
-    const notifier = new WebhookNotifier({
-      slackUrl: 'https://hooks.slack.test/x',
-      fetchImpl: fn,
-    })
-
-    await notifier.notify({
-      type: 'TRADE',
-      side: 'BUY',
-      symbol: 'AAPL',
-      qty: 1,
-      price: 100,
-      mode: 'DRY_RUN',
-    })
-
-    const body = JSON.parse(String(calls[0]?.init.body))
-    expect(body.text).not.toContain('/dashboard/charts')
-  })
-
-  // #141: severity / STATE_CHANGE 拡張
   it('renders ERROR with severity=critical using a critical icon and CRITICAL label', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
@@ -254,7 +242,7 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('portfolio_halted')
   })
 
-  it('renders ERROR with default severity=warning using ⚠️ icon (back-compat)', async () => {
+  it('renders ERROR with default severity=warning', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
 
@@ -307,7 +295,6 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('state change: tradingEnabled true → false')
   })
 
-  // news-shock-gate follow-up: SUMMARY 拡張
   it('renders SUMMARY with the given severity icon and the raw multi-line message', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
@@ -315,7 +302,7 @@ describe('WebhookNotifier', () => {
     await notifier.notify({
       type: 'SUMMARY',
       kind: 'news_shock_daily_summary',
-      message: 'news shock gate 日次サマリ (mode=observe): 合成 regime=warning\n- trump_macro: news_shock_normal: 1.0x\n- market_selloff: news_shock_warning: 2.8x (size x0.5)',
+      message: 'news shock gate 日次サマリ (mode=observe): 合成 regime=warning\n- trump_macro: normal\n- market_selloff: warning',
       severity: 'warning',
     })
 
@@ -325,7 +312,7 @@ describe('WebhookNotifier', () => {
     expect(body.text).toContain('market_selloff')
   })
 
-  it('renders SUMMARY with default severity=info using ℹ️ icon when severity is omitted', async () => {
+  it('renders SUMMARY with default severity=info when severity is omitted', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
 
