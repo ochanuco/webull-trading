@@ -18,8 +18,8 @@ export interface WebhookNotifierOptions {
   discordUrl?: string
   /**
    * dashboard の base URL (例: `https://webull-trading.example.workers.dev`)。
-   * 設定されていれば各メッセージ末尾に `/dashboard/charts?...` link を付ける。
-   * 未設定なら link 省略 (deploy 環境固有なので env 任せ)。
+   * ERROR 通知に symbol がある場合のみ `/dashboard/charts?...` link を付ける。
+   * TRADE 通知は約定結果を読みやすく保つため link を付けない。
    */
   dashboardBaseUrl?: string
   /**
@@ -37,8 +37,6 @@ export interface WebhookNotifierOptions {
  *   - 両方の URL が設定されていれば **両方に並列送信**
  *   - 個別 POST が失敗しても他方は止めない (Promise.allSettled)
  *   - 全失敗でも throw しない (`silent fallback`、cron を fail させない)
- *
- * dedup / retry / batching は意図的に持たない (POC、頻度は cron 15 分粒度の範囲)。
  */
 export class WebhookNotifier implements Notifier {
   private readonly slackUrl?: string
@@ -47,9 +45,6 @@ export class WebhookNotifier implements Notifier {
   private readonly fetchImpl: typeof fetch
 
   constructor(options: WebhookNotifierOptions) {
-    // 空文字列 / 空白のみ も「未設定」扱い。env loader が `?? ''` した時に静かに
-    // 無効化する。trim 値を保存することで、前後空白付き URL が webhook fetch を
-    // 失敗させてサイレントに通知が落ちる事故を防ぐ。
     const slack = options.slackUrl?.trim()
     const discord = options.discordUrl?.trim()
     const dashboard = options.dashboardBaseUrl?.trim()
@@ -69,7 +64,6 @@ export class WebhookNotifier implements Notifier {
       tasks.push(this.postSafe(this.discordUrl, { content: message }, 'discord'))
     }
     if (tasks.length === 0) return
-    // allSettled で握りつぶす (silent fallback)。caller には常に resolve を返す。
     await Promise.allSettled(tasks)
   }
 
@@ -83,13 +77,9 @@ export class WebhookNotifier implements Notifier {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        // Webhook 先が無応答だと `ctx.waitUntil` 配下のタスクが timeout まで
-        // 残り続ける (CodeRabbit PR #694)。通知は best-effort なので打ち切って
-        // silent fallback (下の catch) に倒す。
         signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
       })
       if (!response.ok) {
-        // 4xx / 5xx は webhook URL 設定ミス / Slack 側の問題。log だけ残して続行。
         console.warn(
           JSON.stringify({
             event: 'notifier_webhook_non_ok',
@@ -99,7 +89,6 @@ export class WebhookNotifier implements Notifier {
         )
       }
     } catch (error) {
-      // network failure 等。やはり throw しない (silent fallback)。
       console.warn(
         JSON.stringify({
           event: 'notifier_webhook_failed',
@@ -117,19 +106,9 @@ export class WebhookNotifier implements Notifier {
    */
   formatMessage(event: NotificationEvent): string {
     if (event.type === 'TRADE') {
-      const head =
-        event.side === 'BUY'
-          ? `🟢 BUY ${event.symbol} qty=${event.qty} @ $${formatPrice(event.price)} (${event.mode})`
-          : `🔴 SELL ${event.symbol} qty=${event.qty} @ $${formatPrice(event.price)}${
-              event.realizedPnl !== undefined ? ` pnl=${formatPnl(event.realizedPnl)}` : ''
-            } (${event.mode})`
-      const link = this.dashboardLinkFor(event.symbol)
-      return link ? `${head}\n${link}` : head
+      return formatTradeMessage(event)
     }
     if (event.type === 'STATE_CHANGE') {
-      // headline があれば人間向け文言を優先する (news_shock_regime 等の内部
-      // enum を読み手のアクションが分かる文に差し替える)。無ければ従来の
-      // `from → to` 表示。severity icon で実発注に近づく遷移を強調する。
       const head = event.headline
         ? `${severityIcon(event.severity)} ${event.headline}`
         : `${severityIcon(event.severity)} state change: ${event.field} ${formatValue(event.from)} → ${formatValue(event.to)}`
@@ -137,11 +116,8 @@ export class WebhookNotifier implements Notifier {
       return `${head}${note}`
     }
     if (event.type === 'SUMMARY') {
-      // message は呼び出し側 (例: newsShockDailySummary) が既に組み立て済みの
-      // 複数行本文。ここでは severity icon を先頭に付けるだけ。
       return `${severityIcon(event.severity ?? 'info')} ${event.message}`
     }
-    // ERROR
     const sym = event.symbol ?? 'global'
     const causePart = event.cause ? ` (${event.cause})` : ''
     const icon = severityIcon(event.severity ?? 'warning')
@@ -153,10 +129,40 @@ export class WebhookNotifier implements Notifier {
 
   private dashboardLinkFor(symbol: string): string | undefined {
     if (!this.dashboardBaseUrl) return undefined
-    // chart UI の deep link。dashboard route は src/routes/dashboard 配下に存在。
     const encoded = encodeURIComponent(symbol)
     return `${this.dashboardBaseUrl}/dashboard/charts?tab=symbol&symbol=${encoded}`
   }
+}
+
+type TradeEvent = Extract<NotificationEvent, { type: 'TRADE' }>
+
+function formatTradeMessage(event: TradeEvent): string {
+  const modeLine = event.mode === 'DRY_RUN' ? '\n\n🧪 DRY RUN' : ''
+  if (event.side === 'BUY') {
+    return `⚪ ${event.symbol} 買付\n${event.qty}株 @ $${formatPrice(event.price)}${modeLine}`
+  }
+
+  if (event.realizedPnl === undefined) {
+    return `⚪ ${event.symbol} 売却\n${event.qty}株 @ $${formatPrice(event.price)}${modeLine}`
+  }
+
+  const icon = event.realizedPnl > 0 ? '🟢' : event.realizedPnl < 0 ? '🔴' : '⚪'
+  const pnlRate = realizedPnlRate(event.realizedPnl, event.qty, event.price)
+  const ratePart = pnlRate === null ? '' : ` (${formatPercent(pnlRate)})`
+  return `${icon} ${event.symbol} 売却\n${event.qty}株 @ $${formatPrice(event.price)}\n\n実現損益: $${formatPnl(event.realizedPnl)}${ratePart}${modeLine}`
+}
+
+/**
+ * realizedPnl は売買コスト控除後。exit notional - net PnL を投入資本相当額とみなし、
+ * 通知用のネット損益率を算出する。追加の position 情報を event に持たせず、
+ * Discord 上で「結局いくら勝ち負けしたか」を割合でも把握できるようにする。
+ */
+function realizedPnlRate(realizedPnl: number, qty: number, exitPrice: number): number | null {
+  if (!Number.isFinite(realizedPnl) || !Number.isFinite(qty) || !Number.isFinite(exitPrice)) return null
+  const exitNotional = qty * exitPrice
+  const capitalBasis = exitNotional - realizedPnl
+  if (!Number.isFinite(capitalBasis) || capitalBasis <= 0) return null
+  return (realizedPnl / capitalBasis) * 100
 }
 
 function stripTrailingSlash(url: string): string {
@@ -170,16 +176,16 @@ function formatPrice(price: number): string {
 
 function formatPnl(pnl: number): string {
   if (!Number.isFinite(pnl)) return String(pnl)
-  // pnl は正負ありうる。読みやすさで小数 2 桁固定 + 符号明示。
   const sign = pnl > 0 ? '+' : ''
   return `${sign}${pnl.toFixed(2)}`
 }
 
-/**
- * Severity を icon に対応付ける (#141)。Slack/Discord 共通で render される
- * unicode emoji。critical = 赤、warning = 黄、info = 青を採用。BUY/SELL の
- * 緑/赤と差別化するため critical は警告マーク (🚨) を使う。
- */
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return String(value)
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(1)}%`
+}
+
 function severityIcon(severity: NotificationSeverity): string {
   switch (severity) {
     case 'critical':
@@ -192,11 +198,6 @@ function severityIcon(severity: NotificationSeverity): string {
   }
 }
 
-/**
- * STATE_CHANGE event の `from` / `to` を 1 行表記に。primitive はそのまま、
- * object は JSON 化する。null/undefined は明示文字列で出して「値が消えた」と
- * 区別できるようにする。
- */
 function formatValue(value: unknown): string {
   if (value === null) return 'null'
   if (value === undefined) return 'undefined'
