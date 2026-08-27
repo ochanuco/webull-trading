@@ -3,9 +3,15 @@ import type { Env } from './config/env'
 import { createDb, insertJournalRecord } from './infrastructure/db/tradeJournalRepo'
 import { setTradeJournalDbContext } from './infrastructure/logger/tradeJournal'
 import { createNotifier } from './infrastructure/notification/createNotifier'
+import {
+  findHeldTradableDisappearances,
+  formatHeldTradableDisappearanceMessage,
+} from './infrastructure/notification/tradableAllowlistDisappearance'
 import { checkMarketDataHealth } from './infrastructure/webull/checkMarketDataHealth'
 import { refreshTradableAllowlist } from './infrastructure/webull/refreshTradableAllowlist'
 import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
+import { resolveAccessToken } from './infrastructure/webull/resolveAccessToken'
+import { createWebullReadClient } from './infrastructure/webull/WebullReadClient'
 import { runExtendedHoursObservation } from './trading/quotes/extendedHoursScheduler'
 import { runNewsScheduler } from './trading/news/newsScheduler'
 import { runNewsShockDailySummary } from './trading/news/newsShockDailySummary'
@@ -165,7 +171,7 @@ export default {
       // 取引時間外 (22:00 UTC) に動かして rate limit / 副作用を最小化する。
       ctx.waitUntil(
         refreshTradableAllowlist(env, new Date().toISOString()).then(
-          (summary) => {
+          async (summary) => {
             console.log(
               JSON.stringify({
                 event: 'tradable_allowlist_refresh',
@@ -179,18 +185,41 @@ export default {
                 error: summary.error ?? null,
               }),
             )
-            // 保有中銘柄が allowlist から消えた可能性 = 取扱停止された監視シグナル。
-            // true→false 遷移があれば warning で push する (false→true や新規は通常運用)。
-            if (summary.disappeared > 0) {
-              ctx.waitUntil(
-                createNotifier(env, { requestId })
-                  .notify({
-                    type: 'ERROR',
-                    message: `Webull tradable/list から ${summary.disappeared} 銘柄が消失 (取扱停止の可能性): ${summary.disappearedSymbols.join(', ')}. 保有・運用中なら確認を — issue #460.`,
-                    cause: 'tradable_allowlist_disappeared',
-                    severity: 'warning',
-                  })
-                  .catch(() => undefined),
+            if (summary.disappeared <= 0) return
+
+            try {
+              const accessToken = await resolveAccessToken(env)
+              const positions = await createWebullReadClient(env, { accessToken }).getPositions()
+              const held = findHeldTradableDisappearances(summary.disappearedSymbols, positions)
+
+              console.log(
+                JSON.stringify({
+                  event: 'tradable_allowlist_disappearance_holdings_check',
+                  requestId,
+                  disappearedSymbols: summary.disappearedSymbols,
+                  heldDisappeared: held,
+                }),
+              )
+
+              if (held.length === 0) return
+
+              await createNotifier(env, { requestId })
+                .notify({
+                  type: 'SUMMARY',
+                  kind: 'tradable_allowlist_held_disappearance',
+                  message: formatHeldTradableDisappearanceMessage(held),
+                  severity: 'critical',
+                })
+                .catch(() => undefined)
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+              console.error(
+                JSON.stringify({
+                  event: 'tradable_allowlist_disappearance_holdings_check_error',
+                  requestId,
+                  disappearedSymbols: summary.disappearedSymbols,
+                  message,
+                }),
               )
             }
           },
@@ -441,4 +470,3 @@ export default {
     )
   },
 }
-
