@@ -358,8 +358,15 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   // without this guard *every no-fill cancel ever recorded* would match
   // `isNull(stateAppliedAt)` and get re-swept into `repair_skipped_invalid_row`
   // every single tick, forever.
+  // Excludes `filled_price IS NULL`: a row stamped with a fill-carrying
+  // terminal status whose first poll had `resolveFilledPrice()` reject the
+  // price (sanity failure) has no usable cached price to repair with —
+  // reusing it would immediately hit `repair_skipped_invalid_row` even
+  // though a later broker poll could still return a valid price. Those rows
+  // fall into `priceRetryFilter` below instead, which re-polls Webull.
   const repairFilter = and(
     isNull(tradeJournal.stateAppliedAt),
+    isNotNull(tradeJournal.filledPrice),
     or(
       eq(tradeJournal.brokerStatus, 'FILLED'),
       and(
@@ -367,6 +374,19 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         gt(tradeJournal.filledQty, 0),
       ),
     ),
+  )
+  // Same fill-carrying-terminal-status shape as `repairFilter`, but for the
+  // `filled_price IS NULL` sanity-failure case: the cached data is not
+  // trustworthy, so these need an actual broker query (not the cache-only
+  // repair path). Bounded by the same `since` lookback as the ordinary
+  // fresh-poll cohort below, for the same reason (avoid unbounded broker
+  // pressure from old stuck rows) — the `MAX_REPAIR_ATTEMPTS` auto-abandon
+  // check (applied to this cohort too, see below) is the other backstop.
+  const priceRetryFilter = and(
+    isNull(tradeJournal.stateAppliedAt),
+    isNull(tradeJournal.filledPrice),
+    gt(tradeJournal.filledQty, 0),
+    inArray(tradeJournal.brokerStatus, ['FILLED', 'CANCELLED', 'CANCELED', 'EXPIRED']),
   )
   const preSubmit = alias(tradeJournal, 'pre_submit')
   const candidates = await db
@@ -418,6 +438,11 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           //     48h 経過後 aged-out で permanent split-brain になる事故を防ぐ。
           //     行数爆発は SELECT LIMIT 50 で bounded、永続 fail 行は #228 の
           //     auto-abandon (MAX_REPAIR_ATTEMPTS=5) で cohort から自動的に外れる。
+          //   - price-retry cohort (`priceRetryFilter`): fill-carrying terminal
+          //     status だが filled_price が sanity 失敗で NULL — キャッシュされた
+          //     価格は信用できないので repair 同様には扱えず、broker への再問合せが
+          //     要る。fresh poll cohort と同じ `since` lookback を適用する
+          //     (broker pressure 回避、永続 fail は同じ auto-abandon で外れる)。
           //
           // `retryStateApply` フラグは残してあるが #268 以降は no-op
           // (互換性のため signature 維持、将来 admin 側で別 sweep モードに
@@ -426,6 +451,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
             eq(tradeJournal.submitted, true),
             or(
               and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since)),
+              and(priceRetryFilter, gte(tradeJournal.timestamp, since)),
               repairFilter,
             ),
           ),
@@ -474,34 +500,23 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       continue
     }
 
-    // Distinguish the two cohorts so we can:
-    //   - skip the Webull poll for already-terminal repair rows (we already
-    //     have the canonical fill data on the journal row),
-    //   - count the repair stat correctly for ops visibility.
-    //
-    // Mirrors the SQL `repairFilter`: `broker_status='FILLED'`, or a
-    // CANCELLED/CANCELED/EXPIRED row that actually carries a fill, with
-    // `state_applied_at IS NULL`, is the repair case — status is canonical,
-    // only the DO apply needs retry. Any other shape (NULL broker_status)
-    // means we still need a fresh status from the broker.
-    //
-    // The `filledQty > 0` guard on the non-FILLED half is required: an
-    // ordinary no-fill cancel/expiry is never stamped `state_applied_at`
-    // (nothing to apply), so without it every no-fill cancel ever recorded
-    // would be treated as repair and re-hit `repair_skipped_invalid_row`
-    // every tick, forever.
-    const isRepair =
+    // Any row still stamped with a fill-carrying terminal status and
+    // `state_applied_at IS NULL` — whether the cached price is usable
+    // (repair) or not (price-retry, see below) — is a candidate for
+    // auto-abandon. Checking this before splitting into the two paths means
+    // a permanently-bad price (e.g. a JP stub that never becomes valid)
+    // still gets capped at `MAX_REPAIR_ATTEMPTS` even though it now goes
+    // through the fresh-poll path instead of the cache-only repair path.
+    const stuckPendingApply =
       row.stateAppliedAt === null &&
-      (row.brokerStatus === 'FILLED' ||
-        ((row.filledQty ?? 0) > 0 &&
-          row.brokerStatus !== null &&
-          FILL_CARRYING_TERMINAL_STATUSES.has(row.brokerStatus)))
+      row.brokerStatus !== null &&
+      FILL_CARRYING_TERMINAL_STATUSES.has(row.brokerStatus)
 
-    if (isRepair) {
+    if (stuckPendingApply) {
       // Auto-abandon: a row that has tripped a permanent sanity-class
       // error MAX_REPAIR_ATTEMPTS times in a row is not going to recover
       // on the next tick. Force-stamp `state_applied_at` so:
-      //   - it falls out of the repair cohort SELECT,
+      //   - it falls out of the repair / price-retry cohort SELECT,
       //   - subsequent reconcile cycles do not include it in
       //     `summary.errors` and so the `reconcile_fills_partial`
       //     alarm stops re-firing for the same stuck row.
@@ -563,7 +578,39 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         summary.abandoned += 1
         continue
       }
+    }
 
+    // Distinguish the two cohorts so we can:
+    //   - skip the Webull poll for already-terminal repair rows (we already
+    //     have the canonical fill data on the journal row),
+    //   - count the repair stat correctly for ops visibility.
+    //
+    // Mirrors the SQL `repairFilter`: `broker_status='FILLED'`, or a
+    // CANCELLED/CANCELED/EXPIRED row that actually carries a fill, with
+    // `state_applied_at IS NULL`, is the repair case — status is canonical,
+    // only the DO apply needs retry. Any other shape (NULL broker_status,
+    // or a fill-carrying terminal status whose cached `filled_price` is
+    // NULL from a prior sanity-check rejection) means we still need a
+    // fresh status/price from the broker — see `priceRetryFilter`. A row
+    // with `filled_price IS NULL` must not be treated as repair: the cached
+    // price is unusable, and reusing it would immediately trip
+    // `repair_skipped_invalid_row` even though a later broker poll could
+    // still return a valid price.
+    //
+    // The `filledQty > 0` guard on the non-FILLED half is required: an
+    // ordinary no-fill cancel/expiry is never stamped `state_applied_at`
+    // (nothing to apply), so without it every no-fill cancel ever recorded
+    // would be treated as repair and re-hit `repair_skipped_invalid_row`
+    // every tick, forever.
+    const isRepair =
+      row.stateAppliedAt === null &&
+      row.filledPrice !== null &&
+      (row.brokerStatus === 'FILLED' ||
+        ((row.filledQty ?? 0) > 0 &&
+          row.brokerStatus !== null &&
+          FILL_CARRYING_TERMINAL_STATUSES.has(row.brokerStatus)))
+
+    if (isRepair) {
       // Use the canonical fill data already on the row. We must not
       // re-poll Webull — orders/history can rotate the row off the first
       // page after a few days, and re-polling would also waste a quota.

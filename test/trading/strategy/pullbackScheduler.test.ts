@@ -2938,6 +2938,30 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
       })
       expect(summary.buys).toBe(1)
     })
+
+    it('vetoes a HALF-eligible entry_gate HOLD at 15:45 ET even when the symbol also qualifies for HALF promotion', async () => {
+      // #452 HALF 昇格ブロックより前で veto しないと、intraday-only かつ
+      // half-entry 両方に属する銘柄で veto 後の HALF 昇格が BUY を復活させる
+      // (regression fixture: HALF_RULE と同条件の near-miss pullback setup)。
+      const HALF_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.035 }
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: HALF_RULE,
+        intradayOnlySymbols: new Set(['QQQ']),
+        halfEntrySymbols: new Set(['QQQ']),
+        now: () => noEntryWindow,
+      })
+      expect(summary.buys).toBe(0)
+      expect(execution.calls).toHaveLength(0)
+      const decision = summary.decisions.find((d) => d.symbol === 'QQQ')
+      expect(decision?.decision).toBe('HOLD')
+      expect(decision?.trace?.map((s) => s.label)).toContain('entry.intraday_no_entry')
+    })
   })
 })
 

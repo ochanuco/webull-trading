@@ -934,7 +934,7 @@ export async function runStrategyCron(
   // USD/JPY は budget 換算・買付余力に加え、portfolio exposure ledger (下記)
   // が USD run の建玉を JPY 換算するのにも要るため、USD run がある tick は
   // 常に取得する。
-  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null || runs.some((r) => r.currency === 'USD')
+  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null || runCurrency.USD.length > 0
   const usdJpyRate = needUsdJpy ? await loadUsdJpyRate({ requestId: options.requestId }) : null
 
   // #415: 発注前の共有プール pre-trade ゲート。live 時のみ Webull の買付余力を取得し
@@ -953,8 +953,17 @@ export async function runStrategyCron(
   // fallback の position 上書きで容易に drift し (#660 系)、そのまま基準に
   // すると誤ったエクスポージャーで発注可否を決めることになるため。
   // pass 1/2 で同一 ledger object を共有し、tick 内の連続 BUY を逐次減算する。
+  // `runs` は session window gate でその tick に評価する currency に絞られている
+  // (#session-window-gate) が、建玉評価は window の内外を問わない — 例えば US
+  // window のみ開いている tick でも保有 JPY 建玉は台帳に含めないと remainingJpy
+  // を過大評価する。`runCurrency` (exit-only 銘柄込みの全 currency 別 symbol
+  // リスト) を全件渡し、scheduler 呼び出し自体は `runs` (window 内のみ) を使う
+  // 従来どおりの分離を保つ。
   const exposureCap = await buildExposureLedger({
-    runs,
+    runs: [
+      { currency: 'USD', symbols: runCurrency.USD },
+      { currency: 'JPY', symbols: runCurrency.JPY },
+    ],
     positionStore,
     usdJpyRate,
     budgetBasisJpy,
@@ -1378,7 +1387,13 @@ async function buildExposureLedger(params: {
         return createUnavailableExposureLedger('usd/jpy rate unavailable')
       }
       const notionalJpy = position.qty * position.avgPrice * fx
-      if (Number.isFinite(notionalJpy)) currentJpy += notionalJpy
+      // 有効建玉 (qty > 0) の avgPrice/notional が非有限・非正なら黙って skip せず
+      // unavailable にする — 上限チェックの分母が過小評価されたまま status: 'ok'
+      // で通ると、実際の建玉より緩い remainingJpy で BUY を通してしまう。
+      if (!Number.isFinite(position.avgPrice) || position.avgPrice <= 0 || !Number.isFinite(notionalJpy) || notionalJpy <= 0) {
+        return createUnavailableExposureLedger(`invalid position valuation for ${sym}`)
+      }
+      currentJpy += notionalJpy
     }
   }
   return createExposureLedger({ ceilingJpy: budgetBasisJpy * maxPortfolioExposurePct, currentJpy })

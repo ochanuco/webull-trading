@@ -889,37 +889,6 @@ export async function runPullbackScheduler(
       }
     }
 
-    // intraday-only 銘柄はオーバーナイト持ち越しを防ぐために
-    // 存在するので、force-close window に飲み込まれる直前 (30分) の新規 BUY も
-    // 止める — 15分 cron は「force-close」と「新規 entry」を同じ window 内で
-    // 両立できない (上のコメント参照)。holdCause は 'entry_gate' 以外にする:
-    // 下の HALF 昇格ブロックは holdCause==='entry_gate' の HOLD だけを対象に
-    // するため、これを 'guard' にしておけば絶対 veto として再昇格されない。
-    if (
-      options.intradayOnlySymbols?.has(upper) &&
-      market === 'US' &&
-      signal.action === 'BUY' &&
-      isWithinUsCloseWindow(now(), INTRADAY_NO_ENTRY_WINDOW_MIN)
-    ) {
-      signal = {
-        ...signal,
-        action: 'HOLD',
-        holdCause: 'guard',
-        reason: 'intraday-only: no new entry within 30min of US close',
-        trace: appendTrace(
-          signal.trace,
-          traceStep(
-            'entry.intraday_no_entry',
-            false,
-            undefined,
-            undefined,
-            undefined,
-            'intraday-only: no new entry within 30min of US close',
-          ),
-        ),
-      }
-    }
-
     // ペアレジーム (#472): zone/score を全評価の trace に残す (HOLD 含む —
     // observe 期間の監査が目的なので BUY/SKIP 時だけでは足りない)。
     const regime = regimeBySymbol.get(upper)
@@ -1027,6 +996,38 @@ export async function runPullbackScheduler(
             gate.operator === '>=' ? '>=' : '<=',
             gate.threshold,
             'HALF: single degree-gate miss within tolerance → 0.5x sizing (#452)',
+          ),
+        ),
+      }
+    }
+
+    // intraday-only 銘柄はオーバーナイト持ち越しを防ぐために存在するので、
+    // force-close window に飲み込まれる直前 (30分) の新規 BUY も止める — HALF
+    // 昇格ブロックの後にこれを置くのが必須: 昇格前に置くと、まだ HOLD の
+    // signal.action を見て veto が不発のまま通過し、直後の HALF 昇格が
+    // veto 済みの entry_gate HOLD を BUY へ戻してしまう (intradayOnlySymbols と
+    // halfEntrySymbols の両方に属する銘柄で発生)。cash rebalance による BUY も
+    // 同様にここで最終判定を受ける。
+    if (
+      options.intradayOnlySymbols?.has(upper) &&
+      market === 'US' &&
+      signal.action === 'BUY' &&
+      isWithinUsCloseWindow(now(), INTRADAY_NO_ENTRY_WINDOW_MIN)
+    ) {
+      signal = {
+        ...signal,
+        action: 'HOLD',
+        holdCause: 'guard',
+        reason: 'intraday-only: no new entry within 30min of US close',
+        trace: appendTrace(
+          signal.trace,
+          traceStep(
+            'entry.intraday_no_entry',
+            false,
+            undefined,
+            undefined,
+            undefined,
+            'intraday-only: no new entry within 30min of US close',
           ),
         ),
       }
@@ -1708,7 +1709,7 @@ export async function runPullbackScheduler(
         const reason =
           ledger.status !== 'ok'
             ? `risk: portfolio exposure cap unavailable (${ledger.reason ?? 'unknown'})`
-            : `risk: portfolio exposure cap (notionalJpy ${Math.round(notionalJpy)} + current ${Math.round(ledger.currentJpy)} > ceiling ${Math.round(ledger.ceilingJpy)})`
+            : `risk: portfolio exposure cap (notionalJpy ${Math.round(notionalJpy)} > remaining ${Math.round(ledger.remainingJpy)} of ceiling ${Math.round(ledger.ceilingJpy)})`
         summary.rejected.push({ symbol: upper, reason })
         await emitDecision({
           symbol: upper,

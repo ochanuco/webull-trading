@@ -464,6 +464,71 @@ describe('runStrategyCron', () => {
         globalThis.fetch = originalFetch
       }
     })
+
+    it('includes a held JPY position in the ledger while only the US session window is open', async () => {
+      // session gate on: US 窓内 / JP 窓外。runs (= scheduler 呼び出し対象) は
+      // USD のみだが、ledger は runCurrency (全 currency の保有銘柄) から積む
+      // べきなので、窓外の JPY 建玉も currentJpy に反映される。
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-04-20T17:00:00.000Z')) // US 13:00 ET (in) / JP 02:00 JST 火 (out)
+      const fetchSpy = vi.fn(async () => {
+        throw new Error('network disabled in test')
+      })
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = fetchSpy as unknown as typeof fetch
+      try {
+        vi.mocked(loadSymbolUniverse).mockResolvedValue(
+          makeSymbolUniverse({
+            allowedSymbols: ['AAPL', '9697'],
+            symbolCurrency: { AAPL: 'USD', '9697': 'JPY' },
+            symbolMarket: { AAPL: 'US', '9697': 'JP' },
+            symbolLotSize: { AAPL: 1, '9697': 100 },
+          }),
+        )
+        vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+          makeGlobalConfigSnapshot({
+            sessionWindowGateEnabled: true,
+            totalCapitalJpy: 1_000_000,
+            maxPortfolioExposurePct: 0.6,
+          }),
+        )
+        const symbolState = fakeSymbolStateWithPositions({ '9697': { qty: 100, avgPrice: 2000 } })
+        const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+        // current = 100*2000 = 200,000 (JP window は窓外でも ledger には計上される)。
+        expect(result.analysis.exposure).toEqual({
+          status: 'ok',
+          ceilingJpy: 600_000,
+          currentJpy: 200_000,
+          remainingJpy: 400_000,
+        })
+        // scheduler 自体は窓内の USD だけ呼ぶ (JPY run は窓外なので起動しない)。
+        expect(vi.mocked(runPullbackScheduler).mock.calls).toHaveLength(1)
+        expect(lastSchedulerOptions().symbols).toEqual(['AAPL'])
+      } finally {
+        globalThis.fetch = originalFetch
+        vi.useRealTimers()
+      }
+    })
+
+    it('fails closed when a held position has a non-finite avgPrice', async () => {
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(
+        makeSymbolUniverse({
+          allowedSymbols: ['9697'],
+          symbolCurrency: { '9697': 'JPY' },
+          symbolMarket: { '9697': 'JP' },
+          symbolLotSize: { '9697': 100 },
+        }),
+      )
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ totalCapitalJpy: 1_000_000, maxPortfolioExposurePct: 0.6 }),
+      )
+      const symbolState = fakeSymbolStateWithPositions({ '9697': { qty: 100, avgPrice: NaN } })
+      const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+      expect(result.analysis.exposure?.status).toBe('unavailable')
+      expect(result.analysis.exposure?.reason).toBe('invalid position valuation for 9697')
+    })
   })
 
   it('fail-closes to portfolio_halted on invalid tradingDisabledUntil timestamp', async () => {

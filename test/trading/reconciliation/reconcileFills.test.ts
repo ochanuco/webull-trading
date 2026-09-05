@@ -1577,15 +1577,15 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       expect(summary.errors).toEqual([])
     })
 
-    it('attempts < 5 + sanity_failed → keeps retrying (existing behaviour)', async () => {
-      // Below threshold: standard repair retry path. Because filledPrice is
-      // null on this row the repair branch's invalid-row guard fires (this
-      // is the existing `repair_skipped_invalid_row` path) — what we are
-      // asserting is that auto-abandon does NOT fire prematurely.
+    it('attempts < 5 + sanity_failed (filledPrice null) → re-polls Webull instead of the cache-only repair path', async () => {
+      // A row with a cached `filled_price=null` (prior sanity rejection) must
+      // NOT be treated as repair (the cache is unusable) — it goes through
+      // the fresh-poll path instead. Below MAX_REPAIR_ATTEMPTS, auto-abandon
+      // must not fire prematurely even though this poll's price is still bad.
       const row: CandidateRow = {
         id: 200,
         clientOrderId: 'coid-stuck-early',
-        symbol: '9697',
+        symbol: '6971',
         side: 'BUY',
         brokerStatus: 'FILLED',
         filledQty: 1,
@@ -1597,8 +1597,83 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       }
       const { db, updates } = makeFakeDb([row])
       vi.mocked(createDb).mockReturnValue(db)
+      const webullStub = makeWebullStub({
+        'coid-stuck-early': {
+          status: 'FILLED',
+          filled_quantity: '1',
+          limit_price: '2683',
+          items: [{ filled_price: '10' }], // still the broker stub — sanity fails again
+          side: 'BUY',
+          symbol: '6971',
+        },
+      })
       vi.mocked(createWebullHttpClient).mockReturnValue(
-        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+        webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // Re-polled Webull (not the cache-only repair path).
+      expect(webullStub.findOrderByClientId).toHaveBeenCalled()
+      expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+      // Two UPDATEs: (1) journal fill columns from the fresh poll,
+      // (2) failure marker (sanity_failed again) — state_applied_at NOT
+      // stamped, so the row stays eligible for the next tick's poll.
+      expect(updates).toHaveLength(2)
+      expect(updates[0]!.set.filledPrice).toBeNull()
+      expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
+      expect(updates[1]!.set.stateAppliedAt).toBeUndefined()
+      expect(updates[1]!.set.stateApplyError).toMatch(/sanity_failed/)
+      // Crucially: NOT abandoned, error counted (so the operator alert can
+      // still surface a fresh issue while it is recoverable).
+      expect(summary.abandoned).toBe(0)
+      expect(summary.stateApplyFailed).toBe(1)
+      expect(summary.errors).toHaveLength(1)
+    })
+
+    it('CANCELLED partial fill: invalid first price re-polls and applies once the broker returns a valid price', async () => {
+      // #6 regression: a CANCELLED/CANCELED/EXPIRED row that carries a
+      // partial fill must get the same re-poll treatment as FILLED when the
+      // first price fails the sanity ratio guard — not the cache-only repair
+      // path (which would immediately hit `repair_skipped_invalid_row` and,
+      // after enough ticks, auto-abandon a row a later poll could still
+      // resolve).
+      const row: CandidateRow = {
+        id: 201,
+        clientOrderId: 'coid-cancel-stub',
+        symbol: '6971',
+        side: 'BUY',
+        brokerStatus: 'CANCELLED',
+        filledQty: 1,
+        filledPrice: null,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 1,
+        stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      const webullStub = makeWebullStub({
+        'coid-cancel-stub': {
+          status: 'CANCELLED',
+          filled_quantity: '1',
+          limit_price: '2683',
+          items: [{ filled_price: '2680' }], // this poll returns a realistic price
+          side: 'BUY',
+          symbol: '6971',
+        },
+      })
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
       )
       const symbolStub = emptySymbolStateStub()
 
@@ -1611,17 +1686,17 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // Existing path: repair_skipped_invalid_row fires (filledPrice=null).
-      // state_applied_at MUST NOT be stamped (= row stays in repair cohort).
-      expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
-      expect(updates).toHaveLength(1)
-      expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
-      expect(updates[0]!.set.stateApplyError).toMatch(/repair_skipped_invalid_row/)
-      // Crucially: NOT abandoned, error counted (so the operator alert can
-      // still surface a fresh issue while it is recoverable).
-      expect(summary.abandoned).toBe(0)
-      expect(summary.stateApplyFailed).toBe(1)
-      expect(summary.errors).toHaveLength(1)
+      expect(webullStub.findOrderByClientId).toHaveBeenCalled()
+      expect(symbolStub.recordFillOnce).toHaveBeenCalledOnce()
+      expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('6971', 'coid-cancel-stub', {
+        side: 'BUY',
+        qty: 1,
+        price: 2680,
+      })
+      expect(summary.stateApplied).toBe(1)
+      expect(summary.errors).toEqual([])
+      const markerUpdate = updates.find((u) => u.set.stateAppliedAt !== undefined)
+      expect(markerUpdate?.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     })
 
     it('attempts >= 5 + transient error (DO unavailable) → keeps retrying (NOT abandoned)', async () => {
