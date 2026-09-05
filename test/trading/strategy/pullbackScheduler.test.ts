@@ -16,6 +16,10 @@ import {
   createBuyingPowerLedger,
   createUnavailableBuyingPowerLedger,
 } from '../../../src/trading/strategy/buyingPower'
+import {
+  createExposureLedger,
+  createUnavailableExposureLedger,
+} from '../../../src/trading/strategy/exposureLedger'
 import type { DailyBar } from '../../../src/trading/strategy/indicators'
 
 const now = new Date('2026-04-20T14:30:00.000Z')
@@ -387,6 +391,87 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
   })
 
+  // daily bar 取得が失敗しても held position の exit 判定を
+  // 無防備なまま放置しない。flat は今まで通り (1 回で確定)、held は 1 回だけ
+  // retry してから ERROR にする。
+  describe('held position survives bar-fetch failure', () => {
+    const heldState = (): SymbolState => ({
+      ...emptySymbolState('BROKEN', () => now),
+      position: { qty: 7, avgPrice: 100, openedAt: '2026-01-01T00:00:00.000Z' },
+    })
+
+    it('emits ERROR with the holding reason and retries the daily fetch once when it keeps failing', async () => {
+      const events: NotificationEvent[] = []
+      const notifier: Notifier = {
+        async notify(event) {
+          events.push(event)
+        },
+      }
+      const getDailyBars = vi.fn(async () => {
+        throw new Error('upstream 500')
+      })
+      const summary = await runPullbackScheduler({
+        symbols: ['BROKEN'],
+        equity: 100_000,
+        barClient: { getDailyBars },
+        positionStore: makeStore({ BROKEN: heldState() }),
+        execution: mockExecution(),
+        notifier,
+        now: () => now,
+      })
+
+      expect(getDailyBars).toHaveBeenCalledTimes(2) // 1 回目 + retry 1 回
+      const decision = summary.decisions.find((d) => d.symbol === 'BROKEN')
+      expect(decision?.decision).toBe('ERROR')
+      expect(decision?.reason).toBe(
+        'exit evaluation unavailable while holding 7: bar fetch: upstream 500',
+      )
+      expect(summary.errors).toEqual([
+        { symbol: 'BROKEN', message: 'exit evaluation unavailable while holding 7: bar fetch: upstream 500' },
+      ])
+      await Promise.resolve()
+      const err = events.find((e) => e.type === 'ERROR') as
+        | Extract<NotificationEvent, { type: 'ERROR' }>
+        | undefined
+      expect(err?.cause).toBe('exit_unavailable_while_holding')
+    })
+
+    it('does not attempt a degraded SELL when bars are unavailable for a held position', async () => {
+      const getDailyBars = vi.fn(async () => {
+        throw new Error('upstream 500')
+      })
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['BROKEN'],
+        equity: 100_000,
+        barClient: { getDailyBars },
+        positionStore: makeStore({ BROKEN: heldState() }),
+        execution,
+        now: () => now,
+      })
+
+      expect(summary.sells).toBe(0)
+      expect(execution.calls).toHaveLength(0)
+    })
+
+    it('emits the same exit-unavailable ERROR when bars are fetched but insufficient for indicators', async () => {
+      const summary = await runPullbackScheduler({
+        symbols: ['BROKEN'],
+        equity: 100_000,
+        barClient: mockBarClient([synth(0, 100), synth(1, 101)]), // too short for indicators
+        positionStore: makeStore({ BROKEN: heldState() }),
+        execution: mockExecution(),
+        now: () => now,
+      })
+
+      const decision = summary.decisions.find((d) => d.symbol === 'BROKEN')
+      expect(decision?.decision).toBe('ERROR')
+      expect(decision?.reason).toBe(
+        'exit evaluation unavailable while holding 7: insufficient bars for indicators',
+      )
+    })
+  })
+
   it('uses intraday 1h close as fill price when getIntradayBars resolves', async () => {
     // 既存 BUY fixture (uptrendBars) は daily last close = 117.5。chart UI と
     // 整合させるため cron は intraday の最新 close を採用するのが今回の挙動。
@@ -418,9 +503,15 @@ describe('runPullbackScheduler', () => {
     expect(intent.price).toBe(118.25)
     // decision sink に渡る price も intraday 由来のものになっていること
     expect(summary.decisions[0]?.price).toBe(118.25)
+    // 判断価格の出所が trace 先頭に残る (fresh な intraday bar)。
+    expect(summary.decisions[0]?.trace?.[0]?.label).toBe('data.price_as_of')
+    expect(summary.decisions[0]?.trace?.[0]?.message).toBe('intraday_60m:2026-04-20T14:00:00.000Z')
   })
 
-  it('falls back to daily close when getIntradayBars rejects', async () => {
+  it('falls back to daily close for the decision record, but skips the BUY as stale price', async () => {
+    // intraday 対応 client では daily close fallback は BUY の判断価格として
+    // 採用しない (intraday bar 0件 = 鮮度確認不能)。fallback
+    // 自体 (indicators.price = daily close 117.5) は decision record に残る。
     const store = makeStore({})
     const execution = mockExecution()
     const barClient: BarClient = {
@@ -438,10 +529,93 @@ describe('runPullbackScheduler', () => {
       now: () => now,
     })
 
-    // intraday 失敗は致命扱いせず daily close (= 117.5) で fallback。
-    expect(summary.buys).toBe(1)
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SKIP')
+    expect(decision?.reason).toBe(
+      'stale price: intraday bar unavailable, daily close fallback not accepted for BUY',
+    )
+    expect(decision?.price).toBe(117.5)
+    expect(decision?.trace?.map((s) => s.label)).toContain('risk.price_freshness')
+    expect(decision?.trace?.[0]?.label).toBe('data.price_as_of')
+    expect(decision?.trace?.[0]?.message).toBe('daily_close:2026-03-01')
+  })
+
+  it('still SELLs a held position at the stop price when intraday bars are unavailable', async () => {
+    // 価格鮮度ゲートは BUY のみが対象 — 保有中の exit (stop hit) は intraday bar
+    // が無くても daily close の判断価格で通常どおり動く。
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString() },
+    }
+    const store = makeStore({ AAPL: heldState })
+    const execution = mockExecution()
+    const barClient: BarClient = {
+      getDailyBars: vi.fn(async () => uptrendBars()), // last close 117.5 << avgPrice 200 → stop hit
+      getIntradayBars: vi.fn(async () => {
+        throw new Error('yahoo 429')
+      }),
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient,
+      positionStore: store,
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.sells).toBe(1)
     const intent = execution.calls[0] as { side: string; price: number }
+    expect(intent.side).toBe('SELL')
     expect(intent.price).toBe(117.5)
+  })
+
+  it('skips the BUY as stale price when the latest intraday bar is 5h old', async () => {
+    const staleTimestamp = new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString()
+    const store = makeStore({})
+    const execution = mockExecution()
+    const barClient: BarClient = {
+      getDailyBars: vi.fn(async () => uptrendBars()),
+      getIntradayBars: vi.fn(async () => [
+        { timestamp: staleTimestamp, open: 117.6, high: 118.4, low: 117.4, close: 118.0 },
+      ]),
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient,
+      positionStore: store,
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SKIP')
+    expect(decision?.reason).toBe(
+      `stale price: intraday_60m as of ${staleTimestamp} exceeds 7200000ms`,
+    )
+    expect(decision?.trace?.map((s) => s.label)).toContain('risk.price_freshness')
+  })
+
+  it('proceeds with the BUY at the daily close when the client has no getIntradayBars', async () => {
+    // intraday 非対応 client (Webull 等) は従来どおり無 gate。
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()), // getIntradayBars を実装しない fake
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.trace?.[0]?.label).toBe('data.price_as_of')
+    expect(decision?.trace?.[0]?.message).toBe('daily_close:2026-03-01')
   })
 
   it('fires notifier with TRADE event on a successful BUY (#199)', async () => {
@@ -724,6 +898,52 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     })
     expect(summary.buys).toBe(1)
     expect(execution.calls).toHaveLength(1)
+  })
+
+  it('normal BUY still proceeds when cooldownUntil is already in the past (evaluateCooldown: true)', async () => {
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      cooldownUntil: new Date(now.getTime() - 60_000).toISOString(),
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: state }),
+      execution,
+      perSymbolRisk: baseRiskConfig,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('SELL exit is still submitted when cooldownUntil is in the future (evaluateCooldown does not block exits)', async () => {
+    // #intraday-only force-close signal (SELL) を経路として使う: decide() 自体は
+    // cooldownUntil 未来だと HOLD を返すため、cooldown 中の SELL を作るには
+    // decide() 後に override する既存経路 (intraday close) を借りる。
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 3, avgPrice: 117, openedAt: '2026-04-19T00:00:00.000Z' },
+      cooldownUntil: new Date('2026-04-21T00:00:00.000Z').toISOString(),
+    }
+    // 2026-04-20 月曜、EDT → 引け 20:00 UTC。19:50 UTC = 引け 15分前 window 内。
+    const closeWindow = new Date('2026-04-20T19:50:00.000Z')
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      intradayOnlySymbols: new Set(['AAPL']),
+      perSymbolRisk: baseRiskConfig,
+      now: () => closeWindow,
+    })
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
   })
 })
 
@@ -2328,6 +2548,135 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
   })
 })
 
+describe('runPullbackScheduler global max order notional cap', () => {
+  // budget-alloc mode で target を固定し、cap 適用後の qty を厳密に検証する
+  // (risk-% sizing は ATR/stop 由来で notional が動くため predictability が低い)。
+  // entryPrice はいずれも uptrendBars() の last close 117.5。
+  it('caps notional to the global cap when no symbol cap is set (10 shares → 5)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      symbolBudgetAllocPctMap: { AAPL: 1 },
+      budgetBasisJpy: 1175, // target=1175 → uncapped qty = floor(1175/117.5) = 10
+      fxJpyPerSymbolCcy: 1,
+      maxOrderNotional: 587.5, // → capped target 587.5 → qty = floor(587.5/117.5) = 5
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(5)
+  })
+
+  it('per-symbol cap wins when smaller than the global cap (min semantics)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      symbolBudgetAllocPctMap: { AAPL: 1 },
+      budgetBasisJpy: 1175,
+      fxJpyPerSymbolCcy: 1,
+      symbolCapMap: { AAPL: 300 }, // smaller than the global cap below
+      maxOrderNotional: 587.5,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    // floor(300/117.5) = 2, not floor(587.5/117.5) = 5 → symbol cap bound.
+    expect(intent.quantity).toBe(2)
+  })
+})
+
+describe('runPullbackScheduler portfolio exposure cap gate', () => {
+  it('fail-closed: rejects BUY when the exposure ledger is unavailable', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      exposureCap: createUnavailableExposureLedger('total_capital_jpy unset'),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('SKIP')
+    expect(aapl?.reason).toMatch(/portfolio exposure cap unavailable/)
+  })
+
+  it('places a BUY and decrements the exposure ledger when remaining covers notional', async () => {
+    const execution = mockExecution()
+    const ledger = createExposureLedger({ ceilingJpy: 1_000_000_000, currentJpy: 0 })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      fxJpyPerSymbolCcy: 150,
+      exposureCap: ledger,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(ledger.remainingJpy).toBeLessThan(1_000_000_000)
+  })
+
+  it('shared exposure ledger covers only the first of two BUYs (sequential decrement)', async () => {
+    const execution = mockExecution()
+    const ledger = createExposureLedger({ ceilingJpy: 60_000, currentJpy: 0 })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAA', 'BBB'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAA: 1, BBB: 1 },
+      symbolBudgetAllocPctMap: { AAA: 1, BBB: 1 },
+      symbolCapMap: { AAA: 50_000, BBB: 50_000 },
+      budgetBasisJpy: 1_000_000,
+      fxJpyPerSymbolCcy: 1,
+      exposureCap: ledger,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const rejected = summary.decisions.filter((d) => d.decision === 'SKIP')
+    expect(rejected.some((d) => /portfolio exposure cap/.test(d.reason ?? ''))).toBe(true)
+  })
+
+  it('SELL (stop-loss exit) is not blocked by an unavailable exposure ledger', async () => {
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()), // last close 117.5 << avgPrice 200 → stop hit
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      exposureCap: createUnavailableExposureLedger('total_capital_jpy unset'),
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
+  })
+})
+
 describe('runPullbackScheduler broker-error decision embeds order amount (#417)', () => {
   it('includes qty + USD/JPY notional in the REJECT reason for a USD symbol', async () => {
     const throwing: Execution & { calls: unknown[] } = {
@@ -2531,6 +2880,88 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
     })
     expect(summary.sells).toBe(0)
     expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
+  })
+
+  // force-close window (引け前15分) に飲み込まれる直前の新規
+  // BUY を止める。15分 cron は force-close と新規 entry を同じ window で両立
+  // できない (const 定義のコメント参照)。
+  describe('no new entry within 30min of US close', () => {
+    // 2026-04-20 月曜、EDT → 引け 20:00 UTC。
+    const noEntryWindow = new Date('2026-04-20T19:45:00.000Z') // 15:45 ET (引け15分前、force-close 境界と重複)
+    const beforeNoEntryWindow = new Date('2026-04-20T19:20:00.000Z') // 15:20 ET (30分window の外)
+
+    it('holds a flat intraday-only symbol with an entry setup at 15:45 ET (0 BUYs)', async () => {
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: TEST_DEFAULT_RULE,
+        intradayOnlySymbols: new Set(['QQQ']),
+        now: () => noEntryWindow,
+      })
+      expect(summary.buys).toBe(0)
+      expect(execution.calls).toHaveLength(0)
+      const decision = summary.decisions.find((d) => d.symbol === 'QQQ')
+      expect(decision?.decision).toBe('HOLD')
+      expect(decision?.trace?.map((s) => s.label)).toContain('entry.intraday_no_entry')
+    })
+
+    it('still allows the BUY at 15:20 ET (outside the 30min window)', async () => {
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: TEST_DEFAULT_RULE,
+        intradayOnlySymbols: new Set(['QQQ']),
+        now: () => beforeNoEntryWindow,
+      })
+      expect(summary.buys).toBe(1)
+    })
+
+    it('does not hold a non-intraday-only symbol at 15:45 ET (BUY proceeds)', async () => {
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: TEST_DEFAULT_RULE,
+        intradayOnlySymbols: new Set(['TQQQ']), // QQQ は対象外
+        now: () => noEntryWindow,
+      })
+      expect(summary.buys).toBe(1)
+    })
+
+    it('vetoes a HALF-eligible entry_gate HOLD at 15:45 ET even when the symbol also qualifies for HALF promotion', async () => {
+      // #452 HALF 昇格ブロックより前で veto しないと、intraday-only かつ
+      // half-entry 両方に属する銘柄で veto 後の HALF 昇格が BUY を復活させる
+      // (regression fixture: HALF_RULE と同条件の near-miss pullback setup)。
+      const HALF_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.035 }
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: HALF_RULE,
+        intradayOnlySymbols: new Set(['QQQ']),
+        halfEntrySymbols: new Set(['QQQ']),
+        now: () => noEntryWindow,
+      })
+      expect(summary.buys).toBe(0)
+      expect(execution.calls).toHaveLength(0)
+      const decision = summary.decisions.find((d) => d.symbol === 'QQQ')
+      expect(decision?.decision).toBe('HOLD')
+      expect(decision?.trace?.map((s) => s.label)).toContain('entry.intraday_no_entry')
+    })
   })
 })
 
@@ -2893,6 +3324,102 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
     expect(summary.rejected[0]?.reason).toContain('missing-lot-size')
+  })
+
+  it('cash rebalance never overrides a strategy SELL (stop-loss exit wins)', async () => {
+    // avgPrice 200 vs uptrendBars last close 117.5 → deep loss, well past the
+    // -4% stop → decide() returns SELL regardless of the rebalance map.
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      cashRebalanceQuantityMap: { AAPL: 80 },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SELL')
+    const step = decision?.trace?.find((s) => s.label === 'entry.cash_rebalance')
+    expect(step?.passed).toBe(false)
+    expect(decision?.reason).toContain('cash rebalance skipped: strategy exit takes precedence')
+  })
+
+  it('cash rebalance respects post-exit cooldown', async () => {
+    const flatState: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      cooldownUntil: new Date(now.getTime() + 60_000).toISOString(),
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: flatState }),
+      execution,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SGOV')
+    const step = decision?.trace?.find((s) => s.label === 'entry.cash_rebalance')
+    expect(step?.passed).toBe(false)
+    expect(decision?.reason).toContain('cash rebalance skipped: cooldown active until')
+  })
+
+  it('cash rebalance respects the re-entry guard window', async () => {
+    // TEST_DEFAULT_RULE.reentryGuardBusinessDays = 3。lastExitAt 1 business day
+    // 前 (2026-04-17 金, now = 2026-04-20 月) → bd=1 < 3 → guard 有効、BUY なし。
+    const withinGuard: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      lastExitAt: '2026-04-17T14:30:00.000Z',
+      lastExitPrice: 100,
+    }
+    const execution1 = mockExecution()
+    const withinSummary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: withinGuard }),
+      execution: execution1,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(withinSummary.buys).toBe(0)
+    expect(execution1.calls).toHaveLength(0)
+    const withinDecision = withinSummary.decisions.find((d) => d.symbol === 'SGOV')
+    const withinStep = withinDecision?.trace?.find((s) => s.label === 'entry.cash_rebalance')
+    expect(withinStep?.passed).toBe(false)
+    expect(withinDecision?.reason).toContain('cash rebalance skipped: re-entry guard window')
+
+    // lastExitAt 10 business days 前 (2026-04-06 月) → bd=10 >= 3 → guard 失効、BUY 通る。
+    const pastGuard: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      lastExitAt: '2026-04-06T14:30:00.000Z',
+      lastExitPrice: 100,
+    }
+    const execution2 = mockExecution()
+    const pastSummary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: pastGuard }),
+      execution: execution2,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(pastSummary.buys).toBe(1)
+    expect(execution2.calls).toHaveLength(1)
   })
 })
 

@@ -126,6 +126,31 @@ export function localizeReason(en: string | null | undefined): string {
     '発注見送り: 損切り幅が算出不能 ($1)',
   )
   s = s.replace(/^sizing rejected: zero qty$/, '買付余力不足: 1株分の余力なし')
+  s = s.replace(
+    /^sizing rejected: capital-unset \(set total_capital_usd \/ total_capital_jpy for risk-% sizing\)$/,
+    '発注見送り: 総資産未設定 (risk-% sizing には total_capital_usd / total_capital_jpy の設定が必要)',
+  )
+
+  // === Portfolio 全体エクスポージャー上限 (#415系) ===
+  s = s.replace(
+    /^risk: portfolio exposure cap unavailable \((.+)\)$/,
+    (_m, reason) => `発注スキップ: 建玉上限データ取得不可 (${reason})`,
+  )
+  s = s.replace(
+    /^risk: portfolio exposure cap \(notionalJpy (\S+) > remaining (\S+) of ceiling (\S+)\)$/,
+    (_m, notional, remaining, ceiling) =>
+      `発注スキップ: 建玉上限超過 (発注金額 ${notional}円 > 残枠 ${remaining}円 / 上限 ${ceiling}円)`,
+  )
+
+  // === 価格鮮度ゲート (BUY のみ、#intraday-price-freshness) ===
+  s = s.replace(
+    /^stale price: intraday bar unavailable, daily close fallback not accepted for BUY$/,
+    '発注スキップ: 価格データ不足 (直近1時間足が取得できず、日足終値での代用は不可)',
+  )
+  s = s.replace(
+    /^stale price: intraday_60m as of (.+) exceeds (\d+)ms$/,
+    (_m, ts, maxAgeMs) => `発注スキップ: 価格データが古い (1時間足時点 ${fmtJst(ts)} が許容 ${maxAgeMs}ms を超過)`,
+  )
 
   // === Per-symbol risk gate: spread guard (#547) ===
   // spread reject は臨時休場 (session gate をルールで書けない閉場) のバック
@@ -179,6 +204,28 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(/^invalid expiresAt/, 'データ不足: 注文有効期限が無効')
   s = s.replace(/^bar fetch: /, 'データ不足: 日足取得失敗 — ')
   s = s.replace(/^broker submit error: /, '発注失敗: 証券会社への発注が成立せず — ')
+  // 末尾の実 reason (bar fetch: ... / insufficient bars for indicators 等) は
+  // 上の各ルールが個別に翻訳する。ここでは「保有中に exit 判定が飛んだ」ことを
+  // 明示する prefix だけ差し替え、後続部分はそのまま残す (既存の bar fetch: /
+  // broker submit error: と同じ prefix-only 方式)。
+  s = s.replace(
+    /^exit evaluation unavailable while holding (\S+): /,
+    'データ不足: 保有中の手仕舞い判定不能 (保有 $1 株) — ',
+  )
+
+  // === Session / lifecycle ガード ===
+  s = s.replace(
+    /^outside regular session: BUY deferred \(exits still evaluated\)$/,
+    '様子見: 通常取引時間外のため新規買い見送り (手仕舞いは継続評価)',
+  )
+  s = s.replace(
+    /^symbol inactive: exit-only$/,
+    '様子見: 銘柄無効化済み (保有分の手仕舞いのみ実施)',
+  )
+  s = s.replace(
+    /^intraday-only: no new entry within 30min of US close$/,
+    '様子見: 引け30分前のため新規エントリー見送り (オーバーナイト回避)',
+  )
 
   return s
 }
