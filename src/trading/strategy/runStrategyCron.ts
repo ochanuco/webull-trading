@@ -862,6 +862,36 @@ export async function runStrategyCron(
       })
     : undefined
 
+  // Behavioral BUY gates shared by pass 1 and cash rebalance pass 2 (#452
+  // follow-up): built once so the two runPullbackScheduler call sites cannot
+  // drift apart and let a rebalance BUY dodge restrictions a normal BUY hits.
+  const intradayOnlySymbols = new Set(Object.keys(universe.symbolIntradayOnly))
+  const earningsGateOption =
+    env.DB && earningsGateReady
+      ? {
+          earningsGate: {
+            repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
+            freezeBusinessDays: 1,
+          },
+        }
+      : {}
+  const macroEventGateOption =
+    env.DB && macroEventGateReady
+      ? {
+          macroEventGate: {
+            repo: createMacroEventCalendarRepo(createMacroEventCalendarDb(env.DB)),
+          },
+        }
+      : {}
+  const sanityFailedCooldownOption = env.DB
+    ? {
+        sanityFailedCooldown: {
+          check: (symbol: string) => hasRecentSanityFailure(env.DB!, symbol, SANITY_FAILED_COOLDOWN_MS),
+          withinMs: SANITY_FAILED_COOLDOWN_MS,
+        },
+      }
+    : {}
+
   for (const run of runs) {
     analysis.runs.push({
       currency: run.currency,
@@ -883,7 +913,7 @@ export async function runStrategyCron(
       budgetBasisJpy,
       fxJpyPerSymbolCcy,
       buyingPower,
-      intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
+      intradayOnlySymbols,
       defaultRule,
       rulesMap,
       entrySuppressedSymbols: effectiveEntrySuppressed,
@@ -932,23 +962,10 @@ export async function runStrategyCron(
       // migrate なら skip (POC 後方互換 / CodeRabbit #196 review)。
       // freezeBusinessDays は POC 段階では default 1 固定。将来 global_config に
       // 出すなら別 PR (#196 follow-up)。
-      ...(env.DB && earningsGateReady
-        ? {
-            earningsGate: {
-              repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
-              freezeBusinessDays: 1,
-            },
-          }
-        : {}),
+      ...earningsGateOption,
       // Macro event gate (issue #196 2/3)。同様に env.DB / 0014 適用の双方が
       // あるときだけ注入。config は default (±1h, full-day=true) で POC 運用。
-      ...(env.DB && macroEventGateReady
-        ? {
-            macroEventGate: {
-              repo: createMacroEventCalendarRepo(createMacroEventCalendarDb(env.DB)),
-            },
-          }
-        : {}),
+      ...macroEventGateOption,
       // VIX regime filter (issue #196 3/3)。critical で BUY 全停止、warning で
       // size を縮小、normal は no-op。両 currency run に同じ decision を渡す
       // (`^VIX` は global indicator なので per-currency に変える意味はない)。
@@ -965,15 +982,7 @@ export async function runStrategyCron(
       // 6 BUY 累積)。env.DB がある時だけ有効化 — D1 が無いと journal 検査
       // できないので skip (= 過去挙動)。fail-closed: check throw 時は scheduler
       // 側で BUY reject。
-      ...(env.DB
-        ? {
-            sanityFailedCooldown: {
-              check: (symbol: string) =>
-                hasRecentSanityFailure(env.DB!, symbol, SANITY_FAILED_COOLDOWN_MS),
-              withinMs: SANITY_FAILED_COOLDOWN_MS,
-            },
-          }
-        : {}),
+      ...sanityFailedCooldownOption,
       onDecision: ({ trace, ...record }) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
@@ -1036,8 +1045,9 @@ export async function runStrategyCron(
     if (plan.orders.length > 0) {
       // pass 2: cash 銘柄だけを cashRebalanceQuantityMap 付きで再実行する。
       // entrySuppressedSymbols は渡さない (cash_parking の BUY を許可する唯一の
-      // 経路)。lot / per-symbol risk / buying-power / pending lock / DRY_RUN は
-      // 通常 BUY と同じ gate を通る。
+      // 経路)。lot / per-symbol risk / buying-power / pending lock / DRY_RUN /
+      // earnings・macro・sanity・intraday-only gate は pass 1 と共有 (#452
+      // follow-up) — rebalance BUY だけが通常 BUY の制約を回避しないように。
       const byCcy: Record<SymbolCurrency, typeof plan.orders> = { USD: [], JPY: [] }
       for (const order of plan.orders) {
         byCcy[universe.symbolCurrency[order.symbol] ?? 'USD'].push(order)
@@ -1055,6 +1065,7 @@ export async function runStrategyCron(
           execution,
           symbolCapMap: universe.symbolMaxNotional,
           cashRebalanceQuantityMap: Object.fromEntries(orders.map((o) => [o.symbol, o.quantity])),
+          intradayOnlySymbols,
           ...(onTickerDeny ? { onTickerDeny } : {}),
           fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
           buyingPower,
@@ -1076,6 +1087,9 @@ export async function runStrategyCron(
           vixDecision,
           ...(newsShockGateOption ? { newsShockGate: newsShockGateOption } : {}),
           ...(extendedHoursGateOption ? { extendedHoursGate: extendedHoursGateOption } : {}),
+          ...earningsGateOption,
+          ...macroEventGateOption,
+          ...sanityFailedCooldownOption,
           onDecision: ({ trace, ...record }) =>
             logStrategyDecision(decisionDb, {
               timestamp: new Date().toISOString(),

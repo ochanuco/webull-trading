@@ -675,20 +675,52 @@ export async function runPullbackScheduler(
 
     // cash rebalance (#452 Layer 3 pass 2): 指定数量の BUY に置き換える。
     // pending order 中は strategy の HOLD (pending guard) をそのまま残す。
-    // 下流 gate (lot / per-symbol risk / buying-power / pending lock /
-    // execution の DRY_RUN) は通常 BUY と同様に全部通る。
+    // strategy exit (SELL) / cooldown / re-entry guard は迂回させない —
+    // これを外すと time-stop 等で SELL した直後に同ティックで cash
+    // rebalance が買い戻す whipsaw が起きる (ICLN 8/18, VUG 8/25, ICLN 9/1 実績)。
     const cashRebalanceQty = options.cashRebalanceQuantityMap?.[upper]
     if (cashRebalanceQty !== undefined && state.pendingOrder === null) {
       if (Number.isInteger(cashRebalanceQty) && cashRebalanceQty > 0) {
-        signal = {
-          ...signal,
-          action: 'BUY',
-          quantity: cashRebalanceQty,
-          reason: `cash allocation rebalance: buy ${cashRebalanceQty} toward active weight (#452)`,
-          trace: appendTrace(
-            signal.trace,
-            traceStep('entry.cash_rebalance', true, cashRebalanceQty, '>', 0, 'conditional allocation cash rebalance (#452)'),
-          ),
+        const cooldownUntilMs = state.cooldownUntil ? new Date(state.cooldownUntil).getTime() : NaN
+        const cooldownActive = Number.isFinite(cooldownUntilMs) && cooldownUntilMs > now().getTime()
+        const guardDays = strategy.resolveRule(upper).reentryGuardBusinessDays
+        const reentryGuardActive =
+          state.position === null &&
+          state.lastExitAt !== null &&
+          Number.isFinite(guardDays) &&
+          guardDays > 0 &&
+          reentryBusinessDaysSinceExit !== null &&
+          reentryBusinessDaysSinceExit < guardDays
+
+        let skipWhy: string | null = null
+        if (signal.action === 'SELL') {
+          skipWhy = 'strategy exit takes precedence'
+        } else if (cooldownActive) {
+          skipWhy = `cooldown active until ${state.cooldownUntil}`
+        } else if (reentryGuardActive) {
+          skipWhy = `re-entry guard window (${reentryBusinessDaysSinceExit}bd < ${guardDays}bd since exit)`
+        }
+
+        if (skipWhy !== null) {
+          signal = {
+            ...signal,
+            reason: `${signal.reason}; cash rebalance skipped: ${skipWhy}`,
+            trace: appendTrace(
+              signal.trace,
+              traceStep('entry.cash_rebalance', false, cashRebalanceQty, '>', 0, skipWhy),
+            ),
+          }
+        } else {
+          signal = {
+            ...signal,
+            action: 'BUY',
+            quantity: cashRebalanceQty,
+            reason: `cash allocation rebalance: buy ${cashRebalanceQty} toward active weight (#452)`,
+            trace: appendTrace(
+              signal.trace,
+              traceStep('entry.cash_rebalance', true, cashRebalanceQty, '>', 0, 'conditional allocation cash rebalance (#452)'),
+            ),
+          }
         }
       }
     }
@@ -1398,9 +1430,12 @@ export async function runPullbackScheduler(
           spreadLimits: options.perSymbolRisk.spreadLimits,
           staleQuoteMs: options.perSymbolRisk.staleQuoteMs,
           gapRejectPct: options.perSymbolRisk.gapRejectPct,
-          // Strategy.decide() が cooldown を既に評価しているので冗長 (両者
-          // 同義)。重複させても挙動は変わらないが、cron 経路では skip。
-          evaluateCooldown: false,
+          // cash rebalance / intraday close は decide() 後に signal を上書きする
+          // ため、Strategy.decide() 自身の cooldown 判定を経由しない BUY が
+          // 発生し得る — ここで評価しないと cooldown 中の再購入を止められない。
+          // SELL は評価対象外 (gate 1 が side 非依存のため、BUY のみに絞って
+          // exit を cooldown で block しないようにする)。
+          evaluateCooldown: intent.side === 'BUY',
         },
       )
       if (!riskDecision.approved) {

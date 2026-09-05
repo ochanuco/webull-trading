@@ -725,6 +725,52 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
     expect(summary.buys).toBe(1)
     expect(execution.calls).toHaveLength(1)
   })
+
+  it('normal BUY still proceeds when cooldownUntil is already in the past (evaluateCooldown: true)', async () => {
+    const state: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      cooldownUntil: new Date(now.getTime() - 60_000).toISOString(),
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: state }),
+      execution,
+      perSymbolRisk: baseRiskConfig,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+  })
+
+  it('SELL exit is still submitted when cooldownUntil is in the future (evaluateCooldown does not block exits)', async () => {
+    // #intraday-only force-close signal (SELL) を経路として使う: decide() 自体は
+    // cooldownUntil 未来だと HOLD を返すため、cooldown 中の SELL を作るには
+    // decide() 後に override する既存経路 (intraday close) を借りる。
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 3, avgPrice: 117, openedAt: '2026-04-19T00:00:00.000Z' },
+      cooldownUntil: new Date('2026-04-21T00:00:00.000Z').toISOString(),
+    }
+    // 2026-04-20 月曜、EDT → 引け 20:00 UTC。19:50 UTC = 引け 15分前 window 内。
+    const closeWindow = new Date('2026-04-20T19:50:00.000Z')
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      intradayOnlySymbols: new Set(['AAPL']),
+      perSymbolRisk: baseRiskConfig,
+      now: () => closeWindow,
+    })
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
+  })
 })
 
 describe('runPullbackScheduler earnings calendar gate (#196)', () => {
@@ -2893,6 +2939,102 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
     expect(summary.buys).toBe(0)
     expect(execution.calls).toHaveLength(0)
     expect(summary.rejected[0]?.reason).toContain('missing-lot-size')
+  })
+
+  it('cash rebalance never overrides a strategy SELL (stop-loss exit wins)', async () => {
+    // avgPrice 200 vs uptrendBars last close 117.5 → deep loss, well past the
+    // -4% stop → decide() returns SELL regardless of the rebalance map.
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      cashRebalanceQuantityMap: { AAPL: 80 },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SELL')
+    const step = decision?.trace?.find((s) => s.label === 'entry.cash_rebalance')
+    expect(step?.passed).toBe(false)
+    expect(decision?.reason).toContain('cash rebalance skipped: strategy exit takes precedence')
+  })
+
+  it('cash rebalance respects post-exit cooldown', async () => {
+    const flatState: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      cooldownUntil: new Date(now.getTime() + 60_000).toISOString(),
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: flatState }),
+      execution,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SGOV')
+    const step = decision?.trace?.find((s) => s.label === 'entry.cash_rebalance')
+    expect(step?.passed).toBe(false)
+    expect(decision?.reason).toContain('cash rebalance skipped: cooldown active until')
+  })
+
+  it('cash rebalance respects the re-entry guard window', async () => {
+    // TEST_DEFAULT_RULE.reentryGuardBusinessDays = 3。lastExitAt 1 business day
+    // 前 (2026-04-17 金, now = 2026-04-20 月) → bd=1 < 3 → guard 有効、BUY なし。
+    const withinGuard: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      lastExitAt: '2026-04-17T14:30:00.000Z',
+      lastExitPrice: 100,
+    }
+    const execution1 = mockExecution()
+    const withinSummary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: withinGuard }),
+      execution: execution1,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(withinSummary.buys).toBe(0)
+    expect(execution1.calls).toHaveLength(0)
+    const withinDecision = withinSummary.decisions.find((d) => d.symbol === 'SGOV')
+    const withinStep = withinDecision?.trace?.find((s) => s.label === 'entry.cash_rebalance')
+    expect(withinStep?.passed).toBe(false)
+    expect(withinDecision?.reason).toContain('cash rebalance skipped: re-entry guard window')
+
+    // lastExitAt 10 business days 前 (2026-04-06 月) → bd=10 >= 3 → guard 失効、BUY 通る。
+    const pastGuard: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      lastExitAt: '2026-04-06T14:30:00.000Z',
+      lastExitPrice: 100,
+    }
+    const execution2 = mockExecution()
+    const pastSummary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: pastGuard }),
+      execution: execution2,
+      cashRebalanceQuantityMap: { SGOV: 80 },
+      now: () => now,
+    })
+    expect(pastSummary.buys).toBe(1)
+    expect(execution2.calls).toHaveLength(1)
   })
 })
 

@@ -702,6 +702,84 @@ describe('runStrategyCron', () => {
     })
   })
 
+  // #452 follow-up: cash rebalance pass 2 は pass 1 と同じ挙動制約 (earnings /
+  // macro / sanity-failed cooldown / intraday-only close) を受けないと、通常
+  // BUY が止まる局面でも退避先へ買い戻す抜け道になる。
+  describe('cash rebalance pass 2 shares pass 1 behavioral gates (#452 follow-up)', () => {
+    /** sqlite_master probe に全 table ready (`{ ok: 1 }`) で応答する fake D1。 */
+    function fakeDbAllTablesReady(): D1Database {
+      return {
+        prepare: vi.fn(() => ({
+          first: vi.fn(async () => ({ ok: 1 })),
+        })),
+      } as unknown as D1Database
+    }
+
+    function envWithHealthyPortfolio(db: D1Database) {
+      return {
+        DB: db,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 0,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+    }
+
+    it('pass 2 runPullbackScheduler call receives the same behavioral gate options as pass 1', async () => {
+      // JPY-only universe (fx=1) を使い、usdJpyRate 取得を経路から外す。SOXL は
+      // entry_required だが WATCH/NG 想定 (pass 1 の mocked entrySnapshots) →
+      // cash_fallback 先 SGOV へ退避し、pass 2 の BUY 計画が立つ。
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(
+        makeSymbolUniverse({
+          allowedSymbols: ['SOXL', 'SGOV'],
+          symbolCurrency: { SOXL: 'JPY', SGOV: 'JPY' },
+          symbolMarket: { SOXL: 'JP', SGOV: 'JP' },
+          symbolLotSize: { SOXL: 1, SGOV: 1 },
+          symbolBudgetAllocPct: { SOXL: 0.5 },
+          symbolEntryRequired: { SOXL: true },
+          symbolCashFallback: { SOXL: ['SGOV'] },
+        }),
+      )
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ cashFallbackOrdersEnabled: true, totalCapitalJpy: 10_000_000 }),
+      )
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'NG', price: 100, heldQty: 0 },
+          SGOV: { status: 'NG', price: 100, heldQty: 0 },
+        },
+      })
+
+      const db = fakeDbAllTablesReady()
+      await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(2) // pass 1 + cash rebalance pass 2
+      const [pass1Options] = calls[0]!
+      const [pass2Options] = calls[1]!
+      // pass 2 が実際に cash rebalance 経路を通ったことの前提確認。
+      expect(pass2Options.cashRebalanceQuantityMap).toBeDefined()
+
+      for (const key of [
+        'intradayOnlySymbols',
+        'sanityFailedCooldown',
+        'earningsGate',
+        'macroEventGate',
+      ] as const) {
+        expect(pass1Options[key]).toBeDefined()
+        expect(pass2Options[key]).toBeDefined()
+      }
+    })
+  })
 })
 
 describe('resolvePortfolioForRiskScale', () => {
