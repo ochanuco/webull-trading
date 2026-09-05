@@ -11,7 +11,7 @@
 | `dry_run` | `1` | Execution Mock に固定、broker へ送らない |
 | `trading_enabled` | `0` | Risk layer が全注文 reject (**exit も止まる** 唯一の停止) |
 | `market_hours_check` | `0` | 手動 `/trade` 経路の発注ゲート。銘柄の市場別レギュラーセッション (US/JP・祝日・半日取引対応) 外を reject。cron 経路は `session_window_gate_enabled` が担当 (#656) |
-| `session_window_gate_enabled` | `0` | 開場 30 分前〜引けの窓外は戦略 cron の評価自体を skip |
+| `session_window_gate_enabled` | `0` | 開場 30 分前〜引けの窓外は戦略 cron の評価自体を skip。flag の値に関わらず、BUY はレギュラーセッション内 (US 09:30–16:00 ET / JP 09:00–15:30 JST、半日取引・休場対応) でしか出さない (寄り前は exit 判定のみ) |
 | `drawdown_kill_threshold` | `-0.02` | 日次 realized_pnl / start_equity 比で自動 kill (**entry のみ停止**、#595) |
 | `stale_quote_ms` | `900000` | halt 判定 (15 min) |
 
@@ -19,10 +19,10 @@
 
 | フィールド | 既定 | 意味 |
 |---|---|---|
-| `max_order_notional_usd` | `2000` | USD 銘柄の 1 注文上限 ($) |
+| `max_order_notional_usd` | `2000` | USD 銘柄の 1 注文上限 ($)。手動 `/trade` 経路・cron の通常 BUY・退避 BUY すべてに適用 (symbol の `max_notional` との小さい方) |
 | `max_order_notional_jpy` | `100000` | JPY 銘柄の 1 注文上限 (¥) |
-| `total_capital_usd` / `_jpy` | `NULL` | NAV (NULL なら exposure check skip) |
-| `max_portfolio_exposure_pct` | `0.6` | total_capital × これを超える open 合計を禁止 |
+| `total_capital_usd` / `_jpy` | `NULL` | NAV。risk-% sizing (`budget_alloc_pct` 未設定の銘柄) は通貨別の値が NULL だと `capital-unset` で発注しない (架空の既定値には倒さない)。`_jpy` は予算配分と exposure 上限の基準額でもある |
+| `max_portfolio_exposure_pct` | `0.6` | 建玉合計の上限。cron BUY は `total_capital_jpy × これ` を上限に、cron が読む symbol state の保有 (qty × 取得単価、USD は USD/JPY 換算) を積み上げて判定する (`total_capital_jpy` 未設定 / FX 取得失敗時は BUY 全停止)。手動 `/trade` 経路は従来どおり `total_capital_{usd,jpy}` × これ を `PortfolioState.openExposure*` と比較 |
 | `spread_limit_pct_{us,jp}` | `0.0025` / `0.006` | spread guard |
 | `gap_reject_pct` | `0.03` | gap 判定 |
 
@@ -114,7 +114,8 @@ stale な観測が新規 BUY を停止する。
 
 ## per-symbol / テーブル由来の制御
 
-- `symbol_config.active = 0` にすれば universe から外れて cron から除外される
+- `symbol_config.active = 0` にすれば universe から外れて新規 entry は止まる。保有 (qty > 0) が残っている間は exit-only で cron の評価に残り、stop / TP / time-stop は動き続ける
+- `symbol_config.intraday_only = 1` の US 銘柄は引け 15 分前に保有を強制クローズし、引け 30 分前からは新規 BUY を出さない
 - `symbol_config` の override (`stop_pct_override` / `k_atr_override` / `lot_size` / `budget_alloc_pct` / `role` など) が global default に優先する
 - `inverse_pairs` で SOXL/SOXS のような同時保有を構造的に禁止する
 - `tradable_instrument` は Webull の取扱可能銘柄 allowlist (日次 refresh)
