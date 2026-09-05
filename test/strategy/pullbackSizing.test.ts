@@ -156,6 +156,15 @@ describe('computePullbackSizing', () => {
     expect(() => computePullbackSizing(baseInput({ kAtr: -1 }))).toThrow(/kAtr/)
     expect(() => computePullbackSizing(baseInput({ kAtr: Number.NaN }))).toThrow(/kAtr/)
   })
+
+  it('risk-% sizing fails closed with capital-unset when equity is missing', () => {
+    for (const bad of [undefined, 0, -1, Number.NaN]) {
+      const result = computePullbackSizing(baseInput({ equity: bad as number | undefined }))
+      expect(result.quantity).toBe(0)
+      expect(result.capped).toBe(true)
+      expect(result.capReason).toBe('capital-unset')
+    }
+  })
 })
 
 describe('computePullbackSizing — fixed-% budget allocation, JPY account + FX (#budget-jpy-base-fx)', () => {
@@ -225,5 +234,20 @@ describe('computePullbackSizing — fixed-% budget allocation, JPY account + FX 
       expect(result.quantity).toBe(0)
       expect(result.capped).toBe(true)
     }
+  })
+
+  it('budget allocation sizing ignores equity (sizes even when equity is unset)', () => {
+    const result = computePullbackSizing(
+      baseInput({
+        equity: undefined,
+        entryPrice: 35_000,
+        budgetAllocPct: 0.4,
+        budgetBasisJpy: 100_000,
+        fxJpyPerSymbolCcy: 1,
+      }),
+    )
+    expect(result.quantity).toBe(1)
+    expect(result.notional).toBe(35_000)
+    expect(result.capped).toBe(false)
   })
 })
