@@ -322,6 +322,150 @@ describe('runStrategyCron', () => {
     })
   })
 
+  // risk-% sizing の equity は total_capital_usd/jpy が未設定なら架空の
+  // $10,000/¥1,500,000 baseline に倒さず、scheduler へ equity を渡さない
+  // (キー自体を省略) → capital-unset で fail-closed させる。
+  describe('risk-% sizing equity — no phantom capital baseline', () => {
+    it('omits equity from scheduler options and reports null in analysis when total_capital_usd is unset', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ totalCapitalUsd: null }),
+      )
+      const result = await runStrategyCron(env)
+      expect(lastSchedulerOptions().equity).toBeUndefined()
+      const usdRun = result.analysis.runs.find((r) => r.currency === 'USD')
+      expect(usdRun?.equity).toBeNull()
+    })
+
+    it('passes total_capital_usd through as scheduler equity and analysis.runs equity when set', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ totalCapitalUsd: 50_000 }),
+      )
+      const result = await runStrategyCron(env)
+      expect(lastSchedulerOptions().equity).toBe(50_000)
+      const usdRun = result.analysis.runs.find((r) => r.currency === 'USD')
+      expect(usdRun?.equity).toBe(50_000)
+    })
+  })
+
+  // `global_config.max_order_notional_usd/jpy` は manual `/trade/execute` /
+  // cash-rebalance plan では既に効いていたが、cron の通常 BUY sizing だけ
+  // symbol cap しか見ていなかった回帰ガード。
+  describe('global max order notional cap passthrough', () => {
+    it('passes max_order_notional_usd through to the scheduler for a USD run', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ maxOrderNotionalUsd: 3_000 }),
+      )
+      await runStrategyCron(env)
+      expect(lastSchedulerOptions().maxOrderNotional).toBe(3_000)
+    })
+
+    it('omits maxOrderNotional when the configured value is non-finite/non-positive', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ maxOrderNotionalUsd: 0 }),
+      )
+      await runStrategyCron(env)
+      expect(lastSchedulerOptions().maxOrderNotional).toBeUndefined()
+    })
+  })
+
+  // portfolio 全体エクスポージャー上限。manual 経路 (`TradingService`) は
+  // `PortfolioState.openExposure*` を見るが、cron はそれを使わず自身が読む
+  // symbol state から現在建玉を積み上げる。
+  describe('portfolio exposure ledger', () => {
+    function fakeSymbolStateWithPositions(
+      positions: Record<string, { qty: number; avgPrice: number } | null>,
+    ): DurableObjectNamespace<never> {
+      return {
+        idFromName: (name: string) => ({ name }),
+        get: (id: { name: string }) => ({
+          getState: vi.fn().mockResolvedValue({ position: positions[id.name] ?? null }),
+        }),
+      } as unknown as DurableObjectNamespace<never>
+    }
+
+    function envWithSymbolState(
+      symbolState: DurableObjectNamespace<never>,
+    ): Parameters<typeof runStrategyCron>[0] {
+      return {
+        DB: {} as D1Database,
+        SYMBOL_STATE: symbolState,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 0,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+    }
+
+    it('builds an ok ledger from held JPY symbol states and applies the exposure ceiling', async () => {
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(
+        makeSymbolUniverse({
+          allowedSymbols: ['9697'],
+          symbolCurrency: { '9697': 'JPY' },
+          symbolMarket: { '9697': 'JP' },
+          symbolLotSize: { '9697': 100 },
+        }),
+      )
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ totalCapitalJpy: 1_000_000, maxPortfolioExposurePct: 0.6 }),
+      )
+      const symbolState = fakeSymbolStateWithPositions({ '9697': { qty: 100, avgPrice: 2000 } })
+      const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+      // current = 100*2000 = 200,000. ceiling = 1,000,000*0.6 = 600,000.
+      expect(result.analysis.exposure).toEqual({
+        status: 'ok',
+        ceilingJpy: 600_000,
+        currentJpy: 200_000,
+        remainingJpy: 400_000,
+      })
+      expect(lastSchedulerOptions().exposureCap?.status).toBe('ok')
+    })
+
+    it('reports unavailable when total_capital_jpy is unset', async () => {
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ totalCapitalJpy: null }),
+      )
+      const result = await runStrategyCron(env)
+      expect(result.analysis.exposure?.status).toBe('unavailable')
+      expect(result.analysis.exposure?.reason).toBe('total_capital_jpy unset')
+    })
+
+    it('fails closed when a USD position exists but the usd/jpy rate is unavailable', async () => {
+      const fetchSpy = vi.fn(async () => {
+        throw new Error('network disabled in test')
+      })
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = fetchSpy as unknown as typeof fetch
+      try {
+        vi.mocked(loadSymbolUniverse).mockResolvedValue(
+          makeSymbolUniverse({
+            allowedSymbols: ['AAPL'],
+            symbolCurrency: { AAPL: 'USD' },
+            symbolMarket: { AAPL: 'US' },
+            symbolLotSize: { AAPL: 1 },
+          }),
+        )
+        vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+          makeGlobalConfigSnapshot({ totalCapitalJpy: 1_000_000 }),
+        )
+        const symbolState = fakeSymbolStateWithPositions({ AAPL: { qty: 10, avgPrice: 100 } })
+        const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+        expect(result.analysis.exposure?.status).toBe('unavailable')
+        expect(result.analysis.exposure?.reason).toBe('usd/jpy rate unavailable')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+  })
+
   it('fail-closes to portfolio_halted on invalid tradingDisabledUntil timestamp', async () => {
     const envBadTimestamp = {
       ...env,
@@ -947,6 +1091,12 @@ describe('runStrategyCron', () => {
         expect(pass1Options[key]).toBeDefined()
         expect(pass2Options[key]).toBeDefined()
       }
+
+      // exposure ledger は tick 内で 1 個の object を pass 1/2 で共有し、
+      // 逐次減算する契約 — 別 object だと片方の BUY 消費が他方に反映されず
+      // tick 全体で上限を超過し得る。
+      expect(pass1Options.exposureCap).toBeDefined()
+      expect(pass2Options.exposureCap).toBe(pass1Options.exposureCap)
     })
 
     // #p0-path-fixes 1: pass 2 は entrySuppressedSymbols を渡さない唯一の BUY

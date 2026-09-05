@@ -8,6 +8,12 @@ import {
   createUnavailableBuyingPowerLedger,
   type BuyingPowerLedger,
 } from './buyingPower'
+import {
+  createExposureLedger,
+  createUnavailableExposureLedger,
+  type ExposureLedger,
+} from './exposureLedger'
+import type { PositionStore } from '../state/PositionStore'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
@@ -79,8 +85,6 @@ import {
   type EntrySnapshot,
 } from './conditionalAllocation'
 
-const DEFAULT_EQUITY_USD = 10_000
-const DEFAULT_EQUITY_JPY = 1_500_000
 // 売買単位は per-symbol (symbol_config.lot_size) で持つ。未設定銘柄は scheduler
 // 側で fail-closed (発注見送り) — blanket default に倒さない (#symbol-lot-size)。
 
@@ -202,7 +206,8 @@ interface StrategyCronAnalysis {
   newsShock?: NewsShockGateDecision
   runs: Array<{
     currency: SymbolCurrency
-    equity: number
+    /** null = `total_capital_usd/jpy` 未設定 (risk-% sizing は capital-unset で fail-closed)。 */
+    equity: number | null
     symbols: string[]
   }>
   decisions: PullbackDecisionTrace[]
@@ -215,6 +220,19 @@ interface StrategyCronAnalysis {
     view: AllocationView
     ordersEnabled: boolean
     rebalanceSkipped?: CashRebalanceSkip[]
+  }
+  /**
+   * Portfolio 全体エクスポージャー上限。cron が読んだ symbol
+   * state から算出した現在建玉 (`currentJpy`) と `max_portfolio_exposure_pct`
+   * 由来の上限 (`ceilingJpy`) の diagnostic snapshot。`unavailable` は `reason` 付き
+   * (この tick は cron BUY 全 fail-closed だったことを示す)。
+   */
+  exposure?: {
+    status: 'ok' | 'unavailable'
+    ceilingJpy: number
+    currentJpy: number
+    remainingJpy: number
+    reason?: string
   }
 }
 
@@ -882,18 +900,18 @@ export async function runStrategyCron(
   // run は `activeCurrencies` (= 銘柄あり ∧ (gate off ∨ 窓内)) のみ構築する。
   // gate off の時は両 currency が active なので従来挙動と一致する (#session-window-gate)。
   // symbols は `runCurrency` (= `byCurrency` + exit-only 銘柄、#p0-path-fixes 4a)。
-  const runs: Array<{ currency: SymbolCurrency; equity: number; symbols: string[] }> = []
+  const runs: Array<{ currency: SymbolCurrency; equity: number | null; symbols: string[] }> = []
   if (activeCurrencies.has('USD')) {
     runs.push({
       currency: 'USD',
-      equity: sanitizeEquity(global.totalCapitalUsd, DEFAULT_EQUITY_USD),
+      equity: sanitizeEquity(global.totalCapitalUsd),
       symbols: runCurrency.USD,
     })
   }
   if (activeCurrencies.has('JPY')) {
     runs.push({
       currency: 'JPY',
-      equity: sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY),
+      equity: sanitizeEquity(global.totalCapitalJpy),
       symbols: runCurrency.JPY,
     })
   }
@@ -915,9 +933,10 @@ export async function runStrategyCron(
   const usdHasBudgetSymbol = byCurrency.USD.some(
     (s) => universe.symbolBudgetAllocPct[s.toUpperCase()] !== undefined,
   )
-  // USD/JPY は budget 換算に加え、live 時は買付余力 (USD 建て) の JPY 換算にも要る
-  // ので、live ならば取得する (#415)。
-  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null
+  // USD/JPY は budget 換算・買付余力に加え、portfolio exposure ledger (下記)
+  // が USD run の建玉を JPY 換算するのにも要るため、USD run がある tick は
+  // 常に取得する。
+  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null || runs.some((r) => r.currency === 'USD')
   const usdJpyRate = needUsdJpy ? await loadUsdJpyRate({ requestId: options.requestId }) : null
 
   // #415: 発注前の共有プール pre-trade ゲート。live 時のみ Webull の買付余力を取得し
@@ -927,6 +946,44 @@ export async function runStrategyCron(
   const buyingPower: BuyingPowerLedger | undefined = liveReadClient
     ? await resolveBuyingPowerLedger(liveReadClient, usdJpyRate, options.requestId)
     : undefined
+
+  // portfolio 全体エクスポージャー上限 (`max_portfolio_exposure_pct`)
+  // を cron BUY にも適用する。manual `/trade/execute` (`TradingService`) は
+  // `PortfolioState.openExposureUsd/Jpy` を見ているが、cron はそれを使わず
+  // 「この tick で cron 自身が読む symbol state」から現在建玉を積み上げる —
+  // openExposure* は sync-holdings / operator override / SELL_QTY_EXCEED
+  // fallback の position 上書きで容易に drift し (#660 系)、そのまま基準に
+  // すると誤ったエクスポージャーで発注可否を決めることになるため。
+  // pass 1/2 で同一 ledger object を共有し、tick 内の連続 BUY を逐次減算する。
+  const exposureCap = await buildExposureLedger({
+    runs,
+    positionStore,
+    usdJpyRate,
+    budgetBasisJpy,
+    maxPortfolioExposurePct: global.maxPortfolioExposurePct,
+    requestId: options.requestId,
+  })
+  console.log(
+    JSON.stringify({
+      event: 'portfolio_exposure_ledger',
+      requestId: options.requestId,
+      status: exposureCap.status,
+      ceilingJpy: exposureCap.ceilingJpy,
+      currentJpy: exposureCap.currentJpy,
+      remainingJpy: exposureCap.remainingJpy,
+      ...(exposureCap.reason !== undefined ? { reason: exposureCap.reason } : {}),
+    }),
+  )
+  analysis = {
+    ...analysis,
+    exposure: {
+      status: exposureCap.status,
+      ceilingJpy: exposureCap.ceilingJpy,
+      currentJpy: exposureCap.currentJpy,
+      remainingJpy: exposureCap.remainingJpy,
+      ...(exposureCap.reason !== undefined ? { reason: exposureCap.reason } : {}),
+    },
+  }
 
   // TICKER_IS_DENY 自動停止ガード (#460)。env.DB がある時だけ有効化 — D1 が
   // 無いと symbol_config を停止できないので skip (= 従来挙動)。
@@ -969,6 +1026,15 @@ export async function runStrategyCron(
       }
     : {}
 
+  // global per-order cap を通貨別に解決。manual 経路
+  // (`DefaultRiskPolicy` / `buildCashRebalancePlan`) は既にこの値を使っており、
+  // cron の通常 BUY sizing だけ symbol cap のみで global cap を見ていなかった。
+  // 非有限/非正の config 値は undefined (= 無制限、既存挙動) に倒す。
+  const maxOrderNotionalFor = (currency: SymbolCurrency): number | undefined => {
+    const value = currency === 'JPY' ? global.maxOrderNotionalJpy : global.maxOrderNotionalUsd
+    return Number.isFinite(value) && value > 0 ? value : undefined
+  }
+
   for (const run of runs) {
     analysis.runs.push({
       currency: run.currency,
@@ -980,16 +1046,20 @@ export async function runStrategyCron(
     const decisionDb = strategyDecisionDbOrUndefined(env)
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
-      equity: run.equity,
+      ...(run.equity !== null ? { equity: run.equity } : {}),
       symbolLotSizeMap: universe.symbolLotSize,
       barClient,
       positionStore,
       execution,
       symbolCapMap: universe.symbolMaxNotional,
+      ...(maxOrderNotionalFor(run.currency) !== undefined
+        ? { maxOrderNotional: maxOrderNotionalFor(run.currency) }
+        : {}),
       symbolBudgetAllocPctMap: universe.symbolBudgetAllocPct,
       budgetBasisJpy,
       fxJpyPerSymbolCcy,
       buyingPower,
+      exposureCap,
       intradayOnlySymbols,
       defaultRule,
       rulesMap,
@@ -1156,17 +1226,21 @@ export async function runStrategyCron(
         const decisionDb = strategyDecisionDbOrUndefined(env)
         const sub = await runPullbackScheduler({
           symbols: orders.map((o) => o.symbol),
-          equity: run.equity,
+          ...(run.equity !== null ? { equity: run.equity } : {}),
           symbolLotSizeMap: universe.symbolLotSize,
           barClient,
           positionStore,
           execution,
           symbolCapMap: universe.symbolMaxNotional,
+          ...(maxOrderNotionalFor(run.currency) !== undefined
+            ? { maxOrderNotional: maxOrderNotionalFor(run.currency) }
+            : {}),
           cashRebalanceQuantityMap: Object.fromEntries(orders.map((o) => [o.symbol, o.quantity])),
           intradayOnlySymbols,
           ...(onTickerDeny ? { onTickerDeny } : {}),
           fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
           buyingPower,
+          exposureCap,
           defaultRule,
           rulesMap,
           momentumSymbols,
@@ -1215,9 +1289,16 @@ export async function runStrategyCron(
   }
 }
 
-function sanitizeEquity(value: number | null | undefined, fallback: number): number {
-  if (value === null || value === undefined) return fallback
-  if (!Number.isFinite(value) || value <= 0) return fallback
+/**
+ * `total_capital_usd/jpy` が未設定/非有限/非正なら **null** を返す (架空の
+ * baseline へ倒さない)。risk-% sizing (`computePullbackSizing`) はここで
+ * null が出ると `capital-unset` で fail-closed する — 本番の VUG/ICLN が
+ * `total_capital_usd` 未設定のまま $10,000 default 相当のサイズで発注されて
+ * いた事象の再発防止。
+ */
+function sanitizeEquity(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  if (!Number.isFinite(value) || value <= 0) return null
   return value
 }
 
@@ -1254,6 +1335,55 @@ async function resolveBuyingPowerLedger(
     console.warn(JSON.stringify({ event: 'buying_power_unavailable', reason, requestId }))
     return createUnavailableBuyingPowerLedger(reason)
   }
+}
+
+/**
+ * Portfolio 全体エクスポージャー上限の ledger を組み立てる。
+ * `runs` (= `runCurrency`、exit-only 銘柄込み) 全体の symbol state を読み、
+ * 保有中ポジションの評価額 (JPY 換算) を積み上げて現在建玉とする。
+ *
+ * fail-closed 条件 (いずれか一つでも該当すれば unavailable):
+ *   - `total_capital_jpy` 未設定 (`budgetBasisJpy === undefined`)
+ *   - `max_portfolio_exposure_pct` が非有限/非正
+ *   - state read が throw (DO 障害。symbol を reason に含める)
+ *   - USD 建玉があるのに `usdJpyRate` が null (誤換算で上限を過小評価しない)
+ */
+async function buildExposureLedger(params: {
+  runs: Array<{ currency: SymbolCurrency; symbols: string[] }>
+  positionStore: PositionStore
+  usdJpyRate: number | null
+  budgetBasisJpy: number | undefined
+  maxPortfolioExposurePct: number
+  requestId: string | undefined
+}): Promise<ExposureLedger> {
+  const { runs, positionStore, usdJpyRate, budgetBasisJpy, maxPortfolioExposurePct } = params
+  if (budgetBasisJpy === undefined) {
+    return createUnavailableExposureLedger('total_capital_jpy unset')
+  }
+  if (!Number.isFinite(maxPortfolioExposurePct) || maxPortfolioExposurePct <= 0) {
+    return createUnavailableExposureLedger('max_portfolio_exposure_pct invalid')
+  }
+  let currentJpy = 0
+  for (const run of runs) {
+    const fx = run.currency === 'JPY' ? 1 : usdJpyRate
+    for (const sym of run.symbols) {
+      let state: Awaited<ReturnType<typeof positionStore.getState>>
+      try {
+        state = await positionStore.getState(sym)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return createUnavailableExposureLedger(`state read failed for ${sym}: ${message}`)
+      }
+      const position = state.position
+      if (position === null || !Number.isFinite(position.qty) || position.qty <= 0) continue
+      if (fx === null) {
+        return createUnavailableExposureLedger('usd/jpy rate unavailable')
+      }
+      const notionalJpy = position.qty * position.avgPrice * fx
+      if (Number.isFinite(notionalJpy)) currentJpy += notionalJpy
+    }
+  }
+  return createExposureLedger({ ceilingJpy: budgetBasisJpy * maxPortfolioExposurePct, currentJpy })
 }
 
 /**

@@ -1,7 +1,13 @@
 import { resolveStopDistance } from './stopDistance'
 
 export interface PullbackSizingInput {
-  equity: number
+  /**
+   * Risk-% sizing の母数となる口座資産。未指定/非有限/<=0 は risk-% branch を
+   * fail-closed させる (`capital-unset`) — 架空の baseline を当てると
+   * `total_capital_usd` 未設定の口座 (本番の VUG/ICLN 等) が実在しない資金に
+   * 対して実発注サイズを計算してしまう。budgetAllocPct モードでは未使用。
+   */
+  equity?: number
   entryPrice: number
   /** Stop-loss fraction, negative (e.g. -0.04). */
   stopPct: number
@@ -66,6 +72,7 @@ export interface PullbackSizingResult {
     | 'invalid-stop'
     | 'insufficient-risk-budget'
     | 'lot-size-round'
+    | 'capital-unset'
   /**
    * Diagnostic fields populated only when applicable per decision/reject route;
    * may be undefined otherwise. These are diagnostic-only for debugging and
@@ -157,7 +164,12 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
       return { quantity: 0, notional: 0, capped: true, capReason: 'invalid-stop', stopDistance }
     }
 
-    riskBudget = input.equity * riskPct
+    const equity = input.equity
+    if (equity === undefined || !Number.isFinite(equity) || equity <= 0) {
+      return { quantity: 0, notional: 0, capped: true, capReason: 'capital-unset', stopDistance }
+    }
+
+    riskBudget = equity * riskPct
     if (!Number.isFinite(riskBudget) || riskBudget <= 0) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget', stopDistance, riskBudget }
     }

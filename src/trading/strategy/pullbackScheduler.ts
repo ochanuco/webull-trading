@@ -18,6 +18,7 @@ import {
 } from './indicators'
 import { computePullbackSizing } from './pullbackSizing'
 import type { BuyingPowerLedger } from './buyingPower'
+import type { ExposureLedger } from './exposureLedger'
 
 /**
  * #intraday-only: US 引け何分前から強制クローズ window を開けるか。cron は 5 分間隔
@@ -72,7 +73,13 @@ const DEFAULT_BAR_LOOKBACK = 60
 
 export interface PullbackSchedulerOptions {
   symbols: string[]
-  equity: number
+  /**
+   * Risk-% sizing の母数となる口座資産。未指定は risk-% branch を
+   * `capital-unset` で fail-closed させる (`total_capital_usd/jpy` 未設定の
+   * 口座に架空の baseline を当てない)。budget-alloc 銘柄は未使用なので
+   * 影響しない。
+   */
+  equity?: number
   barClient: BarClient
   positionStore: PositionStore
   execution: Execution
@@ -93,6 +100,16 @@ export interface PullbackSchedulerOptions {
   /** #momentum: momentum symbol 用の戦略。未指定なら momentum symbol も押し目で判定 (後方互換)。 */
   momentumStrategy?: BreakoutMomentumStrategy
   symbolCapMap?: Record<string, number>
+  /**
+   * `global_config.max_order_notional_usd/jpy` (symbol 通貨単位)。
+   * 銘柄別 `symbolCapMap` とは min で合成する global な 1 注文あたりの上限 —
+   * 未設定なら無制限 (従来挙動)。manual `/trade/execute` (`DefaultRiskPolicy`) /
+   * cash-rebalance plan (`buildCashRebalancePlan`) は既にこの cap を通しているが、
+   * cron の通常 BUY sizing 経路 (`computePullbackSizing`) だけ symbol cap しか
+   * 見ていなかった — global cap を上げ忘れたまま個別銘柄 cap を外すと、想定外の
+   * 巨大 notional が cron から発注され得る。
+   */
+  maxOrderNotional?: number
   barLookback?: number
   riskPerTradePct?: number
   pendingLockTtlMs?: number
@@ -132,6 +149,15 @@ export interface PullbackSchedulerOptions {
    * する想定。未指定 (DryRun / legacy / test) は pool ゲート無効。
    */
   buyingPower?: BuyingPowerLedger
+  /**
+   * Portfolio 全体エクスポージャー上限の共有台帳
+   * (`global_config.max_portfolio_exposure_pct`)。指定時、BUY の submit 直前に
+   * notional を JPY 換算して `tryReserve` し、残枠を超える/`unavailable` は
+   * pre-trade で reject する。`buyingPower` と同じ設計 (runs=USD/JPY・pass 1/2
+   * をまたいで同一 ledger を共有し、逐次減算する)。未指定 (DryRun / legacy /
+   * test) はゲート無効。
+   */
+  exposureCap?: ExposureLedger
   /**
    * intraday-only 銘柄の集合 (#intraday-only)。US 引け前 window 内で保有があれば
    * strategy 判定を上書きして **強制 SELL**(オーバーナイト持ち越し禁止)。レバ ETF の
@@ -1165,24 +1191,46 @@ export async function runPullbackScheduler(
         })
         continue
       }
+      // 銘柄別 cap (`symbolCapMap`) と global per-order cap (`maxOrderNotional`) を
+      // min で合成する。片方だけ設定されていればそちらをそのまま使い、両方
+      // 未設定なら undefined (無制限) — 既存の 1 銘柄 1 cap という
+      // `computePullbackSizing` の契約を変えず、呼び出し側で先に絞る。
+      const perSymbolCap = options.symbolCapMap?.[upper]
+      const globalOrderCap = options.maxOrderNotional
+      const effectiveSymbolCap =
+        perSymbolCap !== undefined && globalOrderCap !== undefined
+          ? Math.min(perSymbolCap, globalOrderCap)
+          : (perSymbolCap ?? globalOrderCap)
       // cash rebalance (#452): 数量は runStrategyCron が allocation 差分から
       // 計算済み (cap / lot 適用済み)。pullback sizing は通さず、lot 整合だけ
       // 再確認する (lot 倍数でなければ floor、0 になれば下の reject で見送り)。
+      // ただし global per-order cap は plan 計算後に変わり得るので、ここでも
+      // 二重適用する (「cron BUY notional が cap を超えない」という不変条件を
+      // rebalance 経路にも及ぼす)。
       const sizing =
         cashRebalanceQty !== undefined
-          ? {
-              quantity: Math.floor(cashRebalanceQty / resolvedLotSize) * resolvedLotSize,
-              notional:
-                Math.floor(cashRebalanceQty / resolvedLotSize) * resolvedLotSize * indicators.price,
-              capped: false,
-            }
+          ? (() => {
+              const lotQty = Math.floor(cashRebalanceQty / resolvedLotSize) * resolvedLotSize
+              const lotNotional = lotQty * indicators.price
+              if (effectiveSymbolCap !== undefined && lotNotional > effectiveSymbolCap) {
+                const cappedQty =
+                  Math.floor(effectiveSymbolCap / indicators.price / resolvedLotSize) * resolvedLotSize
+                return {
+                  quantity: cappedQty,
+                  notional: cappedQty * indicators.price,
+                  capped: true,
+                  capReason: 'symbol-cap' as const,
+                }
+              }
+              return { quantity: lotQty, notional: lotNotional, capped: false }
+            })()
           : computePullbackSizing({
               equity: options.equity,
               entryPrice: indicators.price,
               stopPct: rule.stopPct,
               atr20: indicators.atr20,
               baselineAtr20: indicators.baselineAtr20,
-              symbolCap: options.symbolCapMap?.[upper],
+              symbolCap: effectiveSymbolCap,
               riskPerTradePct: options.riskPerTradePct,
               lotSize: resolvedLotSize,
               kAtr: rule.kAtr,
@@ -1649,6 +1697,34 @@ export async function runPullbackScheduler(
       }
     }
 
+    // portfolio 全体エクスポージャー上限ゲート (BUY only)。
+    // 買付余力 pool ゲートと同じ形 (JPY 換算 → 共有台帳の残枠と突き合わせ、
+    // unavailable / 超過は pre-trade で reject)。SELL/exit は対象外。
+    if (intent.side === 'BUY' && options.exposureCap) {
+      const ledger = options.exposureCap
+      const notionalJpy = intent.notional * (options.fxJpyPerSymbolCcy ?? 1)
+      const exceeds = ledger.status !== 'ok' || notionalJpy > ledger.remainingJpy
+      if (exceeds) {
+        const reason =
+          ledger.status !== 'ok'
+            ? `risk: portfolio exposure cap unavailable (${ledger.reason ?? 'unknown'})`
+            : `risk: portfolio exposure cap (notionalJpy ${Math.round(notionalJpy)} + current ${Math.round(ledger.currentJpy)} > ceiling ${Math.round(ledger.ceilingJpy)})`
+        summary.rejected.push({ symbol: upper, reason })
+        await emitDecision({
+          symbol: upper,
+          decision: 'SKIP',
+          reason,
+          price: indicators.price,
+          indicatorsJson: JSON.stringify(indicators),
+          trace: appendTrace(
+            signal.trace,
+            traceStep('risk.portfolio_exposure_cap', false, Math.round(notionalJpy), '<=', Math.round(ledger.remainingJpy), reason),
+          ),
+        })
+        continue
+      }
+    }
+
     const expiresAtMs = now().getTime() + pendingLockTtlMs
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
       const reason = `invalid expiresAt computed from pendingLockTtlMs: ${pendingLockTtlMs}`
@@ -1843,6 +1919,8 @@ export async function runPullbackScheduler(
       summary.buys += 1
       // #415: 約定した BUY 分の買付余力を共有台帳から減算 (次銘柄の pool 判定に反映)。
       options.buyingPower?.tryReserve(intent.notional * (options.fxJpyPerSymbolCcy ?? 1))
+      // 同様にエクスポージャー上限の共有台帳からも減算。
+      options.exposureCap?.tryReserve(intent.notional * (options.fxJpyPerSymbolCcy ?? 1))
     } else {
       summary.sells += 1
     }
@@ -2128,6 +2206,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'exit.regime_flip_secondary': 'レジーム反転 (副次理由、#472)',
   'sizing.half_entry_quantity_positive': 'HALF 数量が1株/1単元以上ある',
   'risk.buying_power_pool': '口座買付余力プール (発注前)',
+  'risk.portfolio_exposure_cap': 'ポートフォリオ全体エクスポージャー上限',
   'risk.sanity_failed_cooldown': 'sanity_failed cooldown (broker stub 疑い)',
   'broker.submit': '証券会社への発注送信',
   'broker.sell_qty_fallback': 'SELL 数量超過時の broker available qty 再 submit',
@@ -2160,6 +2239,9 @@ function buildSizingRejectReason(
   if (cr === 'invalid-stop') {
     const stop = sizing.stopDistance ?? 0
     return `sizing rejected: invalid-stop (stopDistance ${stop})`
+  }
+  if (cr === 'capital-unset') {
+    return 'sizing rejected: capital-unset (set total_capital_usd / total_capital_jpy for risk-% sizing)'
   }
   return `sizing rejected: ${cr ?? 'zero qty'}`
 }

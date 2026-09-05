@@ -16,6 +16,10 @@ import {
   createBuyingPowerLedger,
   createUnavailableBuyingPowerLedger,
 } from '../../../src/trading/strategy/buyingPower'
+import {
+  createExposureLedger,
+  createUnavailableExposureLedger,
+} from '../../../src/trading/strategy/exposureLedger'
 import type { DailyBar } from '../../../src/trading/strategy/indicators'
 
 const now = new Date('2026-04-20T14:30:00.000Z')
@@ -2541,6 +2545,135 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
     expect(execution.calls).toHaveLength(1)
     const rejected = summary.decisions.filter((d) => d.decision === 'SKIP')
     expect(rejected.some((d) => /insufficient buying power/.test(d.reason ?? ''))).toBe(true)
+  })
+})
+
+describe('runPullbackScheduler global max order notional cap', () => {
+  // budget-alloc mode で target を固定し、cap 適用後の qty を厳密に検証する
+  // (risk-% sizing は ATR/stop 由来で notional が動くため predictability が低い)。
+  // entryPrice はいずれも uptrendBars() の last close 117.5。
+  it('caps notional to the global cap when no symbol cap is set (10 shares → 5)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      symbolBudgetAllocPctMap: { AAPL: 1 },
+      budgetBasisJpy: 1175, // target=1175 → uncapped qty = floor(1175/117.5) = 10
+      fxJpyPerSymbolCcy: 1,
+      maxOrderNotional: 587.5, // → capped target 587.5 → qty = floor(587.5/117.5) = 5
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(5)
+  })
+
+  it('per-symbol cap wins when smaller than the global cap (min semantics)', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      symbolBudgetAllocPctMap: { AAPL: 1 },
+      budgetBasisJpy: 1175,
+      fxJpyPerSymbolCcy: 1,
+      symbolCapMap: { AAPL: 300 }, // smaller than the global cap below
+      maxOrderNotional: 587.5,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    // floor(300/117.5) = 2, not floor(587.5/117.5) = 5 → symbol cap bound.
+    expect(intent.quantity).toBe(2)
+  })
+})
+
+describe('runPullbackScheduler portfolio exposure cap gate', () => {
+  it('fail-closed: rejects BUY when the exposure ledger is unavailable', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      exposureCap: createUnavailableExposureLedger('total_capital_jpy unset'),
+      now: () => now,
+    })
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const aapl = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(aapl?.decision).toBe('SKIP')
+    expect(aapl?.reason).toMatch(/portfolio exposure cap unavailable/)
+  })
+
+  it('places a BUY and decrements the exposure ledger when remaining covers notional', async () => {
+    const execution = mockExecution()
+    const ledger = createExposureLedger({ ceilingJpy: 1_000_000_000, currentJpy: 0 })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAPL: 1 },
+      fxJpyPerSymbolCcy: 150,
+      exposureCap: ledger,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    expect(ledger.remainingJpy).toBeLessThan(1_000_000_000)
+  })
+
+  it('shared exposure ledger covers only the first of two BUYs (sequential decrement)', async () => {
+    const execution = mockExecution()
+    const ledger = createExposureLedger({ ceilingJpy: 60_000, currentJpy: 0 })
+    const summary = await runPullbackScheduler({
+      symbols: ['AAA', 'BBB'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}),
+      execution,
+      symbolLotSizeMap: { AAA: 1, BBB: 1 },
+      symbolBudgetAllocPctMap: { AAA: 1, BBB: 1 },
+      symbolCapMap: { AAA: 50_000, BBB: 50_000 },
+      budgetBasisJpy: 1_000_000,
+      fxJpyPerSymbolCcy: 1,
+      exposureCap: ledger,
+      now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const rejected = summary.decisions.filter((d) => d.decision === 'SKIP')
+    expect(rejected.some((d) => /portfolio exposure cap/.test(d.reason ?? ''))).toBe(true)
+  })
+
+  it('SELL (stop-loss exit) is not blocked by an unavailable exposure ledger', async () => {
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()), // last close 117.5 << avgPrice 200 → stop hit
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      exposureCap: createUnavailableExposureLedger('total_capital_jpy unset'),
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    expect((execution.calls[0] as { side: string }).side).toBe('SELL')
   })
 })
 
