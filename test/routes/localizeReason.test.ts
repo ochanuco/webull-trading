@@ -237,6 +237,72 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
         '発注失敗: 証券会社への発注が成立せず — Webull 429',
       )
     })
+
+    it('capital-unset → 総資産未設定', () => {
+      expect(
+        localizeReason(
+          'sizing rejected: capital-unset (set total_capital_usd / total_capital_jpy for risk-% sizing)',
+        ),
+      ).toBe('発注見送り: 総資産未設定 (risk-% sizing には total_capital_usd / total_capital_jpy の設定が必要)')
+    })
+
+    it('portfolio exposure cap unavailable → 建玉上限データ取得不可', () => {
+      expect(
+        localizeReason('risk: portfolio exposure cap unavailable (total_capital_jpy unset)'),
+      ).toBe('発注スキップ: 建玉上限データ取得不可 (total_capital_jpy unset)')
+    })
+
+    it('portfolio exposure cap exceeded → 建玉上限超過 (remaining ベース)', () => {
+      expect(
+        localizeReason('risk: portfolio exposure cap (notionalJpy 50000 > remaining 30000 of ceiling 600000)'),
+      ).toBe('発注スキップ: 建玉上限超過 (発注金額 50000円 > 残枠 30000円 / 上限 600000円)')
+    })
+
+    it('stale price (intraday bar unavailable) → 価格データ不足', () => {
+      expect(
+        localizeReason('stale price: intraday bar unavailable, daily close fallback not accepted for BUY'),
+      ).toBe('発注スキップ: 価格データ不足 (直近1時間足が取得できず、日足終値での代用は不可)')
+    })
+
+    it('stale price (intraday_60m age exceeded) → 価格データが古い (JST 表記)', () => {
+      expect(
+        localizeReason('stale price: intraday_60m as of 2026-04-25T00:00:00.000Z exceeds 3600000ms'),
+      ).toBe('発注スキップ: 価格データが古い (1時間足時点 2026-04-25 09:00:00 JST が許容 3600000ms を超過)')
+    })
+
+    it('exit evaluation unavailable while holding → データ不足 (保有中の手仕舞い判定不能)', () => {
+      expect(
+        localizeReason('exit evaluation unavailable while holding 5: insufficient bars for indicators'),
+      ).toBe('データ不足: 保有中の手仕舞い判定不能 (保有 5 株) — insufficient bars for indicators')
+    })
+
+    it('outside regular session (BUY deferred) → 様子見', () => {
+      expect(localizeReason('outside regular session: BUY deferred (exits still evaluated)')).toBe(
+        '様子見: 通常取引時間外のため新規買い見送り (手仕舞いは継続評価)',
+      )
+    })
+
+    it('symbol inactive: exit-only → 様子見', () => {
+      expect(localizeReason('symbol inactive: exit-only')).toBe(
+        '様子見: 銘柄無効化済み (保有分の手仕舞いのみ実施)',
+      )
+    })
+
+    it('intraday-only no new entry within 30min of US close → 様子見', () => {
+      expect(localizeReason('intraday-only: no new entry within 30min of US close')).toBe(
+        '様子見: 引け30分前のため新規エントリー見送り (オーバーナイト回避)',
+      )
+    })
+
+    // #cash-rebalance-skipped: `cash rebalance skipped: ...` は既存 reason への
+    // suffix (`${signal.reason}; cash rebalance skipped: ${skipWhy}`) として
+    // 付与される。localizeReason のルールは `^...$` の完全一致 (この pullback
+    // ルール含む) がほとんどで、suffix が付くと元の reason 部分にもマッチしなく
+    // なる — 結果、この compound reason は丸ごと未翻訳のまま画面に出る。
+    it('cash rebalance skipped suffix breaks the underlying reason match (left fully untranslated, by design)', () => {
+      const compound = 'pullback 0.0023 > -0.01 (not deep enough); cash rebalance skipped: some reason'
+      expect(localizeReason(compound)).toBe(compound)
+    })
   })
 
   it('does not touch unknown strings', () => {

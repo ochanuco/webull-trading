@@ -1038,6 +1038,316 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // Partial-fill-then-cancel (this PR): a limit order that partially fills
+  // before the remainder is CANCELLED/EXPIRED still owes the DO the shares
+  // that actually filled — the prior code only applied on `status === 'FILLED'`
+  // and silently dropped these.
+  // ---------------------------------------------------------------------------
+  it('CANCELLED with filled_quantity > 0 applies the filled portion to symbol state', async () => {
+    const row: CandidateRow = {
+      id: 40,
+      clientOrderId: 'coid-cancel-partial',
+      symbol: 'SOXL',
+      side: 'BUY',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-cancel-partial': {
+          status: 'CANCELLED',
+          filled_quantity: '3',
+          limit_price: '50',
+          side: 'BUY',
+          symbol: 'SOXL',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-cancel-partial', {
+      side: 'BUY',
+      qty: 3,
+      price: 50,
+    })
+    expect(summary.stateApplied).toBe(1)
+    expect(updates[0]!.set.filledQty).toBe(3)
+  })
+
+  it('CANCELLED with filled_quantity 0 is a silent no-op (no state apply, no error)', async () => {
+    const row: CandidateRow = {
+      id: 41,
+      clientOrderId: 'coid-cancel-zero',
+      symbol: 'SOXL',
+      side: 'BUY',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-cancel-zero': {
+          status: 'CANCELLED',
+          filled_quantity: '0',
+          limit_price: '50',
+          side: 'BUY',
+          symbol: 'SOXL',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+    expect(summary.stateApplied).toBe(0)
+    expect(summary.stateApplyFailed).toBe(0)
+    expect(summary.errors).toEqual([])
+  })
+
+  // Regression: a historical no-fill CANCELLED row is never stamped
+  // state_applied_at (there was nothing to apply), so `broker_status`
+  // already equals 'CANCELLED' with `state_applied_at IS NULL` on the
+  // journal. Without the `filledQty > 0` guard on the repair cohort, this
+  // shape would be treated as "repair" and re-hit
+  // `repair_skipped_invalid_row` (recordApplyFailure + summary.errors) on
+  // every single reconcile tick forever, even though the cancel was
+  // perfectly normal.
+  //
+  // `makeFakeDb`'s select chain does not evaluate the drizzle `where(...)`
+  // predicate (it just returns the fixture rows unconditionally), so this
+  // exercises the in-loop `isRepair` guard rather than the SQL
+  // `repairFilter` — the two are written to mirror each other.
+  it('a no-fill CANCELLED row already on the journal is not treated as repair (no recordApplyFailure, no errors, no DO call)', async () => {
+    const row: CandidateRow = {
+      id: 45,
+      clientOrderId: 'coid-cancel-already-recorded',
+      symbol: 'SOXL',
+      side: 'BUY',
+      brokerStatus: 'CANCELLED',
+      filledQty: 0,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    const webullStub = makeWebullStub({
+      'coid-cancel-already-recorded': {
+        status: 'CANCELLED',
+        filled_quantity: '0',
+        limit_price: '50',
+        side: 'BUY',
+        symbol: 'SOXL',
+      },
+    })
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    // Went through the fresh-poll path (webull queried), not the repair
+    // shortcut — proves `isRepair` evaluated to false for this row.
+    expect(webullStub.findOrderByClientId).toHaveBeenCalledWith(
+      'coid-cancel-already-recorded',
+      expect.anything(),
+    )
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+    expect(summary.repaired).toBe(0)
+    expect(summary.stateApplyFailed).toBe(0)
+    expect(summary.errors).toEqual([])
+    expect(updates.some((u) => typeof u.set.stateApplyError === 'string' && u.set.stateApplyError.includes('repair_skipped_invalid_row'))).toBe(false)
+  })
+
+  it('EXPIRED with partial fill applies like CANCELLED', async () => {
+    const row: CandidateRow = {
+      id: 42,
+      clientOrderId: 'coid-expired-partial',
+      symbol: 'SOXL',
+      side: 'BUY',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-expired-partial': {
+          status: 'EXPIRED',
+          filled_quantity: '2',
+          limit_price: '50',
+          side: 'BUY',
+          symbol: 'SOXL',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-expired-partial', {
+      side: 'BUY',
+      qty: 2,
+      price: 50,
+    })
+    expect(summary.stateApplied).toBe(1)
+  })
+
+  it('REJECTED with filled_quantity > 0 does not apply and logs an anomaly', async () => {
+    const row: CandidateRow = {
+      id: 43,
+      clientOrderId: 'coid-rejected-fill',
+      symbol: 'SOXL',
+      side: 'BUY',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-rejected-fill': {
+          status: 'REJECTED',
+          filled_quantity: '2',
+          limit_price: '50',
+          side: 'BUY',
+          symbol: 'SOXL',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+    expect(summary.stateApplied).toBe(0)
+    expect(summary.stateApplyFailed).toBe(0)
+    expect(errorSpy.mock.calls.some(([arg]) => typeof arg === 'string' && arg.includes('reconcile_rejected_with_fill'))).toBe(true)
+  })
+
+  it('SELL partial: CANCELLED with a partial fill computes realized PnL on the filled quantity only', async () => {
+    const row: CandidateRow = {
+      id: 44,
+      clientOrderId: 'coid-sell-partial-cancel',
+      symbol: 'SOXL',
+      side: 'SELL',
+      brokerStatus: null,
+      filledQty: null,
+      filledPrice: null,
+      realizedPnl: null,
+      stateAppliedAt: null,
+      stateApplyAttempts: 0,
+    }
+    const { db, updates } = makeFakeDb([row])
+    vi.mocked(createDb).mockReturnValue(db)
+    vi.mocked(createWebullHttpClient).mockReturnValue(
+      makeWebullStub({
+        'coid-sell-partial-cancel': {
+          status: 'CANCELLED',
+          filled_quantity: '4',
+          limit_price: '60',
+          side: 'SELL',
+          symbol: 'SOXL',
+        },
+      }) as unknown as ReturnType<typeof createWebullHttpClient>,
+    )
+    const symbolStub = emptySymbolStateStub()
+    symbolStub.getState.mockResolvedValueOnce({
+      symbol: 'SOXL',
+      position: { qty: 10, avgPrice: 50, openedAt: '2026-04-20T00:00:00.000Z' },
+      appliedClientOrderIds: [],
+      pendingOrder: null,
+      lastSignalAt: null,
+      cooldownUntil: null,
+      settledCash: 0,
+      pendingSettlement: [],
+      lastExecutedPrice: null,
+      lastQuote: null,
+      updatedAt: '2026-04-25T00:00:00.000Z',
+    })
+    const portfolioStub: PortfolioStateStub = {
+      applyRealizedPnl: vi.fn(async () => ({})),
+      applyRealizedPnlOnce: vi.fn(async () => ({ state: {}, applied: true })),
+      applyFillExposure: vi.fn(async () => ({})),
+    }
+
+    const summary = await reconcileFills({
+      env: {
+        DB: FAKE_DB_BINDING,
+        SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        PORTFOLIO_STATE: makePortfolioNamespace(portfolioStub) as never,
+      } as never,
+      now: () => new Date('2026-04-25T12:00:00.000Z'),
+    })
+
+    // (60 - 50) * 4 = 40 realized, on the 4 filled shares — not the original
+    // order quantity.
+    expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-sell-partial-cancel', {
+      side: 'SELL',
+      qty: 4,
+      price: 60,
+    })
+    expect(portfolioStub.applyRealizedPnlOnce).toHaveBeenCalledWith('coid-sell-partial-cancel', 40)
+    expect(updates[0]!.set.realizedPnl).toBe(40)
+    expect(summary.stateApplied).toBe(1)
+  })
+
+  // ---------------------------------------------------------------------------
   // 9697 ping-pong scenario (this PR): broker echoes detail.limit_price=10 to
   // match its stub filled_price=10 → ratio=1 silently passes the PR #223
   // sanity check. Pre_submit limit_price (3516, our signed intent) is the
@@ -1112,7 +1422,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     ])
   })
 
-  it('shouldRetryStateApply: true only for FILLED + qty>0 + price=null', () => {
+  it('shouldRetryStateApply: true for any fill-carrying terminal status with qty>0 + price=null', () => {
     const fn = _internal.shouldRetryStateApply as (
       qty: number | null,
       price: number | null,
@@ -1122,8 +1432,29 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(fn(0, null, 'FILLED')).toBe(false) // genuine no-op
     expect(fn(null, null, 'FILLED')).toBe(false) // missing qty
     expect(fn(1, 50, 'FILLED')).toBe(false) // healthy fill
-    expect(fn(1, null, 'CANCELLED')).toBe(false) // not FILLED
+    expect(fn(1, null, 'REJECTED')).toBe(false) // REJECTED never carries a fill to retry
     expect(fn(1, null, null)).toBe(false) // no status
+  })
+
+  it('shouldRetryStateApply: CANCELLED with a partial fill and a failed apply retries like FILLED', () => {
+    const fn = _internal.shouldRetryStateApply as (
+      qty: number | null,
+      price: number | null,
+      status: string | null,
+    ) => boolean
+    expect(fn(3, null, 'CANCELLED')).toBe(true)
+    expect(fn(3, null, 'CANCELED')).toBe(true)
+    expect(fn(3, null, 'EXPIRED')).toBe(true)
+  })
+
+  it('shouldRetryStateApply: CANCELLED with no fill never retries', () => {
+    const fn = _internal.shouldRetryStateApply as (
+      qty: number | null,
+      price: number | null,
+      status: string | null,
+    ) => boolean
+    expect(fn(0, null, 'CANCELLED')).toBe(false)
+    expect(fn(null, null, 'CANCELLED')).toBe(false)
   })
 
   // ---------------------------------------------------------------------------
@@ -1246,15 +1577,15 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       expect(summary.errors).toEqual([])
     })
 
-    it('attempts < 5 + sanity_failed → keeps retrying (existing behaviour)', async () => {
-      // Below threshold: standard repair retry path. Because filledPrice is
-      // null on this row the repair branch's invalid-row guard fires (this
-      // is the existing `repair_skipped_invalid_row` path) — what we are
-      // asserting is that auto-abandon does NOT fire prematurely.
+    it('attempts < 5 + sanity_failed (filledPrice null) → re-polls Webull instead of the cache-only repair path', async () => {
+      // A row with a cached `filled_price=null` (prior sanity rejection) must
+      // NOT be treated as repair (the cache is unusable) — it goes through
+      // the fresh-poll path instead. Below MAX_REPAIR_ATTEMPTS, auto-abandon
+      // must not fire prematurely even though this poll's price is still bad.
       const row: CandidateRow = {
         id: 200,
         clientOrderId: 'coid-stuck-early',
-        symbol: '9697',
+        symbol: '6971',
         side: 'BUY',
         brokerStatus: 'FILLED',
         filledQty: 1,
@@ -1266,8 +1597,83 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       }
       const { db, updates } = makeFakeDb([row])
       vi.mocked(createDb).mockReturnValue(db)
+      const webullStub = makeWebullStub({
+        'coid-stuck-early': {
+          status: 'FILLED',
+          filled_quantity: '1',
+          limit_price: '2683',
+          items: [{ filled_price: '10' }], // still the broker stub — sanity fails again
+          side: 'BUY',
+          symbol: '6971',
+        },
+      })
       vi.mocked(createWebullHttpClient).mockReturnValue(
-        makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
+        webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
+      )
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const symbolStub = emptySymbolStateStub()
+
+      const summary = await reconcileFills({
+        env: {
+          DB: FAKE_DB_BINDING,
+          SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
+        } as never,
+        now: () => new Date('2026-04-25T12:00:00.000Z'),
+        retryStateApply: true,
+      })
+
+      // Re-polled Webull (not the cache-only repair path).
+      expect(webullStub.findOrderByClientId).toHaveBeenCalled()
+      expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
+      // Two UPDATEs: (1) journal fill columns from the fresh poll,
+      // (2) failure marker (sanity_failed again) — state_applied_at NOT
+      // stamped, so the row stays eligible for the next tick's poll.
+      expect(updates).toHaveLength(2)
+      expect(updates[0]!.set.filledPrice).toBeNull()
+      expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
+      expect(updates[1]!.set.stateAppliedAt).toBeUndefined()
+      expect(updates[1]!.set.stateApplyError).toMatch(/sanity_failed/)
+      // Crucially: NOT abandoned, error counted (so the operator alert can
+      // still surface a fresh issue while it is recoverable).
+      expect(summary.abandoned).toBe(0)
+      expect(summary.stateApplyFailed).toBe(1)
+      expect(summary.errors).toHaveLength(1)
+    })
+
+    it('CANCELLED partial fill: invalid first price re-polls and applies once the broker returns a valid price', async () => {
+      // #6 regression: a CANCELLED/CANCELED/EXPIRED row that carries a
+      // partial fill must get the same re-poll treatment as FILLED when the
+      // first price fails the sanity ratio guard — not the cache-only repair
+      // path (which would immediately hit `repair_skipped_invalid_row` and,
+      // after enough ticks, auto-abandon a row a later poll could still
+      // resolve).
+      const row: CandidateRow = {
+        id: 201,
+        clientOrderId: 'coid-cancel-stub',
+        symbol: '6971',
+        side: 'BUY',
+        brokerStatus: 'CANCELLED',
+        filledQty: 1,
+        filledPrice: null,
+        realizedPnl: null,
+        stateAppliedAt: null,
+        stateApplyAttempts: 1,
+        stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
+      }
+      const { db, updates } = makeFakeDb([row])
+      vi.mocked(createDb).mockReturnValue(db)
+      const webullStub = makeWebullStub({
+        'coid-cancel-stub': {
+          status: 'CANCELLED',
+          filled_quantity: '1',
+          limit_price: '2683',
+          items: [{ filled_price: '2680' }], // this poll returns a realistic price
+          side: 'BUY',
+          symbol: '6971',
+        },
+      })
+      vi.mocked(createWebullHttpClient).mockReturnValue(
+        webullStub as unknown as ReturnType<typeof createWebullHttpClient>,
       )
       const symbolStub = emptySymbolStateStub()
 
@@ -1280,17 +1686,17 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // Existing path: repair_skipped_invalid_row fires (filledPrice=null).
-      // state_applied_at MUST NOT be stamped (= row stays in repair cohort).
-      expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
-      expect(updates).toHaveLength(1)
-      expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
-      expect(updates[0]!.set.stateApplyError).toMatch(/repair_skipped_invalid_row/)
-      // Crucially: NOT abandoned, error counted (so the operator alert can
-      // still surface a fresh issue while it is recoverable).
-      expect(summary.abandoned).toBe(0)
-      expect(summary.stateApplyFailed).toBe(1)
-      expect(summary.errors).toHaveLength(1)
+      expect(webullStub.findOrderByClientId).toHaveBeenCalled()
+      expect(symbolStub.recordFillOnce).toHaveBeenCalledOnce()
+      expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('6971', 'coid-cancel-stub', {
+        side: 'BUY',
+        qty: 1,
+        price: 2680,
+      })
+      expect(summary.stateApplied).toBe(1)
+      expect(summary.errors).toEqual([])
+      const markerUpdate = updates.find((u) => u.set.stateAppliedAt !== undefined)
+      expect(markerUpdate?.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     })
 
     it('attempts >= 5 + transient error (DO unavailable) → keeps retrying (NOT abandoned)', async () => {

@@ -201,4 +201,4 @@ UPDATE global_config SET
 WHERE id = 'default';
 ```
 
-**注: `total_capital_*` / `max_portfolio_exposure_pct` は schema に入れてあるが、現時点で exposure tracking 側 (PortfolioStateDO の open_exposure) が未実装。gate に反映されるのは follow-up issue 完了後。**
+注: cron の BUY は `total_capital_jpy × max_portfolio_exposure_pct` を上限に、symbol state の保有を積み上げて判定する (`total_capital_jpy` 未設定なら BUY 全停止)。risk-% sizing の銘柄は通貨別 `total_capital_*` が NULL だと発注しない。

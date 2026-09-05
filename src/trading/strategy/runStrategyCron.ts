@@ -8,6 +8,12 @@ import {
   createUnavailableBuyingPowerLedger,
   type BuyingPowerLedger,
 } from './buyingPower'
+import {
+  createExposureLedger,
+  createUnavailableExposureLedger,
+  type ExposureLedger,
+} from './exposureLedger'
+import type { PositionStore } from '../state/PositionStore'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
@@ -55,7 +61,11 @@ import {
 } from '../risk/newsShockDecision'
 import { isExtendedHoursGateReady, loadExtendedHoursGateDecisions } from '../risk/extendedHoursGate'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
-import { evaluateStrategyWindow, type StrategyWindowVerdict } from '../domain/tradingCalendar'
+import {
+  evaluateStrategyWindow,
+  isWithinRegularSession,
+  type StrategyWindowVerdict,
+} from '../domain/tradingCalendar'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 import { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } from './strategies/BreakoutMomentumStrategy'
 import {
@@ -75,8 +85,6 @@ import {
   type EntrySnapshot,
 } from './conditionalAllocation'
 
-const DEFAULT_EQUITY_USD = 10_000
-const DEFAULT_EQUITY_JPY = 1_500_000
 // 売買単位は per-symbol (symbol_config.lot_size) で持つ。未設定銘柄は scheduler
 // 側で fail-closed (発注見送り) — blanket default に倒さない (#symbol-lot-size)。
 
@@ -159,6 +167,13 @@ interface StrategyCronAnalysis {
     byCurrency: Record<SymbolCurrency, string[]>
     symbolMaxNotional: Record<string, number>
   }
+  /**
+   * `symbol_config.active = 0` だが qty>0 の保有が残っている symbol
+   *。`universe.symbols` には含めない (evaluated 銘柄では
+   * ないという既存の意味を保つ) — exit 判定だけを cron に通す「別枠」として
+   * ここに列挙する。
+   */
+  exitOnlySymbols: string[]
   portfolio?: {
     dailyStartEquity: number
     dailyRealizedPnl: number
@@ -191,7 +206,8 @@ interface StrategyCronAnalysis {
   newsShock?: NewsShockGateDecision
   runs: Array<{
     currency: SymbolCurrency
-    equity: number
+    /** null = `total_capital_usd/jpy` 未設定 (risk-% sizing は capital-unset で fail-closed)。 */
+    equity: number | null
     symbols: string[]
   }>
   decisions: PullbackDecisionTrace[]
@@ -204,6 +220,19 @@ interface StrategyCronAnalysis {
     view: AllocationView
     ordersEnabled: boolean
     rebalanceSkipped?: CashRebalanceSkip[]
+  }
+  /**
+   * Portfolio 全体エクスポージャー上限。cron が読んだ symbol
+   * state から算出した現在建玉 (`currentJpy`) と `max_portfolio_exposure_pct`
+   * 由来の上限 (`ceilingJpy`) の diagnostic snapshot。`unavailable` は `reason` 付き
+   * (この tick は cron BUY 全 fail-closed だったことを示す)。
+   */
+  exposure?: {
+    status: 'ok' | 'unavailable'
+    ceilingJpy: number
+    currentJpy: number
+    remainingJpy: number
+    reason?: string
   }
 }
 
@@ -352,11 +381,18 @@ export async function runStrategyCron(
           pairs: universe.pairRegimes,
         }
       : undefined
+  // `byCurrency` は analysis 報告用 (= 評価対象 `allowedSymbols` のみ)。exit-only
+  // 銘柄 は評価対象ではないので混ぜない — run 構築 /
+  // window gate 判定には別途 `runCurrency` (このコピーへ exit-only を追加した
+  // もの) を使う。
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
     byCurrency[cur].push(sym)
   }
+  // active=0 だが qty>0 の保有が残る symbol。SYMBOL_STATE
+  // check 通過後に populate する (positionStore が要る)。
+  const exitOnlySymbols: string[] = []
   const analysisBase = (): StrategyCronAnalysis => ({
     schema: 'strategy_cron_analysis.v1',
     generatedAt: new Date().toISOString(),
@@ -377,6 +413,7 @@ export async function runStrategyCron(
       byCurrency,
       symbolMaxNotional: universe.symbolMaxNotional,
     },
+    exitOnlySymbols: [...exitOnlySymbols],
     runs: [],
     decisions: [],
   })
@@ -389,7 +426,53 @@ export async function runStrategyCron(
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'trading_disabled' }
   }
 
-  if (universe.allowedSymbols.length === 0) {
+  // exit-only 銘柄 (下記) の判定に positionStore が要るので、SYMBOL_STATE check は
+  // no_tradable_symbols / window gate より前に置く。
+  if (!env.SYMBOL_STATE) {
+    emitSkipReasonNotify(notifier, 'no_bridge_state', options.requestId, 'critical')
+    return {
+      summary: emptySummary(),
+      symbols: universe.allowedSymbols,
+      analysis: analysisBase(),
+      skipReason: 'no_bridge_state',
+    }
+  }
+  const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
+
+  // `symbol_config.active = 0` は cron の評価対象から丸ごと
+  // 外れるため、そこに残った保有はこれまで永久に exit されなかった。inactive
+  // 銘柄のうち qty>0 が残っているものだけ「exit-only」として run に混ぜる —
+  // entry は絶対に許可しない (`effectiveEntrySuppressed` に無条件で入れる) が、
+  // stop / TP / time-stop の evaluation は通す。
+  const runCurrency: Record<SymbolCurrency, string[]> = {
+    USD: [...byCurrency.USD],
+    JPY: [...byCurrency.JPY],
+  }
+  for (const sym of universe.inactiveSymbols) {
+    let state: Awaited<ReturnType<typeof positionStore.getState>>
+    try {
+      state = await positionStore.getState(sym)
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: 'exit_only_state_read_failed',
+          requestId: options.requestId,
+          symbol: sym,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+      continue
+    }
+    if (state.position === null || state.position.qty <= 0) continue
+    exitOnlySymbols.push(sym)
+    const cur = universe.symbolCurrency[sym] ?? 'USD'
+    runCurrency[cur].push(sym)
+    // 既存の role 由来抑止理由があっても exit-only の方が実情を表すので上書きする
+    // (inactive = 発注不可が確定事実、role は付随情報)。
+    entrySuppressedSymbols[sym] = 'symbol inactive: exit-only'
+  }
+
+  if (universe.allowedSymbols.length === 0 && exitOnlySymbols.length === 0) {
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'no_tradable_symbols' }
   }
 
@@ -403,11 +486,15 @@ export async function runStrategyCron(
   // 休場が読めなかった反省。US 半日取引日は引けが 13:00 ET に短縮される (#547)。
   // flag off は従来挙動 (全 currency 常時評価)。skip は「設定通り」なので
   // `trading_disabled` 同様 **通知しない** (noisy 回避)。
+  //
+  // `runCurrency` (exit-only 銘柄込み) で currency の有無を判定する —
+  // exit-only 銘柄しか無い通貨でも、市場窓が開いていれば run 自体は起動して
+  // exit 判定を通す。
   const sessionNow = new Date()
   const windowVerdicts: StrategyWindowVerdict[] = []
   const activeCurrencies = new Set<SymbolCurrency>(
     (['USD', 'JPY'] as const).filter((cur) => {
-      if (byCurrency[cur].length === 0) return false
+      if (runCurrency[cur].length === 0) return false
       if (!global.sessionWindowGateEnabled) return true
       const verdict = evaluateStrategyWindow(
         sessionNow,
@@ -428,16 +515,6 @@ export async function runStrategyCron(
       symbols: universe.allowedSymbols,
       analysis: analysisBase(),
       skipReason: allHoliday ? 'market_holiday' : 'outside_session_window',
-    }
-  }
-
-  if (!env.SYMBOL_STATE) {
-    emitSkipReasonNotify(notifier, 'no_bridge_state', options.requestId, 'critical')
-    return {
-      summary: emptySummary(),
-      symbols: universe.allowedSymbols,
-      analysis: analysisBase(),
-      skipReason: 'no_bridge_state',
     }
   }
 
@@ -579,7 +656,6 @@ export async function runStrategyCron(
   }
   const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
-  const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
   // #21: trade と read を別 client に分離。WebullTradeClient は ENVIRONMENT
   // で staging gate を持つ (= staging からの live order を構造的に防ぐ)。
   // DRY_RUN path では両方 null、MockExecution が選ばれ fallback resolver も
@@ -775,18 +851,34 @@ export async function runStrategyCron(
   // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
   // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
   // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
+  // レギュラーセッション開場前に決定した BUY は MARKET 注文
+  // として寄り値と乖離した価格で約定し得る (実例: SOXS 9/4 寄り前 51.60 判断
+  // → 寄り 49.53 約定)。extendedHoursGate は 09:30 ET 以降しか評価しないため
+  // 寄り前 BUY をすり抜ける。`sessionWindowGateEnabled` の値に関わらず適用する
+  // — gate off だと cron は終日評価を続けるので、無条件にしないと寄り前 BUY が
+  // そのまま次の開場でキューされてしまう。SELL/HOLD は対象外 (exit は止めない)。
+  const sessionSuppressedSymbols: Record<string, string> = {}
+  for (const symbol of universe.allowedSymbols) {
+    const market = universe.symbolCurrency[symbol] === 'JPY' ? 'JP' : 'US'
+    if (!isWithinRegularSession(sessionNow, market)) {
+      sessionSuppressedSymbols[symbol.toUpperCase()] =
+        'outside regular session: BUY deferred (exits still evaluated)'
+    }
+  }
   // #exit-only-halt: risk 由来の halt 中は **全銘柄の BUY を抑止**し、SELL /
   // exit だけを通す。role 由来の抑止理由が既にある銘柄はそちらを優先して残す
-  // (より具体的な理由の方が decision log で有用)。
-  const effectiveEntrySuppressed: Record<string, string> =
-    entryHaltReason === null
-      ? entrySuppressedSymbols
-      : {
-          ...Object.fromEntries(
-            universe.allowedSymbols.map((symbol) => [symbol.toUpperCase(), entryHaltReason]),
-          ),
-          ...entrySuppressedSymbols,
-        }
+  // (より具体的な理由の方が decision log で有用)。優先順位 (高→低):
+  // role (`entrySuppressedSymbols`、exit-only 銘柄の理由もここに含む) >
+  // entryHaltReason > セッション外理由。
+  const effectiveEntrySuppressed: Record<string, string> = {
+    ...sessionSuppressedSymbols,
+    ...(entryHaltReason === null
+      ? {}
+      : Object.fromEntries(
+          universe.allowedSymbols.map((symbol) => [symbol.toUpperCase(), entryHaltReason]),
+        )),
+    ...entrySuppressedSymbols,
+  }
   if (entryHaltReason !== null) {
     console.log(
       JSON.stringify({
@@ -805,19 +897,20 @@ export async function runStrategyCron(
   }
   // run は `activeCurrencies` (= 銘柄あり ∧ (gate off ∨ 窓内)) のみ構築する。
   // gate off の時は両 currency が active なので従来挙動と一致する (#session-window-gate)。
-  const runs: Array<{ currency: SymbolCurrency; equity: number; symbols: string[] }> = []
+  // symbols は `runCurrency` (= `byCurrency` + exit-only 銘柄)。
+  const runs: Array<{ currency: SymbolCurrency; equity: number | null; symbols: string[] }> = []
   if (activeCurrencies.has('USD')) {
     runs.push({
       currency: 'USD',
-      equity: sanitizeEquity(global.totalCapitalUsd, DEFAULT_EQUITY_USD),
-      symbols: byCurrency.USD,
+      equity: sanitizeEquity(global.totalCapitalUsd),
+      symbols: runCurrency.USD,
     })
   }
   if (activeCurrencies.has('JPY')) {
     runs.push({
       currency: 'JPY',
-      equity: sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY),
-      symbols: byCurrency.JPY,
+      equity: sanitizeEquity(global.totalCapitalJpy),
+      symbols: runCurrency.JPY,
     })
   }
 
@@ -838,9 +931,10 @@ export async function runStrategyCron(
   const usdHasBudgetSymbol = byCurrency.USD.some(
     (s) => universe.symbolBudgetAllocPct[s.toUpperCase()] !== undefined,
   )
-  // USD/JPY は budget 換算に加え、live 時は買付余力 (USD 建て) の JPY 換算にも要る
-  // ので、live ならば取得する (#415)。
-  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null
+  // USD/JPY は budget 換算・買付余力に加え、portfolio exposure ledger (下記)
+  // が USD run の建玉を JPY 換算するのにも要るため、USD run がある tick は
+  // 常に取得する。
+  const needUsdJpy = usdHasBudgetSymbol || liveReadClient !== null || runCurrency.USD.length > 0
   const usdJpyRate = needUsdJpy ? await loadUsdJpyRate({ requestId: options.requestId }) : null
 
   // #415: 発注前の共有プール pre-trade ゲート。live 時のみ Webull の買付余力を取得し
@@ -850,6 +944,53 @@ export async function runStrategyCron(
   const buyingPower: BuyingPowerLedger | undefined = liveReadClient
     ? await resolveBuyingPowerLedger(liveReadClient, usdJpyRate, options.requestId)
     : undefined
+
+  // portfolio 全体エクスポージャー上限 (`max_portfolio_exposure_pct`)
+  // を cron BUY にも適用する。manual `/trade/execute` (`TradingService`) は
+  // `PortfolioState.openExposureUsd/Jpy` を見ているが、cron はそれを使わず
+  // 「この tick で cron 自身が読む symbol state」から現在建玉を積み上げる —
+  // openExposure* は sync-holdings / operator override / SELL_QTY_EXCEED
+  // fallback の position 上書きで容易に drift し (#660 系)、そのまま基準に
+  // すると誤ったエクスポージャーで発注可否を決めることになるため。
+  // pass 1/2 で同一 ledger object を共有し、tick 内の連続 BUY を逐次減算する。
+  // `runs` は session window gate でその tick に評価する currency に絞られている
+  // (#session-window-gate) が、建玉評価は window の内外を問わない — 例えば US
+  // window のみ開いている tick でも保有 JPY 建玉は台帳に含めないと remainingJpy
+  // を過大評価する。`runCurrency` (exit-only 銘柄込みの全 currency 別 symbol
+  // リスト) を全件渡し、scheduler 呼び出し自体は `runs` (window 内のみ) を使う
+  // 従来どおりの分離を保つ。
+  const exposureCap = await buildExposureLedger({
+    runs: [
+      { currency: 'USD', symbols: runCurrency.USD },
+      { currency: 'JPY', symbols: runCurrency.JPY },
+    ],
+    positionStore,
+    usdJpyRate,
+    budgetBasisJpy,
+    maxPortfolioExposurePct: global.maxPortfolioExposurePct,
+    requestId: options.requestId,
+  })
+  console.log(
+    JSON.stringify({
+      event: 'portfolio_exposure_ledger',
+      requestId: options.requestId,
+      status: exposureCap.status,
+      ceilingJpy: exposureCap.ceilingJpy,
+      currentJpy: exposureCap.currentJpy,
+      remainingJpy: exposureCap.remainingJpy,
+      ...(exposureCap.reason !== undefined ? { reason: exposureCap.reason } : {}),
+    }),
+  )
+  analysis = {
+    ...analysis,
+    exposure: {
+      status: exposureCap.status,
+      ceilingJpy: exposureCap.ceilingJpy,
+      currentJpy: exposureCap.currentJpy,
+      remainingJpy: exposureCap.remainingJpy,
+      ...(exposureCap.reason !== undefined ? { reason: exposureCap.reason } : {}),
+    },
+  }
 
   // TICKER_IS_DENY 自動停止ガード (#460)。env.DB がある時だけ有効化 — D1 が
   // 無いと symbol_config を停止できないので skip (= 従来挙動)。
@@ -862,6 +1003,45 @@ export async function runStrategyCron(
       })
     : undefined
 
+  // Behavioral BUY gates shared by pass 1 and cash rebalance pass 2 (#452
+  // follow-up): built once so the two runPullbackScheduler call sites cannot
+  // drift apart and let a rebalance BUY dodge restrictions a normal BUY hits.
+  const intradayOnlySymbols = new Set(Object.keys(universe.symbolIntradayOnly))
+  const earningsGateOption =
+    env.DB && earningsGateReady
+      ? {
+          earningsGate: {
+            repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
+            freezeBusinessDays: 1,
+          },
+        }
+      : {}
+  const macroEventGateOption =
+    env.DB && macroEventGateReady
+      ? {
+          macroEventGate: {
+            repo: createMacroEventCalendarRepo(createMacroEventCalendarDb(env.DB)),
+          },
+        }
+      : {}
+  const sanityFailedCooldownOption = env.DB
+    ? {
+        sanityFailedCooldown: {
+          check: (symbol: string) => hasRecentSanityFailure(env.DB!, symbol, SANITY_FAILED_COOLDOWN_MS),
+          withinMs: SANITY_FAILED_COOLDOWN_MS,
+        },
+      }
+    : {}
+
+  // global per-order cap を通貨別に解決。manual 経路
+  // (`DefaultRiskPolicy` / `buildCashRebalancePlan`) は既にこの値を使っており、
+  // cron の通常 BUY sizing だけ symbol cap のみで global cap を見ていなかった。
+  // 非有限/非正の config 値は undefined (= 無制限、既存挙動) に倒す。
+  const maxOrderNotionalFor = (currency: SymbolCurrency): number | undefined => {
+    const value = currency === 'JPY' ? global.maxOrderNotionalJpy : global.maxOrderNotionalUsd
+    return Number.isFinite(value) && value > 0 ? value : undefined
+  }
+
   for (const run of runs) {
     analysis.runs.push({
       currency: run.currency,
@@ -873,17 +1053,21 @@ export async function runStrategyCron(
     const decisionDb = strategyDecisionDbOrUndefined(env)
     const sub = await runPullbackScheduler({
       symbols: run.symbols,
-      equity: run.equity,
+      ...(run.equity !== null ? { equity: run.equity } : {}),
       symbolLotSizeMap: universe.symbolLotSize,
       barClient,
       positionStore,
       execution,
       symbolCapMap: universe.symbolMaxNotional,
+      ...(maxOrderNotionalFor(run.currency) !== undefined
+        ? { maxOrderNotional: maxOrderNotionalFor(run.currency) }
+        : {}),
       symbolBudgetAllocPctMap: universe.symbolBudgetAllocPct,
       budgetBasisJpy,
       fxJpyPerSymbolCcy,
       buyingPower,
-      intradayOnlySymbols: new Set(Object.keys(universe.symbolIntradayOnly)),
+      exposureCap,
+      intradayOnlySymbols,
       defaultRule,
       rulesMap,
       entrySuppressedSymbols: effectiveEntrySuppressed,
@@ -932,23 +1116,10 @@ export async function runStrategyCron(
       // migrate なら skip (POC 後方互換 / CodeRabbit #196 review)。
       // freezeBusinessDays は POC 段階では default 1 固定。将来 global_config に
       // 出すなら別 PR (#196 follow-up)。
-      ...(env.DB && earningsGateReady
-        ? {
-            earningsGate: {
-              repo: createEarningsCalendarRepo(createEarningsCalendarDb(env.DB)),
-              freezeBusinessDays: 1,
-            },
-          }
-        : {}),
+      ...earningsGateOption,
       // Macro event gate (issue #196 2/3)。同様に env.DB / 0014 適用の双方が
       // あるときだけ注入。config は default (±1h, full-day=true) で POC 運用。
-      ...(env.DB && macroEventGateReady
-        ? {
-            macroEventGate: {
-              repo: createMacroEventCalendarRepo(createMacroEventCalendarDb(env.DB)),
-            },
-          }
-        : {}),
+      ...macroEventGateOption,
       // VIX regime filter (issue #196 3/3)。critical で BUY 全停止、warning で
       // size を縮小、normal は no-op。両 currency run に同じ decision を渡す
       // (`^VIX` は global indicator なので per-currency に変える意味はない)。
@@ -965,15 +1136,7 @@ export async function runStrategyCron(
       // 6 BUY 累積)。env.DB がある時だけ有効化 — D1 が無いと journal 検査
       // できないので skip (= 過去挙動)。fail-closed: check throw 時は scheduler
       // 側で BUY reject。
-      ...(env.DB
-        ? {
-            sanityFailedCooldown: {
-              check: (symbol: string) =>
-                hasRecentSanityFailure(env.DB!, symbol, SANITY_FAILED_COOLDOWN_MS),
-              withinMs: SANITY_FAILED_COOLDOWN_MS,
-            },
-          }
-        : {}),
+      ...sanityFailedCooldownOption,
       onDecision: ({ trace, ...record }) =>
         logStrategyDecision(decisionDb, {
           timestamp: new Date().toISOString(),
@@ -1032,12 +1195,13 @@ export async function runStrategyCron(
       symbolMaxNotional: universe.symbolMaxNotional,
       maxOrderNotional: { USD: global.maxOrderNotionalUsd, JPY: global.maxOrderNotionalJpy },
     })
-    analysis.allocation.rebalanceSkipped = plan.skipped
+    const rebalanceSkipped: CashRebalanceSkip[] = [...plan.skipped]
     if (plan.orders.length > 0) {
       // pass 2: cash 銘柄だけを cashRebalanceQuantityMap 付きで再実行する。
       // entrySuppressedSymbols は渡さない (cash_parking の BUY を許可する唯一の
-      // 経路)。lot / per-symbol risk / buying-power / pending lock / DRY_RUN は
-      // 通常 BUY と同じ gate を通る。
+      // 経路)。lot / per-symbol risk / buying-power / pending lock / DRY_RUN /
+      // earnings・macro・sanity・intraday-only gate は pass 1 と共有 (#452
+      // follow-up) — rebalance BUY だけが通常 BUY の制約を回避しないように。
       const byCcy: Record<SymbolCurrency, typeof plan.orders> = { USD: [], JPY: [] }
       for (const order of plan.orders) {
         byCcy[universe.symbolCurrency[order.symbol] ?? 'USD'].push(order)
@@ -1045,19 +1209,45 @@ export async function runStrategyCron(
       for (const run of runs) {
         const orders = byCcy[run.currency]
         if (orders.length === 0) continue
+        // pass 2 は entrySuppressedSymbols を渡さない唯一の
+        // BUY 経路なので、上の per-symbol セッション抑止 (`sessionSuppressedSymbols`)
+        // が効かない。通貨単位でレギュラーセッション外を丸ごと弾かないと、
+        // 寄り前の退避 BUY がそのまま素通りしてしまう。
+        if (!isWithinRegularSession(sessionNow, run.currency === 'JPY' ? 'JP' : 'US')) {
+          for (const order of orders) {
+            rebalanceSkipped.push({
+              symbol: order.symbol,
+              reason: 'outside regular session: cash rebalance deferred',
+            })
+          }
+          console.log(
+            JSON.stringify({
+              event: 'cash_rebalance_pass2_skipped_outside_session',
+              requestId: options.requestId,
+              currency: run.currency,
+              symbols: orders.map((o) => o.symbol),
+            }),
+          )
+          continue
+        }
         const decisionDb = strategyDecisionDbOrUndefined(env)
         const sub = await runPullbackScheduler({
           symbols: orders.map((o) => o.symbol),
-          equity: run.equity,
+          ...(run.equity !== null ? { equity: run.equity } : {}),
           symbolLotSizeMap: universe.symbolLotSize,
           barClient,
           positionStore,
           execution,
           symbolCapMap: universe.symbolMaxNotional,
+          ...(maxOrderNotionalFor(run.currency) !== undefined
+            ? { maxOrderNotional: maxOrderNotionalFor(run.currency) }
+            : {}),
           cashRebalanceQuantityMap: Object.fromEntries(orders.map((o) => [o.symbol, o.quantity])),
+          intradayOnlySymbols,
           ...(onTickerDeny ? { onTickerDeny } : {}),
           fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
           buyingPower,
+          exposureCap,
           defaultRule,
           rulesMap,
           momentumSymbols,
@@ -1076,6 +1266,9 @@ export async function runStrategyCron(
           vixDecision,
           ...(newsShockGateOption ? { newsShockGate: newsShockGateOption } : {}),
           ...(extendedHoursGateOption ? { extendedHoursGate: extendedHoursGateOption } : {}),
+          ...earningsGateOption,
+          ...macroEventGateOption,
+          ...sanityFailedCooldownOption,
           onDecision: ({ trace, ...record }) =>
             logStrategyDecision(decisionDb, {
               timestamp: new Date().toISOString(),
@@ -1092,6 +1285,7 @@ export async function runStrategyCron(
         analysis.decisions.push(...sub.decisions)
       }
     }
+    analysis.allocation.rebalanceSkipped = rebalanceSkipped
   }
 
   return {
@@ -1102,9 +1296,16 @@ export async function runStrategyCron(
   }
 }
 
-function sanitizeEquity(value: number | null | undefined, fallback: number): number {
-  if (value === null || value === undefined) return fallback
-  if (!Number.isFinite(value) || value <= 0) return fallback
+/**
+ * `total_capital_usd/jpy` が未設定/非有限/非正なら **null** を返す (架空の
+ * baseline へ倒さない)。risk-% sizing (`computePullbackSizing`) はここで
+ * null が出ると `capital-unset` で fail-closed する — 本番の VUG/ICLN が
+ * `total_capital_usd` 未設定のまま $10,000 default 相当のサイズで発注されて
+ * いた事象の再発防止。
+ */
+function sanitizeEquity(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  if (!Number.isFinite(value) || value <= 0) return null
   return value
 }
 
@@ -1141,6 +1342,61 @@ async function resolveBuyingPowerLedger(
     console.warn(JSON.stringify({ event: 'buying_power_unavailable', reason, requestId }))
     return createUnavailableBuyingPowerLedger(reason)
   }
+}
+
+/**
+ * Portfolio 全体エクスポージャー上限の ledger を組み立てる。
+ * `runs` (= `runCurrency`、exit-only 銘柄込み) 全体の symbol state を読み、
+ * 保有中ポジションの評価額 (JPY 換算) を積み上げて現在建玉とする。
+ *
+ * fail-closed 条件 (いずれか一つでも該当すれば unavailable):
+ *   - `total_capital_jpy` 未設定 (`budgetBasisJpy === undefined`)
+ *   - `max_portfolio_exposure_pct` が非有限/非正
+ *   - state read が throw (DO 障害。symbol を reason に含める)
+ *   - USD 建玉があるのに `usdJpyRate` が null (誤換算で上限を過小評価しない)
+ */
+async function buildExposureLedger(params: {
+  runs: Array<{ currency: SymbolCurrency; symbols: string[] }>
+  positionStore: PositionStore
+  usdJpyRate: number | null
+  budgetBasisJpy: number | undefined
+  maxPortfolioExposurePct: number
+  requestId: string | undefined
+}): Promise<ExposureLedger> {
+  const { runs, positionStore, usdJpyRate, budgetBasisJpy, maxPortfolioExposurePct } = params
+  if (budgetBasisJpy === undefined) {
+    return createUnavailableExposureLedger('total_capital_jpy unset')
+  }
+  if (!Number.isFinite(maxPortfolioExposurePct) || maxPortfolioExposurePct <= 0) {
+    return createUnavailableExposureLedger('max_portfolio_exposure_pct invalid')
+  }
+  let currentJpy = 0
+  for (const run of runs) {
+    const fx = run.currency === 'JPY' ? 1 : usdJpyRate
+    for (const sym of run.symbols) {
+      let state: Awaited<ReturnType<typeof positionStore.getState>>
+      try {
+        state = await positionStore.getState(sym)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return createUnavailableExposureLedger(`state read failed for ${sym}: ${message}`)
+      }
+      const position = state.position
+      if (position === null || !Number.isFinite(position.qty) || position.qty <= 0) continue
+      if (fx === null) {
+        return createUnavailableExposureLedger('usd/jpy rate unavailable')
+      }
+      const notionalJpy = position.qty * position.avgPrice * fx
+      // 有効建玉 (qty > 0) の avgPrice/notional が非有限・非正なら黙って skip せず
+      // unavailable にする — 上限チェックの分母が過小評価されたまま status: 'ok'
+      // で通ると、実際の建玉より緩い remainingJpy で BUY を通してしまう。
+      if (!Number.isFinite(position.avgPrice) || position.avgPrice <= 0 || !Number.isFinite(notionalJpy) || notionalJpy <= 0) {
+        return createUnavailableExposureLedger(`invalid position valuation for ${sym}`)
+      }
+      currentJpy += notionalJpy
+    }
+  }
+  return createExposureLedger({ ceilingJpy: budgetBasisJpy * maxPortfolioExposurePct, currentJpy })
 }
 
 /**
