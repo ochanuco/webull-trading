@@ -108,7 +108,7 @@ describe('isWithinStrategyWindow — JP (#session-window-gate)', () => {
   })
 })
 
-describe('isWithinRegularSession (#p0-path-fixes)', () => {
+describe('isWithinRegularSession', () => {
   // 2026-04-20 は月曜、EDT (UTC-4) → 開場 09:30 ET = 13:30 UTC、引け 16:00 ET = 20:00 UTC。
   it('開場前 (09:29 ET) は false', () => {
     expect(isWithinRegularSession(new Date('2026-04-20T13:29:00.000Z'), 'US')).toBe(false)

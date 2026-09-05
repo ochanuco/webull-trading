@@ -234,10 +234,10 @@ describe('runStrategyCron', () => {
     expect(result.analysis.universe.symbols).not.toContain('9697')
   })
 
-  // #p0-path-fixes 4a: `symbol_config.active = 0` は評価対象から丸ごと外れるため、
+  // `symbol_config.active = 0` は評価対象から丸ごと外れるため、
   // そこに残った保有はこれまで永久に exit されなかった。qty>0 が残る inactive
   // 銘柄だけを exit-only として run に混ぜる回帰ガード。
-  describe('exit-only inactive symbols with a held position (#p0-path-fixes 4a)', () => {
+  describe('exit-only inactive symbols with a held position', () => {
     function fakeSymbolState(
       states: Record<string, { position: { qty: number } | null }>,
     ): DurableObjectNamespace<never> {
@@ -934,11 +934,11 @@ describe('runStrategyCron', () => {
     })
   })
 
-  // #p0-path-fixes 1: 寄り前に決定した BUY は MARKET 注文として寄り値と乖離した
+  // 寄り前に決定した BUY は MARKET 注文として寄り値と乖離した
   // 価格で約定し得る (実例: SOXS 9/4 寄り前 51.60 判断 → 寄り 49.53 約定)。
   // sessionWindowGateEnabled の値に関わらず、レギュラーセッション外の BUY は
   // 常に抑止する (exit は対象外)。
-  describe('regular session BUY gate (#p0-path-fixes 1)', () => {
+  describe('regular session BUY gate', () => {
     afterEach(() => {
       vi.useRealTimers()
     })
@@ -1004,7 +1004,7 @@ describe('runStrategyCron', () => {
   // BUY が止まる局面でも退避先へ買い戻す抜け道になる。
   describe('cash rebalance pass 2 shares pass 1 behavioral gates (#452 follow-up)', () => {
     // 2026-04-20 (月) は JP 取引日。09:00-15:30 JST がレギュラーセッション
-    // (#p0-path-fixes 1: pass 2 は通貨単位でセッション外を弾く)。
+    // (pass 2 は通貨単位でセッション外を弾く)。
     const JP_IN_SESSION = '2026-04-20T02:00:00.000Z' // 11:00 JST
     const JP_PRE_OPEN = '2026-04-19T23:00:00.000Z' // 08:00 JST (月, 開場前)
 
@@ -1099,7 +1099,7 @@ describe('runStrategyCron', () => {
       expect(pass2Options.exposureCap).toBe(pass1Options.exposureCap)
     })
 
-    // #p0-path-fixes 1: pass 2 は entrySuppressedSymbols を渡さない唯一の BUY
+    // pass 2 は entrySuppressedSymbols を渡さない唯一の BUY
     // 経路なので、通貨単位でレギュラーセッション外を弾かないと開場前の退避
     // BUY がそのまま素通りしてしまう。
     it('pass 2 is not invoked before the regular session opens', async () => {

@@ -502,7 +502,7 @@ export function isWithinStrategyWindow(
 
 /**
  * `now` が **当該 market のレギュラーセッション内** ([開場, 引け)、取引日限定)
- * なら true (#p0-path-fixes)。`evaluateStrategyWindow` と異なり pre-open 待機窓
+ * なら true。`evaluateStrategyWindow` と異なり pre-open 待機窓
  * (`minutesBeforeOpen`) を持たない — BUY 発注をレギュラーセッション開場後に
  * 限定する専用ゲート。寄り前に決定した MARKET 注文は寄り値と大きく乖離した
  * 価格で約定し得るため (実例: SOXS 9/4 寄り前 51.60 判断 → 寄り 49.53 約定)、

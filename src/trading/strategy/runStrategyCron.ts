@@ -169,7 +169,7 @@ interface StrategyCronAnalysis {
   }
   /**
    * `symbol_config.active = 0` だが qty>0 の保有が残っている symbol
-   * (#p0-path-fixes 4a)。`universe.symbols` には含めない (evaluated 銘柄では
+   *。`universe.symbols` には含めない (evaluated 銘柄では
    * ないという既存の意味を保つ) — exit 判定だけを cron に通す「別枠」として
    * ここに列挙する。
    */
@@ -382,7 +382,7 @@ export async function runStrategyCron(
         }
       : undefined
   // `byCurrency` は analysis 報告用 (= 評価対象 `allowedSymbols` のみ)。exit-only
-  // 銘柄 (#p0-path-fixes 4a) は評価対象ではないので混ぜない — run 構築 /
+  // 銘柄 は評価対象ではないので混ぜない — run 構築 /
   // window gate 判定には別途 `runCurrency` (このコピーへ exit-only を追加した
   // もの) を使う。
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
@@ -390,7 +390,7 @@ export async function runStrategyCron(
     const cur = universe.symbolCurrency[sym] ?? 'USD'
     byCurrency[cur].push(sym)
   }
-  // #p0-path-fixes 4a: active=0 だが qty>0 の保有が残る symbol。SYMBOL_STATE
+  // active=0 だが qty>0 の保有が残る symbol。SYMBOL_STATE
   // check 通過後に populate する (positionStore が要る)。
   const exitOnlySymbols: string[] = []
   const analysisBase = (): StrategyCronAnalysis => ({
@@ -426,8 +426,8 @@ export async function runStrategyCron(
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'trading_disabled' }
   }
 
-  // SYMBOL_STATE check は #p0-path-fixes 4a で no_tradable_symbols / window gate
-  // より前に上げた: exit-only 銘柄 (下記) の判定に positionStore が要るため。
+  // exit-only 銘柄 (下記) の判定に positionStore が要るので、SYMBOL_STATE check は
+  // no_tradable_symbols / window gate より前に置く。
   if (!env.SYMBOL_STATE) {
     emitSkipReasonNotify(notifier, 'no_bridge_state', options.requestId, 'critical')
     return {
@@ -439,7 +439,7 @@ export async function runStrategyCron(
   }
   const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
 
-  // #p0-path-fixes 4a: `symbol_config.active = 0` は cron の評価対象から丸ごと
+  // `symbol_config.active = 0` は cron の評価対象から丸ごと
   // 外れるため、そこに残った保有はこれまで永久に exit されなかった。inactive
   // 銘柄のうち qty>0 が残っているものだけ「exit-only」として run に混ぜる —
   // entry は絶対に許可しない (`effectiveEntrySuppressed` に無条件で入れる) が、
@@ -489,7 +489,7 @@ export async function runStrategyCron(
   //
   // `runCurrency` (exit-only 銘柄込み) で currency の有無を判定する —
   // exit-only 銘柄しか無い通貨でも、市場窓が開いていれば run 自体は起動して
-  // exit 判定を通す (#p0-path-fixes 4a)。
+  // exit 判定を通す。
   const sessionNow = new Date()
   const windowVerdicts: StrategyWindowVerdict[] = []
   const activeCurrencies = new Set<SymbolCurrency>(
@@ -656,8 +656,6 @@ export async function runStrategyCron(
   }
   const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
-  // positionStore は #p0-path-fixes 4a (exit-only 判定) のため上流の
-  // SYMBOL_STATE check 直後に生成済み。
   // #21: trade と read を別 client に分離。WebullTradeClient は ENVIRONMENT
   // で staging gate を持つ (= staging からの live order を構造的に防ぐ)。
   // DRY_RUN path では両方 null、MockExecution が選ばれ fallback resolver も
@@ -853,7 +851,7 @@ export async function runStrategyCron(
   // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
   // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
   // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
-  // #p0-path-fixes 1: レギュラーセッション開場前に決定した BUY は MARKET 注文
+  // レギュラーセッション開場前に決定した BUY は MARKET 注文
   // として寄り値と乖離した価格で約定し得る (実例: SOXS 9/4 寄り前 51.60 判断
   // → 寄り 49.53 約定)。extendedHoursGate は 09:30 ET 以降しか評価しないため
   // 寄り前 BUY をすり抜ける。`sessionWindowGateEnabled` の値に関わらず適用する
@@ -899,7 +897,7 @@ export async function runStrategyCron(
   }
   // run は `activeCurrencies` (= 銘柄あり ∧ (gate off ∨ 窓内)) のみ構築する。
   // gate off の時は両 currency が active なので従来挙動と一致する (#session-window-gate)。
-  // symbols は `runCurrency` (= `byCurrency` + exit-only 銘柄、#p0-path-fixes 4a)。
+  // symbols は `runCurrency` (= `byCurrency` + exit-only 銘柄)。
   const runs: Array<{ currency: SymbolCurrency; equity: number | null; symbols: string[] }> = []
   if (activeCurrencies.has('USD')) {
     runs.push({
@@ -1202,7 +1200,7 @@ export async function runStrategyCron(
       for (const run of runs) {
         const orders = byCcy[run.currency]
         if (orders.length === 0) continue
-        // #p0-path-fixes 1: pass 2 は entrySuppressedSymbols を渡さない唯一の
+        // pass 2 は entrySuppressedSymbols を渡さない唯一の
         // BUY 経路なので、上の per-symbol セッション抑止 (`sessionSuppressedSymbols`)
         // が効かない。通貨単位でレギュラーセッション外を丸ごと弾かないと、
         // 寄り前の退避 BUY がそのまま素通りしてしまう。

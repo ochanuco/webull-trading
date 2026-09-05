@@ -391,10 +391,10 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
   })
 
-  // #p0-path-fixes 4b: daily bar 取得が失敗しても held position の exit 判定を
+  // daily bar 取得が失敗しても held position の exit 判定を
   // 無防備なまま放置しない。flat は今まで通り (1 回で確定)、held は 1 回だけ
   // retry してから ERROR にする。
-  describe('held position survives bar-fetch failure (#p0-path-fixes 4b)', () => {
+  describe('held position survives bar-fetch failure', () => {
     const heldState = (): SymbolState => ({
       ...emptySymbolState('BROKEN', () => now),
       position: { qty: 7, avgPrice: 100, openedAt: '2026-01-01T00:00:00.000Z' },
@@ -503,14 +503,14 @@ describe('runPullbackScheduler', () => {
     expect(intent.price).toBe(118.25)
     // decision sink に渡る price も intraday 由来のものになっていること
     expect(summary.decisions[0]?.price).toBe(118.25)
-    // #p0-path-fixes 3: 判断価格の出所が trace 先頭に残る (fresh な intraday bar)。
+    // 判断価格の出所が trace 先頭に残る (fresh な intraday bar)。
     expect(summary.decisions[0]?.trace?.[0]?.label).toBe('data.price_as_of')
     expect(summary.decisions[0]?.trace?.[0]?.message).toBe('intraday_60m:2026-04-20T14:00:00.000Z')
   })
 
-  it('falls back to daily close for the decision record, but skips the BUY as stale price (#p0-path-fixes 3)', async () => {
+  it('falls back to daily close for the decision record, but skips the BUY as stale price', async () => {
     // intraday 対応 client では daily close fallback は BUY の判断価格として
-    // 採用しない (#p0-path-fixes 3: intraday bar 0件 = 鮮度確認不能)。fallback
+    // 採用しない (intraday bar 0件 = 鮮度確認不能)。fallback
     // 自体 (indicators.price = daily close 117.5) は decision record に残る。
     const store = makeStore({})
     const execution = mockExecution()
@@ -542,7 +542,7 @@ describe('runPullbackScheduler', () => {
     expect(decision?.trace?.[0]?.message).toBe('daily_close:2026-03-01')
   })
 
-  it('still SELLs a held position at the stop price when intraday bars are unavailable (#p0-path-fixes 3)', async () => {
+  it('still SELLs a held position at the stop price when intraday bars are unavailable', async () => {
     // 価格鮮度ゲートは BUY のみが対象 — 保有中の exit (stop hit) は intraday bar
     // が無くても daily close の判断価格で通常どおり動く。
     const heldState: SymbolState = {
@@ -572,7 +572,7 @@ describe('runPullbackScheduler', () => {
     expect(intent.price).toBe(117.5)
   })
 
-  it('skips the BUY as stale price when the latest intraday bar is 5h old (#p0-path-fixes 3)', async () => {
+  it('skips the BUY as stale price when the latest intraday bar is 5h old', async () => {
     const staleTimestamp = new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString()
     const store = makeStore({})
     const execution = mockExecution()
@@ -601,7 +601,7 @@ describe('runPullbackScheduler', () => {
     expect(decision?.trace?.map((s) => s.label)).toContain('risk.price_freshness')
   })
 
-  it('proceeds with the BUY at the daily close when the client has no getIntradayBars (#p0-path-fixes 3)', async () => {
+  it('proceeds with the BUY at the daily close when the client has no getIntradayBars', async () => {
     // intraday 非対応 client (Webull 等) は従来どおり無 gate。
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -2882,10 +2882,10 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
     expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
   })
 
-  // #p0-path-fixes 2: force-close window (引け前15分) に飲み込まれる直前の新規
+  // force-close window (引け前15分) に飲み込まれる直前の新規
   // BUY を止める。15分 cron は force-close と新規 entry を同じ window で両立
   // できない (const 定義のコメント参照)。
-  describe('no new entry within 30min of US close (#p0-path-fixes 2)', () => {
+  describe('no new entry within 30min of US close', () => {
     // 2026-04-20 月曜、EDT → 引け 20:00 UTC。
     const noEntryWindow = new Date('2026-04-20T19:45:00.000Z') // 15:45 ET (引け15分前、force-close 境界と重複)
     const beforeNoEntryWindow = new Date('2026-04-20T19:20:00.000Z') // 15:20 ET (30分window の外)
