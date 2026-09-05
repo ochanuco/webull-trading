@@ -387,6 +387,87 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
   })
 
+  // #p0-path-fixes 4b: daily bar 取得が失敗しても held position の exit 判定を
+  // 無防備なまま放置しない。flat は今まで通り (1 回で確定)、held は 1 回だけ
+  // retry してから ERROR にする。
+  describe('held position survives bar-fetch failure (#p0-path-fixes 4b)', () => {
+    const heldState = (): SymbolState => ({
+      ...emptySymbolState('BROKEN', () => now),
+      position: { qty: 7, avgPrice: 100, openedAt: '2026-01-01T00:00:00.000Z' },
+    })
+
+    it('emits ERROR with the holding reason and retries the daily fetch once when it keeps failing', async () => {
+      const events: NotificationEvent[] = []
+      const notifier: Notifier = {
+        async notify(event) {
+          events.push(event)
+        },
+      }
+      const getDailyBars = vi.fn(async () => {
+        throw new Error('upstream 500')
+      })
+      const summary = await runPullbackScheduler({
+        symbols: ['BROKEN'],
+        equity: 100_000,
+        barClient: { getDailyBars },
+        positionStore: makeStore({ BROKEN: heldState() }),
+        execution: mockExecution(),
+        notifier,
+        now: () => now,
+      })
+
+      expect(getDailyBars).toHaveBeenCalledTimes(2) // 1 回目 + retry 1 回
+      const decision = summary.decisions.find((d) => d.symbol === 'BROKEN')
+      expect(decision?.decision).toBe('ERROR')
+      expect(decision?.reason).toBe(
+        'exit evaluation unavailable while holding 7: bar fetch: upstream 500',
+      )
+      expect(summary.errors).toEqual([
+        { symbol: 'BROKEN', message: 'exit evaluation unavailable while holding 7: bar fetch: upstream 500' },
+      ])
+      await Promise.resolve()
+      const err = events.find((e) => e.type === 'ERROR') as
+        | Extract<NotificationEvent, { type: 'ERROR' }>
+        | undefined
+      expect(err?.cause).toBe('exit_unavailable_while_holding')
+    })
+
+    it('does not attempt a degraded SELL when bars are unavailable for a held position', async () => {
+      const getDailyBars = vi.fn(async () => {
+        throw new Error('upstream 500')
+      })
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['BROKEN'],
+        equity: 100_000,
+        barClient: { getDailyBars },
+        positionStore: makeStore({ BROKEN: heldState() }),
+        execution,
+        now: () => now,
+      })
+
+      expect(summary.sells).toBe(0)
+      expect(execution.calls).toHaveLength(0)
+    })
+
+    it('emits the same exit-unavailable ERROR when bars are fetched but insufficient for indicators', async () => {
+      const summary = await runPullbackScheduler({
+        symbols: ['BROKEN'],
+        equity: 100_000,
+        barClient: mockBarClient([synth(0, 100), synth(1, 101)]), // too short for indicators
+        positionStore: makeStore({ BROKEN: heldState() }),
+        execution: mockExecution(),
+        now: () => now,
+      })
+
+      const decision = summary.decisions.find((d) => d.symbol === 'BROKEN')
+      expect(decision?.decision).toBe('ERROR')
+      expect(decision?.reason).toBe(
+        'exit evaluation unavailable while holding 7: insufficient bars for indicators',
+      )
+    })
+  })
+
   it('uses intraday 1h close as fill price when getIntradayBars resolves', async () => {
     // 既存 BUY fixture (uptrendBars) は daily last close = 117.5。chart UI と
     // 整合させるため cron は intraday の最新 close を採用するのが今回の挙動。
@@ -418,9 +499,15 @@ describe('runPullbackScheduler', () => {
     expect(intent.price).toBe(118.25)
     // decision sink に渡る price も intraday 由来のものになっていること
     expect(summary.decisions[0]?.price).toBe(118.25)
+    // #p0-path-fixes 3: 判断価格の出所が trace 先頭に残る (fresh な intraday bar)。
+    expect(summary.decisions[0]?.trace?.[0]?.label).toBe('data.price_as_of')
+    expect(summary.decisions[0]?.trace?.[0]?.message).toBe('intraday_60m:2026-04-20T14:00:00.000Z')
   })
 
-  it('falls back to daily close when getIntradayBars rejects', async () => {
+  it('falls back to daily close for the decision record, but skips the BUY as stale price (#p0-path-fixes 3)', async () => {
+    // intraday 対応 client では daily close fallback は BUY の判断価格として
+    // 採用しない (#p0-path-fixes 3: intraday bar 0件 = 鮮度確認不能)。fallback
+    // 自体 (indicators.price = daily close 117.5) は decision record に残る。
     const store = makeStore({})
     const execution = mockExecution()
     const barClient: BarClient = {
@@ -438,10 +525,93 @@ describe('runPullbackScheduler', () => {
       now: () => now,
     })
 
-    // intraday 失敗は致命扱いせず daily close (= 117.5) で fallback。
-    expect(summary.buys).toBe(1)
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SKIP')
+    expect(decision?.reason).toBe(
+      'stale price: intraday bar unavailable, daily close fallback not accepted for BUY',
+    )
+    expect(decision?.price).toBe(117.5)
+    expect(decision?.trace?.map((s) => s.label)).toContain('risk.price_freshness')
+    expect(decision?.trace?.[0]?.label).toBe('data.price_as_of')
+    expect(decision?.trace?.[0]?.message).toBe('daily_close:2026-03-01')
+  })
+
+  it('still SELLs a held position at the stop price when intraday bars are unavailable (#p0-path-fixes 3)', async () => {
+    // 価格鮮度ゲートは BUY のみが対象 — 保有中の exit (stop hit) は intraday bar
+    // が無くても daily close の判断価格で通常どおり動く。
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString() },
+    }
+    const store = makeStore({ AAPL: heldState })
+    const execution = mockExecution()
+    const barClient: BarClient = {
+      getDailyBars: vi.fn(async () => uptrendBars()), // last close 117.5 << avgPrice 200 → stop hit
+      getIntradayBars: vi.fn(async () => {
+        throw new Error('yahoo 429')
+      }),
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient,
+      positionStore: store,
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.sells).toBe(1)
     const intent = execution.calls[0] as { side: string; price: number }
+    expect(intent.side).toBe('SELL')
     expect(intent.price).toBe(117.5)
+  })
+
+  it('skips the BUY as stale price when the latest intraday bar is 5h old (#p0-path-fixes 3)', async () => {
+    const staleTimestamp = new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString()
+    const store = makeStore({})
+    const execution = mockExecution()
+    const barClient: BarClient = {
+      getDailyBars: vi.fn(async () => uptrendBars()),
+      getIntradayBars: vi.fn(async () => [
+        { timestamp: staleTimestamp, open: 117.6, high: 118.4, low: 117.4, close: 118.0 },
+      ]),
+    }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient,
+      positionStore: store,
+      execution,
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.decision).toBe('SKIP')
+    expect(decision?.reason).toBe(
+      `stale price: intraday_60m as of ${staleTimestamp} exceeds 7200000ms`,
+    )
+    expect(decision?.trace?.map((s) => s.label)).toContain('risk.price_freshness')
+  })
+
+  it('proceeds with the BUY at the daily close when the client has no getIntradayBars (#p0-path-fixes 3)', async () => {
+    // intraday 非対応 client (Webull 等) は従来どおり無 gate。
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()), // getIntradayBars を実装しない fake
+      positionStore: makeStore({}),
+      execution: mockExecution(),
+      now: () => now,
+    })
+
+    expect(summary.buys).toBe(1)
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    expect(decision?.trace?.[0]?.label).toBe('data.price_as_of')
+    expect(decision?.trace?.[0]?.message).toBe('daily_close:2026-03-01')
   })
 
   it('fires notifier with TRADE event on a successful BUY (#199)', async () => {
@@ -2577,6 +2747,64 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
     })
     expect(summary.sells).toBe(0)
     expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
+  })
+
+  // #p0-path-fixes 2: force-close window (引け前15分) に飲み込まれる直前の新規
+  // BUY を止める。15分 cron は force-close と新規 entry を同じ window で両立
+  // できない (const 定義のコメント参照)。
+  describe('no new entry within 30min of US close (#p0-path-fixes 2)', () => {
+    // 2026-04-20 月曜、EDT → 引け 20:00 UTC。
+    const noEntryWindow = new Date('2026-04-20T19:45:00.000Z') // 15:45 ET (引け15分前、force-close 境界と重複)
+    const beforeNoEntryWindow = new Date('2026-04-20T19:20:00.000Z') // 15:20 ET (30分window の外)
+
+    it('holds a flat intraday-only symbol with an entry setup at 15:45 ET (0 BUYs)', async () => {
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: TEST_DEFAULT_RULE,
+        intradayOnlySymbols: new Set(['QQQ']),
+        now: () => noEntryWindow,
+      })
+      expect(summary.buys).toBe(0)
+      expect(execution.calls).toHaveLength(0)
+      const decision = summary.decisions.find((d) => d.symbol === 'QQQ')
+      expect(decision?.decision).toBe('HOLD')
+      expect(decision?.trace?.map((s) => s.label)).toContain('entry.intraday_no_entry')
+    })
+
+    it('still allows the BUY at 15:20 ET (outside the 30min window)', async () => {
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: TEST_DEFAULT_RULE,
+        intradayOnlySymbols: new Set(['QQQ']),
+        now: () => beforeNoEntryWindow,
+      })
+      expect(summary.buys).toBe(1)
+    })
+
+    it('does not hold a non-intraday-only symbol at 15:45 ET (BUY proceeds)', async () => {
+      const execution = mockExecution()
+      const summary = await runPullbackScheduler({
+        symbols: ['QQQ'],
+        equity: 100_000,
+        barClient: mockBarClient(uptrendBars()),
+        positionStore: makeStore({}),
+        execution,
+        defaultRule: TEST_DEFAULT_RULE,
+        intradayOnlySymbols: new Set(['TQQQ']), // QQQ は対象外
+        now: () => noEntryWindow,
+      })
+      expect(summary.buys).toBe(1)
+    })
   })
 })
 

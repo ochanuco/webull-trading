@@ -399,6 +399,60 @@ const MARKET_SESSION: Record<
  */
 export type StrategyWindowVerdict = 'in_window' | 'outside_window' | 'market_holiday'
 
+/** 市場ローカル暦日時刻 (曜日込み) の抽出結果。 */
+type SessionLocalTime = {
+  weekday: string
+  year: number
+  month: number
+  day: number
+  hour: number
+  minute: number
+}
+
+/**
+ * `now` の market ローカル暦日・曜日・時刻を `Intl.DateTimeFormat` 1 回で抽出する
+ * (`evaluateStrategyWindow` / `isWithinRegularSession` 共通)。抽出失敗
+ * (invalid Date 等) は null — 呼び出し側は fail-closed (窓外扱い) にする。
+ */
+function extractSessionLocalTime(now: Date, market: TradingMarket): SessionLocalTime | null {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: MARKET_SESSION[market].timeZone,
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(now)
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? ''
+  const weekday = get('weekday')
+  const year = Number(get('year'))
+  const month = Number(get('month'))
+  const day = Number(get('day'))
+  const hour = Number(get('hour'))
+  const minute = Number(get('minute'))
+  if (
+    !Number.isFinite(year) ||
+    !Number.isFinite(month) ||
+    !Number.isFinite(day) ||
+    !Number.isFinite(hour) ||
+    !Number.isFinite(minute)
+  ) {
+    return null
+  }
+  return { weekday, year, month, day, hour, minute }
+}
+
+const pad2 = (n: number) => String(n).padStart(2, '0')
+
+/** market ローカル暦日 y/m/d が祝日 (全日休場) か。US はルール計算、JP は static テーブル。 */
+function isMarketHolidayLocalYmd(market: TradingMarket, year: number, month: number, day: number): boolean {
+  if (market === 'US') return isUsMarketHolidayYmd(year, month, day)
+  return HOLIDAYS[market].has(`${year}-${pad2(month)}-${pad2(day)}`)
+}
+
 /**
  * `now` が **当該 market の取引日かつ「開場 `minutesBeforeOpen` 分前〜引け」**
  * の窓のどこに居るかを返す (#session-window-gate)。戦略 cron を開場前まで停止する
@@ -418,36 +472,13 @@ export function evaluateStrategyWindow(
   minutesBeforeOpen: number,
 ): StrategyWindowVerdict {
   if (!Number.isFinite(minutesBeforeOpen) || minutesBeforeOpen < 0) return 'outside_window'
+  const local = extractSessionLocalTime(now, market)
+  if (local === null) return 'outside_window'
+  if (local.weekday === 'Sat' || local.weekday === 'Sun') return 'outside_window'
+  const { year, month, day } = local
+  if (isMarketHolidayLocalYmd(market, year, month, day)) return 'market_holiday'
   const session = MARKET_SESSION[market]
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: session.timeZone,
-    weekday: 'short',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(now)
-  const get = (type: Intl.DateTimeFormatPartTypes): string =>
-    parts.find((p) => p.type === type)?.value ?? ''
-  const weekday = get('weekday')
-  if (weekday === 'Sat' || weekday === 'Sun') return 'outside_window'
-  const year = Number(get('year'))
-  const month = Number(get('month'))
-  const day = Number(get('day'))
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
-    return 'outside_window'
-  }
-  if (market === 'US') {
-    if (isUsMarketHolidayYmd(year, month, day)) return 'market_holiday'
-  } else if (HOLIDAYS[market].has(`${get('year')}-${get('month')}-${get('day')}`)) {
-    return 'market_holiday'
-  }
-  const hour = Number(get('hour'))
-  const minute = Number(get('minute'))
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 'outside_window'
-  const localMinutes = (hour % 24) * 60 + minute // hour12:false で稀に '24' を返す Intl quirk 対策
+  const localMinutes = (local.hour % 24) * 60 + local.minute // hour12:false で稀に '24' を返す Intl quirk 対策
   const closeMinutes =
     market === 'US' && isUsMarketEarlyCloseYmd(year, month, day)
       ? US_EARLY_CLOSE_ET_MINUTES
@@ -467,6 +498,30 @@ export function isWithinStrategyWindow(
   minutesBeforeOpen: number,
 ): boolean {
   return evaluateStrategyWindow(now, market, minutesBeforeOpen) === 'in_window'
+}
+
+/**
+ * `now` が **当該 market のレギュラーセッション内** ([開場, 引け)、取引日限定)
+ * なら true (#p0-path-fixes)。`evaluateStrategyWindow` と異なり pre-open 待機窓
+ * (`minutesBeforeOpen`) を持たない — BUY 発注をレギュラーセッション開場後に
+ * 限定する専用ゲート。寄り前に決定した MARKET 注文は寄り値と大きく乖離した
+ * 価格で約定し得るため (実例: SOXS 9/4 寄り前 51.60 判断 → 寄り 49.53 約定)、
+ * 「窓が開いていれば評価してよい」(`evaluateStrategyWindow`) と「発注してよい」
+ * を分離する。
+ */
+export function isWithinRegularSession(now: Date, market: TradingMarket): boolean {
+  const local = extractSessionLocalTime(now, market)
+  if (local === null) return false
+  if (local.weekday === 'Sat' || local.weekday === 'Sun') return false
+  const { year, month, day } = local
+  if (isMarketHolidayLocalYmd(market, year, month, day)) return false
+  const session = MARKET_SESSION[market]
+  const localMinutes = (local.hour % 24) * 60 + local.minute
+  const closeMinutes =
+    market === 'US' && isUsMarketEarlyCloseYmd(year, month, day)
+      ? US_EARLY_CLOSE_ET_MINUTES
+      : session.closeMinutes
+  return localMinutes >= session.openMinutes && localMinutes < closeMinutes
 }
 
 /**
@@ -493,7 +548,6 @@ function isTradingDayLocalYmd(market: TradingMarket, year: number, month: number
   const dow = dayOfWeek(year, month, day)
   if (dow === 0 || dow === 6) return false
   if (market === 'US') return !isUsMarketHolidayYmd(year, month, day)
-  const pad2 = (n: number) => String(n).padStart(2, '0')
   return !HOLIDAYS.JP.has(`${year}-${pad2(month)}-${pad2(day)}`)
 }
 

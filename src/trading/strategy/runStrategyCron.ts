@@ -55,7 +55,11 @@ import {
 } from '../risk/newsShockDecision'
 import { isExtendedHoursGateReady, loadExtendedHoursGateDecisions } from '../risk/extendedHoursGate'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
-import { evaluateStrategyWindow, type StrategyWindowVerdict } from '../domain/tradingCalendar'
+import {
+  evaluateStrategyWindow,
+  isWithinRegularSession,
+  type StrategyWindowVerdict,
+} from '../domain/tradingCalendar'
 import { runPullbackScheduler, type PullbackDecisionTrace, type PullbackRunSummary } from './pullbackScheduler'
 import { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } from './strategies/BreakoutMomentumStrategy'
 import {
@@ -159,6 +163,13 @@ interface StrategyCronAnalysis {
     byCurrency: Record<SymbolCurrency, string[]>
     symbolMaxNotional: Record<string, number>
   }
+  /**
+   * `symbol_config.active = 0` だが qty>0 の保有が残っている symbol
+   * (#p0-path-fixes 4a)。`universe.symbols` には含めない (evaluated 銘柄では
+   * ないという既存の意味を保つ) — exit 判定だけを cron に通す「別枠」として
+   * ここに列挙する。
+   */
+  exitOnlySymbols: string[]
   portfolio?: {
     dailyStartEquity: number
     dailyRealizedPnl: number
@@ -352,11 +363,18 @@ export async function runStrategyCron(
           pairs: universe.pairRegimes,
         }
       : undefined
+  // `byCurrency` は analysis 報告用 (= 評価対象 `allowedSymbols` のみ)。exit-only
+  // 銘柄 (#p0-path-fixes 4a) は評価対象ではないので混ぜない — run 構築 /
+  // window gate 判定には別途 `runCurrency` (このコピーへ exit-only を追加した
+  // もの) を使う。
   const byCurrency: Record<SymbolCurrency, string[]> = { USD: [], JPY: [] }
   for (const sym of universe.allowedSymbols) {
     const cur = universe.symbolCurrency[sym] ?? 'USD'
     byCurrency[cur].push(sym)
   }
+  // #p0-path-fixes 4a: active=0 だが qty>0 の保有が残る symbol。SYMBOL_STATE
+  // check 通過後に populate する (positionStore が要る)。
+  const exitOnlySymbols: string[] = []
   const analysisBase = (): StrategyCronAnalysis => ({
     schema: 'strategy_cron_analysis.v1',
     generatedAt: new Date().toISOString(),
@@ -377,6 +395,7 @@ export async function runStrategyCron(
       byCurrency,
       symbolMaxNotional: universe.symbolMaxNotional,
     },
+    exitOnlySymbols: [...exitOnlySymbols],
     runs: [],
     decisions: [],
   })
@@ -389,7 +408,53 @@ export async function runStrategyCron(
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'trading_disabled' }
   }
 
-  if (universe.allowedSymbols.length === 0) {
+  // SYMBOL_STATE check は #p0-path-fixes 4a で no_tradable_symbols / window gate
+  // より前に上げた: exit-only 銘柄 (下記) の判定に positionStore が要るため。
+  if (!env.SYMBOL_STATE) {
+    emitSkipReasonNotify(notifier, 'no_bridge_state', options.requestId, 'critical')
+    return {
+      summary: emptySummary(),
+      symbols: universe.allowedSymbols,
+      analysis: analysisBase(),
+      skipReason: 'no_bridge_state',
+    }
+  }
+  const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
+
+  // #p0-path-fixes 4a: `symbol_config.active = 0` は cron の評価対象から丸ごと
+  // 外れるため、そこに残った保有はこれまで永久に exit されなかった。inactive
+  // 銘柄のうち qty>0 が残っているものだけ「exit-only」として run に混ぜる —
+  // entry は絶対に許可しない (`effectiveEntrySuppressed` に無条件で入れる) が、
+  // stop / TP / time-stop の evaluation は通す。
+  const runCurrency: Record<SymbolCurrency, string[]> = {
+    USD: [...byCurrency.USD],
+    JPY: [...byCurrency.JPY],
+  }
+  for (const sym of universe.inactiveSymbols) {
+    let state: Awaited<ReturnType<typeof positionStore.getState>>
+    try {
+      state = await positionStore.getState(sym)
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: 'exit_only_state_read_failed',
+          requestId: options.requestId,
+          symbol: sym,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+      continue
+    }
+    if (state.position === null || state.position.qty <= 0) continue
+    exitOnlySymbols.push(sym)
+    const cur = universe.symbolCurrency[sym] ?? 'USD'
+    runCurrency[cur].push(sym)
+    // 既存の role 由来抑止理由があっても exit-only の方が実情を表すので上書きする
+    // (inactive = 発注不可が確定事実、role は付随情報)。
+    entrySuppressedSymbols[sym] = 'symbol inactive: exit-only'
+  }
+
+  if (universe.allowedSymbols.length === 0 && exitOnlySymbols.length === 0) {
     return { summary: emptySummary(), symbols: [], analysis: analysisBase(), skipReason: 'no_tradable_symbols' }
   }
 
@@ -403,11 +468,15 @@ export async function runStrategyCron(
   // 休場が読めなかった反省。US 半日取引日は引けが 13:00 ET に短縮される (#547)。
   // flag off は従来挙動 (全 currency 常時評価)。skip は「設定通り」なので
   // `trading_disabled` 同様 **通知しない** (noisy 回避)。
+  //
+  // `runCurrency` (exit-only 銘柄込み) で currency の有無を判定する —
+  // exit-only 銘柄しか無い通貨でも、市場窓が開いていれば run 自体は起動して
+  // exit 判定を通す (#p0-path-fixes 4a)。
   const sessionNow = new Date()
   const windowVerdicts: StrategyWindowVerdict[] = []
   const activeCurrencies = new Set<SymbolCurrency>(
     (['USD', 'JPY'] as const).filter((cur) => {
-      if (byCurrency[cur].length === 0) return false
+      if (runCurrency[cur].length === 0) return false
       if (!global.sessionWindowGateEnabled) return true
       const verdict = evaluateStrategyWindow(
         sessionNow,
@@ -428,16 +497,6 @@ export async function runStrategyCron(
       symbols: universe.allowedSymbols,
       analysis: analysisBase(),
       skipReason: allHoliday ? 'market_holiday' : 'outside_session_window',
-    }
-  }
-
-  if (!env.SYMBOL_STATE) {
-    emitSkipReasonNotify(notifier, 'no_bridge_state', options.requestId, 'critical')
-    return {
-      summary: emptySummary(),
-      symbols: universe.allowedSymbols,
-      analysis: analysisBase(),
-      skipReason: 'no_bridge_state',
     }
   }
 
@@ -579,7 +638,8 @@ export async function runStrategyCron(
   }
   const scaledRiskPerTradePct = global.riskBasePerTradePct * ddScale.scale
 
-  const positionStore = new SymbolStateClient(env.SYMBOL_STATE)
+  // positionStore は #p0-path-fixes 4a (exit-only 判定) のため上流の
+  // SYMBOL_STATE check 直後に生成済み。
   // #21: trade と read を別 client に分離。WebullTradeClient は ENVIRONMENT
   // で staging gate を持つ (= staging からの live order を構造的に防ぐ)。
   // DRY_RUN path では両方 null、MockExecution が選ばれ fallback resolver も
@@ -775,18 +835,34 @@ export async function runStrategyCron(
   // VIX regime decision を summary にも載せる (CodeRabbit #216 4th):
   // sub-run ごとに独立した summary が `vix` を持つので、aggregate もそれと
   // 揃えておく。`emptySummary()` は `vix` を埋めないので明示的に上書きする。
+  // #p0-path-fixes 1: レギュラーセッション開場前に決定した BUY は MARKET 注文
+  // として寄り値と乖離した価格で約定し得る (実例: SOXS 9/4 寄り前 51.60 判断
+  // → 寄り 49.53 約定)。extendedHoursGate は 09:30 ET 以降しか評価しないため
+  // 寄り前 BUY をすり抜ける。`sessionWindowGateEnabled` の値に関わらず適用する
+  // — gate off だと cron は終日評価を続けるので、無条件にしないと寄り前 BUY が
+  // そのまま次の開場でキューされてしまう。SELL/HOLD は対象外 (exit は止めない)。
+  const sessionSuppressedSymbols: Record<string, string> = {}
+  for (const symbol of universe.allowedSymbols) {
+    const market = universe.symbolCurrency[symbol] === 'JPY' ? 'JP' : 'US'
+    if (!isWithinRegularSession(sessionNow, market)) {
+      sessionSuppressedSymbols[symbol.toUpperCase()] =
+        'outside regular session: BUY deferred (exits still evaluated)'
+    }
+  }
   // #exit-only-halt: risk 由来の halt 中は **全銘柄の BUY を抑止**し、SELL /
   // exit だけを通す。role 由来の抑止理由が既にある銘柄はそちらを優先して残す
-  // (より具体的な理由の方が decision log で有用)。
-  const effectiveEntrySuppressed: Record<string, string> =
-    entryHaltReason === null
-      ? entrySuppressedSymbols
-      : {
-          ...Object.fromEntries(
-            universe.allowedSymbols.map((symbol) => [symbol.toUpperCase(), entryHaltReason]),
-          ),
-          ...entrySuppressedSymbols,
-        }
+  // (より具体的な理由の方が decision log で有用)。優先順位 (高→低):
+  // role (`entrySuppressedSymbols`、exit-only 銘柄の理由もここに含む) >
+  // entryHaltReason > セッション外理由。
+  const effectiveEntrySuppressed: Record<string, string> = {
+    ...sessionSuppressedSymbols,
+    ...(entryHaltReason === null
+      ? {}
+      : Object.fromEntries(
+          universe.allowedSymbols.map((symbol) => [symbol.toUpperCase(), entryHaltReason]),
+        )),
+    ...entrySuppressedSymbols,
+  }
   if (entryHaltReason !== null) {
     console.log(
       JSON.stringify({
@@ -805,19 +881,20 @@ export async function runStrategyCron(
   }
   // run は `activeCurrencies` (= 銘柄あり ∧ (gate off ∨ 窓内)) のみ構築する。
   // gate off の時は両 currency が active なので従来挙動と一致する (#session-window-gate)。
+  // symbols は `runCurrency` (= `byCurrency` + exit-only 銘柄、#p0-path-fixes 4a)。
   const runs: Array<{ currency: SymbolCurrency; equity: number; symbols: string[] }> = []
   if (activeCurrencies.has('USD')) {
     runs.push({
       currency: 'USD',
       equity: sanitizeEquity(global.totalCapitalUsd, DEFAULT_EQUITY_USD),
-      symbols: byCurrency.USD,
+      symbols: runCurrency.USD,
     })
   }
   if (activeCurrencies.has('JPY')) {
     runs.push({
       currency: 'JPY',
       equity: sanitizeEquity(global.totalCapitalJpy, DEFAULT_EQUITY_JPY),
-      symbols: byCurrency.JPY,
+      symbols: runCurrency.JPY,
     })
   }
 
@@ -1041,7 +1118,7 @@ export async function runStrategyCron(
       symbolMaxNotional: universe.symbolMaxNotional,
       maxOrderNotional: { USD: global.maxOrderNotionalUsd, JPY: global.maxOrderNotionalJpy },
     })
-    analysis.allocation.rebalanceSkipped = plan.skipped
+    const rebalanceSkipped: CashRebalanceSkip[] = [...plan.skipped]
     if (plan.orders.length > 0) {
       // pass 2: cash 銘柄だけを cashRebalanceQuantityMap 付きで再実行する。
       // entrySuppressedSymbols は渡さない (cash_parking の BUY を許可する唯一の
@@ -1055,6 +1132,27 @@ export async function runStrategyCron(
       for (const run of runs) {
         const orders = byCcy[run.currency]
         if (orders.length === 0) continue
+        // #p0-path-fixes 1: pass 2 は entrySuppressedSymbols を渡さない唯一の
+        // BUY 経路なので、上の per-symbol セッション抑止 (`sessionSuppressedSymbols`)
+        // が効かない。通貨単位でレギュラーセッション外を丸ごと弾かないと、
+        // 寄り前の退避 BUY がそのまま素通りしてしまう。
+        if (!isWithinRegularSession(sessionNow, run.currency === 'JPY' ? 'JP' : 'US')) {
+          for (const order of orders) {
+            rebalanceSkipped.push({
+              symbol: order.symbol,
+              reason: 'outside regular session: cash rebalance deferred',
+            })
+          }
+          console.log(
+            JSON.stringify({
+              event: 'cash_rebalance_pass2_skipped_outside_session',
+              requestId: options.requestId,
+              currency: run.currency,
+              symbols: orders.map((o) => o.symbol),
+            }),
+          )
+          continue
+        }
         const decisionDb = strategyDecisionDbOrUndefined(env)
         const sub = await runPullbackScheduler({
           symbols: orders.map((o) => o.symbol),
@@ -1106,6 +1204,7 @@ export async function runStrategyCron(
         analysis.decisions.push(...sub.decisions)
       }
     }
+    analysis.allocation.rebalanceSkipped = rebalanceSkipped
   }
 
   return {

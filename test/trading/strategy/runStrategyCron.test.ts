@@ -234,6 +234,94 @@ describe('runStrategyCron', () => {
     expect(result.analysis.universe.symbols).not.toContain('9697')
   })
 
+  // #p0-path-fixes 4a: `symbol_config.active = 0` は評価対象から丸ごと外れるため、
+  // そこに残った保有はこれまで永久に exit されなかった。qty>0 が残る inactive
+  // 銘柄だけを exit-only として run に混ぜる回帰ガード。
+  describe('exit-only inactive symbols with a held position (#p0-path-fixes 4a)', () => {
+    function fakeSymbolState(
+      states: Record<string, { position: { qty: number } | null }>,
+    ): DurableObjectNamespace<never> {
+      return {
+        idFromName: (name: string) => ({ name }),
+        get: (id: { name: string }) => ({
+          getState: vi.fn().mockResolvedValue(states[id.name] ?? { position: null }),
+        }),
+      } as unknown as DurableObjectNamespace<never>
+    }
+
+    function envWithSymbolState(
+      symbolState: DurableObjectNamespace<never>,
+    ): Parameters<typeof runStrategyCron>[0] {
+      return {
+        DB: {} as D1Database,
+        SYMBOL_STATE: symbolState,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 0,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+    }
+
+    const inactiveUniverse = () =>
+      makeSymbolUniverse({
+        allowedSymbols: ['SOXL'],
+        inactiveSymbols: ['9697'],
+        symbolCurrency: { SOXL: 'USD', '9697': 'JPY' },
+        symbolMarket: { SOXL: 'US', '9697': 'JP' },
+        symbolLotSize: { SOXL: 1, '9697': 100 },
+      })
+
+    it('inactive symbol with qty>0 is added to its currency run and suppressed as exit-only', async () => {
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(inactiveUniverse())
+      const symbolState = fakeSymbolState({ '9697': { position: { qty: 100 } } })
+      const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+      expect(result.analysis.exitOnlySymbols).toEqual(['9697'])
+      // 評価対象 (universe) には混ぜない — dashboard / risk gate 表示の意味を保つ。
+      expect(result.analysis.universe.symbols).toEqual(['SOXL'])
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      const jpyCall = calls.find((c) => c[0].symbols.includes('9697'))
+      expect(jpyCall).toBeDefined()
+      expect(jpyCall![0].entrySuppressedSymbols?.['9697']).toBe('symbol inactive: exit-only')
+    })
+
+    it('inactive symbol with no position is not added to any run', async () => {
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(inactiveUniverse())
+      const symbolState = fakeSymbolState({ '9697': { position: null } })
+      const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+      expect(result.analysis.exitOnlySymbols).toEqual([])
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      for (const [opts] of calls) {
+        expect(opts.symbols).not.toContain('9697')
+      }
+    })
+
+    it('logs exit_only_state_read_failed and skips the symbol when getState throws', async () => {
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(inactiveUniverse())
+      const symbolState = {
+        idFromName: (name: string) => ({ name }),
+        get: () => ({
+          getState: vi.fn().mockRejectedValue(new Error('DO unavailable')),
+        }),
+      } as unknown as DurableObjectNamespace<never>
+      const result = await runStrategyCron(envWithSymbolState(symbolState))
+
+      expect(result.analysis.exitOnlySymbols).toEqual([])
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('exit_only_state_read_failed'),
+      )
+    })
+  })
+
   it('fail-closes to portfolio_halted on invalid tradingDisabledUntil timestamp', async () => {
     const envBadTimestamp = {
       ...env,
@@ -702,10 +790,84 @@ describe('runStrategyCron', () => {
     })
   })
 
+  // #p0-path-fixes 1: 寄り前に決定した BUY は MARKET 注文として寄り値と乖離した
+  // 価格で約定し得る (実例: SOXS 9/4 寄り前 51.60 判断 → 寄り 49.53 約定)。
+  // sessionWindowGateEnabled の値に関わらず、レギュラーセッション外の BUY は
+  // 常に抑止する (exit は対象外)。
+  describe('regular session BUY gate (#p0-path-fixes 1)', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** PORTFOLIO_STATE を健全な値で bind した env (entryHaltReason を null に保つ)。 */
+    function envHealthyPortfolio(): Parameters<typeof runStrategyCron>[0] {
+      return {
+        DB: {} as D1Database,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 0,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+    }
+
+    const SESSION_REASON = 'outside regular session: BUY deferred (exits still evaluated)'
+
+    it('gate on: 寄り前 (09:10 ET) は USD 銘柄全てが session 理由で BUY 抑止される', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-04-20T13:10:00.000Z')) // 09:10 ET (月)
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      await runStrategyCron(envHealthyPortfolio())
+      const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
+      expect(suppressed.SOXL).toBe(SESSION_REASON)
+      expect(suppressed.SOXS).toBe(SESSION_REASON)
+    })
+
+    it('gate on: 開場後 (09:35 ET) は session 理由で抑止されない', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-04-20T13:35:00.000Z')) // 09:35 ET (月)
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
+      )
+      await runStrategyCron(envHealthyPortfolio())
+      const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
+      expect(suppressed.SOXL).toBeUndefined()
+      expect(suppressed.SOXS).toBeUndefined()
+    })
+
+    it('gate off でも時間外 (20:00 ET) は session 理由で抑止される (終日評価の素通し防止)', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-04-21T00:00:00.000Z')) // 20:00 ET (月)
+      // default config: sessionWindowGateEnabled=false
+      await runStrategyCron(envHealthyPortfolio())
+      const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
+      expect(suppressed.SOXL).toBe(SESSION_REASON)
+      expect(suppressed.SOXS).toBe(SESSION_REASON)
+    })
+  })
+
   // #452 follow-up: cash rebalance pass 2 は pass 1 と同じ挙動制約 (earnings /
   // macro / sanity-failed cooldown / intraday-only close) を受けないと、通常
   // BUY が止まる局面でも退避先へ買い戻す抜け道になる。
   describe('cash rebalance pass 2 shares pass 1 behavioral gates (#452 follow-up)', () => {
+    // 2026-04-20 (月) は JP 取引日。09:00-15:30 JST がレギュラーセッション
+    // (#p0-path-fixes 1: pass 2 は通貨単位でセッション外を弾く)。
+    const JP_IN_SESSION = '2026-04-20T02:00:00.000Z' // 11:00 JST
+    const JP_PRE_OPEN = '2026-04-19T23:00:00.000Z' // 08:00 JST (月, 開場前)
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
     /** sqlite_master probe に全 table ready (`{ ok: 1 }`) で応答する fake D1。 */
     function fakeDbAllTablesReady(): D1Database {
       return {
@@ -733,7 +895,8 @@ describe('runStrategyCron', () => {
       } as unknown as Parameters<typeof runStrategyCron>[0]
     }
 
-    it('pass 2 runPullbackScheduler call receives the same behavioral gate options as pass 1', async () => {
+    /** pass 2 テスト共通の universe/config: JPY-only (fx=1) + SOXL→SGOV cash fallback。 */
+    function setUpCashFallbackFixture(): void {
       // JPY-only universe (fx=1) を使い、usdJpyRate 取得を経路から外す。SOXL は
       // entry_required だが WATCH/NG 想定 (pass 1 の mocked entrySnapshots) →
       // cash_fallback 先 SGOV へ退避し、pass 2 の BUY 計画が立つ。
@@ -758,6 +921,12 @@ describe('runStrategyCron', () => {
           SGOV: { status: 'NG', price: 100, heldQty: 0 },
         },
       })
+    }
+
+    it('pass 2 runPullbackScheduler call receives the same behavioral gate options as pass 1', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackFixture()
 
       const db = fakeDbAllTablesReady()
       await runStrategyCron(envWithHealthyPortfolio(db))
@@ -778,6 +947,27 @@ describe('runStrategyCron', () => {
         expect(pass1Options[key]).toBeDefined()
         expect(pass2Options[key]).toBeDefined()
       }
+    })
+
+    // #p0-path-fixes 1: pass 2 は entrySuppressedSymbols を渡さない唯一の BUY
+    // 経路なので、通貨単位でレギュラーセッション外を弾かないと開場前の退避
+    // BUY がそのまま素通りしてしまう。
+    it('pass 2 is not invoked before the regular session opens', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_PRE_OPEN))
+      setUpCashFallbackFixture()
+
+      const db = fakeDbAllTablesReady()
+      const result = await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(1) // pass 1 のみ、cash rebalance pass 2 は skip
+      expect(result.analysis.allocation?.rebalanceSkipped).toContainEqual(
+        expect.objectContaining({
+          symbol: 'SGOV',
+          reason: 'outside regular session: cash rebalance deferred',
+        }),
+      )
     })
   })
 })
