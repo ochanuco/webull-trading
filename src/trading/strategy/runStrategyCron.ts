@@ -78,9 +78,11 @@ import {
 import { createTickerDenyGuard } from '../risk/tickerDenyGuard'
 import { createDb as createSymbolConfigDb } from '../../infrastructure/db/tradeJournalRepo'
 import {
+  buildCashFallbackSellPlan,
   buildCashRebalancePlan,
   computeConditionalAllocation,
   type AllocationView,
+  type CashRebalanceOrder,
   type CashRebalanceSkip,
   type EntrySnapshot,
 } from './conditionalAllocation'
@@ -212,13 +214,15 @@ interface StrategyCronAnalysis {
   }>
   decisions: PullbackDecisionTrace[]
   /**
-   * 条件連動配分 (#452 Layer 3)。target/active weight と退避の判定結果。
-   * `cash_fallback_orders_enabled` が off でも**計算は常に行い**ここに残す
-   * (判定・表示のみモード)。発注 plan は on の時のみ。
+   * 条件連動配分 (#452 Layer 3 / #452 follow-up)。target/active weight と退避の
+   * 判定結果。`cash_fallback_orders_enabled` / `cash_fallback_sell_mode` が
+   * off でも**計算は常に行い**ここに残す (判定・表示のみモード)。発注 plan は
+   * どちらか on の時のみ。
    */
   allocation?: {
     view: AllocationView
     ordersEnabled: boolean
+    sellMode: 'off' | 'observe' | 'enforce'
     rebalanceSkipped?: CashRebalanceSkip[]
   }
   /**
@@ -1157,10 +1161,27 @@ export async function runStrategyCron(
     analysis.decisions.push(...sub.decisions)
   }
 
-  // ---- 条件連動配分 (#452 Layer 3) ----
+  // cash rebalance SELL の需要判定 (#452 follow-up)。pass 1 (通常評価) 時点の
+  // 保有 / BUY 試行のみを見る — pass 2 (BUY 側 cash rebalance) の結果まで含めると
+  // 「退避先へ BUY した直後に退避元へ SELL の需要判定が回る」自己参照になる
+  // ため、pass 1 終了直後・pass 2 実行前のこの時点で確定させる。broker 側で
+  // reject/error になった BUY 試行も「資金需要はあった」ので需要に含める。
+  const demandSources = new Set<string>()
+  for (const [sym, snap] of Object.entries(summary.entrySnapshots)) {
+    if (snap.heldQty > 0) demandSources.add(sym)
+  }
+  for (const record of summary.decisions) {
+    if (record.decision === 'BUY' || record.order?.side === 'BUY') {
+      demandSources.add(record.symbol)
+    }
+  }
+
+  // ---- 条件連動配分 (#452 Layer 3 / #452 follow-up) ----
   // target/active weight の計算は flag に関わらず常に行い analysis に残す
-  // (判定・表示)。退避先への自動発注 (pass 2) は cash_fallback_orders_enabled
-  // (default false) が on で、かつ budget 基準額がある時だけ。
+  // (判定・表示)。退避先への自動発注 (BUY pass 2) は cash_fallback_orders_enabled
+  // (default false)、退避先からの自動 SELL は cash_fallback_sell_mode
+  // (default 'off') がそれぞれ独立に on の時だけ — BUY を切ったまま SELL だけ
+  // 先に enforce する運用も想定する。
   const allocationView = computeConditionalAllocation({
     targetWeights: universe.symbolBudgetAllocPct,
     policy: {
@@ -1179,112 +1200,189 @@ export async function runStrategyCron(
     symbolCurrency: universe.symbolCurrency,
     inversePairs: universe.inversePairs,
   })
-  analysis.allocation = { view: allocationView, ordersEnabled: global.cashFallbackOrdersEnabled }
+  analysis.allocation = {
+    view: allocationView,
+    ordersEnabled: global.cashFallbackOrdersEnabled,
+    sellMode: global.cashFallbackSellMode,
+  }
 
   // #exit-only-halt: cash rebalance pass 2 は entrySuppressedSymbols を渡さない
   // 唯一の BUY 経路なので、halt 中はここで丸ごと止める (退避先への自動 BUY も
-  // 「新規 entry」として扱う)。
-  if (global.cashFallbackOrdersEnabled && budgetBasisJpy !== undefined && entryHaltReason === null) {
-    const plan = buildCashRebalancePlan({
-      allocation: allocationView,
-      snapshots: summary.entrySnapshots,
-      budgetBasisJpy,
-      fxJpyPerCcy: (currency) => (currency === 'JPY' ? 1 : (usdJpyRate ?? undefined)),
-      symbolCurrency: universe.symbolCurrency,
-      symbolLotSize: universe.symbolLotSize,
-      symbolMaxNotional: universe.symbolMaxNotional,
-      maxOrderNotional: { USD: global.maxOrderNotionalUsd, JPY: global.maxOrderNotionalJpy },
-    })
-    const rebalanceSkipped: CashRebalanceSkip[] = [...plan.skipped]
-    if (plan.orders.length > 0) {
-      // pass 2: cash 銘柄だけを cashRebalanceQuantityMap 付きで再実行する。
-      // entrySuppressedSymbols は渡さない (cash_parking の BUY を許可する唯一の
-      // 経路)。lot / per-symbol risk / buying-power / pending lock / DRY_RUN /
-      // earnings・macro・sanity・intraday-only gate は pass 1 と共有 (#452
-      // follow-up) — rebalance BUY だけが通常 BUY の制約を回避しないように。
-      const byCcy: Record<SymbolCurrency, typeof plan.orders> = { USD: [], JPY: [] }
+  // 「新規 entry」として扱う)。SELL 側も同じ guard を共有する — halt 中は
+  // 新規 entry だけでなく allocation の巻き戻し全般を止める。
+  if (
+    budgetBasisJpy !== undefined &&
+    entryHaltReason === null &&
+    (global.cashFallbackOrdersEnabled || global.cashFallbackSellMode !== 'off')
+  ) {
+    const rebalanceSkipped: CashRebalanceSkip[] = []
+    const buyOrdersByCcy: Record<SymbolCurrency, CashRebalanceOrder[]> = { USD: [], JPY: [] }
+    const sellOrdersByCcy: Record<SymbolCurrency, CashRebalanceOrder[]> = { USD: [], JPY: [] }
+    const fxJpyPerCcy = (currency: SymbolCurrency) => (currency === 'JPY' ? 1 : (usdJpyRate ?? undefined))
+    const maxOrderNotional = { USD: global.maxOrderNotionalUsd, JPY: global.maxOrderNotionalJpy }
+
+    if (global.cashFallbackOrdersEnabled) {
+      const plan = buildCashRebalancePlan({
+        allocation: allocationView,
+        snapshots: summary.entrySnapshots,
+        budgetBasisJpy,
+        fxJpyPerCcy,
+        symbolCurrency: universe.symbolCurrency,
+        symbolLotSize: universe.symbolLotSize,
+        symbolMaxNotional: universe.symbolMaxNotional,
+        maxOrderNotional,
+      })
+      rebalanceSkipped.push(...plan.skipped)
       for (const order of plan.orders) {
-        byCcy[universe.symbolCurrency[order.symbol] ?? 'USD'].push(order)
-      }
-      for (const run of runs) {
-        const orders = byCcy[run.currency]
-        if (orders.length === 0) continue
-        // pass 2 は entrySuppressedSymbols を渡さない唯一の
-        // BUY 経路なので、上の per-symbol セッション抑止 (`sessionSuppressedSymbols`)
-        // が効かない。通貨単位でレギュラーセッション外を丸ごと弾かないと、
-        // 寄り前の退避 BUY がそのまま素通りしてしまう。
-        if (!isWithinRegularSession(sessionNow, run.currency === 'JPY' ? 'JP' : 'US')) {
-          for (const order of orders) {
-            rebalanceSkipped.push({
-              symbol: order.symbol,
-              reason: 'outside regular session: cash rebalance deferred',
-            })
-          }
-          console.log(
-            JSON.stringify({
-              event: 'cash_rebalance_pass2_skipped_outside_session',
-              requestId: options.requestId,
-              currency: run.currency,
-              symbols: orders.map((o) => o.symbol),
-            }),
-          )
-          continue
-        }
-        const decisionDb = strategyDecisionDbOrUndefined(env)
-        const sub = await runPullbackScheduler({
-          symbols: orders.map((o) => o.symbol),
-          ...(run.equity !== null ? { equity: run.equity } : {}),
-          symbolLotSizeMap: universe.symbolLotSize,
-          barClient,
-          positionStore,
-          execution,
-          symbolCapMap: universe.symbolMaxNotional,
-          ...(maxOrderNotionalFor(run.currency) !== undefined
-            ? { maxOrderNotional: maxOrderNotionalFor(run.currency) }
-            : {}),
-          cashRebalanceQuantityMap: Object.fromEntries(orders.map((o) => [o.symbol, o.quantity])),
-          intradayOnlySymbols,
-          ...(onTickerDeny ? { onTickerDeny } : {}),
-          fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
-          buyingPower,
-          exposureCap,
-          defaultRule,
-          rulesMap,
-          momentumSymbols,
-          ...(momentumStrategy ? { momentumStrategy } : {}),
-          requestId: options.requestId,
-          notifier,
-          perSymbolRisk: {
-            inversePairs: universe.inversePairs,
-            spreadLimits: {
-              US: global.spreadLimitPctUs,
-              JP: global.spreadLimitPctJp,
-            },
-            staleQuoteMs: global.staleQuoteMs,
-            gapRejectPct: global.gapRejectPct,
-          },
-          vixDecision,
-          ...(newsShockGateOption ? { newsShockGate: newsShockGateOption } : {}),
-          ...(extendedHoursGateOption ? { extendedHoursGate: extendedHoursGateOption } : {}),
-          ...earningsGateOption,
-          ...macroEventGateOption,
-          ...sanityFailedCooldownOption,
-          onDecision: ({ trace, ...record }) =>
-            logStrategyDecision(decisionDb, {
-              timestamp: new Date().toISOString(),
-              requestId: options.requestId,
-              ...record,
-              traceJson: trace && trace.length > 0 ? JSON.stringify(trace) : null,
-            }),
-        })
-        summary.evaluated += sub.evaluated
-        summary.buys += sub.buys
-        summary.rejected.push(...sub.rejected)
-        summary.errors.push(...sub.errors)
-        summary.decisions.push(...sub.decisions)
-        analysis.decisions.push(...sub.decisions)
+        buyOrdersByCcy[universe.symbolCurrency[order.symbol] ?? 'USD'].push(order)
       }
     }
+
+    if (global.cashFallbackSellMode !== 'off') {
+      const sellPlan = buildCashFallbackSellPlan({
+        allocation: allocationView,
+        snapshots: summary.entrySnapshots,
+        budgetBasisJpy,
+        fxJpyPerCcy,
+        symbolCurrency: universe.symbolCurrency,
+        symbolLotSize: universe.symbolLotSize,
+        symbolMaxNotional: universe.symbolMaxNotional,
+        maxOrderNotional,
+        cashFallback: universe.symbolCashFallback,
+        demandSources,
+      })
+      rebalanceSkipped.push(...sellPlan.skipped)
+      if (global.cashFallbackSellMode === 'observe') {
+        // observe: 計画は log に残すだけ。実発注しない (qty 不干渉)。
+        console.log(
+          JSON.stringify({
+            event: 'cash_rebalance_sell_observed',
+            requestId: options.requestId,
+            orders: sellPlan.orders,
+            skipped: sellPlan.skipped,
+          }),
+        )
+        for (const order of sellPlan.orders) {
+          rebalanceSkipped.push({
+            symbol: order.symbol,
+            reason: `observe: would sell ${order.quantity} toward active weight`,
+          })
+        }
+      } else {
+        for (const order of sellPlan.orders) {
+          sellOrdersByCcy[universe.symbolCurrency[order.symbol] ?? 'USD'].push(order)
+        }
+      }
+    }
+
+    // BUY (active weight 未達) と SELL (超過分) は計画上排他のはずだが、上流
+    // ロジックの変更で万一同一 symbol に両方立った場合に二重発注しないよう
+    // 防御的に SELL 側を落とす。
+    for (const currency of ['USD', 'JPY'] as const) {
+      const buySymbols = new Set(buyOrdersByCcy[currency].map((o) => o.symbol))
+      const conflicting = sellOrdersByCcy[currency].filter((o) => buySymbols.has(o.symbol))
+      if (conflicting.length > 0) {
+        sellOrdersByCcy[currency] = sellOrdersByCcy[currency].filter((o) => !buySymbols.has(o.symbol))
+        for (const order of conflicting) {
+          rebalanceSkipped.push({
+            symbol: order.symbol,
+            reason: 'conflicting buy and sell plan (skipped sell)',
+          })
+        }
+      }
+    }
+
+    for (const run of runs) {
+      const buyOrders = buyOrdersByCcy[run.currency]
+      const sellOrders = sellOrdersByCcy[run.currency]
+      if (buyOrders.length === 0 && sellOrders.length === 0) continue
+      const symbols = [...new Set([...buyOrders.map((o) => o.symbol), ...sellOrders.map((o) => o.symbol)])]
+      // pass 2 は entrySuppressedSymbols を渡さない唯一の
+      // BUY/SELL 経路なので、上の per-symbol セッション抑止 (`sessionSuppressedSymbols`)
+      // が効かない。通貨単位でレギュラーセッション外を丸ごと弾かないと、
+      // 寄り前の退避 BUY/SELL がそのまま素通りしてしまう。
+      if (!isWithinRegularSession(sessionNow, run.currency === 'JPY' ? 'JP' : 'US')) {
+        for (const symbol of symbols) {
+          rebalanceSkipped.push({
+            symbol,
+            reason: 'outside regular session: cash rebalance deferred',
+          })
+        }
+        console.log(
+          JSON.stringify({
+            event: 'cash_rebalance_pass2_skipped_outside_session',
+            requestId: options.requestId,
+            currency: run.currency,
+            symbols,
+          }),
+        )
+        continue
+      }
+      const decisionDb = strategyDecisionDbOrUndefined(env)
+      const sub = await runPullbackScheduler({
+        symbols,
+        ...(run.equity !== null ? { equity: run.equity } : {}),
+        symbolLotSizeMap: universe.symbolLotSize,
+        barClient,
+        positionStore,
+        execution,
+        symbolCapMap: universe.symbolMaxNotional,
+        ...(maxOrderNotionalFor(run.currency) !== undefined
+          ? { maxOrderNotional: maxOrderNotionalFor(run.currency) }
+          : {}),
+        ...(buyOrders.length > 0
+          ? { cashRebalanceQuantityMap: Object.fromEntries(buyOrders.map((o) => [o.symbol, o.quantity])) }
+          : {}),
+        ...(sellOrders.length > 0
+          ? {
+              cashRebalanceSellQuantityMap: Object.fromEntries(
+                sellOrders.map((o) => [o.symbol, o.quantity]),
+              ),
+            }
+          : {}),
+        intradayOnlySymbols,
+        ...(onTickerDeny ? { onTickerDeny } : {}),
+        fxJpyPerSymbolCcy: run.currency === 'JPY' ? 1 : (usdJpyRate ?? undefined),
+        buyingPower,
+        exposureCap,
+        defaultRule,
+        rulesMap,
+        momentumSymbols,
+        ...(momentumStrategy ? { momentumStrategy } : {}),
+        requestId: options.requestId,
+        notifier,
+        perSymbolRisk: {
+          inversePairs: universe.inversePairs,
+          spreadLimits: {
+            US: global.spreadLimitPctUs,
+            JP: global.spreadLimitPctJp,
+          },
+          staleQuoteMs: global.staleQuoteMs,
+          gapRejectPct: global.gapRejectPct,
+        },
+        vixDecision,
+        ...(newsShockGateOption ? { newsShockGate: newsShockGateOption } : {}),
+        ...(extendedHoursGateOption ? { extendedHoursGate: extendedHoursGateOption } : {}),
+        ...earningsGateOption,
+        ...macroEventGateOption,
+        ...sanityFailedCooldownOption,
+        onDecision: ({ trace, ...record }) =>
+          logStrategyDecision(decisionDb, {
+            timestamp: new Date().toISOString(),
+            requestId: options.requestId,
+            ...record,
+            traceJson: trace && trace.length > 0 ? JSON.stringify(trace) : null,
+          }),
+      })
+      summary.evaluated += sub.evaluated
+      summary.buys += sub.buys
+      summary.sells += sub.sells
+      summary.rejected.push(...sub.rejected)
+      summary.errors.push(...sub.errors)
+      summary.decisions.push(...sub.decisions)
+      analysis.decisions.push(...sub.decisions)
+    }
+
     analysis.allocation.rebalanceSkipped = rebalanceSkipped
   }
 

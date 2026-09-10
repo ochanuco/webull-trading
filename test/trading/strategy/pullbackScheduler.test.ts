@@ -3421,6 +3421,126 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
     expect(pastSummary.buys).toBe(1)
     expect(execution2.calls).toHaveLength(1)
   })
+
+  it('cashRebalanceSellQuantityMap emits a partial SELL toward active weight (#452 follow-up)', async () => {
+    // avgPrice 112 vs uptrendBars last close 117.5 → pnl ≈ +4.9%、stop/TP の
+    // どちらにも掛からず HOLD になる held position。
+    const heldState: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      position: { qty: 100, avgPrice: 112, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    // mockExecution は常に mode='DRY_RUN' を返す (このスイートの他ケースと同じ
+    // DRY_RUN 経路) — 部分 SELL でも同じ経路が通ることを確認する。
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: heldState }),
+      execution,
+      cashRebalanceSellQuantityMap: { SGOV: 30 },
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    const intent = execution.calls[0] as { symbol: string; side: string; quantity: number }
+    expect(intent).toMatchObject({ symbol: 'SGOV', side: 'SELL', quantity: 30 })
+    const sell = summary.decisions.find((d) => d.decision === 'SELL')
+    expect(sell?.reason).toContain('cash allocation rebalance: sell 30 toward active weight')
+    expect(sell?.trace?.map((s) => s.label)).toContain('exit.cash_rebalance')
+  })
+
+  it('cashRebalanceSellQuantityMap の要求数量が保有数量を超える場合は保有数量に clamp する', async () => {
+    const heldState: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      position: { qty: 10, avgPrice: 112, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: heldState }),
+      execution,
+      cashRebalanceSellQuantityMap: { SGOV: 30 }, // > 保有 10
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    const intent = execution.calls[0] as { quantity: number }
+    expect(intent.quantity).toBe(10)
+  })
+
+  it('cash rebalance SELL は strategy exit (stop-loss) を上書きしない (全量売却が優先、二重発注なし)', async () => {
+    // avgPrice 200 vs uptrendBars last close 117.5 → 深い含み損で stop-loss
+    // 経由の SELL (全量 5 株)。cashRebalanceSellQuantityMap の 2 株は無視される。
+    const heldState: SymbolState = {
+      ...emptySymbolState('AAPL', () => now),
+      position: { qty: 5, avgPrice: 200, openedAt: now.toISOString() },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ AAPL: heldState }),
+      execution,
+      cashRebalanceSellQuantityMap: { AAPL: 2 },
+      now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    expect(execution.calls).toHaveLength(1)
+    const intent = execution.calls[0] as { quantity: number; side: string }
+    expect(intent.side).toBe('SELL')
+    expect(intent.quantity).toBe(5) // strategy exit の全量、cash rebalance の 2 ではない
+    const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
+    const step = decision?.trace?.find((s) => s.label === 'exit.cash_rebalance')
+    expect(step?.passed).toBe(false)
+    expect(decision?.reason).not.toContain('cash allocation rebalance: sell')
+  })
+
+  it('cash rebalance SELL は pending order ロックを尊重する (二重発注なし)', async () => {
+    const pendingState: SymbolState = {
+      ...emptySymbolState('SGOV', () => now),
+      position: { qty: 100, avgPrice: 112, openedAt: now.toISOString() },
+      pendingOrder: {
+        clientOrderId: 'coid-1',
+        side: 'SELL',
+        submittedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      },
+    }
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({ SGOV: pendingState }),
+      execution,
+      cashRebalanceSellQuantityMap: { SGOV: 30 },
+      now: () => now,
+    })
+    expect(summary.sells).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+  })
+
+  it('保有が無ければ cash rebalance SELL は何もしない', async () => {
+    const execution = mockExecution()
+    const summary = await runPullbackScheduler({
+      symbols: ['SGOV'],
+      equity: 100_000,
+      barClient: mockBarClient(uptrendBars()),
+      positionStore: makeStore({}), // 保有なし
+      execution,
+      cashRebalanceSellQuantityMap: { SGOV: 30 },
+      // entry 側の BUY signal と混同しないよう、通常評価は HOLD 相当に倒す。
+      defaultRule: { ...TEST_DEFAULT_RULE, minReturn50d: 5 },
+      now: () => now,
+    })
+    expect(summary.sells).toBe(0)
+    expect(execution.calls).toHaveLength(0)
+    const decision = summary.decisions.find((d) => d.symbol === 'SGOV')
+    const step = decision?.trace?.find((s) => s.label === 'exit.cash_rebalance')
+    expect(step?.passed).toBe(false)
+  })
 })
 
 describe('inverse_hedge role enabled but inverse-pair gate still wins (#457)', () => {

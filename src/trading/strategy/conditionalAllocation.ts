@@ -184,7 +184,7 @@ export interface CashRebalancePlanInput {
   maxOrderNotional: Record<SymbolCurrency, number>
 }
 
-interface CashRebalanceOrder {
+export interface CashRebalanceOrder {
   symbol: string
   quantity: number
   /** 概算 notional (symbol 通貨)。実際の execution では再計算される。 */
@@ -203,8 +203,8 @@ export interface CashRebalancePlan {
 
 /**
  * cash fallback / always_active 銘柄の「目標配分に対する不足分」を BUY 数量に
- * 落とす (#452 Layer 3)。**BUY-only**: 退避元が再 entry して active が縮んでも
- * 退避先を自動 SELL はしない (待機資金の取り崩しは operator 判断 — 後続 issue)。
+ * 落とす (#452 Layer 3)。SELL 側 (退避元の再 entry で active weight が縮んだ分を
+ * 取り崩す) は `buildCashFallbackSellPlan` が別途持つ。
  *
  * fail-closed 系: price / lot / fx が無い銘柄は発注計画に入れない。上限は
  * min(差分, symbol max_notional, 通貨別 global max_order_notional) を lot に
@@ -239,7 +239,7 @@ export function buildCashRebalancePlan(input: CashRebalancePlanInput): CashRebal
     const currentJpy = snapshot.heldQty * snapshot.price * fx
     const deltaJpy = desiredJpy - currentJpy
     if (deltaJpy <= 0) {
-      skipped.push({ symbol, reason: 'already at/above active weight (BUY-only, no auto-sell)' })
+      skipped.push({ symbol, reason: 'already at/above active weight' })
       continue
     }
     const capCcy = Math.min(
@@ -250,6 +250,109 @@ export function buildCashRebalancePlan(input: CashRebalancePlanInput): CashRebal
     const quantity = Math.floor(deltaCcy / snapshot.price / lot) * lot
     if (quantity < lot) {
       skipped.push({ symbol, reason: `delta below 1 lot (delta ${Math.round(deltaCcy)} ${currency})` })
+      continue
+    }
+    orders.push({ symbol, quantity, estimatedNotional: quantity * snapshot.price })
+  }
+  return { orders, skipped }
+}
+
+export interface CashFallbackSellPlanInput extends CashRebalancePlanInput {
+  /** symbol (退避元) → 退避先リスト。policy.cashFallback と同じ形。 */
+  cashFallback: Record<string, string[]>
+  /**
+   * この tick で「退避元に資金需要がある」symbol の集合 (保有中、または pass 1
+   * で BUY を試みた)。runStrategyCron が pass 1 の summary から組む。
+   */
+  demandSources: ReadonlySet<string>
+  /** 許容乖離バンド (fraction、target 比)。default 0.10。 */
+  overweightBand?: number
+}
+
+export interface CashFallbackSellPlan {
+  orders: CashRebalanceOrder[]
+  skipped: CashRebalanceSkip[]
+}
+
+const DEFAULT_OVERWEIGHT_BAND = 0.10
+
+/**
+ * 退避先 (cash fallback) 銘柄の active weight 超過分を SELL 数量に落とす
+ * (#452 follow-up)。
+ *
+ * demand-linked にしている理由: ENTRY/HALF 判定だけで売ると、退避元の BUY が
+ * gate (spread / lot / buying-power 等) で reject された tick でも退避先の
+ * 現金を吐き出してしまい、次 tick に退避元が WATCH へ戻った瞬間に買い戻す
+ * whipsaw になる。「保有中 or この tick で BUY を試みた」を需要の定義にする
+ * ことで、退避元に資金の受け皿が実在するときだけ取り崩す。
+ *
+ * band を挟む理由: 退避先自体の値上がりだけで active weight を超過しても
+ * 売らない — 含み益を rebalance 名目で取り崩すのは意図した挙動ではない
+ * (退避先の値動きは通常の exit ルールで刈り取る)。
+ *
+ * 全量 close をしない理由: 退避先も他銘柄と同じく stop / TP / time-stop の
+ * 戦略 exit が exit を管理する。ここは active weight を上回る分だけを戻す
+ * 部分 SELL に留め、退避先自体のポジション管理ロジックと競合しない。
+ */
+export function buildCashFallbackSellPlan(input: CashFallbackSellPlanInput): CashFallbackSellPlan {
+  const orders: CashRebalanceOrder[] = []
+  const skipped: CashRebalanceSkip[] = []
+  const band = input.overweightBand ?? DEFAULT_OVERWEIGHT_BAND
+
+  // 候補は「誰かの退避先として登場する symbol」のみ (dedupe)。always_active
+  // のみの symbol は対象外 — 退避を受けていない限り、価格ドリフトだけで
+  // 売る理由がない。
+  const candidates = new Set<string>()
+  for (const targets of Object.values(input.cashFallback)) {
+    for (const target of targets) candidates.add(target)
+  }
+
+  for (const symbol of candidates) {
+    const snapshot = input.snapshots[symbol]
+    if (!snapshot) {
+      skipped.push({ symbol, reason: 'no fresh price snapshot (fail-closed)' })
+      continue
+    }
+    if (snapshot.heldQty <= 0) continue
+    if (!Number.isFinite(snapshot.price) || snapshot.price <= 0) {
+      skipped.push({ symbol, reason: 'no fresh price snapshot (fail-closed)' })
+      continue
+    }
+    const currency = input.symbolCurrency[symbol] ?? 'USD'
+    const fx = input.fxJpyPerCcy(currency)
+    if (fx === undefined || !Number.isFinite(fx) || fx <= 0) {
+      skipped.push({ symbol, reason: `fx unavailable for ${currency} (fail-closed)` })
+      continue
+    }
+    const lot = input.symbolLotSize[symbol]
+    if (lot === undefined || !Number.isInteger(lot) || lot < 1) {
+      skipped.push({ symbol, reason: 'lot_size not configured (fail-closed)' })
+      continue
+    }
+    const desiredJpy = (input.allocation.bySymbol[symbol]?.activeWeight ?? 0) * input.budgetBasisJpy
+    const currentJpy = snapshot.heldQty * snapshot.price * fx
+    if (currentJpy <= desiredJpy * (1 + band)) {
+      skipped.push({ symbol, reason: 'within active weight band' })
+      continue
+    }
+    const sources = Object.entries(input.cashFallback)
+      .filter(([, targets]) => targets.includes(symbol))
+      .map(([source]) => source)
+    if (!sources.some((source) => input.demandSources.has(source))) {
+      skipped.push({ symbol, reason: 'no demand from reroute sources' })
+      continue
+    }
+    const capCcy = Math.min(
+      input.symbolMaxNotional[symbol] ?? Number.POSITIVE_INFINITY,
+      input.maxOrderNotional[currency],
+    )
+    const excessCcy = Math.min((currentJpy - desiredJpy) / fx, capCcy)
+    const quantity = Math.min(
+      Math.floor(excessCcy / snapshot.price / lot) * lot,
+      snapshot.heldQty,
+    )
+    if (quantity < lot) {
+      skipped.push({ symbol, reason: `excess below 1 lot (excess ${Math.round(excessCcy)} ${currency})` })
       continue
     }
     orders.push({ symbol, quantity, estimatedNotional: quantity * snapshot.price })

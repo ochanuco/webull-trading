@@ -324,6 +324,18 @@ export interface PullbackSchedulerOptions {
    */
   cashRebalanceQuantityMap?: Record<string, number>
   /**
+   * 条件連動配分の cash rebalance 部分 SELL 数量 (#452 follow-up)。
+   * runStrategyCron が pass 1 の保有 / BUY 試行から「退避元の資金需要」を判定し、
+   * 退避先の active weight 超過分をこの map に入れて呼ぶ。指定 symbol は
+   * strategy の SELL signal が無い時だけ、この数量 (position.qty にクランプ済み)
+   * で部分 SELL intent を作る — 全量 close ではない点が `cashRebalanceQuantityMap`
+   * (BUY) と対称の唯一の違い。strategy 自身が SELL を出している場合はそちらを
+   * 優先し、この map は無視する (exit ロジックの上書きはしない)。未注入なら
+   * 従来挙動。`cash_fallback_sell_mode` (default 'off') が off の間は
+   * runStrategyCron がこの map を渡さない。
+   */
+  cashRebalanceSellQuantityMap?: Record<string, number>
+  /**
    * TICKER_IS_DENY 自動停止 hook (#460)。BUY submit が Webull の銘柄単位の
    * 恒久拒否 (`OAUTH_OPENAPI_TICKER_IS_DENY`) で失敗したとき、該当 symbol を
    * 引数に 1 回呼ばれる。production (`runStrategyCron`) は
@@ -865,6 +877,51 @@ export async function runPullbackScheduler(
       }
     }
 
+    // cash rebalance SELL (#452 follow-up): 退避先の active weight 超過分を
+    // 部分 SELL に置き換える。強制全量 close ではない — 全量 close は下の
+    // intraday-only / regime-flip や通常の stop/TP/time-stop に譲る。それら
+    // (常に position.qty 全量) が既に action='SELL' を出している場合はここで
+    // 上書きしない (strategy exit / 強制クローズが優先、二重に売らない)。
+    let cashRebalancePartialSell = false
+    const cashRebalanceSellQty = options.cashRebalanceSellQuantityMap?.[upper]
+    if (
+      cashRebalanceSellQty !== undefined &&
+      state.pendingOrder === null &&
+      Number.isInteger(cashRebalanceSellQty) &&
+      cashRebalanceSellQty > 0
+    ) {
+      if (signal.action === 'SELL') {
+        signal = {
+          ...signal,
+          trace: appendTrace(
+            signal.trace,
+            traceStep('exit.cash_rebalance', false, cashRebalanceSellQty, '>', 0, 'strategy exit takes precedence'),
+          ),
+        }
+      } else if (state.position === null || state.position.qty <= 0) {
+        signal = {
+          ...signal,
+          trace: appendTrace(
+            signal.trace,
+            traceStep('exit.cash_rebalance', false, cashRebalanceSellQty, '>', 0, 'no position'),
+          ),
+        }
+      } else {
+        const qty = Math.min(cashRebalanceSellQty, state.position.qty)
+        signal = {
+          ...signal,
+          action: 'SELL',
+          quantity: qty,
+          reason: `cash allocation rebalance: sell ${qty} toward active weight (#452)`,
+          trace: appendTrace(
+            signal.trace,
+            traceStep('exit.cash_rebalance', true, qty, '>', 0, 'conditional allocation cash rebalance sell (#452)'),
+          ),
+        }
+        cashRebalancePartialSell = true
+      }
+    }
+
     // #intraday-only: レバ ETF 等は US 引け前 window で保有があれば strategy 判定を
     // 上書きして強制 SELL (オーバーナイト持ち越し禁止 = 寄りギャップ stop-out 回避)。
     // 既存の SELL 経路 (全保有クローズ) に流れる。US 銘柄のみ対象。
@@ -878,6 +935,10 @@ export async function runPullbackScheduler(
     ) {
       // symbol/quantity/price/generatedAtIso は元 signal を流用 (SELL 経路は
       // state.position.qty / indicators.price で再計算するので値は不問)。
+      // cash rebalance が直前に部分 SELL を仕込んでいても、intraday-only の
+      // 強制クローズは全量優先 — フラグを落とし、下流の intent 組み立てで
+      // position.qty (全量) を使わせる (#452 follow-up)。
+      cashRebalancePartialSell = false
       signal = {
         ...signal,
         action: 'SELL',
@@ -926,6 +987,11 @@ export async function runPullbackScheduler(
       const flipped =
         (regime.side === 'bull' && d.zone === 'bear') || (regime.side === 'bear' && d.zone === 'bull')
       if (options.pairRegime.mode === 'enforce' && held && flipped) {
+        // regime flip は常に全量 close の意図。直前の cash rebalance 部分 SELL
+        // (action='SELL' だが quantity は部分) がここで「既に SELL 済み」として
+        // 素通りしないよう、フラグを落として下流に position.qty (全量) を
+        // 使わせる (#452 follow-up)。
+        cashRebalancePartialSell = false
         if (signal.action === 'SELL') {
           signal = {
             ...signal,
@@ -1552,7 +1618,37 @@ export async function runPullbackScheduler(
         })
         continue
       }
-      intent = buildIntent(upper, 'SELL', state.position.qty, indicators.price)
+      // cash rebalance 部分 SELL (#452 follow-up): signal.quantity は
+      // position.qty にクランプ済みのはずだが、上流の trace 差し替えで壊れて
+      // いないか防御的に再検証する (fail-closed)。壊れていれば全量 close に
+      // フォールバックせず SKIP — 意図しない数量で発注しない。
+      if (cashRebalancePartialSell) {
+        if (
+          !Number.isInteger(signal.quantity) ||
+          signal.quantity <= 0 ||
+          signal.quantity > state.position.qty
+        ) {
+          const reason = `invalid cash rebalance sell qty: ${signal.quantity} (position ${state.position.qty})`
+          summary.rejected.push({ symbol: upper, reason })
+          await emitDecision({
+            symbol: upper,
+            decision: 'SKIP',
+            reason,
+            price: indicators.price,
+            trace: appendTrace(
+              signal.trace,
+              traceStep('scheduler.sell_qty_valid', false, signal.quantity, '<=', state.position.qty),
+            ),
+          })
+          continue
+        }
+      }
+      intent = buildIntent(
+        upper,
+        'SELL',
+        cashRebalancePartialSell ? signal.quantity : state.position.qty,
+        indicators.price,
+      )
     }
 
     // Earnings calendar gate (issue #196 1/3)。BUY の場合のみ評価し、
@@ -1794,8 +1890,19 @@ export async function runPullbackScheduler(
       // whatever the broker actually still holds, so the next cron tick
       // sees a clean slate. If anything in the fallback fails, re-throw
       // the original error path (no silent recovery).
+      //
+      // cash rebalance の部分 SELL (#452 follow-up) はこの fallback から除外
+      // する: 成功後に position を qty=0 へ強制リセットする挙動 (下記) は
+      // 「意図した SELL は全量 close だった」前提に依存しており、意図的に
+      // 一部だけ残すつもりの部分 SELL に適用すると、実際は残っているはずの
+      // 保有を DO 上だけ消して以後のリスク管理 (stop/TP/time-stop) から外して
+      // しまう。部分 SELL が SELL_QTY_EXCEED を踏んだ場合は通常の ERROR/REJECT
+      // 経路 (fail-closed、position は変更しない) に倒す。
       const fallbackResult =
-        intent.side === 'SELL' && options.sellFallback && isSellQtyExceedError(error)
+        intent.side === 'SELL' &&
+        !cashRebalancePartialSell &&
+        options.sellFallback &&
+        isSellQtyExceedError(error)
           ? await tryFallbackSell({
               originalIntent: intent,
               error,
@@ -2201,6 +2308,8 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
   'entry.half_status': '段階判定 HALF (0.5x、#452)',
   'entry.cash_rebalance': '条件連動配分 cash rebalance (#452)',
+  'exit.cash_rebalance': '条件連動配分 cash rebalance SELL (#452 follow-up)',
+  'scheduler.sell_qty_valid': 'SELL 数量が保有数量以下の正整数',
   'regime.zone': 'ペアレジーム判定 (#472)',
   'risk.pair_regime': 'ペアレジーム gate (#472)',
   'exit.regime_flip': 'レジーム反転 exit (#472)',
