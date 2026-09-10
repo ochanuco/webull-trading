@@ -479,6 +479,15 @@ export const globalConfig = sqliteTable(
      * 同じ方針 — 検証は `globalConfigRepo` の runtime sanitize に寄せる)。
      */
     extendedHoursGateMode: text('extended_hours_gate_mode').notNull().default('off'),
+    /**
+     * 退避先 (cash fallback) 銘柄の需要連動自動 SELL (#452 follow-up)。退避元が
+     * 保有 or BUY を試みた ("demand" あり) tick でだけ、退避先の active weight
+     * 超過分を部分 SELL して本体戦略へ資金を戻す。'off' (default) | 'observe'
+     * (trace/log のみ) | 'enforce'。enum 外の DB 値は 'off' に倒す (gate 無効が
+     * 安全側、newsShockMode と同じ規約)。BUY 側 (`cashFallbackOrdersEnabled`)
+     * とは独立の flag — SELL だけ先に enforce する運用も想定する。
+     */
+    cashFallbackSellMode: text('cash_fallback_sell_mode').notNull().default('off'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({

@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildCashFallbackSellPlan,
   buildCashRebalancePlan,
   computeConditionalAllocation,
   type AllocationComputeInput,
+  type AllocationView,
+  type CashFallbackSellPlanInput,
 } from '../../../src/trading/strategy/conditionalAllocation'
 
 const baseInput = (): AllocationComputeInput => ({
@@ -194,12 +197,12 @@ describe('buildCashRebalancePlan (#452 Layer 3)', () => {
     expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 80, estimatedNotional: 8000 }])
   })
 
-  it('保有が目標以上なら BUY しない (BUY-only、自動 SELL なし)', () => {
+  it('保有が目標以上なら BUY しない (SELL 側は buildCashFallbackSellPlan が担う)', () => {
     const input = planInput()
     input.snapshots.SGOV = { status: 'NG', price: 100, heldQty: 90 } // $9,000 > $8,000
     const plan = buildCashRebalancePlan(input)
     expect(plan.orders).toEqual([])
-    expect(plan.skipped.find((s) => s.symbol === 'SGOV')?.reason).toContain('BUY-only')
+    expect(plan.skipped.find((s) => s.symbol === 'SGOV')?.reason).toBe('already at/above active weight')
   })
 
   it('不足分だけ買う (差分 BUY)', () => {
@@ -228,5 +231,130 @@ describe('buildCashRebalancePlan (#452 Layer 3)', () => {
     input.symbolMaxNotional = { SGOV: 2000 } // $2,000 cap
     const plan = buildCashRebalancePlan(input)
     expect(plan.orders[0]?.quantity).toBe(20)
+  })
+})
+
+describe('buildCashFallbackSellPlan (#452 follow-up: demand-linked trim)', () => {
+  // desired = 0.7 * 1.5M JPY = 1,050,000 JPY ($7,000 @ fx 150)。
+  const allocationView = (activeWeight = 0.7): AllocationView => ({
+    bySymbol: {
+      SGOV: {
+        symbol: 'SGOV',
+        targetWeight: 0.7,
+        activeWeight,
+        reason: 'always_active: 常時配分対象',
+        reroutedInWeight: 0,
+      },
+    },
+  })
+
+  const baseSellInput = (
+    overrides: Partial<CashFallbackSellPlanInput> = {},
+  ): CashFallbackSellPlanInput => ({
+    allocation: allocationView(),
+    snapshots: { SGOV: { status: 'NG', price: 100, heldQty: 100 } },
+    budgetBasisJpy: 1_500_000,
+    fxJpyPerCcy: ((ccy) => (ccy === 'JPY' ? 1 : 150)) as (
+      ccy: 'USD' | 'JPY',
+    ) => number | undefined,
+    symbolCurrency: { SGOV: 'USD' },
+    symbolLotSize: { SGOV: 1 },
+    symbolMaxNotional: {},
+    maxOrderNotional: { USD: 1_000_000, JPY: 100_000_000 },
+    cashFallback: { QQQ: ['SGOV'] },
+    demandSources: new Set(['QQQ']),
+    ...overrides,
+  })
+
+  it('超過保有 + 需要ありで超過分を lot floor した SELL 計画になる', () => {
+    // current = 100株 * $100 * 150 = 1,500,000 JPY。excess = (1.5M-1.05M)/150
+    // = 3000 (株換算)。lot=7 で floor → floor(3000/100/7)*7 = 28。
+    const plan = buildCashFallbackSellPlan(baseSellInput({ symbolLotSize: { SGOV: 7 } }))
+    expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 28, estimatedNotional: 2800 }])
+  })
+
+  it('退避元が保有ではなく BUY を試みただけでも需要ありとみなす', () => {
+    const input = baseSellInput({
+      cashFallback: { QQQ: ['SGOV'], SOXL: ['SGOV'] },
+      demandSources: new Set(['SOXL']), // QQQ ではなく SOXL 側の需要
+    })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 30, estimatedNotional: 3000 }])
+  })
+
+  it('退避元のいずれにも需要が無ければ売らない', () => {
+    const plan = buildCashFallbackSellPlan(baseSellInput({ demandSources: new Set() }))
+    expect(plan.orders).toEqual([])
+    expect(plan.skipped).toEqual([{ symbol: 'SGOV', reason: 'no demand from reroute sources' }])
+  })
+
+  it('band 内の乖離 (価格上昇のみ) では売らない', () => {
+    // desired 株数 70 に対し heldQty=75 (+7.1%、band 10% 以内)。
+    const plan = buildCashFallbackSellPlan(baseSellInput({ snapshots: { SGOV: { status: 'NG', price: 100, heldQty: 75 } } }))
+    expect(plan.orders).toEqual([])
+    expect(plan.skipped).toEqual([{ symbol: 'SGOV', reason: 'within active weight band' }])
+  })
+
+  it('activeWeight 0 (退避先ではなくなった) なら cap/heldQty まで全量売却対象になる', () => {
+    const input = baseSellInput({
+      allocation: allocationView(0),
+      snapshots: { SGOV: { status: 'NG', price: 100, heldQty: 50 } },
+    })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 50, estimatedNotional: 5000 }])
+  })
+
+  it('計算上の超過分が heldQty を上回る場合は heldQty に clamp する (defensive)', () => {
+    // 通常 activeWeight は負にならないが、防御的な clamp を明示的に検証する。
+    const input = baseSellInput({
+      allocation: allocationView(-0.1),
+      snapshots: { SGOV: { status: 'NG', price: 100, heldQty: 10 } },
+    })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 10, estimatedNotional: 1000 }])
+  })
+
+  it('symbolMaxNotional で clamp する', () => {
+    const input = baseSellInput({ symbolMaxNotional: { SGOV: 1000 } })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 10, estimatedNotional: 1000 }])
+  })
+
+  it('通貨別 global max_order_notional で clamp する', () => {
+    const input = baseSellInput({ maxOrderNotional: { USD: 500, JPY: 100_000_000 } })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 5, estimatedNotional: 500 }])
+  })
+
+  it('price snapshot 無し / fx 無し / lot 未設定は fail-closed で skip', () => {
+    const noSnap = baseSellInput()
+    delete (noSnap.snapshots as Record<string, unknown>).SGOV
+    expect(buildCashFallbackSellPlan(noSnap).skipped).toEqual([
+      { symbol: 'SGOV', reason: 'no fresh price snapshot (fail-closed)' },
+    ])
+
+    const noFx = baseSellInput({ fxJpyPerCcy: () => undefined })
+    expect(buildCashFallbackSellPlan(noFx).skipped).toEqual([
+      { symbol: 'SGOV', reason: 'fx unavailable for USD (fail-closed)' },
+    ])
+
+    const noLot = baseSellInput({ symbolLotSize: {} })
+    expect(buildCashFallbackSellPlan(noLot).skipped).toEqual([
+      { symbol: 'SGOV', reason: 'lot_size not configured (fail-closed)' },
+    ])
+  })
+
+  it('誰の退避先にも登場しない symbol は候補にすらならない (always_active のみでは対象外)', () => {
+    const input = baseSellInput({ cashFallback: {} })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([])
+    expect(plan.skipped).toEqual([])
+  })
+
+  it('保有が無い candidate は silent に skip される (skip 一覧に出ない)', () => {
+    const input = baseSellInput({ snapshots: { SGOV: { status: 'NG', price: 100, heldQty: 0 } } })
+    const plan = buildCashFallbackSellPlan(input)
+    expect(plan.orders).toEqual([])
+    expect(plan.skipped).toEqual([])
   })
 })

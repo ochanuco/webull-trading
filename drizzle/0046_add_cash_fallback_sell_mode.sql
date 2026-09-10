@@ -1,0 +1,1 @@
+ALTER TABLE `global_config` ADD `cash_fallback_sell_mode` text DEFAULT 'off' NOT NULL;

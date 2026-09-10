@@ -63,6 +63,7 @@ export function makeGlobalConfigSnapshot(
     newsShockMaxAgeMin: 90,
     attentionStalePolicy: 'fail_open',
     extendedHoursGateMode: 'off',
+    cashFallbackSellMode: 'off',
     source: 'd1',
     ...overrides,
   }
