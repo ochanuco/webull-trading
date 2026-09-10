@@ -1185,6 +1185,220 @@ describe('runStrategyCron', () => {
       )
     })
   })
+
+  describe('cash rebalance SELL (#452 follow-up)', () => {
+    const JP_IN_SESSION = '2026-04-20T02:00:00.000Z' // 11:00 JST
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    function fakeDbAllTablesReady(): D1Database {
+      return {
+        prepare: vi.fn(() => ({
+          first: vi.fn(async () => ({ ok: 1 })),
+        })),
+      } as unknown as D1Database
+    }
+
+    function envWithHealthyPortfolio(db: D1Database) {
+      return {
+        DB: db,
+        SYMBOL_STATE: {} as DurableObjectNamespace<never>,
+        PORTFOLIO_STATE: {
+          idFromName: () => ({}),
+          get: () => ({
+            getPortfolio: vi.fn().mockResolvedValue({
+              dailyStartEquity: 0,
+              dailyRealizedPnl: 0,
+              tradingDisabledUntil: null,
+              updatedAt: new Date().toISOString(),
+            }),
+          }),
+        },
+      } as unknown as Parameters<typeof runStrategyCron>[0]
+    }
+
+    /** JPY-only universe (fx=1) + SOXL→SGOV cash fallback。BUY 側は off のまま
+     * SELL 側の独立性も検証する (`cashFallbackOrdersEnabled` は各テストで
+     * 明示的に指定しない限り false のまま)。maxOrderNotionalJpy は default
+     * (100,000) だと想定 quantity を clamp してしまうので上限を外す。 */
+    function setUpCashFallbackSellUniverse(): void {
+      vi.mocked(loadSymbolUniverse).mockResolvedValue(
+        makeSymbolUniverse({
+          allowedSymbols: ['SOXL', 'SGOV'],
+          symbolCurrency: { SOXL: 'JPY', SGOV: 'JPY' },
+          symbolMarket: { SOXL: 'JP', SGOV: 'JP' },
+          symbolLotSize: { SOXL: 1, SGOV: 1 },
+          symbolBudgetAllocPct: { SOXL: 0.5 },
+          symbolEntryRequired: { SOXL: true },
+          symbolCashFallback: { SOXL: ['SGOV'] },
+        }),
+      )
+    }
+
+    it('observe: 発注せず log と rebalanceSkipped だけに計画を残す', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackSellUniverse()
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({
+          cashFallbackSellMode: 'observe',
+          totalCapitalJpy: 10_000_000,
+          maxOrderNotionalJpy: 100_000_000,
+        }),
+      )
+      // SOXL 保有中 (= 需要あり、自身の枠を使用中で SGOV への reroute は無い →
+      // desired=0) かつ SGOV を保有超過。
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'NG', price: 100, heldQty: 10 },
+          SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
+        },
+      })
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+      const db = fakeDbAllTablesReady()
+      const result = await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(1) // pass 1 のみ、observe は発注しない
+
+      const observedLog = logSpy.mock.calls
+        .map((args) => JSON.parse(args[0] as string) as Record<string, unknown>)
+        .find((payload) => payload.event === 'cash_rebalance_sell_observed')
+      expect(observedLog?.orders).toEqual([
+        { symbol: 'SGOV', quantity: 10_000, estimatedNotional: 10_000_000 },
+      ])
+
+      expect(result.analysis.allocation?.rebalanceSkipped).toContainEqual({
+        symbol: 'SGOV',
+        reason: 'observe: would sell 10000 toward active weight',
+      })
+      logSpy.mockRestore()
+    })
+
+    it('enforce: 保有中の退避元 (需要あり) を起点に pass 2 が cashRebalanceSellQuantityMap 付きで呼ばれる', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackSellUniverse()
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({
+          cashFallbackSellMode: 'enforce',
+          cashFallbackOrdersEnabled: false, // BUY 側は off のままでも SELL 側は独立に動く
+          totalCapitalJpy: 10_000_000,
+          maxOrderNotionalJpy: 100_000_000,
+        }),
+      )
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'NG', price: 100, heldQty: 10 },
+          SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
+        },
+      })
+
+      const db = fakeDbAllTablesReady()
+      await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(2) // pass 1 + cash rebalance pass 2 (SELL)
+      const [pass2Options] = calls[1]!
+      expect(pass2Options.cashRebalanceSellQuantityMap).toEqual({ SGOV: 10_000 })
+      // BUY 側 flag は off のままなので BUY map は付かない。
+      expect(pass2Options.cashRebalanceQuantityMap).toBeUndefined()
+    })
+
+    it('enforce: 需要は pass 1 の BUY 試行 (保有ではない) からも成立する', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackSellUniverse()
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({
+          cashFallbackSellMode: 'enforce',
+          totalCapitalJpy: 10_000_000,
+          maxOrderNotionalJpy: 100_000_000,
+        }),
+      )
+      // SOXL は未保有 (WATCH → SGOV へ reroute、desired=5,000,000) だが pass 1 で
+      // BUY を試みている (broker reject/error でも需要ありとみなす)。
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'WATCH', price: 100, heldQty: 0 },
+          SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
+        },
+        decisions: [{ symbol: 'SOXL', decision: 'BUY' }],
+      })
+
+      const db = fakeDbAllTablesReady()
+      await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(2)
+      const [pass2Options] = calls[1]!
+      // desired = 0.5 * 10M = 5,000,000 JPY → excess = 5,000,000 → 5,000 株。
+      expect(pass2Options.cashRebalanceSellQuantityMap).toEqual({ SGOV: 5_000 })
+    })
+
+    it('需要が無ければ売らない (pass 2 呼ばれず、skip 理由が残る)', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackSellUniverse()
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({
+          cashFallbackSellMode: 'enforce',
+          totalCapitalJpy: 10_000_000,
+          maxOrderNotionalJpy: 100_000_000,
+        }),
+      )
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'WATCH', price: 100, heldQty: 0 },
+          SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
+        },
+      })
+
+      const db = fakeDbAllTablesReady()
+      const result = await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(1) // pass 1 のみ
+      expect(result.analysis.allocation?.rebalanceSkipped).toContainEqual({
+        symbol: 'SGOV',
+        reason: 'no demand from reroute sources',
+      })
+    })
+
+    it('entryHaltReason がある tick では SELL 計画も止める', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackSellUniverse()
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({
+          cashFallbackSellMode: 'enforce',
+          totalCapitalJpy: 10_000_000,
+          maxOrderNotionalJpy: 100_000_000,
+        }),
+      )
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'NG', price: 100, heldQty: 10 },
+          SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
+        },
+      })
+
+      // PORTFOLIO_STATE binding が無い env = entryHaltReason が立つ (#exit-only-halt)。
+      const result = await runStrategyCron(env)
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(1) // pass 1 のみ、halt 中は SELL pass 2 も止まる
+      expect(result.entryHaltReason).toBeDefined()
+    })
+  })
 })
 
 describe('resolvePortfolioForRiskScale', () => {

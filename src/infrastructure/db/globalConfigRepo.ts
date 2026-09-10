@@ -71,6 +71,13 @@ export interface GlobalConfigSnapshot {
    */
   cashFallbackOrdersEnabled: boolean
   /**
+   * 退避先 (cash fallback) 銘柄の需要連動自動 SELL (#452 follow-up)。'off'
+   * (default) / 'observe' (log のみ) / 'enforce'。enum 外の DB 値は 'off' に
+   * 倒す (gate 無効が安全側、newsShockMode と同じ規約)。BUY 側
+   * (`cashFallbackOrdersEnabled`) とは独立に切替可能。
+   */
+  cashFallbackSellMode: 'off' | 'observe' | 'enforce'
+  /**
    * ペアレジーム layer (#472)。'off' (default) / 'observe' (log のみ) /
    * 'enforce'。enum 外の DB 値は 'off' に倒す (gate 無効 = 従来挙動が安全側)。
    */
@@ -169,6 +176,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   vixCriticalThreshold: 30.0,
   vixWarningSizeScale: 0.5,
   cashFallbackOrdersEnabled: false,
+  cashFallbackSellMode: 'off',
   pairRegimeMode: 'off',
   pairRegimeThetaBullEnter: 0.03,
   pairRegimeThetaBullExit: 0.01,
@@ -559,6 +567,8 @@ export async function loadGlobalConfig(
             attentionStalePolicy: GLOBAL_CONFIG_DEFAULTS.attentionStalePolicy,
             // 0045 追加列 (#709 Phase 6)。legacy path は default ('off' = gate 無効)。
             extendedHoursGateMode: GLOBAL_CONFIG_DEFAULTS.extendedHoursGateMode,
+            // 0046 追加列 (#452 follow-up)。legacy path は default ('off' = 自動 SELL しない)。
+            cashFallbackSellMode: GLOBAL_CONFIG_DEFAULTS.cashFallbackSellMode,
           }, requestId), requestId)
         }
       } catch (legacyError) {
@@ -663,6 +673,12 @@ export async function loadGlobalConfig(
     extendedHoursGateMode:
       row.extendedHoursGateMode === 'observe' || row.extendedHoursGateMode === 'enforce'
         ? row.extendedHoursGateMode
+        : 'off',
+    // 0046 で追加 (#452 follow-up)。mode は enum 検証して不正値は 'off' (自動
+    // SELL しない側が安全、newsShockMode と同じ規約)。
+    cashFallbackSellMode:
+      row.cashFallbackSellMode === 'observe' || row.cashFallbackSellMode === 'enforce'
+        ? row.cashFallbackSellMode
         : 'off',
   }, requestId), requestId)
 }
