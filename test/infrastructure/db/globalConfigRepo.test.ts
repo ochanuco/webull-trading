@@ -622,4 +622,23 @@ describe('loadGlobalConfig — news shock validation (CHECK 制約 補完)', () 
     expect(result.extendedHoursGateMode).toBe('enforce')
     warnSpy.mockRestore()
   })
+
+  // 0046 (#452 follow-up): cashFallbackSellMode は newsShockMode /
+  // extendedHoursGateMode と同じ enum fallback 規約 (自動 SELL しない = 'off'
+  // が安全側)。
+  it('falls back cashFallbackSellMode to "off" for an enum-invalid DB value', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, cashFallbackSellMode: 'bogus' })
+    const result = await loadGlobalConfig(db)
+    expect(result.cashFallbackSellMode).toBe('off')
+    warnSpy.mockRestore()
+  })
+
+  it('honors cashFallbackSellMode="enforce" when explicitly set', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDbWithRow({ ...baseRow, cashFallbackSellMode: 'enforce' })
+    const result = await loadGlobalConfig(db)
+    expect(result.cashFallbackSellMode).toBe('enforce')
+    warnSpy.mockRestore()
+  })
 })

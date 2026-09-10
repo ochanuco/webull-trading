@@ -129,8 +129,9 @@ export function pairRoundTrips(fills: readonly LifecycleFill[]): RoundTrip[] {
 /**
  * SELL exit の生 reason 文字列 → カテゴリ。実際の文言は
  * `PullbackUptrendStrategy.ts:181,201,212` (take-profit / stop-loss / time-stop)
- * と `pullbackScheduler.ts:665,690,747` (cash allocation rebalance /
- * intraday-only / pair regime flip) で確認済み (#709 ブリーフ)。
+ * と `pullbackScheduler.ts:870,915,945,1007` (cash allocation rebalance
+ * BUY/SELL / intraday-only / pair regime flip) で確認済み (#709 ブリーフ、
+ * #452 follow-up で SELL 側 rebalance reason を追加)。
  *
  * `reason` が null (= SELL fill の client_order_id が strategy_decision_log に
  * 見つからない、手動売却や migration 前データ) は UNKNOWN。既知パターンに
