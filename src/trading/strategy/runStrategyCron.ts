@@ -1162,14 +1162,14 @@ export async function runStrategyCron(
   }
 
   // cash rebalance SELL の需要判定 (#452 follow-up)。pass 1 (通常評価) 時点の
-  // 保有 / BUY 試行のみを見る — pass 2 (BUY 側 cash rebalance) の結果まで含めると
+  // BUY 試行のみを見る — pass 2 (BUY 側 cash rebalance) の結果まで含めると
   // 「退避先へ BUY した直後に退避元へ SELL の需要判定が回る」自己参照になる
   // ため、pass 1 終了直後・pass 2 実行前のこの時点で確定させる。broker 側で
   // reject/error になった BUY 試行も「資金需要はあった」ので需要に含める。
+  // 退避元の保有は需要に含めない — 保有は現金を既に消費した状態であり、
+  // 含めるとレバ銘柄の短命ポジションのたびに「退避先を売る → exit 後に
+  // 買い戻す」往復が起きる (VUG/ICLN 9/16→9/21 実績、使われない現金が遊ぶ)。
   const demandSources = new Set<string>()
-  for (const [sym, snap] of Object.entries(summary.entrySnapshots)) {
-    if (snap.heldQty > 0) demandSources.add(sym)
-  }
   for (const record of summary.decisions) {
     if (record.decision === 'BUY' || record.order?.side === 'BUY') {
       demandSources.add(record.symbol)
