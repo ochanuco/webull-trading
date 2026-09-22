@@ -1248,14 +1248,15 @@ describe('runStrategyCron', () => {
           maxOrderNotionalJpy: 100_000_000,
         }),
       )
-      // SOXL 保有中 (= 需要あり、自身の枠を使用中で SGOV への reroute は無い →
-      // desired=0) かつ SGOV を保有超過。
+      // SOXL 保有中 (自身の枠を使用中で SGOV への reroute は無い → desired=0)
+      // かつ同 tick で買い増しを試行 (= 需要あり)、SGOV は保有超過。
       vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
         ...emptySchedulerSummary(),
         entrySnapshots: {
           SOXL: { status: 'NG', price: 100, heldQty: 10 },
           SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
         },
+        decisions: [{ symbol: 'SOXL', decision: 'BUY' }],
       })
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
@@ -1279,7 +1280,7 @@ describe('runStrategyCron', () => {
       logSpy.mockRestore()
     })
 
-    it('enforce: 保有中の退避元 (需要あり) を起点に pass 2 が cashRebalanceSellQuantityMap 付きで呼ばれる', async () => {
+    it('enforce: 退避元の BUY 試行を起点に pass 2 が cashRebalanceSellQuantityMap 付きで呼ばれる', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date(JP_IN_SESSION))
       setUpCashFallbackSellUniverse()
@@ -1297,6 +1298,7 @@ describe('runStrategyCron', () => {
           SOXL: { status: 'NG', price: 100, heldQty: 10 },
           SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
         },
+        decisions: [{ symbol: 'SOXL', decision: 'BUY' }],
       })
 
       const db = fakeDbAllTablesReady()
@@ -1310,7 +1312,38 @@ describe('runStrategyCron', () => {
       expect(pass2Options.cashRebalanceQuantityMap).toBeUndefined()
     })
 
-    it('enforce: 需要は pass 1 の BUY 試行 (保有ではない) からも成立する', async () => {
+    it('enforce: 退避元を保有しているだけでは需要にならない (exit 後の買い戻し往復を防ぐ)', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(JP_IN_SESSION))
+      setUpCashFallbackSellUniverse()
+      vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
+        makeGlobalConfigSnapshot({
+          cashFallbackSellMode: 'enforce',
+          totalCapitalJpy: 10_000_000,
+          maxOrderNotionalJpy: 100_000_000,
+        }),
+      )
+      // SOXL は既に約定済み (現金は消費済み) で、この tick に BUY 試行は無い。
+      vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
+        ...emptySchedulerSummary(),
+        entrySnapshots: {
+          SOXL: { status: 'NG', price: 100, heldQty: 10 },
+          SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
+        },
+      })
+
+      const db = fakeDbAllTablesReady()
+      const result = await runStrategyCron(envWithHealthyPortfolio(db))
+
+      const calls = vi.mocked(runPullbackScheduler).mock.calls
+      expect(calls.length).toBe(1) // pass 1 のみ
+      expect(result.analysis.allocation?.rebalanceSkipped).toContainEqual({
+        symbol: 'SGOV',
+        reason: 'no demand from reroute sources',
+      })
+    })
+
+    it('enforce: 需要は未保有の退避元の BUY 試行からも成立する', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date(JP_IN_SESSION))
       setUpCashFallbackSellUniverse()
@@ -1389,6 +1422,7 @@ describe('runStrategyCron', () => {
           SOXL: { status: 'NG', price: 100, heldQty: 10 },
           SGOV: { status: 'NG', price: 1000, heldQty: 10_000 },
         },
+        decisions: [{ symbol: 'SOXL', decision: 'BUY' }],
       })
 
       // PORTFOLIO_STATE binding が無い env = entryHaltReason が立つ (#exit-only-halt)。
