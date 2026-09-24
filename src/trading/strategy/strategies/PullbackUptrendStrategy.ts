@@ -154,7 +154,7 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('guard.pending_order_absent', true, false, 'not_exists', false))
 
-    if (input.cooldownUntil && new Date(input.cooldownUntil).getTime() > now.getTime()) {
+    if (input.position === null && input.cooldownUntil && new Date(input.cooldownUntil).getTime() > now.getTime()) {
       trace.push(step('guard.cooldown_inactive', false, input.cooldownUntil, '<=', now.toISOString(), 'cooldown active'))
       return hold(input, `cooldown active until ${input.cooldownUntil}`, trace)
     }
