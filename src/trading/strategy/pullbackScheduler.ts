@@ -11,6 +11,7 @@ import type { AtrBaselineMode } from './indicators'
 import type { Execution } from '../execution/Execution'
 import type { PositionStore } from '../state/PositionStore'
 import type { SymbolState } from '../state/types'
+import { freshDecisionQuote } from '../quotes/decisionQuote'
 import {
   computeHoldBusinessDays,
   computePullbackIndicators,
@@ -709,7 +710,9 @@ export async function runPullbackScheduler(
       continue
     }
 
-    const indicators = computePullbackIndicators(bars, intradayPrice, {
+    const state = await options.positionStore.getState(upper)
+    const decisionQuote = freshDecisionQuote(upper, state.lastQuote, now())
+    const indicators = computePullbackIndicators(bars, decisionQuote?.price ?? intradayPrice, {
       baselineMode: options.atrBaselineMode ?? 'percentile',
     })
     if (!indicators) {
@@ -729,7 +732,6 @@ export async function runPullbackScheduler(
       continue
     }
 
-    const state = await options.positionStore.getState(upper)
     const market = inferTradingMarket(upper)
     const holdBusinessDays =
       state.position !== null
@@ -787,9 +789,10 @@ export async function runPullbackScheduler(
     // 判断価格の出所・時刻を全 decision の trace 先頭に残す
     // (SKIP/HOLD/ERROR 含む、indicators が存在する以降の全経路)。stale price
     // 調査時に「どの bar を見て判断したか」を trace だけで追えるようにする。
-    const priceAsOfSource = lastIntradayBar !== null ? 'intraday_60m' : 'daily_close'
+    const priceAsOfSource = decisionQuote !== null ? decisionQuote.source
+      : lastIntradayBar !== null ? 'intraday_60m' : 'daily_close'
     const priceAsOfValue =
-      lastIntradayBar !== null ? lastIntradayBar.timestamp : (bars[bars.length - 1]?.date ?? 'unknown')
+      decisionQuote?.asOf ?? (lastIntradayBar !== null ? lastIntradayBar.timestamp : (bars[bars.length - 1]?.date ?? 'unknown'))
     signal = {
       ...signal,
       trace: [
@@ -812,14 +815,14 @@ export async function runPullbackScheduler(
     // bar の timestamp が鮮度上限を超過 / timestamp が parse 不能 (Date.parse
     // が NaN → NaN との比較は常に false になり素通りしてしまうため明示チェック)。
     let priceFreshnessFailure: string | null = null
-    if (intradayAttempted) {
+    if (intradayAttempted && decisionQuote === null) {
       if (lastIntradayBar === null) {
         priceFreshnessFailure =
           'stale price: intraday bar unavailable, daily close fallback not accepted for BUY'
       } else {
         const asOfMs = Date.parse(lastIntradayBar.timestamp)
         const ageMs = now().getTime() - asOfMs
-        if (!Number.isFinite(asOfMs) || ageMs > intradayBarMaxAgeMs) {
+        if (!Number.isFinite(asOfMs) || ageMs < 0 || ageMs > intradayBarMaxAgeMs) {
           priceFreshnessFailure = `stale price: intraday_60m as of ${lastIntradayBar.timestamp} exceeds ${intradayBarMaxAgeMs}ms`
         }
       }
