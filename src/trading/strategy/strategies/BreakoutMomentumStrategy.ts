@@ -96,7 +96,7 @@ export class BreakoutMomentumStrategy {
       trace.push(step('guard.pending_order_absent', false, true, 'not_exists', false, 'pending order in flight'))
       return hold(input, 'pending order in flight', trace)
     }
-    if (input.cooldownUntil && new Date(input.cooldownUntil).getTime() > now.getTime()) {
+    if (input.position === null && input.cooldownUntil && new Date(input.cooldownUntil).getTime() > now.getTime()) {
       trace.push(step('guard.cooldown_inactive', false, input.cooldownUntil, '<=', now.toISOString(), 'cooldown active'))
       return hold(input, `cooldown active until ${input.cooldownUntil}`, trace)
     }

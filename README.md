@@ -19,6 +19,7 @@ production で Pullback / BreakoutMomentum 戦略が 15 分 cron で**実発注�
 | [docs/production-deployment.md](docs/production-deployment.md) | 本番投入の手順とロールバック |
 | [docs/env-separation.md](docs/env-separation.md) | dev / staging / production の分離方針 |
 | [docs/review-queries.md](docs/review-queries.md) | 障害・振り返り用のクエリ集と運用 runbook |
+| [docs/entry-exit-timing.md](docs/entry-exit-timing.md) | 判断価格 (snapshot 優先) と BUY cooldown の適用範囲 |
 
 ## クイックスタート
 
