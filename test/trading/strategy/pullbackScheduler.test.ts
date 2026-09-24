@@ -24,6 +24,46 @@ import type { DailyBar } from '../../../src/trading/strategy/indicators'
 
 const now = new Date('2026-04-20T14:30:00.000Z')
 
+describe('fresh quote decisions and BUY cooldown scope', () => {
+  const quote = { price: 101, asOf: now.toISOString(), fetchedAt: now.toISOString(), source: 'webull-snapshot' }
+  const held = (): SymbolState => ({
+    ...emptySymbolState('AAPL', () => now),
+    position: { qty: 2, avgPrice: 100, openedAt: '2026-04-20T14:00:00Z' },
+    lastQuote: quote,
+  })
+  it('buys from a fresh snapshot when an hourly close is already outside the entry band', async () => {
+    const state = { ...emptySymbolState('AAPL', () => now), lastQuote: { ...quote, price: 117.5 } }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'], equity: 100_000, symbolLotSizeMap: { AAPL: 1 },
+      barClient: { ...mockBarClient(uptrendBars()), getIntradayBars: async () => [{ timestamp: '2026-04-20T14:00:00Z', open: 123, high: 123, low: 123, close: 123 }] },
+      positionStore: makeStore({ AAPL: state }), execution: mockExecution(), now: () => now,
+    })
+    expect(summary.buys).toBe(1)
+    expect(summary.decisions[0]?.price).toBe(117.5)
+    expect(summary.decisions[0]?.trace?.[0]?.message).toBe(`webull-snapshot:${now.toISOString()}`)
+  })
+  it('decides from the hourly bar when the snapshot is stale', async () => {
+    const state = held()
+    state.lastQuote = { ...quote, asOf: '2026-04-20T14:00:00Z' }
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'], barClient: { ...mockBarClient(uptrendBars()), getIntradayBars: async () => [{ timestamp: '2026-04-20T14:00:00Z', open: 101, high: 101, low: 101, close: 101 }] },
+      positionStore: makeStore({ AAPL: state }), execution: mockExecution(), now: () => now,
+    })
+    expect(summary.decisions[0]?.trace?.[0]?.message).toBe('intraday_60m:2026-04-20T14:00:00Z')
+  })
+  it('an existing stop-loss still exits during a BUY cooldown', async () => {
+    const state = held()
+    state.lastQuote = { ...quote, price: 90 }
+    state.cooldownUntil = '2026-04-21T14:30:00Z'
+    const summary = await runPullbackScheduler({
+      symbols: ['AAPL'], barClient: mockBarClient(uptrendBars()), positionStore: makeStore({ AAPL: state }),
+      execution: mockExecution(), now: () => now,
+    })
+    expect(summary.sells).toBe(1)
+    expect(summary.decisions[0]?.reason).toContain('stop-loss')
+  })
+})
+
 function uptrendBars(): DailyBar[] {
   // #318: short-term swing 整合化で trend filter は 20d return ベースになった。
   // closes[-20] vs last の return が +8% を超えるよう、最後の 20 営業日に
