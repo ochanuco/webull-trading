@@ -36,7 +36,7 @@ function fetcherReturning(status: number, body: unknown): typeof fetch {
     })) as typeof fetch
 }
 
-describe('lookupInstrument (#475 instrument/stock/list v2)', () => {
+describe('lookupInstrument (instrument/stock/list v2)', () => {
   it('found: 実測レコードをドメイン型に正規化する', async () => {
     const result = await lookupInstrument(env, {
       symbol: 'usmv',

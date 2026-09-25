@@ -7,7 +7,7 @@ const env = {
   WEBULL_APP_SECRET: 's'.repeat(32),
 } as unknown as Env
 
-describe('checkMarketDataHealth (#475 snapshot v2 canary)', () => {
+describe('checkMarketDataHealth (trade host + v2 snapshot canary)', () => {
   it('healthy=true when snapshot returns 200', async () => {
     const fetchFn = vi.fn(
       async () => new Response('[{"symbol":"AAPL","price":"291.58"}]', { status: 200 }),
@@ -46,7 +46,7 @@ describe('checkMarketDataHealth (#475 snapshot v2 canary)', () => {
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
-  it('documented snapshot endpoint を trade host + v2 署名で叩く (PR #474 実測の規約を locked)', async () => {
+  it('hits the documented snapshot endpoint on the trade host with v2 signing', async () => {
     let capturedUrl: string | undefined
     let capturedHeaders: Record<string, string> | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {

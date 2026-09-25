@@ -8,34 +8,28 @@ import {
 } from './WebullTokenClient'
 
 /**
- * Background refresh of the active `x-access-token` (#21 Phase B).
+ * Background refresh of the active `x-access-token`, called from the cron
+ * handler. No stored state or expiring soon → `createToken(existingToken)`.
+ * A NORMAL result writes back immediately; PENDING/INVALID/EXPIRED counts as
+ * failure (operator reseeds via `pnpm run issue-token`).
  *
- * Called from the cron handler. Walks the state machine:
- *   - DO state は無し / 期限切れ間近 → `createToken(existingToken)` で更新
- *   - 既に NORMAL 返却なら即書き戻し
- *   - PENDING 等 → 失敗扱い (operator が再度 `pnpm run issue-token` で seed する想定)
- *   - INVALID / EXPIRED → 失敗扱い
- *
- * Refresh が必要かどうかの判定は時刻と `expires` の差分で行う。Webull docs に
- * `expires` の単位 (ms or sec) が明示されてないので両方サポート (10^12 以上を ms、
- * それ以外を sec として扱う)。これは `coerceAsOf` 等で他にも採用してる pattern。
+ * Webull's docs don't specify whether `expires` is ms or sec, so values
+ * ≥1e12 are treated as ms and smaller ones as sec — the same heuristic used
+ * elsewhere (e.g. `coerceAsOf`).
  */
 
 const DEFAULT_TRADE_API_BASE = 'https://api.webull.co.jp'
-/** expires まで残り日数がこれ以下になったら refresh 試行。Webull 15 days inactivity 規定の半分。 */
+/** Refresh once this many days remain — half of Webull's 15-day inactivity window. */
 const REFRESH_BEFORE_DAYS = 7
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 export interface RefreshSummary {
-  /** 実際に DO を更新したか (= broker から新しい NORMAL token を取得できたか)。 */
+  /** True only when the broker returned a new NORMAL token and the DO was updated. */
   refreshed: boolean
-  /** 試行をスキップしたなら理由 (期限まで余裕がある等)。 */
   skippedReason?: string
-  /** 失敗時の理由 (broker error / PENDING など)。 */
   failureReason?: string
-  /** 試行前の DO 状態 (debug 用)。 */
   before: WebullTokenState | null
-  /** 試行後の DO 状態 (write が走らなかった場合は before と同じ)。 */
+  /** State after the attempt — unchanged from `before` if no write happened. */
   after: WebullTokenState | null
 }
 
@@ -49,8 +43,7 @@ export async function refreshWebullToken(
 ): Promise<RefreshSummary> {
   const namespace = env.WEBULL_TOKEN_STATE
   if (!namespace) {
-    // DO 未バインドな環境 (local dev で wrangler.jsonc を編集してない等)。
-    // 自動 refresh は無効、Phase A の env 経由運用を続ける。
+    // No DO binding (e.g. local dev) — skip rather than fail; the env-based token stays in effect.
     return {
       refreshed: false,
       skippedReason: 'WEBULL_TOKEN_STATE binding is not configured',
@@ -63,8 +56,6 @@ export async function refreshWebullToken(
   const store = new WebullTokenStateClient(namespace)
   const before = await store.getState()
 
-  // refresh の必要判定: state なし or expires が REFRESH_BEFORE_DAYS 以内 or force。
-  // `expires` の単位 (ms vs sec) は値で判定 (10^12 以上は ms、未満は sec)。
   if (!options?.force && before && before.status === 'NORMAL') {
     const expiresMs = before.expires >= 1e12 ? before.expires : before.expires * 1000
     const remainMs = expiresMs - now.getTime()
@@ -111,8 +102,7 @@ export async function refreshWebullToken(
     }
   }
 
-  // Webull は refresh 時に同じ token を返すこともある (status だけ更新)。それでも
-  // NORMAL なら success として書き戻す (= lastSuccessAt が動く事に意味がある)。
+  // Webull may return the same token unchanged — still recorded as success so lastSuccessAt advances.
   if (result.status === 'NORMAL') {
     const after = await store.recordRefresh({
       success: true,

@@ -691,7 +691,7 @@ describe('WebullHttpClient', () => {
   // #257: trade/account endpoint path の env override 経路。default は旧 path、
   // env で新 path を指定すると getPositions / findOrderByClientId / placeOrder
   // 全部が新 path に切替わる。
-  describe('path env override (#257)', () => {
+  describe('path env override', () => {
     it('uses default /openapi/account/* paths when no override is provided', async () => {
       const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
         new Response(JSON.stringify([]), { status: 200 }),
@@ -781,7 +781,7 @@ describe('WebullHttpClient', () => {
   })
 
   // #258: trade/account routes の x-version env override
-  describe('trade x-version env override (#258)', () => {
+  describe('trade x-version env override', () => {
     it('defaults to x-version: v1 when WEBULL_TRADE_VERSION is unset', async () => {
       let captured: Headers | undefined
       const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
@@ -845,7 +845,7 @@ describe('WebullHttpClient', () => {
   })
 
   // #256: Place Order body schema version の env override
-  describe('place order schema env override (#256)', () => {
+  describe('place order schema env override', () => {
     it('defaults to v1 schema (account_id in query, support_trading_session=N, limit_price sent)', async () => {
       let capturedUrl: URL | undefined
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -3,34 +3,32 @@ import { buildSignedHeaders } from './WebullAuth'
 import { resolveAccessToken } from './resolveAccessToken'
 
 /**
- * Webull JP instrument 照会 (`GET /openapi/instrument/stock/list`) の正式実装
- * (issue #475)。
+ * Webull JP instrument lookup (`GET /openapi/instrument/stock/list`).
  *
- * **実測で確定した性質 (2026-06-11, PR #474 probe + 公式 MCP)**:
- *   - host は trade host (`api.webull.co.jp`) + `x-version: v2`。v1 署名だと
- *     gateway routing で 404 になる (「404 = endpoint 不在」と誤読しない)
- *   - 実在しない symbol (ZZZZ) は 200 + 空配列 → 存在検証に使える
- *   - `status` enum は OC=Tradable / CO=Liquidate only / NT=Non-Tradable
- *     (公式 webull-openapi-mcp の定義)。**ただし deny 実証済みの USMV も OC**
- *     なので、JP の取扱 deny (TICKER_IS_DENY) はこの API には反映されない —
- *     OC を「発注可能」とは主張できない
- *   - 対応 category は US_STOCK / US_ETF のみ (JP 銘柄は照会不可)。ETF を
- *     US_STOCK で引いても返る (USMV 実測) ため category 厳密性は不要
- *   - rate limit: 60 req/min per AppId (公式 llms_jp.md)
+ * - Trade host (`api.webull.co.jp`) + x-version: v2 — v1 signing 404s at the
+ *   gateway (don't read that 404 as "endpoint doesn't exist").
+ * - A nonexistent symbol returns 200 + an empty array, usable as an
+ *   existence check.
+ * - `status` (OC=Tradable / CO=Liquidate-only / NT=Non-Tradable, per the
+ *   official webull-openapi-mcp) does not reflect JP's TICKER_IS_DENY
+ *   restriction — a denied symbol still comes back OC, so OC cannot be read
+ *   as "orderable".
+ * - Only US_STOCK / US_ETF are supported; JP symbols aren't queryable here.
+ * - Rate limit: 60 req/min per AppId.
  */
 
-/** instrument status → operator 向け日本語ラベル。 */
+/** Operator-facing Japanese label per instrument status. */
 export const INSTRUMENT_STATUS_LABELS: Record<string, string> = {
   OC: '取引可 (Tradable)',
   CO: '清算のみ (Liquidate only)',
   NT: '取引不可 (Non-Tradable)',
 }
 
-/** 正規化済み instrument。raw JSON はこの層から外に出さない。 */
+/** Normalized instrument; raw JSON never leaves this layer. */
 export interface WebullInstrument {
   symbol: string
   name: string | null
-  /** OC / CO / NT。未知値もそのまま保持する (enum 拡張に fail-safe)。 */
+  /** OC / CO / NT; unknown values pass through as-is for forward-compat. */
   status: string | null
   instrumentId: string | null
   exchangeCode: string | null
@@ -40,16 +38,16 @@ export interface WebullInstrument {
   overnightTradingSupported: boolean | null
   easyToBorrow: boolean | null
   lotSize: number | null
-  /** ETF レバレッジ倍率。+3 (SOXL) / -3 (SOXS) / 0 (非レバ)。非 ETF は null。 */
+  /** Leverage multiplier: +3 (SOXL) / -3 (SOXS) / 0 (unleveraged). null for non-ETFs. */
   etfLeveragedFactor: number | null
   inverseEtf: boolean | null
 }
 
 export type InstrumentLookupResult =
   | { outcome: 'found'; instrument: WebullInstrument }
-  /** 200 + 空配列 (= 銘柄マスタに不存在。ZZZZ 実測パターン)。 */
+  /** 200 + empty array — symbol not in the master list. */
   | { outcome: 'not_found' }
-  /** 通信失敗 / 非200 / 設定不足。判定材料にしない (fail-safe)。 */
+  /** Network failure, non-200, or missing config — never a tradability signal. */
   | { outcome: 'error'; status: number | null; error: string }
 
 const INSTRUMENT_PATH = '/openapi/instrument/stock/list'
@@ -71,9 +69,8 @@ function asString(v: unknown): string | null {
 
 interface LookupInput {
   symbol: string
-  /** US_STOCK / US_ETF。JP 銘柄は API 非対応なので呼び出し側で弾く。 */
+  /** JP symbols aren't supported by this API; callers must filter them out first. */
   category: 'US_STOCK' | 'US_ETF'
-  /** test seam。default は globalThis.fetch。 */
   fetcher?: typeof fetch
 }
 
@@ -124,8 +121,8 @@ export async function lookupInstrument(env: Env, input: LookupInput): Promise<In
       if (!Array.isArray(parsed)) {
         return { outcome: 'error', status: response.status, error: 'unexpected response shape' }
       }
-      // symbols= は完全一致クエリだが、念のため symbol 一致でフィルタする
-      // (複数件返却やマスタ揺れに fail-safe)。
+      // Defensive: symbols= should already be an exact match, but filter
+      // anyway in case the master returns extra rows.
       const row = parsed.find(
         (r): r is Record<string, unknown> =>
           typeof r === 'object' && r !== null && (r as Record<string, unknown>).symbol === symbol,

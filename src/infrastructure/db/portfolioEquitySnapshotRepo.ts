@@ -6,15 +6,10 @@ import {
 import { createDb } from './tradeJournalRepo'
 
 /**
- * Daily snapshot writer / reader for `portfolio_equity_snapshot`. Wraps the
- * raw `D1Database` so callers don't repeat the drizzle bootstrap. Each
- * `recordPortfolioEquitySnapshot` is intended to be called once per
- * `PortfolioStateDO.rollDaily()` execution (manual `/admin/portfolio/roll-daily`
- * or the EOD `runPortfolioRoll` cron); same-day duplicates are intentionally
- * accepted because the table doubles as an audit trail.
- *
- * `loadPortfolioEquitySnapshots` returns rows in ASC order so the dashboard
- * chart can feed echarts directly without a client-side reverse.
+ * Daily snapshot writer / reader for `portfolio_equity_snapshot`.
+ * Same-day duplicates are accepted rather than upserted, since the table
+ * doubles as an audit trail. Rows load in ASC order so the dashboard chart
+ * can feed echarts directly without a client-side reverse.
  */
 
 export interface RecordPortfolioEquitySnapshotPayload {
@@ -29,8 +24,8 @@ export interface RecordPortfolioEquitySnapshotPayload {
   dailyRealizedPnlUsd?: number | null
   dailyRealizedPnlJpy?: number | null
   /**
-   * `dailyRealizedPnl / dailyStartEquity` (fraction、負が drawdown)。
-   * 計算側で start equity が 0 / 無効なら null を渡す。
+   * `dailyRealizedPnl / dailyStartEquity` as a fraction (negative = drawdown).
+   * Null when the caller's start equity was 0 or invalid.
    */
   drawdownPct?: number | null
   requestId?: string | null

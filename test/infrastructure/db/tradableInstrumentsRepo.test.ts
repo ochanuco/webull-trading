@@ -1,3 +1,5 @@
+import type { SQL } from 'drizzle-orm'
+import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core'
 import { describe, expect, it, vi } from 'vitest'
 import {
   finalizeTradableDisappearance,
@@ -134,6 +136,16 @@ describe('finalizeTradableDisappearance (watermark mark-and-sweep)', () => {
     const { db, updateCalls } = memDb([{ symbol: 'SOXL', currentlyTradable: true, lastSeenAt: 'wm2' }])
     expect(await finalizeTradableDisappearance(db, 'wm2', 'now')).toEqual([])
     expect(updateCalls).toHaveLength(0)
+  })
+
+  it('re-evaluates currentlyTradable/lastSeenAt in the UPDATE WHERE, not just symbol IN(...), so a concurrent newer sweep is not overwritten', async () => {
+    const { db, updateCalls } = memDb([{ symbol: 'SOXL', currentlyTradable: true, lastSeenAt: 'wm1' }])
+    await finalizeTradableDisappearance(db, 'wm2', 'now')
+    const dialect = new SQLiteSyncDialect()
+    const { sql } = dialect.sqlToQuery((updateCalls[0] as { where: SQL }).where)
+    expect(sql).toContain('"symbol" in')
+    expect(sql).toContain('"currently_tradable" = ?')
+    expect(sql).toContain('"last_seen_at" < ?')
   })
 })
 

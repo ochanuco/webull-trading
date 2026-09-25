@@ -30,7 +30,7 @@ function pagedFetcher(pages: { hasNext: boolean; instruments: unknown[] }[]): ty
   }) as typeof fetch
 }
 
-describe('fetchTradableInstruments (#460 tradable/list)', () => {
+describe('fetchTradableInstruments (tradable/list)', () => {
   it('複数ページを読み切って正規化・dedup する', async () => {
     const result = await fetchTradableInstruments(env, {
       sleep: noSleep,

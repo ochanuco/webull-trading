@@ -3,24 +3,21 @@ import { configAuditLog, type ConfigAuditLogRow } from './schema'
 import { createDb } from './tradeJournalRepo'
 
 /**
- * Append-only audit trail for state-changing admin POST handlers (#274). Each
- * mutation captures a JSON snapshot of the affected resource `before` and
- * `after`. The pair is `JSON.stringify`'d at write-time so dashboard views can
- * render a diff without re-fetching state.
+ * Append-only audit trail for state-changing admin POST handlers. Each
+ * mutation stores a `JSON.stringify`'d before/after snapshot so dashboard
+ * views can render a diff without re-fetching state.
  *
- * `recordChange` returns early when the stringified before/after match — a
- * pure no-op (e.g. `seed-cash` with the same amount) shouldn't show up in the
- * audit table. D1 write failures are propagated; callers wrap the entire admin
- * handler so a logging failure surfaces rather than silently dropping the row.
+ * `recordChange` skips the insert when before/after are identical, so a
+ * pure no-op (e.g. `seed-cash` with the same amount) doesn't pollute the
+ * audit table. D1 write failures propagate rather than being swallowed —
+ * callers should wrap the handler so a logging failure surfaces.
  */
 
 export interface RecordChangeParams {
   /**
-   * Identity that performed the mutation. Sourced from
-   * `c.get('actor')` set by the Cloudflare Access middleware (#29) — either an
-   * SSO email or a service-token `common_name`. Missing actor at this layer is
-   * a programmer error because the middleware fails closed (401) when neither
-   * a valid JWT nor the dev bypass is present.
+   * Identity that performed the mutation, set by the Access auth middleware
+   * (SSO email or a service-token `common_name`). Missing actor here means
+   * the route was wired without auth — the middleware itself fails closed.
    */
   actor: string
   /** logical endpoint id (e.g. `/admin/symbols/:symbol/seed-cash`). */
@@ -64,11 +61,9 @@ export async function recordChange(
 }
 
 /**
- * Read the request actor previously stamped by `accessJwtMiddleware` (#29) via
- * `c.set('actor', ...)`. The middleware fails closed (401) before route
- * handlers run, so reaching this helper without an actor implies the route
- * was wired without auth — surface that as a thrown error rather than a
- * silent `'ai-agent'` fallback that would mask the misconfiguration.
+ * Reads the actor stamped by `accessJwtMiddleware`. Throws instead of
+ * falling back to a placeholder value — a missing actor here means a route
+ * was wired without auth, and a silent default would mask that.
  */
 export function extractActor(actor: string | undefined | null): string {
   if (typeof actor !== 'string') {
@@ -94,14 +89,11 @@ export interface LoadAuditOptions {
   fromIso?: string
   /** ISO timestamp inclusive upper bound. */
   toIso?: string
-  /** cursor: id < before で古い方へページング。 */
+  /** Pagination cursor: returns rows with `id < before`. */
   before?: number
 }
 
-/**
- * dashboard `/dashboard/audit` 用 SELECT。timestamp DESC で最新から limit 件返す。
- * actor / endpoint / date range は AND で組み合わせる。
- */
+/** Latest-first SELECT for `/dashboard/audit`; filters combine with AND. */
 export async function loadRecentAudit(
   db: D1Database,
   options: LoadAuditOptions = {},

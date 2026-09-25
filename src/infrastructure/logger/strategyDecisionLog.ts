@@ -11,21 +11,14 @@ export interface StrategyDecisionRecord {
   reason?: string | null
   price?: number | null
   indicatorsJson?: string | null
-  /** BUY/SELL 成立時のみ設定。dashboard が trade_journal と JOIN する key (#143)。 */
+  /** BUY/SELL 成立時のみ設定。dashboard が trade_journal と JOIN する key。 */
   clientOrderId?: string | null
-  /** 判定トレース JSON (`DecisionTraceStep[]`)。ラダー可視化用 (#decision-trace)。 */
+  /** 判定トレース JSON (`DecisionTraceStep[]`)。ラダー可視化用。 */
   traceJson?: string | null
 }
 
-/**
- * INSERT one per-symbol decision row. Failure is logged (console.error) and
- * swallowed — logging must NEVER cause the strategy loop to crash or skip
- * symbols (logging failure isolation, as already practiced by pullbackScheduler
- * for tradeJournal entries).
- *
- * Callers that don't have DB bound (e.g. unit tests that pass a fake
- * positionStore) pass `db` as undefined; this function no-ops then.
- */
+// Failures are logged and swallowed: a logging error must never crash the
+// strategy loop or skip a symbol. `db` undefined (e.g. unbound in tests) is a noop.
 export async function logStrategyDecision(
   db: DrizzleD1Database | undefined,
   record: StrategyDecisionRecord,
@@ -56,11 +49,6 @@ export async function logStrategyDecision(
   }
 }
 
-/**
- * Factory for a lazy D1 handle used by strategy scheduler. Returns `undefined`
- * when `env.DB` is unbound so callers can pass a short-circuit value without
- * branching.
- */
 export function strategyDecisionDbOrUndefined(env: { DB?: D1Database }): DrizzleD1Database | undefined {
   return env.DB ? createDb(env.DB) : undefined
 }

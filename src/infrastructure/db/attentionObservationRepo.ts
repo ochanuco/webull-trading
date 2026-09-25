@@ -1,18 +1,9 @@
 /**
- * `attention_observation` テーブルへの薄い repo (news/crowd attention producer,
- * PR 1)。
- *
- * - `bulkInsertIgnore` は producer (`newsScheduler`, 将来の crowdScheduler) から
- *   の write。CHUNK=50 の multi-row INSERT + `.onConflictDoNothing()` で D1
- *   subrequest 制限を避ける (`macroEventCalendarRepo.bulkUpsert` と同パターン)。
- *   `UNIQUE (source, probe_key, metric, bucket_at)` 違反行は静かに skip される
- *   — GDELT `timespan=1d` は毎 tick 全点 (~96) を返すので、これが冪等
- *   backfill の実体になる。
- * - `fetchRecent` は将来の risk gate (newsShockGate 等) からの read。
- * - `purgeOlderThan` は retention purge (将来 PR で 5 分毎 cron に同梱予定) 用。
- *
- * このリポジトリ自体はこの PR ではどこからも read されない (取引経路の変更
- * ゼロ — gate 本体は後続 PR)。テストと将来実装の土台として先に用意する。
+ * Thin repo over `attention_observation` (news/crowd attention producer).
+ * `bulkInsertIgnore` relies on `UNIQUE (source, probe_key, metric, bucket_at)`
+ * + `.onConflictDoNothing()` to silently skip already-seen rows — GDELT's
+ * `timespan=1d` feed returns the full day's ~96 points every tick, so this
+ * is what makes ingestion idempotent.
  */
 import { and, asc, eq, gte, lt, type SQL } from 'drizzle-orm'
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'
@@ -31,25 +22,22 @@ export interface AttentionObservationRecord {
 }
 
 export interface AttentionObservationRepo {
-  /**
-   * Chunk insert (CHUNK=50) + `.onConflictDoNothing()`。既に存在する
-   * `(source, probe_key, metric, bucket_at)` は skip としてカウントする。
-   */
+  /** `skipped` counts rows that already existed for that `(source, probe_key, metric, bucket_at)`. */
   bulkInsertIgnore(
     records: AttentionObservationRecord[],
   ): Promise<{ inserted: number; skipped: number }>
-  /** `(source, probeKey, metric)` を絞り込み、`bucketAt >= sinceIso` を bucketAt asc で返す。 */
+  /** Rows for `(source, probeKey, metric)` with `bucketAt >= sinceIso`, ordered ascending. */
   fetchRecent(filter: {
     source: string
     probeKey: string
     metric: string
     sinceIso: string
   }): Promise<AttentionObservationRow[]>
-  /** `bucketAt < iso` の行を削除し、削除件数を返す。 */
+  /** Deletes rows with `bucketAt < iso`, returns the deleted count. */
   purgeOlderThan(iso: string): Promise<number>
 }
 
-/** Wraps a Worker `env.DB` into a drizzle-typed client (other repos と同形式)。 */
+/** Wraps a Worker `env.DB` into a drizzle-typed client. */
 export function createAttentionObservationDb(d1: D1Database): AttentionObservationDb {
   return drizzle(d1)
 }
@@ -62,10 +50,9 @@ export function createAttentionObservationRepo(
       let inserted = 0
       let skipped = 0
       if (records.length === 0) return { inserted, skipped }
-      // D1 は 1 クエリあたり bound parameter 100 個が上限。multi-row INSERT の
-      // bind 数は `列数 × 行数` なので、7 列 → 100 / 7 = 14 行が安全な最大値。
-      // (CHUNK=50 だと 350 bind になり、GDELT の 1d timeline ~66 点を入れた
-      // 時点で必ず失敗する。)
+      // D1 caps bound params at 100/query; bind count = columns × rows.
+      // 7 columns → 14 rows/chunk is the safe max (CHUNK=50 would need 350
+      // binds and fail once GDELT's ~66-point 1d timeline is ingested).
       const CHUNK = 14
       for (let i = 0; i < records.length; i += CHUNK) {
         const chunk = records.slice(i, i + CHUNK)
