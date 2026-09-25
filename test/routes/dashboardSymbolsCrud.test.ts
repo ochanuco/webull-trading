@@ -5,15 +5,8 @@ import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
 import { makeGlobalConfigSnapshot } from '../helpers/configFixtures'
 import type { SymbolConfigRow } from '../../src/infrastructure/db/schema'
 
-/**
- * symbol_config CRUD UI tests (#292)。dashboard 3 ページ (list / new / edit) +
- * 4 admin POST endpoint を end-to-end でカバーする。
- *
- * DB は `createDb` を spy で差し替えて in-memory store として振る舞わせる
- * (audit log の insert もここに乗る — table を分けて capture)。これで
- * symbol_config 操作と audit log 書き込みを 1 つの fake で検証できる。
- */
-
+// DB は createDb を spy で差し替えて in-memory store (symbol_config + audit log の
+// insert を table 別に capture) として振る舞わせる。
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
 }))
@@ -39,16 +32,9 @@ interface UpdateCall {
   whereSymbol: string | null
 }
 
-/**
- * 最小限の drizzle-like fake。`drizzle` API の chainable オブジェクトを模倣し、
- * symbol_config 行 (in-memory) と audit log の inserts / updates を記録する。
- *
- * select chain は filter を捕捉しないので、呼び出し側は `findSymbolConfig`
- * → `db.select().from(tbl).where(eq(tbl.symbol, X)).limit(1)` の 1 件返却を
- * 期待する。fake では select chain がそれぞれ自身を返し、最終 `await` で
- * `currentRows` を返す。`where` 時に渡される drizzle eq(...) は内部に値を
- * 保持するので JSON 化して symbol を取り出してフィルタする。
- */
+// drizzle API の chainable オブジェクトを模倣し、symbol_config 行 (in-memory) と audit
+// log の inserts/updates を記録する。where() に渡される drizzle eq(...) は内部に値を
+// 保持するので、そのノードを再帰的に辿って symbol を取り出しフィルタする。
 function fakeDb(
   initial: SymbolConfigRow[],
   pairs: Array<{ symbol: string; inverse: string }> = [],
@@ -74,10 +60,8 @@ function fakeDb(
     return 'unknown'
   }
 
-  // drizzle eq(symbolConfig.symbol, X) は SQL クエリオブジェクト内の Param
-  // ノードに X を入れる。POC test 用に、`Param`-like ノード (`{ value: X,
-  // encoder, ... }`) を最初に拾った時点で返す。drizzle 表現は内部 API な
-  // ので unstable だが test 用途には十分。
+  // drizzle eq(symbolConfig.symbol, X) は SQL クエリオブジェクト内の Param ノードに X を
+  // 入れる。`Param`-like ノード (`{ value: X, encoder, ... }`) を最初に拾った時点で返す。
   const extractSymbolFromWhere = (cond: unknown): string | null => {
     const seen = new WeakSet<object>()
     const visit = (node: unknown): string | null => {
@@ -105,8 +89,8 @@ function fakeDb(
 
   const selectChain = (filtered: () => SymbolConfigRow[]) => {
     const chain = {
-      // inverse_pairs を select したら pair 行を返す (loadInversePairs 用)。
-      // それ以外 (symbol_config) は従来通り自身を返して rows を流す。
+      // inverse_pairs を select したら pair 行を返す (loadInversePairs 用)、それ以外は
+      // 従来通り自身を返して rows を流す。
       from: (tbl: unknown) =>
         tableName(tbl) === 'inverse_pairs'
           ? {
@@ -214,9 +198,8 @@ function fakeDb(
           },
         }),
       }),
-      // repo の setInversePair / createSymbolPair / deleteInversePairsForSymbol が使う。
-      // fake の insert().values() / delete().where() は呼び出し時に即実行され Promise を
-      // 返すので、batch は既に走った statement を待つだけで良い (#315)。
+      // fake の insert().values() / delete().where() は呼び出し時に即実行されるので、
+      // batch (setInversePair 等が使う) は既に走った statement を待つだけで良い (#315)。
       batch: (stmts: Promise<unknown>[]) => Promise.all(stmts),
     },
   }
@@ -259,7 +242,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  // --- List page ---
   it('renders /dashboard/symbols list with active + inactive rows', async () => {
     const db = fakeDb([
       row({ symbol: 'SOXL', name: 'Direxion Semi 3X', active: true, maxNotional: 2000 }),
@@ -275,15 +257,13 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('7203')
     expect(body).toContain('トヨタ自動車')
     expect(body).toContain('+ 新規追加')
-    // action links per row
     expect(body).toContain('/dashboard/symbols/SOXL/edit')
     expect(body).toContain('/admin/symbol-config/SOXL/toggle-active')
     // hard delete button only on inactive row (active 行は無効化先行を要求)
     expect(body).toContain('/admin/symbol-config/7203/delete')
     expect(body).not.toContain('/admin/symbol-config/SOXL/delete')
-    // counts (post-cleanup format)
     expect(body).toContain('有効 1 / 無効 1')
-    // #415: 買付余力バッジ (client-side fetch) がページに含まれる
+    // 買付余力バッジ (client-side fetch) がページに含まれる (#415)
     expect(body).toContain('buying-power-badge')
     expect(body).toContain('/admin/buying-power')
   })
@@ -303,7 +283,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toMatch(/100 <span class="muted"[^>]*>株<\/span>/)
   })
 
-  // --- POST add ---
   it('POST /admin/symbol-config inserts row + writes audit row, redirects 303', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -354,7 +333,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     })
   })
 
-  // --- POST update ---
   it('POST /admin/symbol-config/:symbol/update writes audit with before/after diff', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', maxNotional: 2000 })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -395,7 +373,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(after.notes).toBe('bumped')
   })
 
-  // --- POST toggle-active ---
   it('POST /admin/symbol-config/:symbol/toggle-active flips active + writes audit', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', active: true })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -419,7 +396,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(JSON.parse(String(auditInsert!.values.afterJson))).toEqual({ active: false })
   })
 
-  // --- POST delete (hard, inactive only) ---
   it('POST /admin/symbol-config/:symbol/delete hard-deletes inactive row', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', active: false })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -434,7 +410,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     expect(res.status).toBe(303)
-    // DELETE 1 件、UPDATE は走らないこと
     const deletes = db.deletes.filter((d) => d.table === 'symbol_config')
     expect(deletes).toHaveLength(1)
     const auditInsert = db.inserts.find((i) => i.table === 'config_audit_log')
@@ -462,8 +437,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(deletes).toHaveLength(0)
   })
 
-  // --- lot_size 入力必須 (#symbol-lot-size) ---
-  it('validation: rejects missing / empty / non-integer lot_size with 400 (required, no fallback)', async () => {
+  it('validation: rejects missing / empty / non-integer lot_size with 400 (required, no fallback) (#symbol-lot-size)', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -485,20 +459,16 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
         { ...baseEnv, DB: {} as D1Database },
       )
 
-    // lot_size 欄が無い → 400 (fallback しない)
     expect((await post({})).status).toBe(400)
-    // 空文字 → 400
     expect((await post({ lot_size: '' })).status).toBe(400)
-    // 0 / 負 / 非整数 → 400
     expect((await post({ lot_size: '0' })).status).toBe(400)
     expect((await post({ lot_size: '-1' })).status).toBe(400)
     expect((await post({ lot_size: '1.5' })).status).toBe(400)
 
-    // どれも insert は走っていない (fail-closed)
+    // fail-closed: どれも insert は走っていない
     expect(db.inserts.filter((i) => i.table === 'symbol_config')).toHaveLength(0)
   })
 
-  // --- Validation ---
   it('validation: rejects empty symbol / unknown market / negative max_notional with 400', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -542,24 +512,20 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     expect(badNotional.status).toBe(400)
 
-    // どれも insert は走っていない
     expect(db.inserts.filter((i) => i.table === 'symbol_config')).toHaveLength(0)
   })
 
-  // --- XSS regression ---
   it('escapes <script> payloads in notes on list and edit pages', async () => {
     const xssNotes = '<script>alert(1)</script>'
     const db = fakeDb([row({ symbol: 'SOXL', notes: xssNotes })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
 
-    // list page
     const listRes = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const listBody = await listRes.text()
     expect(listBody).not.toContain(xssNotes)
     expect(listBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
 
-    // edit page
     const editRes = await app.request(
       '/dashboard/symbols/SOXL/edit',
       { headers: authHeader },
@@ -570,7 +536,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(editBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
   })
 
-  // --- TOCTOU: 既存 symbol を form POST → 303 redirect with ?error=duplicate ---
   it('POST /admin/symbol-config returns 303 with ?error=duplicate when symbol exists (form)', async () => {
     const db = fakeDb([row({ symbol: 'SOXL' })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -596,7 +561,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
   })
 
-  // --- TOCTOU: 既存 symbol を JSON POST → 409 with error code (JSON path keeps semantics) ---
   it('POST /admin/symbol-config returns 409 when symbol exists (JSON)', async () => {
     const db = fakeDb([row({ symbol: 'SOXL' })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -621,7 +585,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toMatchObject({ error: 'symbol_already_exists', symbol: 'SOXL' })
   })
 
-  // --- list error banner is rendered from ?error= query (PRG from failed POST) ---
   it('renders error banner on /dashboard/symbols?error=duplicate&symbol=SOXL', async () => {
     const db = fakeDb([row({ symbol: 'SOXL' })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -637,7 +600,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('既に登録済み')
   })
 
-  // --- atomic toggle: SQL NOT active is sent in the UPDATE set ---
   it('toggle-active sends SQL NOT expression (not a precomputed boolean) to UPDATE', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', active: true })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -651,16 +613,13 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       },
       { ...baseEnv, DB: {} as D1Database },
     )
-    // fake DB unwraps the SQL NOT into a boolean (= !before.active) so the
-    // resulting row is flipped. The end-state check is what matters:
-    // 単純 read-modify-write だと「現在 active を SELECT してから書き戻し」
-    // になり race するが、新実装は SQL NOT を渡すことで DB が atomic に
-    // flip する。fake では update 後 row が反転していることだけ検証する。
+    // 単純 read-modify-write だと race するが、新実装は SQL NOT を渡すことで DB が
+    // atomic に flip する。fake は SQL NOT を boolean に解決するので、update 後に
+    // row が反転していることだけ検証する。
     const soxl = db.rows.find((r) => r.symbol === 'SOXL')
     expect(soxl?.active).toBe(false)
   })
 
-  // --- /symbols/new : DB unavailable returns unavailable page ---
   it('GET /dashboard/symbols/new returns DB-not-bound page when DB binding missing', async () => {
     const app = createApp()
     const res = await app.request(
@@ -673,7 +632,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('DB not bound')
   })
 
-  // --- edit form has immutability hint ---
   it('GET /dashboard/symbols/:symbol/edit shows immutability hint for the symbol field', async () => {
     const db = fakeDb([row({ symbol: 'SOXL' })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -688,7 +646,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('immutable')
   })
 
-  // --- toggle JSON path returns full row snapshot, not only `active` ---
   it('toggle-active JSON response returns full row snapshot', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', active: true, maxNotional: 2000 })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -714,10 +671,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     })
   })
 
-  // --- Per-symbol strategy override (#316) ---
-  it('POST /admin/symbol-config persists timeStopDaysOverride / kAtrOverride from form', async () => {
-    // SOXL (3x leveraged ETF) で time_stop=5 / k_atr=3.0 を入れて DB に
-    // 書かれることを確認。global default は別途 placeholder で表示するだけ。
+  it('POST /admin/symbol-config persists timeStopDaysOverride / kAtrOverride from form (#316)', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -751,8 +705,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 
   it('POST /admin/symbol-config treats empty override fields as NULL (global fall-through)', async () => {
-    // 空文字 → null (= global default を使う) の挙動を保証。3x ETF 以外の
-    // 一般銘柄 form ではこちらが既定の path。
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -783,12 +735,11 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 
   it('POST /admin/symbol-config rejects out-of-range overrides with 400', async () => {
-    // DB CHECK と二重防御。timeStopDays は 1-365 整数、kAtr は 0.5-5.0 float。
+    // DB CHECK 制約 (timeStopDays 1-365 整数、kAtr 0.5-5.0 float) の二重防御。
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
 
-    // timeStop 0 (下限未満)
     const tooLowDays = await app.request(
       '/admin/symbol-config',
       {
@@ -799,14 +750,13 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
           market: 'US',
           currency: 'USD',
           active: 'true',
-          time_stop_days_override: '0',
+          time_stop_days_override: '0', // 下限未満
         }).toString(),
       },
       { ...baseEnv, DB: {} as D1Database },
     )
     expect(tooLowDays.status).toBe(400)
 
-    // kAtr 0.1 (下限未満)
     const tooLowAtr = await app.request(
       '/admin/symbol-config',
       {
@@ -824,7 +774,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     expect(tooLowAtr.status).toBe(400)
 
-    // kAtr 6.0 (上限超え)
     const tooHighAtr = await app.request(
       '/admin/symbol-config',
       {
@@ -846,7 +795,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
   })
 
   it('POST /admin/symbol-config/:symbol/update persists override values + audit log', async () => {
-    // Update path で override 値が DB に書かれて audit before/after が乗ること。
     const db = fakeDb([row({ symbol: 'SOXL', timeStopDaysOverride: null, kAtrOverride: null })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -897,18 +845,16 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     expect(res.status).toBe(200)
     const body = await res.text()
-    // form input が存在
     expect(body).toContain('name="time_stop_days_override"')
     expect(body).toContain('name="k_atr_override"')
-    // 現在値が反映 (value 属性)
     expect(body).toMatch(/name="time_stop_days_override"[^>]*value="5"/)
     expect(body).toMatch(/name="k_atr_override"[^>]*value="3"/)
     // placeholder に global default が表示される (makeGlobalConfigSnapshot の値)
     expect(body).toContain('global default')
   })
 
-  // 持ち越し設定は radio 2 択で両状態を明示 (「持ち越し」+「持ち越さない」
-  // checkbox の二重否定が読めない、という operator 指摘の regression 防止)。
+  // checkbox の二重否定 (「持ち越さない」を外す/入れる) が読めない、という operator 指摘の
+  // regression 防止のため radio 2 択で両状態を明示する。
   it('持ち越し setting renders as two explicit radios and reflects intradayOnly', async () => {
     const db = fakeDb([row({ symbol: 'SOXL', intradayOnly: true })])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
@@ -921,15 +867,12 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const body = await res.text()
     expect(body).toContain('持ち越す')
     expect(body).toContain('持ち越さない')
-    // intradayOnly=true の行は radio value="true" 側が checked
     expect(body).toMatch(/type="radio" name="intraday_only" value="true" checked/)
     expect(body).not.toMatch(/type="radio" name="intraday_only" value="false" checked/)
-    // 旧 hidden+checkbox パターンが残っていない
     expect(body).not.toContain('type="checkbox" name="intraday_only"')
   })
 
-  // --- #315 inverse-pair linked registration ---
-  it('new form shows inverse_symbol input', async () => {
+  it('new form shows inverse_symbol input (#315)', async () => {
     const db = fakeDb([])
     vi.mocked(createDb).mockReturnValue(db.drizzleLike as never)
     const app = createApp()
@@ -941,11 +884,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const body = await res.text()
     expect(body).toContain('name="inverse_symbol"')
     expect(body).toContain('対で登録')
-    // 登録モード選択 (単体 / インバース対)
     expect(body).toContain('name="reg_mode"')
     expect(body).toContain('value="single"')
     expect(body).toContain('value="inverse"')
-    // inverse 欄は同じ Yahoo autocomplete (searchInverseSuggest)
     expect(body).toContain('window.searchInverseSuggest')
   })
 
@@ -978,16 +919,13 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/dashboard/symbols')
-    // primary + counterpart の symbol_config が両方作られる
     expect(db.rows.map((r) => r.symbol).sort()).toEqual(['SOXL', 'SOXS'])
-    // counterpart は Yahoo メタの銘柄名 / market / currency を焼く
     const soxs = db.rows.find((r) => r.symbol === 'SOXS')!
     expect(soxs.name).toBe('Direxion Daily Semiconductor Bear 3X Shares')
     expect(soxs.market).toBe('US')
     expect(soxs.currency).toBe('USD')
     // counterpart は同じ商品種別なので売買単位を primary 継承 (#symbol-lot-size)
     expect(soxs.lotSize).toBe(1)
-    // inverse_pairs リンクが書かれる
     expect(db.inserts.some((i) => i.table === 'inverse_pairs')).toBe(true)
   })
 
@@ -1089,11 +1027,9 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const app = createApp()
     const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const body = await res.text()
-    // slider が form="symbol-budget-form" に紐づき、現在値 40 が反映
     expect(body).toContain('name="pct_SOXL"')
     expect(body).toContain('form="symbol-budget-form"')
     expect(body).toMatch(/name="pct_SOXL"[^>]*value="40"/)
-    // 確定ボタン (即保存しない)
     expect(body).toContain('確定して保存')
     expect(body).toContain('action="/admin/symbol-config/budget-alloc"')
   })
@@ -1107,7 +1043,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const app = createApp()
     const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const body = await res.text()
-    // 上段 (SOXL) にだけ slider、下段 (SOXS) の予算セルは rowspan で消える
     expect(body).toContain('name="pct_SOXL"')
     expect(body).not.toContain('name="pct_SOXS"')
     expect(body).toContain('rowspan="2"')
@@ -1123,7 +1058,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     const app = createApp()
     const res = await app.request('/dashboard/symbols', { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     const body = await res.text()
-    // meter と同じ max 方式 (同時に建つのは片側のみ) — max(20, 40) = 40
+    // meter と同じ max 方式 (同時に建つのは片側のみ): max(20, 40) = 40
     expect(body).toMatch(/name="pct_SOXL"[^>]*value="40"/)
   })
 
@@ -1147,8 +1082,8 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
 
   it('bulk budget-alloc POST converts % → fraction (÷100), 303', async () => {
     let lastSetPct: number | null | undefined
-    // chain mock: from() は await で [] (loadInversePairs)、where().limit() で
-    // SOXL 行 (findSymbolConfig)、update().set().where() で set 値を捕捉。
+    // chain mock: from() は await で [] (loadInversePairs)、where().limit() で SOXL 行
+    // (findSymbolConfig)、update().set().where() で set 値を捕捉する。
     const chain: Record<string, unknown> = {}
     chain.from = () => chain
     chain.where = () => chain
@@ -1187,7 +1122,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     const body = await res.text()
-    // symbol / inverse 入力に 1Password / LastPass の autofill 抑止属性が付く
     expect((body.match(/data-1p-ignore="true"/g) ?? []).length).toBeGreaterThanOrEqual(2)
     expect(body).toContain('name="inverse_name"')
   })
@@ -1232,7 +1166,6 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     expect(res.status).toBe(303)
-    // symbol_config 削除 + inverse_pairs に対する delete が発行される
     expect(db.deletes.some((d) => d.table === 'symbol_config')).toBe(true)
     expect(db.deletes.some((d) => d.table === 'inverse_pairs')).toBe(true)
   })
@@ -1244,7 +1177,6 @@ describe('#budget-jpy-base-fx computeBudgetUsage (single account % meter)', () =
   const rec = (symbol: string, budgetAllocPct: number | null) => ({ symbol, budgetAllocPct })
 
   it('counts an inverse pair once via max (only one side held at a time)', () => {
-    // SOXL 40% / SOXS 40% (synced) → pair contributes 40, not 80.
     expect(computeBudgetUsage([rec('SOXL', 0.4), rec('SOXS', 0.4)], { SOXL: 'SOXS', SOXS: 'SOXL' })).toBeCloseTo(40, 6)
   })
 
@@ -1253,7 +1185,7 @@ describe('#budget-jpy-base-fx computeBudgetUsage (single account % meter)', () =
   })
 
   it('sums standalone + separate pairs across currencies into one account % (FX-agnostic)', () => {
-    // 口座(円)に対する割合なので通貨混在でも 1 本に合算: 40 + 30 + 10 + 50 = 130 (超過)。
+    // 口座 (円) に対する割合なので通貨混在でも 1 本に合算する: 40+30+10+50 = 130。
     const used = computeBudgetUsage(
       [
         rec('SOXL', 0.4), rec('SOXS', 0.4), // pair → 40
@@ -1278,7 +1210,6 @@ describe('#315 inverse-pair list grouping', () => {
     const rows = [r('AAPL'), r('SOXL'), r('TQQQ'), r('SOXS'), r('SQQQ')]
     const pairs = { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' }
     const ordered = orderRowsByPair(rows, pairs).map((x) => x.symbol)
-    // AAPL(対なし) → SOXL+SOXS → TQQQ+SQQQ。primary の直後に相手が来る。
     expect(ordered).toEqual(['AAPL', 'SOXL', 'SOXS', 'TQQQ', 'SQQQ'])
   })
 
@@ -1294,7 +1225,7 @@ describe('#315 inverse-pair list grouping', () => {
     const pairs = { SOXL: 'SOXS', SOXS: 'SOXL', TQQQ: 'SQQQ', SQQQ: 'TQQQ' }
     const ordered = orderRowsByPair(rows, pairs)
     const color = assignPairColors(ordered, pairs)
-    // 同一ペアは同色、別ペアは別色、対なしは無着色。
+    // 対なし (AAPL) は無着色
     expect(color.get('SOXL')).toBe(color.get('SOXS'))
     expect(color.get('TQQQ')).toBe(color.get('SQQQ'))
     expect(color.get('SOXL')).not.toBe(color.get('TQQQ'))
@@ -1413,7 +1344,7 @@ describe('dashboard symbol_config role / entry override (#452)', () => {
           currency: 'USD',
           active: 'true',
           lot_size: '1',
-          role: 'cash_praking', // typo
+          role: 'cash_praking',
         }).toString(),
       },
       { ...baseEnv, DB: {} as D1Database },
@@ -1467,8 +1398,8 @@ describe('dashboard symbol_config role / entry override (#452)', () => {
     expect(body).toContain('name="role"')
     // select 廃止 → hidden input に現在の role が入る (#role-stats)
     expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role" value="core_trend">/)
-    // #layout 回帰: 編集モードの「銘柄」値セルは 1 div に包む (裸の <span></span> を
-    // グリッドに直接出すと 2 列レイアウトが 1 セルずれて全崩れする)。
+    // 「銘柄」値セルは 1 div に包む — 裸の <span></span> をグリッドに直接出すと
+    // 2 列レイアウトが 1 セルずれて全崩れする (#layout 回帰)。
     expect(body).not.toMatch(/readonly style="padding:6px;background:#eee">\s*<span><\/span>/)
     expect(body).toContain('symbol は immutable です')
     // fraction → % 表示
@@ -1674,7 +1605,6 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     // ロールは select を廃止し hidden input + カードギャラリーで選択 (#role-stats)
     expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role"/)
     expect(body).toContain('選択中:')
-    // 任意セクションは details で、新規時は閉じている (open なし)
     expect(body).toContain('発注サイズ')
     expect(body).toContain('戦略ロール・entry 条件')
     expect(body).toContain('損切・利食・保有')
@@ -1690,7 +1620,6 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).toMatch(/data-arch="pullback"/)
     expect(body).toContain('モメンタム')
     expect(body).toContain('逆張り')
-    // role 別 preset 解決値 (入場ゲート閾値・stop/TP) が含まれる。
     expect(body).toContain('leveraged_trend: { tr: 8, heat: 60')
     expect(body).toContain('inverse_hedge: { tr: 15, heat: 40')
   })
@@ -1715,7 +1644,6 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
       { ...baseEnv, DB: {} as D1Database },
     )
     const body = await res.text()
-    // 値のあるセクションは open
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>戦略ロール・entry 条件/)
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>損切・利食・保有/)

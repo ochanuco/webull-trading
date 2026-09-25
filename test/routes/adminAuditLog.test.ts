@@ -1,15 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../src/app'
 
-/**
- * Integration test for issue #274: state-changing admin POST handlers must
- * write a `config_audit_log` row via `recordChange`. Uses the seed-cash
- * endpoint because it is the smallest path that goes through the wrapper.
- *
- * `createDb` is spied so we can capture the drizzle `insert().values()` call
- * without spinning up a real D1.
- */
-
+// Exercises seed-cash as the smallest path through the recordChange wrapper; createDb is
+// spied to capture the drizzle insert().values() call without a real D1.
 const baseEnv = {
   ACCESS_DEV_BYPASS_USER: 'admin',
   DRY_RUN: 'true',

@@ -300,11 +300,7 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
-    // #cash-rebalance-skipped: `cash rebalance skipped: ...` は既存 reason への
-    // suffix (`${signal.reason}; cash rebalance skipped: ${skipWhy}`) として
-    // 付与される。localizeReason のルールは `^...$` の完全一致 (この pullback
-    // ルール含む) がほとんどで、suffix が付くと元の reason 部分にもマッチしなく
-    // なる — 結果、この compound reason は丸ごと未翻訳のまま画面に出る。
+    // ルールはほぼ `^...$` 完全一致なので、suffix が付くと元の reason 部分にもマッチしなくなる。
     it('cash rebalance skipped suffix breaks the underlying reason match (left fully untranslated, by design)', () => {
       const compound = 'pullback 0.0023 > -0.01 (not deep enough); cash rebalance skipped: some reason'
       expect(localizeReason(compound)).toBe(compound)

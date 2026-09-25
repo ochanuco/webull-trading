@@ -21,8 +21,7 @@ const unauthEnv = {
   MAX_ORDER_NOTIONAL: '100',
 }
 
-// The dev bypass kicks in whenever baseEnv is supplied and no `Cf-Access-Jwt-Assertion`
-// is present, so no per-request header is needed; the empty spread is kept for diff hygiene.
+// Dev bypass kicks in whenever baseEnv is supplied with no Cf-Access-Jwt-Assertion header.
 const authHeader = {}
 
 function fakeSymbolState(captured: { calls: Array<{ symbol: string; amount: number }> }) {
@@ -43,7 +42,6 @@ function fakeSymbolState(captured: { calls: Array<{ symbol: string; amount: numb
       }
     },
   }
-  // Minimal DurableObjectNamespace shape for the SymbolStateClient wrapper.
   return {
     idFromName: (_name: string) => 'id',
     get: (_id: string) => stub,
@@ -201,9 +199,7 @@ describe('GET /admin/orders/repair-status', () => {
   })
 
   it('200s with the count of FILLED rows missing state_applied_at', async () => {
-    // Stub createDb so we can inject the query result without spinning up a
-    // real D1. The wrapper just receives the env.DB reference and forwards
-    // a typed drizzle handle, but here we want the chain we control.
+    // Stub createDb to inject the query chain we control instead of a real D1.
     const dbModule = await import('../../src/infrastructure/db/tradeJournalRepo')
     const spy = vi
       .spyOn(dbModule, 'createDb')
@@ -590,9 +586,7 @@ describe('Earnings calendar admin endpoints (#196)', () => {
     it.each(['2026-02-30', '2026-13-01', '2026-00-15', '2026-04-31', '2025-02-29'])(
       'rejects calendar-impossible date %s (round-trip validation)',
       async (badDate) => {
-        // CodeRabbit #196 review: 単純な regex + Date.parse() では
-        // `2026-02-30` が `2026-03-02` に normalize されて DB に保存される。
-        // round-trip で実在日付のみ通すよう validator が直っていることを確認。
+        // regex + Date.parse() だけだと `2026-02-30` が `2026-03-02` に normalize されて保存されうる (CodeRabbit #196)。
         const app = createApp()
         const res = await app.request(
           '/admin/earnings/seed',
@@ -1053,14 +1047,8 @@ describe('Macro event calendar admin endpoints (#196 2/3)', () => {
   })
 })
 
-/**
- * `POST /admin/orders/sync-holdings` (broker holding reconcile, #221 follow-up).
- *
- * Verifies route-level wiring only — the broker / DO / drift logic is covered
- * end-to-end by `test/trading/reconciliation/syncHoldings.test.ts`. Here we
- * just confirm the route extracts query params, mounts the WebullHttpClient
- * + SymbolStateClient, gates on bindings, and forwards results.
- */
+// Route-level wiring only (#221 follow-up); broker/DO/drift logic is covered
+// end-to-end by test/trading/reconciliation/syncHoldings.test.ts.
 describe('POST /admin/orders/sync-holdings', () => {
   type SyncOverrideCall = {
     symbol: string
@@ -1221,7 +1209,6 @@ describe('POST /admin/orders/sync-holdings', () => {
           { method: 'POST', headers: { ...authHeader } },
           {
             ...baseEnv,
-            // Deliberately no DB binding — single-symbol mode must not need it.
             SYMBOL_STATE: fakeSyncNamespace(captured, {
               SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
             }),
@@ -1337,12 +1324,8 @@ describe('POST /admin/orders/sync-holdings', () => {
     expect(captured.calls).toEqual([])
   })
 
-  /**
-   * Safe-fail guard smoke: when broker returns nothing but DO holds shares,
-   * the route must NOT zero out the DO unless ?force=true is explicit. The
-   * full guard semantics live in `test/trading/reconciliation/syncHoldings.test.ts`;
-   * here we just confirm the route parses `force` correctly and forwards it.
-   */
+  // Confirms the route parses `force` correctly; full guard semantics live in
+  // test/trading/reconciliation/syncHoldings.test.ts.
   it('safe-fails (no overrides) when broker returns empty + DO has positions + force=false', async () => {
     const captured = { calls: [] as SyncOverrideCall[] }
     const res = await withMocks(
@@ -1383,7 +1366,7 @@ describe('POST /admin/orders/sync-holdings', () => {
     const res = await withMocks(
       {
         universe: { allowedSymbols: ['SOXL'] },
-        positions: [], // broker empty
+        positions: [],
       },
       async () => {
         const app = createApp()

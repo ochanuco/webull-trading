@@ -6,17 +6,9 @@ import { loadRecentAlerts } from '../../src/infrastructure/notification/notifica
 import { loadRecentAudit } from '../../src/infrastructure/db/configAuditLog'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
-/**
- * #284 — XSS audit for dashboard. Every DB-derived string interpolated into
- * server-rendered HTML must pass through `escapeHtml`. Otherwise a malicious
- * row (planted by an upstream bug, or a compromised JP/US broker payload that
- * lands in `cause` / `message` / `notes` / `before_json`) can submit the
- * kill-switch / seed-cash POST forms on the operator's authenticated session.
- *
- * Each test seeds a different XSS payload into a different field and asserts
- * the literal payload (raw `<script>` / `<img onerror=…>` / `"><svg …>`) is
- * NOT present in the rendered HTML — only its escaped form.
- */
+// A malicious DB row that skips escapeHtml could submit the kill-switch / seed-cash POST
+// forms on the operator's authenticated session. Each test seeds a payload into a
+// different field and asserts only its escaped form reaches the rendered HTML.
 
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
@@ -69,12 +61,9 @@ describe('dashboard XSS (#284)', () => {
     )
     expect(res.status).toBe(200)
     const body = await res.text()
-    // 生の <script> / <img onerror=…> / "><svg…> はどれも HTML に直で出てはいけない。
     expect(body).not.toContain(scriptPayload)
     expect(body).not.toContain(imgPayload)
     expect(body).not.toContain(symbolPayload)
-    // 代わりに escape 済みの形が含まれること (= payload が table 行として
-    // 表示されているが inert になっている、を確認)。
     expect(body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(body).toContain('&lt;img src=x onerror=alert(2)&gt;')
   })
@@ -90,9 +79,8 @@ describe('dashboard XSS (#284)', () => {
         actor: actorPayload,
         endpoint: '/admin/symbols/SOXL/seed-cash',
         targetKey: 'symbol=SOXL',
-        // before/after は JSON 文字列で DB に入る (admin route 側で stringify)。
-        // formatAuditJson は parse→re-stringify するが、parse 失敗時は raw を返す。
-        // どちらの分岐でも payload 文字列は最終的に escapeHtml で中和される必要がある。
+        // formatAuditJson parse→re-stringifies but falls back to raw on parse failure;
+        // both branches must still escapeHtml the payload.
         beforeJson: JSON.stringify({ notes: beforePayload }),
         afterJson: JSON.stringify({ notes: afterPayload }),
         requestId: 'req-1',
@@ -109,9 +97,6 @@ describe('dashboard XSS (#284)', () => {
     expect(body).not.toContain(beforePayload)
     expect(body).not.toContain('<script>alert(2)</script>')
     expect(body).not.toContain('<script>alert(3)</script>')
-    // formatAuditJson が壊れて parse failure に倒れた場合の raw fallback も
-    // escape されることを確認するため、エスケープ済みの形が body に居ること
-    // (parse 成功でも失敗でも esc は通る)。
     expect(body).toContain('&lt;img onerror=alert(1)&gt;')
   })
 
@@ -123,7 +108,7 @@ describe('dashboard XSS (#284)', () => {
         allowedSymbols: ['SOXL'],
         symbolCurrency: { SOXL: 'USD' },
         symbolNotes: { SOXL: notesPayload },
-        // inversePairs 値は esc() で出力される自由テキスト相当 (DB 列値)。
+        // inversePairs is also a free-text DB column rendered via esc().
         inversePairs: { SOXL: bucketPayload },
       }),
     )
@@ -142,9 +127,8 @@ describe('dashboard XSS (#284)', () => {
   })
 
   it('escapes attribute-break payload in audit filter form (echoed query)', async () => {
-    // actor / endpoint filter は query string をそのまま <input value="..."> に
-    // echo するので attribute-context XSS の最たる surface。`" ` で attribute を
-    // 早期 close されると onfocus= が混入できる。
+    // actor/endpoint filter echoes the query string into <input value="...">, the classic
+    // attribute-context XSS surface.
     vi.mocked(loadRecentAudit).mockResolvedValue([])
     const app = createApp()
     const attackerActor = '" autofocus onfocus="alert(1)'
@@ -152,8 +136,6 @@ describe('dashboard XSS (#284)', () => {
     const res = await app.request(url, { headers: authHeader }, { ...baseEnv, DB: {} as D1Database })
     expect(res.status).toBe(200)
     const body = await res.text()
-    // 生の `" autofocus onfocus="alert(1)` (= attribute break + 新 attribute) が
-    // value="..." の **内側** に出てはいけない。`&quot;` でクオートが中和される。
     expect(body).not.toMatch(/value="" autofocus onfocus="alert\(1\)"/)
     expect(body).toContain('&quot; autofocus onfocus=&quot;alert(1)')
   })

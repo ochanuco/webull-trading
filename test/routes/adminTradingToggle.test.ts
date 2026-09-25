@@ -125,9 +125,7 @@ describe('POST /admin/trading/toggle', () => {
     })
   })
 
-  // #276 invariant: env=false が DB=true を上書きする (より制限的が勝つ)。
-  // toggle 自体は成功して DB が true になっても、レスポンスの `effective` は
-  // false で operator に「env override が効いてる」を視認させる。
+  // toggle 自体は成功して DB が true になっても、`effective` は env override を反映して false (#276)。
   it('reports effective=false and envOverrideActive=true when env TRADING_ENABLED=false', async () => {
     const app = createApp()
     const res = await app.request(
@@ -145,13 +143,12 @@ describe('POST /admin/trading/toggle', () => {
       effective: boolean
       envOverrideActive: boolean
     }
-    expect(body.after).toBe(true) // DB は ON に書いた
-    expect(body.effective).toBe(false) // が effective は env で OFF
+    expect(body.after).toBe(true)
+    expect(body.effective).toBe(false)
     expect(body.envOverrideActive).toBe(true)
   })
 
-  // dashboard 経由は application/x-www-form-urlencoded で来る。`enabled` は
-  // 'true' / 'false' 文字列。submit 後 303 redirect で /dashboard に戻す。
+  // dashboard 経由は application/x-www-form-urlencoded で来る (`enabled` は 'true'/'false' 文字列)。
   it('accepts form-encoded body and redirects to /dashboard (303)', async () => {
     const app = createApp()
     const form = new URLSearchParams({ enabled: 'false', reason: 'panic stop' })

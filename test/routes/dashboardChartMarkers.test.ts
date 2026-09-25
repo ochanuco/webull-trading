@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
-// loadSymbolChart は Yahoo daily / intraday を fetch する。この test では
-// 「D1 → marker / span 整形」だけを検証したいので、実 network を触らない
-// stub class に差し替える (空配列 = Yahoo fetch 失敗時の fallback と同じ経路)。
+// D1 → marker/span 整形だけを検証したいので、実 network を触らない stub に差し替える
+// (空配列 = Yahoo fetch 失敗時の fallback と同じ経路)。
 vi.mock('../../src/infrastructure/quotes/YahooBarClient', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../src/infrastructure/quotes/YahooBarClient')>()
@@ -27,12 +26,10 @@ import {
   type SymbolChartMarker,
   type SymbolChartRules,
 } from '../../src/routes/dashboard'
-// fetchDoPosition はバレル (src/routes/dashboard/index.ts) から re-export されて
-// いないため loaders.ts から直接 import する (他 test も同じ流儀)。
+// fetchDoPosition はバレル (src/routes/dashboard/index.ts) から re-export されないため loaders.ts から直接 import
 import { fetchDoPosition } from '../../src/routes/dashboard/charts/loaders'
-// 銘柄チャートタブの client 側初期化スクリプトは静的ファイル化されている
-// (#charts-symbol-redesign)。html は <script src=...> の参照だけを持つので、
-// JS 内の文字列を検証するテストはこの定数を直接見る。
+// client 側初期化スクリプトは静的ファイル化されており html には <script src=...> 参照のみが乗るため、
+// JS 内の文字列を検証するテストはこの定数を直接見る (#charts-symbol-redesign)。
 import { SYMBOL_CHART_CLIENT_SCRIPT } from '../../src/routes/dashboard/charts/symbolChartScript'
 import type { Env } from '../../src/config/env'
 
@@ -115,8 +112,8 @@ describe('pairClosedTrades (BUY→SELL closed pair の突合)', () => {
   })
 
   it('SELL の realizedPnl 欠損 (旧 fill) は null のまま span に載る', () => {
-    // 注: realizedPnl が null の SELL は resolveFillSide の推測経路では BUY
-    // 扱いになるため、pre_submit の side が引けた行 (= side 明示) のみで発生。
+    // realizedPnl が null の SELL は resolveFillSide の推測経路では BUY 扱いになるため、
+    // pre_submit の side が引けた行 (= side 明示) のみで発生する。
     const spans = pairClosedTrades([buy('2026-06-01', 100), sell('2026-06-05', 107, null)])
     expect(spans).toEqual([
       { openTimestamp: '2026-06-01', closeTimestamp: '2026-06-05', realizedPnl: null },
@@ -124,8 +121,8 @@ describe('pairClosedTrades (BUY→SELL closed pair の突合)', () => {
   })
 })
 
-// D1 の prepare(sql) を SQL 文字列で dispatch する fake。loadSymbolChart は
-// strategy_decision_log と trade_journal の 2 query を投げる。
+// D1 の prepare(sql) を SQL 文字列で dispatch する fake (loadSymbolChart は
+// strategy_decision_log / trade_journal の 2 query を投げる)。
 function fakeChartDb(logRows: unknown[], fillRows: unknown[]): D1Database {
   return {
     prepare(sql: string) {
@@ -209,7 +206,6 @@ describe('loadSymbolChart — fill marker の clientOrderId / holdingSpans', () 
     const env = { DB: db } as unknown as Env
     const chart = await loadSymbolChart(env, 'TQQQ', rules)
     expect(chart.markers[0]!.clientOrderId).toBeNull()
-    // BUY のみ (未決済) → span なし
     expect(chart.holdingSpans).toEqual([])
   })
 })
@@ -293,28 +289,17 @@ describe('renderSymbolTab — fill 詳細パネル + 保有区間 markArea の�
 
   it('payload に clientOrderId / holdingSpans が埋まり、fill クリック配線が出る', () => {
     const html = renderSymbolTab(args())
-    // marker payload に注文への逆リンク素材が乗る
     expect(html).toContain('"clientOrderId":"ord-buy-1"')
     expect(html).toContain('"clientOrderId":"ord-sell-1"')
-    // markArea 用の閉区間データ
     expect(html).toContain('"holdingSpans":[{"openTimestamp":"2026-06-01T14:05:00.000Z"')
-    // client 側の配線 (fill 詳細パネル + trades への逆リンク + markArea host)。
-    // これらは静的ファイル化された client script 側にある
-    // (#charts-symbol-redesign、html には <script src=...> 参照のみが乗る)。
+    // client 側の配線 (fill 詳細パネル + trades への逆リンク + markArea host) は
+    // 静的ファイル化された client script 側にある (#charts-symbol-redesign)。
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('showFillDetail')
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('/dashboard/trades?clientOrderId=')
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('保有区間 (確定)')
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('holdingAreaData')
   })
 
-  // 旧: `__chartData` は実行系の bare <script> だった (safeJsonScript) ので、
-  // ここで抽出して new Function() し構文エラーを検出していた。#charts-symbol-
-  // redesign Phase C で `type="application/json"` の inert script に変えた
-  // (client 側銘柄切替の partial swap 後も同じ読み方で動くようにするため —
-  // innerHTML 経由で挿した実行系 <script> は再実行されないブラウザ仕様がある)。
-  // JS ではなく JSON になったので、検証も「有効な JSON として parse できるか」
-  // に変える。client script 本体 (SYMBOL_CHART_CLIENT_SCRIPT、静的ファイル
-  // 化されている実体) の構文検証は下の別テストで行う。
   it('__chartData embed は type="application/json" の inert script で、エスケープ済みの有効な JSON として parse できる (#462 系 regression → JSON script 化)', () => {
     const html = renderSymbolTab(args())
     const m = html.match(/<script type="application\/json" id="__chartData">([\s\S]*?)<\/script>/)

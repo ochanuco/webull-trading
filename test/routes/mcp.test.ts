@@ -16,7 +16,6 @@ vi.mock('../../src/infrastructure/db/tradeJournalRepo', async () => {
 
 const baseEnv = { ACCESS_DEV_BYPASS_USER: 'admin' }
 
-/** POST /mcp に JSON-RPC message を送る helper。 */
 async function rpc(env: Record<string, unknown>, body: unknown): Promise<Response> {
   const app = createApp()
   return app.request(
@@ -34,7 +33,7 @@ function toolCall(name: string, args: Record<string, unknown> = {}) {
   return { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }
 }
 
-/** dashboardJsonApi.test.ts と同じ SymbolStateDO の fake namespace。 */
+// dashboardJsonApi.test.ts と同じ shape の SymbolStateDO fake namespace
 function fakeSymbolStateNamespace() {
   const stub = {
     async getState(symbol: string) {
@@ -58,7 +57,7 @@ function fakeSymbolStateNamespace() {
   } as unknown
 }
 
-/** loadDecisionRows (select→from→leftJoin→where→orderBy→limit) 用の fake chain。 */
+// loadDecisionRows (select→from→leftJoin→where→orderBy→limit) 用の fake chain
 function fakeCronDb(rows: unknown[]) {
   const query = {
     from: vi.fn(() => query),
@@ -87,7 +86,6 @@ describe('read-only MCP server (#553)', () => {
 
   describe('auth (Cloudflare Access)', () => {
     it('rejects requests without Access JWT / dev bypass', async () => {
-      // bypass なし env → accessJwtMiddleware の既存挙動 (fail-closed 401)
       const res = await rpc({}, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
       expect(res.status).toBe(401)
     })
@@ -163,7 +161,6 @@ describe('read-only MCP server (#553)', () => {
         'get_equity',
         'get_symbol_chart',
       ])
-      // 全 tool が inputSchema (JSON Schema) を持つ
       for (const tool of json.result.tools) {
         expect(tool.inputSchema.type).toBe('object')
         expect(typeof tool.description).toBe('string')

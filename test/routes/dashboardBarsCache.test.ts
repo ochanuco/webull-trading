@@ -5,12 +5,8 @@ import {
   type DashboardCacheLike,
 } from '../../src/routes/dashboard/charts/dashboardBarsCache'
 
-/**
- * `caches.default` (Cloudflare Cache API) の最小 fake。vitest (Node) には
- * `caches` global が無いので、テストでは `cache` を明示注入して検証する
- * (本番は `resolveDefaultCache()` が `caches.default` を拾う — その fail-open
- * 挙動は「cache 未注入」ケースで確認する)。
- */
+// `caches.default` の最小 fake。vitest (Node) には `caches` global が無いので `cache` を
+// 明示注入する (本番は `resolveDefaultCache()` が拾う。その fail-open 挙動は別途「cache 未注入」ケースで確認)。
 function fakeCache(): DashboardCacheLike & { store: Map<string, Response> } {
   const store = new Map<string, Response>()
   return {

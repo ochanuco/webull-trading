@@ -3,9 +3,6 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
 import { and, asc, desc, eq, lt, type SQL } from 'drizzle-orm'
 import { LOG_COPY_ALL_BTN, clampLimit, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
-// charts/shared imports `type { DecisionRow }` back from this file, but
-// type-only, so this import doesn't create a runtime circular dependency.
-import { ECHARTS_CDN } from './charts/shared'
 // A skipped (closed-market) tick never writes a strategy_decision_log row,
 // so the matrix distinguishes "closed" from "no decision" by calendar here
 // at render time rather than at write time.
@@ -808,9 +805,4 @@ export async function loadDecisionRowsInSession(
     lastScannedId,
   }
 }
-
-function jstYmdOf(now: Date): string {
-  return new Date(now.getTime() + 9 * 3_600_000).toISOString().slice(0, 10)
-}
-
 

@@ -92,9 +92,6 @@ describe('POST /admin/portfolio/seed-equity', () => {
   })
 })
 
-// #77: POST /admin/portfolio/seed-exposure roundtrip — operator override of
-// the openExposure{Usd,Jpy} counters. Validates strict body parsing (at
-// least one of usd/jpy; >= 0; finite) and forwards to PORTFOLIO_STATE.
 function fakePortfolioExposureState(
   captured: { calls: Array<{ usd?: number; jpy?: number }> },
   current = { openExposureUsd: 0, openExposureJpy: 0 },
