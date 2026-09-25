@@ -1,14 +1,6 @@
 import type { ExtendedHoursObservationRow } from '../../infrastructure/db/schema'
 import { esc, fmtJst } from './shared'
 
-/**
- * 時間外参考観測 (issue #709 Phase 1) の dashboard 表示。
- *
- * `extendedHoursScheduler` (producer) が書いた `extended_hours_observation` を
- * 読むだけの read-only view — 執行価格ではなく Yahoo 時間外値の参考表示であり、
- * 売買判断には接続していないことを画面上でも明示する (下部の注記)。
- */
-
 const STATUS_LABELS: Record<string, { ja: string; cls: string }> = {
   NORMAL: { ja: 'NORMAL (正常)', cls: 'ok' },
   WARNING: { ja: 'WARNING (警戒)', cls: 'warn' },
@@ -21,7 +13,6 @@ function statusPill(status: string): string {
   return `<span class="pill ${s.cls}">${esc(s.ja)}</span>`
 }
 
-/** すでに % 値 (例: -3.5 → -3.5%) の number を符号付きで表示する。null は「—」。 */
 function fmtPctValue(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return '<span class="muted">—</span>'
   const sign = v >= 0 ? '+' : ''

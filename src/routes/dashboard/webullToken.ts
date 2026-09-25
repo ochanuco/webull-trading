@@ -1,20 +1,6 @@
 import type { WebullTokenState } from '../../trading/state/WebullTokenStateDO'
 import { esc } from './shared'
 
-/**
- * `pnpm run issue-token` の出力から実 token (NORMAL の stdout 行) を抽出する。
- *
- * operator が terminal の出力丸ごと貼ったケースに耐性をつけるため:
- *   - `[issue-token] ...` 始まりの diagnostic は捨てる
- *   - wrangler instruction (`pnpm wrangler ...`, `(paste the value...)`) は捨てる
- *   - 空行 / whitespace-only は捨てる
- *   - 残った 1 行 = NORMAL token
- *
- * 複数行残った場合は何が token か判別不能として error。operator は不要行を
- * 削って再 submit する。
- *
- * exported for testing。
- */
 export function extractTokenFromPaste(raw: string):
   | { ok: true; token: string }
   | { ok: false; error: string } {
@@ -33,9 +19,8 @@ export function extractTokenFromPaste(raw: string):
     }
   }
   if (candidates.length > 1) {
-    // 候補プレビューを URL に含めると token 断片が browser 履歴 / access log に
-    // 漏れる (CodeRabbit #328)。件数のみ返して、operator は form 側で
-    // 不要行を削って再 submit する。
+    // Reports only the count, never the candidate lines: echoing a token fragment back would
+    // leak it into browser history / access logs via the redirect URL.
     return {
       ok: false,
       error: `expected 1 token line, found ${candidates.length}. remove non-token lines and retry`,
@@ -44,11 +29,7 @@ export function extractTokenFromPaste(raw: string):
   return { ok: true, token: candidates[0]! }
 }
 
-/**
- * #21 Phase B follow-up: Webull token 管理 UI の HTML body。token plaintext は
- * 一切埋め込まない (tokenHint だけ)。notice / error は redirect 後の query string
- * 経由で受け取る (PRG パターン)。
- */
+// Never embeds the token plaintext, only tokenHint — see renderWebullTokenStateTable.
 export function renderWebullTokenBody(args: {
   state: WebullTokenState | null
   notice: string | null
@@ -122,7 +103,7 @@ export function renderWebullTokenBody(args: {
 
 function renderWebullTokenStateTable(state: WebullTokenState): string {
   const statusClass = state.status === 'NORMAL' ? 'ok' : 'warn'
-  // expires は ms / sec 両対応 (Webull docs 未明示)。10^12 以上を ms 扱い。
+  // Webull's docs don't specify the unit; treat >= 10^12 as milliseconds, else seconds.
   const expiresMs = state.expires >= 1e12 ? state.expires : state.expires * 1000
   const expiresIso = Number.isFinite(expiresMs) ? new Date(expiresMs).toISOString() : '(invalid)'
   const tokenHint = state.token.length > 10

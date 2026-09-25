@@ -79,6 +79,12 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       )
     })
 
+    it('stop-loss hit still localizes with a trailing diagnostic suffix', () => {
+      expect(localizeReason('stop-loss hit: pnl -0.05 <= -0.04 (atr, dist 9.06)')).toBe(
+        '損切り: 損切りライン到達 (含み損益 -5.00% ≤ ライン -4.00%)',
+      )
+    })
+
     it('time-stop → 保有期限到達', () => {
       expect(localizeReason('time-stop hit: held 10d >= 10d')).toBe(
         '時間切れ: 保有期限到達 (保有 10d ≥ 上限 10d)',

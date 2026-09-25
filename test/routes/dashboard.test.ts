@@ -1065,6 +1065,10 @@ describe('parseChartsTab', () => {
     expect(parseChartsTab('xss')).toBe('overview')
     expect(parseChartsTab('OVERVIEW')).toBe('overview') // 大文字も既知扱いせず default に
   })
+
+  it('旧 grid タブ (廃止済み URL) は symbol にマップする', () => {
+    expect(parseChartsTab('grid')).toBe('symbol')
+  })
 })
 
 import { deriveOpenPosition } from '../../src/routes/dashboard'

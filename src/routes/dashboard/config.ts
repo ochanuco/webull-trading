@@ -8,7 +8,6 @@ export function configBody(
   universe: Awaited<ReturnType<typeof loadSymbolUniverse>>,
   overviewPanels: Set<OverviewPanel>,
 ): string {
-  // #dashboard-mf-layout: overview パネル ON/OFF。POST → PRG redirect (#293 と同型)。
   const panelForm = `<details open>
     <summary>ダッシュボード overview パネル表示</summary>
     <form method="post" action="/dashboard/config/overview-panels" style="margin:8px 0;display:flex;flex-direction:column;gap:6px;max-width:560px">
@@ -17,16 +16,14 @@ export function configBody(
     </form>
     <p class="muted" style="font-size:12px"><code>/dashboard</code> の overview に表示するパネル。全て OFF にすると全表示に戻ります。</p>
   </details>`
-  // 列名 (snake_case) は SQL での copy-paste 互換のため英字のまま残し、
-  // 日本語説明は別列に分離。これで `UPDATE global_config SET xxx = ...` が
-  // そのまま使える。
+  // Keys stay in snake_case (not translated) so a row can be pasted straight into
+  // `UPDATE global_config SET xxx = ...`; the Japanese explanation lives in its own column.
   const globalRows = Object.entries(global as unknown as Record<string, unknown>)
     .filter(([k]) => k !== 'source')
     .map(([k, v]) => {
       const camelKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
-      // DB 列名の digit 前 underscore は列ごとに揺れがある
-      // (min_return_50d は有 / require_above_sma50 は無)。
-      // naive 版 → digit 前 underscore 版の順でフォールバック。
+      // Column names disagree on the underscore-before-digit convention (min_return_50d has
+      // one, require_above_sma50 doesn't), so try the naive form before this variant.
       const camelKeyWithDigitUnderscore = camelKey.replace(/([a-z])(\d)/g, '$1_$2')
       const meta =
         CONFIG_KEY_META[camelKey] ??
@@ -37,9 +34,6 @@ export function configBody(
       return `<tr><th>${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td></tr>`
     })
     .join('')
-  // active + inactive 両方を 1 つの table で表示。inactive 行は grayed-out 化し、
-  // 「状態」「メモ (notes)」列で disable 経緯が読める。cron 評価対象は active=1 のみ
-  // (allowedSymbols)、表示のみ全件出すのが今 PR の趣旨。
   const allConfigSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
   const symRows = allConfigSymbols
     .map((sym) => {
@@ -86,17 +80,6 @@ export function configBody(
   </details>`
 }
 
-/**
- * global_config 列のメタ情報 (label + detail)。
- *
- * - `label`: 短い見出し (単位込み)。IT / 汎用英単語 (dry-run / drawdown / spread
- *   等) は英字のまま、日本株固有語 (押し目 / 保有 / 利食い / 損切り / 騰落率)
- *   のみ日本語化。
- * - `detail`: 株初心者向け advisory。1-3 文、「何をするか」「大小で何が変わるか」
- *   「目安」の順で記述。技術用語を避け具体的な動作で説明。
- *
- * 未登録 key の fallback は em-dash。
- */
 interface ConfigKeyMeta {
   label: string
   detail: string
@@ -277,8 +260,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
 }
 
 function formatConfigValue(v: unknown): string {
-  // null placeholder は他ページと同じ em-dash (—) に統一。"null" 文字列は
-  // 運用者が誤って "null" という string 値と混同するリスクがあるので避ける。
+  // Em-dash, not the string "null": an operator could mistake literal "null" for a string value.
   if (v === null || v === undefined) return '—'
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   return String(v)

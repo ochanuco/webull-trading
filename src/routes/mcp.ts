@@ -16,24 +16,13 @@ import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart } from '
 import { messageOf } from './dashboard/shared'
 
 /**
- * Read-only MCP server (#553) — dashboard の JSON export packet を
- * Model Context Protocol の tools として公開する。
- *
- * 設計方針:
- * - **書き込み tool は作らない (fail-closed)**。全 tool が既存 packet builder
- *   (`dashboard_<page>_export.v<N>`) の read-only 出力をそのまま返すだけ。
- * - **SDK 非依存**: POC 方針 (依存を増やさない) に従い、JSON-RPC 2.0 を素の
- *   Hono handler で処理する streamable HTTP (POST /mcp)。SSE (GET) は spec 上
- *   optional なので非対応 = 405。session 管理も持たない (stateless)。
- * - **認証は Cloudflare Access に一任**: app.ts で `/dashboard` と同じ
- *   `accessJwtMiddleware()` を適用する。MCP クライアントは Access service
- *   token (CF-Access-Client-Id/Secret ヘッダ) で同じ検証を通る — 新しい
- *   認証機構は作らない。
- * - packet builder は HTTP 経由でなく同一 Worker 内で直接呼ぶ。schema
- *   フィールドがそのまま tool の出力契約になる。
+ * Read-only MCP server exposing the dashboard JSON export packets as tools.
+ * No write tool is added, by design: every tool returns an existing
+ * `dashboard_<page>_export.v<N>` packet builder's output unchanged, so the
+ * server can't drift from what the dashboard itself shows or gain a
+ * broker-mutating side effect.
  */
 
-/** initialize が client の protocolVersion を echo できない時の fallback。 */
 const MCP_PROTOCOL_VERSION = '2025-03-26'
 
 const SERVER_INFO = { name: 'webull-trading-dashboard', version: '0.1.0' }
@@ -45,7 +34,6 @@ interface ToolText {
   text: string
 }
 
-/** MCP tools/call の結果形。エラーは throw せず isError: true で返す。 */
 interface ToolResult {
   content: ToolText[]
   isError?: boolean
@@ -63,19 +51,12 @@ function toolOk(packet: unknown): ToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(packet) }] }
 }
 
-/**
- * tool 実行エラー (binding 未設定 / 引数不正 / loader 失敗) は JSON-RPC error
- * でも HTTP 500 でもなく isError: true の text で返す — MCP spec 上、LLM が
- * 読んで自己修正できるのは tool result 側のエラーだけのため。
- */
+// isError result, not a thrown JSON-RPC/HTTP error: MCP spec only lets the calling LLM read and self-correct from a tool result's error.
 function toolError(message: string): ToolResult {
   return { content: [{ type: 'text', text: message }], isError: true }
 }
 
-/**
- * tools/list に返す定義。inputSchema は JSON Schema。description は
- * 「何が返るか + AI がどう使うか」を書く (LLM の tool 選択がこれに依存する)。
- */
+// inputSchema is JSON Schema; each description states what it returns + when an AI should call it, since tool selection depends on that text.
 const TOOLS = [
   {
     name: 'get_positions',
@@ -152,7 +133,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-/** tool argument を string | undefined に正規化 (number も許容して文字列化)。 */
 function stringArg(args: Record<string, unknown>, key: string): string | undefined {
   const v = args[key]
   if (typeof v === 'string') return v
@@ -165,10 +145,6 @@ function numberArg(args: Record<string, unknown>, key: string): number | undefin
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined
 }
 
-/**
- * tool 本体。binding 未設定・引数不正・loader 失敗はすべて isError で返し、
- * HTTP 500 にしない (呼び出し側 LLM に理由を読ませて再試行させる)。
- */
 async function callTool(
   env: Env,
   requestId: string | undefined,
@@ -184,8 +160,7 @@ async function callTool(
     }
     case 'get_trades': {
       if (!env.DB) return toolError('DB binding is not configured')
-      // クエリ解釈は /dashboard/trades(/json) と同じ parseTradesQuery を通す —
-      // 「画面の絞り込みと tool の絞り込みが微妙に違う」drift を作らない。
+      // Reuses the dashboard's own parseTradesQuery so tool filtering can't drift from screen filtering.
       const q = parseTradesQuery((key) => stringArg(args, key))
       const rows = await loadTradeJournalRows(createDb(env.DB), q)
       return toolOk(buildTradesPacket(rows, q))
@@ -212,10 +187,7 @@ async function callTool(
       const symbol = stringArg(args, 'symbol')?.toUpperCase().trim()
       if (!symbol) return toolError('symbol is required (e.g. { "symbol": "SOXL" })')
       if (!env.DB) return toolError('DB binding is not configured')
-      // /dashboard/charts/symbol/json ルート (index.ts) と同じ手順:
-      // effective rule (global default → role preset → per-symbol override) を
-      // buildSymbolRules で解決し、SSR / JSON export とチャート内容を揃える。
-      // 変更時は index.ts 側と同期すること (#dashboard-json-api)。
+      // Mirrors /dashboard/charts/symbol/json's rule resolution so the two stay in sync.
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(env),
         loadGlobalConfigFrom(env, requestId),
@@ -230,8 +202,7 @@ async function callTool(
         timeStopDays: entryRule.timeStopDays,
       }
       const chart = await loadSymbolChart(env, symbol, rules)
-      // 判定履歴の load 失敗 (migration 未適用等) はチャート本体を巻き込まず
-      // 空配列に落とす (/charts/symbol/json と同挙動)。
+      // A decision-history load failure falls back to [] rather than failing the whole chart.
       const decisionRows = await loadDecisionRows(createDb(env.DB), { symbol, limit: 30 }).catch(
         () => [],
       )
@@ -241,15 +212,11 @@ async function callTool(
 }
 
 export const mcp = new Hono<AppBindings>()
-  // read-only + Access 保護済みだが、dashboard と同じ read 系 soft cap
-  // (60 req / 60s) を適用しておく — LLM の tool 連打で D1/DO を焼かない保険。
+  // Same soft cap as the dashboard, so a tool-calling LLM can't hammer D1/DO.
   .use('*', rateLimit('DASHBOARD'))
-  // SSE stream (GET) は MCP spec 上 optional — 本サーバーは server→client の
-  // push を持たないので非対応を 405 で明示する。
   .get('/', (c) =>
     c.json({ error: 'method_not_allowed', message: 'SSE is not supported; POST JSON-RPC to /mcp' }, 405),
   )
-  // session 管理を持たない stateless サーバーなので DELETE (session 終了) も 405。
   .delete('/', (c) =>
     c.json({ error: 'method_not_allowed', message: 'sessions are not supported' }, 405),
   )
@@ -260,7 +227,6 @@ export const mcp = new Hono<AppBindings>()
     } catch {
       return c.json(rpcError(null, -32700, 'Parse error'))
     }
-    // batch (array) は非対応 — 単発 object のみ受ける (POC 最小実装)。
     if (Array.isArray(body)) {
       return c.json(rpcError(null, -32600, 'Batch requests are not supported'))
     }
@@ -273,8 +239,7 @@ export const mcp = new Hono<AppBindings>()
         rpcError(typeof idRaw === 'string' || typeof idRaw === 'number' ? idRaw : null, -32600, 'Invalid Request'),
       )
     }
-    // id なし = notification (notifications/initialized 等)。応答 body 不要、
-    // spec 通り 202 Accepted の空応答を返す。
+    // A missing id is a JSON-RPC notification, which per spec gets an empty 202, not a result body.
     if (idRaw === undefined || idRaw === null) {
       return c.body(null, 202)
     }
@@ -286,8 +251,7 @@ export const mcp = new Hono<AppBindings>()
     switch (body.method) {
       case 'initialize': {
         const params = isRecord(body.params) ? body.params : {}
-        // client の protocolVersion をそのまま echo する (バージョン交渉を
-        // 実装しない最単純形 — 本サーバーの応答形はどの版でも互換)。
+        // Echoes the client's protocolVersion instead of negotiating: the response shape is compatible with any version.
         const protocolVersion =
           typeof params.protocolVersion === 'string'
             ? params.protocolVersion
@@ -300,7 +264,7 @@ export const mcp = new Hono<AppBindings>()
           }),
         )
       }
-      // ping は MCP spec の必須 keep-alive (クライアントが定期送信してくる)。
+      // ping is a required MCP keep-alive the client sends periodically.
       case 'ping':
         return c.json(rpcResult(id, {}))
       case 'tools/list':
@@ -309,7 +273,6 @@ export const mcp = new Hono<AppBindings>()
         const params = isRecord(body.params) ? body.params : {}
         const name = typeof params.name === 'string' ? params.name : ''
         const tool = TOOLS.find((t) => t.name === name)
-        // 未知 tool は spec 通り JSON-RPC error (-32602 Invalid params)。
         if (!tool) {
           return c.json(rpcError(id, -32602, `Unknown tool: ${name || '(missing name)'}`))
         }
@@ -318,7 +281,6 @@ export const mcp = new Hono<AppBindings>()
         try {
           result = await callTool(c.env, c.get('requestId'), tool.name, args)
         } catch (err) {
-          // loader の想定外 throw も 500 にせず isError で返す (fail-graceful)。
           result = toolError(messageOf(err))
         }
         return c.json(rpcResult(id, result))

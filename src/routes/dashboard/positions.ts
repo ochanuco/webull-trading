@@ -7,26 +7,14 @@ import { SymbolStateClient } from '../../trading/state/SymbolStateClient'
 import type { SymbolState } from '../../trading/state/types'
 import { JST_FORMATTER, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, formatCooldown, inactiveTooltip, isSymbolInactive, messageOf, renderJsonToolbar } from './shared'
 
-/**
- * 各銘柄の「strategy が直近に判定で使った価格」を取得。
- * Yahoo daily bars から計算された `indicators.price` が
- * strategy_decision_log.price に書き出されているので、最新行を引く。
- *
- * Webull bridge が落ちて lastQuote が古い場合、こちらが新しければ
- * dashboard の現在値表示に採用される (pickFreshQuote で比較)。
- *
- * 実装: D1 の `(symbol, id)` 複合 index を活かして symbol 並列で
- * `ORDER BY id DESC LIMIT 1` を打つ。1 銘柄あたり 1 row のみ転送。
- */
 export async function loadLatestStrategyPrices(
   db: D1Database,
   symbols: string[],
 ): Promise<Map<string, { price: number; asOf: string }>> {
   if (symbols.length === 0) return new Map()
   const drizzle = createDb(db)
-  // 個別 symbol の失敗で全体を 500 にしないよう per-symbol で catch。
-  // strategy_decision_log がまだ空の銘柄や DB 一時的エラーは「Yahoo 価格なし」
-  // として扱い、Webull lastQuote にフォールバックさせる。
+  // Per-symbol try/catch: an empty strategy_decision_log or a transient DB error for one
+  // symbol falls back to "no Yahoo price" (pickFreshQuote then uses Webull) instead of 500ing.
   const entries = await Promise.all(
     symbols.map(async (sym) => {
       try {
@@ -51,16 +39,7 @@ export async function loadLatestStrategyPrices(
   return new Map(entries.filter((e): e is readonly [string, { price: number; asOf: string }] => e !== null))
 }
 
-/**
- * 表示用「現在値」の決定。dashboard が見せる現在値の source は
- * 2 系統あり、bridge 障害などで Webull snapshot が古くなる場合がある:
- *
- * - webull-snapshot: SymbolStateDO.lastQuote (Webull bridge の 5 分 cron)
- * - yahoo-bars: strategy_decision_log.price (Yahoo daily bars 経由、15 分 cron)
- *
- * 両方あれば asOf が新しい方を採用。strategy が判定に使う価格と表示が
- * 一致するのが UX 上の正なので、片方だけしか無い場合もそちらを採る。
- */
+/** Picks whichever of the two quote sources (Webull snapshot, Yahoo bars) has the fresher `asOf`. */
 export interface ResolvedQuote {
   price: number
   source: string
@@ -76,9 +55,8 @@ export function pickFreshQuote(
   if (yahoo === null) return { price: webull.price, source: webull.source, asOf: webull.asOf }
   const w = new Date(webull.asOf).getTime()
   const y = new Date(yahoo.asOf).getTime()
-  // 不正な ISO は "より古い" 扱い: 有効な側があればそちらを採用、両方
-  // 不正なら webull にタイブレーク (既存挙動維持)。`y > w` だけだと
-  // w=NaN の時に false 評価で不正な webull を選んでしまう回帰がある。
+  // An invalid ISO string is treated as "older", not skipped: plain `y > w` evaluates false
+  // when w is NaN, which would silently pick the invalid webull value over a valid yahoo one.
   const wValid = Number.isFinite(w)
   const yValid = Number.isFinite(y)
   const pickYahoo = yValid && (!wValid || y > w)
@@ -87,26 +65,23 @@ export function pickFreshQuote(
     : { price: webull.price, source: webull.source, asOf: webull.asOf }
 }
 
-/** positions ページの loader 結果 (SSR / JSON export 共用)。 */
+/** Shared loader result for both the SSR page and its JSON export. */
 export interface PositionsPageData {
   rows: Array<{ sym: string; state: SymbolState | null; error: string | null }>
   strategyPriceMap: Map<string, { price: number; asOf: string }>
   universe: SymbolUniverse
 }
 
-/**
- * positions ページの loader (#dashboard-json-api)。SSR (`/dashboard/positions`)
- * と JSON export (`/dashboard/positions/json`) が共用する — 「画面で見る内容 =
- * AI に渡す JSON」を同一の取得結果から作るため、取得ロジックはここ 1 本に寄せる。
- */
+// Single fetch path shared by SSR (/dashboard/positions) and its JSON export, so "what the
+// screen shows" and "what the AI reads" can't drift apart.
 export async function loadPositionsPageData(env: Env): Promise<PositionsPageData> {
   if (!env.DB || !env.SYMBOL_STATE) {
     throw new Error('DB or SYMBOL_STATE not bound')
   }
   const universe = await loadSymbolUniverse(env)
   const client = new SymbolStateClient(env.SYMBOL_STATE)
-  // inactive 銘柄も表示する (operator visibility) — chart に飛んで状態を確認したり
-  // 再有効化判断したりするのに必要。cron / risk gate は引き続き allowedSymbols のみ評価。
+  // Includes inactive symbols for operator visibility (inspect state, decide on
+  // re-enabling) even though cron/risk gates only ever evaluate allowedSymbols.
   const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
   const [rows, strategyPriceMap] = await Promise.all([
     Promise.all(
@@ -123,29 +98,25 @@ export async function loadPositionsPageData(env: Env): Promise<PositionsPageData
   return { rows, strategyPriceMap, universe }
 }
 
-/** JSON export の 1 銘柄行。SSR テーブルの表示列と同じ情報の機械可読版。 */
+/** Machine-readable mirror of the SSR positions table's columns. */
 interface PositionExportRow {
   symbol: string
   displayName: string | null
   qty: number | null
   avgPrice: number | null
   quote: ResolvedQuote | null
-  /** 未実現損益 (%)。SSR の「評価損益」列と同じ式 (現在値 vs 平均取得単価)。 */
+  /** Same formula as the SSR "評価損益" column: (quote.price - avgPrice) / avgPrice. */
   unrealizedPnlPct: number | null
   pendingOrderSide: string | null
   cooldownUntil: string | null
   inactive: boolean
-  /** DO 取得失敗時のみ非 null。この行の他 field は null になる。 */
+  /** Non-null only when the DO fetch failed; the rest of the row is null in that case. */
   error: string | null
 }
 
-/**
- * positions packet builder (schema: `dashboard_positions_export.v1`)。
- *
- * SSR の positionsBody と同じ loader 結果から pure に組み立てる。SymbolState の
- * 内部管理 field (settledCash / pendingSettlement / appliedClientOrderIds) は
- * 画面にも出していないので packet にも載せない — export は画面同等に絞る。
- */
+// Builds the `dashboard_positions_export.v1` packet purely from PositionsPageData, mirroring
+// positionsBody's own field set — SymbolState internals (settledCash, pendingSettlement,
+// appliedClientOrderIds) aren't shown on screen either, so they're left out here too.
 export function buildPositionsPacket(data: PositionsPageData) {
   const positions: PositionExportRow[] = data.rows.map((r) => {
     const inactive = isSymbolInactive(r.sym, data.universe)
@@ -166,8 +137,8 @@ export function buildPositionsPacket(data: PositionsPageData) {
     }
     const s = r.state
     const pos = s.position
-    // 現在値の解決は SSR と同じ pickFreshQuote (Webull snapshot vs Yahoo bars の
-    // 新しい方)。画面と JSON で「現在値」がずれると AI 相談時に混乱するため。
+    // Same pickFreshQuote as the SSR page: a diverging "current price" between the screen and
+    // this JSON would confuse whoever/whatever reads them side by side.
     const webull = s.lastQuote
       ? { price: s.lastQuote.price, source: s.lastQuote.source, asOf: s.lastQuote.asOf ?? s.lastQuote.fetchedAt }
       : null

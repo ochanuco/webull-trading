@@ -83,7 +83,7 @@ describe('webull routes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('returns 403 and never contacts Webull when dryRun=false (issue #137)', async () => {
+  it('returns 403 and never contacts Webull when dryRun=false', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ dryRun: false }),
     )

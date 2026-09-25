@@ -24,15 +24,9 @@ export class ValidationError extends TradingError {
   }
 }
 
-/**
- * Base class for all broker-layer errors. Subclasses narrow the failure
- * into "retry" vs "give up" vs "alert loudly" categories so call sites and
- * cron log filters don't have to re-parse status codes from the message.
- *
- * Keep existing call sites (`throw new BrokerRequestError(...)`) working —
- * it still represents "broker layer request failed, caller probably shouldn't
- * retry". Subclasses exist on top.
- */
+// Subclasses narrow the failure into retry / give-up / alert-loudly categories so call sites
+// and cron log filters don't have to re-parse status codes from the message. The base class
+// itself stays constructible so existing `throw new BrokerRequestError(...)` call sites keep working.
 export class BrokerRequestError extends TradingError {
   readonly code: string = 'broker_request_error'
   readonly status: ContentfulStatusCode = 502
@@ -109,11 +103,6 @@ export class BrokerServerError extends BrokerRequestError {
   }
 }
 
-/**
- * Pick the narrowest BrokerRequestError subclass for an upstream HTTP status.
- * Callers that don't care about the distinction can still catch the base
- * `BrokerRequestError`.
- */
 export function brokerErrorForStatus(
   status: number,
   message: string,
@@ -128,45 +117,24 @@ export function brokerErrorForStatus(
   return new BrokerRequestError(message, operation, opts)
 }
 
-/**
- * Webull error code surfaced when a SELL request's quantity exceeds the
- * account's `available_quantity`. Returned with HTTP 417 alongside the
- * code in the response body. Hard-coded as a string (not enum) because
- * the broker treats it as a versionless protocol constant.
- */
+// A string, not an enum: Webull treats this as a versionless protocol constant, returned with
+// HTTP 417 in the response body when a SELL's quantity exceeds `available_quantity`.
 export const WEBULL_SELL_QTY_EXCEED_CODE = 'OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY'
 
-/**
- * True when the error is the Webull-specific "SELL qty > available qty"
- * 417, used by the SELL fallback path in `pullbackScheduler` to decide
- * whether to refetch the broker's available qty and retry.
- *
- * Detection is conservative: status must be 417 AND the error message
- * (which includes the response body snippet, see `WebullHttpClient`) must
- * contain `OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY`. Other 417s
- * (unlikely but possible) fall through to the regular error path.
- */
+/** Used by pullbackScheduler's SELL fallback to decide whether to refetch available qty and retry. */
 export function isSellQtyExceedError(error: unknown): error is BrokerClientError {
   if (!(error instanceof BrokerClientError)) return false
   if (error.brokerStatus !== 417) return false
   return error.message.includes(WEBULL_SELL_QTY_EXCEED_CODE)
 }
 
-/**
- * Webull JP OpenAPI の銘柄単位の取扱拒否 (#460)。USMV で本番実証: 銘柄が
- * OpenAPI の取引対象外だと place order が 417 + この error_code を返す。
- * **恒久エラー** (リトライ・signing・token の問題ではない) なので、検知したら
- * 該当銘柄を自動 entry 停止する (tickerDenyGuard)。
- */
+// Permanent, not a retry/signing/token issue: once a symbol's place order returns 417 with this
+// code, it stays untradable via OpenAPI, which is why tickerDenyGuard auto-disables entry on it.
 export const WEBULL_TICKER_DENY_CODE = 'OAUTH_OPENAPI_TICKER_IS_DENY'
 
-/** True when Webull rejected the order because the ticker is not tradable via OpenAPI (#460). */
+/** True when Webull rejected the order because the ticker is not tradable via OpenAPI. */
 export function isTickerDenyError(error: unknown): error is BrokerClientError {
   if (!(error instanceof BrokerClientError)) return false
   if (error.brokerStatus !== 417) return false
   return error.message.includes(WEBULL_TICKER_DENY_CODE)
 }
-
-// Planned but deferred per issue #1 §13:
-// RiskRejectedError, BrokerResponseError, ConfigurationError,
-// TradeEventIngestError, BridgeConnectionError.

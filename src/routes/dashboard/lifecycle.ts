@@ -2,14 +2,6 @@ import type { ExitReasonCategory, SkipReasonCategory } from '../../trading/analy
 import type { LifecycleReport } from '../../trading/analysis/lifecycleReport'
 import { esc } from './shared'
 
-/**
- * 売買ライフサイクル計測 (issue #709 Phase 2) の dashboard 表示。
- *
- * `loadLifecycleReport` (D1 + Yahoo daily bars) が組み立てた
- * `LifecycleReport` を読むだけの read-only view — 執行経路には一切接続して
- * いない。数値は全て過去の decision / fill から再現可能に集計したもの。
- */
-
 const EXIT_REASON_LABELS: Record<ExitReasonCategory, string> = {
   TP: 'TP (利食い)',
   SL: 'SL (損切り)',
@@ -171,9 +163,8 @@ function renderCostDrawdownTurnover(report: LifecycleReport): string {
   const tile = (label: string, value: string) =>
     `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value" style="font-size:16px">${value}</div></div>`
   const tiles = [
-    // cost / drawdown はどちらも正の magnitude (「いくら失ったか」)。符号付き
-    // 表示 (fmtUsd) だと 0 円のとき "+$0.00" になり損失方向の意味と噛み合わない
-    // ため、ここだけ符号なしの素の金額で表示する。
+    // Unsigned, not fmtUsd: these are magnitudes ("how much"), and fmtUsd's
+    // sign would render 0 as "+$0.00", implying a gain direction that doesn't apply.
     tile('推定コスト合計', `$${cost.totalEstimatedCostUsd.toFixed(2)}`),
     tile('最大ドローダウン (USD)', `$${drawdown.maxDrawdownUsd.toFixed(2)}`),
     tile('turnover (BUY)', `$${turnover.buyNotionalUsd.toFixed(2)}`),

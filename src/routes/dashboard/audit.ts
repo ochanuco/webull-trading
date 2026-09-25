@@ -13,13 +13,6 @@ export interface AuditBodyArgs {
   hasMore?: boolean
 }
 
-/**
- * `/dashboard/audit` の HTML 本文 (#274)。
- *
- *   - 直近 100 件 (`?limit=N` で 1〜500)
- *   - actor / endpoint / from / to で絞り込み (GET form)
- *   - before_json / after_json は `<details>` で展開表示
- */
 export function auditBody(args: AuditBodyArgs): string {
   const { rows, limit, actorFilter, endpointFilter, fromFilter, toFilter, before, hasMore = false } = args
   const form = `<form method="get" action="/dashboard/audit" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -68,9 +61,6 @@ export function auditBody(args: AuditBodyArgs): string {
   })}`
 }
 
-/**
- * `?limit=N` を 1〜500 に丸める。`/dashboard/audit` 既定 100。
- */
 export function clampAuditLimit(raw: string | undefined): number {
   const n = raw === undefined ? 100 : Number.parseInt(raw, 10)
   if (!Number.isFinite(n) || n <= 0) return 100
@@ -83,11 +73,7 @@ export function trimQuery(raw: string | undefined): string | undefined {
   return trimmed.length === 0 ? undefined : trimmed
 }
 
-/**
- * `YYYY-MM-DD` 日付フィルタを ISO timestamp に展開。`isEnd=true` は `T23:59:59.999Z`、
- * false は `T00:00:00.000Z` を付ける (UTC base — 監査ログの timestamp は
- * ISO UTC で書かれる)。文法が合わない値は undefined を返す (フィルタ skip)。
- */
+// UTC suffix, not local time: configAuditLog.timestamp is written as ISO UTC.
 export function parseAuditDateFilter(raw: string | undefined, isEnd: boolean): string | undefined {
   if (raw === undefined) return undefined
   const trimmed = raw.trim()
@@ -96,10 +82,6 @@ export function parseAuditDateFilter(raw: string | undefined, isEnd: boolean): s
   return isEnd ? `${trimmed}T23:59:59.999Z` : `${trimmed}T00:00:00.000Z`
 }
 
-/**
- * `before_json` / `after_json` を整形して表示。JSON parse が成功すれば 2-space
- * indent、失敗 (= マイグレ前の raw 文字列など) は原文をそのまま返す。
- */
 function formatAuditJson(raw: string): string {
   try {
     return JSON.stringify(JSON.parse(raw), null, 2)

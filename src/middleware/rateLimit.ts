@@ -2,15 +2,10 @@ import type { MiddlewareHandler } from 'hono'
 import type { AppBindings } from '../app'
 import type { Env } from '../config/env'
 
-/**
- * Rate-limit category。Cloudflare Workers `RateLimit` binding に対応する env
- * 名と 1:1 対応 (env.STATE_CHANGE_RATE_LIMIT / env.ADMIN_WRITE_RATE_LIMIT /
- * env.DASHBOARD_RATE_LIMIT)。
- *
- *   - STATE_CHANGE: kill-switch 等の致命的な state 変更。5 req / 60s。
- *   - ADMIN_WRITE:  override / seed / clear-cooldown 等の運用書込。20 req / 60s。
- *   - DASHBOARD:    read-only dashboard GET の soft cap。60 req / 60s。
- */
+// Limits themselves live in wrangler.jsonc's RateLimit bindings, not here:
+//   - STATE_CHANGE: kill-switch etc. — 5 req/60s
+//   - ADMIN_WRITE:  override/seed/clear-cooldown etc. — 20 req/60s
+//   - DASHBOARD:    read-only dashboard GET soft cap — 60 req/60s
 export type RateLimitCategory = 'STATE_CHANGE' | 'ADMIN_WRITE' | 'DASHBOARD'
 
 const BINDING_KEY: Record<RateLimitCategory, keyof Env> = {
@@ -19,21 +14,9 @@ const BINDING_KEY: Record<RateLimitCategory, keyof Env> = {
   DASHBOARD: 'DASHBOARD_RATE_LIMIT',
 }
 
-/**
- * Returns a Hono middleware that rate-limits the request via the Cloudflare
- * Workers `RateLimit` binding for `category`。
- *
- * Key 戦略: actor (Access middleware が `c.set('actor', ...)` で立てる場合)
- * を優先し、無ければ `cf-connecting-ip`、それも無ければ 'unknown'。
- *
- * Binding が未設定 (local miniflare で `[[unsafe.bindings]]` が認識されない等)
- * の場合は warn して fail-open: dev で middleware 全体が壊れる方が POC では
- * リスクが大きいため。Production では wrangler.jsonc 側に binding が必ず
- * 入っているのでこのケースは通常起きない。
- *
- * 429 時は `Retry-After: 60` ヘッダ + JSON body
- * `{ error: 'rate_limited', retry_after: 60 }` を返す。
- */
+// A missing binding (e.g. local miniflare not picking up `[[unsafe.bindings]]`) warns and
+// fails open rather than breaking the whole middleware chain — acceptable in dev/POC since
+// production always has the binding configured in wrangler.jsonc.
 export function rateLimit(category: RateLimitCategory): MiddlewareHandler<AppBindings> {
   const envKey = BINDING_KEY[category]
   return async (c, next) => {
@@ -56,7 +39,7 @@ export function rateLimit(category: RateLimitCategory): MiddlewareHandler<AppBin
     try {
       outcome = await binding.limit({ key })
     } catch (err) {
-      // RateLimit binding の一時障害で admin/dashboard を 500 で巻き添えにしない (fail-open)。
+      // Fails open: a transient RateLimit binding outage shouldn't 500 admin/dashboard traffic.
       console.warn(
         JSON.stringify({
           event: 'rate_limit_check_failed',
@@ -78,11 +61,6 @@ export function rateLimit(category: RateLimitCategory): MiddlewareHandler<AppBin
   }
 }
 
-/**
- * actor (Access middleware の placeholder) → cf-connecting-ip → 'unknown' の
- * 優先順で rate-limit key を解決する。Lane A (#29) が actor を立てるまでは
- * IP fallback で十分機能する。
- */
 function resolveRateLimitKey(
   c: Parameters<MiddlewareHandler<AppBindings>>[0],
 ): string {

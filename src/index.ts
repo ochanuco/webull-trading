@@ -20,16 +20,12 @@ import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
 
-// 5 分毎の quote feed + fill reconcile cron.
 const CRON_QUOTE_RECONCILE = '*/5 * * * *'
-// 15 分毎の Pullback 戦略 cron (position 保有で自然 idempotent)。:00/:05/:10
-// の quote 更新後、:15/:30/:45/:00 に判定が走る (quote と strategy の 5 分ズレ
-// を維持するため HH:00 ではなく +15 相当の */15 にしている)。
+// Offset from `*/5`'s :00/:05/:10 quote updates so strategy decisions always run against a
+// quote that's already landed, instead of racing it at the same minute.
 const CRON_STRATEGY = '*/15 * * * *'
-// EOD 自動 rollover cron (issue #140)。22:00 UTC ≈ NY 17:00 ET / 18:00 EDT で
-// US 通常立会終了後、JP 朝立会前に発火。`PortfolioStateDO.rollDaily()` を呼んで
-// `dailyRealizedPnl` を翌日の `dailyStartEquity` に畳み、drawdown kill / risk
-// scale が「今日の」基準で動くよう毎日アンカーし直す。
+// 22:00 UTC ≈ NY 17:00 ET/18:00 EDT: after the US regular session closes, before the JP morning
+// session opens — the daily anchor point for PortfolioStateDO.rollDaily()'s drawdown/risk-scale reset.
 const CRON_PORTFOLIO_ROLL = '0 22 * * *'
 
 export { SymbolStateDO } from './trading/state/SymbolStateDO'
@@ -38,13 +34,8 @@ export { WebullTokenStateDO } from './trading/state/WebullTokenStateDO'
 
 const app = createApp()
 
-/**
- * Attach a D1-backed sink so tradeJournal records also land in D1.
- * We deliberately do not clear the context on handler exit — the background
- * waitUntil tasks from that handler keep firing logs after return, and those
- * logs should still reach D1. Subsequent handler invocations overwrite the
- * context in place.
- */
+// Never cleared on handler exit: background waitUntil tasks from that handler keep logging
+// after return and still need this context, so the next invocation just overwrites it in place.
 function attachTradeJournalDb(env: Env, ctx: ExecutionContext): void {
   if (!env.DB) return
   const db = createDb(env.DB)
@@ -64,10 +55,9 @@ export default {
     const requestId = crypto.randomUUID()
 
     if (event.cron === CRON_PORTFOLIO_ROLL) {
-      // 22:00 UTC daily: portfolio rollover + Webull access-token refresh.
-      // Token は 15 days inactivity で INVALID 化するので、daily check で
-      // expires 残り 7 days 以内なら createToken(existingToken) で更新する。
-      // 取引時間外に動かす事で broker API への副作用 (rate limit etc) を最小化。
+      // The token goes INVALID after 15 days of inactivity, so this daily check refreshes it
+      // via createToken(existingToken) once expiry is within 7 days — run off-hours to keep
+      // this side effect (rate limit usage etc.) away from the trading window.
       ctx.waitUntil(runPortfolioRoll(env, requestId))
       ctx.waitUntil(
         refreshWebullToken(env).then(
@@ -82,9 +72,8 @@ export default {
                 lastSuccessAt: summary.after?.lastSuccessAt ?? null,
               }),
             )
-            // refresh が失敗したら operator action が必要 (token 再発行 → seed)。
-            // critical 通知で push する (cron は 24h 後の next tick まで待つので
-            // 早めに気付かせたい)。skip は通常運用なので通知しない。
+            // A failure needs operator action (reissue the token, then seed it) — push critical
+            // now rather than let it sit until the next 24h tick. A skip is routine, no notify.
             if (summary.failureReason) {
               ctx.waitUntil(
                 createNotifier(env, { requestId })
@@ -121,11 +110,8 @@ export default {
         ),
       )
 
-      // #475: Market Data API (trade host + x-version v2 で稼働中、PR #474 実測)
-      // の死活監視。旧実装は存在しない host (data-api) の launch を見張っていた
-      // が、向きを反転 — documented snapshot endpoint が **200 を返さなくなったら**
-      // warn 通知する (quote/bars の Webull 回帰の前提カナリア)。healthy は
-      // daily log のみ (spam 防止)。
+      // Canary for a Webull quote/bars regression: warns only when the documented snapshot
+      // endpoint stops returning 200. A healthy result is logged, not notified, to avoid spam.
       ctx.waitUntil(
         checkMarketDataHealth(env).then(
           (result) => {
@@ -153,7 +139,7 @@ export default {
             }
           },
           (error) => {
-            // 関数自体が throw するのは設計上ないが念のため
+            // checkMarketDataHealth is designed to never throw; this branch is a defensive backstop.
             const message = error instanceof Error ? error.message : String(error)
             console.error(
               JSON.stringify({
@@ -166,9 +152,8 @@ export default {
         ),
       )
 
-      // #460: OpenAPI 取扱可能銘柄 allowlist の日次リフレッシュ。
-      // tradable/list を全件 sweep し D1 にキャッシュ (物理削除しない upsert)。
-      // 取引時間外 (22:00 UTC) に動かして rate limit / 副作用を最小化する。
+      // Upserts only — never a physical delete — so a symbol's disappearance from the sweep is
+      // still recoverable/auditable rather than silently dropped from D1.
       ctx.waitUntil(
         refreshTradableAllowlist(env, new Date().toISOString()).then(
           async (summary) => {
@@ -236,10 +221,8 @@ export default {
         ),
       )
 
-      // news shock gate 日次サマリ (news-shock-gate follow-up)。22:00 UTC =
-      // US 市場close後。GDELT producer (newsScheduler) は 24h 稼働しているので
-      // この時刻でも観測は新鮮。mode=observe の間は regime 変化時の
-      // STATE_CHANGE 通知しか出ないため、閾値校正の材料として現状を毎日配信する。
+      // While mode=observe only fires a STATE_CHANGE notify on regime transitions, this daily
+      // summary gives a steady stream of current-state data for calibrating the thresholds.
       ctx.waitUntil(runNewsShockDailySummary(env, requestId))
       return
     }
@@ -256,8 +239,8 @@ export default {
                 requestId,
                 symbols: result.symbols,
                 skipReason: result.skipReason,
-                // #exit-only-halt: run 全体は走っているが新規 entry だけ止めた場合。
-                // skipReason とは排他で、こちらが出ている tick は exit 判定済み。
+                // Mutually exclusive with skipReason: set when the run itself proceeded (exits
+                // were evaluated) but new entries specifically were halted.
                 entryHaltReason: result.entryHaltReason ?? null,
                 summary,
                 analysis: result.analysis,
@@ -273,9 +256,8 @@ export default {
                 message,
               }),
             )
-            // cron 全体が落ちた時 (D1 失敗 / unexpected throw 等) も通知 (#199 → #141)。
-            // severity: critical で push する。waitUntil で wrap して isolate
-            // terminate 前に webhook fetch を完了させる。
+            // Wrapped in waitUntil so the notify webhook fetch completes before the isolate is
+            // torn down — otherwise a cron-ending throw could silently drop the alert.
             ctx.waitUntil(
               createNotifier(env, { requestId })
                 .notify({
@@ -292,9 +274,8 @@ export default {
       return
     }
 
-    // default: CRON_QUOTE_RECONCILE (`*/5 * * * *`) — quote feed + fill reconcile.
-    // 5 分 cron は quote と reconcile が独立に走るので、片方の error 経路で
-    // notifier を 1 回ずつ作る (overhead は無視できる: createNotifier は薄い)。
+    // default: CRON_QUOTE_RECONCILE — quote feed + fill reconcile run independently below,
+    // each creating its own notifier on its own error path.
     ctx.waitUntil(
       runQuoteFeed({ env }).then(
         (summary) => {
@@ -306,18 +287,14 @@ export default {
               persisted: summary.persisted,
               skipped: summary.skipped,
               errors: summary.errors,
-              // #475: QUOTE_SOURCE canary の観測用 — primary source と Yahoo
-              // fallback に回った銘柄をログで追えるようにする。
               source: summary.source,
               fallbackSymbols: summary.fallbackSymbols,
             }),
           )
-          // Partial failure: getSnapshots() がカテゴリ単位で throw しても全体の
-          // promise は resolve するため、summary.errors にだけ積まれて silent に
-          // なってた (SOXL が 5 日 stale だったケース)。errors 件数 > 0 のときは
-          // /dashboard/alerts に warning として昇格させ、operator が cron 沈黙を
-          // 検知できるようにする。global throw の cause='quote_feed' とは区別する
-          // ため cause='quote_feed_partial'。
+          // A per-category throw inside getSnapshots() only lands in summary.errors — the
+          // overall promise still resolves — so without this, a persistent per-symbol failure
+          // stays invisible. Promoted to a warning notify here, under a distinct
+          // cause='quote_feed_partial' so it doesn't get conflated with a full quote_feed throw.
           if (summary.errors.length > 0) {
             const summaryMsg = summary.errors
               .slice(0, 3)
@@ -345,8 +322,7 @@ export default {
               message,
             }),
           )
-          // quote feed の global throw は warning (per-symbol skip と区別)。
-          // 連続 fail で operator が気付けるよう push 通知 (#141)。
+          // Warning, not critical: distinguishes a full quote_feed throw from a per-symbol skip.
           ctx.waitUntil(
             createNotifier(env, { requestId })
               .notify({
@@ -381,13 +357,9 @@ export default {
               abandoned: summary.abandoned,
             }),
           )
-          // reconcile の per-row error が出ていれば 1 件まとめて通知 (#141)。
-          // 1 row 1 通知だと polling tick で連発するので summary 単位で 1 件。
-          //
-          // Auto-abandoned rows (sanity-stuck for >=5 attempts) は
-          // summary.errors に積まれずこの message 経路から抜ける。
-          // operator 側は `reconcile_auto_abandon` audit log を別経路で
-          // 拾えば良い。
+          // One notify per summary, not per row — a per-row notify would fire repeatedly across
+          // polling ticks. Auto-abandoned rows (sanity-stuck for >=5 attempts) don't land in
+          // summary.errors or this notify path; they're visible via the `reconcile_auto_abandon` audit log instead.
           if (summary.errors.length > 0) {
             ctx.waitUntil(
               createNotifier(env, { requestId })
@@ -410,8 +382,7 @@ export default {
               message,
             }),
           )
-          // reconcile 全体 throw は critical (split-brain リスク、#142 系列の
-          // 修復が走らない)。
+          // Critical: a full reconcile throw means split-brain repair between D1 and the DO isn't running at all.
           ctx.waitUntil(
             createNotifier(env, { requestId })
               .notify({
@@ -425,10 +396,9 @@ export default {
         },
       ),
     )
-    // News attention producer (issue #196 follow-up、newsShockGate PR 1)。
-    // quote/reconcile とは完全に独立 — GDELT 障害・レート制限が取引経路に
-    // 伝播しないことを物理的に保証する配線 (runNewsScheduler 自体も内部で
-    // fetch/DB 失敗を throw せず握りつぶすが、ここでも二重に .catch する)。
+    // Wired fully independent of quote/reconcile so a GDELT outage or rate limit can't
+    // propagate into the trading path. runNewsScheduler already swallows its own fetch/DB
+    // failures internally; the `.catch` here is defense in depth, not the primary guard.
     ctx.waitUntil(
       runNewsScheduler({ env, requestId })
         .then((summary) => {
@@ -447,10 +417,8 @@ export default {
         })
         .catch(() => undefined),
     )
-    // Extended-hours (pre-market) reference observation producer (issue #709
-    // Phase 1)。quote/reconcile/strategy とは完全に独立 — Yahoo 障害が取引経路に
-    // 伝播しないことを物理的に保証する配線 (runExtendedHoursObservation 自体も
-    // 内部で fetch/DB 失敗を throw せず握りつぶすが、ここでも二重に .catch する)。
+    // Same isolation pattern as the news scheduler above: wired independent of
+    // quote/reconcile/strategy so a Yahoo outage can't propagate into the trading path.
     ctx.waitUntil(
       runExtendedHoursObservation({ env, requestId })
         .then((summary) => {

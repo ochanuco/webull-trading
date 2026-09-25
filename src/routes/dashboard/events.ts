@@ -9,12 +9,7 @@ import { extractActor, recordChange } from '../../infrastructure/db/configAuditL
 import { type DashboardBindings, renderLayout } from './layout'
 import { displaySymbol, esc, inactiveTooltip, isSymbolInactive, unavailable } from './shared'
 
-// #293 calendar events management UI helpers ===============================
-
-/**
- * `<input value="...">` で再表示する form 入力。バリデーション失敗時は
- * 入力値を保ったまま再描画する。
- */
+/** Form input echoed back on a validation failure so the operator doesn't retype it. */
 export interface EventsEarningsFormEcho {
   symbol: string
   earningsDate: string
@@ -22,9 +17,8 @@ export interface EventsEarningsFormEcho {
 }
 
 export interface EventsMacroFormEcho {
-  /** macro `event_type` (FOMC / CPI / NFP …)。 */
   eventType: string
-  /** 自由 text の国コード (US / JP …)。schema 上は notes に集約する。 */
+  /** Free-text country (US / JP …); the schema has no dedicated column, so this folds into `notes`. */
   country: string
   eventDate: string
   notes: string
@@ -41,15 +35,12 @@ export interface EventsBodyArgs {
     earnings: EventsEarningsFormEcho | null
     macro: EventsMacroFormEcho | null
   } | null
-  /** 非ブロッキング警告 (例: universe 外 symbol を seed 成功した時)。 */
+  /** Non-blocking, e.g. a save that succeeded despite the symbol being outside the universe. */
   notice: { section: 'earnings' | 'macro'; message: string } | null
 }
 
-/**
- * dashboard で表示する範囲 = now-30d 〜 now+30d (= "実際に gate が見る窓")。
- * `evaluateEarningsGate` / `evaluateMacroEventGate` は近未来の数営業日しか
- * 見ないので、それを内包しつつ「今月 + 来月」程度を一覧する目安。
- */
+// ±30d is a superset of the few business days evaluateEarningsGate / evaluateMacroEventGate
+// actually look at — wide enough to browse "this month + next" at a glance.
 export function eventsDisplayRange(now: Date): { from: string; to: string } {
   const ms = now.getTime()
   const from = new Date(ms - 30 * 86_400_000).toISOString().slice(0, 10)
@@ -57,11 +48,8 @@ export function eventsDisplayRange(now: Date): { from: string; to: string } {
   return { from, to }
 }
 
-/**
- * earnings_calendar を ([fromYmd, toYmd]) 範囲で読む。`fetchByRange` は
- * symbol 単位 read なので、ここでは全 symbol の range read を直接 SQL で発行
- * する (dashboard 一覧は universe 全体を横断するため)。
- */
+// Direct SQL range read across all symbols, not the per-symbol `fetchByRange`: the dashboard
+// list spans the whole universe, not one symbol at a time.
 export async function loadEarningsInRange(
   db: D1Database,
   fromYmd: string,
@@ -84,12 +72,7 @@ export interface ValidationOkEarnings {
   symbol: string
   earningsDate: string
   notes: string | null
-  /**
-   * symbol が universe.allowedSymbols に無い場合に立つ非ブロッキング警告。
-   * spec: "universe 外 symbol は保存を許す + UI で warning 表示" — save は通すが
-   * dashboard 側で operator に対して typo の可能性を知らせる。universe が null
-   * (load 失敗) の場合は判定スキップ (= warning なし)。
-   */
+  /** Set when `symbol` isn't in `universe.allowedSymbols` — flags a likely typo without blocking the save. */
   warning: string | null
 }
 
@@ -98,14 +81,6 @@ export interface ValidationFail {
   error: string
 }
 
-/**
- * earnings 1 行 form を validate する。
- *   - symbol: 1〜16 chars, upper-case 正規化。universe にあれば pass; 無くても
- *     pass (warn のみ)。「inactive 銘柄でも入れさせる」spec に合わせ active
- *     判定は無視 (= 入力 → DB は raw に通す)。
- *   - earnings_date: ISO YYYY-MM-DD, round-trip valid, now-90d 〜 now+365d。
- *   - notes (= form の `notes` field): 任意, 256 chars 上限。
- */
 export function validateEarningsForm(
   echo: EventsEarningsFormEcho,
   universe: SymbolUniverse | null,
@@ -114,8 +89,6 @@ export function validateEarningsForm(
   if (sym.length === 0 || sym.length > 16) {
     return { ok: false, error: 'symbol は 1〜16 文字で入力してください' }
   }
-  // universe 不在は warning にとどめ拒否しない (POC 姿勢、operator が unknown
-  // 銘柄を seed したい場合もある、=> notes に書く運用)。
   const date = echo.earningsDate.trim()
   if (!isYmdRoundTrip(date)) {
     return { ok: false, error: 'event_date は YYYY-MM-DD 形式で実在する日付にしてください' }
@@ -127,8 +100,8 @@ export function validateEarningsForm(
   if (notesRaw.length > 256) {
     return { ok: false, error: 'notes (source) は 256 文字以内にしてください' }
   }
-  // universe が読めた場合のみ allowedSymbols 照合 (case-insensitive)。null の時は
-  // load 失敗なので照合をスキップ — false-positive 警告を避ける。
+  // universe===null means the load itself failed, not "no symbols" — skip the check rather
+  // than raise a false-positive "unknown symbol" warning.
   let warning: string | null = null
   if (universe) {
     const inUniverse = universe.allowedSymbols.some((s) => s.toUpperCase() === sym)
@@ -152,20 +125,13 @@ export interface ValidationOkMacro {
   notes: string | null
 }
 
-/**
- * macro 1 行 form を validate する。
- *
- * macro schema は `event_kind` / `country` を別 column で持たないため,
- * country は notes に prefix で混ぜる (`"US — Federal Reserve press release"`)。
- * spec 上 "country: 自由 text、escapeHtml on render" なので分離保持は必須ではない。
- */
 export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro | ValidationFail {
   const kindRaw = echo.eventType.trim()
   if (kindRaw.length === 0 || kindRaw.length > 32) {
     return { ok: false, error: 'event_kind は 1〜32 文字で入力してください' }
   }
-  // schema 制約 `[A-Z0-9_]{1,32}` に合うよう upper-case 化し空白を `_` に
-  // 置換 (`'NFP REV'` → `'NFP_REV'`)。それでも regex に外れる場合は reject。
+  // Normalizes toward the schema's `[A-Z0-9_]{1,32}` constraint (e.g. 'NFP REV' -> 'NFP_REV')
+  // before the regex check below rejects whatever still doesn't fit.
   const kind = kindRaw.toUpperCase().replace(/\s+/g, '_')
   if (!/^[A-Z0-9_]{1,32}$/.test(kind)) {
     return {
@@ -185,7 +151,6 @@ export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro 
     return { ok: false, error: 'event_date は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
   }
   const notesPlain = echo.notes.trim()
-  // notes に "country — notes" を畳む。country / notes ともに空なら null。
   const combined =
     country.length > 0 && notesPlain.length > 0
       ? `${country} — ${notesPlain}`
@@ -203,7 +168,6 @@ export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro 
   }
 }
 
-/** `YYYY-MM-DD` の文法 + 実在日付チェック (admin route の isYmd と同じ)。 */
 function isYmdRoundTrip(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const ms = Date.parse(`${value}T00:00:00.000Z`)
@@ -211,13 +175,9 @@ function isYmdRoundTrip(value: string): boolean {
   return new Date(ms).toISOString().slice(0, 10) === value
 }
 
-/**
- * 過去 90 日 〜 未来 365 日 (両端含む) に入っているか。date-only 比較。
- *
- * 入力は `YYYY-MM-DD` を UTC 0:00 として解釈。`now` も同じ UTC YMD に丸めた
- * 上で ±90d / ±365d する。`+ 86_400_000` の slack を付けると 91d / 366d も
- * 通ってしまうので、UTC YMD epoch ms で純粋に inclusive 比較する。
- */
+// Both `ymd` and `now` are floored to UTC-midnight epoch ms before the ±90d/±365d bound check.
+// Padding either bound by one extra day of slack would let +91d/+366d through, so the bounds
+// are compared as exact day-aligned ms, not with a fudge factor.
 function withinClampRange(ymd: string, now: Date): boolean {
   const t = Date.parse(`${ymd}T00:00:00.000Z`)
   if (!Number.isFinite(t)) return false
@@ -228,11 +188,7 @@ function withinClampRange(ymd: string, now: Date): boolean {
   return t >= earliest && t <= latest
 }
 
-/**
- * バリデーション失敗時 / delete failure 時の再描画 helper。一覧を再 load して
- * エラーメッセージ + 入力 echo つきの events ページを返す。HTTP status は 400
- * (operator 入力起因 — 5xx ではない) を返して PRG 経由ではないことを明示。
- */
+// Returns 400, not the PRG redirect's usual 303: an operator input error, not a server failure.
 export async function renderEventsWithError(
   c: Context<DashboardBindings>,
   args: {
@@ -271,10 +227,8 @@ export async function renderEventsWithError(
   )
 }
 
-/**
- * 保存は成功したが non-blocking 警告 (universe 外 symbol など) を operator に
- * 知らせる必要がある時の再描画 helper。HTTP status は 200 (= 保存済み)。
- */
+// Returns 200, not a redirect: the save already succeeded, this just surfaces a non-blocking
+// warning (e.g. symbol outside the universe) instead of erroring it out.
 export async function renderEventsWithNotice(
   c: Context<DashboardBindings>,
   args: {
@@ -310,11 +264,6 @@ export async function renderEventsWithNotice(
   )
 }
 
-/**
- * `/dashboard/events` の HTML 本文。earnings (上) + macro (下) の 2 セクション。
- * 各セクションは「+ 追加」`<details>` 内に form, 一覧テーブルに 削除 form。
- * 行が無いセクションは空配列メッセージで表示する (= "未登録" を明示)。
- */
 export function eventsBody(args: EventsBodyArgs): string {
   const { earnings, macros, from, to, universe, errors, formEcho, notice } = args
   const earningsErr =
@@ -333,8 +282,6 @@ export function eventsBody(args: EventsBodyArgs): string {
     notice && notice.section === 'macro'
       ? `<p class="warn"><strong>注意:</strong> ${esc(notice.message)}</p>`
       : ''
-  // form が前回 submit で開いていた場合は再描画でも開いた状態を維持したい (operator
-  // が値を確認しながら修正できる)。エラー有りなら details[open]、無しなら閉じる。
   const earningsFormOpen = errors?.section === 'earnings' ? ' open' : ''
   const macroFormOpen = errors?.section === 'macro' ? ' open' : ''
   const eEcho = formEcho?.earnings ?? { symbol: '', earningsDate: '', notes: '' }
@@ -424,12 +371,8 @@ ${macroNotice}
 ${macroTable}`
 }
 
-/**
- * dashboard 側 form handler 用の audit log writer (#293)。admin.ts の
- * writeAuditLog と同形だが route layer が違うので local copy。actor は Access
- * middleware が `c.set('actor', ...)` 済み (ない場合は extractActor が throw
- * するので try/catch で潰す — admin 同様 audit 欠落で 500 を返したくない)。
- */
+// extractActor throws when Access middleware hasn't set `actor` yet — caught here so a missing
+// audit trail never turns into a 500 for the operator's actual form submission.
 export async function writeEventsAuditLog(
   c: Context<DashboardBindings>,
   endpoint: string,
