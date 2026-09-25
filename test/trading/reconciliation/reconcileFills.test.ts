@@ -218,6 +218,29 @@ describe('reconcileFills internals', () => {
       ).toBe(3500)
     })
   })
+
+  describe('findPairPartner', () => {
+    const pairRegimes = [
+      { bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null },
+      { bullSymbol: 'TQQQ', bearSymbol: 'SQQQ', proxySymbol: 'QQQ', invalidConfig: null },
+    ]
+
+    it('returns the bear symbol when the bull leg exits', () => {
+      expect(_internal.findPairPartner('SOXL', pairRegimes)).toBe('SOXS')
+    })
+
+    it('returns the bull symbol when the bear leg exits', () => {
+      expect(_internal.findPairPartner('SQQQ', pairRegimes)).toBe('TQQQ')
+    })
+
+    it('is case-insensitive on the input symbol', () => {
+      expect(_internal.findPairPartner('soxl', pairRegimes)).toBe('SOXS')
+    })
+
+    it('returns null for a symbol not in any regime-enabled pair', () => {
+      expect(_internal.findPairPartner('AAPL', pairRegimes)).toBeNull()
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
