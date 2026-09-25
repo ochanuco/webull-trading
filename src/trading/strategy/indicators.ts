@@ -16,10 +16,10 @@ const BASELINE_PERCENTILE_SAMPLES = 250 // ~1 year
 export interface PullbackIndicatorSnapshot {
   price: number
   sma50: number
-  /** 20-day return. Named `return50d` for storage/dashboard compat with `strategy_decision_log.indicators_json`. */
-  return50d: number
-  /** 10-day reference high for pullback entries. Named `high20d` for storage/dashboard compat. */
-  high20d: number
+  /** 20-day return (trend filter). */
+  return20d: number
+  /** 10-day reference high for pullback entries. */
+  high10d: number
   /** 20-day low. Unused by strategy logic — computed for the dashboard's support-line overlay. */
   low20d: number
   atr20: number
@@ -103,13 +103,24 @@ export function computePullbackIndicators(
   return {
     price,
     sma50,
-    return50d: trendReturn,
-    high20d: pullbackReferenceHigh,
+    return20d: trendReturn,
+    high10d: pullbackReferenceHigh,
     low20d: supportLow,
     atr20,
     baselineAtr20,
     breakoutHigh20: breakoutReferenceHigh,
   }
+}
+
+/**
+ * Persisted decision-log JSON and the chart export still use the historical
+ * keys; renaming them there would need a data migration.
+ */
+export function toIndicatorWireKeys<T extends { return20d: number; high10d: number }>(
+  indicators: T,
+): Omit<T, 'return20d' | 'high10d'> & { return50d: number; high20d: number } {
+  const { return20d, high10d, ...rest } = indicators
+  return { ...rest, return50d: return20d, high20d: high10d }
 }
 
 export function computeHoldBusinessDays(

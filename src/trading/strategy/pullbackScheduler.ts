@@ -15,6 +15,7 @@ import { freshDecisionQuote } from '../quotes/decisionQuote'
 import {
   computeHoldBusinessDays,
   computePullbackIndicators,
+  toIndicatorWireKeys,
   type DailyBar,
 } from './indicators'
 import { computePullbackSizing } from './pullbackSizing'
@@ -535,7 +536,7 @@ export async function runPullbackScheduler(
         decision: 'HOLD',
         reason: signal.reason,
         price: indicators.price,
-        indicatorsJson: JSON.stringify(indicators),
+        indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
         trace: signal.trace,
       })
       continue
@@ -557,7 +558,7 @@ export async function runPullbackScheduler(
             decision: 'SKIP',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('risk.pair_regime', false, d.score, undefined, undefined, reason),
@@ -577,7 +578,7 @@ export async function runPullbackScheduler(
         decision: 'SKIP',
         reason,
         price: indicators.price,
-        indicatorsJson: JSON.stringify(indicators),
+        indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
         trace: appendTrace(
           signal.trace,
           traceStep('risk.role_entry_suppressed', false, undefined, undefined, undefined, reason),
@@ -596,7 +597,7 @@ export async function runPullbackScheduler(
         decision: 'SKIP',
         reason,
         price: indicators.price,
-        indicatorsJson: JSON.stringify(indicators),
+        indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
         trace: appendTrace(
           signal.trace,
           traceStep('risk.price_freshness', false, undefined, undefined, undefined, reason),
@@ -630,7 +631,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.sanity_failed_cooldown', false, undefined, undefined, undefined, reason),
@@ -660,7 +661,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('sizing.lot_size_configured', false, undefined, undefined, undefined, 'missing-lot-size'),
@@ -723,7 +724,7 @@ export async function runPullbackScheduler(
           decision: 'HOLD',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(signal.trace, traceStep('sizing.quantity_positive', false, sizing.quantity, '>', 0, sizing.capReason)),
         })
         continue
@@ -740,7 +741,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('sizing.half_entry_quantity_positive', false, scaledQuantity, '>', 0, reason),
@@ -758,7 +759,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('risk.vix_regime', false, options.vixDecision.vix ?? null, '<=', null, options.vixDecision.reason),
@@ -777,7 +778,7 @@ export async function runPullbackScheduler(
               decision: 'HOLD',
               reason,
               price: indicators.price,
-              indicatorsJson: JSON.stringify(indicators),
+              indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
               trace: appendTrace(
                 signal.trace,
                 traceStep(
@@ -825,7 +826,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('risk.news_shock', false, newsDecision.ratio ?? null, '<=', null, newsDecision.reason),
@@ -842,7 +843,7 @@ export async function runPullbackScheduler(
               decision: 'HOLD',
               reason,
               price: indicators.price,
-              indicatorsJson: JSON.stringify(indicators),
+              indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
               trace: appendTrace(
                 signal.trace,
                 traceStep(
@@ -892,7 +893,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: signal.trace,
           })
           continue
@@ -907,7 +908,7 @@ export async function runPullbackScheduler(
               decision: 'HOLD',
               reason,
               price: indicators.price,
-              indicatorsJson: JSON.stringify(indicators),
+              indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
               trace: appendTrace(
                 signal.trace,
                 traceStep(
@@ -1048,7 +1049,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.earnings_calendar', false, undefined, undefined, undefined, earningsDecision.reason),
@@ -1074,7 +1075,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.macro_event', false, undefined, undefined, undefined, macroDecision.reason),
@@ -1127,7 +1128,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(signal.trace, traceStep('risk.per_symbol_gate', false, undefined, undefined, undefined, riskDecision.reasons.join(', '))),
         })
         continue
@@ -1150,7 +1151,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.buying_power_pool', false, Math.round(notionalJpy), '<=', Math.round(ledger.remainingJpy), reason),
@@ -1176,7 +1177,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.portfolio_exposure_cap', false, Math.round(notionalJpy), '<=', Math.round(ledger.remainingJpy), reason),
@@ -1379,7 +1380,7 @@ export async function runPullbackScheduler(
         ? `sell_qty_fallback: ${signal.reason} (originalQty=${intent.quantity}, executedQty=${executedIntent.quantity})`
         : signal.reason,
       price: executedIntent.price,
-      indicatorsJson: JSON.stringify(indicators),
+      indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
       clientOrderId: executedIntent.clientOrderId,
       trace: appendTrace(
         signal.trace,

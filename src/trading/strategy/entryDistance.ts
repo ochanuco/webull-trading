@@ -54,17 +54,17 @@ const POS_INF = Number.POSITIVE_INFINITY
 
 /** `entryDecision` と同じゲート式・順序で評価する。 */
 export function computeEntryDistance(ind: PullbackIndicators, rule: SymbolRule): EntryDistance {
-  const { price, sma50, return50d, high20d, atr20, baselineAtr20 } = ind
+  const { price, sma50, return20d, high10d, atr20, baselineAtr20 } = ind
   const sma50Deviation = sma50 > 0 ? (price - sma50) / sma50 : 0
   const atrRatio = baselineAtr20 > 0 ? atr20 / baselineAtr20 : 0
-  const pullback = high20d > 0 ? (price - high20d) / high20d : 0
+  const pullback = high10d > 0 ? (price - high10d) / high10d : 0
 
   const gates: EntryGateStatus[] = [
     {
       key: 'trend',
       labelJa: GATE_LABEL_JA.trend,
-      passed: return50d > rule.minReturn50d,
-      actual: return50d,
+      passed: return20d > rule.minReturn50d,
+      actual: return20d,
       threshold: rule.minReturn50d,
       operator: '>',
       priceDependent: false,
@@ -99,8 +99,8 @@ export function computeEntryDistance(ind: PullbackIndicators, rule: SymbolRule):
     {
       key: 'high20d_valid',
       labelJa: GATE_LABEL_JA.high20d_valid,
-      passed: high20d > 0,
-      actual: high20d,
+      passed: high10d > 0,
+      actual: high10d,
       threshold: 0,
       operator: '>',
       priceDependent: false,
@@ -146,12 +146,12 @@ function resolveNearestEntryPrice(
   const priceIndependentBlocked = gates.some((g) => !g.priceDependent && !g.passed)
   if (priceIndependentBlocked) return null
 
-  const { sma50, high20d } = ind
-  if (high20d <= 0) return null
+  const { sma50, high10d } = ind
+  if (high10d <= 0) return null
 
   // pullbackMin < pullbackMax < 0 前提 (下端 < 上端)。
-  const bandLow = high20d * (1 + rule.pullbackMin)
-  const bandHigh = high20d * (1 + rule.pullbackMax)
+  const bandLow = high10d * (1 + rule.pullbackMin)
+  const bandHigh = high10d * (1 + rule.pullbackMax)
 
   const sma50Low = rule.requireAboveSma50 ? sma50 : NEG_INF
   const overextHigh = sma50 > 0 ? sma50 * (1 + rule.maxSma50DeviationPct) : POS_INF

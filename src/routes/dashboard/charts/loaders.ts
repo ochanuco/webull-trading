@@ -1,6 +1,7 @@
 import type { Env } from '../../../config/env'
 import { MAX_TIME_STOP_DAYS } from '../../../infrastructure/db/schema'
 import { type EvalIndicatorPoint } from '../../../trading/strategy/entryDistance'
+import { toIndicatorWireKeys } from '../../../trading/strategy/indicators'
 import type { PullbackIndicators } from '../../../trading/strategy/strategies/PullbackUptrendStrategy'
 import { SymbolStateClient } from '../../../trading/state/SymbolStateClient'
 import { YahooBarClient } from '../../../infrastructure/quotes/YahooBarClient'
@@ -793,21 +794,23 @@ function parseFullIndicators(indicatorsJson: string | null): PullbackIndicators 
     typeof v === 'number' && Number.isFinite(v) ? v : null
   const price = num(obj.price)
   const sma50 = num(obj.sma50)
-  const return50d = num(obj.return50d)
-  const high20d = num(obj.high20d)
+  // obj.return50d / obj.high20d are the stored wire keys (#see toIndicatorWireKeys);
+  // return20d/high10d are their in-memory names (actual lookback: 20d / 10d).
+  const return20d = num(obj.return50d)
+  const high10d = num(obj.high20d)
   const atr20 = num(obj.atr20)
   const baselineAtr20 = num(obj.baselineAtr20)
   if (
     price === null ||
     sma50 === null ||
-    return50d === null ||
-    high20d === null ||
+    return20d === null ||
+    high10d === null ||
     atr20 === null ||
     baselineAtr20 === null
   ) {
     return null
   }
-  return { price, sma50, return50d, high20d, atr20, baselineAtr20 }
+  return { price, sma50, return20d, high10d, atr20, baselineAtr20 }
 }
 
 const MAX_EVAL_INDICATOR_DAYS = 20
@@ -843,7 +846,13 @@ export function buildSymbolChartPacket(chart: SymbolChartData, decisionRows: Dec
     intradayBars: chart.intradayBars,
     latestCronPrice: chart.latestCronPrice,
     latestCronTimestamp: chart.latestCronTimestamp,
-    evalIndicators: chart.evalIndicators ?? [],
+    // return20d/high10d are in-memory names; the export echoes the historical
+    // return50d/high20d wire keys (#toIndicatorWireKeys) so existing consumers
+    // of dashboard_chart_symbol_export.v1 keep reading the same shape.
+    evalIndicators: (chart.evalIndicators ?? []).map((e) => ({
+      timestamp: e.timestamp,
+      indicators: toIndicatorWireKeys(e.indicators),
+    })),
     chartDecisions: (chart.decisions ?? []).map(({ ladderHtml: _ladderHtml, ...rest }) => rest),
     decisionHistory: decisionRows.map((r) => ({
       ...cronDecisionJson(r),
