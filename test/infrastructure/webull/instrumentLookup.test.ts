@@ -10,7 +10,7 @@ const env = {
   WEBULL_APP_SECRET: 's'.repeat(32),
 } as unknown as Env
 
-// staging 実測 (2026-06-11, PR #474 probe) の USMV レコードそのまま。
+// Actual staging record from the PR #474 probe (2026-06-11), used verbatim.
 const USMV_ROW = {
   name: 'iShares MSCI USA Min Vol Factor ETF',
   category: 'US_STOCK',

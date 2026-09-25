@@ -8,22 +8,9 @@ import {
 } from '../../../src/infrastructure/notification/regimeChange'
 import type { Notifier, NotificationEvent } from '../../../src/infrastructure/notification/Notifier'
 
-/**
- * Tests for the generic regime-change module (extracted from
- * `vixRegimeChange.ts`, news-shock-gate PR 2)。
- *
- * `vixRegimeChange.test.ts` covers the VIX-specific wrapper end-to-end
- * (unchanged by this extraction). Here we exercise the generic surface
- * directly with an independent regime domain (`'unknown' | 'normal' | 'warning' | 'critical'`,
- * matching the news-shock gate's regime set) to prove the module is not
- * secretly VIX-shaped.
- *
- * 観点:
- *   - CAS (compare-and-swap) による重複通知防止
- *   - 初回 (snapshot なし) は emit しない
- *   - 同 regime 連続は emit しない (dedup)
- *   - key ごとに独立した warn ログ event 名 (`${key}_snapshot_load_failed` 等)
- */
+// Exercises the regime-change module generically (extracted from
+// vixRegimeChange.ts) using an independent regime domain, to prove it isn't
+// secretly VIX-shaped. vixRegimeChange.test.ts covers the VIX wrapper end to end.
 
 type Regime = 'unknown' | 'normal' | 'warning' | 'critical'
 const RANK: Record<Regime, number> = { unknown: 0, normal: 0, warning: 1, critical: 2 }
@@ -32,7 +19,7 @@ function isRegime(value: unknown): value is Regime {
 }
 const KEY = 'news_shock_regime'
 
-/** Fake D1 — vixRegimeChange.test.ts の fakeDb と同構造の最小限 spy。 */
+// Same minimal-spy shape as vixRegimeChange.test.ts's fakeDb.
 function fakeDb(
   initial: string | null,
   options: { corruptInitial?: boolean } = {},
@@ -339,12 +326,11 @@ describe('detectAndNotifyRegimeChange — dedup / first-run / db-less noop', () 
       criticalRegime: 'critical',
       isValidRegime: isRegime,
       requestId: 'req-suppress',
-      // unknown→normal (データ欠測の回復) はアクションが取れないため流さない。
+      // unknown->normal is just missing-data recovery; no action follows, so don't notify.
       shouldNotify: (from, to) => !(from === 'unknown' && to === 'normal'),
     })
     expect(calls).toHaveLength(0)
     expect(result.emitted).toBe(false)
-    // snapshot は更新済み — 次 tick の normal は「変化なし」として dedup される。
     expect(JSON.parse(getStored()!.value)).toBe('normal')
     expect(result.from).toBe('unknown')
     expect(result.to).toBe('normal')
@@ -367,8 +353,7 @@ describe('detectAndNotifyRegimeChange — dedup / first-run / db-less noop', () 
     expect(calls).toHaveLength(1)
     if (calls[0]!.type === 'STATE_CHANGE') {
       expect(calls[0]!.headline).toBe('テスト見出し (normal→warning)')
-      // headline があれば本文はそれで完結 — requestId / canonical reason の
-      // note は付けない (ユーザーフィードバック)。
+      // Per user feedback: a headline is self-contained, so no requestId/reason note is added.
       expect(calls[0]!.note).toBeUndefined()
     }
   })

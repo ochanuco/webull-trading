@@ -12,8 +12,7 @@ function mockJson(body: unknown, status = 200): Response {
 }
 
 describe('WebullTokenClient.createToken', () => {
-  // #21: token endpoint は v2 固定 (SDK 実装より)。Webull は version mismatch を
-  // signature reject で返してくるので、ここの version drift を必ず lock する。
+  // #21: fixed at v2 per the SDK; Webull rejects a version mismatch as a signature error, so this must never drift.
   it('POSTs /openapi/auth/token/create with x-version: v2 (no body when no existing token)', async () => {
     let capturedUrl: URL | undefined
     let capturedHeaders: Headers | undefined
@@ -38,15 +37,13 @@ describe('WebullTokenClient.createToken', () => {
     expect(capturedMethod).toBe('POST')
     expect(capturedUrl?.pathname).toBe('/openapi/auth/token/create')
     expect(capturedHeaders?.get('x-version')).toBe('v2')
-    // SDK の CreateTokenRequest: token 未指定なら body params が空のまま。
-    // ここで `{}` を送ると body MD5 が canonical に混ざってしまうので、
-    // `undefined` を保ってるか locked する (signing への影響あり)。
+    // Must stay `undefined`, not `{}` — an empty-object body would still get
+    // MD5'd into the canonical string and change the signature.
     expect(capturedBody).toBeNull()
     expect(result).toEqual({ token: 'tok-1', expires: 1700000000, status: 'PENDING' })
   })
 
-  // refresh path: existing token を渡すと body に乗る。check_token と区別するため
-  // body shape を locked。
+  // Locks this body shape so it stays distinguishable from checkToken's.
   it('includes the existing token in the body when refreshing', async () => {
     let capturedBody: string | null = null
     const fetchFn = vi.fn(async (_input: Request | string | URL, init?: RequestInit) => {
@@ -119,7 +116,7 @@ describe('WebullTokenClient.checkToken', () => {
     expect(result.status).toBe('NORMAL')
   })
 
-  // Status は string enum で 4 値しかない。typo / unknown は throw する事を locked。
+  // The exhaustive 4-value status enum (a typo/unknown value throws — see the createToken describe above).
   it.each(['PENDING', 'NORMAL', 'INVALID', 'EXPIRED'] as const)(
     'accepts status=%s',
     async (status) => {

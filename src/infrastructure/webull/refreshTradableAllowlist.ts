@@ -7,29 +7,18 @@ import {
 import { fetchTradableInstruments } from './tradableInstruments'
 
 /**
- * Sweeps tradable/list and updates the D1 allowlist.
- *
- * A full sweep is rate-limited to ~50 pages (~1 minute), which doesn't fit
- * in one `waitUntil` budget, so this supports chunking + a resume cursor:
- *   - `opts.maxPages` bounds this call's page count (admin runs ~15/call).
- *   - `opts.startCursor` resumes from a prior call's `nextCursor`.
- *   - `watermarkIso` must stay the same fixed, monotonically increasing
- *     timestamp across every chunk of one sweep — that's what lets the final
- *     chunk's disappearance check correctly detect "rows this sweep never
- *     touched" (mark-and-sweep).
- *
- * The cron path (larger budget) omits `maxPages` and completes in one call.
- * A partial fetch (`done=false`) skips the disappearance check so it never
- * corrupts the allowlist off an incomplete sweep.
+ * Sweeps tradable/list and updates the D1 allowlist. Chunked via
+ * `opts.maxPages` / `opts.startCursor` because a full sweep (~50 pages)
+ * doesn't fit in one Workers `waitUntil` budget; the cron path (larger
+ * budget) omits `maxPages`. `watermarkIso` must stay identical across every
+ * chunk of one sweep — the mark-and-sweep disappearance check relies on it.
  */
 export interface RefreshTradableAllowlistSummary {
   ok: boolean
   done: boolean
-  /** Resume cursor for the next call; null once `done`. */
   nextCursor: string | null
   upserted: number
   pages: number
-  /** Only non-zero when `done` — disappearance is only checked on a complete sweep. */
   disappeared: number
   disappearedSymbols: string[]
   error?: string
@@ -63,7 +52,6 @@ export async function refreshTradableAllowlist(
     },
   })
 
-  // No disappearance check on a wholly failed fetch — an empty sweep must not mark everything gone.
   if (result.outcome === 'error' && result.instruments.length === 0) {
     return {
       ok: false,

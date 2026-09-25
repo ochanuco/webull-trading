@@ -1,13 +1,12 @@
 /**
- * TSE (JP equity) session-day calendar. Design mirrors `usMarketCalendar.ts`
- * (see its header comment) — used to skip the daily-roll cron when the next
- * JP calendar day is a weekend/holiday. Holiday data lives in
- * `src/trading/domain/tradingCalendar.ts`'s `TSE_CLOSURES`.
+ * TSE (JP equity) session-day calendar. Design mirrors `usMarketCalendar.ts`.
+ * Holiday data lives in `src/trading/domain/tradingCalendar.ts`'s `TSE_CLOSURES`.
  */
 
 import { TSE_CLOSURES } from '../../trading/domain/tradingCalendar'
 
-/** Hard-coded holiday data の有効年セット。範囲外は呼び出し側で fail-closed。 */
+// Fail-closed on years not yet added here, rather than trusting TSE_CLOSURES
+// alone — an un-added future year must not silently be treated as tradable.
 const TSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026])
 
 // See usMarketCalendar.ts for why formatToParts is used over `.format()`.
@@ -43,7 +42,6 @@ function extractJpYmdParts(date: Date): YmdParts | null {
   return { ymd: `${year}-${month}-${day}`, year: yearInt }
 }
 
-/** Empty string on an unparseable date, which `isTseSessionDay` treats as fail-closed (false). */
 export function formatJpYmd(date: Date): string {
   return extractJpYmdParts(date)?.ymd ?? ''
 }
@@ -54,7 +52,6 @@ export function isWithinSupportedRange(date: Date): boolean {
   return TSE_SUPPORTED_YEARS.has(parts.year)
 }
 
-/** JP calendar day is a TSE session day (weekday, not a holiday, within `TSE_SUPPORTED_YEARS`). */
 export function isTseSessionDay(date: Date): boolean {
   if (!isWithinSupportedRange(date)) return false
   const ymd = formatJpYmd(date)

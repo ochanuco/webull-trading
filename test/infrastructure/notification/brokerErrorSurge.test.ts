@@ -25,10 +25,7 @@ vi.mock('../../../src/infrastructure/db/tradeJournalRepo', () => ({
 
 const fakeD1 = {} as D1Database
 
-/**
- * `detectBrokerErrorSurge` で使う drizzle chain の最小 stub。
- *   db.select().from(...).where(...) が `rows` を返す。
- */
+// Minimal stub for detectBrokerErrorSurge's db.select().from().where() chain.
 function fakeSelectChain(rows: Array<{ cause: string | null }>) {
   const query = {
     from: vi.fn(() => query),
@@ -145,7 +142,6 @@ describe('detectBrokerErrorSurge', () => {
     expect(BROKER_ERROR_CAUSES).toContain('broker_4xx')
     expect(BROKER_ERROR_CAUSES).toContain('broker_5xx')
     expect(BROKER_ERROR_CAUSES).toContain('broker_429')
-    // legacy from older notify call sites
     expect(BROKER_ERROR_CAUSES).toContain('broker submit')
   })
 })
@@ -157,7 +153,7 @@ describe('notifyBrokerErrorSurgeIfChanged', () => {
 
   it('emits STATE_CHANGE critical when first crossing threshold (no prev snapshot)', async () => {
     const errorRows = Array.from({ length: 6 }, () => ({ cause: 'broker_5xx' }))
-    // 1st select: broker errors. 2nd select: snapshot row (empty = first run).
+    // `ordered` feeds the two sequential where() calls: [errorRows, snapshotRow].
     const ordered: Array<unknown[]> = [errorRows, []]
     const where = vi.fn(async () => ordered.shift() ?? [])
     const query = {
@@ -196,7 +192,6 @@ describe('notifyBrokerErrorSurgeIfChanged', () => {
       severity: 'critical',
       note: 'requestId=req-A',
     })
-    // snapshot persist must run (delete then insert, exactly once)
     expect(deleteChain.where).toHaveBeenCalledTimes(1)
     expect(insertChain.values).toHaveBeenCalledTimes(1)
     const insertedRow = insertChain.values.mock.calls[0]![0]
@@ -230,7 +225,7 @@ describe('notifyBrokerErrorSurgeIfChanged', () => {
     expect(result.emitted).toBe(false)
     expect(result.surging).toBe(false)
     expect(events).toHaveLength(0)
-    // snapshot still re-persisted (idempotent — keeps snapshot_at fresh)
+    // Re-persisted even though the value didn't change, to keep snapshot_at fresh.
     expect(insertChain.values).toHaveBeenCalledTimes(1)
   })
 
@@ -303,7 +298,6 @@ describe('notifyBrokerErrorSurgeIfChanged', () => {
   })
 
   it('persists snapshot even when notifier.notify() throws', async () => {
-    // first surge, prev=false, notifier blows up
     const errorRows = Array.from({ length: 6 }, () => ({ cause: 'broker_5xx' }))
     const ordered: Array<unknown[]> = [errorRows, []]
     const where = vi.fn(async () => ordered.shift() ?? [])
@@ -328,7 +322,6 @@ describe('notifyBrokerErrorSurgeIfChanged', () => {
     }
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const result = await notifyBrokerErrorSurgeIfChanged({ db: fakeD1, notifier })
-    // notify rejected → emitted stays false, but snapshot still updated
     expect(result.emitted).toBe(false)
     expect(result.surging).toBe(true)
     expect(insertChain.values).toHaveBeenCalledTimes(1)

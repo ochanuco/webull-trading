@@ -12,16 +12,7 @@ import type {
 } from '../../../src/infrastructure/notification/Notifier'
 import type { VixRegimeFilterDecision } from '../../../src/trading/risk/vixRegimeFilter'
 
-/**
- * Tests for VIX regime change detection (#196 3/3)。
- *
- * 観点:
- *   - 同 regime 連続では通知しない (dedup)
- *   - 初回 (snapshot null) では通知しない (false alert 防止)
- *   - normal → warning は warning severity、normal → critical は critical
- *   - critical → normal / critical → warning は info (緩和方向)
- *   - DB 未注入時は noop
- */
+// Tests for VIX regime change detection (#196 3/3).
 
 describe('classifyVixRegimeSeverity', () => {
   it('first observation (from=null) is info', () => {
@@ -49,13 +40,9 @@ describe('classifyVixRegimeSeverity', () => {
   })
 })
 
-/**
- * Fake D1 — drizzle が呼ぶ select / delete / insert を素朴に動かす最小限の
- * spy。`config_state_snapshot` 1 行のみ扱う。
- *
- * `corruptInitial: true` を渡すと「行は存在するが value が parse 不能」状態を
- * 注入する (snapshot 破損 self-heal の test 用 — CodeRabbit #216 5th)。
- */
+// Minimal spy driving drizzle's select/delete/insert against a single
+// `config_state_snapshot` row. `corruptInitial: true` injects a row whose
+// value fails to parse (self-heal test fixture, CodeRabbit #216 5th).
 function fakeDb(
   initialRegime: string | null,
   options: { corruptInitial?: boolean } = {},
@@ -71,12 +58,10 @@ function fakeDb(
       : null
   const inserts: Array<{ key: string; value: string }> = []
 
-  // drizzle は env.DB.prepare(sql).bind(args).all() / .run() / .first() / .raw()
-  // の流れで叩く。`select({ value: ... })` の field 指定形式は drizzle 内部で
-  // `.raw()` 経由 (= 配列で返す) になるため raw() も実装する。`select / delete /
-  // insert / update` を動かす最低限の fake。詳細は configStateChange と同様の構造。
-  // 大文字 SQL (atomicallyUpdateVixRegimeSnapshot の raw prepare) と小文字 SQL
-  // (drizzle 経由) の両方に対応するため lowercase 化して比較する。
+  // drizzle's `select({ value: ... })` field form goes through `.raw()`
+  // (array result), not `.all()`, so both must be stubbed. SQL is lowercased
+  // before matching since callers mix raw uppercase prepare() calls
+  // (atomicallyUpdateVixRegimeSnapshot) with drizzle-generated lowercase SQL.
   const prepare = (sqlOriginal: string): unknown => {
     const sql = sqlOriginal.toLowerCase()
     return {
@@ -90,7 +75,6 @@ function fakeDb(
             return { results: [] }
           },
           async raw() {
-            // drizzle `select({ value: x })` は raw 配列を期待する。
             if (sql.includes('select')) {
               if (stored) return [[stored.value]]
               return []
@@ -99,7 +83,6 @@ function fakeDb(
           },
           async run() {
             if (sql.startsWith('insert or ignore')) {
-              // CAS 用 insert or ignore: 既に行があれば no-op (changes=0)。
               if (stored) return { meta: { changes: 0 } }
               const key = String(args[0])
               const value = String(args[1])
@@ -108,14 +91,11 @@ function fakeDb(
               return { meta: { changes: 1 } }
             }
             if (sql.includes('update')) {
-              // 2 種類の UPDATE を処理する:
-              //   (a) CAS update: WHERE key=? AND value=? — bind 5 個 (CodeRabbit #216 4th)
-              //   (b) self-heal update: WHERE key=? のみ — bind 4 個 (CodeRabbit #216 5th)
-              // bind 数で分岐する (どちらも先頭は (newValue, snapshotAt, requestId, key, ...))。
+              // Branches on bind count: 5 args = CAS update (WHERE key=? AND
+              // value=?, #216 4th); 4 args = self-heal update (WHERE key=? only, #216 5th).
               const newValue = String(args[0])
               const expectedKey = String(args[3])
               if (args.length >= 5) {
-                // CAS path
                 const expectedOldValue = String(args[4])
                 if (
                   stored &&
@@ -128,7 +108,6 @@ function fakeDb(
                 }
                 return { meta: { changes: 0 } }
               }
-              // self-heal path: 行が存在するなら問答無用で書き換える。
               if (stored && stored.key === expectedKey) {
                 stored = { key: expectedKey, value: newValue }
                 inserts.push({ key: expectedKey, value: newValue })
@@ -150,7 +129,6 @@ function fakeDb(
             return { meta: { changes: 0 } }
           },
           async first() {
-            // raw SELECT value FROM ... LIMIT 1 経由 — stored の {value} を返す。
             if (sql.includes('select')) {
               return stored
             }
@@ -201,10 +179,9 @@ function decision(
 
 describe('detectAndNotifyVixRegimeChange — dedup / first-run', () => {
   it('does not emit on first observation (no previous snapshot)', async () => {
-    // detectAndNotifyVixRegimeChange は drizzle 経由で D1 を叩く。drizzle の
-    // 内部 SQL 文字列に依存した fake は脆いので、ここでは「DB 未注入時の noop」
-    // 経路だけテストする。完全な D1 経由 path は wrangler dev 越しの結合 test に
-    // 委ねる (POC scope の trade-off)。
+    // Only the db:undefined noop path is unit-tested here: faking drizzle's
+    // internal SQL well enough for a full D1 round trip would be brittle;
+    // that path is left to a wrangler-dev integration test (POC scope trade-off).
     const { notifier, calls } = makeNotifier()
     const result = await detectAndNotifyVixRegimeChange({
       db: undefined,
@@ -218,17 +195,8 @@ describe('detectAndNotifyVixRegimeChange — dedup / first-run', () => {
   })
 })
 
-// 注: drizzle 経由の D1 read/write を fake する完全 path は drizzle 内部 SQL
-// 形式に依存して脆いため、severity 判定 (`classifyVixRegimeSeverity`) と
-// `db: undefined` 経路のみを unit test でカバー。
-// 「同 regime 連続では emit しない」「DB に書く / 読む」結合は
-// configStateChange と同じ pattern で動くことを既存実装で担保している。
-
-/**
- * `prepare` を呼ぶと throw する D1 fake。drizzle `select` / `delete` /
- * `insert` のいずれも prepare phase で死ぬ。load/persist 失敗時の warn ログに
- * requestId が含まれることだけを確認する。
- */
+// D1 fake whose prepare() always throws, so select/delete/insert all die at
+// the prepare phase — used to check load/persist failure warn logs carry requestId.
 function brokenDb(): D1Database {
   return {
     prepare(_sql: string) {
@@ -279,7 +247,7 @@ describe('detectAndNotifyVixRegimeChange — sync throw from notify', () => {
   it('still persists snapshot when notify() throws synchronously', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { db, inserts } = fakeDb('normal')
-    // 同期 throw する notifier。`.catch(...)` では拾えない経路を再現する。
+    // A synchronously-throwing notifier — a bare .catch() on the call wouldn't reach this.
     const throwingNotifier: Notifier = {
       notify(_event) {
         throw new Error('boom: sync notify failure')
@@ -294,11 +262,9 @@ describe('detectAndNotifyVixRegimeChange — sync throw from notify', () => {
     expect(result.from).toBe('normal')
     expect(result.to).toBe('warning')
     expect(result.emitted).toBe(true)
-    // notify が同期 throw しても snapshot は upsert されているはず。
     expect(inserts).toHaveLength(1)
     expect(inserts[0]!.key).toBe('vix_regime')
     expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
-    // warn ログに requestId が乗っていること。
     const failedLogs = warnSpy.mock.calls
       .map((call) => {
         try {
@@ -330,21 +296,13 @@ describe('detectAndNotifyVixRegimeChange — sync throw from notify', () => {
       requestId: 'req-async-reject',
     })
     expect(result.emitted).toBe(true)
-    // async rejection でも snapshot は到達する (これは既存挙動の確認)。
     expect(inserts).toHaveLength(1)
     expect(inserts[0]!.value).toBe(JSON.stringify('critical'))
     warnSpy.mockRestore()
   })
 })
 
-/**
- * `atomicallyUpdateVixRegimeSnapshot` の race-safe 性 (CodeRabbit #216 4th)。
- *
- * 並行 cron で同 next regime を渡す 2 caller が居た場合、CAS 経由で必ず
- * 片方だけが `updated=true` になり、もう片方は `updated=false`。これを使って
- * `detectAndNotifyVixRegimeChange` 側で重複通知を防ぐ。
- */
-describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
+describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety (CodeRabbit #216 4th)', () => {
   it('returns updated=false when the regime did not change (no-op)', async () => {
     const { db, inserts } = fakeDb('warning')
     const result = await atomicallyUpdateVixRegimeSnapshot(
@@ -355,7 +313,6 @@ describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
     )
     expect(result.previous).toBe('warning')
     expect(result.updated).toBe(false)
-    // CAS 起動せず、既存値も書き換えない。
     expect(inserts).toHaveLength(0)
   })
 
@@ -369,39 +326,28 @@ describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
     )
     expect(result.previous).toBeNull()
     expect(result.updated).toBe(true)
-    // INSERT OR IGNORE 経由で 1 件 insert される。
     expect(inserts).toHaveLength(1)
     expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
   })
 
-  it('only one of two parallel callers wins CAS for the same next regime', async () => {
-    // 2 caller が並行で normal → critical を書きに来る race を再現する。
-    // shared fakeDb で stored を共有し、両 promise を Promise.all で起動する。
+  it('only one of two parallel callers wins CAS for the same next regime; the loser reads back the value the winner just wrote', async () => {
     const { db, inserts } = fakeDb('normal')
     const [a, b] = await Promise.all([
       atomicallyUpdateVixRegimeSnapshot(db, 'critical', new Date(), 'req-a'),
       atomicallyUpdateVixRegimeSnapshot(db, 'critical', new Date(), 'req-b'),
     ])
-    // どちらの previous も normal ('critical' に書き換わる前 / 書き換わった後の
-    // 再 SELECT のいずれか — どちらも 'normal' を見る/読む)。
-    // 重要なのは: updated=true は ちょうど 1 つ。
     const updates = [a.updated, b.updated]
     expect(updates.filter((u) => u === true)).toHaveLength(1)
     expect(updates.filter((u) => u === false)).toHaveLength(1)
-    // 失敗側の previous は最新値 ('critical') を読み戻す。
     const loser = a.updated ? b : a
     const winner = a.updated ? a : b
     expect(winner.previous).toBe('normal')
     expect(loser.previous).toBe('critical')
-    // CAS 成功は 1 回だけ insert/update される (insert log にも 1 件)。
     expect(inserts).toHaveLength(1)
     expect(inserts[0]!.value).toBe(JSON.stringify('critical'))
   })
 
-  it('self-heals a corrupted snapshot row by overwriting with next (no notify) (CodeRabbit #216 5th)', async () => {
-    // 行は存在するが value が parse 不能 (= readCurrentRegime → null)。
-    // INSERT OR IGNORE は既存行に当たって changes=0、その後の self-heal UPDATE で
-    // next が書き込まれる。previous=null を返すので caller 側で notify は skip される。
+  it('self-heals a corrupted snapshot row by overwriting with next (previous=null, so the caller skips notify) (CodeRabbit #216 5th)', async () => {
     const { db, inserts, getStored } = fakeDb(null, { corruptInitial: true })
     const result = await atomicallyUpdateVixRegimeSnapshot(
       db,
@@ -411,16 +357,12 @@ describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
     )
     expect(result.previous).toBeNull()
     expect(result.updated).toBe(true)
-    // self-heal UPDATE で書き込まれている。
     expect(inserts).toHaveLength(1)
     expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
     expect(getStored()?.value).toBe(JSON.stringify('warning'))
   })
 
   it('after self-heal, the next tick performs a normal compare-and-update (CodeRabbit #216 5th)', async () => {
-    // 1 回目: 壊れた snapshot を warning で self-heal (previous=null, updated=true)。
-    // 2 回目: 正常な warning → critical の compare-and-update が動く
-    //         (previous=warning, updated=true)。
     const { db, inserts, getStored } = fakeDb(null, { corruptInitial: true })
     const first = await atomicallyUpdateVixRegimeSnapshot(
       db,
@@ -441,15 +383,12 @@ describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
     expect(second.previous).toBe('warning')
     expect(second.updated).toBe(true)
     expect(getStored()?.value).toBe(JSON.stringify('critical'))
-    // self-heal + 通常 CAS で 2 件分の書き込みが log されている。
     expect(inserts).toHaveLength(2)
     expect(inserts[0]!.value).toBe(JSON.stringify('warning'))
     expect(inserts[1]!.value).toBe(JSON.stringify('critical'))
   })
 
   it('detectAndNotifyVixRegimeChange dedups parallel callers via CAS', async () => {
-    // race-safe な dedup を end-to-end で確認: 2 caller が同 next regime で
-    // detectAndNotify を呼んでも、notifier には 1 回しか届かない。
     const { db } = fakeDb('normal')
     const { notifier, calls } = makeNotifier()
     const [a, b] = await Promise.all([
@@ -469,7 +408,6 @@ describe('atomicallyUpdateVixRegimeSnapshot — CAS race safety', () => {
     const emitted = [a.emitted, b.emitted]
     expect(emitted.filter((e) => e === true)).toHaveLength(1)
     expect(emitted.filter((e) => e === false)).toHaveLength(1)
-    // notifier 呼び出しはちょうど 1 回。
     expect(calls).toHaveLength(1)
     expect(calls[0]!.type).toBe('STATE_CHANGE')
     if (calls[0]!.type === 'STATE_CHANGE') {

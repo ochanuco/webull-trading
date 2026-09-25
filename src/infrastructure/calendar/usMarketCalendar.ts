@@ -1,20 +1,16 @@
 /**
- * NYSE (US equity) session-day calendar. Used to skip the daily-roll cron on
- * weekends/holidays it would otherwise fire on, so `lastRolledAt` only
- * advances on real session boundaries. Holiday data itself lives in
+ * NYSE (US equity) session-day calendar. Holiday data itself lives in
  * `src/trading/domain/tradingCalendar.ts`'s `NYSE_CLOSURES` (single source
- * of truth) — this module only adds tz-aware (America/New_York) session-day
- * classification and its own `NYSE_SUPPORTED_YEARS` range guard.
+ * of truth) — this module only adds tz-aware (America/New_York) classification.
  */
 
 import { NYSE_CLOSURES } from '../../trading/domain/tradingCalendar'
 
-/** Hard-coded holiday data の有効年セット。範囲外は呼び出し側で fail-closed。 */
+// Fail-closed on years not yet added here, rather than trusting NYSE_CLOSURES
+// alone — an un-added future year must not silently be treated as tradable.
 const NYSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026])
 
-// `Intl.DateTimeFormat#format`'s output ordering/separators are
-// implementation-dependent per ECMA-402; formatToParts avoids depending on
-// a specific runtime/ICU build producing YYYY-MM-DD from `en-CA`.
+// formatToParts avoids relying on `.format()`'s ICU-build-dependent ordering.
 const NY_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'America/New_York',
   year: 'numeric',
@@ -47,7 +43,6 @@ function extractNyYmdParts(date: Date): YmdParts | null {
   return { ymd: `${year}-${month}-${day}`, year: yearInt }
 }
 
-/** Empty string on an unparseable date, which `isNyseSessionDay` treats as fail-closed (false). */
 export function formatNyYmd(date: Date): string {
   return extractNyYmdParts(date)?.ymd ?? ''
 }
@@ -58,7 +53,6 @@ export function isWithinSupportedRange(date: Date): boolean {
   return NYSE_SUPPORTED_YEARS.has(parts.year)
 }
 
-/** NY calendar day is a NYSE session day (weekday, not a holiday, within `NYSE_SUPPORTED_YEARS`). */
 export function isNyseSessionDay(date: Date): boolean {
   if (!isWithinSupportedRange(date)) return false
   const ymd = formatNyYmd(date)

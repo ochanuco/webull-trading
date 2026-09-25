@@ -56,11 +56,6 @@ describe('insertJournalRecord', () => {
   })
 })
 
-/**
- * Stubs the drizzle chain `db.select({...}).from(...).where(...)` to return
- * `rows` and capture each phase for assertions. The repo treats the awaited
- * `where(...)` value as the array.
- */
 function collectSqlStrings(node: unknown, acc: string[] = []): string[] {
   if (node == null) return acc
   if (typeof node === 'string') {
