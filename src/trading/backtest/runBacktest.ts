@@ -10,11 +10,7 @@ import {
 } from '../strategy/strategies/PullbackUptrendStrategy'
 import type { PendingOrderLock, PositionState } from '../state/types'
 
-/**
- * Strategy を差し替え可能にする最小インターフェース (#momentum)。
- * `decide` の input は runBacktest が組み立てる形。PullbackUptrendStrategy も
- * BreakoutMomentumStrategy もこれを満たす (indicators は snapshot 全部入り)。
- */
+/** Minimal shape shared by PullbackUptrendStrategy and BreakoutMomentumStrategy, letting runBacktest swap strategies. */
 interface BacktestStrategy {
   decide(input: {
     symbol: string
@@ -28,41 +24,31 @@ interface BacktestStrategy {
 }
 
 /**
- * Offline backtest harness for PullbackUptrendStrategy。issue #198。
+ * Offline backtest harness for PullbackUptrendStrategy. Calls the live
+ * `decide()` unmodified so backtest and production can't diverge, bypassing
+ * sizing/risk-gate/pending-lock to isolate entry/exit profitability for
+ * tuning `pullback_default_*`.
  *
- * 既存の `PullbackUptrendStrategy.decide()` を **そのまま** 呼ぶことで
- * live cron と同じ判定を再現する (= backtest と本番で divergence しない)。
- * Sizing / risk gate / pending-lock はバイパスし、純粋な entry / exit
- * 判定の収益性のみを評価する (POC で `pullback_default_*` を data-driven
- * に tuning するための tool)。
- *
- * 使い方:
+ * Usage:
  *   const bars = await yahoo.getDailyBars('AAPL', 300)  // warmup + live
  *   const result = await runBacktest(bars, params)
  *
- * `bars` は **oldest-first** で、最初の 50 本以上は warmup (SMA50 / ATR
- * 算出用) として消費される。それ以降の bar 各日でストラテジーを 1 tick
- * 進める。
+ * `bars` must be oldest-first; the first 50+ bars are consumed as warmup
+ * (SMA50/ATR) before any decision is made.
  */
 
 export interface BacktestParams {
   symbol: string
-  /** ISO date "YYYY-MM-DD". 含まれる bar の最も古い日 (warmup 込み) を表現するメタ情報。 */
+  /** ISO date "YYYY-MM-DD" — metadata only, describing the oldest bar included (warmup included). */
   from: string
   to: string
-  /** 初期 cash (positions=0 起点)。BUY シグナル時に floor(cash/price) qty を発注。 */
+  /** Starting cash (position=0). A BUY signal orders floor(cash/price) shares. */
   initialCash: number
-  /** PullbackUptrendStrategy の rule。entry/exit 判定に使う (strategy 未指定時)。 */
+  /** Used when `strategy` isn't given, to build a PullbackUptrendStrategy. */
   rule: SymbolRule
-  /**
-   * 差し替え用 strategy (#momentum)。未指定なら `rule` から
-   * PullbackUptrendStrategy を構築。BreakoutMomentumStrategy 等を渡せる。
-   */
+  /** Defaults to a PullbackUptrendStrategy built from `rule`; pass BreakoutMomentumStrategy etc. to swap it. */
   strategy?: BacktestStrategy
-  /**
-   * baseline ATR の作り方 (#atr-baseline-window)。閾値 (`maxAtrRatio`) の
-   * 再校正はここを振って測る。未指定は本番既定の 'percentile'。
-   */
+  /** For re-calibrating `maxAtrRatio` against different baseline definitions (see indicators.ts's AtrBaselineMode). Defaults to the production 'percentile'. */
   atrBaselineMode?: 'overlap' | 'exclude-recent' | 'percentile'
 }
 
@@ -76,7 +62,7 @@ interface BacktestTrade {
   qty: number
   realizedPnl: number
   exitReason: ExitReason
-  /** Strategy が SELL 決定を出した理由 (TP/STOP/TIME_STOP) または END_OF_DATA。 */
+  /** The strategy's raw SELL reason string, or 'forced close at end of data'. */
   exitDetail: string
   holdingDays: number
 }
@@ -84,7 +70,7 @@ interface BacktestTrade {
 interface EquityPoint {
   date: string
   equity: number
-  /** Peak-to-current drawdown (<=0). 0 ならピーク更新中。 */
+  /** Peak-to-current drawdown (<=0). 0 while at a new peak. */
   drawdown: number
 }
 
@@ -92,19 +78,19 @@ export interface BacktestResult {
   params: BacktestParams
   trades: BacktestTrade[]
   totalPnl: number
-  /** totalPnl / initialCash. initialCash<=0 なら 0。 */
+  /** totalPnl / initialCash. 0 when initialCash <= 0. */
   totalReturn: number
-  /** 勝ち trade 数 / total trade 数. trades=0 なら 0。 */
+  /** wins / totalTrades. 0 when there are no trades. */
   winRate: number
   avgWin: number
   avgLoss: number
-  /** sum(wins) / |sum(losses)|. losses が 0 なら +Infinity (wins>0) または 0。 */
+  /** sum(wins) / |sum(losses)|. +Infinity when losses=0 and wins>0, else 0. */
   profitFactor: number
-  /** Daily equity returns ベース、252 営業日 annualized。equity 列が 1 以下なら 0。 */
+  /** Annualized (252 trading days) from daily equity returns. 0 when the equity curve has 1 or fewer points. */
   sharpeRatio: number
-  /** Peak-to-trough の最大幅 (絶対金額、<=0)。 */
+  /** Peak-to-trough decline, absolute USD (<=0). */
   maxDrawdown: number
-  /** maxDrawdown / peak. peak<=0 なら 0。 */
+  /** maxDrawdown / peak. 0 when peak <= 0. */
   maxDrawdownPct: number
   totalTrades: number
   avgHoldingDays: number
@@ -116,17 +102,6 @@ const SECONDS_PER_DAY = 86_400_000
 /**
  * Run the backtest synchronously over `bars`. Async signature is kept for
  * future extension (loading bars internally) but the implementation is pure.
- *
- * 仕様:
- * - 最初の 50 本は warmup (`computePullbackIndicators` が >=50 bars 必須)。
- * - それ以降の各 bar に対し:
- *   1. その bar までの直近 60 本で indicators を再計算
- *   2. PullbackUptrendStrategy.decide() を呼ぶ
- *   3. BUY → qty = floor(cash / close)、cash -= qty*close、position 開始
- *   4. SELL → cash += qty * close、trade を記録、position をクローズ
- *   5. 保有中なら equity = cash + qty * close、未保有なら equity = cash
- *   6. equity curve / drawdown を更新
- * - 期間末に position が残っていれば END_OF_DATA で強制クローズ。
  */
 export async function runBacktest(
   bars: DailyBar[],
@@ -344,11 +319,7 @@ function pushEquity(
   })
 }
 
-/**
- * Map the strategy's SELL reason text to a coarse exit category。
- * `decide()` の reason は `take-profit hit ...` / `stop-loss hit ...` /
- * `time-stop hit ...` 形式。startsWith で identify する (実装間結合は弱め)。
- */
+/** Maps the strategy's SELL reason text (`take-profit hit ...` / `stop-loss hit ...` / `time-stop hit ...`) to a coarse exit category via prefix match. */
 function classifyExitReason(reason: string): ExitReason {
   if (reason.startsWith('take-profit')) return 'TP'
   if (reason.startsWith('stop-loss')) return 'STOP'
@@ -364,10 +335,10 @@ export function calendarDaysBetween(fromYmd: string, toYmd: string): number {
 }
 
 /**
- * 簡易な営業日カウント (土日除外)。祝日は無視 (offline backtest 用途では
- * holiday カレンダーまで持つ overhead に見合わないため)。`PullbackUptrend
- * Strategy` の time-stop 判定は holdBusinessDays で動くので、ここでの近似
- * は exit timing に若干影響するが POC tuning には十分。
+ * Weekday count, ignoring holidays — not worth a holiday calendar for an
+ * offline backtest. Feeds PullbackUptrendStrategy's time-stop check, so
+ * this approximation nudges exit timing slightly, which is acceptable for
+ * POC tuning.
  */
 export function businessDaysBetween(fromYmd: string, toYmd: string): number {
   const a = Date.parse(`${fromYmd}T00:00:00.000Z`)

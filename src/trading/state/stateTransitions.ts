@@ -7,9 +7,9 @@ import type {
 } from './types'
 
 /**
- * Pure state transitions applied by {@link SymbolStateDO}. Exposed separately
- * so they are testable without a Durable Object runtime. Every function takes
- * the current state and returns a new state — no mutation, no I/O.
+ * Split from {@link SymbolStateDO} so these are testable without a Durable
+ * Object runtime. Every function takes the current state and returns a new
+ * one — no mutation, no I/O.
  */
 
 export interface TransitionContext {
@@ -24,10 +24,8 @@ export function lockPendingOrder(
   lock: PendingOrderLock,
   ctx: TransitionContext = defaultCtx,
 ): { ok: boolean; state: SymbolState } {
-  // Validate lock.expiresAt before accepting the lock (fail-closed)
   const lockExpiresAtMs = new Date(lock.expiresAt).getTime()
   if (!Number.isFinite(lockExpiresAtMs)) {
-    // Invalid expiresAt (NaN) - reject the lock
     return { ok: false, state }
   }
 
@@ -52,7 +50,6 @@ export function recordFill(
   fill: { side: 'BUY' | 'SELL'; qty: number; price: number },
   ctx: TransitionContext = defaultCtx,
 ): SymbolState {
-  // Validate fill inputs before applying
   if (!Number.isFinite(fill.qty) || fill.qty <= 0) {
     throw new Error(`Invalid fill.qty: ${fill.qty} (must be a finite number > 0)`)
   }
@@ -62,11 +59,9 @@ export function recordFill(
 
   const position = applyFillToPosition(state.position, fill, ctx.now)
   const iso = ctx.now().toISOString()
-  // 保有を閉じた SELL (position が null に落ちた) のときだけ lastExitAt /
-  // lastExitPrice を同時に刻む。#reentry の価格ガードが基準にする「前回手仕舞い
-  // 価格」と「そこからの経過営業日」を明示フィールドとして永続化する
-  // (state.position===null な間 lastExecutedPrice=直近 SELL 価格、という推論には
-  // 依存しない。#660)。部分 SELL / BUY では更新しない (position !== null)。
+  // Stamped only on a closing SELL — never inferred from `position === null`
+  // elsewhere, since overridePosition can null the position without a SELL
+  // ever happening (mirrored by the guard in overridePosition below).
   const closedByExit = fill.side === 'SELL' && position === null
   return {
     ...state,
@@ -121,7 +116,6 @@ export function setQuote(
   quote: QuoteSnapshot,
   ctx: TransitionContext = defaultCtx,
 ): SymbolState {
-  // Validate quote.price before accepting it (fail-closed)
   if (!Number.isFinite(quote.price) || quote.price <= 0) {
     throw new Error(`Invalid quote.price: ${quote.price} (must be a finite number > 0)`)
   }
@@ -143,7 +137,6 @@ export function addPendingSettlement(
   settlement: PendingSettlement,
   ctx: TransitionContext = defaultCtx,
 ): SymbolState {
-  // Validate settlement inputs before adding
   if (!Number.isFinite(settlement.amount) || settlement.amount <= 0) {
     throw new Error(`Invalid settlement.amount: ${settlement.amount} (must be a finite number > 0)`)
   }
@@ -158,26 +151,11 @@ export function addPendingSettlement(
 }
 
 /**
- * Operator-driven position override. Used to manually reconcile a corrupted
- * `position` against the real broker holding (e.g. after a reconcile-race
- * double-apply that drifted DO qty above broker truth). Not part of the
- * regular BUY/SELL fill flow — `recordFill` should be the only writer for
- * organic state changes.
- *
- *   - `qty <= 0` (or null caller intent) → close the position entirely.
- *     Internally accepted only when the operator explicitly opts in via
- *     `qty=0` so we never silently swallow a typo as "close".
- *   - `qty > 0` → write `{ qty, avgPrice, openedAt: openedAt ?? now() }`.
- *
- * Fail-closed on bad inputs (NaN / negative / zero avgPrice when qty>0)
- * because operators paste these values from a CLI; rejecting upfront avoids
- * a malformed position propagating into the strategy loop.
- *
- * `lastExitPrice` / `lastExitAt` / `lastExecutedPrice` are **intentionally
- * left untouched** here — an override via sync-holdings (broker-side
- * liquidation, manual lot reconciliation) must not contaminate the
- * re-entry guard's reference price by fabricating an exit that never
- * happened through `recordFill` (#660).
+ * Not part of the regular BUY/SELL flow — `recordFill` is the only writer
+ * for organic state changes. `lastExitPrice` / `lastExitAt` /
+ * `lastExecutedPrice` are intentionally left untouched: an override must
+ * not fabricate an exit that never went through `recordFill`, which would
+ * corrupt the re-entry guard's reference price.
  */
 export function overridePosition(
   state: SymbolState,
@@ -191,8 +169,8 @@ export function overridePosition(
   }
   const iso = ctx.now().toISOString()
   if (args.qty === 0) {
-    // Operator-explicit close. avgPrice / openedAt are ignored on close so a
-    // mistyped price field doesn't accidentally seed a fresh position.
+    // avgPrice / openedAt are ignored on close so a mistyped price field
+    // can't accidentally seed a fresh position.
     return { ...state, position: null, updatedAt: iso }
   }
   if (!Number.isFinite(args.avgPrice) || args.avgPrice <= 0) {
@@ -219,11 +197,7 @@ export function overridePosition(
   }
 }
 
-/**
- * Overwrites `settledCash` with an operator-provided value. POC seed path —
- * used once during initial setup or after a manual reconciliation with the
- * broker. Not part of the regular fill/roll flow.
- */
+/** POC operator seed path — not part of the regular fill/roll flow. */
 export function seedSettledCash(
   state: SymbolState,
   amount: number,
@@ -235,11 +209,7 @@ export function seedSettledCash(
   return { ...state, settledCash: amount, updatedAt: ctx.now().toISOString() }
 }
 
-/**
- * Any pendingSettlement whose settleDate is on or before `asOf` moves its
- * amount into `settledCash` and is removed from the queue. Used both
- * proactively (T+1 EOD roll) and defensively on read.
- */
+/** Called both proactively (T+1 EOD roll) and defensively on every read. */
 export function rollSettlements(
   state: SymbolState,
   asOfIso: string,
@@ -280,7 +250,6 @@ function applyFillToPosition(
     const avgPrice = (position.qty * position.avgPrice + fill.qty * fill.price) / totalQty
     return { qty: totalQty, avgPrice, openedAt: position.openedAt }
   }
-  // SELL
   if (position === null) {
     throw new Error('Cannot SELL without an open position (short not supported)')
   }

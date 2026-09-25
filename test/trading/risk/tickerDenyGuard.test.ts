@@ -35,7 +35,7 @@ function makeDeps() {
   }
 }
 
-describe('createTickerDenyGuard (#460)', () => {
+describe('createTickerDenyGuard', () => {
   beforeEach(() => {
     vi.mocked(deactivateSymbolForBrokerDeny).mockReset()
     vi.mocked(recordChange).mockClear()

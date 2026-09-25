@@ -17,13 +17,12 @@ import {
 
 /**
  * Offline backtest harness for staged (probe → confirm → full) entry vs. the
- * current one-shot entry (issue #709 Phase 3), a partial-exit + ATR trailing
- * `ExitPolicy` axis on top of the same structure (issue #709 Phase 4), and a
- * `ReentryPolicy` axis gating the flat→open transition by exit reason (issue
- * #709 Phase 5). Bar-walk structure (warmup 60, `computePullbackIndicators`,
- * T+0 close fills) mirrors `runBacktest.ts`, but entry/exit are pluggable
- * `EntryPolicy`/`ExitPolicy` + a tranche-aware position model instead of a
- * single `PullbackUptrendStrategy.decide()` call.
+ * current one-shot entry, a partial-exit + ATR trailing `ExitPolicy` axis on
+ * top of the same structure, and a `ReentryPolicy` axis gating the
+ * flat→open transition by exit reason. Bar-walk structure (warmup 60,
+ * `computePullbackIndicators`, T+0 close fills) mirrors `runBacktest.ts`,
+ * but entry/exit are pluggable `EntryPolicy`/`ExitPolicy` + a tranche-aware
+ * position model instead of a single `PullbackUptrendStrategy.decide()` call.
  *
  * Entry gating reuses `computeEntryDistance` (not `PullbackUptrendStrategy`)
  * because the strategy's re-entry price guard needs `lastExitPrice` /
@@ -64,9 +63,9 @@ export type ExitPolicy =
 type LifecycleExitReason = ExitReason | 'TRAIL'
 
 /**
- * Re-entry gate for the flat→open transition (issue #709 Phase 5). `'none'` is the Phase 3/4
- * default (no gate — proven by the untouched regression suite). `'price-guard'` replicates the
- * live `PullbackUptrendStrategy` re-entry ceiling verbatim (see `evaluateReentry`).
+ * Re-entry gate for the flat→open transition. `'none'` is the pre-existing default (no gate —
+ * proven by the untouched regression suite). `'price-guard'` replicates the live
+ * `PullbackUptrendStrategy` re-entry ceiling verbatim (see `evaluateReentry`).
  * `'reason-aware'` branches the gate by the *previous* exit's reason instead of applying the same
  * price ceiling to every exit kind (a STOP and a TP are different signals about whether the setup
  * is still good).
@@ -90,11 +89,9 @@ export interface LifecycleBacktestParams {
   rule: SymbolRule
   atrBaselineMode?: AtrBaselineMode
   entryPolicy: EntryPolicy
-  /** Defaults to `{kind:'preset'}` (all-quantity TP/stop/time-stop, issue #709 Phase 3 behavior)
-   * so existing callers/tests built before Phase 4 keep compiling and behaving unchanged. */
+  /** Defaults to `{kind:'preset'}` (all-quantity TP/stop/time-stop) so existing callers/tests keep compiling and behaving unchanged. */
   exitPolicy?: ExitPolicy
-  /** Defaults to `{kind:'none'}` (no re-entry gate, issue #709 Phase 3/4 behavior) so existing
-   * callers/tests built before Phase 5 keep compiling and behaving unchanged. */
+  /** Defaults to `{kind:'none'}` (no re-entry gate) so existing callers/tests keep compiling and behaving unchanged. */
   reentryPolicy?: ReentryPolicy
   feePctOfNotional: number
   feeFixedPerOrder: number
@@ -204,7 +201,7 @@ interface OpenPosition {
 }
 
 const WARMUP = 60
-/** 押し目系 gate。probe 判定ではこの 2 つだけ未成立を許容する。 */
+/** Pullback-depth gates — the only ones a probe fill is allowed to leave unmet. */
 const PULLBACK_GATE_KEYS: ReadonlySet<string> = new Set(['pullback_shallow', 'pullback_deep'])
 
 export interface StagedEntryStepState {
@@ -215,15 +212,15 @@ export interface StagedEntryStepState {
 
 export interface StagedEntryStep {
   action: 'fill_full' | 'fill_probe' | 'fill_confirm' | 'none'
-  /** この bar 処理後の streak 値 (保有中のみ意味を持つ)。 */
+  /** Streak value after processing this bar (meaningful only while a position is open). */
   probeStreak: number
 }
 
 /**
- * 段階 entry の 1 bar 分の状態遷移 (pure)。ハーネス本体から切り出しているのは
- * eligibility の一過性 break (streak リセット) が実 bar からは再現しづらく
- * (ATR gate は 20-bar 窓で 20 本 sticky)、遷移表をここで直接テストするしか
- * ないため。cash / fill の副作用は呼び出し側 (`fillFraction`) に残す。
+ * One bar's staged-entry state transition (pure). Split out from the bar-walk loop because an
+ * eligibility break (streak reset) is hard to reproduce with a real bar — the ATR gate's 20-bar
+ * window makes eligibility sticky — so this transition table needs to be table-tested directly.
+ * Cash/fill side effects stay in the caller (`fillFraction`).
  */
 export function nextStagedEntryStep(
   state: StagedEntryStepState | null,
@@ -247,8 +244,9 @@ export function nextStagedEntryStep(
       ? { action: 'fill_confirm', probeStreak: streak }
       : { action: 'none', probeStreak: streak }
   }
-  // eligible が途切れた bar で streak を捨てる — 「confirmDays 営業 bar 連続」
-  // の定義どおり。捨てないと断続的な eligible の累計で confirm leg が発火する。
+  // Drops the streak on a bar where eligibility breaks, per confirmDays'
+  // "consecutive" definition — without this, intermittent eligible bars
+  // would accumulate toward the confirm leg instead of resetting.
   return { action: 'none', probeStreak: 0 }
 }
 /** Below this, a leg's target fraction is treated as fully consumed — guards
@@ -271,7 +269,7 @@ export interface ReentryEvalInput {
   price: number
   atr20: number
   rule: SymbolRule
-  /** = 押し目系 gate 以外の全 gate 通過 (harness の `trendContinues`、hoisted once per bar). */
+  /** All non-pullback-depth gates passed — the harness's `trendContinues`, hoisted once per bar. */
   trendContinues: boolean
   entryPolicyKind: EntryPolicy['kind']
 }
@@ -284,16 +282,15 @@ export interface ReentryEvalResult {
 }
 
 /**
- * Re-entry gate for the flat→open transition (issue #709 Phase 5), evaluated once per bar right
- * before the harness would otherwise fire `fill_full`/`fill_probe` from `state === null`. Pure
- * (no bar-walk) so the STOP-wait / trend-recapture branches are table-testable directly.
+ * Re-entry gate for the flat→open transition, evaluated once per bar right before the harness
+ * would otherwise fire `fill_full`/`fill_probe` from `state === null`. Pure (no bar-walk) so the
+ * STOP-wait / trend-recapture branches are table-testable directly.
  *
  * `price-guard` reproduces `PullbackUptrendStrategy.entryDecision`'s re-entry ceiling
  * (`lastExitPrice - reentryMinAtrBelowLastExit * atr20`, active while `businessDaysSinceExit <
- * reentryGuardBusinessDays`) verbatim, *except* the live strategy's `#660` legacy fail-closed
- * branch (guard window active but `lastExitPrice` unknown from a pre-migration DO state) — this
- * harness always knows `lastExit.price` once `lastExit` is non-null, so that branch has no
- * offline equivalent to replicate.
+ * reentryGuardBusinessDays`) verbatim, *except* the live strategy's legacy fail-closed branch for
+ * a guard window active but `lastExitPrice` unknown (pre-migration DO state) — this harness always
+ * knows `lastExit.price` once `lastExit` is non-null, so that branch has no offline equivalent.
  */
 export function evaluateReentry(input: ReentryEvalInput): ReentryEvalResult {
   const { policy, lastExit, todayYmd, price, atr20, rule, trendContinues, entryPolicyKind } = input
@@ -307,9 +304,9 @@ export function evaluateReentry(input: ReentryEvalInput): ReentryEvalResult {
     if (!windowConfigured) return true
     const bd = businessDaysBetween(lastExit.dateYmd, todayYmd)
     if (bd >= rule.reentryGuardBusinessDays) return true
-    // atr20 が finite かつ > 0 でなければライブ guard も非活性 (`reentryGuardActive`
-    // の条件と同一) — Infinity を通すと ceiling が -Infinity になり恒久 block に
-    // 化けるので、有限性まで含めて fail-open に倒す。
+    // Matches the live guard's `reentryGuardActive` condition: a non-finite
+    // or non-positive atr20 would drive ceiling to -Infinity (permanent
+    // block) instead of deactivating the guard, so fail-open here too.
     if (!Number.isFinite(atr20) || !(atr20 > 0)) return true
     const ceiling = lastExit.price - rule.reentryMinAtrBelowLastExit * atr20
     return price <= ceiling
@@ -402,10 +399,9 @@ export async function runLifecycleBacktest(
     let qty = Math.floor(amount / price)
     let notional = qty * price
     let cost = estimateOrderCost(notional, feeConfig)
-    // amount は cash でクランプ済みでも手数料は含まれていない — fee > 0 で
-    // notional + cost が cash を超えると cash が負 (= 暗黙の借入) になり
-    // equity / turnover / CAGR が全部過大評価される。手数料込みで収まるまで
-    // 1 株ずつ落とす。
+    // `amount` is clamped to cash but doesn't include the fee — with fee > 0,
+    // notional + cost exceeding cash would go negative (an implicit loan),
+    // inflating equity/turnover/CAGR. Shed a share at a time until it fits.
     while (qty > 0 && notional + cost > cash) {
       qty -= 1
       notional = qty * price
@@ -534,9 +530,8 @@ export async function runLifecycleBacktest(
     // side uses — computing it twice per bar would risk the two readings drifting apart.
     const distance = computeEntryDistance(indicators, rule)
     const fullEligible = distance.buyable
-    // トレンド継続 = 押し目系以外の全 gate 通過 (gate 配列の並び順に依存させない
-    // — entryDistance 側で gate が追加/並べ替えされたとき、probe 条件と
-    // time-stop 延長条件が静かにズレる事故を防ぐ)。
+    // Keyed by gate identity, not array position — a future gate reorder in
+    // entryDistance.ts must not silently desync the probe/time-stop-extension condition here.
     const trendContinues = distance.gates.every((g) => PULLBACK_GATE_KEYS.has(g.key) || g.passed)
     const probeEligible = !fullEligible && trendContinues
 
@@ -591,7 +586,7 @@ export async function runLifecycleBacktest(
           }
         }
       } else {
-        // partial-trailing (#709 Phase 4). Checked as a priority cascade (hard stop → TP-partial
+        // partial-trailing. Checked as a priority cascade (hard stop → TP-partial
         // → trailing → time-stop) against a local `pos` (rather than reassigning the outer `let
         // state` mid-cascade) — a partial TP sale doesn't end the round trip, so a later step in
         // the same cascade (trailing, time-stop) can still fire on the very bar the partial sale
@@ -692,15 +687,14 @@ export async function runLifecycleBacktest(
       exitedThisBar = state === null
     }
 
-    // 部分利確が済んだ建玉には entry leg を追加しない — 利確で縮めた玉に段階
-    // entry が積み増しで逆行すると、1 round trip の中で「出口方針」と「入口方針」
-    // が矛盾し、比較指標 (保有期間・turnover) の解釈が壊れる。
+    // No entry legs on a position that already partially took profit — a staged add-on there would
+    // pit the exit policy against the entry policy within the same round trip, breaking the
+    // holding-period/turnover comparison across policies.
     const entryFrozenAfterPartialExit = state !== null && state.partialTpDone
     if (!exitedThisBar && !entryFrozenAfterPartialExit) {
-      // #reentry (issue #709 Phase 5): only gates the flat→open transition (`state === null`
-      // right before the fill) — a staged position already open (fill_confirm, or a later
-      // fill_full topping off an existing probe/confirm) isn't a "re-entry", so it runs
-      // ungated exactly as Phase 3/4 did.
+      // Only gates the flat→open transition (`state === null` right before the fill) — a staged
+      // position already open (fill_confirm, or a later fill_full topping off an existing
+      // probe/confirm) isn't a "re-entry", so it runs ungated as before this gate existed.
       const reentryAllows = (entryPolicyKind: EntryPolicy['kind']): ReentryEvalResult =>
         evaluateReentry({
           policy: reentryPolicy,
@@ -737,10 +731,9 @@ export async function runLifecycleBacktest(
         if (step.action === 'fill_full') {
           if (state === null) {
             const reentry = reentryAllows('staged')
-            // `probeOnly` (TIME_STOP + staged) は full leg を probe leg に置き換える。
-            // 抑止 (この bar を flat のまま流す) にすると、fullEligible が毎 bar
-            // 続く強トレンド局面で再エントリーが永久に発生しない — 「probe から
-            // 入り直す」という policy の意図と逆になる。
+            // `probeOnly` (TIME_STOP + staged) downgrades the full leg to a probe leg rather than
+            // blocking the bar outright — blocking would mean a strong trend with fullEligible
+            // true every bar never re-enters at all, defeating the "re-enter via probe" intent.
             if (reentry.allowed) {
               state = reentry.probeOnly
                 ? fillFraction(null, 'probe', fractions.probe, today, nowIso)

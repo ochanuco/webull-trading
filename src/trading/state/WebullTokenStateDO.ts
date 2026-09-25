@@ -4,15 +4,11 @@ import type { WebullTokenStatus } from '../../infrastructure/webull/WebullTokenC
 const STATE_KEY = 'webull_token'
 
 /**
- * Durable Object that stores the active Webull `x-access-token` and its
- * metadata for runtime use (#21 Phase B). Singleton — every caller addresses
- * `idFromName('default')`, so there is exactly one shared instance per worker
- * environment.
- *
- * The DO is intentionally storage-only. Refresh orchestration (calling
- * `WebullTokenClient.createToken(existingToken)` and deciding whether to
- * update) lives in `refreshWebullToken` so the network-call boundary stays
- * out of the DO and unit tests don't need to mock fetch through a DO stub.
+ * Callers must address this DO via `idFromName('default')` — one shared
+ * instance per worker environment. Intentionally storage-only: refresh
+ * orchestration lives in `refreshWebullToken` instead, so the network-call
+ * boundary stays out of the DO and unit tests don't need to mock fetch
+ * through a DO stub.
  */
 
 export interface WebullTokenState {
@@ -35,11 +31,7 @@ export class WebullTokenStateDO extends DurableObject<object> {
     return stored ?? null
   }
 
-  /**
-   * Operator seeds the DO with a freshly verified token (issued via
-   * `pnpm run issue-token` and confirmed `NORMAL`). Refusing non-NORMAL values
-   * here keeps a half-verified PENDING token out of the runtime path.
-   */
+  /** Refuses non-NORMAL status so a half-verified PENDING token never enters the runtime path. */
   async seedToken(input: {
     token: string
     expires: number
@@ -64,11 +56,7 @@ export class WebullTokenStateDO extends DurableObject<object> {
     return next
   }
 
-  /**
-   * Persist the result of a refresh attempt. `result.success === true` means
-   * `next` replaces the active token; otherwise we keep the previous token
-   * but bump `lastAttemptAt` so monitoring can detect a stuck retry.
-   */
+  /** On failure, keeps the previous token but still bumps `lastAttemptAt` so monitoring can detect a stuck retry. */
   async recordRefresh(
     result:
       | {
@@ -88,9 +76,8 @@ export class WebullTokenStateDO extends DurableObject<object> {
         token: result.token,
         expires: result.expires,
         status: result.status,
-        // Keep the original fetchedAt only if this is the same token; otherwise
-        // reset so dashboards / alerts can distinguish "token rotated just now"
-        // from "still using the old token".
+        // Resets on a token change so dashboards/alerts can tell "rotated
+        // just now" apart from "still using the old token".
         fetchedAt: current && current.token === result.token ? current.fetchedAt : now,
         lastAttemptAt: now,
         lastSuccessAt: now,
@@ -100,9 +87,8 @@ export class WebullTokenStateDO extends DurableObject<object> {
     }
 
     if (!current) {
-      // We have no prior state and refresh failed — there is nothing usable to
-      // persist. We return null so the caller knows there's no token, but we
-      // still write a marker row to capture the attempt timestamp for ops.
+      // Nothing usable to persist, but the marker row still records the
+      // attempt timestamp for ops even though the returned state is null.
       const marker: WebullTokenState = {
         token: '',
         expires: 0,

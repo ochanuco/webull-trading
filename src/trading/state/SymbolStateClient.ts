@@ -2,11 +2,6 @@ import type { PositionStore } from './PositionStore'
 import type { SymbolStateDO } from './SymbolStateDO'
 import type { PendingOrderLock, PendingSettlement, SymbolState } from './types'
 
-/**
- * Thin adapter from {@link DurableObjectNamespace} to {@link PositionStore}.
- * Routes every call for a given symbol to the DO instance derived from
- * `idFromName(symbol)` so all reads/writes land on the same object.
- */
 export class SymbolStateClient implements PositionStore {
   constructor(private readonly namespace: DurableObjectNamespace<SymbolStateDO>) {}
 
