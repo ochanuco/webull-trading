@@ -4,48 +4,36 @@ import type { PullbackIndicatorSnapshot } from '../indicators'
 import { resolveStopDistance } from '../stopDistance'
 
 /**
- * ブレイクアウト/モメンタム entry 戦略 (#momentum)。
+ * Breakout/momentum entry strategy. Not wired into `runStrategyCron`'s live
+ * dispatch or `ENTRY_ENABLED_ROLES` — backtest-only (`scripts/backtest-momentum.ts`)
+ * until edge is validated. 1x symbols only, not 3x leveraged ETFs (vol drag).
  *
- * **現状は backtest 専用の dormant 実装**。`runStrategyCron` の live dispatch には
- * 一切繋がっておらず、`ENTRY_ENABLED_ROLES` にも載っていないので、本番で発注する
- * 経路は存在しない (fail-closed)。エッジ検証 (`scripts/backtest-momentum.ts`) で
- * 継続性・コスト後・押し目との相関を測る目的でのみ使う。
- *
- * 設計上の要点 (trading-strategist 設計 + red-team を反映):
- * - **3x レバ ETF には使わない** (vol drag・騙し3倍で却下)。1x 銘柄向け。
- * - **gate を自己矛盾させない**: 「新高値ブレイク」と「低ボラ要求」を同時に課さない
- *   (両立する局面が無く永久に発火しないため)。ATR 上限 gate は entry から外し、
- *   過熱 (SMA50 乖離) の上限だけで blowoff を弾く。
- * - **ブレイク基準は当日を除く終値20日高値** (`breakoutHigh20`)。当日含む high を
- *   流用すると自己参照で発火不能になる。
- * - exit は押し目と同型 (TP / ATR連動 stop / time-stop) だが preset は別 (高値圏
- *   entry なので stop 深め・保有短め)。
+ * The entry gate deliberately has no low-volatility requirement: combined
+ * with "new high breakout" it would never both be true, so the ATR check
+ * only caps overheating (SMA50 deviation), not volatility itself.
  */
 export interface MomentumRule {
-  /** Stop-loss as a fraction of avgPrice (negative)。高値圏 entry なので押し目より深め推奨。 */
+  /** Fraction of avgPrice (negative). Deeper than the pullback strategy's since entry is already extended. */
   stopPct: number
-  /** Take-profit as a fraction of avgPrice (positive)。 */
+  /** Fraction of avgPrice (positive). */
   takeProfitPct: number
-  /** Time stop in business days。モメンタムは短期 (走らなければ早く撤退)。 */
+  /** Business days. Short — momentum that stalls should be cut quickly. */
   timeStopDays: number
-  /** ATR multiplier for vol-adaptive stop。stopDistance = max(kAtr*atr20, |entry*stopPct|)。 */
+  /** ATR multiplier for vol-adaptive stop: stopDistance = max(kAtr*atr20, |entry*stopPct|). */
   kAtr: number
-  /** トレンド成立に必要な 20日リターン下限 (正)。 */
+  /** Minimum 20-day return required to treat the trend as established. */
   minReturn: number
-  /** ブレイク確認のバッファ (正、例 0.005 = +0.5%)。高値ジャストのノイズ抜けを弾く。 */
+  /** Fraction above breakoutHigh20 required to confirm (e.g. 0.005 = +0.5%), filtering noise right at the high. */
   breakoutBuffer: number
-  /** 過熱ガード (blowoff のみ切る上限、例 0.6)。低ボラ要求はしない (自己矛盾回避)。 */
+  /** Blowoff cap on SMA50 deviation (e.g. 0.6). Not a low-volatility floor — see class doc. */
   maxSma50DeviationPct: number
-  /** `price > sma50` を要求するか。 */
+  /** Whether to require `price > sma50`. */
   requireAboveSma50: boolean
-  /**
-   * Stop 幅の上限 = |avgPrice * takeProfitPct| * これ (#stop-rr-cap)。押し目側と
-   * 同じ意味。0 で無効。
-   */
+  /** Cap on stop width as a multiple of |avgPrice * takeProfitPct|, same meaning as the pullback strategy's. 0 disables. */
   maxStopToTpRatio: number
 }
 
-/** backtest / unit test 用のデフォルト (全数値 backtest 未検証の初期推定)。 */
+/** Backtest/unit-test defaults — initial estimates, not yet backtest-validated. */
 export const TEST_DEFAULT_MOMENTUM_RULE: MomentumRule = Object.freeze({
   stopPct: -0.05,
   takeProfitPct: 0.1,
@@ -65,11 +53,7 @@ export interface MomentumInput {
   pendingOrder: PendingOrderLock | null
   cooldownUntil: string | null
   holdBusinessDays: number
-  /**
-   * #reentry: pullback 戦略の再エントリー価格ガード用フィールド。momentum は
-   * 使わないが、scheduler が両戦略へ同一 input オブジェクトを渡すため (union の
-   * excess property check を通すため) optional で受けておく。
-   */
+  /** Unused by momentum; accepted because the scheduler passes one shared input shape to both strategies. */
   lastExitPrice?: number | null
   businessDaysSinceExit?: number | null
   now: Date
@@ -122,7 +106,6 @@ function entryDecision(input: MomentumInput, rule: MomentumRule, trace: Decision
   }
   trace.push(step('entry.above_sma50', true, ind.price, '>', ind.sma50))
 
-  // 過熱 (blowoff) 上限のみ。低ボラ要求はしない (新高値ブレイクと両立しないため)。
   const sma50Deviation = ind.sma50 > 0 ? (ind.price - ind.sma50) / ind.sma50 : 0
   if (sma50Deviation > rule.maxSma50DeviationPct) {
     trace.push(step('entry.not_blowoff', false, sma50Deviation, '<=', rule.maxSma50DeviationPct))
@@ -136,7 +119,6 @@ function entryDecision(input: MomentumInput, rule: MomentumRule, trace: Decision
   }
   trace.push(step('entry.breakout_high_valid', true, ind.breakoutHigh20, '>', 0))
 
-  // 当日を除く20日終値高値を buffer 込みで終値ブレイク。
   const breakoutLevel = ind.breakoutHigh20 * (1 + rule.breakoutBuffer)
   if (ind.price < breakoutLevel) {
     trace.push(step('entry.breakout', false, ind.price, '>=', breakoutLevel))
@@ -222,8 +204,7 @@ function labelJa(label: string): string {
   return TRACE_LABEL_JA[label] ?? label
 }
 
-// momentum 固有の trace 識別子 → 日本語ラベル。識別子 (`entry.breakout` 等) は
-// decision_log 互換のため英語据え置きで、表示文字列のみ日本語化する (#trace-readability)。
+// Identifiers stay English for decision_log compat; only the display string is localized.
 const TRACE_LABEL_JA: Record<string, string> = {
   'guard.pending_order_absent': '未約定注文がない',
   'guard.cooldown_inactive': 'クールダウン中ではない',

@@ -1,64 +1,46 @@
 import type { DailyBar } from './indicators'
 
-/**
- * ペアレジーム layer (#472)。インバース対 (SOXL/SOXS 等) を両側独立に評価する
- * のではなく、**非レバ原資産 proxy** (SOXX / QQQ 等) の 20 営業日リターンから
- * ペア単位の zone を先に決める:
- *
- *   - bull    : ブル側のみ entry 可
- *   - bear    : ベア側のみ entry 可
- *   - neutral : 両側 entry 不可 (= chop 帯。交互 stop-out の帯を明示的に回避)
- *   - unknown : 判定不能 (データ不足 / stale / misconfig / fetch 失敗) —
- *               fail-closed で両側 entry 不可。**exit は一切妨げない**
- *
- * 設計の要 (issue #472 + operator review):
- *   - score は**完結済み daily bar のみ**から計算 (当日進行中 bar は落とす) →
- *     score は 1 日 1 回しか変化せず、5 分 cron でのフラップを入口で殺す
- *   - 二重閾値の Schmitt trigger + 前 zone 依存 (hysteresis)。順序制約
- *     bearEnter < bearExit < bullExit < bullEnter により bull↔bear の直接遷移
- *     は構造的に不可能 (必ず neutral を経由)
- *   - zone は stateless 決定: 毎評価で score 列の先頭を neutral に seed して
- *     walk → 状態ストア不要・決定論的・decision log から完全再現可能
- *   - 単一スコアは起点 (20 営業日前の価格) 依存がある。初版は overfit 防止の
- *     ため意図的に単純化 — 傾き / MA クロス / ADX 等の追加は out of scope
- */
-
+// Zone is decided once for the pair from the unleveraged proxy's 20d return,
+// not per leg: evaluating bull/bear independently lets both legs stop out in
+// the same chop band. Zone is re-walked statelessly from a neutral seed on
+// every evaluation (no persisted state), so it's deterministic and fully
+// reproducible from the decision log. Score stays a single point-to-point
+// return rather than a slope/MA-cross/ADX blend, to avoid overfitting.
+//
+// `unknown` (insufficient data / stale / misconfig) fails closed on entry
+// for both legs but never blocks exit.
 export type PairRegimeZone = 'bull' | 'bear' | 'neutral' | 'unknown'
 
 export interface PairRegimeThresholds {
-  /** neutral → bull (1x proxy の 20d リターン)。default +0.03。 */
+  /** neutral → bull, proxy 20d return. Default +0.03. */
   bullEnter: number
-  /** bull → neutral。default +0.01。 */
+  /** bull → neutral. Default +0.01. */
   bullExit: number
-  /** neutral → bear。default -0.04。 */
+  /** neutral → bear. Default -0.04. */
   bearEnter: number
-  /** bear → neutral。default -0.015。 */
+  /** bear → neutral. Default -0.015. */
   bearExit: number
 }
 
 export interface PairRegimeDecision {
   zone: PairRegimeZone
-  /** 最新 score (= proxy の 20 営業日リターン)。unknown 時は null。 */
+  /** Latest score (proxy 20-trading-day return); null when `zone` is `unknown`. */
   score: number | null
   proxySymbol: string
-  /** score 計算に使った最終完結 bar の日付 (YYYY-MM-DD)。unknown 時は null。 */
+  /** Date (YYYY-MM-DD) of the last completed bar the score used; null when `zone` is `unknown`. */
   asOfDate: string | null
-  /** 判定根拠 / unknown の理由 (operator 向け)。 */
+  /** Human-readable basis for the decision, or the `unknown` reason. */
   reason: string
 }
 
-/** score 1 点の lookback (営業日)。既存 trend filter (#318) と同じ実体 20d。 */
 const SCORE_LOOKBACK = 20
-
-/** Schmitt walk に使う score 数の上限 (= bar 約 80 本ぶん)。 */
 const WALK_WINDOW = 60
 
-/** 最終完結 bar がこれより古ければ stale → unknown (暦日)。 */
+/** A last completed bar older than this many calendar days makes the decision `unknown`. */
 const STALE_CALENDAR_DAYS = 5
 
 const NY_DATE_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' })
 
-/** thresholds の順序制約。破壊は misconfig → unknown (静かに続行しない)。 */
 export function validatePairRegimeThresholds(t: PairRegimeThresholds): boolean {
   return (
     Number.isFinite(t.bearEnter) &&
@@ -71,11 +53,9 @@ export function validatePairRegimeThresholds(t: PairRegimeThresholds): boolean {
   )
 }
 
-/**
- * Schmitt trigger 1 step。1 評価につき遷移は最大 1 段 — bull 状態で
- * score が bearEnter を割っても、その評価では neutral 止まり (直接 bull→bear
- * しない)。次の score で bear に入る。
- */
+// One Schmitt-trigger step: at most one zone transition per call, so a
+// crash straight through bearEnter from `bull` lands on `neutral` first,
+// not `bear` — the next score is what carries it into `bear`.
 function stepZone(prev: PairRegimeZone, score: number, t: PairRegimeThresholds): PairRegimeZone {
   if (prev === 'bull') {
     return score < t.bullExit ? 'neutral' : 'bull'
@@ -83,7 +63,7 @@ function stepZone(prev: PairRegimeZone, score: number, t: PairRegimeThresholds):
   if (prev === 'bear') {
     return score > t.bearExit ? 'neutral' : 'bear'
   }
-  // neutral (unknown からは呼ばれない)
+  // prev === 'neutral' (never called with 'unknown')
   if (score >= t.bullEnter) return 'bull'
   if (score <= t.bearEnter) return 'bear'
   return 'neutral'
@@ -105,8 +85,6 @@ export function evaluatePairRegime(
   if (!validatePairRegimeThresholds(thresholds)) {
     return unknown(proxySymbol, 'misconfigured thresholds (order must be bearEnter < bearExit < bullExit < bullEnter)')
   }
-  // 完結済み bar のみ: 当日 (US 取引所の暦日) の bar は進行中の可能性があるので
-  // 落とす。これで intraday の価格が score に混ざらない (AC 3)。
   const todayNy = NY_DATE_FMT.format(now)
   const completed = bars.filter((b) => b.date < todayNy && Number.isFinite(b.close) && b.close > 0)
   if (completed.length < SCORE_LOOKBACK + 1) {
@@ -117,14 +95,13 @@ export function evaluatePairRegime(
   if (!Number.isFinite(lastMs) || now.getTime() - lastMs > STALE_CALENDAR_DAYS * 86_400_000) {
     return unknown(proxySymbol, `stale proxy data (last completed bar ${last.date})`)
   }
-  // score 列: S_i = C[i] / C[i-20] - 1。walk は直近 WALK_WINDOW 個。
   const scores: number[] = []
   for (let i = SCORE_LOOKBACK; i < completed.length; i += 1) {
     const base = completed[i - SCORE_LOOKBACK]!.close
     scores.push(completed[i]!.close / base - 1)
   }
   const walk = scores.slice(-WALK_WINDOW)
-  let zone: PairRegimeZone = 'neutral' // stateless seed (窓先頭を neutral と仮定)
+  let zone: PairRegimeZone = 'neutral'
   for (const s of walk) {
     if (!Number.isFinite(s)) {
       return unknown(proxySymbol, 'non-finite score in walk window')
@@ -141,12 +118,11 @@ export function evaluatePairRegime(
   }
 }
 
-/** ペア設定 (inverse_pairs の regime 列、検証済み or invalid 理由付き)。 */
 export interface PairRegimeEntry {
   bullSymbol: string
   bearSymbol: string
   proxySymbol: string
-  /** repo 検証で見つけた misconfig。non-null なら zone=unknown 扱い (fail-closed)。 */
+  /** Non-null when repo validation found a misconfig; forces `zone: 'unknown'` (fail-closed). */
   invalidConfig: string | null
 }
 

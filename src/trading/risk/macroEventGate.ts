@@ -1,70 +1,32 @@
 /**
- * Macro economic event calendar gate (issue #196 2/3)。
- *
- * FOMC / CPI / NFP / PCE / GDP / ISM 等の重要 macro 発表 当日 (±N 時間) の
- * BUY エントリを凍結する **avoid 用 risk gate**。
- * - シグナル源ではない (BUY を出す根拠にしない、BUY を *止める* だけ)
- * - 計算コストはゼロに近い (D1 read 1 本)
- * - DB read 失敗 → fail-closed (entry block) で safe 側に倒す
- * - `event_time` (ET) があれば 発表時刻 ± freezeHoursBefore/After で window 判定。
- *   なければ event_date 当日全日凍結 (POC 簡略 fallback)。
- * - tz 計算は完璧でなくて OK (POC、`Intl.DateTimeFormat('en-US', { timeZone:
- *   'America/New_York' })` で ET の wall-clock 文字列を取って比較)。
- *
- * scope:
- *   - in: BUY を ±N 時間内に macro event がある時刻について止める
- *   - out: SELL は止めない (既存 position 保護のため macro 跨ぎ手仕舞いは許容)
- *   - out: 銘柄非依存 (ETF だろうと個別株だろうと cron 全銘柄に適用)
- *   - out: VIX regime filter は別 PR (#196 3/3) で
- *
- * 呼び出し側 (`pullbackScheduler` 経由) は gate decision の `reason` を
- * `risk: macro_event_gate: FOMC 2026-06-17 14:00ET` 形式で
- * `strategy_decision_log.reason` に書く。
+ * Freezes BUY entries within ±N hours of a macro calendar event (FOMC / CPI /
+ * NFP / PCE / GDP / ISM). Symbol-agnostic; applies to every cron symbol.
+ * SELL is never gated so an existing position can still exit across an event.
  */
 import type { MacroEventCalendarRepo } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import type { MacroEventCalendarRow } from '../../infrastructure/db/schema'
 
 export interface MacroEventGateInput {
-  /**
-   * 評価時刻 ISO datetime (e.g. `2026-06-17T18:30:00.000Z`)。cron tick の現在
-   * 時刻を渡す。time-of-day を持つ点が earnings gate との違い (発表時刻 ±N
-   * 時間で window 判定するため)。
-   */
+  /** ISO datetime of the cron tick being evaluated (window is centered on this). */
   evalTimestamp: string
-  /**
-   * 評価対象の side。BUY のみ gate を効かせる。SELL は既存 position の
-   * 撤退 / cleanup を妨げないように常に approve。
-   */
+  /** SELL always approves — the gate only freezes new entries. */
   side: 'BUY' | 'SELL'
 }
 
 export interface MacroEventGateConfig {
-  /** 発表前の凍結時間 (hours)。default 1。 */
+  /** Freeze window before the event, in hours. Default 1. */
   freezeHoursBefore: number
-  /**
-   * 発表後の凍結時間 (hours)。default 6 (発表直後の volatility / drift を回避)。
-   * 上限は `sanitizeHours` で 6h クランプ。
-   */
+  /** Freeze window after the event, in hours. Default 6, clamped to 6h by `sanitizeHours`. */
   freezeHoursAfter: number
-  /**
-   * `event_time` が NULL の event を全日凍結するか。default true。
-   * false なら時刻不明 event は無視 (POC ではあまり推奨しない)。
-   */
+  /** Freeze the full event_date when `event_time` is NULL. Default true. */
   freezeFullDayWhenTimeUnknown: boolean
 }
 
 export interface MacroEventGateDecision {
   approved: boolean
-  /**
-   * Approved=false のときの reject 理由。形式:
-   *   - `macro_event_gate: FOMC 2026-06-17 14:00ET` (時刻指定あり)
-   *   - `macro_event_gate: ISM 2026-07-01 (full-day)` (時刻不明)
-   *   - `macro_event_gate_invalid_eval_timestamp: <raw>`
-   *   - `macro_event_gate_invalid_calendar_row: <type> <date> <time>` (event_time が不正)
-   *   - `macro_event_gate_fetch_failed: <error>`
-   */
+  /** Reject reason, e.g. `macro_event_gate: FOMC 2026-06-17 14:00ET` or `..._fetch_failed: <error>`. */
   reason?: string
-  /** Operator UI / log 用に reject を引き起こした event を返す。 */
+  /** Event that caused the rejection, for operator UI / logs. */
   triggeringEvent?: { type: string; date: string; time: string | null }
 }
 
@@ -76,22 +38,7 @@ export const DEFAULT_MACRO_GATE_CONFIG: MacroEventGateConfig = {
 
 const MS_PER_HOUR = 3_600_000
 
-/**
- * Pure-ish gate evaluator (`repo.fetchByDateRange` のみ side-effect)。
- *
- * 振る舞い:
- *  1. SELL → 常に approve (gate scope 外)
- *  2. evalTimestamp parse 失敗 → fail-closed reject
- *  3. ET tz の `eval` を中心に ±freezeHours で window を計算し、被りそうな
- *     event_date 範囲を repo.fetchByDateRange で取得 (前日 / 当日 / 翌日 を
- *     カバーすれば DST / midnight 跨ぎ含めて十分粗く拾える)
- *  4. fetch throw → fail-closed reject (D1 read failure を silent pass させない)
- *  5. event_time 指定行: ET wall-clock で `event_date + event_time` を組み立て
- *     evalTimestamp と差分を取り freezeHoursBefore/After 以内なら reject
- *  6. event_time NULL 行: `freezeFullDayWhenTimeUnknown=true` のときのみ、
- *     ET の評価日が event_date と一致したら reject
- *  7. 該当なければ approve
- */
+/** Pure aside from `repo.fetchByDateRange`. Any repo/parse failure fails closed (reject). */
 export async function evaluateMacroEventGate(
   input: MacroEventGateInput,
   repo: MacroEventCalendarRepo,
@@ -112,9 +59,9 @@ export async function evaluateMacroEventGate(
   const freezeAfter = sanitizeHours(config.freezeHoursAfter, DEFAULT_MACRO_GATE_CONFIG.freezeHoursAfter)
   const freezeFullDayWhenTimeUnknown = config.freezeFullDayWhenTimeUnknown
 
-  // ET 観点で評価対象になりうる event_date を 3 日窓 (前日 / 当日 / 翌日) で拾う。
-  // freeze 幅が ±1〜2 時間想定であれば、ET の midnight 跨ぎが噛んでも 3 日で
-  // 包含できる (24h を超える freeze は sanitizeHours で 6h にクランプ)。
+  // ±1 day around the ET eval date, not just the eval date itself: a freeze
+  // window can straddle ET midnight, and this stays wide enough for any
+  // freeze up to the sanitizeHours 6h cap.
   const evalEtYmd = formatEtYmd(evalDate)
   const fromYmd = shiftYmd(evalEtYmd, -1)
   const toYmd = shiftYmd(evalEtYmd, 1)
@@ -136,11 +83,9 @@ export async function evaluateMacroEventGate(
   const afterMs = freezeAfter * MS_PER_HOUR
 
   for (const row of rows) {
-    // event_time あり / NULL の両分岐を通す前に event_date を round-trip validate。
-    // event_time NULL 分岐は単純文字列一致 (`row.eventDate === evalEtYmd`) しか
-    // しないため、不正な event_date (e.g., `2026-02-30`, `2026-13-01`) が来ても
-    // 一致する可能性が無く silent pass = fail-open する。両分岐で対称な
-    // fail-closed validation を保証するため、ループ先頭で reject する。
+    // Validated before either branch: the NULL-time branch below only does a
+    // string equality check, so a malformed event_date would never match and
+    // would silently pass (fail-open) instead of rejecting.
     if (!isStrictYmd(row.eventDate)) {
       return {
         approved: false,
@@ -154,12 +99,10 @@ export async function evaluateMacroEventGate(
     }
 
     if (row.eventTime !== null && row.eventTime !== undefined && row.eventTime !== '') {
-      // 発表時刻指定あり: ET wall-clock で `event_date + event_time` を UTC ms
-      // に変換 (簡略 ET tz: `America/New_York` の現時点 offset を Intl で取得)。
       const eventMs = etWallClockToUtcMs(row.eventDate, row.eventTime)
       if (eventMs === null) {
-        // 不正な event_date / event_time の row を silent skip すると
-        // その event だけ BUY 素通り = fail-open になるため fail-closed reject。
+        // Skipping an unparseable row would let BUY through for that event —
+        // reject instead of silently passing it.
         return {
           approved: false,
           reason: `macro_event_gate_invalid_calendar_row: ${row.eventType} ${row.eventDate} ${row.eventTime}`,
@@ -170,7 +113,7 @@ export async function evaluateMacroEventGate(
           },
         }
       }
-      const delta = evalMs - eventMs // > 0 なら eval が event より後
+      const delta = evalMs - eventMs
       if (delta >= -beforeMs && delta <= afterMs) {
         return {
           approved: false,
@@ -183,7 +126,6 @@ export async function evaluateMacroEventGate(
         }
       }
     } else if (freezeFullDayWhenTimeUnknown) {
-      // 時刻不明 event: ET の評価日と event_date が一致したら全日凍結。
       if (row.eventDate === evalEtYmd) {
         return {
           approved: false,
@@ -201,11 +143,8 @@ export async function evaluateMacroEventGate(
   return { approved: true }
 }
 
-/**
- * 不正値を default に倒し、上限 6 時間でクランプ。POC 段階では「±1〜2 時間
- * 凍結」が想定運用で、巨大値による全停止暴発を防ぐため軽い sane bound。
- * 24h を超えると ±1 日窓 fetch では拾えなくなるため、6h で十分。
- */
+// Clamped to 6h: beyond that the ±1 day fetch window in evaluateMacroEventGate
+// would no longer cover the freeze range.
 function sanitizeHours(value: unknown, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
   if (value < 0) return fallback
@@ -213,11 +152,7 @@ function sanitizeHours(value: unknown, fallback: number): number {
   return value
 }
 
-/**
- * UTC `Date` を `America/New_York` 観点の "YYYY-MM-DD" に format。
- * `Intl.DateTimeFormat` で `en-CA` ('YYYY-MM-DD' をそのまま返す locale) を
- * 使う方が format 後の split が要らないので採用。
- */
+// en-CA formats as YYYY-MM-DD directly, avoiding a manual split of another locale's output.
 function formatEtYmd(date: Date): string {
   const fmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/New_York',
@@ -228,17 +163,9 @@ function formatEtYmd(date: Date): string {
   return fmt.format(date)
 }
 
-/**
- * "YYYY-MM-DD" を厳密 validate (round-trip)。
- *
- * JS Date は不正な暦日 (e.g. `2026-02-30`, `2026-13-01`, `2026-04-31`) を
- * silent normalize するため、`Date.parse` だけでは fail-open する。`toISOString`
- * に戻して入力文字列と一致するか比較し、実在する暦日のみ true を返す。
- *
- * `etWallClockToUtcMs` は event_time あり経路で同等 round-trip を内部で行うが、
- * event_time NULL 経路 (full-day freeze) ではこの helper を使って対称な
- * fail-closed validation を行う。
- */
+// Date.parse alone would fail-open: JS Date silently normalizes an invalid
+// calendar day (e.g. 2026-02-30 -> 2026-03-02), so round-trip through
+// toISOString and compare against the input.
 function isStrictYmd(ymd: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return false
   const ms = Date.parse(`${ymd}T00:00:00.000Z`)
@@ -246,10 +173,6 @@ function isStrictYmd(ymd: string): boolean {
   return new Date(ms).toISOString().slice(0, 10) === ymd
 }
 
-/**
- * "YYYY-MM-DD" を `±days` 日シフトして "YYYY-MM-DD" に戻す。pure UTC 計算で
- * tz は介さない (windowing で前日 / 翌日 を拾うため)。
- */
 function shiftYmd(ymd: string, days: number): string {
   const ms = Date.parse(`${ymd}T00:00:00.000Z`)
   if (!Number.isFinite(ms)) return ymd
@@ -257,18 +180,9 @@ function shiftYmd(ymd: string, days: number): string {
   return shifted.toISOString().slice(0, 10)
 }
 
-/**
- * `event_date` (ET YYYY-MM-DD) + `event_time` (ET HH:MM) を UTC ms に変換。
- *
- * 簡略 ET 変換 (POC):
- *   1. naive UTC ms = `Date.parse(${date}T${time}:00.000Z)`
- *   2. その瞬間に America/New_York が UTC からどれだけ offset しているかを
- *      `Intl.DateTimeFormat` で probe (DST aware)
- *   3. `naive UTC ms - offset` が真の UTC ms
- *
- * DST 境界の 1 時間ジャンプは無視 (POC では 1 時間程度の誤差を許容する旨
- * task に明記)。不正値は `null` を返し、caller 側で fail-closed reject する。
- */
+// Converts event_date + event_time (both ET) to UTC ms. Does not special-case
+// the DST transition hour itself — a ~1h error there is accepted rather than
+// pulling in a full tz library for this POC gate.
 function etWallClockToUtcMs(eventDate: string, eventTime: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) return null
   const tm = /^(\d{2}):(\d{2})$/.exec(eventTime)
@@ -279,26 +193,18 @@ function etWallClockToUtcMs(eventDate: string, eventTime: string): number | null
   if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null
   const naiveUtcMs = Date.parse(`${eventDate}T${eventTime}:00.000Z`)
   if (!Number.isFinite(naiveUtcMs)) return null
-  // round-trip で実在しない暦日 (e.g. 2026-02-30, 2026-04-31) を reject。
-  // JS Date は不正な日付を silent normalize する (2026-02-30 → 2026-03-02) ため、
-  // ISOString に戻して入力と一致するか厳密比較しないと fail-open する。
+  // Round-trip through toISOString to reject a nonexistent calendar day (e.g.
+  // 2026-02-30) that JS Date would otherwise silently normalize.
   const roundTrip = new Date(naiveUtcMs).toISOString()
   if (roundTrip.slice(0, 10) !== eventDate) return null
   if (roundTrip.slice(11, 16) !== eventTime) return null
   const offsetMin = etOffsetMinutesAt(naiveUtcMs)
-  // ET は UTC の西側 (negative offset)。例: EST = -300, EDT = -240。
-  // wall-clock が UTC `XX` のときの真 UTC = naive - offset (offset is negative)
-  // → naiveUtcMs - offsetMin*60_000 = 真の UTC ms。
+  // ET offset is negative (west of UTC), so subtracting it from the naive
+  // UTC ms moves the time later, back to the true UTC instant.
   return naiveUtcMs - offsetMin * 60_000
 }
 
-/**
- * 与えられた瞬間 (UTC ms) で America/New_York が UTC から何分 offset している
- * かを Intl 経由で probe。DST 切替を吸収する。
- *
- * 計算は `Intl.DateTimeFormat({ timeZone: 'America/New_York', timeZoneName:
- * 'shortOffset' })` で 'GMT-4' / 'GMT-5' 文字列を取得 → 数値化。
- */
+// Probes America/New_York's UTC offset at a given instant via Intl (DST-aware).
 function etOffsetMinutesAt(utcMs: number): number {
   try {
     const fmt = new Intl.DateTimeFormat('en-US', {
@@ -307,14 +213,13 @@ function etOffsetMinutesAt(utcMs: number): number {
     })
     const parts = fmt.formatToParts(new Date(utcMs))
     const tzName = parts.find((p) => p.type === 'timeZoneName')?.value ?? ''
-    // 'GMT-4' / 'GMT-04:00' / 'GMT-5' などをサポート。
     const match = /GMT([+-])(\d{1,2})(?::?(\d{2}))?/.exec(tzName)
-    if (!match) return -300 // 失敗時は EST 相当に倒す (POC default)
+    if (!match) return -300 // Intl parse failure falls back to EST.
     const sign = match[1] === '-' ? -1 : 1
     const hours = Number(match[2])
     const mins = match[3] !== undefined ? Number(match[3]) : 0
     return sign * (hours * 60 + mins)
   } catch {
-    return -300
+    return -300 // Intl unavailable falls back to EST.
   }
 }

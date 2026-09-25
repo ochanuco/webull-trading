@@ -1,14 +1,5 @@
-/**
- * 東京証券取引所の daily price band (値幅制限) を粗く近似したテーブル。
- *
- * 正確な table は TSE 公式 (https://www.jpx.co.jp/equities/trading/domestic/03.html)
- * が銘柄ごと・呼値単位で定義しているが、POC では reference price level から
- * 一意に決まる static approximation で十分としている。後続 PR で Webull feed
- * から取れるようなら差し替える。
- *
- * 各エントリは `{ upTo: basePrice, band: 値幅 }` で、reference price が
- * `upTo` 以下なら `band` が適用される。
- */
+// TSE の daily price band (値幅制限) は本来銘柄・呼値単位だが、POC では
+// reference price のみから引ける静的近似テーブルで代用する。
 interface JpPriceBandRow {
   upTo: number
   band: number
@@ -46,14 +37,11 @@ const JP_PRICE_BAND_TABLE: readonly JpPriceBandRow[] = [
   { upTo: 10_000_000, band: 1_500_000 },
 ] as const
 
-// 10,000,000 円を超える reference price は POC 範囲外として "無制限 = 一律大きい値"
-// を返す。RHS を Infinity にしないのは downstream で加減算されるため。
+// 10,000,000 円超は POC 範囲外として大きな固定値を返す (Infinity だと downstream
+// の加減算結果が壊れるため有限値にしている)。
 const EXTREME_PRICE_FALLBACK_BAND = 3_000_000
 
-/**
- * reference price に対する upper/lower 値幅バンドを返す。
- * 正の reference price のみを受け付ける (fail-closed: それ以外は zero バンド)。
- */
+/** 不正な reference price (<=0 / 非有限) は fail-closed で zero バンドを返す。 */
 export function jpPriceBand(referencePrice: number): { upper: number; lower: number } {
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
     return { upper: 0, lower: 0 }
@@ -66,10 +54,8 @@ export function jpPriceBand(referencePrice: number): { upper: number; lower: num
   }
 }
 
-/**
- * orderPrice が jpPriceBand(referencePrice) の [lower, upper] 内に収まるか。
- * reference price が不正 (<=0 / 非有限) なときは true (skip — 比較基準なし) を返す。
- */
+// referencePrice が不正 (比較基準なし) なときは fail-closed の false ではなく
+// true (skip) を返す — band 判定不能を理由に BUY を弾かない。
 export function isWithinJpPriceBand(referencePrice: number, orderPrice: number): boolean {
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
     return true

@@ -24,8 +24,6 @@ export class DefaultRiskPolicy implements RiskPolicy {
       reasons.push(`symbol ${input.orderIntent.symbol} is not allowed`)
     }
 
-    // #656: 独自の US-only / 祝日非対応の時刻判定をやめ、tradingCalendar の市場別
-    // (US/JP) レギュラーセッション判定 (祝日・半日取引対応) に委譲する。
     if (input.marketHoursCheck) {
       const market = inferTradingMarket(symbol)
       if (!isWithinStrategyWindow((input.now ?? defaultNow)(), market, 0)) {

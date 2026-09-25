@@ -2,30 +2,6 @@ import type { WebullPositionDto } from '../../infrastructure/webull/dto'
 import type { PositionStore } from '../state/PositionStore'
 import type { PositionState, SymbolState } from '../state/types'
 
-/**
- * Operator-driven reconcile of per-symbol DO position against broker truth.
- *
- * Backstory: PR #215 fixed the reconcile idempotency race that originally
- * corrupted DO state, and PR #221 added an in-flight SELL_QTY_EXCEED fallback
- * that re-reads broker `available_quantity` before retrying a SELL. Neither
- * touches **already-corrupted** DO rows that pre-date those fixes (e.g. the
- * SOXL row with DO qty=8 vs broker actual=4). This module is the manual one-
- * shot tool to walk the universe, compare DO `position.qty` against the
- * Webull `/openapi/account/positions` truth, and overwrite the DO row when
- * they disagree.
- *
- * Safety stance:
- *   - Read-only against the broker (`getPositions()` only — no orders).
- *   - Mutates DO state via `PositionStore.overridePosition`, which already
- *     emits a structured audit log per write. We add an outer
- *     `holdings_sync_applied` log so the caller's request id is correlated
- *     with the symbol-level diff.
- *   - `dryRun=true` returns the same diff shape but skips every override —
- *     intended for "show me what would change" before letting it loose.
- *   - `avgPrice` policy: prefer broker `avg_cost` when finite + positive,
- *     else keep the existing DO `avgPrice`. Falling through to `0` would
- *     break realized-PnL math in `recordFill` so we explicitly avoid that.
- */
 interface SyncHoldingResult {
   symbol: string
   /** DO position before the override (null if there was none). */
@@ -36,12 +12,7 @@ interface SyncHoldingResult {
   broker_qty: number | null
   /** Broker-side `avg_cost` if parseable, else `null`. */
   broker_avg: number | null
-  /**
-   * Set when the row was a no-op:
-   *   - `'no_drift'`: broker_qty == DO qty, nothing to do.
-   *   - `'dry_run'`:  drift detected but `options.dryRun=true`, so we report
-   *                   the planned `before/after` without mutating DO state.
-   */
+  /** `'no_drift'`: broker qty already matches DO. `'dry_run'`: drift found but not written — see `options.dryRun`. */
   skipped?: 'no_drift' | 'dry_run'
 }
 
@@ -60,13 +31,7 @@ export interface SyncHoldingsSummary {
     errors: number
   }
   dryRun: boolean
-  /**
-   * Soft signals surfaced to the operator without abort semantics. Currently
-   * one literal: `'broker_returned_empty_diff_suspicious'` — emitted only on
-   * `dryRun=true` to flag that the live (non-dryRun) call would safe-fail.
-   * Absent on the happy path; never present alongside a safe-fail abort
-   * (those go through `errors`).
-   */
+  /** `'broker_returned_empty_diff_suspicious'`: dryRun diff that would have tripped the safe-fail guard on a live call. Never set alongside a safe-fail `errors` abort. */
   warnings?: string[]
 }
 
@@ -75,13 +40,7 @@ export interface SyncHoldingsOptions {
   symbol?: string
   /** When true, compute diffs but do not write to the DO. */
   dryRun: boolean
-  /**
-   * Operator escape hatch for the safe-fail guard. When the broker returns
-   * no usable holdings AND the DO has positions for the targeted symbols,
-   * we refuse to zero-out the DO unless `force=true` — that pattern most
-   * often indicates a broker auth / sandbox glitch, not actual liquidation.
-   * Default `false` keeps existing callers on the safe path.
-   */
+  /** Bypasses the safe-fail guard below to allow a genuine broker-side liquidation to zero out the DO. Default `false`. */
   force?: boolean
   /** Audit-correlation id from the route layer (`c.get('requestId')`). */
   requestId: string | null
@@ -97,12 +56,14 @@ export interface SyncHoldingsDeps {
 }
 
 /**
- * Walk `allowedSymbols` (or the single symbol filter), pull broker positions
- * once, diff against DO state, and emit overrides where they disagree.
+ * Diffs each symbol's DO position against Webull's broker truth and
+ * overwrites the DO row where they disagree. Read-only against the broker
+ * (`getPositions()` only); `dryRun` computes the diff without writing.
  *
- * One broker round-trip per call (positions endpoint is account-wide). The
- * `errors[]` channel keeps a per-symbol failure from poisoning the rest of
- * the run — a 500 from `overridePosition` on AAPL still lets MSFT proceed.
+ * One broker round-trip per call, so a fetch failure or the safe-fail guard
+ * applies uniformly to every symbol. Per-symbol write failures land in
+ * `errors[]` instead of aborting, so one bad `overridePosition` call doesn't
+ * block the rest of the universe.
  */
 export async function syncHoldings(
   options: SyncHoldingsOptions,
@@ -113,8 +74,6 @@ export async function syncHoldings(
     ? [target]
     : deps.allowedSymbols.map((s) => s.toUpperCase())
 
-  // Single positions fetch shared across the loop. If it throws (auth /
-  // network), every symbol gets the same error rather than each retrying.
   let brokerByUpper: Map<string, WebullPositionDto> | null = null
   let brokerFetchError: string | null = null
   try {
@@ -131,8 +90,6 @@ export async function syncHoldings(
   const synced: SyncHoldingResult[] = []
   const errors: SyncHoldingError[] = []
 
-  // Short-circuit when the broker fetch itself failed — every symbol gets
-  // the same error and the safe-fail guard is moot.
   if (brokerFetchError !== null) {
     for (const sym of symbols) {
       errors.push({ symbol: sym, error: brokerFetchError })
@@ -140,11 +97,8 @@ export async function syncHoldings(
     return summarize(synced, errors, options.dryRun)
   }
 
-  // Read-only pass: gather broker + DO state for each target symbol so we
-  // can run the safe-fail guard *before* any destructive write. The guard
-  // catches the "broker getPositions returned all-null but DO holds shares"
-  // pattern (most often a sandbox / auth glitch — see PR motivating bug:
-  // SOXL qty=8 + AAPL qty=1 zeroed out by a single bad fetch).
+  // Gathered before any write so the safe-fail guard below can inspect the
+  // whole batch and refuse a destructive zero-out before it happens.
   interface SymbolPlan {
     sym: string
     before: PositionState | null
@@ -178,9 +132,8 @@ export async function syncHoldings(
     }
   }
 
-  // Safe-fail predicate: zero broker holdings AND DO has at least one row
-  // for a targeted symbol. We deliberately check `qty>0` rather than
-  // `position!==null` so a stale `{qty:0}` row doesn't block the guard.
+  // `qty>0`, not `position!==null` — a stale `{qty:0}` DO row must not block
+  // the guard from letting a genuine zero-out through.
   const hasAnyBrokerQty = plans.some(
     (p) => p.brokerQty !== null && p.brokerQty > 0,
   )
@@ -190,9 +143,8 @@ export async function syncHoldings(
   const safeFailTriggered = !hasAnyBrokerQty && doHasAnyPosition
 
   if (safeFailTriggered && !options.dryRun && !options.force) {
-    // Refuse the destructive zero-out. Surface a single error rather than
-    // per-symbol noise — the operator's recovery action is "investigate or
-    // re-run with ?force=true", not "retry per symbol".
+    // One error, not per-symbol noise — the recovery action (investigate or
+    // retry with force=true) is the same regardless of how many symbols drifted.
     errors.push({
       symbol: '*',
       error:
@@ -210,9 +162,8 @@ export async function syncHoldings(
     try {
       const doQty = before?.qty ?? 0
 
-      // No-drift fast path. We treat "broker has no row" as `brokerQty=0`
-      // for comparison purposes (Webull omits zero-quantity positions). If
-      // DO is already null/0, this is a true no-op.
+      // Webull omits zero-quantity positions rather than returning qty=0,
+      // so an absent row must be treated as 0 here.
       const effectiveBrokerQty = brokerQty ?? 0
       if (effectiveBrokerQty === doQty) {
         synced.push({
@@ -226,7 +177,6 @@ export async function syncHoldings(
         continue
       }
 
-      // Drift detected. dryRun returns the planned shape without writing.
       if (options.dryRun) {
         const plannedAfter = computePlannedAfter({
           brokerQty: effectiveBrokerQty,
@@ -277,8 +227,6 @@ export async function syncHoldings(
     }
   }
 
-  // dryRun + safe-fail-would-trigger: surface as a soft warning so the
-  // operator sees the diff but also knows the live call would refuse.
   const warnings: string[] = []
   if (safeFailTriggered && options.dryRun && !options.force) {
     warnings.push('broker_returned_empty_diff_suspicious')
@@ -318,17 +266,10 @@ interface ApplyOverrideArgs {
   requestId: string | null
 }
 
-/**
- * Apply the override and return the post-state's `position`. Encapsulates
- * the avg-price fallback policy: prefer broker `avg_cost`, else preserve DO
- * `avgPrice`, else (only when broker forces a `qty>0` row with no usable
- * avg) refuse — `overridePosition` rejects `avgPrice<=0` for a non-zero
- * qty, which is the right behaviour (a synthetic 0 would corrupt PnL).
- */
+/** Applies the override and returns the post-state's `position`, via `pickAvgPrice`'s fallback policy. */
 async function applyOverride(args: ApplyOverrideArgs): Promise<PositionState | null> {
   const { positionStore, symbol, before, brokerQty, brokerAvg, requestId } = args
 
-  // Broker says zero (or omits the row): close the DO position.
   if (brokerQty <= 0) {
     const state = await positionStore.overridePosition(symbol, {
       qty: 0,
@@ -342,9 +283,8 @@ async function applyOverride(args: ApplyOverrideArgs): Promise<PositionState | n
 
   const avgPrice = pickAvgPrice(brokerAvg, before?.avgPrice ?? null)
   if (avgPrice === null) {
-    // Should be very rare: broker has shares but reports no avg_cost AND we
-    // have no prior DO avgPrice to preserve. Surface as an error rather
-    // than silently writing avgPrice=0 (would break recordFill PnL math).
+    // Refuses rather than writing avgPrice=0, which would corrupt
+    // recordFill's realized-PnL math.
     throw new Error(
       `cannot determine avgPrice for ${symbol}: broker avg_cost missing and no DO avgPrice to preserve`,
     )
@@ -369,9 +309,8 @@ function computePlannedAfter(args: {
   if (brokerQty <= 0) return null
   const avgPrice = pickAvgPrice(brokerAvg, before?.avgPrice ?? null)
   if (avgPrice === null) {
-    // Mirror the live error path — a dryRun shouldn't pretend it can write
-    // `avgPrice=0`. Returning the existing `before` keeps the diff
-    // visible (qty changes) while signalling no usable avg via null.
+    // Mirrors the live error path: a dryRun preview must not claim it could
+    // write avgPrice=0, so it signals "no usable avg" with null instead.
     return null
   }
   return {
@@ -381,11 +320,7 @@ function computePlannedAfter(args: {
   }
 }
 
-/**
- * Choose the avgPrice to write back. Broker `avg_cost` wins when usable;
- * otherwise we fall through to the existing DO avgPrice rather than zero.
- * Returns `null` when neither source yields a positive finite number.
- */
+/** Broker `avg_cost` wins when usable, else the existing DO avgPrice, else `null` — never a synthetic `0` (would corrupt PnL). */
 function pickAvgPrice(brokerAvg: number | null, doAvg: number | null): number | null {
   if (brokerAvg !== null && Number.isFinite(brokerAvg) && brokerAvg > 0) return brokerAvg
   if (doAvg !== null && Number.isFinite(doAvg) && doAvg > 0) return doAvg
@@ -394,25 +329,21 @@ function pickAvgPrice(brokerAvg: number | null, doAvg: number | null): number | 
 
 function parseBrokerQty(pos: WebullPositionDto | undefined): number | null {
   if (pos === undefined) return null
-  // available_quantity は新旧 docs 共通の名前 (#251 / #252)。
   const raw = pos.available_quantity
   if (raw === undefined || raw === null || raw === '') return null
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? parsed : null
 }
 
+// `??` alone would treat an empty-string field as "set" and skip the fallback.
+function isEmptyBrokerField(v: unknown): boolean {
+  return v === undefined || v === null || v === ''
+}
+
 function parseBrokerAvg(pos: WebullPositionDto | undefined): number | null {
   if (pos === undefined) return null
-  // 新 docs (#251) では `cost_price`、旧 SDK は `avg_cost`。新→旧の順で defensive
-  // parse (#252)。新 endpoint への切替前でも JP UAT は既に新名前で返してくる
-  // ケースがあり、旧名前だけ読んでると silently null = avg-price fallback を
-  // 強制発動してしまう。
-  // 新名前が undefined / null / 空文字 (== "未送信") なら旧名前にフォールバック。
-  // `??` だけでは空文字を「設定済」と扱ってしまうので、明示的に空かどうか判定。
-  const isEmpty = (v: unknown): boolean =>
-    v === undefined || v === null || v === ''
-  const raw = !isEmpty(pos.cost_price) ? pos.cost_price : pos.avg_cost
-  if (isEmpty(raw)) return null
+  const raw = !isEmptyBrokerField(pos.cost_price) ? pos.cost_price : pos.avg_cost
+  if (isEmptyBrokerField(raw)) return null
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? parsed : null
 }

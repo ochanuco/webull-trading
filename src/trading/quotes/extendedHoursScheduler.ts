@@ -1,17 +1,9 @@
 /**
- * Extended-hours (pre-market) reference observation producer (issue #709 Phase 1)。
- *
- * `newsScheduler` と同じ「cron から呼ばれる producer」の位置づけで、
- * `CRON_QUOTE_RECONCILE` (5分毎) にぶら下がる。US プレマーケット帯
- * ([開場-90分, 開場)) の間だけ Yahoo `/v8/finance/chart` の時間外 1分足を取り、
- * `extended_hours_observation` に保存する。**取引経路 (strategy/risk/execution)
- * からは一切参照されない参考情報** — `SymbolStateDO` への write も
- * `lastQuote` / `QuoteSnapshot` への write も行わない (read のみ)。
- *
- * fetch / DB 失敗は絶対に throw しない — 呼び出し元の cron (index.ts の
- * `ctx.waitUntil`) に伝播させず、既存ログ形式 (`console.warn(JSON.stringify(...))`)
- * で握りつぶす (`newsScheduler` と同じ配線パターン)。個別銘柄の Yahoo fetch
- * 失敗は全体を止めず、その銘柄だけ status=UNKNOWN の行として保存する。
+ * Pre-market reference producer, run from the quote-reconcile cron. Read
+ * only — never writes SymbolStateDO or QuoteSnapshot — so a bad observation
+ * can't leak into strategy/execution decisions. Never throws: fetch/DB
+ * failures are logged and swallowed per symbol so one bad fetch doesn't
+ * fail the whole tick.
  */
 import type { Env } from '../../config/env'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
@@ -32,13 +24,10 @@ import { resolveStopDistance } from '../strategy/stopDistance'
 import type { SymbolRule } from '../strategy/strategies/PullbackUptrendStrategy'
 import { SymbolStateClient } from '../state/SymbolStateClient'
 
-/** [開場 - 90分, 開場) の帯だけ稼働する (US プレマーケット)。 */
+/** Half-open band [open − 90min, open) — the US premarket window. */
 const PREMARKET_LEAD_MINUTES = 90
-/** gap が -3% 以下なら WARNING。 */
 const GAP_WARNING_PCT = -3
-/** stop までの距離が 2% 以下なら WARNING。 */
 const TO_STOP_WARNING_PCT = 2
-/** 最終 bar から 20 分以上 stale なら UNKNOWN。 */
 const STALE_FRESHNESS_SEC = 20 * 60
 
 type ExtendedHoursStatus = 'NORMAL' | 'WARNING' | 'STOP_AT_OPEN_CANDIDATE' | 'UNKNOWN'
@@ -56,14 +45,14 @@ interface RunExtendedHoursObservationOptions {
   env: Env
   requestId?: string
   now?: () => Date
-  /** test seam。未指定なら本番 `YahooExtendedHoursClient` を使う。 */
+  /** Test seam; defaults to the real `YahooExtendedHoursClient`. */
   client?: YahooExtendedHoursClient
 }
 
 export interface AssessPreMarketInput {
   series: PreMarketSeries | null
   now: Date
-  /** qty>0 / avgPrice>0 の保有時のみ toStopPct を算出する。 */
+  /** toStopPct is only computed when qty > 0 and avgPrice > 0. */
   position?: { qty: number; avgPrice: number } | null
   rule?: SymbolRule
   atr20?: number | null
@@ -82,8 +71,8 @@ export interface AssessPreMarketResult {
 }
 
 /**
- * pure function — Yahoo series + (任意) position/rule/atr20 から表示指標と
- * status を導出する。副作用なしなのでユニットテストで status 4 種を直接検証できる。
+ * Pure: derives display metrics and status from a Yahoo series plus
+ * optional position/rule/atr20 context.
  */
 export function assessPreMarket(input: AssessPreMarketInput): AssessPreMarketResult {
   const { series, now } = input
@@ -130,12 +119,11 @@ export function assessPreMarket(input: AssessPreMarketInput): AssessPreMarketRes
   return { status, preMarketLast, preMarketLow, prevClose, gapPct, direction15mPct, toStopPct, lastBarAt, freshnessSec }
 }
 
-/** 最終 bar 時刻から遡って 15 分以内で最も古い bar を基準にした変化率。基準 bar が最終 bar と同一なら null。 */
+/** % change from the oldest bar within the last 15 minutes to the last bar; null if they're the same bar. */
 function computeDirection15m(bars: PreMarketBar[], lastBar: PreMarketBar, lastBarMs: number): number | null {
   if (!Number.isFinite(lastBarMs)) return null
   const cutoffMs = lastBarMs - 15 * 60 * 1000
-  // bars は ascending 順 (YahooExtendedHoursClient が sort 済み) なので、
-  // cutoff 以降で最初に見つかる bar が「15分以内で最も古い bar」。
+  // Assumes bars are pre-sorted ascending (YahooExtendedHoursClient's contract).
   let baseBar: PreMarketBar | null = null
   for (const bar of bars) {
     const barMs = new Date(bar.at).getTime()
@@ -148,7 +136,7 @@ function computeDirection15m(bars: PreMarketBar[], lastBar: PreMarketBar, lastBa
   return ((lastBar.close - baseBar.close) / baseBar.close) * 100
 }
 
-/** 保有時のみ算出。pnlPct(プレマ値基準) - effectiveStopPct。position/rule が無ければ null。 */
+/** Position-only: (pre-market pnl%) − effectiveStopPct. Null without a position/rule. */
 function computeToStopPct(
   preMarketLast: number,
   position: { qty: number; avgPrice: number } | null | undefined,
@@ -169,9 +157,9 @@ function computeToStopPct(
 }
 
 /**
- * 銘柄ごとの最新 atr20 (判定ログの indicators_json)。dashboard/index.ts の
- * `loadLatestAtr20` と同じ SQL — trading 層が routes 層を import する逆流を
- * 避けるため、あえて複製している (dashboard 側の表示挙動には触れない)。
+ * Latest atr20 per symbol from the decision log's `indicators_json`.
+ * Duplicates the same SQL as dashboard/index.ts's `loadLatestAtr20` rather
+ * than importing it, to avoid a trading-layer → routes-layer dependency.
  */
 async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>()
@@ -190,13 +178,13 @@ async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<s
         out.set(r.symbol.toUpperCase(), parsed.atr20)
       }
     } catch {
-      // 壊れた JSON は無視 (この銘柄の atr20 が無いだけ)
+      // Malformed row: skip, this symbol just has no atr20.
     }
   }
   return out
 }
 
-/** NY ローカル日付 (YYYY-MM-DD)。`usMarketCalendar.formatNyYmd` と同じ formatToParts 手法。 */
+/** NY local date (YYYY-MM-DD), same formatToParts technique as `usMarketCalendar.formatNyYmd`. */
 const NY_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'America/New_York',
   year: 'numeric',
@@ -206,6 +194,11 @@ const NY_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
 
 function formatNySessionYmd(date: Date): string {
   return NY_YMD_FORMATTER.format(date)
+}
+
+/** Unset or anything but `'true'` means disabled (opt-in, fail-closed default). */
+function isOptInEnabled(flag: string | undefined): boolean {
+  return (flag ?? '').trim().toLowerCase() === 'true'
 }
 
 export async function runExtendedHoursObservation(
@@ -222,8 +215,7 @@ export async function runExtendedHoursObservation(
     errors: 0,
   })
 
-  // 未設定 = 無効 (NEWS_ATTENTION_ENABLED と同じ判定パターン)。
-  if ((env.EXTENDED_HOURS_OBSERVATION_ENABLED ?? '').trim().toLowerCase() !== 'true') {
+  if (!isOptInEnabled(env.EXTENDED_HOURS_OBSERVATION_ENABLED)) {
     return empty('extended_hours_observation_disabled')
   }
   if (!env.DB) {
@@ -231,7 +223,7 @@ export async function runExtendedHoursObservation(
   }
 
   const nowDate = now()
-  // US 取引日の [開場-90分, 開場) の帯だけ稼働。tradingCalendar 自体は変更しない。
+  // Bounds the premarket band externally rather than modifying tradingCalendar.
   const inPremarketWindow =
     evaluateStrategyWindow(nowDate, 'US', PREMARKET_LEAD_MINUTES) === 'in_window' &&
     !isWithinStrategyWindow(nowDate, 'US', 0)
@@ -334,8 +326,6 @@ export async function runExtendedHoursObservation(
       errors,
     }
   } catch (error) {
-    // universe / global config load 失敗等、tick 全体が失敗したケース。cron
-    // 呼び出し元 (index.ts) には一切伝播させない。
     console.warn(
       JSON.stringify({
         event: 'extended_hours_observation_error',

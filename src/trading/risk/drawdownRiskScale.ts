@@ -16,22 +16,6 @@ export interface DrawdownScaleResult {
   step: 'normal' | 'half' | 'halt'
 }
 
-/**
- * Compute the risk-scale factor from the current portfolio snapshot given
- * caller-provided thresholds (loaded from D1 global_config). Pure function.
- *
- *   dd >= halfThreshold → scale 1.0 (normal)
- *   dd >= haltThreshold → scale 0.5 (half)
- *   dd <  haltThreshold → scale 0.0 (halt)
- *
- * `drawdown` is clipped at 0 from above so an intraday up-move does not
- * yield a positive "drawdown". When `dailyStartEquity <= 0` (uninitialized
- * portfolio) we **fail-closed** with scale 0 / step 'halt' — the caller
- * can reject rather than silently trade at full size.
- *
- * Invalid params (non-finite, or halt > half, or non-negative halt) throw
- * — caller must pass coherent thresholds. No silent clamping.
- */
 export function computeDrawdownRiskScale(
   portfolio: Pick<PortfolioState, 'dailyStartEquity' | 'dailyRealizedPnl'>,
   params: DrawdownRiskScaleParams,
@@ -48,10 +32,8 @@ export function computeDrawdownRiskScale(
   if (params.haltThreshold > params.halfThreshold) {
     throw new Error(`computeDrawdownRiskScale: haltThreshold (${params.haltThreshold}) must be <= halfThreshold (${params.halfThreshold})`)
   }
-  // Fail-closed: if portfolio snapshot is invalid / uninitialized, we cannot
-  // evaluate drawdown and must not silently pass full-size trades. Return
-  // halt so Risk can reject. (CodeRabbit #125 review: "Risk must be able to
-  // reject".)
+  // Fail-closed: an invalid/uninitialized snapshot halts instead of
+  // defaulting to normal, so Risk rejects rather than trading full size.
   if (
     !Number.isFinite(portfolio.dailyStartEquity) ||
     portfolio.dailyStartEquity <= 0 ||
@@ -59,8 +41,8 @@ export function computeDrawdownRiskScale(
   ) {
     return { scale: 0, drawdown: 0, step: 'halt' }
   }
-  const raw = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
-  const drawdown = raw < 0 ? raw : 0
+  const dailyReturn = portfolio.dailyRealizedPnl / portfolio.dailyStartEquity
+  const drawdown = dailyReturn < 0 ? dailyReturn : 0
   if (drawdown >= params.halfThreshold) {
     return { scale: 1, drawdown, step: 'normal' }
   }

@@ -6,15 +6,9 @@ import { resolveStopDistance } from '../stopDistance'
 export interface PullbackIndicators {
   price: number
   sma50: number
-  /**
-   * 騰落率トレンド filter (entry condition)。**issue #318 で lookback を
-   * 50d → 20d に短縮**。フィールド名は historical (storage/dashboard 互換)。
-   */
+  /** 20-day return (trend filter). Named `return50d` for storage/dashboard compat. */
   return50d: number
-  /**
-   * 押し目買いの reference high。**issue #318 で lookback を 20d → 10d に
-   * 短縮**。フィールド名は historical (storage/dashboard 互換)。
-   */
+  /** 10-day reference high for pullback entries. Named `high20d` for storage/dashboard compat. */
   high20d: number
   atr20: number
   baselineAtr20: number
@@ -32,12 +26,9 @@ export interface SymbolRule {
   /** Pullback range: deeper bound. Default -0.06. */
   pullbackMin: number
   /**
-   * Minimum N-day return required to consider the stock in an uptrend.
-   * Default 0.08. Set negative to effectively disable the filter.
-   *
-   * **issue #318**: lookback は indicators.ts で 20 営業日。フィールド名
-   * (`minReturn50d`) は global_config 列名 / TS interface 互換のため historical
-   * に維持。renaming は #318 follow-up で。
+   * Minimum 20-day return required to consider the stock in an uptrend
+   * (lookback lives in indicators.ts). Default 0.08; negative disables the
+   * filter. Named `minReturn50d` for global_config column / interface compat.
    */
   minReturn50d: number
   /**
@@ -45,46 +36,27 @@ export interface SymbolRule {
    * demo / frequent-cycle mode so entry doesn't depend on trend direction.
    */
   requireAboveSma50: boolean
-  /**
-   * ATR multiplier for vol-adaptive stop sizing。
-   *   stopDistance = max(kAtr * atr20, |entry * stopPct|)
-   * POC 推奨域 1.5–2.5。
-   */
+  /** ATR multiplier for vol-adaptive stop sizing: stopDistance = max(kAtr * atr20, |entry * stopPct|). POC-recommended range 1.5–2.5. */
   kAtr: number
-  /**
-   * 過熱ガード (#strategy-overextension-guards)。`(price - sma50) / sma50` が
-   * この比率を超える (= SMA50 から上方に乖離しすぎ) 局面では BUY を見送る。
-   * 0.60 = +60%。強トレンドの初動も切るが、+3x レバ ETF の高値掴み
-   * (mean-reversion ゾーンでの entry) を避ける fail-safe 側ガード。
-   */
+  /** Blowoff guard: skip BUY when `(price - sma50) / sma50` exceeds this (0.60 = +60%). Cuts strong early trends too, but avoids chasing a 3x leveraged ETF into a mean-reversion zone. */
   maxSma50DeviationPct: number
-  /**
-   * ボラ過熱ガード。`atr20 / baselineAtr20` がこの比率を超える (= 直近ボラが
-   * baseline 対比で膨らみすぎ) 局面では BUY を見送る。1.5 = baseline の 1.5 倍。
-   * 既存の atr-floor (低ボラで size 半減) と対になる高ボラ側の上限。
-   */
+  /** Skip BUY when `atr20 / baselineAtr20` exceeds this (1.5 = 1.5x baseline) — the high-volatility counterpart to the atr-floor sizing cut on the low side. */
   maxAtrRatio: number
   /**
-   * 再エントリー価格ガード (#reentry)。直前に手仕舞いした価格 (flat 時の
-   * `lastExecutedPrice` = 前回売値) より、この倍率 × atr20 以上 **安く** ない限り
-   * 同一銘柄を買い直さない。「良い利確の直後に同水準/上で買い戻して往復で削る」
-   * whipsaw を価格軸で防ぐ (時間軸の cooldown = reconcileFills が全 exit で翌
-   * 営業日まで、と対)。0 で無効。既定 1.0 (= 前回売値 −1ATR)。
+   * Re-entry price guard: within the window, re-buying is blocked unless
+   * price is at least this many ATRs below the last exit price
+   * (`SymbolState.lastExecutedPrice`). Blocks a whipsaw round-trip right
+   * after a good exit — the price-axis counterpart to reconcileFills' next-
+   * business-day time cooldown. 0 disables. Default 1.0 (last exit − 1 ATR).
    */
   reentryMinAtrBelowLastExit: number
   /**
-   * 再エントリー価格ガードの有効窓 (営業日)。前回手仕舞いからこの日数**未満**の
-   * 間だけ上のガードを適用し、それを過ぎたら無効化して通常のトレンド再 entry を
-   * 妨げない (前回売値より高い新レグでの押し目買いを永久に塞がないため)。
-   * 0 で無効。既定 3。
+   * Business days the re-entry price guard stays active after an exit; once
+   * elapsed, a higher new-leg pullback re-entry is no longer blocked. 0
+   * disables. Default 3.
    */
   reentryGuardBusinessDays: number
-  /**
-   * Stop 幅の上限 = |avgPrice * takeProfitPct| * これ (#stop-rr-cap)。ATR 連動
-   * stop が利確幅に対して一方的に広がるのを止め、銘柄ごとの R:R に下限を作る
-   * (2.0 なら R:R >= 0.5)。0 で無効 (= ATR 連動そのまま)。pct stop は floor
-   * なので、cap が名目 stop より狭くなる場合は名目が勝つ。
-   */
+  /** Cap on stop width as a multiple of |avgPrice * takeProfitPct| (2.0 → R:R >= 0.5), so an ATR-driven stop can't widen without bound. 0 disables. The pct-stop floor still wins if it's narrower than the cap. */
   maxStopToTpRatio: number
 }
 
@@ -117,15 +89,9 @@ export interface PullbackInput {
   cooldownUntil: string | null
   /** Business days elapsed since position.openedAt. 0 when position is null. */
   holdBusinessDays: number
-  /**
-   * 前回手仕舞い価格 (#reentry)。flat 時の `SymbolState.lastExecutedPrice`
-   * (= 保有を閉じた SELL の約定価格) を渡す。null / 未設定なら価格ガード素通り。
-   */
+  /** Last closing SELL's fill price (`SymbolState.lastExecutedPrice`) while flat. Null/unset passes the re-entry price guard through. */
   lastExitPrice?: number | null
-  /**
-   * 前回手仕舞いからの経過営業日 (#reentry)。scheduler が `lastExitAt` から
-   * market 別に算出して渡す。null なら価格ガード素通り (recency 判定不能)。
-   */
+  /** Business days since the last exit, computed per-market by the scheduler from `lastExitAt`. Null passes the guard through (recency unknown). */
   businessDaysSinceExit?: number | null
   now: Date
 }
@@ -182,8 +148,6 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('exit.take_profit', false, pnlPct, '>=', rule.takeProfitPct))
 
-    // ATR 連動 stop (#exit-atr) + R:R cap (#stop-rr-cap)。距離の決定は
-    // `resolveStopDistance` に一本化 (sizing と同式)。
     const stop = resolveStopDistance({
       price: position.avgPrice,
       stopPct: rule.stopPct,
@@ -214,9 +178,9 @@ export class PullbackUptrendStrategy {
       )
     }
     trace.push(step('exit.time_stop', false, input.holdBusinessDays, '>=', rule.timeStopDays))
-    // #stop-rr-cap: 表示する下限は名目 `stopPct` ではなく **実効 stop**。
-    // ATR / cap で動く値なので、名目を出すと operator が「-8% で切れる」と
-    // 誤読する (実際は -10.7% だった等)。
+    // Shows effectiveStopPct, not the nominal rule.stopPct — the ATR/cap-
+    // adjusted value is what actually triggers, and showing nominal would
+    // mislead an operator reading the reason string.
     trace.push(
       step('exit.hold_position', true, pnlPct, 'between', [effectiveStopPct, rule.takeProfitPct]),
     )
@@ -230,26 +194,16 @@ export class PullbackUptrendStrategy {
   private entryDecision(input: PullbackInput, rule: SymbolRule, trace: DecisionTraceStep[]): Signal {
     const ind = input.indicators
 
-    // 再エントリー価格ガード (#reentry): 前回手仕舞い (前回売値) から
-    // reentryGuardBusinessDays 営業日以内は、前回売値より reentryMinAtrBelowLastExit
-    // × atr20 以上 安い水準でなければ BUY を見送る。良い利確直後の同水準/高値
-    // 買い戻し (往復で削る whipsaw) を価格軸で止める。窓を過ぎる or 経過日数
-    // すら不明 (一度も exit していない) は fail-open (通常のトレンド再 entry を
-    // 妨げない)。ただし窓内なのに前回売値だけ不明 (#660 移行期) は例外的に
-    // fail-closed — 下の early block を参照。
     const lastExitPrice = input.lastExitPrice ?? null
     const bdSinceExit = input.businessDaysSinceExit ?? null
     const reentryWindowConfigured = rule.reentryMinAtrBelowLastExit > 0 && rule.reentryGuardBusinessDays > 0
 
-    // #660: 移行期 fail-closed。lastExitAt は既に本番 DO にあるが lastExitPrice
-    // は新規フィールドなので、deploy 直前の guard 窓内 (reentryGuardBusinessDays
-    // 未満) に exit した銘柄は lastExitAt はあるのに lastExitPrice が無い状態に
-    // なりうる。これを従来通り fail-open (ガード不活性) にすると、まさに
-    // ガードで守るべき窓内で無防備に買い直せてしまう。窓内かどうかは
-    // lastExitAt 由来の bdSinceExit だけで判定できるので、価格不明でも窓内は
-    // entry を保留する。恒久 block ではなく窓経過 (bdSinceExit >=
-    // reentryGuardBusinessDays) で自然解除。lastExitAt も無い (=一度も exit
-    // していない、または旧 state のまま) 銘柄は従来どおり無条件で通す。
+    // Exception to the guard's normal fail-open-when-unknown behavior below:
+    // a symbol can have bdSinceExit (from lastExitAt) but no lastExitPrice
+    // yet (the field's rollout lagged lastExitAt). Treating that as
+    // fail-open would leave exactly the window the guard exists to cover
+    // unprotected, so within the window it holds on unknown price too;
+    // outside the window (or with no exit on record at all) it's fail-open.
     if (
       reentryWindowConfigured &&
       lastExitPrice === null &&
@@ -297,17 +251,13 @@ export class PullbackUptrendStrategy {
       trace.push(step('entry.reentry_below_last_exit', true, ind.price, '<=', ind.price, 'guard inactive'))
     }
 
-    // #658: ここから先の 7 gate は entryDistance.ts の EntryGateKey と一対一で
-    // 対応する「setup の質」ゲート (行動可否 guard ではない)。HALF 昇格の検討
-    // 対象になり得るので、HOLD を返す際は holdCause='entry_gate' と 4 段階判定
-    // スナップショットを同梱する。scheduler 側の再導出を廃止した対価として、
-    // HOLD ごとに deriveEntryStatusFromIndicators (7 gate の再評価 1 回) を呼ぶ
-    // (#658)。
+    // The gates below are "setup quality" gates (one-to-one with
+    // entryDistance.ts's EntryGateKey), not action guards — they're HALF-
+    // promotion candidates, so their HOLDs carry holdCause='entry_gate' plus
+    // a fresh deriveEntryStatusFromIndicators snapshot for the scheduler.
 
     if (ind.return50d <= rule.minReturn50d) {
       trace.push(step('entry.trend_50d_return', false, ind.return50d, '>', rule.minReturn50d))
-      // #318: lookback は 20 営業日 (フィールド名は historical)。reason は人間
-      // 向け表示なので「20d return」と書いて誤読を避ける。
       return hold(
         input,
         `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`,
@@ -330,8 +280,6 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('entry.above_sma50', true, ind.price, '>', ind.sma50, rule.requireAboveSma50 ? undefined : 'disabled by rule'))
 
-    // 過熱ガード (#strategy-overextension-guards): trend は成立していても SMA50 から
-    // 上方に乖離しすぎた blowoff では押し目買いを見送る (+3x の高値掴み回避)。
     const sma50Deviation = ind.sma50 > 0 ? (ind.price - ind.sma50) / ind.sma50 : 0
     if (sma50Deviation > rule.maxSma50DeviationPct) {
       trace.push(step('entry.not_overextended', false, sma50Deviation, '<=', rule.maxSma50DeviationPct))
@@ -345,8 +293,7 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('entry.not_overextended', true, sma50Deviation, '<=', rule.maxSma50DeviationPct))
 
-    // ボラ過熱ガード: 直近 ATR が baseline 対比で膨らみすぎた regime 破綻局面の
-    // entry を抑制。baseline 不明 (<=0) のときは gate を素通り (情報不足で止めない)。
+    // baseline <= 0 (unknown) passes the gate rather than blocking on missing data.
     const atrRatio = ind.baselineAtr20 > 0 ? ind.atr20 / ind.baselineAtr20 : 0
     if (atrRatio > rule.maxAtrRatio) {
       trace.push(step('entry.vol_not_elevated', false, atrRatio, '<=', rule.maxAtrRatio))
@@ -362,7 +309,6 @@ export class PullbackUptrendStrategy {
 
     if (ind.high20d <= 0) {
       trace.push(step('entry.high20d_valid', false, ind.high20d, '>', 0))
-      // #318: lookback は 10 営業日 (フィールド名は historical)。
       return hold(input, 'invalid 10d high', trace, 'entry_gate', deriveEntryStatusFromIndicators(ind, rule))
     }
     trace.push(step('entry.high20d_valid', true, ind.high20d, '>', 0))
@@ -396,12 +342,7 @@ export class PullbackUptrendStrategy {
   }
 }
 
-/**
- * `cause` の既定値は 'guard' (#658, fail-closed)。行動可否 guard
- * (position / pendingOrder / cooldown / 再エントリー価格ガード) 由来の HOLD は
- * すべてこの既定に乗る — HALF 昇格は絶対禁止なので、明示的に 'entry_gate' を
- * 渡した呼び出し元 (setup の質を測る 7 gate) だけが昇格の検討対象になる。
- */
+/** Defaults `cause` to 'guard' so only callers that explicitly pass 'entry_gate' (the setup-quality gates) are HALF-promotion candidates. */
 function hold(
   input: PullbackInput,
   reason: string,
@@ -481,9 +422,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'guard.cooldown_inactive': 'クールダウン中ではない',
   'route.position_open': '保有中',
   'entry.reentry_below_last_exit': '前回売値からの再エントリー間隔・値幅が十分',
-  // #318: trace 識別子 (`entry.trend_50d_return` / `entry.high20d_valid`) は
-  // 既存 decision_log と互換維持のため据え置き。**表示文字列のみ実 lookback に
-  // 合わせて 20日 / 10日 と表記**。
+  // Identifiers stay historical for decision_log compat; only the display strings use the real 20d/10d lookbacks.
   'entry.trend_50d_return': '20日騰落率が上昇トレンド条件を満たす',
   'entry.above_sma50': '株価が50日移動平均線を上回る',
   'entry.not_overextended': '移動平均からの上方乖離が過大でない',

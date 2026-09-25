@@ -1,19 +1,13 @@
 /**
- * news shock gate 日次サマリ通知 (news-shock-gate follow-up)。
+ * Daily summary notification for the news-shock gate, ridden on the 22:00
+ * UTC portfolio-roll cron. `newsShockGate` in `mode=observe` only notifies
+ * on a regime STATE_CHANGE, which isn't enough to calibrate whether the
+ * thresholds are sane against real data — this sends the combined regime
+ * plus each probe's reason once a day regardless of whether it changed.
  *
- * newsShockGate は `mode=observe` の間 STATE_CHANGE 通知 (regime 遷移時のみ)
- * しか出さない。sparse probe (`market_selloff`) が恒常的に 'unknown' に
- * 張り付いていたバグ (このファイルの姉妹修正 `newsShockGate.ts` /
- * `newsShockDecision.ts` 参照) のせいで、実運用開始から一度も通知が飛んで
- * いなかった。observe モードの校正 (閾値が実データに対して妥当か判断する)
- * には「今どう判定されているか」を regime 変化が無くても定期的に見られる
- * 必要があるため、22:00 UTC の portfolio roll cron に相乗りして 1 日 1 回、
- * 合成 regime + probe 別の reason を配信する。
- *
- * `runPortfolioRoll` / `checkMarketDataHealth` 等の隣接スケジューラと同じ
- * fail-safe 方針: 何が起きても throw しない。D1/評価が失敗しても
- * portfolio roll を巻き込まないよう、呼び出し元 (`index.ts`) から見て
- * 独立した `ctx.waitUntil` として起動する。
+ * Same fail-safe stance as its neighboring schedulers: never throws, and
+ * runs as its own `ctx.waitUntil` task so a D1/evaluation failure here
+ * can't take portfolio roll down with it.
  */
 import type { Env } from '../../config/env'
 import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader'
@@ -57,10 +51,8 @@ export async function runNewsShockDailySummary(env: Env, requestId: string): Pro
       return
     }
 
-    // 表示用は 'latest_observation' で評価する。GDELT の反映は実測 1〜7 時間
-    // 遅れるため、now 基準 (strategy tick と同じ) だと 22:00 UTC のサマリは
-    // ほぼ毎回 unavailable (判定不能) になり校正材料として機能しない。届いて
-    // いる最新観測の時点でどう判定されるかを、観測時刻つきで配信する。
+    // 'latest_observation' basis, not 'now': GDELT lags ~1-7h, so a
+    // now-basis read would show unavailable on almost every 22:00 UTC run.
     const now = new Date()
     const { combined, probes } = await loadNewsShockDecision(
       env.DB,
@@ -83,11 +75,10 @@ export async function runNewsShockDailySummary(env: Env, requestId: string): Pro
     const message = lines.join('\n')
     const severity = combined.regime === 'critical' ? 'critical' : combined.regime === 'warning' ? 'warning' : 'info'
 
-    // await する — この関数自体が `ctx.waitUntil` のタスク本体なので、
-    // fire-and-forget にすると notify の webhook fetch 完了前に isolate が
-    // 終了しうる (index.ts の他タスクは notify promise を ctx.waitUntil に
-    // 渡して同じ問題を回避している)。Notifier は必ず resolve する契約だが
-    // 念のため catch も残す。
+    // Awaited, not fire-and-forget: this function IS the ctx.waitUntil task
+    // body, so a dangling promise could let the isolate exit before the
+    // webhook fetch completes. Notifier is contracted to always resolve;
+    // the catch below is defensive.
     await createNotifier(env, { requestId })
       .notify({
         type: 'SUMMARY',
@@ -105,9 +96,6 @@ export async function runNewsShockDailySummary(env: Env, requestId: string): Pro
         )
       })
   } catch (err) {
-    // D1 / config load / evaluate のいずれで失敗しても、この scheduler は
-    // portfolio roll と同じ tick に相乗りしているので、絶対にここから外へ
-    // 例外を投げない (呼び出し元は ctx.waitUntil で待つだけで catch しない前提)。
     console.warn(
       JSON.stringify({
         event: 'news_shock_daily_summary_failed',

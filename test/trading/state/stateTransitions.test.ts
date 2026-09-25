@@ -438,7 +438,7 @@ describe('overridePosition', () => {
     ).toThrow(/invalid qty/)
   })
 
-  it('does not touch lastExitPrice / lastExitAt / lastExecutedPrice (#660)', () => {
+  it('does not touch lastExitPrice / lastExitAt / lastExecutedPrice on a broker-side reconcile override', () => {
     let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
     state = recordFill(state, { side: 'BUY', qty: 2, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
     state = recordFill(state, { side: 'SELL', qty: 2, price: 12 }, { now: fixedNow('2026-04-18T11:00:00.000Z') })

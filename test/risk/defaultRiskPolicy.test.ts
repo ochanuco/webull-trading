@@ -335,7 +335,7 @@ describe('DefaultRiskPolicy', () => {
     })
   })
 
-  describe('market hours market-aware handling (#656)', () => {
+  describe('market hours market-aware handling (holidays, half-days, per-market session)', () => {
     const buyIntent = {
       symbol: 'SOXL',
       side: 'BUY' as const,

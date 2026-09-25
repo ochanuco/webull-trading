@@ -14,9 +14,8 @@ import { emptyPortfolioState, type PortfolioState } from './portfolioTypes'
 const STATE_KEY = 'portfolio'
 
 /**
- * Account-level (singleton) state held in a Durable Object. Use a fixed id
- * (e.g. `PORTFOLIO_STATE.idFromName('default')`) so every caller lands on the
- * same instance — there is no per-symbol sharding here.
+ * Callers must address this DO via `idFromName('default')` — unlike
+ * {@link SymbolStateDO}, portfolio state has no per-symbol sharding.
  */
 export class PortfolioStateDO extends DurableObject<object> {
   private readonly transitionCtx: PortfolioTransitionContext = { now: () => new Date() }
@@ -84,11 +83,9 @@ export class PortfolioStateDO extends DurableObject<object> {
   private async load(): Promise<PortfolioState> {
     const stored = await this.ctx.storage.get<PortfolioState>(STATE_KEY)
     if (stored !== undefined) {
-      // Backfill `lastRolledAt` for DO instances persisted before issue #140.
-      // The field is added forward-compatibly: existing rows missing it read
-      // back as `undefined`, which we normalize to `null`. We do not write the
-      // backfilled row here — it will be persisted on the next state-mutating
-      // call to keep `load()` side-effect free.
+      // Backfilled fields are not written back here, so load() stays free of
+      // storage side effects — the normalized value persists on the next
+      // state-mutating call instead.
       return this.normalize(stored)
     }
     return emptyPortfolioState(this.transitionCtx.now)
@@ -113,9 +110,8 @@ export class PortfolioStateDO extends DurableObject<object> {
       lastRolledAt: !('lastRolledAt' in state) || raw.lastRolledAt === undefined
         ? null
         : state.lastRolledAt,
-      // #77: backfill open-exposure counters for DO instances persisted before
-      // the field was added. `undefined`/non-finite reads as 0 so the gate
-      // starts from a clean baseline without an explicit migration step.
+      // Missing/non-finite reads as 0 rather than requiring an explicit
+      // migration of pre-existing rows.
       openExposureUsd:
         typeof raw.openExposureUsd === 'number' && Number.isFinite(raw.openExposureUsd)
           ? raw.openExposureUsd

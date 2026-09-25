@@ -26,6 +26,16 @@ describe('setQuote', () => {
     const next = setQuote(state, newer, { now: fixedNow('2026-04-18T10:05:01.000Z') })
     expect(next.lastQuote?.price).toBe(11)
   })
+
+  it('rejects a non-positive or non-finite price (fail-closed)', () => {
+    const state = emptySymbolState('SOXL', fixedNow('2026-04-18T09:00:00.000Z'))
+    expect(() =>
+      setQuote(state, { ...quote, price: 0 }, { now: fixedNow('2026-04-18T10:00:02.000Z') }),
+    ).toThrow('Invalid quote.price')
+    expect(() =>
+      setQuote(state, { ...quote, price: NaN }, { now: fixedNow('2026-04-18T10:00:02.000Z') }),
+    ).toThrow('Invalid quote.price')
+  })
 })
 
 describe('isQuoteStale', () => {

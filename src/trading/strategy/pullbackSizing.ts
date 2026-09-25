@@ -3,9 +3,9 @@ import { resolveStopDistance } from './stopDistance'
 export interface PullbackSizingInput {
   /**
    * Risk-% sizing の母数となる口座資産。未指定/非有限/<=0 は risk-% branch を
-   * fail-closed させる (`capital-unset`) — 架空の baseline を当てると
-   * `total_capital_usd` 未設定の口座 (本番の VUG/ICLN 等) が実在しない資金に
-   * 対して実発注サイズを計算してしまう。budgetAllocPct モードでは未使用。
+   * `capital-unset` で fail-closed させる — 架空の baseline を当てると
+   * `total_capital_usd` 未設定の口座が実在しない資金に対してサイズを計算して
+   * しまう。budgetAllocPct モードでは未使用。
    */
   equity?: number
   entryPrice: number
@@ -17,23 +17,20 @@ export interface PullbackSizingInput {
   /** Optional symbol-specific absolute notional cap. */
   symbolCap?: number
   /**
-   * Per-symbol budget allocation fraction (0..1)。指定されると **fixed-% 配分モード**に
-   * なり risk-% / ATR floor を bypass して、**口座(円)単一プール**に対する割合で sizing
-   * する (#budget-jpy-base-fx)。
+   * Per-symbol budget allocation fraction (0..1)。指定すると risk-% / ATR floor
+   * を bypass し、口座(円)単一プールに対する割合で sizing する (fixed-% モード) —
+   * 高額レバ ETF は risk-% sizing だと小口座で 0 株になるため:
    *   targetSymbolCcy = (budgetBasisJpy * budgetAllocPct) / fxJpyPerSymbolCcy
    *   notional = min(targetSymbolCcy, symbolCap) → floor(/price) → lot
-   * 小口座で risk-% sizing が 0 株になる高額レバ ETF 用。NULL は従来の risk sizing。
+   * 未指定は従来の risk sizing。
    */
   budgetAllocPct?: number
-  /**
-   * 予算配分モードの基準額 = 口座総額 (円)。`total_capital_jpy` を流用。
-   * budgetAllocPct 指定時に必須 (finite>0 でなければ fail-closed)。
-   */
+  /** budgetAllocPct モードの基準額 = 口座総額 (円、`total_capital_jpy`)。指定時は finite>0 必須 (fail-closed)。 */
   budgetBasisJpy?: number
   /**
    * 1 単位の symbol 通貨 = 何円か (JPY 銘柄=1、USD 銘柄=USD/JPY レート)。
-   * budgetAllocPct 指定時に必須 (finite>0 でなければ fail-closed)。USD で FX 取得
-   * 失敗 (null) のときは呼び出し側が未指定にして fail-closed させる。
+   * budgetAllocPct 指定時は finite>0 必須。USD で FX 取得失敗時は呼び出し側が
+   * 未指定にして fail-closed させる。
    */
   fxJpyPerSymbolCcy?: number
   /** Risk fraction of NAV per trade. Default 0.004 (0.4%). */
@@ -53,9 +50,9 @@ export interface PullbackSizingInput {
    */
   kAtr: number
   /**
-   * Stop 幅の上限 = |entryPrice * takeProfitPct| * これ (#stop-rr-cap)。exit 側と
-   * **同じ式**で距離を出さないと「サイズを決めた stop」と「実際に切る stop」が
-   * ズレるので、strategy と共有の `resolveStopDistance` を使う。0 / 未指定で無効。
+   * Stop 幅の上限 = `|entryPrice * takeProfitPct| * maxStopToTpRatio`。exit 側と
+   * 同じ `resolveStopDistance` で算出しないとサイズを決めた stop とズレる。
+   * 0 / 未指定で無効。
    */
   maxStopToTpRatio?: number
   /** cap の基準となる利確幅 (正値)。未指定なら cap 無効。 */
@@ -73,19 +70,11 @@ export interface PullbackSizingResult {
     | 'insufficient-risk-budget'
     | 'lot-size-round'
     | 'capital-unset'
-  /**
-   * Diagnostic fields populated only when applicable per decision/reject route;
-   * may be undefined otherwise. These are diagnostic-only for debugging and
-   * help operators understand the reject reason.
-   * - `rawQuantity`: pre-lot-size quantity (shows how much short of 1 lot).
-   *   Filled on lot-size-round path and in successful sizing path.
-   * - `stopDistance`: max(kAtr * atr20, |entry * stopPct|).
-   *   Filled on invalid-stop, insufficient-risk-budget, lot-size-round, and successful paths.
-   * - `riskBudget`: equity * riskPerTradePct.
-   *   Filled on insufficient-risk-budget, lot-size-round, and successful paths.
-   */
+  /** Diagnostic-only, populated per reject route: pre-lot-size quantity. */
   rawQuantity?: number
+  /** Diagnostic-only: max(kAtr * atr20, |entry * stopPct|). */
   stopDistance?: number
+  /** Diagnostic-only: equity * riskPerTradePct. */
   riskBudget?: number
 }
 
@@ -109,15 +98,8 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
   let riskBudget: number | undefined
 
   if (input.budgetAllocPct !== undefined) {
-    // === fixed-% 予算配分モード (#budget-jpy-base-fx) ===
-    // 口座(円)単一プールに対する割合で sizing。risk-% / ATR floor は使わない。
-    //   targetSymbolCcy = (budgetBasisJpy * pct) / fxJpyPerSymbolCcy
-    //   notional = min(targetSymbolCcy, symbolCap)
-    // 小口座で高額レバ ETF を「口座の N%」で建てるための path。
-    //
-    // budgetAllocPct / budgetBasisJpy / fxJpyPerSymbolCcy のいずれかが不正なら
-    // **fail-closed (0 qty)**。risk-% へ fallback すると想定外サイジングになるため、
-    // また USD で FX 取得失敗 (fxJpyPerSymbolCcy 未指定/非有限) のときも発注しない。
+    // 不正な入力を risk-% へフォールバックすると想定外サイジングになるため
+    // fail-closed (0 qty) にする。
     if (!Number.isFinite(input.budgetAllocPct) || input.budgetAllocPct <= 0 || input.budgetAllocPct > 1) {
       return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
     }
@@ -140,7 +122,6 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
       return { quantity: 0, notional: 0, capped: true, capReason: 'insufficient-risk-budget' }
     }
     let target = targetSymbolCcy
-    // %優先・絶対上限は安全弁: min(換算後 target, symbolCap)。
     if (input.symbolCap !== undefined && target > input.symbolCap) {
       target = input.symbolCap
       capped = true
@@ -148,9 +129,8 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
     }
     quantity = Math.floor(target / input.entryPrice)
   } else {
-    // === 従来の risk-% sizing ===
-    // vol-adaptive: kAtr * atr20 (atr20=0 は pct stop が floor)、さらに
-    // R:R cap (#stop-rr-cap)。exit 判定と同一関数で算出する。
+    // strategy の exit 判定と同一関数で算出しないと、サイズを決めた stop と
+    // 実際に切る stop がズレる。
     stopDistance = resolveStopDistance({
       price: input.entryPrice,
       stopPct: input.stopPct,
@@ -193,17 +173,11 @@ export function computePullbackSizing(input: PullbackSizingInput): PullbackSizin
 
   let notional = quantity * input.entryPrice
 
-  // Exchange lot-size rounding (e.g. TSE 100-share lots). Must run AFTER all
-  // other caps so we don't round up back over symbolCap. If the round-down
-  // zeroes the qty, surface it explicitly so caller can reject rather than
-  // silently skip.
-  // Validate and normalize lotSize to a positive finite integer.
+  // symbolCap 適用後に丸めないと、lot 丸めで上に戻って cap を超えうる。
   let lotSize = input.lotSize ?? 1
   if (!Number.isFinite(lotSize) || !Number.isInteger(lotSize) || lotSize <= 0) {
     lotSize = 1
   }
-  // pre-lot-round を diagnostic 用に捕捉 (symbol-cap で clamp されていれば
-  // その clamp 後の qty、されていなければ rawQuantity と同じ)
   const preLotQuantity = quantity
   if (lotSize > 1) {
     const rounded = Math.floor(quantity / lotSize) * lotSize
