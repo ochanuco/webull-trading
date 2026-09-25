@@ -23,7 +23,6 @@ const baseInput = (): AllocationComputeInput => ({
 describe('computeConditionalAllocation (#452 Layer 3)', () => {
   it('issue #450 の設定例: 未通過のレバ枠が SGOV へ退避される', () => {
     const view = computeConditionalAllocation(baseInput())
-    // QQQ は ENTRY → target 維持。TQQQ/SOXL は未通過 → 0、SGOV へ +10%。
     expect(view.bySymbol.QQQ!.activeWeight).toBeCloseTo(0.2, 9)
     expect(view.bySymbol.TQQQ!.activeWeight).toBe(0)
     expect(view.bySymbol.TQQQ!.rerouteTo).toEqual(['SGOV'])
@@ -34,7 +33,6 @@ describe('computeConditionalAllocation (#452 Layer 3)', () => {
 
   it('always_active は判定 NG でも常時 target = active (cash_parking)', () => {
     const view = computeConditionalAllocation(baseInput())
-    // SGOV 自身の判定は NG だが always_active なので退避前で 0.7 を維持。
     expect(view.bySymbol.SGOV!.activeWeight).toBeGreaterThanOrEqual(0.7)
     expect(view.bySymbol.SGOV!.reason).toContain('always_active')
   })
@@ -110,7 +108,6 @@ describe('computeConditionalAllocation × 多分岐退避 (#496 等分割)', () 
       heldSymbols: new Set(),
       symbolCurrency: { AAPL: 'USD', SGOV: 'USD', USMV: 'USD', '1357': 'JPY' },
     })
-    // 設定 3 件で等分割 (各 0.2)。無効な 1357 の取り分は流れない = 合計 0.4 のみ退避
     expect(view.bySymbol.SGOV!.reroutedInWeight).toBeCloseTo(0.2)
     expect(view.bySymbol.USMV!.reroutedInWeight).toBeCloseTo(0.2)
     expect(view.bySymbol['1357']).toBeUndefined()
@@ -267,8 +264,7 @@ describe('buildCashFallbackSellPlan (#452 follow-up: demand-linked trim)', () =>
   })
 
   it('超過保有 + 需要ありで超過分を lot floor した SELL 計画になる', () => {
-    // current = 100株 * $100 * 150 = 1,500,000 JPY。excess = (1.5M-1.05M)/150
-    // = 3000 (株換算)。lot=7 で floor → floor(3000/100/7)*7 = 28。
+    // excess = (1.5M held − 1.05M desired) / fx150 = 3000 (株換算)。lot=7 で floor → 28。
     const plan = buildCashFallbackSellPlan(baseSellInput({ symbolLotSize: { SGOV: 7 } }))
     expect(plan.orders).toEqual([{ symbol: 'SGOV', quantity: 28, estimatedNotional: 2800 }])
   })

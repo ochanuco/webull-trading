@@ -21,8 +21,7 @@ describe('WebullExecution', () => {
         order_id: 'ord-123',
       }),
     }
-    // test 用に WebullTradeClient の `placeOrder` のみ実装した minimal mock を
-    // 型 cast で渡す。`isLiveTradingEnabled` getter は WebullExecution が読まないので不要。
+    // placeOrder のみ実装した minimal mock を型 cast で渡す (isLiveTradingEnabled は WebullExecution が読まない)
     const execution = new WebullExecution(
       client as unknown as ConstructorParameters<typeof WebullExecution>[0],
     )
@@ -40,8 +39,7 @@ describe('WebullExecution', () => {
     const client = {
       placeOrder: vi.fn().mockRejectedValue(new Error('network down')),
     }
-    // test 用に WebullTradeClient の `placeOrder` のみ実装した minimal mock を
-    // 型 cast で渡す。`isLiveTradingEnabled` getter は WebullExecution が読まないので不要。
+    // placeOrder のみ実装した minimal mock を型 cast で渡す (isLiveTradingEnabled は WebullExecution が読まない)
     const execution = new WebullExecution(
       client as unknown as ConstructorParameters<typeof WebullExecution>[0],
     )

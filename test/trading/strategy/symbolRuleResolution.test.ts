@@ -54,7 +54,6 @@ describe('momentum role (#momentum)', () => {
     expect(Object.keys(rules)).toEqual(['ICLN']) // momentum のみ
     expect(rules.ICLN!.stopPct).toBe(-0.03) // override 反映
     expect(rules.ICLN!.timeStopDays).toBe(4)
-    // override 無い項目は preset 既定。
     expect(rules.ICLN!.takeProfitPct).toBe(TEST_DEFAULT_MOMENTUM_RULE.takeProfitPct)
     expect(rules.ICLN!.breakoutBuffer).toBe(TEST_DEFAULT_MOMENTUM_RULE.breakoutBuffer)
   })
@@ -62,8 +61,6 @@ describe('momentum role (#momentum)', () => {
 
 describe('buildSymbolRules (#452)', () => {
   it('returns an empty map when no symbol has a role or override (regression: role NULL = 従来挙動)', () => {
-    // #452 受け入れ条件: 既存 SOXL/SOXS/TQQQ/SQQQ (role NULL・override なし) は
-    // rulesMap に現れず defaultRule がそのまま使われる = 挙動変更ゼロ。
     expect(buildSymbolRules(TEST_DEFAULT_RULE, emptyOverrides())).toEqual({})
   })
 
@@ -90,7 +87,7 @@ describe('buildSymbolRules (#452)', () => {
     expect(rules.TQQQ).toEqual(TEST_DEFAULT_RULE)
   })
 
-  it('core_trend role applies the looser non-leveraged preset', () => {
+  it('core_trend role applies the looser non-leveraged preset, exit fields untouched', () => {
     const overrides = emptyOverrides()
     overrides.symbolRole.QQQ = 'core_trend'
     const rules = buildSymbolRules(TEST_DEFAULT_RULE, overrides)
@@ -98,7 +95,6 @@ describe('buildSymbolRules (#452)', () => {
       ...TEST_DEFAULT_RULE,
       ...ROLE_RULE_PRESETS.core_trend,
     })
-    // preset は entry 系のみ — exit 系 (stop/TP/time-stop/kAtr) は global のまま。
     expect(rules.QQQ!.stopPct).toBe(TEST_DEFAULT_RULE.stopPct)
     expect(rules.QQQ!.takeProfitPct).toBe(TEST_DEFAULT_RULE.takeProfitPct)
     expect(rules.QQQ!.timeStopDays).toBe(TEST_DEFAULT_RULE.timeStopDays)
@@ -110,10 +106,8 @@ describe('buildSymbolRules (#452)', () => {
     overrides.symbolMinReturn50dOverride.QQQ = 0.02
     overrides.symbolMaxAtrRatioOverride.QQQ = 2.0
     const rules = buildSymbolRules(TEST_DEFAULT_RULE, overrides)
-    // override 指定: per-symbol 値が勝つ
     expect(rules.QQQ!.minReturn50d).toBe(0.02)
     expect(rules.QQQ!.maxAtrRatio).toBe(2.0)
-    // override 未指定: preset が global に勝つ
     expect(rules.QQQ!.pullbackMax).toBe(ROLE_RULE_PRESETS.core_trend!.pullbackMax)
     expect(rules.QQQ!.maxSma50DeviationPct).toBe(ROLE_RULE_PRESETS.core_trend!.maxSma50DeviationPct)
   })
@@ -195,7 +189,6 @@ describe('role presets for low_volatility / sector_trend / inverse_hedge (#457)'
     expect(rules.SMH!.pullbackMax).toBe(-0.02)
     expect(rules.SMH!.pullbackMin).toBe(-0.05)
     expect(rules.SMH!.maxSma50DeviationPct).toBe(0.3)
-    // exit 据え置き (issue #457: 変更点を entry 4 つに絞る)
     expect(rules.SMH!.stopPct).toBe(TEST_DEFAULT_RULE.stopPct)
     expect(rules.SMH!.takeProfitPct).toBe(TEST_DEFAULT_RULE.takeProfitPct)
     expect(rules.SMH!.timeStopDays).toBe(TEST_DEFAULT_RULE.timeStopDays)

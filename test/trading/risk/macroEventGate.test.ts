@@ -10,18 +10,7 @@ import type {
 } from '../../../src/infrastructure/calendar/macroEventCalendarRepo'
 import type { MacroEventCalendarRow } from '../../../src/infrastructure/db/schema'
 
-/**
- * Tests for the macro event gate (#196 2/3)。
- *
- * 観点:
- *   - event_time 指定: 発表前 1h / 発表後 6h 内 reject、外 approve (default)
- *   - event_time NULL: 当日全日 reject (default)
- *   - 範囲外 → approve
- *   - DB 失敗 → fail-closed reject
- *   - SELL は常に approve (撤退路を妨げない)
- *   - 不正 timestamp → fail-closed reject
- *   - 不正 event_time row → fail-closed reject (silent fail-open 防止)
- */
+// Macro event gate (#196 2/3): SELL は常に approve (撤退路を妨げない)
 
 const baseConfig: MacroEventGateConfig = { ...DEFAULT_MACRO_GATE_CONFIG }
 
@@ -146,8 +135,7 @@ describe('evaluateMacroEventGate — event_time specified', () => {
   })
 
   it('approves >6h after event (outside default freezeHoursAfter=6)', async () => {
-    // NFP 08:30 ET (EDT) = 12:30 UTC、6h+1min 後 = 18:31 UTC は default 6h を
-    // 超えるので approve。
+    // NFP 08:30 ET = 12:30 UTC, 6h+1min 後 = 18:31 UTC
     const repo = fakeRepo([row('NFP', '2026-06-05', '08:30')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-06-05T18:31:00.000Z', side: 'BUY' },
@@ -169,7 +157,6 @@ describe('evaluateMacroEventGate — event_time specified', () => {
   })
 
   it('approves 90min after event when freezeHoursAfter=1 override', async () => {
-    // default は 6h だが、explicit 1h override で 90 分後は window 外。
     const repo = fakeRepo([row('NFP', '2026-06-05', '08:30')])
     // 10:00 ET (EDT) = 14:00 UTC
     const decision = await evaluateMacroEventGate(
@@ -207,7 +194,6 @@ describe('evaluateMacroEventGate — event_time specified', () => {
 
 describe('evaluateMacroEventGate — event_time NULL (full-day fallback)', () => {
   it('rejects on the event day when event_time is NULL and freezeFullDay=true', async () => {
-    // ET の評価日が event_date と一致 → 全日凍結
     // 2026-07-01 12:00 UTC = 2026-07-01 08:00 EDT
     const repo = fakeRepo([row('GDP', '2026-07-01', null)])
     const decision = await evaluateMacroEventGate(
@@ -225,8 +211,7 @@ describe('evaluateMacroEventGate — event_time NULL (full-day fallback)', () =>
   })
 
   it('approves NULL-time event one ET day before', async () => {
-    // 2026-06-30 23:00 ET ≠ 2026-07-01。ET YMD で別日扱い。
-    // 2026-07-01 02:59:59 UTC = 2026-06-30 22:59:59 EDT
+    // 2026-07-01 02:59:59 UTC = 2026-06-30 22:59:59 EDT — ET YMD で判定するので別日扱い
     const repo = fakeRepo([row('GDP', '2026-07-01', null)])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-07-01T02:59:59.000Z', side: 'BUY' },
@@ -289,9 +274,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects when calendar row has invalid event_time (silent fail-open prevention)', async () => {
-    // event_time が `HH:MM` 規格を満たさない row は parse できない。
-    // continue (silent skip) すると当該 event だけ BUY 素通り = fail-open に
-    // なるため、fail-closed で reject させる。
+    // continue (silent skip) だと当該 event だけ BUY 素通りになるため fail-closed で reject する
     const repo = fakeRepo([row('CPI', '2026-06-12', 'invalid-time')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-06-12T12:30:00.000Z', side: 'BUY' },
@@ -321,9 +304,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects nonexistent calendar date 2026-02-30 (round-trip validation)', async () => {
-    // JS Date は 2026-02-30 を 2026-03-02 に silent normalize するため、
-    // 形式チェック + Date.parse だけでは fail-open する。round-trip 比較で
-    // 実在しない暦日を弾くことを保証する。
+    // JS Date は 2026-02-30 を 2026-03-02 に silent normalize するため、Date.parse だけでは fail-open する
     const repo = fakeRepo([row('CPI', '2026-02-30', '08:30')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-02-28T13:30:00.000Z', side: 'BUY' },
@@ -336,8 +317,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects nonexistent month 2026-13-01 (round-trip validation)', async () => {
-    // 月 > 12 を弾く (13 月は normalize で翌年 1 月になる)。
-    // fakeRepo の date filter を回避するため、malformed row を必ず返す repo を使う。
+    // 13 月は normalize で翌年 1 月になる — fakeRepo の date filter を回避するため malformed row を必ず返す repo を使う
     const malformedRow = row('FOMC', '2026-13-01', '14:00')
     const repo: MacroEventCalendarRepo = {
       async fetchByDateRange() {
@@ -364,7 +344,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects nonexistent day 2026-04-31 (round-trip validation)', async () => {
-    // 4 月 31 日は存在しない (normalize で 5/1)。round-trip で reject されること。
+    // normalize で 5/1 になる
     const repo = fakeRepo([row('NFP', '2026-04-31', '08:30')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-04-30T13:00:00.000Z', side: 'BUY' },
@@ -377,8 +357,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects out-of-range hour "25:00" (range validation)', async () => {
-    // 24h 超の hour は range check で reject (Date.parse は 25:00 を翌日 01:00
-    // に normalize して通してしまう)。
+    // Date.parse は 25:00 を翌日 01:00 に normalize して通してしまうため range check で reject する
     const repo = fakeRepo([row('CPI', '2026-06-12', '25:00')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-06-12T12:30:00.000Z', side: 'BUY' },
@@ -404,9 +383,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects event_time=NULL with nonexistent date 2026-02-30 (full-day branch round-trip)', async () => {
-    // event_time NULL 経路は単純文字列一致しか見ないため、`2026-02-30` のような
-    // 実在しない暦日が DB に入っていると一致せず silent pass = fail-open する。
-    // ループ先頭の `isStrictYmd` で reject されることを保証。
+    // NULL 経路は単純文字列一致のため、malformed な暦日でも一致せず silent pass = fail-open しうる
     const malformedRow = row('GDP', '2026-02-30', null)
     const repo: MacroEventCalendarRepo = {
       async fetchByDateRange() {
@@ -438,7 +415,6 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects event_time=NULL with nonexistent month 2026-13-01 (full-day branch round-trip)', async () => {
-    // 月 > 12 の row が full-day freeze 経路で素通りしないことを保証。
     const malformedRow = row('FOMC', '2026-13-01', null)
     const repo: MacroEventCalendarRepo = {
       async fetchByDateRange() {
@@ -465,7 +441,6 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
   })
 
   it('rejects event_time=NULL with nonexistent day 2026-04-31 (full-day branch round-trip)', async () => {
-    // 4 月 31 日は存在しない (normalize で 5/1)。round-trip で reject されること。
     const malformedRow = row('NFP', '2026-04-31', null)
     const repo: MacroEventCalendarRepo = {
       async fetchByDateRange() {
@@ -494,8 +469,7 @@ describe('evaluateMacroEventGate — fail-closed paths', () => {
 
 describe('evaluateMacroEventGate — config sanitisation', () => {
   it('clamps negative freezeHoursBefore/After to defaults (1h/6h)', async () => {
-    // negative → defaults (before=1h, after=6h)。FOMC 14:00 ET、before=1h で
-    // 13:30 ET (= 17:30 UTC) は window 内 (-1h ≤ delta ≤ +6h) なので reject されるはず。
+    // FOMC 14:00 ET、eval 13:30 ET (17:30 UTC) は before=1h の window 内 (-1h ≤ delta ≤ +6h)
     const repo = fakeRepo([row('FOMC', '2026-06-17', '14:00')])
     const decision = await evaluateMacroEventGate(
       { evalTimestamp: '2026-06-17T17:30:00.000Z', side: 'BUY' },

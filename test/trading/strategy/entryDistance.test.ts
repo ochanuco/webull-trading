@@ -10,8 +10,7 @@ import {
   type PullbackIndicators,
 } from '../../../src/trading/strategy/strategies/PullbackUptrendStrategy'
 
-// TEST_DEFAULT_RULE: minReturn50d 0.08 / requireAboveSma50 true /
-// maxSma50DeviationPct 0.6 / maxAtrRatio 1.5 / pullbackMax -0.03 / pullbackMin -0.06
+// minReturn50d 0.08 / requireAboveSma50 true / maxSma50DeviationPct 0.6 / maxAtrRatio 1.5 / pullbackMax -0.03 / pullbackMin -0.06
 const RULE = TEST_DEFAULT_RULE
 
 function ind(overrides: Partial<PullbackIndicators>): PullbackIndicators {
@@ -67,17 +66,14 @@ describe('computeEntryDistance', () => {
   })
 
   it('過熱と押し目 band が両立しない → binding=overextension、entryPrice null', () => {
-    // sma50 50 / high20d 100: band [94,97] だが過熱上限は 50*1.6=80。
-    // 価格で同時成立できないので「価格を動かすだけでは入場不可」。
+    // band [94,97] だが過熱上限は 50*1.6=80 → 両立不可
     const d = computeEntryDistance(ind({ sma50: 50, price: 95, high20d: 100 }), RULE)
     expect(d.bindingGate?.key).toBe('overextension')
     expect(d.entryPrice).toBeNull()
   })
 
   it('過熱が上限を価格距離として制約する (band 上端 > 過熱上限のとき過熱上限を採る)', () => {
-    // sma50 95, high20d 100: band [94,97]、過熱上限 95*(1+0.05)=99.75 (緩めた rule)。
-    // ここでは過熱が緩いので band 上端 97 が entry。過熱が band 内に食い込むケースを
-    // 作るため maxSma50DeviationPct を絞る。
+    // band [94,97] に過熱上限を食い込ませるため maxSma50DeviationPct を絞る
     const tightRule = { ...RULE, maxSma50DeviationPct: 0.005 } // 上限 95*1.005=95.475
     const d = computeEntryDistance(ind({ sma50: 95, price: 99, high20d: 100 }), tightRule)
     // band [94,97] ∩ (>95) ∩ (<=95.475) = [95, 95.475] → 現価格99 に最も近い点 95.475

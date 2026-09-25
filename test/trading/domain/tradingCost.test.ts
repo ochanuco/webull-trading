@@ -50,8 +50,6 @@ describe('netRealizedPnl', () => {
     expect(r.net).toBe(15)
   })
 
-  // 本番実測 (SQQQ 5 株 @40.775 → 42.9401、gross +10.83)。往復 0.22% だと
-  // コストは約 0.92 で、勝ち幅の 8% 相当が消える。
   it('実測トレードで gross から往復コストを引く', () => {
     const r = netRealizedPnl({
       avgPrice: 40.775,

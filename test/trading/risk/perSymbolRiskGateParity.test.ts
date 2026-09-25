@@ -36,8 +36,7 @@ const riskConfig: PerSymbolRiskConfig = {
 }
 
 function uptrendBars(): DailyBar[] {
-  // #318: 20d return + 10d high で BUY 成立する形状。
-  // closes[-20] ≈ 108 (bar 40)、last = 117.5、20d return ≈ +8.8% (> +8% threshold)。
+  // #318: closes[-20] ≈ 108, last = 117.5 → 20d return ≈ +8.8% (> +8% threshold, BUY 成立)
   const bars: DailyBar[] = []
   for (let i = 0; i < 40; i += 1) bars.push(synth(i, 100 + i * 0.2))
   for (let i = 40; i < 55; i += 1) bars.push(synth(i, 108 + (i - 40) * 1.0))
@@ -99,12 +98,6 @@ function mockExecution(): Execution & { calls: unknown[] } {
 }
 
 describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) — #138', () => {
-  // 各シナリオで:
-  //   1. pure helper の判定
-  //   2. TradingService.executeTrade() の `riskDecision`
-  //   3. runPullbackScheduler の SKIP decision
-  // が同じ reason で reject (or 同じく approve) することを確認する。
-
   const tradingConfig: TradingConfig = {
     dryRun: true,
     tradingEnabled: true,
@@ -225,9 +218,7 @@ describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) �
   })
 
   it('SELL passes the stale-quote gate (exit priority — TradingService)', async () => {
-    // Anchors the SOXL stop-hit bug: SELL must NOT be blocked by stale lastQuote.
-    // (cron path drives BUY-only via runPullbackScheduler, so this assertion is
-    // limited to TradingService — the manual / liquidate / exit code path.)
+    // no cron leg here: runPullbackScheduler only drives BUY, so this is TradingService-only
     const state: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 1, avgPrice: 124.95, openedAt: now.toISOString() },

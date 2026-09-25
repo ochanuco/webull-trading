@@ -86,17 +86,14 @@ describe('syncHoldings internals', () => {
     expect(_internal.parseBrokerQty({ available_quantity: 'banana' })).toBeNull()
   })
 
-  // #251 / #252: 新 docs (account-position) は `cost_price`、旧 SDK は `avg_cost`。
-  // defensive parser は新→旧の順、両方無ければ null。
+  // #251 / #252: 新 docs (account-position) は `cost_price`、旧 SDK は `avg_cost`
   it('parseBrokerAvg prefers new cost_price over legacy avg_cost', () => {
     expect(_internal.parseBrokerAvg(undefined)).toBeNull()
     expect(_internal.parseBrokerAvg({ cost_price: '124.95' })).toBe(124.95)
     expect(_internal.parseBrokerAvg({ avg_cost: '100.00' })).toBe(100)
-    // 両方ある場合は new (cost_price) 優先
     expect(_internal.parseBrokerAvg({ cost_price: '124.95', avg_cost: '100.00' })).toBe(124.95)
     // 新名前が空文字 / null の場合は旧名前にフォールバック
     expect(_internal.parseBrokerAvg({ cost_price: '', avg_cost: '100.00' })).toBe(100)
-    // 数値化できない値は null
     expect(_internal.parseBrokerAvg({ cost_price: 'banana' })).toBeNull()
     expect(_internal.parseBrokerAvg({})).toBeNull()
   })
@@ -150,7 +147,6 @@ describe('syncHoldings', () => {
       MSFT: { qty: 5, avgPrice: 410, openedAt: '2026-04-21T00:00:00.000Z' },
       NVDA: { qty: 2, avgPrice: 900, openedAt: '2026-04-22T00:00:00.000Z' },
     })
-    // Wrap NVDA's getState to throw — exercises the per-symbol error path.
     const realGetState = store.getState
     store.getState = async (symbol: string) => {
       if (symbol === 'NVDA') throw new Error('DO unreachable')
@@ -163,8 +159,8 @@ describe('syncHoldings', () => {
         fetchPositions: async () => [
           brokerPosition('SOXL', '4', '125.50'),
           brokerPosition('MSFT', '5', '410'),
-          // AAPL omitted = not held on broker; DO already null → no_drift
-          // NVDA throws via getState wrapper above
+          // AAPL/NVDA omitted: AAPL not held on broker (DO already null → no_drift);
+          // NVDA is exercised via the getState wrapper above instead
         ],
         positionStore: store,
       },
@@ -190,11 +186,9 @@ describe('syncHoldings', () => {
     // NVDA: error
     expect(result.errors).toEqual([{ symbol: 'NVDA', error: 'DO unreachable' }])
 
-    // Summary
     expect(result.summary).toEqual({ total: 4, synced: 1, no_drift: 2, errors: 1 })
     expect(result.dryRun).toBe(false)
 
-    // Only SOXL was written; AAPL/MSFT untouched.
     expect(overrides).toHaveLength(1)
     expect(overrides[0]!.symbol).toBe('SOXL')
     expect(overrides[0]!.args.qty).toBe(4)
@@ -257,13 +251,13 @@ describe('syncHoldings', () => {
     const { store, overrides } = createFakeStore({
       SOXL: { qty: 4, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
     })
-    // PR #222 follow-up: this destructive zero-out now requires force=true.
-    // The bare-call equivalent is covered by the safe-fail guard tests above.
+    // destructive zero-out requires force=true (#222); bare-call case covered by the safe-fail
+    // guard tests above
     const result = await syncHoldings(
       { dryRun: false, force: true, requestId: 'req-4' },
       {
         allowedSymbols: ['SOXL'],
-        // Webull omits zero-qty rows entirely.
+        // Webull omits zero-qty rows entirely
         fetchPositions: async () => [],
         positionStore: store,
       },
@@ -297,9 +291,8 @@ describe('syncHoldings', () => {
     const { store, overrides } = createFakeStore({
       SOXL: { qty: 4, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
     })
-    // Broker explicitly reports qty=0 (vs. omitting the row). Either way the
-    // safe-fail guard sees "no usable broker qty + DO has positions" and
-    // requires force=true to proceed with the destructive zero-out.
+    // explicit qty=0 vs. omitted row: either way the guard sees "no usable broker qty +
+    // DO has positions" and requires force=true
     const result = await syncHoldings(
       { dryRun: false, force: true, requestId: 'req-6' },
       {
@@ -343,7 +336,6 @@ describe('syncHoldings', () => {
       { dryRun: false, requestId: 'req-8' },
       {
         allowedSymbols: ['SOXL'],
-        // No avg_cost on the broker row — fallback to DO 124.95.
         fetchPositions: async () => [brokerPosition('SOXL', '4')],
         positionStore: store,
       },
@@ -353,7 +345,6 @@ describe('syncHoldings', () => {
   })
 
   it('errors when broker has shares but no avg available from any source', async () => {
-    // DO row missing AND broker avg_cost missing → cannot synthesize avg
     const { store, overrides } = createFakeStore({ SOXL: null })
     const result = await syncHoldings(
       { dryRun: false, requestId: 'req-9' },
@@ -370,15 +361,8 @@ describe('syncHoldings', () => {
     expect(result.errors[0]!.error).toMatch(/cannot determine avgPrice/)
   })
 
-  /**
-   * Safe-fail guard: PR #222 follow-up. The bug being defended against was
-   * a broker getPositions response that returned all 14 universe symbols
-   * with `available_quantity: null` (UAT auth glitch), which sync-holdings
-   * happily interpreted as "broker has nothing → zero out the DO". That
-   * destroyed real DO rows (SOXL qty=8, AAPL qty=1). The guard refuses the
-   * write when broker has zero usable rows AND DO has any qty>0 row;
-   * `force=true` is the operator escape hatch for genuine liquidations.
-   */
+  // Safe-fail guard (#222): refuses the write when broker has zero usable rows AND DO has any
+  // qty>0 row; force=true is the operator escape hatch for genuine liquidations.
   describe('safe-fail guard (broker empty + DO non-empty)', () => {
     it('aborts with safe-fail error when broker returns no qty and DO has positions (force=false, dryRun=false)', async () => {
       const { store, overrides } = createFakeStore({
@@ -389,7 +373,6 @@ describe('syncHoldings', () => {
         { dryRun: false, requestId: 'req-safe-1' },
         {
           allowedSymbols: ['SOXL', 'AAPL'],
-          // Broker returns nothing — the bug pattern.
           fetchPositions: async () => [],
           positionStore: store,
         },
@@ -406,8 +389,7 @@ describe('syncHoldings', () => {
     })
 
     it('also triggers when broker returns rows but every available_quantity is null', async () => {
-      // Mirrors the actual incident: 14 symbols returned but `available_quantity: null`
-      // on every row. The guard treats that the same as "no rows".
+      // the guard treats an all-null-quantity response the same as "no rows"
       const { store, overrides } = createFakeStore({
         SOXL: { qty: 8, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
       })
@@ -465,7 +447,6 @@ describe('syncHoldings', () => {
           positionStore: store,
         },
       )
-      // Guard does NOT trigger — no DO position to protect.
       expect(overrides).toEqual([])
       expect(result.errors).toEqual([])
       expect(result.synced.every((r) => r.skipped === 'no_drift')).toBe(true)
@@ -481,13 +462,11 @@ describe('syncHoldings', () => {
         { dryRun: false, requestId: 'req-safe-4' },
         {
           allowedSymbols: ['SOXL', 'AAPL'],
-          // SOXL has qty (broker partly works), AAPL omitted (zero-out is real).
+          // AAPL omitted (its zero-out is real, distinct from the guard's "empty response" case)
           fetchPositions: async () => [brokerPosition('SOXL', '4', '125.50')],
           positionStore: store,
         },
       )
-      // Guard does NOT trigger because broker reported at least one qty>0.
-      // SOXL drifts 8 → 4 (write), AAPL DO 1 → 0 (write).
       expect(overrides).toHaveLength(2)
       const byName = new Map(overrides.map((o) => [o.symbol, o]))
       expect(byName.get('SOXL')!.args.qty).toBe(4)
@@ -507,13 +486,12 @@ describe('syncHoldings', () => {
           positionStore: store,
         },
       )
-      // dryRun is non-destructive, so we still emit the diff for inspection.
       expect(overrides).toEqual([])
       expect(result.synced).toHaveLength(1)
       expect(result.synced[0]!.skipped).toBe('dry_run')
       expect(result.synced[0]!.before?.qty).toBe(8)
       expect(result.synced[0]!.after).toBeNull()
-      // Warning communicates "the live call would refuse this".
+      // warns that the live call would refuse this
       expect(result.warnings).toEqual(['broker_returned_empty_diff_suspicious'])
       expect(result.errors).toEqual([])
       expect(result.dryRun).toBe(true)
@@ -535,8 +513,6 @@ describe('syncHoldings', () => {
       expect(result.synced).toHaveLength(1)
       expect(result.synced[0]!.skipped).toBe('dry_run')
       expect(result.synced[0]!.after).toBeNull()
-      // force=true means the operator already opted into the destructive
-      // zero-out, so the "suspicious" warning is silenced.
       expect(result.warnings).toBeUndefined()
       expect(result.errors).toEqual([])
       expect(result.dryRun).toBe(true)
@@ -577,8 +553,7 @@ describe('syncHoldings', () => {
 
     it('stale {qty:0} DO row does NOT count as "DO has positions" (guard not triggered)', async () => {
       const { store, overrides } = createFakeStore({
-        // Edge case: DO has a position record but qty=0 (already closed).
-        // Zeroing it again is a no-op, not destructive — guard should let it through.
+        // qty=0 is already closed, so re-zeroing it is a no-op, not destructive
         SOXL: { qty: 0, avgPrice: 124.95, openedAt: '2026-04-20T00:00:00.000Z' },
       })
       const result = await syncHoldings(
@@ -589,7 +564,6 @@ describe('syncHoldings', () => {
           positionStore: store,
         },
       )
-      // No safe-fail error; symbol is just no-drift (DO=0, broker=0).
       expect(overrides).toEqual([])
       expect(result.errors).toEqual([])
       expect(result.synced[0]!.skipped).toBe('no_drift')
@@ -604,7 +578,6 @@ describe('syncHoldings', () => {
       { dryRun: false, requestId: 'req-10' },
       {
         allowedSymbols: ['SOXL'],
-        // Lowercase broker symbol — should still match SOXL.
         fetchPositions: async () => [brokerPosition('soxl', '4', '125')],
         positionStore: store,
       },

@@ -31,8 +31,8 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
 
 // 2026-05-20 (Wed, US トレーディング日、非祝日) の NYSE open = 13:30 UTC (EDT)。
 const OPEN_UTC = new Date('2026-05-20T13:30:00.000Z')
-const IN_WINDOW_NOW = new Date(OPEN_UTC.getTime() - 30 * 60 * 1000) // open-30分
-const AFTER_OPEN_NOW = new Date(OPEN_UTC.getTime() + 10 * 60 * 1000) // open+10分
+const IN_WINDOW_NOW = new Date(OPEN_UTC.getTime() - 30 * 60 * 1000)
+const AFTER_OPEN_NOW = new Date(OPEN_UTC.getTime() + 10 * 60 * 1000)
 const WEEKEND_NOW = new Date('2026-05-23T13:00:00.000Z') // Sat
 
 describe('runExtendedHoursObservation — opt-in gate', () => {
@@ -231,6 +231,6 @@ describe('assessPreMarket — status 判定 (pure)', () => {
       }),
       now: NOW,
     })
-    expect(result.direction15mPct).toBeCloseTo(4, 5) // (104-100)/100*100
+    expect(result.direction15mPct).toBeCloseTo(4, 5)
   })
 })

@@ -98,8 +98,7 @@ describe('TradingService inverse-pair correlation cap', () => {
       },
     })
     const result = await service(store, { SOXL: 'SOXS', SOXS: 'SOXL' }).executeTrade(sellInput, config)
-    // SELL signals with no position still fail at RiskPolicy for DefaultRiskPolicy,
-    // but the reason must NOT be the inverse-pair correlation reason.
+    // no-position SELL still fails at DefaultRiskPolicy, so assert on the reason not on allowed
     expect(result.riskDecision.reasons.some((r) => r.includes('inverse-pair'))).toBe(false)
   })
 })
