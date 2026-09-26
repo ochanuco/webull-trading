@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createApp } from '../../src/app'
 
-// universe ロードは DB 無しで null fallback するので mock 不要 (UI は AAPL
-// control のみで描画される)。このテストは #461 のカード UI の存在確認。
+// universe ロードは DB 無しで null fallback するため mock 不要 (UI は AAPL control のみで描画)
 const baseEnv = { ACCESS_DEV_BYPASS_USER: 'admin' }
 
 describe('/dashboard/broker-probe カード UI (#461)', () => {
@@ -13,7 +12,6 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     const body = await res.text()
     expect(body).toContain('Webull 取扱')
     expect(body).toContain('id="bp-instrument-pill"')
-    // quote / 買付余力カード
     expect(body).toContain('id="bp-quote-pill"')
     expect(body).toContain('id="bp-yahoo-pill"')
     expect(body).toContain('id="probe-buying-power"')
@@ -37,7 +35,6 @@ describe('/dashboard/broker-probe カード UI (#461)', () => {
     expect(body).toContain('id="probe-preview-check"')
     expect(body).toContain('発注なし')
     expect(body).toContain('previewVariants')
-    // chip クリックは選択のみ (setSelection)、通信は submit ボタンから
     expect(body).toContain('function setSelection(')
     expect(body).toMatch(/data-symbol="AAPL" data-category="US_STOCK"/)
   })

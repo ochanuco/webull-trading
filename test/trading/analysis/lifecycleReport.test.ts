@@ -6,10 +6,6 @@ import {
   type LifecycleBarClient,
 } from '../../../src/trading/analysis/lifecycleReport'
 
-/**
- * D1 の prepare(sql) を SQL 文字列で dispatch する fake。
- * `test/routes/dashboardChartMarkers.test.ts` の `fakeChartDb` と同じ流儀。
- */
 function fakeDb(tables: {
   fills?: unknown[]
   sellReasons?: unknown[]
@@ -172,8 +168,7 @@ describe('loadLifecycleReport', () => {
 
     expect(report.meta.barFetchFailedSymbols).toEqual(['FAILSYM'])
     expect(report.meta.roundTripCount).toBe(1)
-    // reason が join できない (UNKNOWN) round trip の exitReasonStats は
-    // realizedPnl があれば集計される (bar 取得失敗とは独立)。
+    // exitReasonStats の集計は realizedPnl 依存で、bar 取得失敗とは独立
     expect(report.exitReasonStats).toEqual([
       {
         category: 'UNKNOWN',
@@ -209,8 +204,6 @@ describe('loadLifecycleReport', () => {
         estimated_cost: null,
         client_order_id: 'buy-1',
       },
-      // 以下 3 行は不正値 (qty null / price 0 / qty 負) — fillCount にも
-      // turnover にも入らないこと
       {
         timestamp: '2026-06-02T14:00:00.000Z',
         symbol: 'SOXL',

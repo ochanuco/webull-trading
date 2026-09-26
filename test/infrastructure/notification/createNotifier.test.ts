@@ -45,7 +45,6 @@ describe('createNotifier', () => {
     expect(n).toBeInstanceOf(WebhookNotifier)
   })
 
-  // #141: env.DB あり = LoggingNotifier で wrap される (D1 ログ用)
   it('returns LoggingNotifier wrapping NoopNotifier when only DB is bound (#141)', () => {
     const n = createNotifier(makeEnv({ DB: {} as D1Database }))
     expect(n).toBeInstanceOf(LoggingNotifier)

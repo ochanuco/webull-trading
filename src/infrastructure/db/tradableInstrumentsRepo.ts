@@ -5,22 +5,20 @@ import type { TradableInstrumentEntry } from '../webull/tradableInstruments'
 import { tradableInstrument, type TradableInstrumentRow } from './schema'
 
 /**
- * tradable_instrument allowlist の読み書き (#460)。
- *
- * 設計の肝は **物理削除しない upsert**: 日次 sweep で消えた銘柄は
- * `currentlyTradable=false` に倒すだけで行は残す ([[schema.ts]] の table コメント
- * 参照)。これにより運用中銘柄の追跡が壊れず、`true→false` 遷移を監視できる。
+ * Read/write for the `tradable_instrument` allowlist. Never hard-deletes: a
+ * symbol missing from a daily sweep is flipped to `currentlyTradable=false`
+ * and the row kept, so `true→false` transitions stay observable instead of
+ * vanishing from history.
  */
 
 export type TradableDb = DrizzleD1Database<Record<string, never>>
 
-/** 銘柄の allowlist 突合結果。 */
 export type TradableStatus =
-  /** 直近 sweep で tradable/list に在籍。OpenAPI 発注可。 */
+  /** Present in the most recent sweep — order-eligible on the broker. */
   | 'tradable'
-  /** 過去は在籍したが直近 sweep で消失。取扱停止された可能性。 */
+  /** Was present, missing from the most recent sweep — may be delisted. */
   | 'disappeared'
-  /** allowlist に一度も観測されていない。OpenAPI で発注できない可能性。 */
+  /** Never observed in the allowlist — may be unorderable on the broker. */
   | 'unknown'
 
 interface TradableAllowlistEntry {
@@ -31,17 +29,14 @@ interface TradableAllowlistEntry {
   lastSeenAt: string | null
 }
 
-/** symbol(大文字) → allowlist エントリ の lookup map。 */
+/** symbol (uppercase) → allowlist entry. */
 export type TradableAllowlist = Map<string, TradableAllowlistEntry>
 
 function rowStatus(row: TradableInstrumentRow): TradableStatus {
   return row.currentlyTradable ? 'tradable' : 'disappeared'
 }
 
-/**
- * allowlist 全件を map で返す。dashboard (フォーム / 一覧 / ワークフロー) の突合に
- * 使う。row が無い symbol を引いたら 'unknown' (= 取扱対象外の可能性) 扱い。
- */
+/** Loads the full allowlist for dashboard form/list/workflow lookups. */
 export async function loadTradableAllowlist(db: TradableDb): Promise<TradableAllowlist> {
   const rows = await db.select().from(tradableInstrument)
   const map: TradableAllowlist = new Map()
@@ -57,12 +52,11 @@ export async function loadTradableAllowlist(db: TradableDb): Promise<TradableAll
   return map
 }
 
-/** map から 1 銘柄の status を引く (row 無し → 'unknown')。 */
 export function lookupTradableStatus(allowlist: TradableAllowlist, symbol: string): TradableStatus {
   return allowlist.get(symbol.trim().toUpperCase())?.status ?? 'unknown'
 }
 
-/** D1 から 1 銘柄の allowlist status を引く (form のライブチェック用。row 無し → 'unknown')。 */
+/** Live per-symbol D1 lookup for the admin form's inline status check. */
 export async function getTradableStatusForSymbol(
   db: TradableDb,
   symbol: string,
@@ -78,33 +72,32 @@ export async function getTradableStatusForSymbol(
 }
 
 export interface RefreshTradableResult {
-  /** 今回 tradable として upsert した件数。 */
   upserted: number
-  /** true→false に倒した (今回消失) 件数。 */
   disappeared: number
-  /** 消失と判定した symbol (監視通知用、最大数件想定)。 */
+  /** Symbols newly marked disappeared, for the monitoring notifier. */
   disappearedSymbols: string[]
-  /** sweep が完走 (complete=true) して消失判定まで行ったか。 */
+  /** True only when the sweep completed and disappearance was evaluated. */
   appliedDisappearance: boolean
 }
 
-// D1 は 1 文あたり束縛変数 ~100 個まで。1 行 9 列なので 1 chunk = 10 行に抑える。
+// D1 caps bound params at ~100/statement; 9 columns/row → 10 rows/chunk.
 const UPSERT_CHUNK = 10
-// db.batch にまとめる文数の上限 (round-trip 削減)。
+// Statements per db.batch() call, to cut round-trips.
 const BATCH_STMTS = 40
-// inArray の IN 句に積む symbol 数の上限。
+// Symbols per inArray() IN clause.
 const IN_CHUNK = 80
 
 /**
- * 取得できた 1 ページ分 (または任意件数) の銘柄を `currentlyTradable=true` で
- * bulk upsert する (#460)。`firstSeenAt` は **conflict 時に更新しない** ので
- * 初回観測時刻が保持される。多数行を per-row await せず chunk + `db.batch` で
- * 数往復に畳む (4957 件の per-row 書き込みは遅すぎるため)。
+ * Bulk-upserts a page of symbols as `currentlyTradable=true`. `firstSeenAt`
+ * is left untouched on conflict, so it keeps the original observation time.
+ * Writes are chunked through `db.batch` instead of per-row awaits, since a
+ * full sweep is too many rows for that to stay fast.
  *
- * `watermarkIso` は **その sweep を識別する単調増加タイムスタンプ** で、seen 行の
- * `lastSeenAt` に書く。分割 sweep (チャンク) では全チャンクで同じ watermark を
- * 使い、最後に {@link finalizeTradableDisappearance} が「この watermark で
- * 触られなかった行 = 消失」を判定する (mark-and-sweep)。
+ * `watermarkIso` is a monotonically increasing timestamp identifying this
+ * sweep, stamped onto every seen row's `lastSeenAt`. A multi-chunk sweep
+ * reuses the same watermark across chunks; {@link finalizeTradableDisappearance}
+ * later treats any row not touched by that watermark as disappeared
+ * (mark-and-sweep).
  */
 export async function upsertTradablePage(
   db: TradableDb,
@@ -112,7 +105,7 @@ export async function upsertTradablePage(
   watermarkIso: string,
 ): Promise<number> {
   if (entries.length === 0) return 0
-  // 同一ページ内の symbol 重複を除去 (ON CONFLICT 二重発火を避ける)。
+  // Dedup within the page — avoids firing ON CONFLICT twice for one symbol.
   const bySymbol = new Map<string, TradableInstrumentEntry>()
   for (const e of entries) bySymbol.set(e.symbol.toUpperCase(), e)
   const rows = [...bySymbol.values()].map((e) => ({
@@ -156,11 +149,10 @@ export async function upsertTradablePage(
 }
 
 /**
- * mark-and-sweep の sweep フェーズ: 直近 sweep (= `watermarkIso`) で触られなかった
- * 既存 tradable 行を `currentlyTradable=false` に倒す (消失判定、物理削除しない)。
- * `lastSeenAt < watermarkIso` が「今回 sweep に出てこなかった」を意味する。
- * **完走した sweep でのみ呼ぶ** (部分結果で呼ぶと未到達ページの銘柄を誤って
- * 消失扱いする)。seen 集合を持ち回らずに済むのでチャンク分割と相性が良い。
+ * Sweep phase of mark-and-sweep: flips existing tradable rows not touched
+ * by `watermarkIso` (`lastSeenAt < watermarkIso`) to `currentlyTradable=false`.
+ * Call only after a sweep completes — a partial sweep would wrongly mark
+ * not-yet-reached pages as disappeared.
  */
 export async function finalizeTradableDisappearance(
   db: TradableDb,
@@ -173,10 +165,9 @@ export async function finalizeTradableDisappearance(
     .map((r) => r.symbol.toUpperCase())
   for (let i = 0; i < disappeared.length; i += IN_CHUNK) {
     const chunk = disappeared.slice(i, i + IN_CHUNK)
-    // select と update の間に別 sweep (新しい watermark) が同 symbol を再 upsert
-    // する競合に備え、UPDATE 側でも消失述語 (currently_tradable=true かつ
-    // last_seen_at < watermark) を再評価する。古い snapshot 由来の false 化で
-    // 新しい sweep の結果を上書きしない (cron + 手動 refresh の同時実行対策)。
+    // Re-checks the disappearance predicate in the UPDATE itself, not just
+    // symbol IN chunk — guards against a concurrent newer sweep re-upserting
+    // the same symbol between this SELECT and UPDATE.
     await db
       .update(tradableInstrument)
       .set({ currentlyTradable: false, updatedAt: nowIso })
@@ -192,15 +183,14 @@ export async function finalizeTradableDisappearance(
 }
 
 export interface TradableAllowlistStatus {
-  /** 行総数 (tradable + disappeared)。 */
+  /** Row count (tradable + disappeared). */
   total: number
-  /** currently_tradable=true の件数。 */
   tradableCount: number
-  /** 最新 last_seen_at (空文字 = 未取得)。 */
+  /** Most recent `lastSeenAt`; empty string when nothing has synced yet. */
   lastSync: string
 }
 
-/** allowlist のサマリ (UI のポーリング・進捗表示用)。 */
+/** Allowlist summary for UI polling/progress display. */
 export async function getTradableAllowlistStatus(db: TradableDb): Promise<TradableAllowlistStatus> {
   const rows = await db
     .select({ currentlyTradable: tradableInstrument.currentlyTradable, lastSeenAt: tradableInstrument.lastSeenAt })
@@ -215,8 +205,9 @@ export async function getTradableAllowlistStatus(db: TradableDb): Promise<Tradab
 }
 
 /**
- * 全件 (= 1 配列) を一括反映する高水準ヘルパー。逐次保存しない呼び出し側
- * (テスト等) 向け。live の sweep は `upsertTradablePage` を per-page で呼ぶ。
+ * High-level helper that applies one full fetch in a single call, for
+ * callers (tests, etc.) that don't stream by page. A live sweep should call
+ * `upsertTradablePage` per page instead.
  */
 export async function refreshTradableInstruments(
   db: TradableDb,
@@ -224,8 +215,6 @@ export async function refreshTradableInstruments(
   opts: { complete: boolean; nowIso: string },
 ): Promise<RefreshTradableResult> {
   const { complete, nowIso } = opts
-  // 一括なので watermark = nowIso。seen 行は lastSeenAt=nowIso になり、それ未満の
-  // 既存 tradable 行が消失。
   const upserted = await upsertTradablePage(db, fetched, nowIso)
   const disappearedSymbols = complete
     ? await finalizeTradableDisappearance(db, nowIso, nowIso)

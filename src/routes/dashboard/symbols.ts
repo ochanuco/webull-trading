@@ -8,10 +8,6 @@ import { asc, eq } from 'drizzle-orm'
 import { buyingPowerBadge } from './overview'
 import { esc, safeJsonScript } from './shared'
 
-/**
- * 銘柄管理 (#292) ページの SELECT。`symbol_config` 全行 (active + inactive)
- * を symbol ASC で返す。dashboard 表示専用。
- */
 export async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[]> {
   const drizzle = createDb(db)
   return await drizzle.select().from(symbolConfig).orderBy(asc(symbolConfig.symbol))
@@ -59,19 +55,13 @@ const ROLE_NODE_COLORS: Record<string, string> = {
   inverse_hedge: '#c22d2d',
 }
 
-/**
- * 配分マップキャンバス (#symbol-relation-map)。描画単位は **unit (対 = 1 カード、
- * 単独銘柄 = 1 カード)** — 対を 2 カード + 連動パッチ (ミラー線・連動移動・
- * 共有側ポート非表示) で表現していた旧方式は edit/view で不整合が漏れ続けた
- * ため、operator の指定で一塊に再設計した。
- *
- *   - ペアカード: `SOXL ⇄ SOXS`。両側の状態を 1 枚に表示、配分は対で 1 枠
- *   - 口座 → unit = 配分 1 本 (1/枝)。unit → unit = 退避 1 本 (緑破線) で、
- *     適用時に**側別に展開** (対→対は role で側合わせ、対→単独は両側→同一先)
- *   - 単独 → 対の退避は側を特定できないため不可 (理由付き拒否)
- *   - 'view' はノード移動のみ可 (編集系は封印)、'edit' は draft + 適用
- * DB / API は従来の銘柄単位のまま — 展開はこのキャンバスの適用時のみ。
- */
+// Draws one card per unit (a pair = 1 card, a standalone symbol = 1 card),
+// not one card per symbol. An earlier 2-cards-per-pair design (mirrored
+// lines, linked drag, hidden shared port) kept leaking edit/view
+// inconsistencies, so pairs were collapsed into a single unit at the
+// operator's request. DB/API stay symbol-level; a unit only exists as this
+// canvas's drawing/editing abstraction and gets expanded back to per-symbol
+// writes on apply.
 export function symbolMapEditorBody(
   rows: SymbolConfigRow[],
   inversePairs: Record<string, string>,
@@ -157,9 +147,8 @@ export function symbolMapEditorBody(
   if (onCanvas.length === 0) {
     return `<p class="muted">有効な銘柄がありません。</p>`
   }
-  // unit の退避先 (unit 単位、#496 多分岐): 各側の fallback リストが指す unit
-  // 群の和集合。側ごとの食い違い (旧データの片側欠け等) は適用で側別に正規化
-  // される。
+  // Union of the unit(s) each side's fallback list points to. A per-side
+  // mismatch (e.g. stale data missing one side) gets normalized on apply.
   const fallbackUnitsOf = (u: Unit): string[] => {
     const targets = u.syms
       .flatMap((x) => u.fallbackSyms[x] ?? [])
@@ -188,7 +177,6 @@ export function symbolMapEditorBody(
       held: u.held,
       entryRequired: u.entryRequired,
       fallbacks: fallbackUnitsOf(u),
-      // #460: OpenAPI 取扱バッジ HTML (tradable は空文字)。card に innerHTML 挿入。
       tradeBadge: unitTradeBadge(u.syms),
       y: u.y,
     })),
@@ -319,9 +307,9 @@ export function symbolMapEditorBody(
     editor.start();
     if (isView) el.classList.add('sm-view');
 
-    // 盤面レイアウトの記憶 (#496 follow-up): ノード位置とパン/ズームを
-    // localStorage に保存する (origin 単位・管理画面のみなのでティッカーと座標が
-    // 残る程度は許容、operator 合意)。view/edit でキーを共有して同じ配置に。
+    // Persisting ticker/coordinates in localStorage was accepted by the
+    // operator since this is an admin-only page scoped per browser origin.
+    // view and edit share the key so both render the same layout.
     var LAYOUT_KEY = 'webull-sm-map-layout-v1';
     var savedLayout = {};
     try {
@@ -345,7 +333,7 @@ export function symbolMapEditorBody(
           canvasX: editor.canvas_x,
           canvasY: editor.canvas_y,
         }));
-      } catch (e) { /* private mode 等は黙って諦める (表示専用機能) */ }
+      } catch (e) { /* layout memory is a nicety; give up silently (e.g. private mode) */ }
     }
 
     var idOf = {};      // unitId -> drawflow node id
@@ -385,7 +373,6 @@ export function symbolMapEditorBody(
       var metaParts = [];
       if (roleShorts.length > 0) metaParts.push(roleShorts.join(' / '));
       metaParts.push(u.currency);
-      // #460: OpenAPI 取扱バッジ (server 生成済み HTML、tradable は空)。
       var tradeBadgeHtml = u.tradeBadge ? '<div style="margin-top:4px">' + u.tradeBadge + '</div>' : '';
       return '<div class="sm-card">' +
         '<div class="sm-title" style="color:' + u.color + '">' + u.label + '</div>' +
@@ -425,7 +412,6 @@ export function symbolMapEditorBody(
     });
     programmatic = false;
 
-    // パン/ズームの復元と、移動・ズームのたびの保存。
     if (typeof savedLayout.zoom === 'number' && savedLayout.zoom > 0.2 && savedLayout.zoom <= 2) {
       editor.zoom = savedLayout.zoom;
       editor.canvas_x = savedLayout.canvasX || 0;
@@ -490,10 +476,10 @@ export function symbolMapEditorBody(
       div.innerHTML = html;
       wrap.appendChild(div);
     }
-    // 適用/シミュレートで使う「unit → 銘柄ごとの fallback 展開」(#496 多分岐)。
-    // 各 src 側は dst unit ごとに 1 銘柄ずつ受け取る:
-    //   対→対: 役割で側合わせ (leveraged↔leveraged)、なければ並び順。
-    //   対→単独: 両側 → 同一先。単独→単独: そのまま。
+    // Expands a unit-level fallback edge into per-symbol targets: each src
+    // symbol gets exactly one symbol per dst unit — pair→pair matches by
+    // role (leveraged with leveraged), falling back to position order;
+    // pair→standalone sends both sides to the same symbol.
     function expandFallbacks(srcUid, dstUids) {
       var src = unitBy[srcUid];
       var out = {};
@@ -755,7 +741,8 @@ export function symbolMapEditorBody(
         alert('異通貨の退避先は設定できません (同一通貨のみ)。');
         return;
       }
-      // 退避は多分岐可 (#496): 追加で**等分割**される。重複と上限 (4) のみ防ぐ。
+      // Multiple fallback targets are allowed and get equally split; only
+      // duplicates and the cap (4) are rejected here.
       var cur = draft[src].fallbacks || [];
       if (cur.indexOf(dst) !== -1 || cur.length >= 4) {
         programmatic = true;
@@ -952,7 +939,6 @@ export function symbolMapEditorBody(
       var src = unitOf[state.srcId];
       var oldDst = unitOf[state.oldDstId];
       if (!newDst || accountCcyOf[newDst] || newDst === oldDst || newDst === src) return;
-      // 旧線を外す。
       programmatic = true;
       editor.removeSingleConnection(state.srcId, state.oldDstId, 'output_1', 'input_1');
       programmatic = false;
@@ -1092,13 +1078,12 @@ export function symbolsListBody(args: {
   inversePairs?: Record<string, string>
   pairRegimes?: PairRegimeEntry[]
   mapAmounts?: Record<string, { native: string; jpy: number }>
-  /** #460: OpenAPI 取扱 allowlist。各行/カードの取扱バッジに使う。 */
   tradable?: TradableAllowlist
   errorCode?: string | null
   errorSymbol?: string | null
   filter: SymbolsListFilter
-  /** 'list' = 表 (default)、'workflow' = 配分キャンバス。マップ埋め込みでページが
-   *  重くなったため tab 分離 (operator 要望)。Drawflow の読み込みも workflow 時のみ。 */
+  // 'workflow' loads Drawflow only when selected — embedding the canvas
+  // unconditionally made the page heavy (operator request to split tabs).
   tab?: 'list' | 'workflow'
 }): string {
   const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
@@ -1108,8 +1093,8 @@ export function symbolsListBody(args: {
     <a href="/dashboard/symbols" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'list' ? '#06c' : 'transparent'};color:${tab === 'list' ? '#06c' : '#5f6368'};font-weight:${tab === 'list' ? '600' : 'normal'}">一覧</a>
     <a href="/dashboard/symbols?tab=workflow" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'workflow' ? '#06c' : 'transparent'};color:${tab === 'workflow' ? '#06c' : '#5f6368'};font-weight:${tab === 'workflow' ? '600' : 'normal'}">ワークフロー</a>
   </div>`
-  // #415: 買付余力バッジをページ最上部に (全 return が ${errorBanner} を先頭に持つので
-  // ここに前置すると一覧・空・フィルタ 0 件の全ケースで表示される)。
+  // Every branch below starts with ${errorBanner}, so prepending the
+  // buying-power badge here shows it in every case (list / empty / 0-filter).
   const errorBanner = buyingPowerBadge() + renderSymbolErrorBanner(errorCode, errorSymbol)
   const filtered = applySymbolsListFilter(rows, filter)
   const activeCount = rows.filter((r) => r.active).length
@@ -1132,7 +1117,6 @@ export function symbolsListBody(args: {
     <a href="/dashboard/symbols" style="padding:4px 8px;text-decoration:none;font-size:12px;color:#86868b">リセット</a>
   </form>`
 
-  // #460: allowlist の取得状況サマリ (操作判断のため最終取得日と件数を出す)。
   const tradableEntries = [...tradable.values()]
   const tradableCount = tradableEntries.filter((e) => e.status === 'tradable').length
   const lastSync = tradableEntries.reduce<string>(
@@ -1151,10 +1135,9 @@ export function symbolsListBody(args: {
     <span id="tradable-refresh-status" style="font-size:12px"></span>
   </p>
   <script>
-  // #460: 全件 sweep は 1 リクエストの予算で完走できないので、チャンク式で
-  // done になるまで連続 POST する。各 POST は ~15 ページ (~20秒) を処理し、
-  // nextCursor + watermark を返すので同じ watermark で続きを叩く。件数は
-  // total でライブ表示。done で再読込してバッジを反映。
+  // A full sweep can't finish in one request's budget, so this chunks: each
+  // POST processes ~15 pages (~20s) and returns nextCursor + watermark to
+  // resume from. Reloads on done to reflect the refreshed badge.
   window.refreshTradableAllowlist = function () {
     var btn = document.getElementById('tradable-refresh-btn');
     var st = document.getElementById('tradable-refresh-status');
@@ -1206,11 +1189,9 @@ export function symbolsListBody(args: {
   if (filtered.length === 0) {
     return `${errorBanner}${tabBar}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
-  // #315: インバース対が隣接するよう並べ替え、ペアごとに交互の薄色背景 + ツリー表記。
   const ordered = orderRowsByPair(filtered, inversePairs)
   const pairColor = assignPairColors(ordered, inversePairs)
   const roles = pairRoles(ordered, inversePairs)
-  // 共有 slider の初期値計算用 (対の max を採るため両側の % を引けるように)。
   const pctOf = new Map(
     ordered.map((r) => [
       r.symbol.toUpperCase(),
@@ -1241,21 +1222,18 @@ export function symbolsListBody(args: {
       const maxNotionalCell = r.maxNotional === null
         ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
-      // 売買単位 (lot_size)。未設定・不正値 (NULL/0/負/非整数) は cron sizing が
-      // fail-closed (発注見送り) するので、一覧でも同じ判定で赤字警告を出す
-      // (loadSymbolConfig の採用条件 = integer>=1 と揃える、CodeRabbit #409)。
-      // 戦略ロール + 条件連動配分の要約 (#452)。NULL は従来挙動なので「—」。
-      // entry 抑止 role (cash_parking / 定義のみ) は title で発注されない旨を明示。
       const roleCell = renderSymbolRoleCell(r)
+      // Same integer>=1 validity check loadSymbolConfig uses to adopt a
+      // row, so this warning matches what cron sizing will actually
+      // fail-closed on rather than a looser display-only check.
       const lotSizeValid = Number.isInteger(r.lotSize) && (r.lotSize as number) >= 1
       const lotSizeCell = !lotSizeValid
         ? '<span class="err" title="売買単位が未設定または不正です。設定するまで BUY は発注されません (fail-closed)。編集から入力してください。">⚠ 未設定</span>'
         : `${esc(String(r.lotSize))} <span class="muted" style="font-size:11px">${r.lotSize === 1 ? '株/口' : '株'}</span>`
-      // 予算配分 ladder slider (#budget-alloc): 5%刻み。確定するまで client 側で仮調整、
-      // form="symbol-budget-form" で一括 POST。両側表示中のインバース対は 1 本の共有
-      // slider (rowspan=2) に統合する — 同時に建つのは片側のみで予算消費は 1 回分
-      // なのに、2 本並ぶと倍取られているように見えるため。初期値は両側の max、
-      // POST に載らない相手側は server が同値同期する (admin #budget-alloc)。
+      // An inverse pair (both sides shown) shares one slider (rowspan=2)
+      // instead of two: only one side is ever held at a time, so two
+      // separate sliders would visually double-count the same budget. The
+      // side not submitted in the POST gets synced server-side to match.
       const allocPctNum =
         role === 'top'
           ? Math.max(pctOf.get(sym) ?? 0, pctOf.get(inverse!.toUpperCase()) ?? 0)
@@ -1272,12 +1250,12 @@ export function symbolsListBody(args: {
           : role === 'top'
             ? `<td rowspan="2" style="vertical-align:middle">${sliderHtml}<div class="muted" style="font-size:11px;margin-top:2px">ペア共通 — 保有は片側のみ、予算消費は1回分</div></td>`
             : `<td>${sliderHtml}</td>`
-      // ツリー表記 (#315): 対を縦線で連結。上段は中央→下端に縦線 + 中央で右へ横棒
-      // (┌)、下段は上端→中央に縦線 + 中央で右へ横棒 (└)。隣接行で左の縦線が
-      // 行境界を跨いで連結し、1 本の bracket に見える。線は相手 edit へのリンク。
       const treeTitle = inverse
         ? `インバース対: ${esc(inverse)} (相手に保有がある間は BUY 見送り #315)`
         : ''
+      // Draws a bracket across the pair's two adjacent rows: the top row's
+      // corner radius forms ┌, the bottom row's forms └, and the shared
+      // left border between them reads as one continuous line.
       const connBase =
         'position:absolute;left:11px;width:9px;border-left:2px solid #06c;display:block'
       const connStyle =
@@ -1290,7 +1268,6 @@ export function symbolsListBody(args: {
         ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse!)}/edit" title="${treeTitle}" style="${connStyle}"></a>`
         : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
-      // #460: OpenAPI 取扱 allowlist バッジ (tradable は出さない)。
       const tradBadge = tradableBadgeHtml(tradable.get(sym)?.status ?? 'unknown')
       const tradBadgeHtml = tradBadge ? `<div style="margin-top:2px">${tradBadge}</div>` : ''
       return `<tr${rowStyle}>
@@ -1347,10 +1324,9 @@ export function symbolsListBody(args: {
   <script>${BUDGET_LADDER_JS}</script>`
 }
 
-// #budget-alloc ladder の client JS: slider 移動でラベル更新 + 「未確定」バーを表示。
-// 保存は確定ボタン押下の form POST のみ (即保存しない = 確定するまで仮)。
-// インバース対は 1 本の共有 slider なので相手 slider の同期は不要 — POST に載らない
-// 相手側は server が同値同期する (#315 regime hedge)。
+// Sliders only adjust client-side state until the confirm button POSTs
+// symbol-budget-form; nothing saves on drag. A pair's non-submitted side is
+// synced server-side, so this JS never needs to write to its sibling slider.
 const BUDGET_LADDER_JS = `
   window.__budgetDirty = {};
   window.__fmtBudget = function (v) { return Number(v) <= 0 ? 'risk' : v + '%'; };
@@ -1360,7 +1336,7 @@ const BUDGET_LADDER_JS = `
     var v = el.value;
     var lb = document.getElementById('budget-label-' + sym);
     if (lb) lb.textContent = window.__fmtBudget(v);
-    // 保存時に server 同期で相手側も変わるので、dirty 数には相手も数える。
+    // The pair's other side also changes on save (server sync), so count it dirty too.
     window.__budgetDirty[sym] = true;
     if (inv) window.__budgetDirty[inv] = true;
     var bar = document.getElementById('symbol-budget-bar');
@@ -1369,13 +1345,12 @@ const BUDGET_LADDER_JS = `
     if (note) note.textContent = Object.keys(window.__budgetDirty).length + ' 銘柄を変更中';
     window.__recomputeBudgetMeter();
   };
-  // 同時保有ベースの予算使用率を全 slider から再計算してメーターを再描画。
-  // インバース対は max を 1 回だけ計上 (片側のみ建つため)。
   window.__recomputeBudgetMeter = function () {
     var barMeter = document.getElementById('symbol-budget-bar-meter');
     if (!barMeter) return;
-    // 全銘柄の baseline 配分から開始し、表示中 slider の現在値で上書きする。
-    // filter で非表示の銘柄の配分が meter から欠落しないようにするため (CodeRabbit #405)。
+    // Starts from every symbol's saved baseline (not just the visible
+    // sliders), so a symbol hidden by the current filter still counts
+    // toward the meter instead of silently dropping out.
     var bySym = {};
     (window.__budgetBaseline || []).forEach(function (b) {
       if (b.pct > 0) bySym[b.s] = { pct: b.pct, inv: b.inv };
@@ -1385,18 +1360,17 @@ const BUDGET_LADDER_JS = `
       var sym = s.getAttribute('data-symbol');
       var inv = s.getAttribute('data-inverse');
       var v = Number(s.value);
-      // 対の共有 slider は両側を上書きする (相手の baseline が残ると max が
-      // 旧値に張り付き、下げた時にメーターが追従しない)。
+      // Overwrites both sides of a shared slider — leaving the sibling's
+      // stale baseline in place would keep max() pinned to the old value
+      // and the meter would stop tracking a lowered slider.
       if (v > 0) {
         bySym[sym] = { pct: v, inv: inv };
         if (inv) bySym[inv] = { pct: v, inv: sym };
       } else {
-        // 0 にした表示中銘柄は除外 (baseline 値で復活させない)
         delete bySym[sym];
         if (inv) delete bySym[inv];
       }
     });
-    // 口座(円)単一プールに対する使用率を 1 本で合算。インバース対は max を1回計上。
     var used = 0;
     var counted = {};
     Object.keys(bySym).forEach(function (sym) {
@@ -1421,7 +1395,6 @@ const BUDGET_LADDER_JS = `
   };
 `
 
-/** 予算配分 ladder の確定 / 取消 バー。slider は form attr で此処の form に紐づく。 */
 function budgetLadderControls(): string {
   return `<form id="symbol-budget-form" method="post" action="/admin/symbol-config/budget-alloc"></form>
   <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,0.06)">
@@ -1433,12 +1406,10 @@ function budgetLadderControls(): string {
   </div>`
 }
 
-/**
- * #budget-jpy-base-fx: 同時保有ベースの口座(円)予算使用率 (単一 %)。
- * budget_alloc_pct は通貨に関係なく「口座(円)全体に対する割合」なので、通貨で分けず
- * 1 本に合算する。インバース対は同時に片方しか建たないので max(両側) で1回だけ計上、
- * standalone と別ペアは加算 = 「口座に対する最大同時コミット率 (%)」。
- */
+// budget_alloc_pct is "share of the single JPY-denominated account", not
+// currency-scoped, so this sums across currencies rather than per-currency.
+// An inverse pair holds only one side at a time, so it counts once at
+// max(both sides); standalone symbols and separate pairs simply add.
 export function computeBudgetUsage(
   rows: Array<{ symbol: string; budgetAllocPct: number | null }>,
   inversePairs: Record<string, string>,
@@ -1464,10 +1435,6 @@ export function computeBudgetUsage(
   return used
 }
 
-/**
- * #315: インバース対が隣接するよう並べ替える。各 symbol を symbol ASC で走査し、
- * 対の相手が未出力かつ filtered 内に在れば直後に続ける。対なし / 既出は単独。
- */
 export function orderRowsByPair(
   rows: SymbolConfigRow[],
   inversePairs: Record<string, string>,
@@ -1489,10 +1456,6 @@ export function orderRowsByPair(
   return out
 }
 
-/**
- * ペアごとに薄色背景を交互割り当て (両 symbol が表示中の対のみ着色)。
- * 片側しか表示されていない対 / 対なしは無着色。
- */
 export function assignPairColors(
   ordered: SymbolConfigRow[],
   inversePairs: Record<string, string>,
@@ -1518,11 +1481,8 @@ export function assignPairColors(
   return color
 }
 
-/**
- * ordered list 上で各 symbol のツリー位置を判定 (#315 ツリー表記)。
- * 直後が自分の対 → 'top' (┌)、直前が自分の対 → 'bottom' (└)、対なし → null。
- * orderRowsByPair で対は隣接済みなので前後 1 行で判定できる。
- */
+// Only checks the immediately adjacent row in each direction — safe because
+// orderRowsByPair has already made a pair's two rows neighbors.
 export function pairRoles(
   ordered: SymbolConfigRow[],
   inversePairs: Record<string, string>,
@@ -1540,10 +1500,6 @@ export function pairRoles(
   return roles
 }
 
-/**
- * /admin/symbol-config 系 form POST が失敗時に redirect で渡してくる
- * `?error=...&symbol=...` を表示する banner。known code 以外は generic msg。
- */
 function renderSymbolErrorBanner(code: string | null, symbol: string | null): string {
   if (!code) return ''
   const msg = symbolErrorMessage(code, symbol)
@@ -1575,28 +1531,18 @@ function symbolErrorMessage(code: string, symbol: string | null): string {
 export interface SymbolFormArgs {
   mode: 'new' | 'edit'
   row: SymbolConfigRow | null
-  /** validation error message — POST handler が re-render する時に渡す。 */
   error: string | null
-  /**
-   * Pullback rule の global default。override 入力欄の placeholder に「空欄
-   * なら N が適用される」と見せるために使う (#316)。読込失敗時 null。
-   */
+  // Shown as the override field's placeholder ("blank uses N"). Null when
+  // the global default failed to load.
   globalDefaults: { timeStopDays: number; kAtr: number } | null
-  /** 編集対象が既に対を組んでいる相手 symbol (#315)。未ペア / new は null。 */
+  // The symbol already paired with this one. Null when unpaired or new.
   currentInverse?: string | null
-  /** #460: OpenAPI 取扱 allowlist status (edit モードの server 描画用)。 */
   tradableStatus?: TradableStatus
 }
 
-/**
- * OpenAPI 取扱 allowlist (#460) のバッジ表現。tradable/list 由来の status を
- * operator が判断できる短い日本語ラベル + 色 + tooltip にまとめる。
- *   - tradable    : 直近 sweep で OpenAPI 取扱可
- *   - disappeared : 過去は取扱可だったが直近 sweep で消失 (取扱停止の可能性)
- *   - unknown     : allowlist 未観測 (OpenAPI で発注できない可能性)
- * 登録/発注は止めない警告レイヤー (ユーザー方針: 警告のみ)。`tradable` は
- * バッジを出さない (ノイズ削減 — 問題のある状態だけ目立たせる)。
- */
+// A warning layer only — never blocks registration or orders (product
+// decision). `tradable` itself renders no badge, so only a problem state
+// draws attention.
 const TRADABLE_BADGE: Record<
   Exclude<TradableStatus, 'tradable'>,
   { label: string; bg: string; fg: string; title: string }
@@ -1617,14 +1563,12 @@ const TRADABLE_BADGE: Record<
   },
 }
 
-/** allowlist status → 一覧/フォーム用バッジ HTML。tradable は空 (バッジ無し)。 */
 function tradableBadgeHtml(status: TradableStatus): string {
   if (status === 'tradable') return ''
   const b = TRADABLE_BADGE[status]
   return `<span title="${esc(b.title)}" style="display:inline-block;padding:1px 6px;border-radius:6px;background:${b.bg};color:${b.fg};font-size:11px;font-weight:600;white-space:nowrap">${b.label}</span>`
 }
 
-/** role の短い日本語名 (#452)。一覧 / チャートタブのインライン表示用。 */
 export const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
   cash_parking: '待機資金ETF',
   core_trend: '非レバ・トレンド',
@@ -1635,7 +1579,6 @@ export const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
   momentum: 'モメンタム (⚠未検証)',
 }
 
-/** role select の表示ラベル (#452)。値は DB enum と同一、表示だけ日本語補足。 */
 export const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
   core_trend: 'core_trend — 非レバ・トレンド (QQQ / VOO 等)',
@@ -1646,7 +1589,6 @@ export const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
   momentum: 'momentum — ⚠ モメンタム/ブレイク (1x向け・backtest未検証・要警告)',
 }
 
-/** 一覧テーブルの「ロール」セル (#452)。role + 配分の条件連動を 1 セルに要約する。 */
 function renderSymbolRoleCell(row: SymbolConfigRow): string {
   const role = row.role?.trim() || null
   const known = role !== null && (SYMBOL_ROLES as readonly string[]).includes(role)
@@ -1692,7 +1634,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       : String(row.timeStopDaysOverride)
   const kAtrOverrideValue =
     row?.kAtrOverride === null || row?.kAtrOverride === undefined ? '' : String(row.kAtrOverride)
-  // stop/TP override は DB に fraction 保存、表示は % (×100、stop は符号付き)。
+  // DB stores stop/TP override as a fraction; displayed as % (×100).
   const stopPctOverrideValue =
     row?.stopPctOverride === null || row?.stopPctOverride === undefined
       ? ''
@@ -1701,16 +1643,14 @@ export function symbolFormBody(args: SymbolFormArgs): string {
     row?.takeProfitPctOverride === null || row?.takeProfitPctOverride === undefined
       ? ''
       : String(Math.round(row.takeProfitPctOverride * 1000) / 10)
-  // 持ち越し設定は radio 2 択で両状態を明示する (「持ち越し」ラベル + 「持ち越さ
-  // ない」checkbox の二重否定が ON/OFF どちらか読めない、という operator 指摘)。
+  // A 2-way radio, not a "carry over" checkbox — a single checkbox whose
+  // unchecked state means "don't carry over" reads ambiguously as ON or OFF.
   const intradayOnlyChecked = row?.intradayOnly ? ' checked' : ''
-  // role / entry override (#452)。pullback / trend / 過伸長は
-  // DB に fraction 保存、表示は % (×100)。ATR 比は ratio 生値。
-  // 不正 role 値 (enum 外の DB 直書き) の fail-closed をフォームで弱めない
-  // (CodeRabbit #453): 一致 option が無いと先頭 '' が選択され、保存で意図せず
-  // 「未設定 = 従来挙動」へ silent に戻ってしまう。不正値はそのまま selected
-  // option として出し、保存時は admin parse の enum 検証が 400 で弾く —
-  // operator が明示的に正しい role を選び直すまで解除されない。
+  // An out-of-enum role (written directly to the DB) is kept as-is in a
+  // hidden input rather than silently reset to blank — resetting it would
+  // read as "role cleared" and quietly restore default (non-fail-closed)
+  // entry behavior. The warning stays until the operator picks a valid role
+  // and saves; the admin parser's enum check still rejects it with 400.
   const rawRoleValue = row?.role?.trim() ?? ''
   const roleIsKnown = rawRoleValue === '' || (SYMBOL_ROLES as readonly string[]).includes(rawRoleValue)
   const roleValue = rawRoleValue
@@ -1738,7 +1678,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
     row?.requireAboveSma50Override === null || row?.requireAboveSma50Override === undefined
       ? ''
       : String(row.requireAboveSma50Override)
-  // 条件連動配分 (#452 Layer 3)。
   const entryRequiredChecked = row?.entryRequired ? ' checked' : ''
   const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
   const cashFallbackValue = row ? parseCashFallbacksJson(row.cashFallbackSymbols, row.symbol).join(', ') : ''
@@ -1748,12 +1687,13 @@ export function symbolFormBody(args: SymbolFormArgs): string {
   const kAtrPlaceholder = globalDefaults
     ? `空欄で global default (${globalDefaults.kAtr}) を使用`
     : '空欄で global default を使用'
-  // 予算配分は DB に fraction (0..1) 保存、表示は % (×100)。
+  // DB stores budget allocation as a 0..1 fraction; displayed as % (×100).
   const budgetAllocPctValue =
     row?.budgetAllocPct === null || row?.budgetAllocPct === undefined
       ? ''
       : String(Math.round(row.budgetAllocPct * 1000) / 10)
-  // #460: edit モードは symbol 確定なので allowlist バッジを server 描画。
+  // Edit mode knows the symbol up front, so the allowlist badge can render
+  // server-side instead of waiting on a client-side lookup.
   const editAllowlistBadge =
     mode === 'edit'
       ? (() => {
@@ -1765,8 +1705,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       : ''
   const symbolField =
     mode === 'edit'
-      ? // 値セルは必ず 1 要素 (div) に包む。複数の裸要素を出すと 2 列グリッドが
-        // 1 セルずれて以降のラベル/値が全部崩れる (#layout)。
+      ? // Must wrap in one element: multiple bare siblings here shift the
+        // 2-column grid by a cell and misalign every label/value after it.
         `<div>
            <input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
            ${editAllowlistBadge}
@@ -1780,7 +1720,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
            <span id="symbol-tradability" style="margin-left:10px;font-size:13px"></span>
            <div id="symbol-allowlist" style="margin-top:4px;font-size:12px"></div>
          </div>`
-  // #315: 登録モード選択 (単体 / インバース対)。new のみ。
   const modeSelector =
     mode === 'new'
       ? `<div style="grid-column:1/-1;display:flex;gap:16px;align-items:center;padding:8px 10px;background:#f5f5f7;border-radius:6px">
@@ -1793,8 +1732,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
            </label>
          </div>`
       : ''
-  // #315: インバース対。new ではモード選択で表示切替する入力欄 (銘柄欄と同じ Yahoo
-  // autocomplete)、edit では現在の対を表示。
   const inverseField =
     mode === 'edit'
       ? `<label>インバース対 <span class="muted" style="font-size:11px">(inverse)</span></label>
@@ -1819,8 +1756,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
          </div>`
   const errBlock = error ? `<p class="err" style="margin:0 0 12px">${esc(error)}</p>` : ''
   const heading = mode === 'new' ? '新規銘柄追加' : `編集: ${esc(symbolValue)}`
-  // セクション開閉の初期状態: 値が入っている (= 編集で触った) セクションだけ開く。
-  // 不正 role の警告はユーザーが見るべきなので強制 open。
   const hasSizingValues = maxNotionalValue !== '' || budgetAllocPctValue !== ''
   const hasStrategyValues =
     pullbackMaxOverrideValue !== '' ||
@@ -1837,7 +1772,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
     intradayOnlyChecked !== ''
   const hasAllocValues =
     entryRequiredChecked !== '' || alwaysActiveChecked !== '' || cashFallbackValue !== ''
-  // 必須バッジ。任意 field は無印 (バッジだらけにしない)。
   const REQ =
     '<span style="display:inline-block;padding:0 6px;border-radius:8px;background:#fdecec;color:#c22;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle">必須</span>'
   const fieldGrid = 'display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center'
@@ -1915,7 +1849,9 @@ export function symbolFormBody(args: SymbolFormArgs): string {
         </div>
         <script>
         (function () {
-          // ROLE_RULE_PRESETS を global default に重ねた解決値 (%・日・倍)。
+          // Mirrors src/trading/strategy/symbolRuleResolution.ts ROLE_RULE_PRESETS
+          // (%, days, multiplier) — this browser-side copy has no import path to
+          // that module, so keep the two in sync by hand.
           var P = {
             leveraged_trend: { tr: 8, heat: 60, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
             core_trend: { tr: 3, heat: 20, atr: 1.5, pbMax: -1.5, pbMin: -5, stop: -4, tp: 7, tstop: 10, katr: 2.0 },
@@ -1934,8 +1870,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             inverse_hedge: 'インバースヘッジ', cash_parking: '待機資金',
             momentum: 'モメンタム ⚠'
           };
-          // 2軸の説明 (入場アーキ / horizon / 想定銘柄の性質)。現状は全ロール
-          // 「押し目」アーキ。モメンタム/逆張りアーキは別軸で設計中 (未実装)。
           var DESC = {
             leveraged_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '3x レバ ETF' },
             core_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x トレンド' },
@@ -1947,7 +1881,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           };
           var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
-          // 銘柄別 override 入力 (任意セクション) を読む。空 → null。
           var OV_NAMES = {
             tr: 'min_return_50d_override', heat: 'max_sma50_deviation_pct_override',
             atr: 'max_atr_ratio_override', pbMax: 'pullback_max_override',
@@ -1985,16 +1918,16 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             return r;
           }
           function omark(b) { return b ? ' <span style="color:#d97706;font-weight:700" title="この銘柄の override">*</span>' : ''; }
-          // 価格ラダー SVG。p = 実効パラメータ。big=true で軸ラベル付き。
+          // p is the effective (override-merged) parameter set; big=true adds axis labels.
           function ladder(role, p, w, h, big) {
             if (role === 'cash_parking') {
               return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="#5b8c5a" text-anchor="middle">entry なし</text></svg>';
             }
             var color = COLOR[role], ov = p.ov || {};
             var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
-            // 縦軸は描画する全水準 (0% / TP / stop / 押し目バンド) に合わせて動的スケール。
-            // 固定レンジ (+4%..-11%) だと override で押し目や stop を広げた時に SVG 枠外へ
-            // はみ出し、下の入場ゲート文字に重なっていた (operator 指摘) ため。
+            // Scales to whatever levels are actually drawn (0% / TP / stop / pullback
+            // band) rather than a fixed range — a fixed range clipped an override that
+            // widened pullback or stop past it, overlapping the entry-gate text below.
             var hi = Math.max(0, tp, p.pbMax) + 2, lo = Math.min(st, p.pbMin) - 2;
             if (hi - lo < 6) { hi += 1; lo -= 1; }
             function y(pct) { return 12 + (hi - pct) * ((h - 24) / (hi - lo)); }
@@ -2034,8 +1967,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           function cardHtml(role) {
             var color = COLOR[role] || '#5f6368';
             var d = DESC[role] || {};
-            // カードはグラフ無し (ホバー右プレビューに虚チャートがある)。名前 +
-            // 銘柄プロファイル + 保有 だけのコンパクト表示。
+            // No chart on the card itself — the hover preview on the right shows one.
             var sub = role === 'cash_parking'
               ? (d.character || '')
               : (d.character || '') + ' ・ 保有' + P[role].tstop + '日';
@@ -2048,7 +1980,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           var selected = ${JSON.stringify(roleValue)};
           var currentShown = selected;
           function labelOf(role) { return LABEL[role] || (role ? ('⚠ ' + role) : '未選択'); }
-          // 4 つの説明 (ロール / 入場アーキ / horizon / 想定銘柄の性質)。
           function descHtml(role) {
             var d = DESC[role];
             if (!d) return '';
@@ -2106,7 +2037,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             showPreview(role);
           }
           function rerender() { showPreview(currentShown); }
-          // momentum はグラフ無し (preset が押し目と別形)。名前 + 性質だけのカード。
+          // No ladder chart: momentum's preset shape doesn't fit the pullback ladder.
           function momentumCardHtml() {
             var d = DESC.momentum || {};
             return '<div class="role-tpl-card" data-role="momentum" ' +
@@ -2121,7 +2052,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             gallery.innerHTML = ORDER.map(cardHtml).join('');
             var mg = document.getElementById('momentum-gallery');
             if (mg) mg.innerHTML = momentumCardHtml();
-            // gallery + momentum の全カードに listener を張る。
             var cards = document.querySelectorAll('.role-tpl-card');
             for (var i = 0; i < cards.length; i++) {
               (function (card) {
@@ -2130,15 +2060,12 @@ export function symbolFormBody(args: SymbolFormArgs): string {
                 card.addEventListener('mouseenter', function () { showPreview(r); });
               })(cards[i]);
             }
-            // ホバーが外れたら選択中ロールのプレビューに戻す。
             gallery.addEventListener('mouseleave', function () { showPreview(selected); });
-            // 銘柄別 override を編集したら実効プレビューを即更新。
             var names = ['min_return_50d_override', 'max_sma50_deviation_pct_override', 'max_atr_ratio_override', 'pullback_max_override', 'pullback_min_override', 'stop_pct_override', 'take_profit_pct_override', 'time_stop_days_override', 'k_atr_override', 'require_above_sma50_override'];
             for (var j = 0; j < names.length; j++) {
               var el = document.getElementsByName(names[j])[0];
               if (el) { el.addEventListener('input', rerender); el.addEventListener('change', rerender); }
             }
-            // 入場アーキのタブ切替 (押し目=有効、モメンタム/逆張り=設計中パネル)。
             function setArchTab(arch) {
               var tabs = document.querySelectorAll('.role-arch-tab');
               for (var t = 0; t < tabs.length; t++) {
@@ -2306,7 +2233,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       if (sel) sel.value = cur;
       window.syncSymbolFormCurrencyUnits(cur);
     };
-    // 汎用 Yahoo lookup suggest コア。listId の <ul> に候補を描画し、click で pick(m)。
     window._symbolSuggestTimer = {};
     window._symbolSuggestSeq = {};
     window._renderSymbolSuggest = function (q, listId, pick) {
@@ -2351,7 +2277,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           .catch(function () { list.style.display = 'none'; });
       }, 250);
     };
-    // 主銘柄欄: pick で銘柄 / 名前 / 市場 / 通貨を自動入力。
     window.hideSymbolSuggest = function () {
       var list = document.getElementById('symbol-form-symbol-suggest');
       if (list) list.style.display = 'none';
@@ -2374,10 +2299,10 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       if (symInput) symInput.focus();
       window.checkSymbolTradability();
     };
-    // 取扱チェック (#461): 銘柄確定時に Preview Order (発注なし) で Webull JP の
-    // 取引可否を照会。'denied' (TICKER_IS_DENY 確定) のみ保存をブロックする。
-    // 'error' / 'unavailable' はブロックしない — check 不能で登録が全部止まるのは
-    // 過剰 fail-closed (発注側には #460 の事後ガードがある)。
+    // Only a confirmed 'denied' (TICKER_IS_DENY) blocks save. 'error' /
+    // 'unavailable' don't block — refusing registration whenever the check
+    // itself can't run would be over-eager fail-closed; the order path still
+    // has its own guard against a deny that slips through here.
     window._tradabilityDenied = false;
     window._tradabilitySeq = 0;
     window.checkSymbolTradability = function () {
@@ -2398,8 +2323,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       fetch('/admin/symbol-config/tradability-check?symbol=' + encodeURIComponent(sym) + '&market=' + market, { credentials: 'same-origin' })
         .then(function (r) { return r.json(); })
         .then(function (res) {
-          if (mySeq !== window._tradabilitySeq) return; // 古い応答は捨てる
-          // instrument 照会 (#475) のフラグ要約。verdict 行の後ろに添える。
+          if (mySeq !== window._tradabilitySeq) return; // discard a stale response
           var instSuffix = '';
           if (res.instrument) {
             var chips = [];
@@ -2409,8 +2333,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             if (Number.isFinite(lev) && lev !== 0) chips.push('レバレッジ ' + (lev > 0 ? '+' : '') + lev + 'x' + (res.instrument.inverseEtf === true ? ' / インバース' : ''));
             if (chips.length > 0) instSuffix = ' ｜ ' + chips.join(' ・ ');
           }
-          // #460: OpenAPI allowlist (tradable/list)。instrument status (OC) では
-          // 区別できない deny を区別できる唯一の事前シグナルなので別行で強調する。
+          // Shown as its own line: allowlist is the only pre-order signal that
+          // catches a deny instrument status=OC can't distinguish.
           var allowEl = document.getElementById('symbol-allowlist');
           if (allowEl) {
             if (res.allowlist === 'tradable') {
@@ -2435,8 +2359,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             window._tradabilityDenied = true;
             if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
           } else if (res.reason === 'quote_ok') {
-            // instrument status=OC でも発注 deny は事前検証不可 (USMV 前例) ので
-            // ✅ は出さない
+            // No checkmark here even at instrument status=OC: OC doesn't
+            // guarantee an order won't still be denied.
             var head = res.instrument && res.instrument.status === 'OC'
               ? '△ status OC (取引可) + 見積もり可 — 発注 deny のみ未保証'
               : '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
@@ -2453,7 +2377,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           statusEl.style.color = '#86868b';
         });
     };
-    // 手入力で symbol を変えた場合も blur で再チェック。submit は denied 時に阻止。
     (function () {
       var symInput = document.getElementById('symbol-form-symbol');
       if (symInput && !symInput.readOnly) {
@@ -2470,9 +2393,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
         }
       }
     })();
-    // Yahoo quoteType + market から売買単位の推奨値を自動入力する。
-    // ETF → 1 口、JP 個別株 (EQUITY) → 100 株、US 個別株 → 1 株。あくまで推奨で、
-    // operator が手入力で上書き可能 (確定は手入力必須・fail-closed なので #symbol-lot-size)。
+    // Suggestion only — always overridable, since the lot size field itself
+    // requires manual entry to save (fail-closed).
     window.suggestLotSizeFromMatch = function (m) {
       var lotInput = document.getElementById('symbol-form-lot-size');
       var hint = document.getElementById('symbol-form-lot-suggest');
@@ -2486,8 +2408,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
         hint.textContent = '推奨: ' + suggested + ' (' + kind + ')。要確認';
       }
     };
-    // インバース銘柄欄: 同じ Yahoo suggest だが pick は inverse 入力だけを埋める
-    // (主銘柄の name/market/currency は上書きしない)。
     window.hideInverseSuggest = function () {
       var list = document.getElementById('symbol-form-inverse-suggest');
       if (list) list.style.display = 'none';
@@ -2498,8 +2418,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
     window.pickInverseSuggest = function (m) {
       var inv = document.getElementById('symbol-form-inverse');
       if (inv) { inv.value = m.symbol; inv.focus(); }
-      // counterpart の銘柄名 / 市場 / 通貨を hidden field に焼く (#315: 一覧で
-      // インバース側の銘柄名を出すため。空 pick / 手動入力時は空のまま)。
+      // Baked into hidden fields so the list page can show the counterpart's
+      // name; a manual (non-pick) entry leaves these blank.
       var nm = document.getElementById('symbol-form-inverse-name');
       var mk = document.getElementById('symbol-form-inverse-market');
       var cur = document.getElementById('symbol-form-inverse-currency');
@@ -2508,7 +2428,6 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       if (cur) cur.value = m.currency || '';
       window.hideInverseSuggest();
     };
-    // 登録モード切替: 単体 / インバース対。inverse 欄の表示と required を制御。
     window.setSymbolRegMode = function (modeVal) {
       var label = document.getElementById('symbol-form-inverse-label');
       var rowEl = document.getElementById('symbol-form-inverse-row');

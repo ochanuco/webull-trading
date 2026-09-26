@@ -33,18 +33,15 @@ vi.mock('../../../src/infrastructure/db/globalConfigLoader', () => ({
 vi.mock('../../../src/infrastructure/db/symbolUniverse', () => ({
   loadSymbolUniverse: vi.fn(),
 }))
-// #exit-only-halt: risk halt でも scheduler まで進む (entry だけ抑止) ようになった
-// ので、DO / bar client を叩かずに「何が渡されたか」を検証できるよう scheduler を
-// mock する。scheduler 自身の gate 挙動は pullbackScheduler.test.ts が担保する。
+// #exit-only-halt: risk halt でも scheduler まで進むため、DO/bar client を叩かず「何が渡されたか」を
+// 検証できるよう scheduler を mock する。scheduler 自身の gate 挙動は pullbackScheduler.test.ts が担保する。
 vi.mock('../../../src/trading/strategy/pullbackScheduler', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../../src/trading/strategy/pullbackScheduler')>()
   return { ...actual, runPullbackScheduler: vi.fn() }
 })
-// news-shock-gate PR 2: `loadNewsShockDecision` は D1 read のみ (fetch は
-// しない) だが、drizzle 経由の実 D1 plumbing をここで fake するのは重い。
-// repo 自体を mock して「D1 read があったこと」ではなく「fetch が無いこと」
-// (= 本 PR で最重要な回帰ガード) にテストの焦点を絞る。
+// loadNewsShockDecision は D1 read のみのはずなので、repo を mock して「fetch が無いこと」
+// (= 本 PR で最重要な回帰ガード) にテストの焦点を絞る。drizzle 経由の実 D1 plumbing は重い。
 vi.mock('../../../src/infrastructure/db/attentionObservationRepo', () => ({
   createAttentionObservationDb: vi.fn(() => ({}) as unknown),
   createAttentionObservationRepo: vi.fn(() => ({
@@ -60,9 +57,7 @@ const env = {
 } as unknown as Parameters<typeof runStrategyCron>[0]
 
 describe('runStrategyCron', () => {
-  // 0012 migration の new tables (config_state_snapshot / notification_emit_log)
-  // を mock D1 が知らないので、`this.client.prepare is not a function` 系の
-  // warn が大量に出る。挙動には影響しない (silent fallback) ので suppress。
+  // mock D1 は 0012 migration の new tables を知らず prepare 系 warn が出る (silent fallback、無害) → suppress
   let warnSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
@@ -87,9 +82,6 @@ describe('runStrategyCron', () => {
     expect(result.analysis.config.tradingEnabled).toBe(false)
   })
 
-  // #276: env=false が DB=true を上書きする。「より制限的な側が勝つ」 invariant の
-  // cron 経路での確認。DB が true でも env override が効いていれば cron は
-  // trading_disabled で即 skip し、PORTFOLIO_STATE などへ進まない (fail-closed)。
   it('env TRADING_ENABLED=false overrides DB tradingEnabled=true (#276 kill-switch)', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ tradingEnabled: true }),
@@ -100,7 +92,6 @@ describe('runStrategyCron', () => {
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithEnvOverride)
     expect(result.skipReason).toBe('trading_disabled')
-    // analysis.config.tradingEnabled は effective 値 (env override 適用後) を反映する。
     expect(result.analysis.config.tradingEnabled).toBe(false)
   })
 
@@ -121,7 +112,7 @@ describe('runStrategyCron', () => {
     expect(result.skipReason).toBe('no_bridge_state')
   })
 
-  it('skips with portfolio_halted when tradingDisabledUntil is in the future', async () => {
+  it('portfolio_halted halts entry only — exit judgment continues (#exit-only-halt)', async () => {
     const envWithPortfolio = {
       ...env,
       PORTFOLIO_STATE: {
@@ -137,17 +128,15 @@ describe('runStrategyCron', () => {
       },
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithPortfolio)
-    // #exit-only-halt: run 全体は skip せず、entry だけ止めて exit 判定は続ける。
     expect(result.skipReason).toBeUndefined()
     expect(result.entryHaltReason).toMatch(/^portfolio_halted: tradingDisabledUntil=/)
     expect(result.analysis.entryHalt?.reason).toBe(result.entryHaltReason)
-    // 全銘柄が BUY 抑止として scheduler に渡る (SELL は素通り = scheduler 側の契約)。
     const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
     expect(Object.keys(suppressed).sort()).toEqual(['SOXL', 'SOXS'])
     expect(suppressed.SOXL).toBe(result.entryHaltReason)
   })
 
-  it('skips with drawdown_kill when realized drawdown exceeds threshold', async () => {
+  it('drawdown_kill (realized-PnL basis) halts entry only — holding positions keep their stop', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ drawdownKillThreshold: -0.02 }),
     )
@@ -166,8 +155,6 @@ describe('runStrategyCron', () => {
       },
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithPortfolio)
-    // drawdown kill は **実現損益**基準 = stop が効いた直後に発火する。ここで
-    // 全停止すると残りの保有の stop が消えるので、entry だけを止める。
     expect(result.skipReason).toBeUndefined()
     expect(result.entryHaltReason).toMatch(/^drawdown_kill: ratio=/)
     const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
@@ -210,10 +197,6 @@ describe('runStrategyCron', () => {
     expect(lastSchedulerOptions().entrySuppressedSymbols?.SOXL).toBe(result.entryHaltReason)
   })
 
-  // dashboard が disabled (active=0) を表示するために `inactiveSymbols` を
-  // SymbolUniverse に追加したが、cron / risk gate の評価対象は引き続き
-  // `allowedSymbols` のみであることを保証する regression test (= disabled 銘柄が
-  // 評価ループに混入しない)。
   it('cron only evaluates allowedSymbols and ignores inactiveSymbols', async () => {
     vi.mocked(loadSymbolUniverse).mockResolvedValue(
       makeSymbolUniverse({
@@ -228,15 +211,10 @@ describe('runStrategyCron', () => {
       DB: {} as D1Database,
     } as unknown as Parameters<typeof runStrategyCron>[0]
     const result = await runStrategyCron(envWithoutBridge)
-    // analysis.universe.symbols は cron が評価しようとした symbol 集合。
-    // inactiveSymbols (9697) は混入しない。
     expect(result.analysis.universe.symbols).toEqual(['SOXL'])
     expect(result.analysis.universe.symbols).not.toContain('9697')
   })
 
-  // `symbol_config.active = 0` は評価対象から丸ごと外れるため、
-  // そこに残った保有はこれまで永久に exit されなかった。qty>0 が残る inactive
-  // 銘柄だけを exit-only として run に混ぜる回帰ガード。
   describe('exit-only inactive symbols with a held position', () => {
     function fakeSymbolState(
       states: Record<string, { position: { qty: number } | null }>,
@@ -322,9 +300,6 @@ describe('runStrategyCron', () => {
     })
   })
 
-  // risk-% sizing の equity は total_capital_usd/jpy が未設定なら架空の
-  // $10,000/¥1,500,000 baseline に倒さず、scheduler へ equity を渡さない
-  // (キー自体を省略) → capital-unset で fail-closed させる。
   describe('risk-% sizing equity — no phantom capital baseline', () => {
     it('omits equity from scheduler options and reports null in analysis when total_capital_usd is unset', async () => {
       vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
@@ -347,9 +322,7 @@ describe('runStrategyCron', () => {
     })
   })
 
-  // `global_config.max_order_notional_usd/jpy` は manual `/trade/execute` /
-  // cash-rebalance plan では既に効いていたが、cron の通常 BUY sizing だけ
-  // symbol cap しか見ていなかった回帰ガード。
+  // manual /trade/execute と cash-rebalance では既に効いていたが cron の通常 BUY sizing は未対応だった回帰ガード
   describe('global max order notional cap passthrough', () => {
     it('passes max_order_notional_usd through to the scheduler for a USD run', async () => {
       vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
@@ -368,9 +341,7 @@ describe('runStrategyCron', () => {
     })
   })
 
-  // portfolio 全体エクスポージャー上限。manual 経路 (`TradingService`) は
-  // `PortfolioState.openExposure*` を見るが、cron はそれを使わず自身が読む
-  // symbol state から現在建玉を積み上げる。
+  // manual 経路 (TradingService) は PortfolioState.openExposure* を見るが、cron は自身が読む symbol state から建玉を積み上げる
   describe('portfolio exposure ledger', () => {
     function fakeSymbolStateWithPositions(
       positions: Record<string, { qty: number; avgPrice: number } | null>,
@@ -418,7 +389,6 @@ describe('runStrategyCron', () => {
       const symbolState = fakeSymbolStateWithPositions({ '9697': { qty: 100, avgPrice: 2000 } })
       const result = await runStrategyCron(envWithSymbolState(symbolState))
 
-      // current = 100*2000 = 200,000. ceiling = 1,000,000*0.6 = 600,000.
       expect(result.analysis.exposure).toEqual({
         status: 'ok',
         ceilingJpy: 600_000,
@@ -466,9 +436,6 @@ describe('runStrategyCron', () => {
     })
 
     it('includes a held JPY position in the ledger while only the US session window is open', async () => {
-      // session gate on: US 窓内 / JP 窓外。runs (= scheduler 呼び出し対象) は
-      // USD のみだが、ledger は runCurrency (全 currency の保有銘柄) から積む
-      // べきなので、窓外の JPY 建玉も currentJpy に反映される。
       vi.useFakeTimers()
       vi.setSystemTime(new Date('2026-04-20T17:00:00.000Z')) // US 13:00 ET (in) / JP 02:00 JST 火 (out)
       const fetchSpy = vi.fn(async () => {
@@ -495,14 +462,12 @@ describe('runStrategyCron', () => {
         const symbolState = fakeSymbolStateWithPositions({ '9697': { qty: 100, avgPrice: 2000 } })
         const result = await runStrategyCron(envWithSymbolState(symbolState))
 
-        // current = 100*2000 = 200,000 (JP window は窓外でも ledger には計上される)。
         expect(result.analysis.exposure).toEqual({
           status: 'ok',
           ceilingJpy: 600_000,
           currentJpy: 200_000,
           remainingJpy: 400_000,
         })
-        // scheduler 自体は窓内の USD だけ呼ぶ (JPY run は窓外なので起動しない)。
         expect(vi.mocked(runPullbackScheduler).mock.calls).toHaveLength(1)
         expect(lastSchedulerOptions().symbols).toEqual(['AAPL'])
       } finally {
@@ -568,15 +533,7 @@ describe('runStrategyCron', () => {
     expect(result.entryHaltReason).toBe('portfolio_halted: getPortfolio threw: DO unreachable')
   })
 
-  // CodeRabbit #196 review: 0013 未 migrate な D1 で earnings gate を有効化すると
-  // `fetchByRange()` が `no such table` を吐き全 BUY が fail-closed reject される。
-  // 起動時 sqlite_master チェックで table 不在を検知し、gate 自体を **注入しない**
-  // ことを確認する (= 過去挙動 / approve all へ fallback)。`tradingDisabledUntil`
-  // を未来時刻にして scheduler は起動させず、probe + warn だけ評価する。
   it('disables earnings gate when earnings_calendar table is missing (#196 review)', async () => {
-    // sqlite_master を SELECT してくる prepare 呼び出し用 fake D1。
-    // - SELECT 1 ... sqlite_master ... earnings_calendar → first() が null
-    //   (table 未存在) → earningsGateReady=false で gate skip
     const firstSpy = vi.fn(async () => null)
     const fakeDb = {
       prepare: vi.fn(() => ({
@@ -601,9 +558,8 @@ describe('runStrategyCron', () => {
         },
       } as unknown as Parameters<typeof runStrategyCron>[0]
 
+      // scheduler 内部 (bar fetch / DO etc.) はスコープ外なので例外は握りつぶす — 見るのは probe + warn ログのみ
       await runStrategyCron(envWithMissingTable, { requestId: 'req-no-table' }).catch(
-        // scheduler 内部 (bar fetch / DO etc.) は本テストのスコープ外なので
-        // 例外は握りつぶす。重要なのは sqlite_master probe + warn ログ。
         () => undefined,
       )
 
@@ -612,7 +568,6 @@ describe('runStrategyCron', () => {
         (c) => c[0].includes('sqlite_master') && c[0].includes('earnings_calendar'),
       )
       expect(probedSqliteMaster).toBe(true)
-      // table 不在の warn ログが出る (operator が追跡できるよう)。
       const warnLines = warnSpy2.mock.calls.map((c) => String(c[0]))
       expect(
         warnLines.some((l) => l.includes('earnings_gate_disabled_table_missing')),
@@ -622,9 +577,6 @@ describe('runStrategyCron', () => {
     }
   })
 
-  // issue #196 2/3: macro_event_calendar (0014) も同パターンで table 未存在
-  // 環境では gate 無効化される。probe SELECT が走り、warn ログ
-  // `macro_event_gate_disabled_table_missing` が出ることを確認する。
   it('disables macro event gate when macro_event_calendar table is missing (#196 2/3)', async () => {
     const firstSpy = vi.fn(async () => null)
     const fakeDb = {
@@ -668,8 +620,6 @@ describe('runStrategyCron', () => {
     }
   })
 
-  // news-shock-gate PR 2: 同じ sqlite_master probe パターンで
-  // `attention_observation` (PR 1) の有無を判定する。
   describe('news shock gate wiring (news-shock-gate PR 2)', () => {
     /** `sqlite_master` probe で `attention_observation` だけ ready、他は未存在扱いの fake D1。 */
     function fakeDbWithAttentionReady(): D1Database {
@@ -700,18 +650,8 @@ describe('runStrategyCron', () => {
       } as unknown as Parameters<typeof runStrategyCron>[0]
     }
 
-    /**
-     * **最重要の回帰ガード**: news shock gate (D1 read のみのはず) を有効化
-     * しても、15分間隔の strategy tick 中の外部 `fetch` 呼び出し回数が
-     * 1 ミリも増えないこと。`globalThis.fetch` を spy に差し替え、
-     * `news_shock_mode='off'` の baseline run と `'enforce'` (+ table ready)
-     * の run で呼び出し回数が完全に一致することを比較する。
-     *
-     * 比較方式を使う理由: `loadVixDecision` が `^VIX` を実 fetch するため
-     * (既存挙動)、tick 中の fetch 回数は 0 にはならない。baseline との
-     * **差分がゼロ**であることが「news shock gate は fetch を足していない」
-     * ことの正しい証拠になる。
-     */
+    // 比較方式を使う理由: loadVixDecision が ^VIX を実 fetch するため tick 中の fetch 回数は 0 にならない。
+    // baseline (mode=off) との差分ゼロが「news shock gate は fetch を足していない」ことの証拠になる。
     it('adds zero external fetch calls when the news shock gate evaluates (enforce mode)', async () => {
       const fetchSpy = vi.fn(async () => {
         throw new Error('network disabled in test')
@@ -720,7 +660,6 @@ describe('runStrategyCron', () => {
       globalThis.fetch = fetchSpy as unknown as typeof fetch
       const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       try {
-        // baseline: news_shock_mode='off' (default fixture)。
         vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
         await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
           requestId: 'req-news-baseline',
@@ -730,7 +669,6 @@ describe('runStrategyCron', () => {
 
         fetchSpy.mockClear()
 
-        // news shock gate 有効化 + attention_observation ready。
         vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
           makeGlobalConfigSnapshot({ newsShockMode: 'enforce' }),
         )
@@ -790,32 +728,21 @@ describe('runStrategyCron', () => {
       }
     })
 
-    // CodeRabbit PR #619 review (Major): `news_shock_baseline_days` に DB 上の
-    // 設定ミス (NaN / 非数) が入ると、sanitize 前の値で `sinceIso` を
-    // 計算していた旧コードは `new Date(NaN).toISOString()` の RangeError を
-    // 素通しし、strategy tick 全体 (`runStrategyCron`) を落としていた。
-    // これはその回帰ガード: この描画専用 fixture (`makeGlobalConfigSnapshot`)
-    // は `loadGlobalConfigFrom` を直接 mock しているため、
-    // `globalConfigRepo.validateNewsShockConfig` の DB 側 sanitize を経由
-    // しない — `loadNewsShockDecision` 自身の防御 (指摘1 対応) が単独で
-    // 効くことを確認する。
-    it('completes without throwing when newsShockBaselineDays is NaN (misconfigured DB value)', async () => {
+    // #619: mock は globalConfigRepo の DB-side sanitize を経由しないため、
+    // loadNewsShockDecision 自身の NaN 防御が単独で効くことを確認する回帰ガード。
+    it('completes without throwing when newsShockBaselineDays is NaN (misconfigured DB value, #619)', async () => {
       vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
         makeGlobalConfigSnapshot({ newsShockMode: 'enforce', newsShockBaselineDays: Number.NaN }),
       )
       const result = await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
         requestId: 'req-news-nan-baseline',
       })
-      // 完走していること自体が主張。加えて cron tick が正常な analysis を
-      // 返していることも確認する (無言で壊れた結果を返していないか)。
       expect(result.summary).toBeDefined()
       expect(result.analysis.schema).toBe('strategy_cron_analysis.v1')
     })
   })
 
-  // #141: critical な skip reason は Notifier 経由で push 通知される。
-  // env.SLACK_WEBHOOK_URL を設定して fetch を spy し、webhook 行きの POST が
-  // 1 回入ることだけ確認する (formatter は WebhookNotifier.test に分離済み)。
+  // formatter は WebhookNotifier.test に分離済み — ここでは POST が 1 回入ることだけ確認する
   it('pushes notify() when skipReason=portfolio_halted (#141)', async () => {
     const fetchSpy = vi
       .fn(async () => new Response('ok', { status: 200 }))
@@ -826,7 +753,6 @@ describe('runStrategyCron', () => {
       const envWithBrokenPortfolio = {
         DB: {} as D1Database,
         SYMBOL_STATE: {} as DurableObjectNamespace<never>,
-        // Webhook URL を設定 → notifier が fetch を叩く
         SLACK_WEBHOOK_URL: 'https://hooks.slack.test/x',
         PORTFOLIO_STATE: {
           idFromName: () => ({}),
@@ -842,16 +768,16 @@ describe('runStrategyCron', () => {
       expect(fetchSpy).toHaveBeenCalled()
       const calls = fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>
       const body = JSON.parse(String(calls[0]?.[1]?.body))
-      expect(body.text).toContain('CRITICAL')
+      expect(body.text).toContain('🚨')
+      expect(body.text).toContain('売買停止中 (ポートフォリオ停止)')
       expect(body.text).toContain('portfolio_halted')
     } finally {
       globalThis.fetch = originalFetch
     }
   })
 
-  // #session-window-gate: 開場30分前〜引けの窓外は戦略評価を skip する。
-  // 市場ごと判定 (USD→US / JPY→JP)。flag off は従来挙動。
-  describe('session window gate', () => {
+  // 市場ごとに判定 (USD→US / JPY→JP)。flag off は従来挙動。
+  describe('session window gate (#session-window-gate)', () => {
     // 2026-04-20(月) EDT。US 窓 [09:00,16:00 ET]、JP 窓 [08:30,15:30 JST]。
     const T_US_IN = '2026-04-20T17:00:00.000Z' // US 13:00 ET (in) / JP 02:00 JST 火 (out)
     const T_JP_IN = '2026-04-20T01:00:00.000Z' // JP 10:00 JST 月 (in) / US 21:00 ET 日 (out)
@@ -872,8 +798,6 @@ describe('runStrategyCron', () => {
     it('flag off では窓外でも outside_session_window で skip しない', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date(T_US_OUT))
-      // default config は sessionWindowGateEnabled=false。窓外でも gate を通り、
-      // PORTFOLIO_STATE 未 bind の exit-only halt まで進む (= gate で止まっていない)。
       const result = await runStrategyCron(env)
       expect(result.skipReason).toBeUndefined()
       expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
@@ -897,10 +821,7 @@ describe('runStrategyCron', () => {
         makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
       )
       const result = await runStrategyCron(env)
-      // gate 通過 → 後段 (PORTFOLIO_STATE 未 bind) で portfolio_halted。
       expect(result.skipReason).not.toBe('outside_session_window')
-      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
-      // exit-only halt に到達していること。
       expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
@@ -924,14 +845,10 @@ describe('runStrategyCron', () => {
       vi.mocked(loadSymbolUniverse).mockResolvedValue(jpyUniverse())
       const result = await runStrategyCron(env)
       expect(result.skipReason).not.toBe('outside_session_window')
-      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
-      // exit-only halt に到達していること。
       expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
-    // 2026-07-03 は Independence Day 振替休場 (7/4=土)。13:00 ET は通常なら窓内の
-    // 時刻だが、休場日は market_holiday として skip する (#547 — 実際にこの日
-    // stale quote の spread SKIP が量産され、reason から休場と読めなかった)。
+    // 2026-07-03 は Independence Day 振替休場 (7/4=土)。13:00 ET は通常なら窓内だが休場日は market_holiday で skip する。
     const T_US_HOLIDAY = '2026-07-03T17:00:00.000Z'
 
     it('flag on + US 祝日 → market_holiday で skip (#547)', async () => {
@@ -950,15 +867,12 @@ describe('runStrategyCron', () => {
       vi.setSystemTime(new Date(T_US_HOLIDAY))
       const result = await runStrategyCron(env)
       expect(result.skipReason).not.toBe('market_holiday')
-      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
-      // exit-only halt に到達していること。
       expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
 
     it('休場と窓外が混在する場合は outside_session_window に倒す', async () => {
       vi.useFakeTimers()
-      // US = 祝日 / JP = 土曜 02:00 JST (窓外)。全 market skip だが「全休場」では
-      // ないので従来ラベル。
+      // US = 祝日 / JP = 窓外。全 market skip だが「全休場」ではないので従来ラベル。
       vi.setSystemTime(new Date(T_US_HOLIDAY))
       vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
         makeGlobalConfigSnapshot({ sessionWindowGateEnabled: true }),
@@ -993,16 +907,12 @@ describe('runStrategyCron', () => {
       )
       const result = await runStrategyCron(env)
       expect(result.skipReason).not.toBe('outside_session_window')
-      // #exit-only-halt: gate 通過の証拠は「run 全体を skip していない」+ 後段の
-      // exit-only halt に到達していること。
       expect(result.entryHaltReason).toBe('portfolio_halted: PORTFOLIO_STATE binding missing')
     })
   })
 
-  // 寄り前に決定した BUY は MARKET 注文として寄り値と乖離した
-  // 価格で約定し得る (実例: SOXS 9/4 寄り前 51.60 判断 → 寄り 49.53 約定)。
-  // sessionWindowGateEnabled の値に関わらず、レギュラーセッション外の BUY は
-  // 常に抑止する (exit は対象外)。
+  // 寄り前に決定した BUY は MARKET 注文として寄り値と乖離した価格で約定し得るため、
+  // sessionWindowGateEnabled の値に関わらずレギュラーセッション外の BUY は常に抑止する (exit は対象外)。
   describe('regular session BUY gate', () => {
     afterEach(() => {
       vi.useRealTimers()
@@ -1056,7 +966,6 @@ describe('runStrategyCron', () => {
     it('gate off でも時間外 (20:00 ET) は session 理由で抑止される (終日評価の素通し防止)', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date('2026-04-21T00:00:00.000Z')) // 20:00 ET (月)
-      // default config: sessionWindowGateEnabled=false
       await runStrategyCron(envHealthyPortfolio())
       const suppressed = lastSchedulerOptions().entrySuppressedSymbols ?? {}
       expect(suppressed.SOXL).toBe(SESSION_REASON)
@@ -1064,13 +973,10 @@ describe('runStrategyCron', () => {
     })
   })
 
-  // #452 follow-up: cash rebalance pass 2 は pass 1 と同じ挙動制約 (earnings /
-  // macro / sanity-failed cooldown / intraday-only close) を受けないと、通常
-  // BUY が止まる局面でも退避先へ買い戻す抜け道になる。
+  // pass 2 が pass 1 と同じ制約 (earnings / macro / sanity-failed cooldown / intraday-only close)
+  // を受けないと、通常 BUY が止まる局面でも退避先へ買い戻す抜け道になる。
   describe('cash rebalance pass 2 shares pass 1 behavioral gates (#452 follow-up)', () => {
-    // 2026-04-20 (月) は JP 取引日。09:00-15:30 JST がレギュラーセッション
-    // (pass 2 は通貨単位でセッション外を弾く)。
-    const JP_IN_SESSION = '2026-04-20T02:00:00.000Z' // 11:00 JST
+    const JP_IN_SESSION = '2026-04-20T02:00:00.000Z' // 11:00 JST、レギュラーセッション内
     const JP_PRE_OPEN = '2026-04-19T23:00:00.000Z' // 08:00 JST (月, 開場前)
 
     afterEach(() => {
@@ -1104,11 +1010,9 @@ describe('runStrategyCron', () => {
       } as unknown as Parameters<typeof runStrategyCron>[0]
     }
 
-    /** pass 2 テスト共通の universe/config: JPY-only (fx=1) + SOXL→SGOV cash fallback。 */
+    // JPY-only universe (fx=1) で usdJpyRate 取得を経路から外す。SOXL は entry_required だが
+    // WATCH/NG 想定 → cash_fallback 先 SGOV へ退避し、pass 2 の BUY 計画が立つ。
     function setUpCashFallbackFixture(): void {
-      // JPY-only universe (fx=1) を使い、usdJpyRate 取得を経路から外す。SOXL は
-      // entry_required だが WATCH/NG 想定 (pass 1 の mocked entrySnapshots) →
-      // cash_fallback 先 SGOV へ退避し、pass 2 の BUY 計画が立つ。
       vi.mocked(loadSymbolUniverse).mockResolvedValue(
         makeSymbolUniverse({
           allowedSymbols: ['SOXL', 'SGOV'],
@@ -1144,8 +1048,7 @@ describe('runStrategyCron', () => {
       expect(calls.length).toBe(2) // pass 1 + cash rebalance pass 2
       const [pass1Options] = calls[0]!
       const [pass2Options] = calls[1]!
-      // pass 2 が実際に cash rebalance 経路を通ったことの前提確認。
-      expect(pass2Options.cashRebalanceQuantityMap).toBeDefined()
+      expect(pass2Options.cashRebalanceQuantityMap).toBeDefined() // pass 2 が cash rebalance 経路を通った前提確認
 
       for (const key of [
         'intradayOnlySymbols',
@@ -1157,16 +1060,14 @@ describe('runStrategyCron', () => {
         expect(pass2Options[key]).toBeDefined()
       }
 
-      // exposure ledger は tick 内で 1 個の object を pass 1/2 で共有し、
-      // 逐次減算する契約 — 別 object だと片方の BUY 消費が他方に反映されず
-      // tick 全体で上限を超過し得る。
+      // exposure ledger は同一 object を pass 1/2 で共有し逐次減算する契約 — 別 object だと
+      // 片方の BUY 消費が他方に反映されず tick 全体で上限を超過し得る。
       expect(pass1Options.exposureCap).toBeDefined()
       expect(pass2Options.exposureCap).toBe(pass1Options.exposureCap)
     })
 
-    // pass 2 は entrySuppressedSymbols を渡さない唯一の BUY
-    // 経路なので、通貨単位でレギュラーセッション外を弾かないと開場前の退避
-    // BUY がそのまま素通りしてしまう。
+    // pass 2 は entrySuppressedSymbols を渡さない唯一の BUY 経路なので、通貨単位で
+    // レギュラーセッション外を弾かないと開場前の退避 BUY が素通りしてしまう。
     it('pass 2 is not invoked before the regular session opens', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date(JP_PRE_OPEN))
@@ -1219,10 +1120,8 @@ describe('runStrategyCron', () => {
       } as unknown as Parameters<typeof runStrategyCron>[0]
     }
 
-    /** JPY-only universe (fx=1) + SOXL→SGOV cash fallback。BUY 側は off のまま
-     * SELL 側の独立性も検証する (`cashFallbackOrdersEnabled` は各テストで
-     * 明示的に指定しない限り false のまま)。maxOrderNotionalJpy は default
-     * (100,000) だと想定 quantity を clamp してしまうので上限を外す。 */
+    // JPY-only universe (fx=1) + SOXL→SGOV cash fallback。maxOrderNotionalJpy は各テストで
+    // default (100,000) を超える上限に上書きする — 想定 quantity を clamp してしまうため。
     function setUpCashFallbackSellUniverse(): void {
       vi.mocked(loadSymbolUniverse).mockResolvedValue(
         makeSymbolUniverse({
@@ -1248,8 +1147,7 @@ describe('runStrategyCron', () => {
           maxOrderNotionalJpy: 100_000_000,
         }),
       )
-      // SOXL 保有中 (自身の枠を使用中で SGOV への reroute は無い → desired=0)
-      // かつ同 tick で買い増しを試行 (= 需要あり)、SGOV は保有超過。
+      // SOXL 保有中 (自身の枠を使用中 → desired=0) かつ同 tick で買い増しを試行 (= 需要あり)、SGOV は保有超過
       vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
         ...emptySchedulerSummary(),
         entrySnapshots: {
@@ -1308,7 +1206,6 @@ describe('runStrategyCron', () => {
       expect(calls.length).toBe(2) // pass 1 + cash rebalance pass 2 (SELL)
       const [pass2Options] = calls[1]!
       expect(pass2Options.cashRebalanceSellQuantityMap).toEqual({ SGOV: 10_000 })
-      // BUY 側 flag は off のままなので BUY map は付かない。
       expect(pass2Options.cashRebalanceQuantityMap).toBeUndefined()
     })
 
@@ -1354,8 +1251,7 @@ describe('runStrategyCron', () => {
           maxOrderNotionalJpy: 100_000_000,
         }),
       )
-      // SOXL は未保有 (WATCH → SGOV へ reroute、desired=5,000,000) だが pass 1 で
-      // BUY を試みている (broker reject/error でも需要ありとみなす)。
+      // SOXL は未保有 (WATCH → SGOV へ reroute) だが pass 1 で BUY を試みている (broker reject/error でも需要ありとみなす)
       vi.mocked(runPullbackScheduler).mockResolvedValueOnce({
         ...emptySchedulerSummary(),
         entrySnapshots: {
@@ -1405,7 +1301,7 @@ describe('runStrategyCron', () => {
       })
     })
 
-    it('entryHaltReason がある tick では SELL 計画も止める', async () => {
+    it('entryHaltReason がある tick では SELL 計画も止める (#exit-only-halt)', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date(JP_IN_SESSION))
       setUpCashFallbackSellUniverse()
@@ -1425,7 +1321,6 @@ describe('runStrategyCron', () => {
         decisions: [{ symbol: 'SOXL', decision: 'BUY' }],
       })
 
-      // PORTFOLIO_STATE binding が無い env = entryHaltReason が立つ (#exit-only-halt)。
       const result = await runStrategyCron(env)
 
       const calls = vi.mocked(runPullbackScheduler).mock.calls
@@ -1470,8 +1365,7 @@ describe('resolvePortfolioForRiskScale', () => {
   })
 
   it('treats negative dailyStartEquity as unseeded and falls back', () => {
-    // Negative finite value is treated as unseeded (not yet initialized),
-    // distinct from NaN which means corrupt.
+    // negative finite = unseeded (not yet initialized), distinct from NaN which means corrupt
     const r = resolvePortfolioForRiskScale(
       { dailyStartEquity: -1, dailyRealizedPnl: 0 },
       3333,
@@ -1479,10 +1373,7 @@ describe('resolvePortfolioForRiskScale', () => {
     expect(r.usedFallback).toBe(true)
   })
 
-  it('does NOT fallback when dailyRealizedPnl is non-finite (corrupt)', () => {
-    // CodeRabbit #131 review: if realizedPnl is NaN / Infinity, the portfolio
-    // snapshot is corrupt and must trigger fail-closed via drawdownRiskScale,
-    // not get silently zeroed by the fallback path.
+  it('does NOT fallback when dailyRealizedPnl is non-finite (corrupt, #131 review)', () => {
     const p = { dailyStartEquity: 0, dailyRealizedPnl: Number.NaN }
     const r = resolvePortfolioForRiskScale(p, 3333)
     expect(r.usedFallback).toBe(false)
@@ -1491,8 +1382,7 @@ describe('resolvePortfolioForRiskScale', () => {
 })
 
 describe('emitStaleRollWarningIfNeeded (issue #140)', () => {
-  // 2026-04-25T00:00:00Z を「現在」とみなして、24h 前 / 23h 前 / 48h 前 の
-  // 3 ケースを単純化。Date.now の代わりに `now` 注入で時刻 mock。
+  // Date.now の代わりに now 注入で時刻を mock し、24h/23h/48h 前のケースを単純化する
   const fixedNowMs = Date.parse('2026-04-25T00:00:00.000Z')
   const now = () => fixedNowMs
 

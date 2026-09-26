@@ -19,8 +19,7 @@ const baseConfig: PerSymbolRiskConfig = {
 }
 
 function quote(price: number, ageMs = 1_000, overrides: Partial<QuoteSnapshot> = {}): QuoteSnapshot {
-  // bid/ask seeded inside default spread envelope so non-spread tests do not
-  // trip the spread gate inadvertently。Override per-test as needed.
+  // bid/ask default inside the spread envelope so non-spread tests don't trip the spread gate
   return {
     price,
     asOf: new Date(now.getTime() - ageMs).toISOString(),
@@ -159,7 +158,6 @@ describe('evaluatePerSymbolRisk — stale quote / halt fallback', () => {
   })
 
   it('approves SELL even when lastQuote is days-stale (stop hit / exit priority)', () => {
-    // SOXL stop hit scenario from prod: lastQuote 4 days old must NOT block SELL.
     const state: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
       position: { qty: 10, avgPrice: 124.95, openedAt: now.toISOString() },
@@ -206,7 +204,6 @@ describe('evaluatePerSymbolRisk — spread guard', () => {
     try {
       const state: SymbolState = {
         ...emptySymbolState('TQQQ', () => now),
-        // Yahoo feed は bid/ask 無しで price のみ保存する。
         lastQuote: quote(100, 1_000, { source: 'yahoo-snapshot', bid: undefined, ask: undefined }),
       }
       const decision = evaluatePerSymbolRisk(
@@ -226,10 +223,9 @@ describe('evaluatePerSymbolRisk — spread guard', () => {
   })
 
   it('still enforces spread limit when a bid/ask-less source DOES provide bid/ask', () => {
-    // Yahoo source でも bid/ask が来た場合は通常通り spread 判定する (skip は欠損時のみ)。
     const state: SymbolState = {
       ...emptySymbolState('TQQQ', () => now),
-      lastQuote: quote(100, 1_000, { source: 'yahoo-snapshot', bid: 99.0, ask: 101.0 }), // spread 2% >> 0.25%
+      lastQuote: quote(100, 1_000, { source: 'yahoo-snapshot', bid: 99.0, ask: 101.0 }),
     }
     const decision = evaluatePerSymbolRisk(
       { symbol: 'TQQQ', side: 'BUY', intentPrice: 100, intentNotional: 100, state, now },
@@ -240,13 +236,11 @@ describe('evaluatePerSymbolRisk — spread guard', () => {
   })
 
   it('reject reason に quote 鮮度 (asOf + Nh stale) を併記する (#547)', () => {
-    // 臨時休場 (session gate をすり抜ける閉場) では fetchedAt は新鮮なまま
-    // asOf だけが古くなる — その stale 板の wide spread reject が休場由来と
-    // reason 単体で読めることを確認する。now - asOf = 19h18m = 19.3h。
+    // 臨時休場では fetchedAt は新鮮なまま asOf だけ古くなる (now - asOf = 19.3h)
     const asOf = '2026-04-20T19:12:00.000Z'
     const state: SymbolState = {
       ...emptySymbolState('DFEN', () => now),
-      lastQuote: quote(100, 1_000, { bid: 99.0, ask: 101.0, asOf }), // spread 2%
+      lastQuote: quote(100, 1_000, { bid: 99.0, ask: 101.0, asOf }),
     }
     const decision = evaluatePerSymbolRisk(
       { symbol: 'DFEN', side: 'BUY', intentPrice: 100, intentNotional: 100, state, now },
@@ -329,7 +323,7 @@ describe('evaluatePerSymbolRisk — gap re-eval', () => {
   })
 
   it('approves SELL even when |gap| exceeds threshold (stop hit fires)', () => {
-    // SOXL stop hit shape: avgPrice 124.95 vs current 119.38 (~-4.5%) > 3% threshold.
+    // avgPrice 124.95 vs current 119.38 (~-4.5%) > 3% threshold
     const state: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
       position: { qty: 10, avgPrice: 124.95, openedAt: now.toISOString() },

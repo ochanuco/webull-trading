@@ -18,11 +18,6 @@ function equityRangeLimit(range: EquityRange): number {
   return 3650
 }
 
-/**
- * `loadPortfolioEquitySnapshots` を try/catch で wrap。table 未 migration や
- * D1 エラー時は空配列で fallback → ページ自体は描画。チャート枠は "データ無し"
- * メッセージに置き換わる。
- */
 export async function safeLoadPortfolioSnapshots(
   db: D1Database,
   range: EquityRange,
@@ -41,14 +36,6 @@ export async function safeLoadPortfolioSnapshots(
   }
 }
 
-/**
- * `/dashboard/portfolio` の総資産チャート。echarts inline JS で USD / JPY の
- * 2 ライン (片方 NULL は skip)。
- *
- * - X: snapshotAt の日付部分 (UTC date)
- * - Y: dailyStartEquity (通貨別)
- * - range tab で 30d / 90d / 365d / all 切替 (URL `?range=` を維持)
- */
 export function renderPortfolioEquityChart(
   snapshots: PortfolioEquitySnapshotRow[],
   range: EquityRange,
@@ -156,17 +143,8 @@ function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portf
   return `<div class="tab-strip" style="margin-top:12px">${links}</div>`
 }
 
-/**
- * VIX regime snapshot を bage 風に表示 (issue #196 3/3)。
- *
- *   - normal:   緑 (size 1.0、通常運用)
- *   - warning:  黄 (size 0.5、新規 BUY 縮小)
- *   - critical: 赤 (新規 BUY 全停止 / SELL は通常)
- *   - null:     灰 (snapshot 未生成、初回 cron tick 前 or DB 未配線)
- *
- * VIX 値そのものは snapshot table に持たないので regime ラベルのみ表示。
- * 値が必要なら strategy_decision_log の VIX reject reason を見る運用 (POC)。
- */
+// The snapshot table stores only the regime label, not the VIX value itself —
+// see strategy_decision_log's VIX reject reason if the number is needed.
 export function renderVixRegimeCell(regime: VixRegime | null): string {
   if (regime === null) {
     return `<span class="muted">— (cron 未到達 or DB 未配線、fail-open で通常運用)</span>`
@@ -180,17 +158,7 @@ export function renderVixRegimeCell(regime: VixRegime | null): string {
   return `<span class="ok">normal — 通常運用</span>`
 }
 
-/**
- * Issue #140: `lastRolledAt` の経過時間で badge 色を切替。
- *  - null:       未実行 (muted)
- *  - <24h:       OK (ok)
- *  - 24h–48h:    warning (warn)
- *  - >=48h:      error  (err)
- *
- * EOD cron は毎日 22:00 UTC に走るので 24h 以内なら正常、48h 超は **2 日連続
- * miss** で要調査。閾値は `runStrategyCron.emitStaleRollWarningIfNeeded` の
- * 24h と一貫させている。
- */
+// 24h/48h thresholds mirror runStrategyCron.emitStaleRollWarningIfNeeded — keep the two in sync.
 export function renderLastRolledCell(
   lastRolledAt: string | null,
   now: () => number = Date.now,

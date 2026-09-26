@@ -16,14 +16,11 @@ import type { SymbolCurrency } from '../../infrastructure/db/symbolConfigRepo'
 import { PortfolioStateClient } from '../state/PortfolioStateClient'
 import { SymbolStateClient } from '../state/SymbolStateClient'
 
-// Terminal Webull order statuses — once we see one of these we can stop
-// polling for this order. Anything else (NEW, PENDING, PARTIALLY_FILLED) is
-// still in flight.
-//
-// Include both `CANCELLED` (British, expected from the SDK enum) and
-// `CANCELED` (American, actually observed on the JP UAT tenant's
-// orders/history response for a day-expired limit). Matching only one
-// spelling left a 15-hour "stillPending" gap on a real SOXL order.
+// Statuses after which polling stops for an order (anything else — NEW,
+// PENDING, PARTIALLY_FILLED — is still in flight). Both spellings of
+// cancelled are included: the broker's own API returns `CANCELED`
+// (American) as well as the SDK's `CANCELLED` (British); matching only one
+// leaves cancelled orders permanently "stillPending".
 const TERMINAL_STATUSES = new Set<string>([
   'FILLED',
   'CANCELLED',
@@ -33,14 +30,11 @@ const TERMINAL_STATUSES = new Set<string>([
 ])
 
 /**
- * Subset of `TERMINAL_STATUSES` that can carry shares actually filled and
- * therefore needs the DO position applied — a limit order can partially
- * fill before the remainder is CANCELLED/EXPIRED, and the filled portion is
- * real regardless of how the rest of the order ended.
- *
- * Excludes `REJECTED`: Webull's model has no partial-fill-then-reject shape,
- * so a REJECTED row with `filled_quantity>0` is a broker data anomaly, not a
- * fill to apply — see the `reconcile_rejected_with_fill` log below.
+ * Subset of `TERMINAL_STATUSES` that can carry real filled shares — a limit
+ * order may partially fill before the remainder is CANCELLED/EXPIRED, and
+ * that filled portion is still owed to the DO. Excludes `REJECTED`: Webull
+ * has no partial-fill-then-reject shape, so a REJECTED row with
+ * `filled_quantity>0` is a broker data anomaly, not a fill to apply.
  */
 const FILL_CARRYING_TERMINAL_STATUSES = new Set<string>([
   'FILLED',
@@ -53,116 +47,49 @@ export interface ReconcileSummary {
   inspected: number
   updated: Array<{ clientOrderId: string; status: string; realizedPnl?: number }>
   stillPending: Array<{ clientOrderId: string; status?: string }>
-  /**
-   * Union of `notFoundRecentWindow` and `notFoundAfterDeepLookup` — preserved
-   * so dashboards / alerting that read `summary.notFound` keep working. New
-   * callers should prefer the more specific buckets to tell "still inside the
-   * recent first-page window" apart from "broker really doesn't have it any
-   * more". (#139)
-   */
+  /** @deprecated Union of `notFoundRecentWindow` + `notFoundAfterDeepLookup`, kept so existing dashboard/alert readers keep working; prefer the split buckets. */
   notFound: string[]
-  /**
-   * Coids that missed the initial single-page lookup. Without a deep-lookup
-   * sweep (`historyMaxPages=1`) this is the only notFound bucket — the order
-   * may simply have rotated off page 1 of broker history; do not treat it as
-   * authoritative absence.
-   */
+  /** Missed the single-page lookup — may simply be off page 1, not authoritative absence. */
   notFoundRecentWindow: string[]
-  /**
-   * Coids that still missed after walking up to `historyMaxPages` of broker
-   * history. Stronger signal that the order truly doesn't exist on the broker
-   * side (e.g. rejected pre-acceptance, or out of broker retention window).
-   */
+  /** Missed even the `historyMaxPages` deep sweep — stronger signal the broker doesn't have it. */
   notFoundAfterDeepLookup: string[]
   errors: Array<{ clientOrderId: string; message: string }>
-  /**
-   * Number of rows where the DO state apply succeeded on this run (whether
-   * the row was first-seen-FILLED or a repair retry of a previously-failed
-   * apply). Bumped after `state_applied_at` is stamped.
-   */
+  /** Rows where the DO apply succeeded this run, first-seen or repaired (see `repaired`). */
   stateApplied: number
-  /**
-   * Number of rows where the DO state apply attempt threw on this run. The
-   * journal row keeps `state_applied_at = NULL` and gets `state_apply_error`
-   * recorded so the next reconcile / repair tick can retry.
-   */
   stateApplyFailed: number
-  /**
-   * Of `stateApplied`, how many were repair-mode rows (already FILLED in the
-   * journal but not previously applied). Useful to spot persistent split-brain
-   * recovery activity in cron logs.
-   */
+  /** Subset of `stateApplied` that were repair-mode retries of a previously-failed apply. */
   repaired: number
   /**
-   * Number of rows that were force-stamped `state_applied_at` on this run
-   * because they exceeded `MAX_REPAIR_ATTEMPTS` with a permanent sanity
-   * failure. Bumps `state_apply_error` with an `auto_abandoned_after_*`
-   * prefix so an operator can audit them later. Excluded from `errors`
-   * (and from the per-row error count surfaced to the alert notifier) so a
-   * stuck row stops re-firing the same alarm forever.
+   * Rows force-stamped `state_applied_at` after exceeding `MAX_REPAIR_ATTEMPTS`
+   * on a permanent sanity failure. Excluded from `errors` so a stuck row
+   * stops re-firing the same alert forever.
    */
   abandoned: number
 }
 
-/**
- * Hard cap on how many times the repair cohort retries a row whose
- * `state_apply_error` indicates a permanent sanity-style failure. Beyond
- * this we force-stamp `state_applied_at` to drop the row out of the cohort
- * (see `markAsAbandoned`). Picked at 5 to give a few cron ticks of grace
- * for transient DO blips without letting a structurally-broken row
- * (e.g. broker forever returns `filled_price=10` for a 3516 limit) keep
- * the alert siren going indefinitely.
- *
- * Tunable in code only — moving this to env / runtime config is out of
- * scope (separate PR if needed).
- */
+// 5 gives a few cron ticks of grace for a transient DO blip without letting
+// a structurally-broken row (e.g. broker permanently echoing a stub price)
+// keep the alert siren going forever — see `markAsAbandoned`.
 const MAX_REPAIR_ATTEMPTS = 5
 
-/**
- * Default candidate-window for the SELECT on the post_submit cohort. 48 hours
- * is long enough to ride out a brief cron pause without re-scanning the whole
- * table every tick. Overridable per call via `ReconcileOptions.lookbackMs`
- * (#139): callers that need to catch up from a longer pause can widen it.
- */
+// 48h rides out a brief cron pause without re-scanning the whole table every
+// tick. Overridable via `ReconcileOptions.lookbackMs` for a longer catch-up.
 const DEFAULT_LOOKBACK_MS = 48 * 3_600_000
 
-/**
- * #drift: submit が例外 (BrokerAuthError 等で ack ロスト) になった post_submit 行は
- * `submitted` が立たず通常 cohort から漏れる。だが「我々側のエラー = broker 不約定」
- * とは限らない (auth blip で実は FILLED してることがある)。これを broker 注文履歴で
- * 照合して state を heal するため、errored 行も短い window で reconcile 対象に含める。
- *
- * window を 48h ではなく **30 分**に絞る理由:
- *   - reconcile cron は 5 分間隔なので、ack ロスト fill は数 tick (= 数分) で拾える。
- *   - 古い履歴行を再処理しない (手動 sync 後に過去の SELL を再 apply して
- *     "Cannot SELL without an open position" を誘発する事故を避ける)。
- *   - pre-acceptance で本当に失敗した errored 行 (買付余力 / 空売り 417 等) は
- *     notFound のまま 30 分で window から脱落 — broker 照合は bounded。
- */
+// Narrower than DEFAULT_LOOKBACK_MS: an errored submit (ack lost, e.g. an
+// auth blip) surfaces within a few 5-minute cron ticks, so 30 minutes is
+// plenty. Keeping it narrow also avoids re-processing old errored rows,
+// which could re-apply a stale SELL against a since-changed position.
 const ERRORED_SUBMIT_LOOKBACK_MS = 30 * 60_000
 
-/**
- * Default cap on rows inspected per call. Keeps a single invocation bounded
- * so a backlog doesn't fan out into a runaway batch. Overridable via
- * `ReconcileOptions.limit` (#139) when the operator wants to drain a larger
- * backlog deliberately.
- */
+// Bounds each invocation so a backlog can't fan out into a runaway batch.
+// Overridable via `ReconcileOptions.limit` to drain a backlog deliberately.
 const DEFAULT_ROW_LIMIT = 50
 
-/**
- * `state_apply_error` substrings that we treat as "no further retry will
- * help" — repeated reconcile cycles will keep producing the same failure.
- * Distinct from transient errors (`broker_5xx`, `network`, `DO unavailable`,
- * etc.) which should keep retrying.
- *
- * Recognized substrings:
- *   - `sanity_failed` — `resolveFilledPrice()` rejected the broker's price
- *     via the ratio guard. Will keep failing as long as the broker echoes
- *     the same stub.
- *   - `repair_skipped_invalid_row` — repair branch detected a structurally
- *     invalid FILLED row (qty<=0, missing symbol/side, etc.). Cannot be
- *     fixed by retry — the journal row itself is malformed.
- */
+// `sanity_failed` / `repair_skipped_invalid_row` are structural — retrying
+// won't change the broker's data or fix a malformed row. Everything else
+// (broker_5xx, network, DO unavailable) is transient and should keep
+// retrying past MAX_REPAIR_ATTEMPTS.
 function isPermanentSanityFailure(error: string | null | undefined): boolean {
   if (!error) return false
   return error.includes('sanity_failed') || error.includes('repair_skipped_invalid_row')
@@ -170,86 +97,34 @@ function isPermanentSanityFailure(error: string | null | undefined): boolean {
 
 interface ReconcileOptions {
   env: Env
-  /**
-   * Correlates reconcile logs with the originating request. Callers should
-   * pass `c.get('requestId')` when invoking from a route, or generate their
-   * own (e.g. `crypto.randomUUID()`) for cron-triggered runs.
-   */
+  /** Correlates reconcile logs with the originating request/cron run. */
   requestId?: string
   /** How far back to scan for unreconciled post_submit rows. Default 48h. */
   lookbackMs?: number
   /** Cap on rows inspected per call so a single invocation doesn't fan out. */
   limit?: number
   /**
-   * Bound on how many pages of Webull order history we sweep when the initial
-   * single-page lookup misses. `1` (default) preserves prior behaviour — a
-   * single 50-row request per row, no deep sweep. Operator-driven retries
-   * (e.g. catching up after a cron pause) can pass a larger value so older
-   * fills still inside broker retention get reconciled. (#139)
-   *
-   * The deep sweep only triggers for the fresh-poll cohort (broker_status
-   * NULL); the repair cohort never re-polls Webull.
+   * Pages of broker history to sweep when the first-page lookup misses.
+   * `1` (default) = single page only. The repair cohort never re-polls
+   * Webull regardless of this value — only the fresh-poll cohort uses it.
    */
   historyMaxPages?: number
-  /**
-   * Page size used for both the initial lookup and the deep-lookup sweep.
-   * Default 50. Larger values reduce request count at the cost of larger
-   * responses; the broker may also enforce its own ceiling.
-   */
+  /** Page size for both the initial lookup and the deep-lookup sweep. Default 50. */
   historyPageSize?: number
   now?: () => Date
-  /**
-   * When true, the SELECT also picks up `broker_status` in the fill-carrying
-   * terminal statuses (FILLED/CANCELLED/CANCELED/EXPIRED) AND
-   * `state_applied_at IS NULL` rows that fall **outside** the lookback window
-   * — i.e. anything ever stuck in split-brain. Used by the
-   * `/admin/orders/reconcile?retryStateApply=1` repair endpoint. Default
-   * `false`: cron-triggered runs only retry rows still inside `lookbackMs`.
-   */
+  /** @deprecated No-op since the repair cohort started ignoring `lookbackMs` unconditionally; kept for route/signature compatibility. */
   retryStateApply?: boolean
 }
 
 /**
- * Poll Webull for the current state of every locally-submitted order that
- * doesn't yet have a terminal `broker_status` recorded, and patch the
- * matching `post_submit` row in `trade_journal` with `filled_qty /
- * filled_price / broker_status`.
- *
- * Terminal rows with an actual fill (FILLED, or a partial fill left behind
- * by CANCELLED/CANCELED/EXPIRED) are also applied into the DO layer:
- *   - Every filled leg (BUY or SELL) is pushed to SymbolStateDO.recordFill
- *     so per-symbol position + avg cost stay in sync with the broker. A
- *     limit order that partially fills before the remainder is cancelled
- *     still owes the DO those shares.
- *   - SELL fills additionally compute realized_pnl = (fill_price - prior
- *     avg_cost) * filled_qty and apply it to PortfolioStateDO via
- *     applyRealizedPnl. The computed delta is also persisted on the
- *     trade_journal row (realized_pnl column).
- *   - REJECTED is excluded: Webull has no partial-fill-then-reject shape,
- *     so a REJECTED row with filled_quantity>0 logs a
- *     `reconcile_rejected_with_fill` anomaly instead of being applied.
- *
- * Idempotency / split-brain repair (issue #142):
- *   - The SELECT picks up `broker_status IS NULL` (first-seen) AND
- *     `broker_status IN (fill-carrying terminal statuses) AND
- *     state_applied_at IS NULL` (DO apply previously failed). The latter
- *     ensures a single failed DO call does not strand the row forever — the
- *     next cron tick retries.
- *   - After a successful DO apply, `state_applied_at` is stamped on the
- *     row, which removes it from future SELECT candidates. Already-applied
- *     rows are also defensively skipped at the loop level.
- *   - On apply failure the journal keeps `state_applied_at = NULL` and
- *     records `state_apply_error` + bumps `state_apply_attempts` so an
- *     operator can see how many retries it has taken.
- *
- * The previous implementation marked the row reconciled and trusted that
- * any DO failure would be repaired manually — split-brain (D1 = FILLED, DO
- * position = stale) was the result.
+ * Polls Webull for locally-submitted orders without a terminal
+ * `broker_status`, applies fill-carrying terminal rows into SymbolStateDO /
+ * PortfolioStateDO, and stamps `state_applied_at` so a failed DO apply
+ * retries on the next tick instead of leaving D1 and the DO split-brained.
  */
 export async function reconcileFills(options: ReconcileOptions): Promise<ReconcileSummary> {
-  // Fail-closed on a missing DB binding to match loadGlobalConfigFrom /
-  // loadSymbolUniverse. A silent empty summary would be indistinguishable
-  // from "nothing to reconcile" and hide a misconfiguration.
+  // Fail-closed: a silent empty summary would be indistinguishable from
+  // "nothing to reconcile" and hide a misconfigured binding.
   if (!options.env.DB) {
     throw new Error('reconcileFills requires env.DB binding (D1 not configured)')
   }
@@ -268,33 +143,23 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   }
 
   const now = options.now ?? (() => new Date())
-  // Capture a single "reconcile run" timestamp so every derived computation
-  // (lookback window, cooldown expiry) uses the same basis. Using fresh
-  // `new Date()` at each call site makes back-catch-up runs lengthen the
-  // cooldown window incorrectly.
+  // Single basis timestamp for this run — per-call `new Date()` would
+  // lengthen the lookback/cooldown windows on a delayed catch-up run.
   const runNow = now()
   const since = new Date(runNow.getTime() - (options.lookbackMs ?? DEFAULT_LOOKBACK_MS)).toISOString()
-  // #drift: ack ロストした errored submit 用の狭い window (default 30 分)。
   const erroredSince = new Date(runNow.getTime() - ERRORED_SUBMIT_LOOKBACK_MS).toISOString()
   const limit = options.limit ?? DEFAULT_ROW_LIMIT
-  // Deep-lookup sweep settings (#139). Default `historyMaxPages=1` preserves
-  // the prior single-page behaviour, so cron callers see no change in broker
-  // load. Callers that want to recover from a long pause (operator retry,
-  // admin endpoint) pass a larger bound.
   const historyMaxPages = Math.max(1, options.historyMaxPages ?? 1)
   const historyPageSize = options.historyPageSize ?? 50
 
-  // #77 portfolio exposure tracking: resolve symbol → currency once so each
-  // fill apply can update `openExposure{Usd,Jpy}` without per-row DB hits.
-  // Best-effort: a failure here (DB transient, fake DB in tests) falls back
-  // to the JP-numeric heuristic inside `applyFillToState` (see
-  // `resolveFillCurrency`). The exposure counter is informational for the
-  // gate — a missed update is recoverable via `/admin/portfolio/seed-exposure`.
-  // Loaded BEFORE the main `db` handle so `createDb` mock ordering in tests
-  // remains stable (main SELECT uses the second mock return).
+  // Preloads the symbol→currency map (exposure tracking) and pair-regime
+  // table (pair-switch cooldown) in one shot. Best-effort: on failure both
+  // stay undefined and callers fall back (JP-numeric currency heuristic;
+  // pair cooldown simply skipped) rather than blocking reconcile — the
+  // exposure counter alone is recoverable via /admin/portfolio/seed-exposure.
+  // Loaded before `createDb` below so mocked test fixtures that depend on
+  // call order keep their SELECT mock on the second `createDb` call.
   let symbolCurrency: Record<string, SymbolCurrency> | undefined
-  // ペア switch cooldown (#472) 用。universe load に相乗りし、追加の DB 呼び出し
-  // はしない (load 失敗時は cooldown も best-effort で skip)。
   let pairRegimes: PairRegimeEntry[] | undefined
   if (options.env.PORTFOLIO_STATE) {
     try {
@@ -314,10 +179,10 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
 
   const db = createDb(options.env.DB)
 
-  // #trade-cost: realized PnL を net 化するためのコスト設定。**既存の db handle
-  // を使い回す** (createDb を増やすと呼び出し順に依存した test fixture が壊れる)。
-  // 読み出し失敗は 0 (= gross) に倒す — ここで止めると fill の反映自体が止まり、
-  // DO と broker の split-brain が伸びる方が害が大きい。
+  // Reuses the `db` handle above (a second createDb call would break
+  // call-order-dependent test mocks). Read failure falls back to gross
+  // (fee=0) rather than aborting — blocking here would stall every fill's
+  // DO apply, which is worse than an unadjusted PnL.
   let tradeCost: TradeCostConfig = { feePctOfNotional: 0, feeFixedPerOrder: 0 }
   try {
     const globalConfigSnapshot = await loadGlobalConfig(db, options.requestId)
@@ -334,36 +199,11 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       }),
     )
   }
-  // Two cohorts in one query:
-  //   (a) `broker_status IS NULL` — never-reconciled, the original case.
-  //   (b) `broker_status IN (fill-carrying terminal statuses) AND
-  //       state_applied_at IS NULL` — D1 says a status that can carry a
-  //       fill (FILLED, or a partial fill left by CANCELLED/CANCELED/
-  //       EXPIRED) but DO apply previously threw (or was never attempted on
-  //       a row that was UPDATEd before this code shipped).
-  //
-  // For cohort (b), the `retryStateApply` flag controls whether the
-  // `lookbackMs` bound applies. Cron-triggered runs leave it false and
-  // only repair rows still inside the lookback window (match the original
-  // 48h scope). The repair endpoint sets it true to sweep older split-brain
-  // rows that have aged out of the window.
-  // CANCELLED/CANCELED/EXPIRED join the repair cohort too (not just FILLED):
-  // a partially-filled row whose DO apply failed sets `broker_status` to
-  // that terminal status, so restricting this to `FILLED` would strand it —
-  // the row would never satisfy either half of the outer `or()` below and
-  // the failed apply would never retry.
-  //
-  // But only when `filled_qty > 0`: an ordinary no-fill cancel/expiry is
-  // never stamped `state_applied_at` (there is nothing to apply), so
-  // without this guard *every no-fill cancel ever recorded* would match
-  // `isNull(stateAppliedAt)` and get re-swept into `repair_skipped_invalid_row`
-  // every single tick, forever.
-  // Excludes `filled_price IS NULL`: a row stamped with a fill-carrying
-  // terminal status whose first poll had `resolveFilledPrice()` reject the
-  // price (sanity failure) has no usable cached price to repair with —
-  // reusing it would immediately hit `repair_skipped_invalid_row` even
-  // though a later broker poll could still return a valid price. Those rows
-  // fall into `priceRetryFilter` below instead, which re-polls Webull.
+  // Terminal-with-fill, DO apply not yet stamped — status is already known,
+  // so no broker poll is needed, just a DO retry. Ignores `since`: a repair
+  // row is a cheap DO-only retry, so aging it out of the lookback window
+  // would strand it in split-brain indefinitely (bounded instead by
+  // LIMIT + the MAX_REPAIR_ATTEMPTS auto-abandon path below).
   const repairFilter = and(
     isNull(tradeJournal.stateAppliedAt),
     isNotNull(tradeJournal.filledPrice),
@@ -371,17 +211,17 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       eq(tradeJournal.brokerStatus, 'FILLED'),
       and(
         inArray(tradeJournal.brokerStatus, ['CANCELLED', 'CANCELED', 'EXPIRED']),
+        // Without this guard, every no-fill cancel/expiry ever recorded
+        // would match isNull(stateAppliedAt) and get re-swept into
+        // repair_skipped_invalid_row on every tick, forever.
         gt(tradeJournal.filledQty, 0),
       ),
     ),
   )
-  // Same fill-carrying-terminal-status shape as `repairFilter`, but for the
-  // `filled_price IS NULL` sanity-failure case: the cached data is not
-  // trustworthy, so these need an actual broker query (not the cache-only
-  // repair path). Bounded by the same `since` lookback as the ordinary
-  // fresh-poll cohort below, for the same reason (avoid unbounded broker
-  // pressure from old stuck rows) — the `MAX_REPAIR_ATTEMPTS` auto-abandon
-  // check (applied to this cohort too, see below) is the other backstop.
+  // Same terminal-with-fill shape as `repairFilter`, but for rows whose
+  // cached filled_price was rejected by the sanity guard (null) — that
+  // cache can't be trusted, so these get a fresh broker poll instead of
+  // the cache-only repair path.
   const priceRetryFilter = and(
     isNull(tradeJournal.stateAppliedAt),
     isNull(tradeJournal.filledPrice),
@@ -389,6 +229,26 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     inArray(tradeJournal.brokerStatus, ['FILLED', 'CANCELLED', 'CANCELED', 'EXPIRED']),
   )
   const preSubmit = alias(tradeJournal, 'pre_submit')
+
+  // submitted=true rows are polled/repaired: fresh-poll and price-retry
+  // within the `since` lookback (bounds broker pressure from old rows),
+  // repair unconditionally (see repairFilter above).
+  const freshPollCohort = and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since))
+  const priceRetryCohort = and(priceRetryFilter, gte(tradeJournal.timestamp, since))
+  const submittedCohort = and(
+    eq(tradeJournal.submitted, true),
+    or(freshPollCohort, priceRetryCohort, repairFilter),
+  )
+  // Rows where submit itself threw (ack lost, e.g. an auth blip) — status
+  // was never recorded, so these need the same broker poll as a fresh row,
+  // but bounded to the much narrower `erroredSince` window (see
+  // ERRORED_SUBMIT_LOOKBACK_MS).
+  const erroredAckLostCohort = and(
+    isNotNull(tradeJournal.errorClass),
+    isNull(tradeJournal.brokerStatus),
+    gte(tradeJournal.timestamp, erroredSince),
+  )
+
   const candidates = await db
     .select({
       id: tradeJournal.id,
@@ -396,12 +256,9 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       symbol: tradeJournal.symbol,
       side: tradeJournal.side,
       preSubmitSide: preSubmit.side,
-      // pre_submit の limit_price は intent 時に我々が signed した値で、
-      // D1 内に確定している。broker が JP sandbox stub で
-      // detail.limit_price=10 を返しても、こちらの値は影響を受けない。
-      // PR #223 sanity check が broker の stub limit_price と stub
-      // filled_price の両方が同値で ratio=1 になり pass してしまう穴を
-      // 塞ぐため、reference 候補として優先利用する。
+      // Our signed intent at order time — preferred over the broker's
+      // echoed limit_price as resolveFilledPrice's sanity-check reference
+      // because it can't be poisoned by a broker stub.
       preSubmitLimitPrice: preSubmit.limitPrice,
       brokerStatus: tradeJournal.brokerStatus,
       filledQty: tradeJournal.filledQty,
@@ -409,9 +266,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       realizedPnl: tradeJournal.realizedPnl,
       stateAppliedAt: tradeJournal.stateAppliedAt,
       stateApplyAttempts: tradeJournal.stateApplyAttempts,
-      // Required by the auto-abandon path so we can decide whether the
-      // prior failure was a permanent sanity-class error (retry will not
-      // help) vs a transient one. See `isPermanentSanityFailure`.
+      // Read by isPermanentSanityFailure to classify auto-abandon eligibility.
       stateApplyError: tradeJournal.stateApplyError,
     })
     .from(tradeJournal)
@@ -425,56 +280,13 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     .where(
       and(
         eq(tradeJournal.tradeEventType, 'post_submit'),
-        or(
-          // 通常 cohort: submit 成功 (submitted=true)。
-          // Lookback の適用は cohort 別に分かれる (#268):
-          //   - fresh poll cohort (broker_status NULL): broker への問合せが必要
-          //     なので、古い行を毎 tick 引っ張ると broker pressure になる
-          //     (default 48h cap)。
-          //   - repair cohort (broker_status IN fill-carrying terminal statuses
-          //     AND state_applied_at NULL):
-          //     broker poll 不要 (broker_status 確認済)、DO RPC のみで軽量。
-          //     **lookback 無視で常に sweep** する。これにより長期保有 fill が
-          //     48h 経過後 aged-out で permanent split-brain になる事故を防ぐ。
-          //     行数爆発は SELECT LIMIT 50 で bounded、永続 fail 行は #228 の
-          //     auto-abandon (MAX_REPAIR_ATTEMPTS=5) で cohort から自動的に外れる。
-          //   - price-retry cohort (`priceRetryFilter`): fill-carrying terminal
-          //     status だが filled_price が sanity 失敗で NULL — キャッシュされた
-          //     価格は信用できないので repair 同様には扱えず、broker への再問合せが
-          //     要る。fresh poll cohort と同じ `since` lookback を適用する
-          //     (broker pressure 回避、永続 fail は同じ auto-abandon で外れる)。
-          //
-          // `retryStateApply` フラグは残してあるが #268 以降は no-op
-          // (互換性のため signature 維持、将来 admin 側で別 sweep モードに
-          // 再定義する余地)。
-          and(
-            eq(tradeJournal.submitted, true),
-            or(
-              and(isNull(tradeJournal.brokerStatus), gte(tradeJournal.timestamp, since)),
-              and(priceRetryFilter, gte(tradeJournal.timestamp, since)),
-              repairFilter,
-            ),
-          ),
-          // #drift: ack ロストした errored submit (submitted が立たない / error_class
-          // 有り / broker_status 未確定) を **狭い window (30分)** で照合対象に。auth blip
-          // 等で実は FILLED してた注文を broker 履歴から拾って heal する。pre-acceptance
-          // 失敗 (買付余力/空売り 417 等) は notFound のまま window 経過で脱落。
-          and(
-            isNotNull(tradeJournal.errorClass),
-            isNull(tradeJournal.brokerStatus),
-            gte(tradeJournal.timestamp, erroredSince),
-          ),
-        ),
+        or(submittedCohort, erroredAckLostCohort),
       ),
     )
     .groupBy(tradeJournal.id)
-    // ASC = 古い順 = chain 依存 (BUY → SELL) が natural 順で 1 tick 内解決
-    // (#270)。DESC だと SELL を先に処理して DO 上ポジ無し→ "Cannot SELL
-    // without an open position" の false-positive alert が出る。
-    // 古い行を全部捌いてから新しい行に進むので、long-term 蓄積した repair
-    // cohort も時系列どおり apply される。LIMIT 50 + 5min cron で「古い行
-    // 優先で詰まって新しい行が遅延」状況は long-term 蓄積でしか起きない
-    // (= 別問題、#228 auto-abandon と組み合わせれば自然に収束)。
+    // Oldest first so a BUY is always applied before its dependent SELL
+    // within one tick — DESC would apply the SELL first and false-trigger
+    // a "no open position" alert.
     .orderBy(asc(tradeJournal.id))
     .limit(limit)
 
@@ -482,7 +294,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   if (uniqueCandidates.length === 0) return summary
 
   summary.inspected = uniqueCandidates.length
-  // Phase B: DO 由来 token を優先 (fallback で env)。
   const client = createWebullReadClient(options.env, {
     accessToken: await resolveAccessToken(options.env),
   })
@@ -490,9 +301,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
   for (const row of uniqueCandidates) {
     const coid = row.clientOrderId
     if (!coid) {
-      // In practice a post_submit row with submitted=1 always has a coid
-      // (it's the idempotency key we signed the order with). Surface any
-      // violation loudly instead of silently dropping the row.
+      // A post_submit row should always have a coid (our idempotency key) —
+      // surface the violation instead of silently dropping the row.
       summary.errors.push({
         clientOrderId: `row_id:${row.id}`,
         message: 'missing client_order_id on post_submit row',
@@ -500,37 +310,18 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       continue
     }
 
-    // Any row still stamped with a fill-carrying terminal status and
-    // `state_applied_at IS NULL` — whether the cached price is usable
-    // (repair) or not (price-retry, see below) — is a candidate for
-    // auto-abandon. Checking this before splitting into the two paths means
-    // a permanently-bad price (e.g. a JP stub that never becomes valid)
-    // still gets capped at `MAX_REPAIR_ATTEMPTS` even though it now goes
-    // through the fresh-poll path instead of the cache-only repair path.
+    // Checked before the repair/price-retry split so a permanently-bad
+    // price still hits MAX_REPAIR_ATTEMPTS even after it moves from the
+    // cache-only repair path to the fresh-poll path.
     const stuckPendingApply =
       row.stateAppliedAt === null &&
       row.brokerStatus !== null &&
       FILL_CARRYING_TERMINAL_STATUSES.has(row.brokerStatus)
 
     if (stuckPendingApply) {
-      // Auto-abandon: a row that has tripped a permanent sanity-class
-      // error MAX_REPAIR_ATTEMPTS times in a row is not going to recover
-      // on the next tick. Force-stamp `state_applied_at` so:
-      //   - it falls out of the repair / price-retry cohort SELECT,
-      //   - subsequent reconcile cycles do not include it in
-      //     `summary.errors` and so the `reconcile_fills_partial`
-      //     alarm stops re-firing for the same stuck row.
-      //
-      // The prior error is preserved (prefixed with
-      // `auto_abandoned_after_<n>_attempts:`) for operator audit. We
-      // emit a `reconcile_auto_abandon` audit log so dashboards / alert
-      // pipelines can pick up the event separately from the noisy
-      // partial-error alarm.
-      //
-      // Transient errors (broker_5xx, DO unavailable, network) are
-      // intentionally NOT auto-abandoned — those can clear on their own
-      // and should keep retrying past 5 attempts. See
-      // `isPermanentSanityFailure` for the included substrings.
+      // Only permanent sanity-class failures are abandoned — transient
+      // ones (broker_5xx, DO down, network) keep retrying since they can
+      // clear on their own. See `isPermanentSanityFailure`.
       if (
         row.stateApplyAttempts >= MAX_REPAIR_ATTEMPTS &&
         isPermanentSanityFailure(row.stateApplyError)
@@ -544,11 +335,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
             runNow.toISOString(),
           )
         } catch (error) {
-          // The auto-abandon UPDATE itself failed (e.g. D1 throttled, transient
-          // bind error). Do not let a single row kill the whole batch — log,
-          // record the failure on the run summary, and move on to the next
-          // row. The cohort SELECT will pick this row up again next tick and
-          // retry the abandon.
+          // Don't let one row's UPDATE failure kill the batch — record it
+          // and retry the abandon next tick.
           const message = error instanceof Error ? error.message : String(error)
           console.error(
             JSON.stringify({
@@ -580,28 +368,10 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       }
     }
 
-    // Distinguish the two cohorts so we can:
-    //   - skip the Webull poll for already-terminal repair rows (we already
-    //     have the canonical fill data on the journal row),
-    //   - count the repair stat correctly for ops visibility.
-    //
-    // Mirrors the SQL `repairFilter`: `broker_status='FILLED'`, or a
-    // CANCELLED/CANCELED/EXPIRED row that actually carries a fill, with
-    // `state_applied_at IS NULL`, is the repair case — status is canonical,
-    // only the DO apply needs retry. Any other shape (NULL broker_status,
-    // or a fill-carrying terminal status whose cached `filled_price` is
-    // NULL from a prior sanity-check rejection) means we still need a
-    // fresh status/price from the broker — see `priceRetryFilter`. A row
-    // with `filled_price IS NULL` must not be treated as repair: the cached
-    // price is unusable, and reusing it would immediately trip
-    // `repair_skipped_invalid_row` even though a later broker poll could
-    // still return a valid price.
-    //
-    // The `filledQty > 0` guard on the non-FILLED half is required: an
-    // ordinary no-fill cancel/expiry is never stamped `state_applied_at`
-    // (nothing to apply), so without it every no-fill cancel ever recorded
-    // would be treated as repair and re-hit `repair_skipped_invalid_row`
-    // every tick, forever.
+    // Mirrors the SQL `repairFilter`: same shape means the cached fill is
+    // usable and only the DO apply needs retry, so the Webull poll is
+    // skipped. `filledPrice === null` routes to the fresh-poll path instead
+    // (see `priceRetryFilter`) — that cache is untrustworthy.
     const isRepair =
       row.stateAppliedAt === null &&
       row.filledPrice !== null &&
@@ -611,9 +381,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           FILL_CARRYING_TERMINAL_STATUSES.has(row.brokerStatus)))
 
     if (isRepair) {
-      // Use the canonical fill data already on the row. We must not
-      // re-poll Webull — orders/history can rotate the row off the first
-      // page after a few days, and re-polling would also waste a quota.
+      // Must not re-poll Webull — history can rotate the row off page 1
+      // after a few days, wasting quota for nothing new.
       const symbol = row.symbol
       const side = resolveJournalSide(row.side, row.preSubmitSide)
       const filledQty = row.filledQty ?? null
@@ -624,11 +393,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         filledQty === null || filledQty <= 0 ||
         filledPrice === null || filledPrice <= 0
       ) {
-        // The row was stamped with a fill-carrying terminal status earlier
-        // but is missing one of the fields required to apply the fill
-        // (impossibility under the
-        // current code path, but defensive). Mark the apply as
-        // permanently-skipped via an error so an operator can investigate.
+        // Defensive: should be unreachable given repairFilter's shape, but
+        // guards against a malformed row instead of applying garbage.
         const message = `repair_skipped_invalid_row: symbol=${symbol} side=${side} qty=${filledQty} price=${filledPrice}`
         await recordApplyFailure(db, row.id, message)
         summary.errors.push({ clientOrderId: coid, message })
@@ -667,8 +433,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
 
     let detail: WebullOrderDetailDto | undefined
     try {
-      // Initial single-page lookup — covers the typical case where the
-      // order is still on the first page of broker history.
       detail = await client.findOrderByClientId(coid, { pageSize: historyPageSize })
     } catch (error) {
       summary.errors.push({
@@ -680,17 +444,11 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
 
     if (!detail) {
       if (historyMaxPages <= 1) {
-        // No deep-lookup configured — record as recent-window miss only. We
-        // cannot say whether the order rotated off page 1 or never existed
-        // on the broker side, so callers must not treat this as authoritative
-        // absence.
+        // Ambiguous: can't tell rotated-off-page-1 from never-existed.
         summary.notFoundRecentWindow.push(coid)
         summary.notFound.push(coid)
         continue
       }
-      // Deep-lookup sweep: walk pages 2..maxPages. Bounded to avoid
-      // unbounded broker pressure. We still only allow a single result per
-      // row, so the loop returns as soon as the coid is hit or pages run out.
       try {
         detail = await client.findOrderByClientId(coid, {
           maxPages: historyMaxPages,
@@ -704,23 +462,15 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         continue
       }
       if (!detail) {
-        // Even the deep sweep didn't find it — stronger signal that the
-        // broker really doesn't have the order.
         summary.notFoundAfterDeepLookup.push(coid)
         summary.notFound.push(coid)
         continue
       }
     }
 
-    // P0 raw response capture for JP tenant. We've observed the JP UAT
-    // returning `items[].filled_price=10` as a stub on orders that should
-    // have filled near 2683 (issue: 6971 ping-pong loop). The official doc
-    // does not pin down the unit, so emit the raw response (response body
-    // only — never the request body / signature / auth headers) so the
-    // parser can be confirmed against real data. Limited to JP and one log
-    // per row per reconcile cycle (cron is 5min, so this is not noisy).
-    // Once the unit is confirmed, this log can be removed or guarded by a
-    // debug flag.
+    // The JP tenant's filled_price unit isn't documented; keep the raw
+    // response (body only — never request/signature/auth headers) so it can
+    // be verified offline instead of trusting the parsed value blind.
     {
       const logSymbol = row.symbol ?? detail.symbol
       if (logSymbol && inferWebullMarket(logSymbol) === 'JP') {
@@ -760,7 +510,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       requestId: options.requestId,
       clientOrderId: coid,
       symbol: row.symbol ?? detail.symbol ?? null,
-      // 我々が intent で signed した limit。broker stub に依存しない。
       referenceLimitPrice: row.preSubmitLimitPrice ?? null,
     })
 
@@ -769,11 +518,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
     const symbol = row.symbol ?? detail.symbol ?? null
 
     if (status === 'REJECTED' && filledQty !== null && filledQty > 0) {
-      // Webull has no partial-fill-then-reject shape, so this combination
-      // means either a broker data bug or an unmodeled order lifecycle —
-      // apply it and we might poison DO state with shares that were never
-      // actually ours. Surface it loudly instead and leave it unapplied;
-      // an operator can reconcile the specific order by hand.
+      // Applying this would risk poisoning DO state with shares never
+      // actually ours — log and leave unapplied for manual reconciliation.
       console.error(
         JSON.stringify({
           event: 'reconcile_rejected_with_fill',
@@ -785,12 +531,9 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
       )
     }
 
-    // Compute realized P&L for SELL fills BEFORE we touch any state. Needs
-    // the symbol's current avg cost from SymbolStateDO, which is only
-    // meaningful after we've been recording BUY fills. Early trades with no
-    // prior position yield realized=null (can't compute).
+    // Must read priorState before the fill is applied to SymbolStateDO —
+    // afterward avg cost no longer reflects the pre-fill position.
     let realizedPnl: number | null = null
-    // #trade-cost: 往復コストの見積り。SELL 行にだけ入る (entry 分もここで引く)。
     let estimatedCost: number | null = null
     if (
       FILL_CARRYING_TERMINAL_STATUSES.has(status) &&
@@ -804,9 +547,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         const priorState = await new SymbolStateClient(options.env.SYMBOL_STATE).getState(symbol)
         const avg = priorState.position?.avgPrice
         if (typeof avg === 'number' && Number.isFinite(avg) && avg > 0) {
-          // #trade-cost: broker が実費を返さないので設定値から往復コストを
-          // 見積り、**net** を realized として記録する。未設定 (既定 0) なら
-          // gross と完全に一致する。
+          // Broker doesn't return actual fees — estimate from configured
+          // rates; feePctOfNotional=0 (default) makes net equal gross.
           const pnl = netRealizedPnl({
             avgPrice: avg,
             exitPrice: filledPrice,
@@ -817,7 +559,7 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           estimatedCost = pnl.cost > 0 ? pnl.cost : null
         }
       } catch (error) {
-        // Not fatal — just means we can't pre-compute realized. Log + continue.
+        // Non-fatal — realizedPnl just stays unset for this row.
         console.error(
           JSON.stringify({
             event: 'reconcile_prior_state_error',
@@ -843,9 +585,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         .where(eq(tradeJournal.id, row.id))
       summary.updated.push({ clientOrderId: coid, status, ...(realizedPnl !== null ? { realizedPnl } : {}) })
 
-      // After the journal is stamped reconciled, push the fill into the DO
-      // layer. Failure here records `state_apply_error` and leaves
-      // `state_applied_at = NULL` so the next reconcile tick will retry.
       if (
         FILL_CARRYING_TERMINAL_STATUSES.has(status) &&
         resolvedSide !== null &&
@@ -878,25 +617,10 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
           })
         }
       } else if (FILL_CARRYING_TERMINAL_STATUSES.has(status)) {
-        // Terminal-with-possible-fill status but missing one of the apply
-        // prerequisites. Two sub-cases:
-        //
-        //   (a) Genuine no-op — e.g. filledQty=0 (the ordinary no-fill
-        //       cancel/expiry) or symbol/side missing on the row. Nothing
-        //       to apply now and nothing the next tick will recover, so
-        //       stamp `state_applied_at` to prevent forever-retry.
-        //
-        //   (b) Transient sanity failure — `filledQty > 0` but
-        //       `filledPrice === null` because `resolveFilledPrice()`
-        //       rejected the candidate (e.g. JP `items[].filled_price=10`
-        //       stub vs limit ~2683 → ratio 0.0037 → null). The next
-        //       reconcile tick may get a realistic price from the broker;
-        //       leave `state_applied_at` NULL so the row stays in the
-        //       repair cohort.
-        //
-        // `shouldRetryStateApply` distinguishes (b). For it we still record
-        // the reason via `state_apply_error` for operator visibility, but
-        // do NOT stamp the marker.
+        // shouldRetryStateApply distinguishes a genuine no-op (stamp the
+        // marker, never retry) from a price sanity-rejection (leave NULL so
+        // the repair cohort retries once the broker returns a realistic
+        // price).
         if (shouldRetryStateApply(filledQty, filledPrice, status)) {
           await recordApplyFailure(db, row.id, 'sanity_failed: filled_price rejected by ratio guard')
           summary.stateApplyFailed += 1
@@ -916,14 +640,6 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         }
       }
 
-      // Release the pending-order lock on every terminal status — FILLED,
-      // CANCELLED, REJECTED, EXPIRED — so pullbackScheduler can re-enter
-      // the symbol on the next cron tick. Previously the removed
-      // TradeEventHandler did this on every trade_event_type=fill.
-      //
-      // Guard by clientOrderId: a backlog reconcile for an old row A
-      // shouldn't clear a newer order B's lock on the same symbol. Only
-      // clear if the currently-held lock still matches this row's coid.
       if (symbol !== null) {
         await clearPendingLockIfMatches(
           options.env,
@@ -933,9 +649,8 @@ export async function reconcileFills(options: ReconcileOptions): Promise<Reconci
         )
       }
     } catch (error) {
-      // A single row's UPDATE shouldn't kill the whole batch; most other
-      // rows can still be reconciled. Log the failure into the errors bucket
-      // so the operator can retry just this one.
+      // Don't let one row's UPDATE failure kill the batch — record it and
+      // retry next tick.
       const message = error instanceof Error ? error.message : String(error)
       console.error(
         JSON.stringify({
@@ -963,13 +678,9 @@ function toNumberOrNull(value: string | undefined): number | null {
 }
 
 /**
- * Apply a terminal fill-carrying order into SymbolStateDO + PortfolioStateDO and,
- * on success, stamp `state_applied_at` on the journal row. On failure the
- * row keeps `state_applied_at = NULL` and gets `state_apply_error` recorded
- * so the next reconcile tick (or `?retryStateApply=1` repair sweep) can
- * pick it back up.
- *
- * Returns `true` on success (marker stamped), `false` on failure.
+ * Applies a fill into SymbolStateDO/PortfolioStateDO and, on success, stamps
+ * `state_applied_at`. Returns `false` (leaving the marker NULL) on any
+ * failure so the row retries on the next reconcile tick.
  */
 async function tryApplyAndStamp(args: {
   env: Env
@@ -984,11 +695,9 @@ async function tryApplyAndStamp(args: {
   realizedPnl: number | null
   runNow: Date
   nowIso: string
-  /** Symbol → currency map preloaded by `reconcileFills` (#77). Undefined
-   * when the universe load failed — `applyFillToState` falls back to the
-   * JP-numeric heuristic. */
+  /** Undefined when the universe load failed; `applyFillToState` then falls back to the JP-numeric currency heuristic. */
   symbolCurrency?: Record<string, SymbolCurrency>
-  /** Pre-loaded regime 有効ペア (#472 pair switch cooldown 用、best-effort)。 */
+  /** Pre-loaded regime-enabled pairs for pair-switch cooldown (best-effort; undefined skips it). */
   pairRegimes?: PairRegimeEntry[]
 }): Promise<boolean> {
   const {
@@ -1039,8 +748,6 @@ async function tryApplyAndStamp(args: {
     return false
   }
 
-  // Apply succeeded. Stamp the marker so the row is excluded from future
-  // SELECT candidates.
   try {
     await db
       .update(tradeJournal)
@@ -1061,11 +768,10 @@ async function tryApplyAndStamp(args: {
       }),
     )
   } catch (error) {
-    // Marker UPDATE failed *after* DO apply succeeded — log loudly. The DO
-    // is now ahead of the journal; the row will be re-selected next tick
-    // and the apply will run a second time. SymbolStateDO.recordFill is
-    // not idempotent on its own, so this is a real risk and operator
-    // intervention may be needed.
+    // Marker UPDATE failed after the DO apply succeeded — the row will be
+    // re-selected and retried next tick. Safe: recordFillOnce /
+    // applyRealizedPnlOnce are idempotent by clientOrderId, so the retry
+    // no-ops on the DO side; only the marker stamp is actually missing.
     const message = error instanceof Error ? error.message : String(error)
     console.error(
       JSON.stringify({
@@ -1093,20 +799,10 @@ function resolveJournalSide(
 }
 
 /**
- * True when a fill-carrying terminal row (FILLED, or a partial fill left by
- * CANCELLED/CANCELED/EXPIRED) has a positive filledQty but `filledPrice`
- * came back null from `resolveFilledPrice` — i.e. the broker reported a
- * fill but the sanity guardrail rejected the price as a stub. We
- * deliberately keep `state_applied_at = NULL` for these rows so the repair
- * cohort (`broker_status` in `FILL_CARRYING_TERMINAL_STATUSES` AND
- * `state_applied_at IS NULL`) re-selects them on the next reconcile tick.
- * If the broker eventually returns a realistic price, the apply runs
- * normally; if it never does, we never poison DO state.
- *
- * Restricted to `FILL_CARRYING_TERMINAL_STATUSES` (not just `FILLED`, and
- * excluding `REJECTED`) so a CANCELLED/EXPIRED partial fill retries the same
- * way a FILLED one does, while a genuine no-fill CANCELLED (filledQty=0)
- * still falls through to the marker stamp and does not retry forever.
+ * True when a fill-carrying terminal row has a real fill (qty>0) but
+ * `resolveFilledPrice` rejected the price as a stub (filledPrice=null).
+ * Leaves `state_applied_at` NULL instead of stamping it, so the repair
+ * cohort retries with a fresh broker poll rather than a permanent no-op.
  */
 function shouldRetryStateApply(
   filledQty: number | null,
@@ -1132,9 +828,8 @@ function dedupeCandidatesByRowId<T extends { id: number; side: string | null; pr
       byId.set(row.id, row)
       continue
     }
-    // Defensive fallback for malformed append-only journals. If a duplicate
-    // join row has the only usable pre_submit side, keep that one while still
-    // processing the post_submit row at most once.
+    // Prefer whichever duplicate join row has a resolvable side (an
+    // append-only journal can produce more than one pre_submit join match).
     if (resolveJournalSide(existing.side, existing.preSubmitSide) === null &&
       resolveJournalSide(row.side, row.preSubmitSide) !== null) {
       byId.set(row.id, row)
@@ -1144,20 +839,10 @@ function dedupeCandidatesByRowId<T extends { id: number; side: string | null; pr
 }
 
 /**
- * Force-stamp `state_applied_at` on a permanently-stuck repair row. Used
- * by the auto-abandon path: after MAX_REPAIR_ATTEMPTS retries on a
- * sanity-class failure we accept that the next tick will not help and
- * drop the row out of the repair cohort.
- *
- * The prior error is preserved verbatim, prefixed with
- * `auto_abandoned_after_<attempts>_attempts:` so an operator running a
- * journal query can tell at a glance which rows were force-closed vs
- * applied normally.
- *
- * NOT a best-effort path: if this UPDATE fails the row stays in the
- * cohort and the same alert keeps firing — surface the failure to the
- * caller so the run summary reflects reality. Caller wraps it in a
- * try/catch so a single row's failure does not kill the whole batch.
+ * Force-stamps `state_applied_at` so a permanently-stuck repair row drops
+ * out of the cohort. Not best-effort: if this UPDATE fails, the caller must
+ * see it (row stays in cohort, same alert keeps firing) — caller wraps it
+ * in try/catch so one row's failure doesn't kill the batch.
  */
 async function markAsAbandoned(
   db: ReturnType<typeof createDb>,
@@ -1198,11 +883,10 @@ async function recordApplyFailure(
 }
 
 /**
- * Apply a terminal fill-carrying order into SymbolStateDO (position tracking) and,
- * for SELL legs, PortfolioStateDO (realized PnL aggregation).
- *
- * Throws on any underlying DO call failure — caller (`tryApplyAndStamp`)
- * catches and records the error so the row stays repair-able.
+ * Applies a fill into SymbolStateDO (position tracking) and, for SELL legs,
+ * PortfolioStateDO (realized PnL). Throws on any DO call failure — caller
+ * (`tryApplyAndStamp`) catches it and records the error so the row stays
+ * repair-able.
  */
 async function applyFillToState(args: {
   env: Env
@@ -1213,12 +897,10 @@ async function applyFillToState(args: {
   filledQty: number
   filledPrice: number
   realizedPnl: number | null
-  /** Reconcile run basis time — used for cooldown expiry so back-catch-up runs
-   * don't lengthen the window past the original fill's next trading day. */
+  /** Reconcile run basis time — used for cooldown expiry so back-catch-up runs don't lengthen the window past the original fill's next trading day. */
   runNow: Date
-  /** Pre-loaded symbol → currency map (#77 portfolio exposure tracking). */
   symbolCurrency?: Record<string, SymbolCurrency>
-  /** Pre-loaded regime 有効ペア (#472 pair switch cooldown 用、best-effort)。 */
+  /** Regime-enabled pairs for pair-switch cooldown (best-effort; undefined skips it). */
   pairRegimes?: PairRegimeEntry[]
 }): Promise<void> {
   const {
@@ -1238,8 +920,6 @@ async function applyFillToState(args: {
   let portfolioApplied = false
 
   if (env.SYMBOL_STATE) {
-    // Throws on DO failure — caller records `state_apply_error` and will
-    // retry on the next reconcile tick.
     const result = await new SymbolStateClient(env.SYMBOL_STATE).recordFillOnce(symbol, clientOrderId, {
       side,
       qty: filledQty,
@@ -1253,13 +933,10 @@ async function applyFillToState(args: {
     portfolioApplied = result.applied
   }
 
-  // #77 portfolio exposure tracking. BUY adds, SELL subtracts (clamped >=0
-  // inside the DO). Non-fatal: a failure here must not poison the journal
-  // marker because the position-side apply (SymbolStateDO.recordFillOnce)
-  // is already idempotent via clientOrderId. The exposure counter drift can
-  // be repaired via `/admin/portfolio/seed-exposure`. We only fire the call
-  // when SymbolStateDO.recordFillOnce reported a fresh apply (`symbolApplied`)
-  // so repair retries don't double-count exposure.
+  // Non-fatal (drift is repairable via /admin/portfolio/seed-exposure) —
+  // must not poison the journal marker since recordFillOnce already
+  // idempotently applied the position side. Gated on symbolApplied so a
+  // repair retry of an already-applied row doesn't double-count exposure.
   if (env.PORTFOLIO_STATE && symbolApplied) {
     const currency = resolveFillCurrency(symbol, symbolCurrency)
     const notional = filledPrice * filledQty
@@ -1287,24 +964,15 @@ async function applyFillToState(args: {
     }
   }
 
-  // Exit cooldown: **any** completed SELL parks the symbol until the next
-  // trading day so a same-day / next-tick re-entry cannot whipsaw. #reentry:
-  // 以前は損失決済 (realizedPnl < 0) のみ cooldown を張っていたが、**良い利確の
-  // 直後に同一銘柄を即買い戻して往復で削る** ケース (SQQQ 実例: +4% TP → 6h 後に
-  // 売値超で買い直し → 含み損) を止められなかった。TP / time-stop / 損切りを問わず
-  // 全 SELL で cooldown を張り、時間軸で買い直しを 1 営業日ブロックする
-  // (価格軸のガードは PullbackUptrendStrategy 側 = 前回売値 −1ATR)。
+  // Cooldown applies to every completed SELL regardless of realized PnL
+  // sign — restricting it to losses left a good exit exposed to an
+  // immediate same-day buy-back whipsaw. Parks until `nextSessionOpen`
+  // (market open), not a fixed 24h offset — a fixed offset's effective
+  // length varied with what time of day the exit happened.
   //
-  // 解除は翌営業日の**寄り** (`nextSessionOpen`, #661) — 旧 `nextTradingDay`
-  // (24h 刻みで時刻保持) だと実効長が exit 時刻に依存していた (引け際 exit ≈
-  // 1 セッション分、寄り直後 exit ≈ ほぼ 0)。寄りに正規化することでこの依存をなくす。
-  //
-  // Cooldown failures are intentionally NON-fatal (caught + logged) because
-  // the position itself has already been correctly recorded, and a missed
-  // cooldown only loosens a re-entry guard rather than producing
-  // double-counted state. We don't want a transient cooldown failure to
-  // strand the row in retry forever after position+pnl have already
-  // applied.
+  // Non-fatal (caught + logged): the position/pnl apply already succeeded,
+  // so a missed cooldown only loosens a re-entry guard rather than
+  // stranding the row in retry.
   if (
     side === 'SELL' &&
     env.SYMBOL_STATE &&
@@ -1327,12 +995,11 @@ async function applyFillToState(args: {
     }
   }
 
-  // ペア switch cooldown (#472 §3c): regime 有効ペアの片側が exit したら、
-  // **理由問わず** (stop / TP / time-stop / regime_flip、損益符号も問わず)
-  // 反対 symbol にも翌営業日まで cooldown を張る — same-day ドテン (whipsaw の
-  // 最悪形) の禁止。regime_enabled=0 のペアには適用しない (既存挙動の回帰保証)。
-  // 解除は翌営業日の**寄り** (`nextSessionOpen`, #661) — 上の自 symbol cooldown
-  // と同じ理由で exit 時刻依存を無くす。失敗は non-fatal (同上)。
+  // Same rule extended to the partner leg of a regime-enabled pair: exiting
+  // either side, for any reason, cooldowns the other side too — otherwise a
+  // same-day flip to the opposite leg is just the pair-level form of the
+  // same whipsaw. Pairs with regime disabled are filtered out of
+  // `pairRegimes` upstream. Non-fatal, same as above.
   if (
     side === 'SELL' &&
     env.SYMBOL_STATE &&
@@ -1340,10 +1007,8 @@ async function applyFillToState(args: {
     (symbolApplied || portfolioApplied)
   ) {
     try {
-      const upper = symbol.toUpperCase()
-      const pair = pairRegimes.find((p) => p.bullSymbol === upper || p.bearSymbol === upper)
-      if (pair) {
-        const partner = pair.bullSymbol === upper ? pair.bearSymbol : pair.bullSymbol
+      const partner = findPairPartner(symbol, pairRegimes)
+      if (partner !== null) {
         const market = inferTradingMarket(partner)
         const until = nextSessionOpen(runNow, market).toISOString()
         await new SymbolStateClient(env.SYMBOL_STATE).setCooldown(partner, until)
@@ -1352,7 +1017,7 @@ async function applyFillToState(args: {
             event: 'pair_exit_cooldown_applied',
             requestId,
             cooldown: {
-              sourceSymbol: upper,
+              sourceSymbol: symbol.toUpperCase(),
               targetSymbol: partner,
               reason: 'pair_exit_cooldown',
               until,
@@ -1375,17 +1040,10 @@ async function applyFillToState(args: {
 }
 
 /**
- * Ported from the removed TradeEventHandler: any terminal status (FILLED or
- * otherwise) releases the symbol's pending-order lock so subsequent cron
- * ticks can re-enter. pullbackScheduler sets the lock on submit; without
- * this release a failed / cancelled order would leave a dangling
- * `pendingOrder` field that the strategy reads.
- *
- * Guard by clientOrderId: reconcile can run late (back-catch-up / cron
- * pause). By the time we process an old terminal row A, the scheduler may
- * already have issued a new order B and acquired a fresh lock on the same
- * symbol. Unconditionally clearing would drop B's lock; only clear when
- * the currently-held lock still matches row A's coid.
+ * Releases the symbol's pending-order lock so pullbackScheduler can
+ * re-enter. Guarded by clientOrderId: a late reconcile (back-catch-up /
+ * cron pause) of an old terminal row must not clear a newer order's lock
+ * on the same symbol.
  */
 async function clearPendingLockIfMatches(
   env: Env,
@@ -1427,22 +1085,11 @@ async function clearPendingLockIfMatches(
 }
 
 /**
- * Webull's order history response doesn't expose an aggregate `filled_price`.
- * Recover a usable effective fill price in this order:
- *
- *   1. If `items[]` carries per-fill `filled_price` entries (partial or full
- *      fills), **average across all positively-priced items**.
- *   2. Otherwise fall back to the signed `limit_price` — strict upper bound
- *      for a BUY limit and lower bound for a SELL limit, good enough as a
- *      best-effort proxy for small sandbox orders where we only care about
- *      ballpark P&L aggregation.
- *   3. Otherwise `null`.
+ * Recovers an effective fill price when Webull's response has no aggregate
+ * `filled_price`: average across positively-priced `items[]` entries, else
+ * fall back to the signed `limit_price`, else `null`.
  */
 function pickFilledPrice(detail: WebullOrderDetailDto): number | null {
-  // Sandbox orders usually have a single item, so the average collapses to
-  // that one item's price. Partial fills at multiple prices would average
-  // out naturally — callers that need precise per-fill accounting will need
-  // to walk items[] directly instead.
   if (detail.items && detail.items.length > 0) {
     const prices = detail.items
       .map((item) => toNumberOrNull(item.filled_price))
@@ -1452,55 +1099,23 @@ function pickFilledPrice(detail: WebullOrderDetailDto): number | null {
       return sum / prices.length
     }
   }
-  // Fall back to the limit price we signed the order at. This is not
-  // technically the fill price, but it's a strict upper bound for a BUY
-  // limit and lower bound for a SELL limit — good enough for downstream
-  // notional aggregations when the broker doesn't echo the fill back.
   return toNumberOrNull(detail.limit_price)
 }
 
-/**
- * Sanity guardrail: a fill price more than 2x or less than 0.5x the
- * signed limit price is treated as a stub / parse error and rejected. The
- * trigger was JP UAT returning `items[].filled_price=10` on a 6971 order
- * with limit ~2683 (~268x deviation), which then propagated as
- * `avgPrice=10` into SymbolStateDO and produced a +26730% pnl in
- * pullbackScheduler — kicking off a TP→SELL→re-fill ping-pong loop.
- *
- * Returning `null` here causes the reconcile loop to leave
- * `state_applied_at` NULL and skip the DO apply path, so the bogus price
- * never lands in DO state. The next reconcile tick retries; if the
- * broker eventually returns a realistic price we apply normally, and if
- * not we never poison the DO.
- *
- * The threshold is intentionally loose (2x band) because:
- *   - MARKET orders can fill outside the limit on a fast-moving symbol,
- *   - intraday gap-ups / haltreopens also produce >1x moves.
- *   2x catches order-of-magnitude stubs without flagging realistic vol.
- */
+// A fill more than 2x or under 0.5x the reference limit is treated as a
+// stub/parse error and rejected rather than applied. The band is loose
+// enough to admit real slippage (MARKET fills, gap-ups, halt reopens)
+// while still catching an order-of-magnitude broker stub.
 const FILLED_PRICE_RATIO_MIN = 0.5
 const FILLED_PRICE_RATIO_MAX = 2
 
 /**
- * Only record a fill price when there's actually a fill, and only if it
- * passes the "finite and > 0" guideline. For CANCELLED / REJECTED rows
- * (filledQty=0) this returns null so we don't misrepresent the row as if
- * it had transacted at the signed limit price.
- *
- * Also rejects fills whose price is wildly inconsistent with the signed
- * limit (`<0.5x` or `>2x`) — see `FILLED_PRICE_RATIO_*` for the rationale.
- *
- * Reference limit price selection (issue: 9697 ping-pong loop):
- *   1. `context.referenceLimitPrice` (= our intent, persisted on the
- *      `pre_submit` trade_journal row at signing time). Preferred because
- *      it does not depend on broker behaviour — JP sandbox has been
- *      observed to echo a stub `detail.limit_price` that matches its stub
- *      `filled_price` (e.g. both 10) so the ratio collapses to 1 and the
- *      sanity guard passes a wildly wrong fill.
- *   2. `detail.limit_price` (broker response) as fallback for paths that
- *      can't surface the pre_submit reference (e.g. older callers).
- *   3. Neither available → ratio check is skipped (defensive: better to
- *      keep the fill than to drop a healthy MARKET-style order).
+ * Records a fill price only when there's a real fill and it passes the
+ * ratio sanity check against a reference limit price. Reference
+ * precedence: `context.referenceLimitPrice` (our signed pre_submit
+ * intent — broker-stub-proof) over `detail.limit_price` (broker echo,
+ * fallback for older callers); if neither is available the ratio check is
+ * skipped rather than dropping a healthy fill.
  */
 function resolveFilledPrice(
   filledQty: number | null,
@@ -1526,8 +1141,6 @@ function resolveFilledPrice(
     Number.isFinite(context.referenceLimitPrice) && context.referenceLimitPrice > 0
       ? context.referenceLimitPrice
       : null
-  // Prefer pre_submit (our signed intent) over broker echo. Falls back to
-  // broker for legacy callers that don't pass referenceLimitPrice.
   const limit = preSubmitLimit !== null ? preSubmitLimit : brokerLimit
   if (limit !== null && limit > 0) {
     const ratio = candidate / limit
@@ -1539,11 +1152,8 @@ function resolveFilledPrice(
           clientOrderId: context?.clientOrderId,
           symbol: context?.symbol,
           candidate,
-          // Both reference candidates included so the diff between our
-          // intent and the broker echo is easy to inspect during ops.
           pre_submit_limit: preSubmitLimit,
           broker_limit: brokerLimit,
-          // Effective reference used for the ratio check.
           limit_price: limit,
           ratio,
           detail_status: detail.status,
@@ -1557,11 +1167,10 @@ function resolveFilledPrice(
 }
 
 /**
- * Symbol → currency lookup for the #77 portfolio exposure tracker. Prefer
- * the preloaded `symbol_config` map; if missing (universe load failed, or
- * symbol not in `symbol_config`) fall back to the same JP-numeric heuristic
- * the `/trade/*` route uses (4-digit numeric = JPY, else USD). The fallback
- * keeps exposure tracking alive on misconfigured environments without
+ * Falls back to the same JP-numeric heuristic the `/trade/*` route uses
+ * (4-digit numeric symbol = JPY, else USD) when the preloaded
+ * `symbol_config` map is missing or doesn't have the symbol — keeps
+ * exposure tracking alive on a misconfigured environment instead of
  * silently misclassifying a US ETF as JPY.
  */
 function resolveFillCurrency(
@@ -1574,6 +1183,14 @@ function resolveFillCurrency(
   return /^\d{4}$/.test(upper) ? 'JPY' : 'USD'
 }
 
+/** The opposite leg of `symbol`'s regime-enabled pair, or null if it isn't in one. */
+function findPairPartner(symbol: string, pairRegimes: PairRegimeEntry[]): string | null {
+  const upper = symbol.toUpperCase()
+  const pair = pairRegimes.find((p) => p.bullSymbol === upper || p.bearSymbol === upper)
+  if (!pair) return null
+  return pair.bullSymbol === upper ? pair.bearSymbol : pair.bullSymbol
+}
+
 // Exposed for tests.
 export const _internal = {
   TERMINAL_STATUSES,
@@ -1581,4 +1198,5 @@ export const _internal = {
   resolveFilledPrice,
   resolveFillCurrency,
   shouldRetryStateApply,
+  findPairPartner,
 }

@@ -2,46 +2,33 @@ import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { WebullAuth } from './WebullAuth'
 
 /**
- * Webull の `x-access-token` 発行フロー (#21)。
- *
- * - `createToken(existingToken?)` → `POST /openapi/auth/token/create` v2、
- *   返却された token (通常 status=PENDING) を operator が Webull モバイルアプリで
- *   2FA SMS verify するまで使えない。
- * - `checkToken(token)` → `POST /openapi/auth/token/check` v2、status を poll
- *   して NORMAL になったかを確認する。
- *
- * Operator script (`scripts/issue-webull-token.ts`) が createToken → poll
- * checkToken → 取得 token を `wrangler secret put WEBULL_ACCESS_TOKEN` で投入、
- * という流れで使う。Worker runtime からの自動 refresh (Phase B / #21 follow-up) では
- * 同 class を Durable Object 経由で呼び出す予定。
+ * Webull's `x-access-token` issuance flow: `createToken` (`POST
+ * /openapi/auth/token/create`) returns a token that stays PENDING until
+ * 2FA-verified in the Webull mobile app; `checkToken` polls status until it
+ * reaches NORMAL. Driven operationally by `scripts/issue-webull-token.ts`.
  */
 
-/** Webull docs / SDK enum 定義より (PENDING=0 / NORMAL=1 / INVALID=2 / EXPIRED=3)。 */
+/** SDK enum is numeric (PENDING=0/NORMAL=1/INVALID=2/EXPIRED=3); this type keeps the string form. */
 export type WebullTokenStatus = 'PENDING' | 'NORMAL' | 'INVALID' | 'EXPIRED'
 
 export interface WebullAccessTokenDto {
-  /** token 文字列。`x-access-token` ヘッダにそのまま乗せる値。 */
   token: string
-  /** epoch ms (or seconds — Webull docs では明示なし)。SDK は数値として保持。 */
+  /** Epoch ms or seconds — Webull's docs don't specify which. */
   expires: number
   status: WebullTokenStatus
 }
 
 export interface WebullTokenClientOptions {
   auth: WebullAuth
-  /** 通常 `api.webull.co.jp` (本番) または UAT ALB URL。trade host と同じ。 */
+  /** Same host as trade: prod `api.webull.co.jp`, or the UAT ALB URL. */
   baseUrl: string
-  /** Default 10s。create / check のレスポンスは速いはず。 */
   timeoutMs?: number
   fetchFn?: typeof fetch
 }
 
 const CREATE_PATH = '/openapi/auth/token/create'
 const CHECK_PATH = '/openapi/auth/token/check'
-/**
- * Webull は token endpoint だけ x-version=v2 を要求する (SDK 実装より)。
- * 既存の `WebullHttpClient.tradeVersion` (default v1) とは別軸。
- */
+/** Only the token endpoint requires v2 — independent of WebullHttpClient's default v1 trade version. */
 const TOKEN_VERSION = 'v2'
 
 export class WebullTokenClient {
@@ -55,19 +42,15 @@ export class WebullTokenClient {
     this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
   }
 
-  /**
-   * 新規 token 発行 (`existingToken` 渡すと refresh) 。返却された status が
-   * `NORMAL` ならそのまま使える (test env 等)、`PENDING` なら operator が
-   * モバイルアプリで verify する必要があり、その後 `checkToken` で確認する。
-   */
+  /** Issues a new token, or refreshes one when `existingToken` is passed. */
   createToken(existingToken?: string): Promise<WebullAccessTokenDto> {
-    // SDK の CreateTokenRequest は token があれば body に含める、無ければ空 body。
-    // 空 body だと body MD5 は計算しない (signing 上 body 部分が省略される)。
+    // Body must be omitted (not `{}`) when there's no token, or the empty
+    // object still contributes a body MD5 to the signing canonical string.
     const body = existingToken ? { token: existingToken } : undefined
     return this.requestToken(CREATE_PATH, body)
   }
 
-  /** 既存 token の現在 status を取得 (poll 用)。 */
+  /** Fetches the current status for polling. */
   checkToken(token: string): Promise<WebullAccessTokenDto> {
     return this.requestToken(CHECK_PATH, { token })
   }
@@ -155,9 +138,7 @@ function normalizeAccessToken(json: unknown, path: string): WebullAccessTokenDto
   const expires = typeof obj.expires === 'number' ? obj.expires : Number(obj.expires)
   const statusRaw = typeof obj.status === 'string' ? obj.status : null
   if (!token || !Number.isFinite(expires) || statusRaw === null) {
-    // Mask the token in error output. raw token を JSON.stringify でログ /
-    // スタックに残すと、認証情報がエラー解析チャネルに漏れる (CodeRabbit
-    // #325 review)。
+    // Mask before it enters error text — a raw token in a log/stack trace leaks the credential.
     const masked: Record<string, unknown> = { ...obj }
     if (typeof obj.token === 'string' && obj.token.length > 10) {
       masked.token = `${obj.token.slice(0, 6)}...${obj.token.slice(-4)}`

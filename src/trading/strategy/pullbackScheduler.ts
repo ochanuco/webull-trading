@@ -3,9 +3,9 @@ import { logPostSubmit, logPreSubmit } from '../../infrastructure/logger/tradeJo
 import { classifyBrokerErrorCause } from '../../infrastructure/notification/brokerErrorSurge'
 import type { Notifier } from '../../infrastructure/notification/Notifier'
 import { BrokerRequestError, isSellQtyExceedError, isTickerDenyError } from '../../shared/errors'
-import type { DecisionTraceStep } from '../domain/Signal'
+import type { DecisionTraceStep, Signal } from '../domain/Signal'
 import type { StrategyDecision } from '../domain/StrategyDecision'
-import { inferTradingMarket, isWithinUsCloseWindow } from '../domain/tradingCalendar'
+import { inferTradingMarket, isWithinUsCloseWindow, type TradingMarket } from '../domain/tradingCalendar'
 import { NO_TRADE_COST, netRealizedPnl, type TradeCostConfig } from '../domain/tradingCost'
 import type { AtrBaselineMode } from './indicators'
 import type { Execution } from '../execution/Execution'
@@ -15,31 +15,20 @@ import { freshDecisionQuote } from '../quotes/decisionQuote'
 import {
   computeHoldBusinessDays,
   computePullbackIndicators,
+  toIndicatorWireKeys,
   type DailyBar,
 } from './indicators'
 import { computePullbackSizing } from './pullbackSizing'
 import type { BuyingPowerLedger } from './buyingPower'
 import type { ExposureLedger } from './exposureLedger'
 
-/**
- * #intraday-only: US 引け何分前から強制クローズ window を開けるか。cron は 5 分間隔
- * なので 15 分なら必ず 1 tick は窓内に入る (引け前 3 tick = 15/10/5 分前)。
- */
+/** Minutes before US close where a held intraday-only position force-closes. 15 guarantees at least one 5-min cron tick lands inside the window. */
 const INTRADAY_CLOSE_WINDOW_MIN = 15
-/**
- * 新規 BUY を止める引け前 window (分、`INTRADAY_CLOSE_WINDOW_MIN`
- * より広く取る)。15 分 cron は 1 window 内で「force-close」と「新規 entry」を
- * 両立できない — window 内で拾った BUY はその場で force-close されて往復コスト
- * だけ発生するか、次 tick (session gate 外) まで持ち越されてオーバーナイトになる
- * (実例: 15:45 ET に flat SOXL が entry setup で BUY → 16:00 tick は session
- * window 外で素通り、intraday-only が防ぎたい持ち越しがそのまま起きた)。
- */
+// Wider than INTRADAY_CLOSE_WINDOW_MIN: a BUY let through right up to the
+// close-window edge would either round-trip immediately or carry overnight.
 const INTRADAY_NO_ENTRY_WINDOW_MIN = 30
-/**
- * intraday bar 鮮度ゲートの default 上限 (ms)。60m bar の
- * timestamp は足の始値時刻なので正常系でも取得時刻との差は最大 60分。provider
- * 遅延分の余裕を足して 2h — 60分ちょうどにすると正常な bar まで reject する。
- */
+// A 60m bar's timestamp is its open time, so a fresh bar can already be
+// ~60min old; 2h adds provider-delay margin without rejecting normal bars.
 const DEFAULT_INTRADAY_BAR_MAX_AGE_MS = 2 * 60 * 60 * 1000
 import type { ExecutionResult } from '../domain/ExecutionResult'
 import type { OrderIntent } from '../domain/OrderIntent'
@@ -71,325 +60,120 @@ import {
 import type { EntrySnapshot } from './conditionalAllocation'
 
 const DEFAULT_BAR_LOOKBACK = 60
+const DEFAULT_PENDING_LOCK_TTL_MS = 60_000
+/** Daily-bar lookback for the pair-regime proxy symbol, independent of `DEFAULT_BAR_LOOKBACK`. */
+const PAIR_REGIME_PROXY_BAR_LOOKBACK = 80
 
 export interface PullbackSchedulerOptions {
   symbols: string[]
-  /**
-   * Risk-% sizing の母数となる口座資産。未指定は risk-% branch を
-   * `capital-unset` で fail-closed させる (`total_capital_usd/jpy` 未設定の
-   * 口座に架空の baseline を当てない)。budget-alloc 銘柄は未使用なので
-   * 影響しない。
-   */
+  /** Account equity for risk-% sizing. Unspecified fails closed as `capital-unset`; unused for budget-alloc symbols. */
   equity?: number
   barClient: BarClient
   positionStore: PositionStore
   execution: Execution
   strategy?: PullbackUptrendStrategy
-  /**
-   * Default rule used when neither `strategy` nor a per-symbol `rulesMap`
-   * entry applies. Production path (runStrategyCron) loads this from
-   * global_config in D1; tests can pass TEST_DEFAULT_RULE or a custom one.
-   */
+  /** Fallback rule when neither `strategy` nor `rulesMap` has an entry for the symbol. */
   defaultRule?: SymbolRule
   rulesMap?: Record<string, SymbolRule>
-  /**
-   * #momentum: role === 'momentum' の symbol 集合。これに含まれる symbol は
-   * `momentumStrategy` で判定する (押し目戦略の代わり)。signal は以降の
-   * Risk→Execution を通常 BUY/SELL と同じく通る。
-   */
+  /** Symbols with role==='momentum', routed to `momentumStrategy` instead of `strategy`; Risk→Execution afterward is unchanged. */
   momentumSymbols?: Set<string>
-  /** #momentum: momentum symbol 用の戦略。未指定なら momentum symbol も押し目で判定 (後方互換)。 */
+  /** Strategy for `momentumSymbols`. Unspecified falls back to the pullback strategy for them too. */
   momentumStrategy?: BreakoutMomentumStrategy
   symbolCapMap?: Record<string, number>
-  /**
-   * `global_config.max_order_notional_usd/jpy` (symbol 通貨単位)。
-   * 銘柄別 `symbolCapMap` とは min で合成する global な 1 注文あたりの上限 —
-   * 未設定なら無制限 (従来挙動)。manual `/trade/execute` (`DefaultRiskPolicy`) /
-   * cash-rebalance plan (`buildCashRebalancePlan`) は既にこの cap を通しているが、
-   * cron の通常 BUY sizing 経路 (`computePullbackSizing`) だけ symbol cap しか
-   * 見ていなかった — global cap を上げ忘れたまま個別銘柄 cap を外すと、想定外の
-   * 巨大 notional が cron から発注され得る。
-   */
+  /** `global_config.max_order_notional_usd/jpy`, combined with `symbolCapMap` by min. Unset = unlimited. */
   maxOrderNotional?: number
   barLookback?: number
   riskPerTradePct?: number
   pendingLockTtlMs?: number
-  /**
-   * @deprecated Run 単位の一律 lot。後方互換のため残置 (test 用)。production の
-   * `runStrategyCron` は渡さず `symbolLotSizeMap` を使う。symbol が map にも
-   * これにも無ければ fail-closed (#symbol-lot-size)。
-   */
+  /** @deprecated Test-only backward-compat uniform lot; production uses `symbolLotSizeMap`. */
   lotSize?: number
-  /**
-   * symbol → lot_size (売買単位、integer >= 1)。`lotSize` (run 単位) より優先。
-   * **この map を渡した時点で lot 必須モードになる**: map に該当 symbol が無い
-   * BUY は fail-closed (発注見送り) — blanket default に倒さない (#symbol-lot-size)。
-   * production (`runStrategyCron`) は常にこれを渡す。map も `lotSize` も渡さない
-   * legacy caller のみ従来の lot=1 に倒す (旧 unit test 後方互換)。
-   */
+  /** symbol → lot_size (>=1), takes priority over `lotSize`. Passing this switches to lot-required mode: a BUY for a symbol missing from the map fails closed instead of defaulting to lot=1. */
   symbolLotSizeMap?: Record<string, number>
-  /**
-   * symbol → budget_alloc_pct (0<pct<=1)。指定 symbol は fixed-% 配分 sizing
-   * (口座(円)単一プールに対する割合) に切替わる (#budget-jpy-base-fx)。
-   * 未指定 symbol は従来の risk-% sizing。
-   */
+  /** symbol → budget_alloc_pct (0<pct<=1). Present symbols switch to fixed-% sizing against the JPY account pool; unspecified stays risk-%. */
   symbolBudgetAllocPctMap?: Record<string, number>
-  /**
-   * 予算配分の基準額 = 口座総額 (円、`total_capital_jpy`)。budget 銘柄の sizing 基準。
-   */
+  /** Sizing basis for budget-alloc symbols: `global_config.total_capital_jpy`. */
   budgetBasisJpy?: number
-  /**
-   * この run の symbol 通貨 1 単位 = 何円か (JPY run=1、USD run=USD/JPY レート)。
-   * USD で FX 取得失敗時は undefined を渡し、budget 銘柄を fail-closed させる。
-   */
+  /** JPY value of 1 unit of this run's symbol currency (JPY run=1, USD run=USD/JPY rate). Pass undefined on FX fetch failure to fail-close budget symbols. */
   fxJpyPerSymbolCcy?: number
-  /**
-   * 口座買付余力の共有プール台帳 (#415)。指定時、BUY の submit 直前に notional を
-   * JPY 換算して `tryReserve` し、超過 / `unavailable` は pre-trade で reject する
-   * (Webull 417 をローカルで先回り)。runs (USD/JPY) をまたいで同一 ledger を共有
-   * する想定。未指定 (DryRun / legacy / test) は pool ゲート無効。
-   */
+  /** Shared buying-power ledger, reserved (JPY-converted) just before a BUY submit to pre-empt a Webull 417. Shared across USD/JPY runs. Unspecified disables the gate. */
   buyingPower?: BuyingPowerLedger
-  /**
-   * Portfolio 全体エクスポージャー上限の共有台帳
-   * (`global_config.max_portfolio_exposure_pct`)。指定時、BUY の submit 直前に
-   * notional を JPY 換算して `tryReserve` し、残枠を超える/`unavailable` は
-   * pre-trade で reject する。`buyingPower` と同じ設計 (runs=USD/JPY・pass 1/2
-   * をまたいで同一 ledger を共有し、逐次減算する)。未指定 (DryRun / legacy /
-   * test) はゲート無効。
-   */
+  /** Same design as `buyingPower`, gating `global_config.max_portfolio_exposure_pct`. */
   exposureCap?: ExposureLedger
-  /**
-   * intraday-only 銘柄の集合 (#intraday-only)。US 引け前 window 内で保有があれば
-   * strategy 判定を上書きして **強制 SELL**(オーバーナイト持ち越し禁止)。レバ ETF の
-   * 寄りギャップ stop-out 回避。未指定/対象外は従来どおりスイング保有。
-   */
+  /** Symbols force-SELLed in full if held inside the US pre-close window (avoids a leveraged ETF's open-gap stop-out). Unspecified/absent symbols keep swing holds. */
   intradayOnlySymbols?: Set<string>
-  /**
-   * Per-symbol decision sink。HOLD / BUY / SELL / SKIP / REJECT / ERROR の各
-   * route で 1 回ずつ呼ばれる。実装は D1 INSERT が典型 (#128)、テストは fake
-   * 注入可能。呼び出し側が失敗を throw しないのが前提 (logging failure isolation)。
-   */
+  /** Per-symbol decision sink, called once per HOLD/BUY/SELL/SKIP/REJECT/ERROR. A throw here does not stop the scheduler. */
   onDecision?: (record: {
     symbol: string
     decision: StrategyDecision
     reason?: string
     price?: number
     indicatorsJson?: string
-    /** BUY/SELL 成立時のみ設定。dashboard が trade_journal と JOIN する key (#143)。 */
+    /** Set only for a submitted BUY/SELL; the join key the dashboard uses against trade_journal. */
     clientOrderId?: string
     trace?: DecisionTraceStep[]
   }) => Promise<void> | void
-  /**
-   * cron fire 単位の correlation id。emit 失敗時の構造化ログに含めることで
-   * 「どの run で decision sink が落ちたか」を tail から追えるようにする
-   * (CodeRabbit #132 follow-up)。runStrategyCron が scheduled() handler の
-   * `crypto.randomUUID()` を渡す。
-   */
+  /** Correlation id for this cron run, included in structured logs. */
   requestId?: string
-  /**
-   * Slack/Discord webhook 通知用 sink (#199)。BUY/SELL emit 時と cron error 時に
-   * fire-and-forget で叩く。実装は失敗を握りつぶす責務 (silent fallback) なので
-   * scheduler 側は `.catch()` を付けるだけで cron を blocking しない。
-   */
+  /** Fire-and-forget notification sink for BUY/SELL and cron errors; the scheduler only `.catch()`s it, never awaits or retries. */
   notifier?: Notifier
-  /**
-   * Per-symbol risk gate config (issue #138 — TradingService と unify)。未指定で
-   * cron 経路を無 gate のままにできるよう、deps すべてが有効値なら gate 適用、
-   * 一つでも欠けると skip にして既存挙動を保つ (POC 後方互換)。production
-   * (`runStrategyCron`) は global_config / symbolUniverse から fully populate する。
-   */
+  /** Per-symbol risk gate config. Applied only when every dependency is supplied; otherwise skipped (preserves the no-option caller behavior). */
   perSymbolRisk?: PerSymbolRiskScheduleConfig
-  /**
-   * Webull SELL_QTY_EXCEED fallback resolver。SELL submit が
-   * `OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY` (HTTP 417) で reject
-   * された時に呼ばれる: broker portfolio から実 available qty を返し、
-   * `available > 0 && available < intent.quantity` なら scheduler が
-   * 全部売りで再 submit する (= 辻褄合わせ)。失敗時は throw でも null
-   * 返却でも OK で、いずれの場合も元 SELL_QTY_EXCEED エラーが re-throw
-   * される (fail-closed)。production (`runStrategyCron`) は
-   * `WebullHttpClient.getPositions()` でラップして注入する。未注入なら
-   * fallback は skip (= 既存挙動の元 error 再 throw、POC 後方互換)。
-   *
-   * Race window: getAvailableQty と SELL submit の間で broker side が
-   * 動く可能性は POC 段階では許容。連続 reject は次の cron tick で
-   * 再評価される。
-   */
+  /** Resolver for the SELL_QTY_EXCEED (417) fallback. A throw or `null` re-throws the original error (fail-closed); unset skips the fallback. */
   sellFallback?: SellFallbackConfig
-  /**
-   * Earnings calendar gate (issue #196 1/3)。±N 営業日で BUY を凍結。
-   * `repo` 未注入なら gate skip (POC 後方互換)。production
-   * (`runStrategyCron`) が D1 から repo を作って渡す。
-   */
+  /** Earnings calendar gate: freezes BUY within ±N business days. Unset (`repo` missing) skips it. */
   earningsGate?: EarningsScheduleConfig
-  /**
-   * Macro event gate (issue #196 2/3)。FOMC / CPI / NFP 等の発表 ±N 時間で
-   * 全銘柄 BUY を凍結。`repo` 未注入なら skip (POC 後方互換)。earnings gate
-   * より後ろで評価される (両方 reject なら earnings reason が先に確定する)。
-   */
+  /** Freezes all-symbol BUY around FOMC/CPI/NFP etc. Evaluated after `earningsGate`, so an earnings reject wins when both would fire. */
   macroEventGate?: MacroEventScheduleConfig
-  /**
-   * VIX regime filter decision (issue #196 3/3)。caller (`runStrategyCron`) が
-   * cron tick 起動時に `^VIX` を fetch し `evaluateVixRegime` を呼んで作る。
-   * scheduler は decision を受け取って:
-   *   - sizeScale === 0 (critical): BUY 全 reject (reason: `risk: vix_critical: ...`)
-   *   - 0 < sizeScale < 1 (warning): `intent.quantity = floor(qty * sizeScale)`
-   *   - sizeScale === 1 (normal / unavailable): no-op
-   * 未注入なら skip (POC 後方互換)。SELL は VIX 関係なく通す。
-   */
+  /** VIX regime decision from the caller's `evaluateVixRegime` call. sizeScale 0 blocks all BUY, <1 scales qty down, 1 is a no-op. Unset skips it; SELL is never gated. */
   vixDecision?: VixRegimeFilterDecision
-  /**
-   * News shock gate decision (issue #196 follow-up, news-shock-gate PR 2)。
-   * caller (`runStrategyCron`) が cron tick 起動時に `attention_observation`
-   * を D1 read して `evaluateNewsShockGate` を呼んで作る。`mode` は
-   * `global_config.news_shock_mode` ('off' は caller がこの option ごと省略する
-   * ので scheduler 側では扱わない):
-   *   - 'enforce': VIX と同じ scaling を適用 (critical で BUY 全 reject /
-   *     warning で `intent.quantity` を縮小)。VIX と乗算チェーンで合成される
-   *     (`vixScale` を先に適用した後の qty に対して news scale を適用)。
-   *   - 'observe': sizeScale を 1.0 に強制 (qty は変えない) しつつ、
-   *     `traceStep('risk.news_shock', ...)` に reason を残すだけ (shadow mode)。
-   * 未注入なら skip (POC 後方互換)。SELL は news shock 関係なく通す。
-   */
+  /** News shock gate. 'enforce' scales qty into the same multiplier chain as VIX; 'observe' only records the would-be reason in trace. Unset skips it; SELL is never gated. */
   newsShockGate?: {
     mode: 'observe' | 'enforce'
     decision: NewsShockGateDecision
   }
-  /**
-   * Extended-hours (pre-market) gate (issue #709 Phase 6)。caller
-   * (`runStrategyCron`) が cron tick 起動時に `extended_hours_observation`
-   * (Phase 1 producer) を D1 read し `loadExtendedHoursGateDecisions` を呼んで
-   * 作る、symbol (大文字) → decision の Map。VIX / news shock と異なり
-   * **symbol ごと**の decision であり、Map に無い symbol は no-op (= 従来挙動、
-   * trace にも出ない)。`mode` は `global_config.extended_hours_gate_mode`
-   * ('off' は caller がこの option ごと省略するので scheduler 側では扱わない):
-   *   - 'enforce': `action='block_entry'` で BUY 全 reject / `action='reduce_entry'`
-   *     で `intent.quantity` を `multiplier` 倍に縮小 (VIX / news shock と同じ
-   *     乗算チェーンの最後に適用)。
-   *   - 'observe': qty は変えず、`traceStep('risk.extended_hours', ...)` に
-   *     reason を残すだけ (shadow mode)。
-   * 未注入 / 対象 symbol の decision なしなら skip (POC 後方互換)。SELL は
-   * extended hours gate 関係なく通す (issue #709: Yahoo 時間外データ単独では
-   * SELL しない)。
-   */
+  /** Extended-hours (pre-market) gate, per symbol. 'enforce' blocks BUY (`block_entry`) or scales qty (`reduce_entry`, chained after VIX/news shock); 'observe' only records trace. A symbol missing from the Map is a no-op; SELL is never gated. */
   extendedHoursGate?: {
     mode: 'observe' | 'enforce'
     decisions: Map<string, ExtendedHoursGateDecision>
   }
-  /**
-   * Entry 抑止 symbol → 理由 (#452)。role が entry 無効 (cash_parking / 定義のみ
-   * の role / enum 外 'unknown') の銘柄の BUY を SKIP する。SELL / HOLD は
-   * 対象外 (exit 経路を妨げない)。未注入なら skip (POC 後方互換)。production
-   * (`runStrategyCron`) は `buildEntrySuppressedSymbols` の結果を渡す。
-   */
+  /** symbol → reason for a role with entry disabled; SKIPs BUY only (exit stays open). Unset skips it. */
   entrySuppressedSymbols?: Record<string, string>
-  /**
-   * 売買コスト見積り (#trade-cost)。TRADE 通知の realized PnL を net 化する。
-   * 未注入なら 0 (= gross)。永続化される realized は `reconcileFills` 側が
-   * 同じ設定で計算する。
-   */
+  /** Trade cost estimate for netting the TRADE notification's realized PnL; unset = 0 (gross). Kept in sync with `reconcileFills`. */
   tradeCost?: TradeCostConfig
-  /**
-   * baseline ATR の作り方 (#atr-baseline-window)。未注入は 'percentile'
-   * (実測で最良)。production は global_config 経由で渡る。
-   */
+  /** Baseline ATR construction. Unset defaults to 'percentile' (best in backtests). */
   atrBaselineMode?: AtrBaselineMode
-  /**
-   * ペアレジーム layer (#472)。mode='observe' は zone/score を trace に残すだけ
-   * (gate しない)、'enforce' は zone が許可しない側の BUY を SKIP し、保有と
-   * 反対 zone への flip で SELL (regime_flip) を出す。未注入 = 従来挙動。
-   * production (`runStrategyCron`) は global_config + inverse_pairs から組む。
-   */
+  /** Pair-regime layer. 'observe' only records zone/score in trace; 'enforce' SKIPs a BUY on the disallowed side and SELLs (regime_flip) on a flip against the held side. Unset keeps prior behavior. */
   pairRegime?: {
     mode: 'observe' | 'enforce'
     thresholds: PairRegimeThresholds
     pairs: PairRegimeEntry[]
   }
-  /**
-   * 段階判定 HALF (0.5x entry) を有効にする symbol 集合 (#452 PR 2)。role が
-   * entry 有効 (core_trend / leveraged_trend) な銘柄のみ。**未注入 / 集合外の
-   * 銘柄は従来の二値挙動 (HALF なし)** — role NULL の既存銘柄の挙動を変えない
-   * (#452 受け入れ条件)。production (`runStrategyCron`) は
-   * `buildHalfEntrySymbols` の結果を渡す。
-   */
+  /** Symbols eligible for HALF (0.5x) entry promotion. Symbols outside the set keep the binary (no-HALF) behavior. */
   halfEntrySymbols?: Set<string>
-  /**
-   * 条件連動配分の cash rebalance 数量 (#452 Layer 3)。runStrategyCron が
-   * pass 1 (通常評価) の entrySnapshots から allocation を計算し、退避先 /
-   * always_active 銘柄の不足分 BUY 数量を pass 2 でこの map に入れて呼ぶ。
-   * 指定 symbol は **pullback 戦略判定と sizing を bypass** して固定数量の
-   * BUY intent を作る — ただし下流の gate (lot fail-closed / per-symbol risk /
-   * buying-power / pending lock / execution の DRY_RUN) は全部通る。
-   * 未注入なら従来挙動。`cash_fallback_orders_enabled` (default false) が
-   * off の間は runStrategyCron がこの map を渡さない。
-   */
+  /** symbol → fixed BUY quantity for conditional-allocation cash rebalancing; bypasses strategy sizing but still passes every downstream gate (lot, per-symbol risk, buying-power, pending lock, DRY_RUN). Unset keeps prior behavior. */
   cashRebalanceQuantityMap?: Record<string, number>
-  /**
-   * 条件連動配分の cash rebalance 部分 SELL 数量 (#452 follow-up)。
-   * runStrategyCron が pass 1 の保有 / BUY 試行から「退避元の資金需要」を判定し、
-   * 退避先の active weight 超過分をこの map に入れて呼ぶ。指定 symbol は
-   * strategy の SELL signal が無い時だけ、この数量 (position.qty にクランプ済み)
-   * で部分 SELL intent を作る — 全量 close ではない点が `cashRebalanceQuantityMap`
-   * (BUY) と対称の唯一の違い。strategy 自身が SELL を出している場合はそちらを
-   * 優先し、この map は無視する (exit ロジックの上書きはしない)。未注入なら
-   * 従来挙動。`cash_fallback_sell_mode` (default 'off') が off の間は
-   * runStrategyCron がこの map を渡さない。
-   */
+  /** symbol → partial SELL quantity (clamped to position qty) for cash rebalancing, applied only when the strategy itself has no SELL signal — flagged as partial even when the clamp reaches the full position. Unset keeps prior behavior. */
   cashRebalanceSellQuantityMap?: Record<string, number>
-  /**
-   * TICKER_IS_DENY 自動停止 hook (#460)。BUY submit が Webull の銘柄単位の
-   * 恒久拒否 (`OAUTH_OPENAPI_TICKER_IS_DENY`) で失敗したとき、該当 symbol を
-   * 引数に 1 回呼ばれる。production (`runStrategyCron`) は
-   * `createTickerDenyGuard` (symbol_config の自動 inactive 化 + audit + 通知)
-   * を注入する。未注入なら従来挙動 (毎 tick 再送)。hook 内の失敗は hook 側で
-   * 握りつぶす契約 (scheduler は await するだけ)。SELL では呼ばない — 万一
-   * exit 側で deny が出ても銘柄を評価対象から外すと保有が orphan になるため。
-   */
+  /** Called once per symbol when a BUY submit hits Webull's permanent per-ticker deny. Never called for SELL — denying an exit would orphan the position. A failure inside the hook is the hook's own responsibility. */
   onTickerDeny?: (symbol: string) => Promise<void>
-  /**
-   * sanity_failed cooldown gate。直近 N 分以内に同 symbol で broker stub
-   * fill (`resolveFilledPrice` が ratio guard で reject した) が観測されて
-   * いた場合、新規 BUY を block する。9697 04/28 incident (30 min/6 fills 累積、
-   * DO null のまま broker 側 600 株疑い) の再発防止 fail-closed gate。
-   *
-   * 未注入なら skip (POC 後方互換)。SELL は対象外 (= broker stub では起きない、
-   * exit 経路を妨げないため)。
-   */
+  /** Fail-closed gate blocking new BUY when a broker stub fill (sanity-check rejection) was observed for the symbol within `withinMs`. Unset skips it; SELL is unaffected. */
   sanityFailedCooldown?: SanityFailedCooldownConfig
-  /**
-   * intraday 60m bar の最大許容鮮度 (ms)。BUY 判断価格として
-   * intraday bar を使う場合のみ意味を持つ (= `barClient.getIntradayBars` を
-   * 実装した client でのみ評価する — 未実装 client は従来どおり無 gate)。
-   * bar の `timestamp` は足の**始値時刻**なので、最新足は常に「取得時刻 -
-   * timestamp ≤ 60分」になる。default 2h はそれに provider 遅延分の余裕を
-   * 足した値 — 60分ぴったりを閾値にすると正常系の bar が誤検知で reject
-   * される。SELL には適用しない (fail-closed を entry 側だけに閉じる)。
-   */
+  /** Max staleness (ms) for the intraday 60m bar BUY-freshness gate; evaluated only when `barClient.getIntradayBars` exists. Default `DEFAULT_INTRADAY_BAR_MAX_AGE_MS`. SELL is unaffected. */
   intradayBarMaxAgeMs?: number
   now?: () => Date
 }
 
 interface SanityFailedCooldownConfig {
-  /**
-   * `symbol` (大文字) について、直近 `withinMs` 内に sanity_failed 系の
-   * trade_journal row があるかを返す predicate。production は
-   * `hasRecentSanityFailure(env.DB, ...)` で wrap、test は fake で注入する。
-   * throw した場合は fail-closed (= cooldown 有効扱い) で BUY を reject。
-   */
+  /** Predicate for a recent sanity_failed row for `symbol` within `withinMs`. A throw is treated as cooldown-active (fail-closed). */
   check: (symbol: string) => Promise<boolean>
-  /**
-   * Operator 視認用の窓幅 (ms)。reject reason 文字列に埋め込むだけで、
-   * 実際の cutoff は `check` 実装側が持つ (= 1 source of truth)。
-   */
+  /** Window shown in the reject reason string; the actual cutoff lives in `check`'s own implementation. */
   withinMs: number
 }
 
 /**
- * Resolver for the SELL_QTY_EXCEED fallback. Returns the broker-side
- * `quantity_available` for the symbol (case-insensitive match), or `null`
- * if not held / not findable. Throwing here is treated the same as `null`
- * — the fallback is best-effort and never converts a SELL reject into a
- * different reject (the original SELL_QTY_EXCEED error is re-thrown).
+ * Resolver for the SELL_QTY_EXCEED fallback. `null` means not held / not
+ * findable, and a throw is treated the same — the fallback never converts
+ * the original SELL_QTY_EXCEED error into a different one.
  */
 interface SellFallbackConfig {
   getAvailableQty: (symbol: string) => Promise<number | null>
@@ -397,25 +181,18 @@ interface SellFallbackConfig {
 
 interface EarningsScheduleConfig {
   repo: EarningsCalendarRepo
-  /** ±N 営業日。default 1。 */
+  /** ±N business days. Default 1. */
   freezeBusinessDays?: number
 }
 
 interface MacroEventScheduleConfig {
   repo: MacroEventCalendarRepo
-  /**
-   * Gate config (freeze hours / full-day fallback)。Partial で渡せて、
-   * 未指定の field は `DEFAULT_MACRO_GATE_CONFIG` (発表前 1h / 発表後 6h /
-   * full-day=true) で補う。
-   */
+  /** Partial; missing fields fall back to `DEFAULT_MACRO_GATE_CONFIG`. */
   config?: Partial<MacroEventGateConfig>
 }
 
 interface PerSymbolRiskScheduleConfig {
-  /**
-   * BUY symbol → inverse symbol map。production は symbol_universe.inversePairs。
-   * 大文字 key 前提で渡す。
-   */
+  /** BUY symbol → inverse symbol (uppercase keys). */
   inversePairs: Record<string, string>
   spreadLimits: { US: number; JP: number }
   staleQuoteMs: number
@@ -429,31 +206,13 @@ export interface PullbackRunSummary {
   holds: number
   rejected: Array<{ symbol: string; reason: string }>
   errors: Array<{ symbol: string; message: string }>
-  /**
-   * One JSON-copyable record per symbol decision. This mirrors
-   * strategy_decision_log so a single cron run can be analyzed without
-   * reconstructing context from scattered log lines.
-   */
+  /** Mirrors strategy_decision_log; lets one run be analyzed without reassembling scattered log lines. */
   decisions: PullbackDecisionTrace[]
-  /**
-   * 条件連動配分 (#452 Layer 3) 用の per-symbol 観測値。評価が成立した
-   * symbol のみ (bars 不足 / ERROR は不在 = 下流が fail-closed に扱う)。
-   * 段階判定 / 評価価格 / 保有数量を runStrategyCron の allocation 計算に渡す。
-   */
+  /** Per-symbol snapshot for conditional allocation, present only for symbols that reached a decision (missing on insufficient bars / ERROR). Consumed by runStrategyCron's allocation calc. */
   entrySnapshots: Record<string, EntrySnapshot>
-  /**
-   * VIX regime filter decision applied to this run (issue #196 3/3)。
-   * `vixDecision` option を渡された時のみ set される (POC 後方互換)。
-   * cron summary log / dashboard で「この run でどの regime で動いていたか」
-   * を可視化するために残す。
-   */
+  /** Set only when the `vixDecision` option was passed. */
   vix?: VixRegimeFilterDecision
-  /**
-   * News shock gate decision applied to this run (news-shock-gate PR 2)。
-   * `newsShockGate` option を渡された時のみ set される (POC 後方互換)。
-   * cron summary log / dashboard で「この run でどの regime で動いていたか」
-   * を可視化するために残す。
-   */
+  /** Set only when the `newsShockGate` option was passed. */
   newsShock?: NewsShockGateDecision
 }
 
@@ -484,15 +243,13 @@ export async function runPullbackScheduler(
 ): Promise<PullbackRunSummary> {
   const now = options.now ?? (() => new Date())
   const lookback = options.barLookback ?? DEFAULT_BAR_LOOKBACK
-  // intraday bar 対応 client かどうかは実行全体で 1 回だけ
-  // 決まる (client capability であって per-symbol の話ではない)。未対応 client
-  // (Webull 等) は従来どおり無 gate。
+  // Decided once for the whole run, not per symbol; a client without getIntradayBars gets no gate.
   const intradayAttempted = typeof options.barClient.getIntradayBars === 'function'
   const intradayBarMaxAgeMs = options.intradayBarMaxAgeMs ?? DEFAULT_INTRADAY_BAR_MAX_AGE_MS
   const strategy =
     options.strategy ??
     new PullbackUptrendStrategy(options.defaultRule ?? TEST_DEFAULT_RULE, options.rulesMap ?? {})
-  const pendingLockTtlMs = options.pendingLockTtlMs ?? 60_000
+  const pendingLockTtlMs = options.pendingLockTtlMs ?? DEFAULT_PENDING_LOCK_TTL_MS
   if (typeof pendingLockTtlMs !== 'number' || !Number.isFinite(pendingLockTtlMs) || pendingLockTtlMs <= 0) {
     throw new Error(`pendingLockTtlMs must be a finite positive number, got: ${pendingLockTtlMs}`)
   }
@@ -510,8 +267,7 @@ export async function runPullbackScheduler(
     ...(options.newsShockGate !== undefined ? { newsShock: options.newsShockGate.decision } : {}),
   }
 
-  // Notifier helper: fire-and-forget。Notifier 実装側で silent fallback する
-  // 約束だが、念のため二重 catch して cron を絶対に落とさない (#199)。
+  // Fire-and-forget: double-catches so a notifier failure can never fail the cron run.
   const emitNotify = (event: Parameters<NonNullable<typeof options.notifier>['notify']>[0]): void => {
     if (!options.notifier) return
     try {
@@ -538,7 +294,7 @@ export async function runPullbackScheduler(
     }
   }
 
-  // Logging helper: sink が投げても本体を落とさない (logging failure isolation)。
+  // A throw from `onDecision` never stops the scheduler (logging failure isolation).
   const emitDecision = async (
     record: Parameters<NonNullable<typeof options.onDecision>>[0] & {
       order?: PullbackDecisionTrace['order']
@@ -571,90 +327,17 @@ export async function runPullbackScheduler(
     }
   }
 
-  // ペアレジーム評価 (#472): ペア単位で 1 回だけ proxy bars を独立 fetch して
-  // zone を決め、symbol → {decision, side} に展開する。fetch/評価の失敗は
-  // ペア単位で unknown に隔離 (= enforce では両側 BUY block) — cron は落とさない。
-  const regimeBySymbol = new Map<
-    string,
-    { decision: PairRegimeDecision; side: 'bull' | 'bear' }
-  >()
-  if (options.pairRegime) {
-    const runSymbols = new Set(options.symbols.map((s) => s.toUpperCase()))
-    const relevant = options.pairRegime.pairs.filter(
-      (p) => runSymbols.has(p.bullSymbol) || runSymbols.has(p.bearSymbol),
-    )
-    // 評価は並列、Map への反映は**評価完了後に設定順で決定的に**行う
-    // (CodeRabbit #473: async 完了順の set は重複 symbol で run ごとに揺れる)。
-    const evaluated = await Promise.all(
-      relevant.map(async (pair) => {
-        let decision: PairRegimeDecision
-        if (pair.invalidConfig !== null) {
-          decision = {
-            zone: 'unknown',
-            score: null,
-            proxySymbol: pair.proxySymbol,
-            asOfDate: null,
-            reason: `misconfig: ${pair.invalidConfig}`,
-          }
-        } else {
-          try {
-            const proxyBars = await options.barClient.getDailyBars(pair.proxySymbol, 80)
-            decision = evaluatePairRegime(proxyBars, {
-              proxySymbol: pair.proxySymbol,
-              thresholds: options.pairRegime!.thresholds,
-              now: now(),
-            })
-          } catch (err) {
-            decision = {
-              zone: 'unknown',
-              score: null,
-              proxySymbol: pair.proxySymbol,
-              asOfDate: null,
-              reason: `proxy bars fetch failed: ${messageOf(err)}`,
-            }
-          }
-        }
-        return { pair, decision }
-      }),
-    )
-    for (const { pair, decision } of evaluated) {
-      // 同一 symbol が複数ペアに現れる重複設定は判定不能 → unknown (fail-closed)。
-      const duplicate = [pair.bullSymbol, pair.bearSymbol].find((sym) => regimeBySymbol.has(sym))
-      if (duplicate !== undefined) {
-        const dup: PairRegimeDecision = {
-          zone: 'unknown',
-          score: null,
-          proxySymbol: pair.proxySymbol,
-          asOfDate: null,
-          reason: `duplicate pair config for ${duplicate} (fail-closed)`,
-        }
-        regimeBySymbol.set(pair.bullSymbol, { decision: dup, side: 'bull' })
-        regimeBySymbol.set(pair.bearSymbol, { decision: dup, side: 'bear' })
-        const prev = regimeBySymbol.get(duplicate)!
-        regimeBySymbol.set(duplicate, { decision: dup, side: prev.side })
-      } else {
-        regimeBySymbol.set(pair.bullSymbol, { decision, side: 'bull' })
-        regimeBySymbol.set(pair.bearSymbol, { decision, side: 'bear' })
-      }
-      console.warn(
-        JSON.stringify({
-          event: 'pair_regime_evaluated',
-          requestId: options.requestId ?? null,
-          mode: options.pairRegime!.mode,
-          pair: `${pair.bullSymbol}/${pair.bearSymbol}`,
-          proxySymbol: decision.proxySymbol,
-          zone: regimeBySymbol.get(pair.bullSymbol)!.decision.zone,
-          score: decision.score,
-          asOfDate: decision.asOfDate,
-          reason: regimeBySymbol.get(pair.bullSymbol)!.decision.reason,
-        }),
+  const regimeBySymbol: RegimeBySymbol = options.pairRegime
+    ? await evaluatePairRegimesForRun(
+        options.pairRegime,
+        options.symbols,
+        options.barClient,
+        now(),
+        options.requestId,
       )
-    }
-  }
+    : new Map()
 
-  // 保有中 symbol の qty (state read 失敗は 0 = flat 扱いへ
-  // fail-safe — 二重障害を新規分岐で拡大しない)。bar 取得失敗 / insufficient
-  // bars で indicators が作れない 2 箇所から共通で使う。
+  // A state-read failure fails safe to flat (0) rather than compounding the outage with a new branch.
   const heldQtyOrZero = async (symbol: string): Promise<number> => {
     try {
       const state = await options.positionStore.getState(symbol)
@@ -673,27 +356,22 @@ export async function runPullbackScheduler(
     let intradayPrice: number | null = null
     let lastIntradayBar: IntradayBar | null = null
     try {
-      // Daily と intraday は別エンドポイント。並行で叩いて intraday 失敗は
-      // null fallback (= daily close 採用、既存挙動と等価)。daily は 1 回だけ
-      // retry する (upstream の一時的な障害で held position
-      // の exit 判定が丸ごと飛ぶのを避ける) — それでも失敗すれば致命
-      // (indicators が出ない) なので throw のまま。
+      // Intraday failure falls back to null (daily close); a daily fetch
+      // failure after its one retry stays a throw — it would otherwise
+      // silently skip a held position's exit evaluation.
       const intradayP = options.barClient.getIntradayBars
         ? options.barClient.getIntradayBars(symbol, '60m').catch(() => [])
         : Promise.resolve([])
       const dailyBars = await fetchDailyBarsWithRetry(options.barClient, symbol, lookback)
       const intradayBars = await intradayP
       bars = dailyBars
-      // 最新 1h bar の close を fill 価格として使う。chart UI も同じ
-      // intraday endpoint を見ているので BUY pin と candle がズレない。
+      // The chart UI reads the same intraday endpoint, so the BUY pin lines up with the candle.
       const lastIntraday = intradayBars[intradayBars.length - 1]
       lastIntradayBar = lastIntraday ?? null
       intradayPrice = lastIntraday ? lastIntraday.close : null
     } catch (error) {
-      // flat なら従来どおり ERROR。保有が残っていれば
-      // 「exit 判定が飛んだ」ことを明示する reason + notifier cause に差し替え、
-      // 保有を無防備なまま放置しない (SELL の degrade は絶対にしない)。flat の
-      // `summary.errors` メッセージ形式は既存挙動のまま (prefix なし)。
+      // Holding: surface an explicit "exit unavailable" reason/cause — never
+      // silently degrade a SELL. Flat: plain ERROR, as before.
       const bareMessage = messageOf(error)
       const decisionReason = `bar fetch: ${bareMessage}`
       const heldQty = await heldQtyOrZero(upper)
@@ -716,8 +394,6 @@ export async function runPullbackScheduler(
       baselineMode: options.atrBaselineMode ?? 'percentile',
     })
     if (!indicators) {
-      // bar fetch throw 分岐と同じ扱い — flat は従来の SKIP、
-      // 保有が残っていれば exit 判定が飛んだことを明示する ERROR にする。
       const baseReason = 'insufficient bars for indicators'
       const heldQty = await heldQtyOrZero(upper)
       if (heldQty > 0) {
@@ -738,8 +414,7 @@ export async function runPullbackScheduler(
         ? computeHoldBusinessDays(state.position.openedAt, now(), market)
         : 0
 
-    // 条件連動配分 (#452 Layer 3) 用の観測値。判定そのものには使わず、
-    // runStrategyCron が run 後に target/active weight を計算する材料。
+    // Not used in this run's own decision; consumed by runStrategyCron's post-run target/active-weight calc.
     summary.entrySnapshots[upper] = {
       status: deriveEntryStatusFromIndicators(indicators, strategy.resolveRule(upper)).status,
       price: indicators.price,
@@ -749,26 +424,11 @@ export async function runPullbackScheduler(
           : 0,
     }
 
-    // #momentum: momentum ロールの symbol は BreakoutMomentumStrategy で判定。
-    // signal の形は同じで、以降の lot / risk / buying-power / pending / DRY_RUN
-    // execution は通常 BUY/SELL と全く同じ経路を通る (= 通常ロールと同じ動き)。
     const useMomentum = !!(options.momentumStrategy && options.momentumSymbols?.has(upper))
     const decider = useMomentum ? options.momentumStrategy! : strategy
-    // #reentry: flat のときだけ前回手仕舞い情報を渡す。以前は「flat なら直近
-    // fill は保有を閉じた SELL のはず」という推論で lastExecutedPrice を流用
-    // していたが、syncHoldings 経由の overridePosition (broker 側清算 / 手動
-    // override) は position だけ null 化するためこの不変条件が壊れ、
-    // lastExecutedPrice に古い BUY 価格が残ったままガード基準になり得た。
-    // lastExitPrice は recordFill が SELL でクローズしたときだけ明示的に
-    // 刻む専用フィールドなので、それを直接参照する (#660)。lastExecutedPrice
-    // へのフォールバックは意図的に入れない (不健全な推論の再導入になるため)。
-    // lastExitAt (#582 で先行導入済) と lastExitPrice (本フィールド) は導入
-    // 時期が異なるため、旧 state は「lastExitAt はあるが lastExitPrice が
-    // 無い」移行期を経る。その間はガード窓内である限り
-    // PullbackUptrendStrategy.entryDecision 側が fail-closed (価格不明で
-    // entry 保留) する — lastExitAt 由来の businessDaysSinceExit だけは
-    // ここで渡すので、窓経過後は自然に fail-open へ戻る。lastExitAt も無い
-    // (一度も exit していない) 銘柄は従来どおり無条件で通す。
+    // No lastExecutedPrice fallback by design: overridePosition can null
+    // position without a SELL, so "flat ⇒ last fill was SELL" doesn't hold;
+    // lastExitPrice is the dedicated field set only on a SELL close.
     const reentryLastExitPrice = state.position === null ? state.lastExitPrice : null
     const reentryBusinessDaysSinceExit =
       state.position === null && state.lastExitAt
@@ -786,9 +446,7 @@ export async function runPullbackScheduler(
       now: now(),
     })
 
-    // 判断価格の出所・時刻を全 decision の trace 先頭に残す
-    // (SKIP/HOLD/ERROR 含む、indicators が存在する以降の全経路)。stale price
-    // 調査時に「どの bar を見て判断したか」を trace だけで追えるようにする。
+    // Anchors every decision's trace (including SKIP/HOLD/ERROR) to the price source/time actually used, for stale-price investigations.
     const priceAsOfSource = decisionQuote !== null ? decisionQuote.source
       : lastIntradayBar !== null ? 'intraday_60m' : 'daily_close'
     const priceAsOfValue =
@@ -808,12 +466,9 @@ export async function runPullbackScheduler(
       ],
     }
 
-    // intraday bar 対応 client (`getIntradayBars` 実装済み) で
-    // 鮮度が確認できない BUY 判断価格は SKIP する (SELL は対象外、fail-closed を
-    // entry 側だけに閉じる)。「確認できない」は 3 パターン: intraday bar が
-    // そもそも 0 件 (fallback 先の daily close は BUY には採用しない) / 最新
-    // bar の timestamp が鮮度上限を超過 / timestamp が parse 不能 (Date.parse
-    // が NaN → NaN との比較は常に false になり素通りしてしまうため明示チェック)。
+    // BUY only (fail-closed scoped to entry). Date.parse's NaN must be
+    // checked explicitly — an unchecked NaN comparison is always false and
+    // silently disables the freshness gate.
     let priceFreshnessFailure: string | null = null
     if (intradayAttempted && decisionQuote === null) {
       if (lastIntradayBar === null) {
@@ -828,279 +483,51 @@ export async function runPullbackScheduler(
       }
     }
 
-    // cash rebalance (#452 Layer 3 pass 2): 指定数量の BUY に置き換える。
-    // pending order 中は strategy の HOLD (pending guard) をそのまま残す。
-    // strategy exit (SELL) / cooldown / re-entry guard は迂回させない —
-    // これを外すと time-stop 等で SELL した直後に同ティックで cash
-    // rebalance が買い戻す whipsaw が起きる (ICLN 8/18, VUG 8/25, ICLN 9/1 実績)。
     const cashRebalanceQty = options.cashRebalanceQuantityMap?.[upper]
-    if (cashRebalanceQty !== undefined && state.pendingOrder === null) {
-      if (Number.isInteger(cashRebalanceQty) && cashRebalanceQty > 0) {
-        const cooldownUntilMs = state.cooldownUntil ? new Date(state.cooldownUntil).getTime() : NaN
-        const cooldownActive = Number.isFinite(cooldownUntilMs) && cooldownUntilMs > now().getTime()
-        const guardDays = strategy.resolveRule(upper).reentryGuardBusinessDays
-        const reentryGuardActive =
-          state.position === null &&
-          state.lastExitAt !== null &&
-          Number.isFinite(guardDays) &&
-          guardDays > 0 &&
-          reentryBusinessDaysSinceExit !== null &&
-          reentryBusinessDaysSinceExit < guardDays
+    signal = applyCashRebalanceBuyOverride(
+      signal,
+      cashRebalanceQty,
+      state,
+      strategy,
+      upper,
+      reentryBusinessDaysSinceExit,
+      now().getTime(),
+    )
 
-        let skipWhy: string | null = null
-        if (signal.action === 'SELL') {
-          skipWhy = 'strategy exit takes precedence'
-        } else if (cooldownActive) {
-          skipWhy = `cooldown active until ${state.cooldownUntil}`
-        } else if (reentryGuardActive) {
-          skipWhy = `re-entry guard window (${reentryBusinessDaysSinceExit}bd < ${guardDays}bd since exit)`
-        }
-
-        if (skipWhy !== null) {
-          signal = {
-            ...signal,
-            reason: `${signal.reason}; cash rebalance skipped: ${skipWhy}`,
-            trace: appendTrace(
-              signal.trace,
-              traceStep('entry.cash_rebalance', false, cashRebalanceQty, '>', 0, skipWhy),
-            ),
-          }
-        } else {
-          signal = {
-            ...signal,
-            action: 'BUY',
-            quantity: cashRebalanceQty,
-            reason: `cash allocation rebalance: buy ${cashRebalanceQty} toward active weight (#452)`,
-            trace: appendTrace(
-              signal.trace,
-              traceStep('entry.cash_rebalance', true, cashRebalanceQty, '>', 0, 'conditional allocation cash rebalance (#452)'),
-            ),
-          }
-        }
-      }
-    }
-
-    // cash rebalance SELL (#452 follow-up): 退避先の active weight 超過分を
-    // 部分 SELL に置き換える。強制全量 close ではない — 全量 close は下の
-    // intraday-only / regime-flip や通常の stop/TP/time-stop に譲る。それら
-    // (常に position.qty 全量) が既に action='SELL' を出している場合はここで
-    // 上書きしない (strategy exit / 強制クローズが優先、二重に売らない)。
-    let cashRebalancePartialSell = false
     const cashRebalanceSellQty = options.cashRebalanceSellQuantityMap?.[upper]
-    if (
-      cashRebalanceSellQty !== undefined &&
-      state.pendingOrder === null &&
-      Number.isInteger(cashRebalanceSellQty) &&
-      cashRebalanceSellQty > 0
-    ) {
-      if (signal.action === 'SELL') {
-        signal = {
-          ...signal,
-          trace: appendTrace(
-            signal.trace,
-            traceStep('exit.cash_rebalance', false, cashRebalanceSellQty, '>', 0, 'strategy exit takes precedence'),
-          ),
-        }
-      } else if (state.position === null || state.position.qty <= 0) {
-        signal = {
-          ...signal,
-          trace: appendTrace(
-            signal.trace,
-            traceStep('exit.cash_rebalance', false, cashRebalanceSellQty, '>', 0, 'no position'),
-          ),
-        }
-      } else {
-        const qty = Math.min(cashRebalanceSellQty, state.position.qty)
-        signal = {
-          ...signal,
-          action: 'SELL',
-          quantity: qty,
-          reason: `cash allocation rebalance: sell ${qty} toward active weight (#452)`,
-          trace: appendTrace(
-            signal.trace,
-            traceStep('exit.cash_rebalance', true, qty, '>', 0, 'conditional allocation cash rebalance sell (#452)'),
-          ),
-        }
-        cashRebalancePartialSell = true
-      }
-    }
+    let cashRebalancePartialSell: boolean
+    ;({ signal, cashRebalancePartialSell } = applyCashRebalanceSellOverride(signal, cashRebalanceSellQty, state))
 
-    // #intraday-only: レバ ETF 等は US 引け前 window で保有があれば strategy 判定を
-    // 上書きして強制 SELL (オーバーナイト持ち越し禁止 = 寄りギャップ stop-out 回避)。
-    // 既存の SELL 経路 (全保有クローズ) に流れる。US 銘柄のみ対象。
-    if (
-      options.intradayOnlySymbols?.has(upper) &&
-      market === 'US' &&
-      state.position !== null &&
-      Number.isFinite(state.position.qty) &&
-      state.position.qty > 0 &&
-      isWithinUsCloseWindow(now(), INTRADAY_CLOSE_WINDOW_MIN)
-    ) {
-      // symbol/quantity/price/generatedAtIso は元 signal を流用 (SELL 経路は
-      // state.position.qty / indicators.price で再計算するので値は不問)。
-      // cash rebalance が直前に部分 SELL を仕込んでいても、intraday-only の
-      // 強制クローズは全量優先 — フラグを落とし、下流の intent 組み立てで
-      // position.qty (全量) を使わせる (#452 follow-up)。
-      cashRebalancePartialSell = false
-      signal = {
-        ...signal,
-        action: 'SELL',
-        reason: 'intraday-only: force-close before US market close',
-        trace: appendTrace(
-          signal.trace,
-          traceStep('exit.intraday_close', true, undefined, undefined, undefined, 'force-close before US close'),
-        ),
-      }
-    }
+    ;({ signal, cashRebalancePartialSell } = applyIntradayForceCloseOverride(
+      signal,
+      cashRebalancePartialSell,
+      options.intradayOnlySymbols?.has(upper) ?? false,
+      market,
+      state,
+      now(),
+    ))
 
-    // ペアレジーム (#472): zone/score を全評価の trace に残す (HOLD 含む —
-    // observe 期間の監査が目的なので BUY/SKIP 時だけでは足りない)。
     const regime = regimeBySymbol.get(upper)
-    if (regime && options.pairRegime) {
-      const d = regime.decision
-      const allowed = (regime.side === 'bull' && d.zone === 'bull') || (regime.side === 'bear' && d.zone === 'bear')
-      const held =
-        state.position !== null && Number.isFinite(state.position.qty) && state.position.qty > 0
-      const observeNote =
-        options.pairRegime.mode === 'observe' && !allowed && signal.action === 'BUY'
-          ? ' [observe: enforce なら SKIP]'
-          : ''
-      const neutralHoldNote =
-        held && d.zone === 'neutral'
-          ? ' [hold_existing_position: neutral_does_not_force_exit]'
-          : ''
-      signal = {
-        ...signal,
-        trace: appendTrace(
-          signal.trace,
-          traceStep(
-            'regime.zone',
-            allowed,
-            d.score,
-            undefined,
-            undefined,
-            `${d.reason} side=${regime.side} mode=${options.pairRegime.mode}${observeNote}${neutralHoldNote}`,
-          ),
-        ),
-      }
-      // regime_flip exit (#472 §3a): 保有と**反対 zone** に flip したら全量 SELL。
-      // 既存 exit (stop/TP/time-stop) が先に SELL を出していればそれが優先 —
-      // その場合は副次理由として trace にだけ残す (効果測定用、review #4)。
-      // neutral では強制 exit しない (hysteresis 内の正常な押しで降ろさない)。
-      const flipped =
-        (regime.side === 'bull' && d.zone === 'bear') || (regime.side === 'bear' && d.zone === 'bull')
-      if (options.pairRegime.mode === 'enforce' && held && flipped) {
-        // regime flip は常に全量 close の意図。直前の cash rebalance 部分 SELL
-        // (action='SELL' だが quantity は部分) がここで「既に SELL 済み」として
-        // 素通りしないよう、フラグを落として下流に position.qty (全量) を
-        // 使わせる (#452 follow-up)。
-        cashRebalancePartialSell = false
-        if (signal.action === 'SELL') {
-          signal = {
-            ...signal,
-            trace: appendTrace(
-              signal.trace,
-              traceStep('exit.regime_flip_secondary', true, undefined, undefined, undefined, `secondaryExitReasons: regime_flip (${d.reason})`),
-            ),
-          }
-        } else {
-          signal = {
-            ...signal,
-            action: 'SELL',
-            reason: `pair regime flip: zone=${d.zone} against held ${regime.side} side (${d.reason})`,
-            trace: appendTrace(
-              signal.trace,
-              traceStep('exit.regime_flip', true, d.score, undefined, undefined, d.reason),
-            ),
-          }
-        }
-      }
+    if (options.pairRegime) {
+      ;({ signal, cashRebalancePartialSell } = applyPairRegimeOverride(
+        signal,
+        cashRebalancePartialSell,
+        regime,
+        options.pairRegime,
+        state,
+      ))
     }
 
-    // 段階判定 HALF (#658: strategy 申告 holdCause の一方向フロー)。旧実装は
-    // strategy の HOLD 理由を知らずに deriveEntryStatusFromIndicators で entry
-    // status を再導出して昇格判定していたため、再エントリー価格ガード
-    // (entry.reentry_below_last_exit — entryDistance.ts の EntryGateKey には
-    // 存在しない) 由来の HOLD を指標だけ見て BUY (0.5x) に昇格させてしまった
-    // (実害: 2026-07-29 SQQQ)。再エントリーガードは構造的に 7 gate 集合に無い
-    // ため、再導出では検知不能だった。
-    //
-    // 対処: strategy が HOLD の原因 (`holdCause`) と、entry_gate 由来なら 4 段階
-    // 判定スナップショット (`entryStatus`) を Signal に申告し、scheduler は
-    // **再計算しない** (情報フローの一方向化)。HALF が緩めてよいのは「setup の
-    // 質」を測る entry gate だけ — position / pendingOrder / cooldown / 再エント
-    // リーのような「行動可否」guard は絶対 veto であり、holdCause が
-    // 'entry_gate' でなければこのブロックに入らない。
-    let positionMultiplier = 1
-    const entryStatus = signal.entryStatus
-    if (
-      signal.action === 'HOLD' &&
-      signal.holdCause === 'entry_gate' &&
-      options.halfEntrySymbols?.has(upper) &&
-      entryStatus?.status === 'HALF' &&
-      entryStatus.halfGate !== null &&
-      // holdCause==='entry_gate' なら strategy 側で position/pendingOrder/
-      // cooldown が全て非活性であることは既に保証されている (entryDecision は
-      // guard 通過後にしか呼ばれない)。以下 3 条件はその不変条件に対する
-      // belt-and-suspenders アサーション (将来の strategy 実装ミスへの二次防御)
-      // であり、一次判定はあくまで holdCause。
-      state.position === null &&
-      state.pendingOrder === null &&
-      !(state.cooldownUntil && new Date(state.cooldownUntil).getTime() > now().getTime())
-    ) {
-      const gate = entryStatus.halfGate
-      positionMultiplier = entryStatus.positionMultiplier
-      signal = {
-        ...signal,
-        action: 'BUY',
-        reason: `half entry (0.5x): ${gate.key} ${gate.actual.toFixed(4)} near threshold ${gate.threshold} (within tolerance band)`,
-        trace: appendTrace(
-          signal.trace,
-          traceStep(
-            'entry.half_status',
-            true,
-            gate.actual,
-            // EntryGateStatus.operator は人間可読 string だが、ここに来る
-            // degree gate は '<=' / '>=' のみ (DecisionTraceStep の union 内)。
-            gate.operator === '>=' ? '>=' : '<=',
-            gate.threshold,
-            'HALF: single degree-gate miss within tolerance → 0.5x sizing (#452)',
-          ),
-        ),
-      }
-    }
+    const { signal: afterHalfEntry, positionMultiplier } = applyHalfEntryPromotion(
+      signal,
+      options.halfEntrySymbols?.has(upper) ?? false,
+      state,
+      now().getTime(),
+    )
+    signal = afterHalfEntry
 
-    // intraday-only 銘柄はオーバーナイト持ち越しを防ぐために存在するので、
-    // force-close window に飲み込まれる直前 (30分) の新規 BUY も止める — HALF
-    // 昇格ブロックの後にこれを置くのが必須: 昇格前に置くと、まだ HOLD の
-    // signal.action を見て veto が不発のまま通過し、直後の HALF 昇格が
-    // veto 済みの entry_gate HOLD を BUY へ戻してしまう (intradayOnlySymbols と
-    // halfEntrySymbols の両方に属する銘柄で発生)。cash rebalance による BUY も
-    // 同様にここで最終判定を受ける。
-    if (
-      options.intradayOnlySymbols?.has(upper) &&
-      market === 'US' &&
-      signal.action === 'BUY' &&
-      isWithinUsCloseWindow(now(), INTRADAY_NO_ENTRY_WINDOW_MIN)
-    ) {
-      signal = {
-        ...signal,
-        action: 'HOLD',
-        holdCause: 'guard',
-        reason: 'intraday-only: no new entry within 30min of US close',
-        trace: appendTrace(
-          signal.trace,
-          traceStep(
-            'entry.intraday_no_entry',
-            false,
-            undefined,
-            undefined,
-            undefined,
-            'intraday-only: no new entry within 30min of US close',
-          ),
-        ),
-      }
-    }
+    // Must run after applyHalfEntryPromotion: that can promote a HOLD to BUY, and a veto run first would see only the HOLD.
+    signal = applyIntradayNoEntryVeto(signal, options.intradayOnlySymbols?.has(upper) ?? false, market, now())
 
     if (signal.action === 'HOLD') {
       summary.holds += 1
@@ -1109,15 +536,13 @@ export async function runPullbackScheduler(
         decision: 'HOLD',
         reason: signal.reason,
         price: indicators.price,
-        indicatorsJson: JSON.stringify(indicators),
+        indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
         trace: signal.trace,
       })
       continue
     }
 
-    // ペアレジーム BUY gate (#472、enforce のみ): zone が許可しない側の entry を
-    // SKIP。SELL / exit は一切妨げない。zone permits, gates decide — ここを
-    // 通っても以降の全 gate (role / sizing / risk / 余力) は従来どおり評価される。
+    // enforce only; SELL/exit is never gated here.
     if (options.pairRegime?.mode === 'enforce' && signal.action === 'BUY') {
       const regimeGate = regimeBySymbol.get(upper)
       if (regimeGate) {
@@ -1133,7 +558,7 @@ export async function runPullbackScheduler(
             decision: 'SKIP',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('risk.pair_regime', false, d.score, undefined, undefined, reason),
@@ -1144,9 +569,7 @@ export async function runPullbackScheduler(
       }
     }
 
-    // Entry 抑止 role gate (#452)。cash_parking / 定義のみの role / enum 外の
-    // role 値の銘柄は BUY を生成しない (fail-closed)。SELL は対象外 — role を
-    // 後から変えた銘柄の保有 exit (stop / time-stop / TP) を妨げない。
+    // Never gates SELL — a since-relabeled symbol's exit (stop / time-stop / TP) must still run.
     if (signal.action === 'BUY' && options.entrySuppressedSymbols?.[upper] !== undefined) {
       const reason = options.entrySuppressedSymbols[upper]
       summary.rejected.push({ symbol: upper, reason })
@@ -1155,7 +578,7 @@ export async function runPullbackScheduler(
         decision: 'SKIP',
         reason,
         price: indicators.price,
-        indicatorsJson: JSON.stringify(indicators),
+        indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
         trace: appendTrace(
           signal.trace,
           traceStep('risk.role_entry_suppressed', false, undefined, undefined, undefined, reason),
@@ -1164,12 +587,8 @@ export async function runPullbackScheduler(
       continue
     }
 
-    // 価格鮮度ゲート (BUY のみ)。cash rebalance / HALF 昇格の
-    // 後に評価する — どちらも「BUY にする理由」であって「価格が新鮮かどうか」
-    // とは独立の判断だが、最終的に BUY として発注する前には必ず通す。
-    // `priceFreshnessFailure` は decide() 直後 (このブロックのずっと上) で
-    // signal と無関係に前計算済み — lastIntradayBar は cash rebalance / HALF
-    // 昇格の影響を受けない。
+    // Evaluated after cash rebalance / HALF promotion: both are independent
+    // "should this be a BUY" decisions, but every eventual BUY must still clear this gate.
     if (signal.action === 'BUY' && priceFreshnessFailure !== null) {
       const reason = priceFreshnessFailure
       summary.rejected.push({ symbol: upper, reason })
@@ -1178,7 +597,7 @@ export async function runPullbackScheduler(
         decision: 'SKIP',
         reason,
         price: indicators.price,
-        indicatorsJson: JSON.stringify(indicators),
+        indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
         trace: appendTrace(
           signal.trace,
           traceStep('risk.price_freshness', false, undefined, undefined, undefined, reason),
@@ -1187,13 +606,7 @@ export async function runPullbackScheduler(
       continue
     }
 
-    // sanity_failed cooldown gate (incident: 9697 04/28 で 30 min / 6 BUY 累積、
-    // DO null / broker 側 600 株疑い)。直近 N 分以内に同 symbol で broker stub
-    // fill が観測されていれば新規 BUY を block する。SELL は対象外 (broker stub
-    // では起きない、exit を妨げない)。signal.action === 'BUY' のみ評価し、
-    // intent build / sizing 計算より前で短絡させる (= 不要な計算を避ける)。
-    // check が throw した場合は fail-closed (= cooldown 有効扱い) — DB read
-    // 失敗で BUY を通すと incident 再発リスクが残るため。
+    // A throw from `check` fails closed (treated as cooldown-active) rather than letting a DB-read failure wave a BUY through.
     if (signal.action === 'BUY' && options.sanityFailedCooldown) {
       let cooledDown = false
       try {
@@ -1218,7 +631,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.sanity_failed_cooldown', false, undefined, undefined, undefined, reason),
@@ -1231,11 +644,6 @@ export async function runPullbackScheduler(
     let intent: OrderIntent
     if (signal.action === 'BUY') {
       const rule = strategy.resolveRule(upper)
-      // 売買単位は per-symbol map を優先。production (`runStrategyCron`) は常に
-      // `symbolLotSizeMap` を渡す (空でも) ので、**map にあるのに該当 symbol が
-      // 無い = lot_size 未設定 → fail-closed** (発注見送り、#symbol-lot-size)。
-      // 誤った blanket lot で過大/過小発注しない。`symbolLotSizeMap` も
-      // `lotSize` も一切渡さない legacy caller (旧 unit test 等) のみ従来の lot=1。
       const resolvedLotSize =
         options.symbolLotSizeMap?.[upper] ??
         options.lotSize ??
@@ -1253,7 +661,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('sizing.lot_size_configured', false, undefined, undefined, undefined, 'missing-lot-size'),
@@ -1261,22 +669,17 @@ export async function runPullbackScheduler(
         })
         continue
       }
-      // 銘柄別 cap (`symbolCapMap`) と global per-order cap (`maxOrderNotional`) を
-      // min で合成する。片方だけ設定されていればそちらをそのまま使い、両方
-      // 未設定なら undefined (無制限) — 既存の 1 銘柄 1 cap という
-      // `computePullbackSizing` の契約を変えず、呼び出し側で先に絞る。
+      // `computePullbackSizing` only accepts one cap per symbol, so combine symbolCapMap and maxOrderNotional here first.
       const perSymbolCap = options.symbolCapMap?.[upper]
       const globalOrderCap = options.maxOrderNotional
       const effectiveSymbolCap =
         perSymbolCap !== undefined && globalOrderCap !== undefined
           ? Math.min(perSymbolCap, globalOrderCap)
           : (perSymbolCap ?? globalOrderCap)
-      // cash rebalance (#452): 数量は runStrategyCron が allocation 差分から
-      // 計算済み (cap / lot 適用済み)。pullback sizing は通さず、lot 整合だけ
-      // 再確認する (lot 倍数でなければ floor、0 になれば下の reject で見送り)。
-      // ただし global per-order cap は plan 計算後に変わり得るので、ここでも
-      // 二重適用する (「cron BUY notional が cap を超えない」という不変条件を
-      // rebalance 経路にも及ぼす)。
+      // Cash rebalance quantity comes pre-computed from runStrategyCron's
+      // allocation diff, so it skips pullback sizing — but the cap is
+      // re-applied here too, since it can change after the plan was computed
+      // and this keeps "cron BUY notional never exceeds cap" invariant true.
       const sizing =
         cashRebalanceQty !== undefined
           ? (() => {
@@ -1304,7 +707,6 @@ export async function runPullbackScheduler(
               riskPerTradePct: options.riskPerTradePct,
               lotSize: resolvedLotSize,
               kAtr: rule.kAtr,
-              // #stop-rr-cap: sizing と exit で同じ stop 幅を使う。
               takeProfitPct: rule.takeProfitPct,
               maxStopToTpRatio: rule.maxStopToTpRatio,
               budgetAllocPct: options.symbolBudgetAllocPctMap?.[upper],
@@ -1322,14 +724,12 @@ export async function runPullbackScheduler(
           decision: 'HOLD',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(signal.trace, traceStep('sizing.quantity_positive', false, sizing.quantity, '>', 0, sizing.capReason)),
         })
         continue
       }
-      // 段階判定 HALF の 0.5x (#452 PR 2) — sizing 直後・VIX scale より前に適用。
-      // VIX warning と重なった場合は乗算で両方効く (より保守的な側に倒れる)。
-      // lot 丸めで 0 になったら reject (= 部分 entry すらできない小口は見送り)。
+      // Applied right after sizing, before VIX scale; a concurrent VIX warning multiplies on top (the more conservative side wins).
       let scaledQuantity = sizing.quantity
       if (positionMultiplier < 1) {
         scaledQuantity = applySizeScale(sizing.quantity, resolvedLotSize, positionMultiplier)
@@ -1341,7 +741,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('sizing.half_entry_quantity_positive', false, scaledQuantity, '>', 0, reason),
@@ -1350,11 +750,6 @@ export async function runPullbackScheduler(
           continue
         }
       }
-      // VIX regime filter (issue #196 3/3) — sizing 直後に適用。
-      //   - critical (sizeScale === 0): BUY 全 reject
-      //   - warning (0 < sizeScale < 1): qty = floor(qty * sizeScale / lot) * lot
-      //   - normal (sizeScale === 1): no-op
-      // SELL は VIX 関係なく通すため、ここで scaling しても OK (BUY 経路だけ)。
       if (options.vixDecision) {
         if (options.vixDecision.sizeScale === 0) {
           const reason = `risk: ${options.vixDecision.reason}`
@@ -1364,7 +759,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('risk.vix_regime', false, options.vixDecision.vix ?? null, '<=', null, options.vixDecision.reason),
@@ -1373,10 +768,7 @@ export async function runPullbackScheduler(
           continue
         }
         if (options.vixDecision.sizeScale < 1) {
-          // warning: qty を `floor(qty * scale / lot) * lot` で lot に揃える。
-          // lot=1 の US 株は単純な floor、lot=100 の JP 株は単元未満で 0 になり得る。
-          // 結果が 0 になった場合は次の `scaledQuantity <= 0` reject で拾う。
-          // half-entry 適用後の qty を基数にする (#452: 0.5x と VIX scale は乗算)。
+          // Scales the post-half-entry qty (0.5x and VIX scale multiply together).
           scaledQuantity = applySizeScale(scaledQuantity, resolvedLotSize, options.vixDecision.sizeScale)
           if (scaledQuantity <= 0) {
             const reason = `risk: ${options.vixDecision.reason} (qty rounded to 0, lot=${resolvedLotSize})`
@@ -1386,7 +778,7 @@ export async function runPullbackScheduler(
               decision: 'HOLD',
               reason,
               price: indicators.price,
-              indicatorsJson: JSON.stringify(indicators),
+              indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
               trace: appendTrace(
                 signal.trace,
                 traceStep(
@@ -1403,16 +795,10 @@ export async function runPullbackScheduler(
           }
         }
       }
-      // News shock gate (news-shock-gate PR 2) — VIX と乗算チェーンで合成
-      // (finalScale = vixScale × newsShockScale)。VIX 適用後の qty を基数にして
-      // 続けて scale するため、既に VIX で 0 に丸まっていればこのブロックへは
-      // 到達しない (上の `continue` で抜けている)。SELL はこのブロックの外
-      // (signal.action === 'BUY' の中) なので関係なく通る。
+      // Chains onto VIX (scales the post-VIX qty further); unreachable once VIX has already rounded qty to 0.
       if (options.newsShockGate) {
         const newsDecision = options.newsShockGate.decision
         const isObserve = options.newsShockGate.mode === 'observe'
-        // observe は shadow mode — 実際の qty には一切効かせず、trace にだけ
-        // 「enforce だったら何が起きたか」を残す (`pairRegime` observe 分岐と同じ設計)。
         if (isObserve) {
           const wouldReduce = newsDecision.sizeScale < 1
           const observeNote = wouldReduce
@@ -1440,7 +826,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
               traceStep('risk.news_shock', false, newsDecision.ratio ?? null, '<=', null, newsDecision.reason),
@@ -1457,7 +843,7 @@ export async function runPullbackScheduler(
               decision: 'HOLD',
               reason,
               price: indicators.price,
-              indicatorsJson: JSON.stringify(indicators),
+              indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
               trace: appendTrace(
                 signal.trace,
                 traceStep(
@@ -1474,15 +860,10 @@ export async function runPullbackScheduler(
           }
         }
       }
-      // Extended-hours (pre-market) gate (issue #709 Phase 6) — VIX / news shock
-      // と同じ乗算チェーンの最後に適用。symbol ごとの Map なので対象銘柄の
-      // decision が無ければ no-op (trace にも出ない)。decision が Map にある
-      // 時点で WARNING/STOP_AT_OPEN_CANDIDATE 確定 (NORMAL/UNKNOWN は呼び出し側
-      // `loadExtendedHoursGateDecisions` が含めない) なので **observe / enforce
-      // 問わず常に trace を残す** — news shock の enforce-reduce 成功時 (qty>0
-      // まで縮小できた) には trace を残さない既存挙動とは異なり、この gate は
-      // 「今朝この銘柄に警戒シグナルがあった」という運用可視性を optional
-      // narrowing なしで一貫させる (#709 Phase 6 設計)。
+      // Last link in the VIX/news-shock multiplier chain, per symbol; a
+      // symbol missing from the Map is a no-op. Unlike news shock, this
+      // traces in both observe and enforce — a decision present in the Map
+      // already means a warning signal fired, so visibility stays consistent either way.
       const extendedHoursGateOpt = options.extendedHoursGate
       const extendedHoursDecision = extendedHoursGateOpt?.decisions.get(upper)
       if (extendedHoursGateOpt && extendedHoursDecision) {
@@ -1512,7 +893,7 @@ export async function runPullbackScheduler(
             decision: 'HOLD',
             reason,
             price: indicators.price,
-            indicatorsJson: JSON.stringify(indicators),
+            indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: signal.trace,
           })
           continue
@@ -1527,7 +908,7 @@ export async function runPullbackScheduler(
               decision: 'HOLD',
               reason,
               price: indicators.price,
-              indicatorsJson: JSON.stringify(indicators),
+              indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
               trace: appendTrace(
                 signal.trace,
                 traceStep(
@@ -1571,7 +952,6 @@ export async function runPullbackScheduler(
       }
       intent = buildIntent(upper, 'BUY', scaledQuantity, indicators.price)
     } else {
-      // SELL: close the full open position.
       if (state.position === null) {
         const reason = 'SELL without position'
         summary.rejected.push({ symbol: upper, reason })
@@ -1621,10 +1001,9 @@ export async function runPullbackScheduler(
         })
         continue
       }
-      // cash rebalance 部分 SELL (#452 follow-up): signal.quantity は
-      // position.qty にクランプ済みのはずだが、上流の trace 差し替えで壊れて
-      // いないか防御的に再検証する (fail-closed)。壊れていれば全量 close に
-      // フォールバックせず SKIP — 意図しない数量で発注しない。
+      // Defensive re-check: signal.quantity should already be clamped, but a
+      // broken value here SKIPs rather than falling back to a full close —
+      // never submit an unintended quantity.
       if (cashRebalancePartialSell) {
         if (
           !Number.isInteger(signal.quantity) ||
@@ -1654,11 +1033,7 @@ export async function runPullbackScheduler(
       )
     }
 
-    // Earnings calendar gate (issue #196 1/3)。BUY の場合のみ評価し、
-    // ±N 営業日内に earnings_calendar 行があれば reject。SELL は撤退路を
-    // 妨げないよう gate 対象外。`earningsGate` 未注入なら skip (POC 後方互換)。
-    // perSymbolRisk より先に評価することで、broker / spread 系より上位の
-    // 「そもそもエントリしない」判断として cron 経路から見える。
+    // BUY only — never blocks an exit.
     if (options.earningsGate && intent.side === 'BUY') {
       const evalDate = now().toISOString().slice(0, 10)
       const earningsDecision = await evaluateEarningsGate(
@@ -1674,7 +1049,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.earnings_calendar', false, undefined, undefined, undefined, earningsDecision.reason),
@@ -1684,10 +1059,7 @@ export async function runPullbackScheduler(
       }
     }
 
-    // Macro event gate (issue #196 2/3)。FOMC / CPI / NFP 等の発表 ±N 時間
-    // (default 1h) は全銘柄 BUY を凍結する。earnings gate より後で評価する
-    // ので、両方 reject なら earnings reason が先に確定する (task 指定の
-    // 優先順位)。`macroEventGate` 未注入なら skip (POC 後方互換)。
+    // Evaluated after earningsGate, so an earnings reject wins when both would fire.
     if (options.macroEventGate && intent.side === 'BUY') {
       const evalTimestamp = now().toISOString()
       const macroDecision = await evaluateMacroEventGate(
@@ -1703,7 +1075,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.macro_event', false, undefined, undefined, undefined, macroDecision.reason),
@@ -1713,10 +1085,7 @@ export async function runPullbackScheduler(
       }
     }
 
-    // Per-symbol risk gate (issue #138)。manual `/trade/execute` (TradingService)
-    // と同じ pure function を呼ぶことで gate parity を取る。perSymbolRisk が
-    // 未注入の場合は POC 後方互換で skip。Inverse pair の SymbolState は同期
-    // pure 関数で要求されるため、BUY のみ事前 fetch する。
+    // Pre-fetched only for BUY: evaluatePerSymbolRisk is a sync pure function and needs the inverse pair's SymbolState in hand.
     if (options.perSymbolRisk) {
       let inverseState: SymbolState | null = null
       const inverseSymbol =
@@ -1725,9 +1094,8 @@ export async function runPullbackScheduler(
         try {
           inverseState = await options.positionStore.getState(inverseSymbol)
         } catch {
-          // fetch 失敗は inverse gate fail-open。inverse 銘柄の state read 失敗
-          // で BUY ごと止めると universe 全体が連鎖 reject になり得るため、
-          // 他の gate (settled cash / spread / freshness など) に任せる。
+          // Fails open on fetch failure: blocking the BUY here could
+          // cascade-reject the whole universe; defer to the other gates instead.
           inverseState = null
         }
       }
@@ -1746,11 +1114,9 @@ export async function runPullbackScheduler(
           spreadLimits: options.perSymbolRisk.spreadLimits,
           staleQuoteMs: options.perSymbolRisk.staleQuoteMs,
           gapRejectPct: options.perSymbolRisk.gapRejectPct,
-          // cash rebalance / intraday close は decide() 後に signal を上書きする
-          // ため、Strategy.decide() 自身の cooldown 判定を経由しない BUY が
-          // 発生し得る — ここで評価しないと cooldown 中の再購入を止められない。
-          // SELL は評価対象外 (gate 1 が side 非依存のため、BUY のみに絞って
-          // exit を cooldown で block しないようにする)。
+          // Cash rebalance / intraday close override `signal` after decide(),
+          // so a BUY can reach here without having gone through Strategy's
+          // own cooldown check. SELL is never gated (an exit must not be blocked by cooldown).
           evaluateCooldown: intent.side === 'BUY',
         },
       )
@@ -1762,16 +1128,14 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(signal.trace, traceStep('risk.per_symbol_gate', false, undefined, undefined, undefined, riskDecision.reasons.join(', '))),
         })
         continue
       }
     }
 
-    // #415: 買付余力 pool ゲート (BUY only)。notional を JPY 換算して共有台帳の残余力と
-    // 突き合わせ、unavailable / 不足は pre-trade で reject (Webull 417 をローカル先回り)。
-    // 減算は約定成立後 (loop は逐次なので check→commit で整合)。SELL/exit は対象外。
+    // The ledger is decremented only after a successful submit, below; the loop is sequential so this check→commit stays consistent.
     if (intent.side === 'BUY' && options.buyingPower) {
       const ledger = options.buyingPower
       const notionalJpy = intent.notional * (options.fxJpyPerSymbolCcy ?? 1)
@@ -1787,7 +1151,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.buying_power_pool', false, Math.round(notionalJpy), '<=', Math.round(ledger.remainingJpy), reason),
@@ -1797,9 +1161,7 @@ export async function runPullbackScheduler(
       }
     }
 
-    // portfolio 全体エクスポージャー上限ゲート (BUY only)。
-    // 買付余力 pool ゲートと同じ形 (JPY 換算 → 共有台帳の残枠と突き合わせ、
-    // unavailable / 超過は pre-trade で reject)。SELL/exit は対象外。
+    // Same shape as the buying-power pool gate above (JPY-convert, then check against the shared ledger's remaining room).
     if (intent.side === 'BUY' && options.exposureCap) {
       const ledger = options.exposureCap
       const notionalJpy = intent.notional * (options.fxJpyPerSymbolCcy ?? 1)
@@ -1815,7 +1177,7 @@ export async function runPullbackScheduler(
           decision: 'SKIP',
           reason,
           price: indicators.price,
-          indicatorsJson: JSON.stringify(indicators),
+          indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
           trace: appendTrace(
             signal.trace,
             traceStep('risk.portfolio_exposure_cap', false, Math.round(notionalJpy), '<=', Math.round(ledger.remainingJpy), reason),
@@ -1857,15 +1219,10 @@ export async function runPullbackScheduler(
       continue
     }
 
-    // Journal the pre_submit so reconcileFills (which scans
-    // trade_journal.post_submit with broker_status IS NULL) can pick up
-    // the cron-placed order. Without this, cron orders bypass the
-    // journal entirely and are invisible to reconcile.
-    //
-    // Logging is isolated in its own try/catch — if the logger sink
-    // (D1 write) throws, we must still proceed to execute + release
-    // the pending lock, otherwise the lock leaks and the symbol gets
-    // stuck.
+    // Without this, cron orders bypass trade_journal entirely and are
+    // invisible to reconcileFills. Logging is isolated in its own try/catch —
+    // if the D1 write throws, execution + pending-lock release must still
+    // proceed, otherwise the lock leaks and the symbol gets stuck.
     try {
       logPreSubmit({ clientOrderId: intent.clientOrderId, intent })
     } catch (logError) {
@@ -1886,21 +1243,11 @@ export async function runPullbackScheduler(
     try {
       result = await options.execution.execute(intent)
     } catch (error) {
-      // SELL_QTY_EXCEED fallback: Webull rejected the SELL because qty >
-      // broker-side `quantity_available`. This usually means DO state has
-      // drifted above broker truth (#215 reconcile race). Fetch the actual
-      // available qty and retry the SELL with that — i.e. close out
-      // whatever the broker actually still holds, so the next cron tick
-      // sees a clean slate. If anything in the fallback fails, re-throw
-      // the original error path (no silent recovery).
-      //
-      // cash rebalance の部分 SELL (#452 follow-up) はこの fallback から除外
-      // する: 成功後に position を qty=0 へ強制リセットする挙動 (下記) は
-      // 「意図した SELL は全量 close だった」前提に依存しており、意図的に
-      // 一部だけ残すつもりの部分 SELL に適用すると、実際は残っているはずの
-      // 保有を DO 上だけ消して以後のリスク管理 (stop/TP/time-stop) から外して
-      // しまう。部分 SELL が SELL_QTY_EXCEED を踏んだ場合は通常の ERROR/REJECT
-      // 経路 (fail-closed、position は変更しない) に倒す。
+      // Excludes a cash-rebalance partial SELL: the success-path reset to
+      // qty=0 below assumes the intended SELL was a full close, and applying
+      // it to a deliberately partial SELL would erase a position that's
+      // still genuinely held. A partial SELL that hits SELL_QTY_EXCEED falls
+      // through to the normal ERROR/REJECT path instead (fail-closed, no position change).
       const fallbackResult =
         intent.side === 'SELL' &&
         !cashRebalancePartialSell &&
@@ -1927,20 +1274,17 @@ export async function runPullbackScheduler(
           symbol: upper,
           message: messageOf(error),
         })
-        // broker 4xx = 注文の**確定拒否** (417 SELL_SHORT / TICKER_IS_DENY /
-        // Insufficient Buying Power 等、再送しても解消しない) → REJECT。
-        // 429 (rate limit) は再送で解消しうる一時的失敗なので除外して ERROR。
-        // それ以外 (5xx / ネットワーク断 / 非 BrokerRequestError 例外) も
-        // 原因不明・一時的として ERROR のまま。
+        // A broker 4xx (except 429) is a definitive reject → REJECT. 429 is
+        // a transient failure retry can resolve; everything else (5xx,
+        // network, unknown cause) stays ERROR.
         const brokerStatus = error instanceof BrokerRequestError ? error.brokerStatus : undefined
         const isBrokerReject =
           brokerStatus !== undefined && brokerStatus >= 400 && brokerStatus < 500 && brokerStatus !== 429
         await emitDecision({
           symbol: upper,
           decision: isBrokerReject ? 'REJECT' : 'ERROR',
-          // DB には英語 canonical で保存。表示層 (localizeReason) で日本語化。
-          // localize は `^broker submit error: ` を prefix match するので、発注内容
-          // (何口 / $ と ¥) は **message の後ろ**に付けて prefix を壊さない (#417)。
+          // The order details go after the message, not before — localizeReason
+          // prefix-matches `^broker submit error: ` and a leading insert would break it.
           reason: `broker submit error: ${messageOf(error)} [${describeOrderAmount(intent, options.fxJpyPerSymbolCcy)}]`,
           price: indicators.price,
           trace: appendTrace(signal.trace, traceStep('broker.submit', false, messageOf(error), '==', 'submitted')),
@@ -1949,14 +1293,11 @@ export async function runPullbackScheduler(
           type: 'ERROR',
           symbol: upper,
           message: messageOf(error),
-          // surge detector が cause で count するため (#209)、broker submit
-          // failure を 4xx / 429 / 5xx / other に分類する。`null` (= broker
-          // error ではない) なら legacy の `'broker submit'` に戻す。
+          // The surge detector buckets by cause into 4xx/429/5xx/other.
           cause: classifyBrokerErrorCause(error) ?? 'broker submit',
         })
-        // TICKER_IS_DENY 自動停止 (#460): 銘柄単位の恒久拒否は再送しても解消
-        // しないので、BUY のみ hook で fail-closed に停止する (SELL は対象外 —
-        // exit 経路と保有の orphan 化を避ける)。
+        // Only BUY stops on a permanent per-ticker deny (fail-closed, retry
+        // won't help); SELL is excluded to avoid orphaning a held position.
         if (intent.side === 'BUY' && options.onTickerDeny && isTickerDenyError(error)) {
           await options.onTickerDeny(upper)
         }
@@ -1999,11 +1340,9 @@ export async function runPullbackScheduler(
       )
     }
 
-    // SELL_QTY_EXCEED fallback succeeded → DO state currently lies above
-    // broker truth (the very reason we hit the fallback). Force-reset
-    // `position=null` so the next cron tick doesn't try to SELL phantom
-    // shares again. We deliberately bypass `recordFill` here because the
-    // executed qty < DO qty would leave a non-zero remainder.
+    // DO state lies above broker truth (the reason we hit the fallback).
+    // Force-reset position=null instead of `recordFill`, which would leave
+    // a non-zero remainder from executed qty < DO qty.
     if (fallbackApplied) {
       try {
         await options.positionStore.overridePosition(upper, {
@@ -2028,9 +1367,8 @@ export async function runPullbackScheduler(
     // Increment counters only after successful execution.
     if (executedIntent.side === 'BUY') {
       summary.buys += 1
-      // #415: 約定した BUY 分の買付余力を共有台帳から減算 (次銘柄の pool 判定に反映)。
+      // Decrements the shared ledger for the executed BUY so the next symbol's pool check sees it.
       options.buyingPower?.tryReserve(intent.notional * (options.fxJpyPerSymbolCcy ?? 1))
-      // 同様にエクスポージャー上限の共有台帳からも減算。
       options.exposureCap?.tryReserve(intent.notional * (options.fxJpyPerSymbolCcy ?? 1))
     } else {
       summary.sells += 1
@@ -2042,7 +1380,7 @@ export async function runPullbackScheduler(
         ? `sell_qty_fallback: ${signal.reason} (originalQty=${intent.quantity}, executedQty=${executedIntent.quantity})`
         : signal.reason,
       price: executedIntent.price,
-      indicatorsJson: JSON.stringify(indicators),
+      indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
       clientOrderId: executedIntent.clientOrderId,
       trace: appendTrace(
         signal.trace,
@@ -2067,13 +1405,8 @@ export async function runPullbackScheduler(
       },
     })
 
-    // SELL の realizedPnl は state.position.avgPrice (existing) と
-    // executedIntent.price (exit) の差から推定。BUY 時は undefined。avgPrice
-    // が無い SELL は不正経路 (上で reject 済) なので発生しないはずだが defensive。
-    // fallback で qty が変わった場合も executedIntent.quantity を使うので
-    // realized PnL は実 SELL 数量分のみ。
-    // #trade-cost: 通知に出す realized も reconcile と同じ net にする
-    // (片方 gross・片方 net だと突き合わせできない)。
+    // A SELL with no avgPrice should already be rejected above; this guard is defensive.
+    // Nets the same way as `reconcileFills` — mixing gross and net would make the two unreconcilable.
     const realizedPnl =
       executedIntent.side === 'SELL' && state.position && Number.isFinite(state.position.avgPrice)
         ? netRealizedPnl({
@@ -2148,9 +1481,8 @@ async function tryFallbackSell(args: {
     return null
   }
   if (available >= args.originalIntent.quantity) {
-    // Broker says we have at least as much as we tried to SELL — the 417
-    // contradicts that, so the situation is something else (transient,
-    // race, broker bug). Don't fabricate a reduced SELL.
+    // Broker-reported qty already covers the original SELL, so the 417 must
+    // be something else (transient/race/bug) — don't fabricate a reduced SELL.
     return null
   }
   const fallbackIntent: OrderIntent = {
@@ -2214,12 +1546,96 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+type RegimeBySymbol = Map<string, { decision: PairRegimeDecision; side: 'bull' | 'bear' }>
+
 /**
- * Daily bar 取得を 1 回だけ retry する。upstream の一時的な
- * 障害 (タイムアウト等) をここで吸収しないと、保有中 symbol の exit 判定が
- * そのまま丸ごと飛ぶ。2 回とも失敗したら呼び出し側が「daily bar が使えない」
- * として扱う (2 回目の error をそのまま投げる)。
+ * Evaluates each configured pair once per run and fans the decision out to
+ * both legs. A fetch/eval failure is isolated to that one pair as
+ * zone='unknown' (fail-closed under enforce) instead of aborting the run.
  */
+async function evaluatePairRegimesForRun(
+  pairRegimeOption: NonNullable<PullbackSchedulerOptions['pairRegime']>,
+  symbols: string[],
+  barClient: BarClient,
+  now: Date,
+  requestId: string | undefined,
+): Promise<RegimeBySymbol> {
+  const regimeBySymbol: RegimeBySymbol = new Map()
+  const runSymbols = new Set(symbols.map((s) => s.toUpperCase()))
+  const relevant = pairRegimeOption.pairs.filter(
+    (p) => runSymbols.has(p.bullSymbol) || runSymbols.has(p.bearSymbol),
+  )
+  // Evaluated in parallel; applied to the map in array order afterward so a
+  // duplicate symbol's winner doesn't depend on async completion order.
+  const evaluated = await Promise.all(
+    relevant.map(async (pair) => {
+      let decision: PairRegimeDecision
+      if (pair.invalidConfig !== null) {
+        decision = {
+          zone: 'unknown',
+          score: null,
+          proxySymbol: pair.proxySymbol,
+          asOfDate: null,
+          reason: `misconfig: ${pair.invalidConfig}`,
+        }
+      } else {
+        try {
+          const proxyBars = await barClient.getDailyBars(pair.proxySymbol, PAIR_REGIME_PROXY_BAR_LOOKBACK)
+          decision = evaluatePairRegime(proxyBars, {
+            proxySymbol: pair.proxySymbol,
+            thresholds: pairRegimeOption.thresholds,
+            now,
+          })
+        } catch (err) {
+          decision = {
+            zone: 'unknown',
+            score: null,
+            proxySymbol: pair.proxySymbol,
+            asOfDate: null,
+            reason: `proxy bars fetch failed: ${messageOf(err)}`,
+          }
+        }
+      }
+      return { pair, decision }
+    }),
+  )
+  for (const { pair, decision } of evaluated) {
+    // A symbol appearing in more than one pair config can't be resolved deterministically — fail closed to unknown.
+    const duplicate = [pair.bullSymbol, pair.bearSymbol].find((sym) => regimeBySymbol.has(sym))
+    if (duplicate !== undefined) {
+      const dup: PairRegimeDecision = {
+        zone: 'unknown',
+        score: null,
+        proxySymbol: pair.proxySymbol,
+        asOfDate: null,
+        reason: `duplicate pair config for ${duplicate} (fail-closed)`,
+      }
+      regimeBySymbol.set(pair.bullSymbol, { decision: dup, side: 'bull' })
+      regimeBySymbol.set(pair.bearSymbol, { decision: dup, side: 'bear' })
+      const prev = regimeBySymbol.get(duplicate)!
+      regimeBySymbol.set(duplicate, { decision: dup, side: prev.side })
+    } else {
+      regimeBySymbol.set(pair.bullSymbol, { decision, side: 'bull' })
+      regimeBySymbol.set(pair.bearSymbol, { decision, side: 'bear' })
+    }
+    console.warn(
+      JSON.stringify({
+        event: 'pair_regime_evaluated',
+        requestId: requestId ?? null,
+        mode: pairRegimeOption.mode,
+        pair: `${pair.bullSymbol}/${pair.bearSymbol}`,
+        proxySymbol: decision.proxySymbol,
+        zone: regimeBySymbol.get(pair.bullSymbol)!.decision.zone,
+        score: decision.score,
+        asOfDate: decision.asOfDate,
+        reason: regimeBySymbol.get(pair.bullSymbol)!.decision.reason,
+      }),
+    )
+  }
+  return regimeBySymbol
+}
+
+/** One retry for a transient upstream blip; without it, a held symbol's exit evaluation would be skipped entirely. Throws the second error if both attempts fail. */
 async function fetchDailyBarsWithRetry(
   barClient: BarClient,
   symbol: string,
@@ -2232,11 +1648,7 @@ async function fetchDailyBarsWithRetry(
   }
 }
 
-/**
- * 発注しようとした数量・金額を「何口 / いくら」で人間可読に整形する (#417 follow-up)。
- * USD 銘柄 (fx>0 かつ !=1) は **$ と ¥ を併記** (notional × USD/JPY)、JPY 銘柄 (fx=1) は ¥、
- * fx 不明は通貨記号なし。decision log の reason に付けて 417 等の原因切り分けに使う。
- */
+/** Human-readable order amount: USD symbols show $ and ¥, JPY symbols (fx=1) show ¥ only, unknown fx shows no currency symbol. */
 function describeOrderAmount(intent: OrderIntent, fxJpyPerSymbolCcy: number | undefined): string {
   const { quantity: qty, price: px, notional } = intent
   const yen = (n: number) => `¥${Math.round(n).toLocaleString('en-US')}`
@@ -2249,17 +1661,308 @@ function describeOrderAmount(intent: OrderIntent, fxJpyPerSymbolCcy: number | un
   return `発注内容: ${qty}口 @ ${px} = ${notional} (通貨不明)`
 }
 
-/**
- * Risk gate (VIX / news shock / half-entry) が共通で使う size scaling
- * (news-shock-gate PR 2 で抽出、以前は VIX warning ブロックと half-entry ブロックに
- * 同じ式が二重記述されていた)。`scale` 倍した raw qty を lot 単位に floor する:
- *   - lot > 1 (JP 単元株等): `floor(raw / lot) * lot`
- *   - lot === 1 (US 株等): `floor(raw)`
- * 結果が 0 になれば呼び出し側が reject する (= 部分 entry すらできない小口は見送り)。
- */
+/** Shared by the VIX / news-shock / half-entry gates: scales `qty` and floors to a lot; the caller rejects a result of 0. */
 function applySizeScale(qty: number, lot: number, scale: number): number {
   const raw = qty * scale
   return lot > 1 ? Math.floor(raw / lot) * lot : Math.floor(raw)
+}
+
+/**
+ * Cash-rebalance BUY override: replaces the signal with a fixed-quantity
+ * BUY toward active weight, unless a strategy exit / cooldown / re-entry
+ * guard already applies. Those aren't bypassed — skipping them would let
+ * cash rebalance whipsaw-buy back the same tick a time-stop SELLs.
+ */
+function applyCashRebalanceBuyOverride(
+  signal: Signal,
+  cashRebalanceQty: number | undefined,
+  state: SymbolState,
+  strategy: PullbackUptrendStrategy,
+  upper: string,
+  reentryBusinessDaysSinceExit: number | null,
+  nowMs: number,
+): Signal {
+  if (cashRebalanceQty === undefined || state.pendingOrder !== null) return signal
+  if (!Number.isInteger(cashRebalanceQty) || cashRebalanceQty <= 0) return signal
+
+  const cooldownUntilMs = state.cooldownUntil ? new Date(state.cooldownUntil).getTime() : NaN
+  const cooldownActive = Number.isFinite(cooldownUntilMs) && cooldownUntilMs > nowMs
+  const guardDays = strategy.resolveRule(upper).reentryGuardBusinessDays
+  const reentryGuardActive =
+    state.position === null &&
+    state.lastExitAt !== null &&
+    Number.isFinite(guardDays) &&
+    guardDays > 0 &&
+    reentryBusinessDaysSinceExit !== null &&
+    reentryBusinessDaysSinceExit < guardDays
+
+  let skipWhy: string | null = null
+  if (signal.action === 'SELL') {
+    skipWhy = 'strategy exit takes precedence'
+  } else if (cooldownActive) {
+    skipWhy = `cooldown active until ${state.cooldownUntil}`
+  } else if (reentryGuardActive) {
+    skipWhy = `re-entry guard window (${reentryBusinessDaysSinceExit}bd < ${guardDays}bd since exit)`
+  }
+
+  if (skipWhy !== null) {
+    return {
+      ...signal,
+      reason: `${signal.reason}; cash rebalance skipped: ${skipWhy}`,
+      trace: appendTrace(signal.trace, traceStep('entry.cash_rebalance', false, cashRebalanceQty, '>', 0, skipWhy)),
+    }
+  }
+  return {
+    ...signal,
+    action: 'BUY',
+    quantity: cashRebalanceQty,
+    reason: `cash allocation rebalance: buy ${cashRebalanceQty} toward active weight (#452)`,
+    trace: appendTrace(
+      signal.trace,
+      traceStep('entry.cash_rebalance', true, cashRebalanceQty, '>', 0, 'conditional allocation cash rebalance (#452)'),
+    ),
+  }
+}
+
+/**
+ * Cash-rebalance partial-SELL override. Never overrides a strategy exit
+ * already in `signal` — a full close there takes precedence.
+ */
+function applyCashRebalanceSellOverride(
+  signal: Signal,
+  cashRebalanceSellQty: number | undefined,
+  state: SymbolState,
+): { signal: Signal; cashRebalancePartialSell: boolean } {
+  if (
+    cashRebalanceSellQty === undefined ||
+    state.pendingOrder !== null ||
+    !Number.isInteger(cashRebalanceSellQty) ||
+    cashRebalanceSellQty <= 0
+  ) {
+    return { signal, cashRebalancePartialSell: false }
+  }
+  if (signal.action === 'SELL') {
+    return {
+      signal: {
+        ...signal,
+        trace: appendTrace(
+          signal.trace,
+          traceStep('exit.cash_rebalance', false, cashRebalanceSellQty, '>', 0, 'strategy exit takes precedence'),
+        ),
+      },
+      cashRebalancePartialSell: false,
+    }
+  }
+  if (state.position === null || state.position.qty <= 0) {
+    return {
+      signal: {
+        ...signal,
+        trace: appendTrace(
+          signal.trace,
+          traceStep('exit.cash_rebalance', false, cashRebalanceSellQty, '>', 0, 'no position'),
+        ),
+      },
+      cashRebalancePartialSell: false,
+    }
+  }
+  const qty = Math.min(cashRebalanceSellQty, state.position.qty)
+  return {
+    signal: {
+      ...signal,
+      action: 'SELL',
+      quantity: qty,
+      reason: `cash allocation rebalance: sell ${qty} toward active weight (#452)`,
+      trace: appendTrace(
+        signal.trace,
+        traceStep('exit.cash_rebalance', true, qty, '>', 0, 'conditional allocation cash rebalance sell (#452)'),
+      ),
+    },
+    cashRebalancePartialSell: true,
+  }
+}
+
+/** Forces a full SELL for a held intraday-only US symbol inside the pre-close window (leveraged-ETF open-gap stop-out avoidance). */
+function applyIntradayForceCloseOverride(
+  signal: Signal,
+  cashRebalancePartialSell: boolean,
+  isIntradayOnly: boolean,
+  market: TradingMarket,
+  state: SymbolState,
+  nowDate: Date,
+): { signal: Signal; cashRebalancePartialSell: boolean } {
+  const shouldForceClose =
+    isIntradayOnly &&
+    market === 'US' &&
+    state.position !== null &&
+    Number.isFinite(state.position.qty) &&
+    state.position.qty > 0 &&
+    isWithinUsCloseWindow(nowDate, INTRADAY_CLOSE_WINDOW_MIN)
+  if (!shouldForceClose) return { signal, cashRebalancePartialSell }
+  return {
+    signal: {
+      ...signal,
+      action: 'SELL',
+      reason: 'intraday-only: force-close before US market close',
+      trace: appendTrace(
+        signal.trace,
+        traceStep('exit.intraday_close', true, undefined, undefined, undefined, 'force-close before US close'),
+      ),
+    },
+    // Always a full close, even if cash rebalance had already queued a partial SELL.
+    cashRebalancePartialSell: false,
+  }
+}
+
+/**
+ * Traces the pair-regime zone/score on every evaluation (including HOLD,
+ * for observe-mode audit) and, in enforce mode, force-SELLs a position held
+ * against a zone flip. A flip always means a full close, so it also clears
+ * `cashRebalancePartialSell` even if a partial SELL was already queued.
+ */
+function applyPairRegimeOverride(
+  signal: Signal,
+  cashRebalancePartialSell: boolean,
+  regime: { decision: PairRegimeDecision; side: 'bull' | 'bear' } | undefined,
+  pairRegimeOption: NonNullable<PullbackSchedulerOptions['pairRegime']>,
+  state: SymbolState,
+): { signal: Signal; cashRebalancePartialSell: boolean } {
+  if (!regime) return { signal, cashRebalancePartialSell }
+  const d = regime.decision
+  const allowed = (regime.side === 'bull' && d.zone === 'bull') || (regime.side === 'bear' && d.zone === 'bear')
+  const held = state.position !== null && Number.isFinite(state.position.qty) && state.position.qty > 0
+  const observeNote =
+    pairRegimeOption.mode === 'observe' && !allowed && signal.action === 'BUY' ? ' [observe: enforce なら SKIP]' : ''
+  const neutralHoldNote =
+    held && d.zone === 'neutral' ? ' [hold_existing_position: neutral_does_not_force_exit]' : ''
+  let nextSignal: Signal = {
+    ...signal,
+    trace: appendTrace(
+      signal.trace,
+      traceStep(
+        'regime.zone',
+        allowed,
+        d.score,
+        undefined,
+        undefined,
+        `${d.reason} side=${regime.side} mode=${pairRegimeOption.mode}${observeNote}${neutralHoldNote}`,
+      ),
+    ),
+  }
+  const flipped = (regime.side === 'bull' && d.zone === 'bear') || (regime.side === 'bear' && d.zone === 'bull')
+  let nextCashRebalancePartialSell = cashRebalancePartialSell
+  // neutral never forces an exit — a normal pullback inside hysteresis shouldn't drop the position.
+  if (pairRegimeOption.mode === 'enforce' && held && flipped) {
+    nextCashRebalancePartialSell = false
+    if (nextSignal.action === 'SELL') {
+      nextSignal = {
+        ...nextSignal,
+        trace: appendTrace(
+          nextSignal.trace,
+          traceStep(
+            'exit.regime_flip_secondary',
+            true,
+            undefined,
+            undefined,
+            undefined,
+            `secondaryExitReasons: regime_flip (${d.reason})`,
+          ),
+        ),
+      }
+    } else {
+      nextSignal = {
+        ...nextSignal,
+        action: 'SELL',
+        reason: `pair regime flip: zone=${d.zone} against held ${regime.side} side (${d.reason})`,
+        trace: appendTrace(
+          nextSignal.trace,
+          traceStep('exit.regime_flip', true, d.score, undefined, undefined, d.reason),
+        ),
+      }
+    }
+  }
+  return { signal: nextSignal, cashRebalancePartialSell: nextCashRebalancePartialSell }
+}
+
+/**
+ * HALF (0.5x) entry promotion. Trusts the strategy's own `holdCause` /
+ * `entryStatus` rather than re-deriving entry status from indicators —
+ * recomputing would also promote a re-entry-guard HOLD, which isn't part of
+ * the gate set HALF is meant to loosen. The position/pendingOrder/cooldown
+ * checks are a belt-and-suspenders re-check of what holdCause==='entry_gate'
+ * already guarantees, against a future strategy implementation bug.
+ */
+function applyHalfEntryPromotion(
+  signal: Signal,
+  isHalfEntryEligible: boolean,
+  state: SymbolState,
+  nowMs: number,
+): { signal: Signal; positionMultiplier: number } {
+  const entryStatus = signal.entryStatus
+  const eligible =
+    signal.action === 'HOLD' &&
+    signal.holdCause === 'entry_gate' &&
+    isHalfEntryEligible &&
+    entryStatus?.status === 'HALF' &&
+    entryStatus.halfGate !== null &&
+    state.position === null &&
+    state.pendingOrder === null &&
+    !(state.cooldownUntil && new Date(state.cooldownUntil).getTime() > nowMs)
+  if (!eligible || !entryStatus) return { signal, positionMultiplier: 1 }
+  const gate = entryStatus.halfGate!
+  return {
+    positionMultiplier: entryStatus.positionMultiplier,
+    signal: {
+      ...signal,
+      action: 'BUY',
+      reason: `half entry (0.5x): ${gate.key} ${gate.actual.toFixed(4)} near threshold ${gate.threshold} (within tolerance band)`,
+      trace: appendTrace(
+        signal.trace,
+        traceStep(
+          'entry.half_status',
+          true,
+          gate.actual,
+          // DecisionTraceStep's operator union only has '<=' / '>='.
+          gate.operator === '>=' ? '>=' : '<=',
+          gate.threshold,
+          'HALF: single degree-gate miss within tolerance → 0.5x sizing (#452)',
+        ),
+      ),
+    },
+  }
+}
+
+/**
+ * Vetoes a new BUY within `INTRADAY_NO_ENTRY_WINDOW_MIN` of US close for an
+ * intraday-only symbol. Must run after HALF promotion, not before — HALF
+ * can promote a HOLD to BUY, and vetoing first would leave that
+ * promotion unblocked.
+ */
+function applyIntradayNoEntryVeto(
+  signal: Signal,
+  isIntradayOnly: boolean,
+  market: TradingMarket,
+  nowDate: Date,
+): Signal {
+  const shouldVeto =
+    isIntradayOnly && market === 'US' && signal.action === 'BUY' && isWithinUsCloseWindow(nowDate, INTRADAY_NO_ENTRY_WINDOW_MIN)
+  if (!shouldVeto) return signal
+  return {
+    ...signal,
+    action: 'HOLD',
+    holdCause: 'guard',
+    reason: 'intraday-only: no new entry within 30min of US close',
+    trace: appendTrace(
+      signal.trace,
+      traceStep(
+        'entry.intraday_no_entry',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'intraday-only: no new entry within 30min of US close',
+      ),
+    ),
+  }
 }
 
 function appendTrace(
@@ -2328,13 +2031,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.price_freshness': '価格鮮度ゲート (BUY のみ)',
 }
 
-/**
- * Build an operator-actionable reject reason from a sizing failure。
- * 単に capReason を出すと「なぜ失敗したか / 何を直せばよいか」が見えない
- * (例: `lot-size-round` だけでは raw qty も stop も予算も分からない)。
- * 失敗 route ごとに diagnostic 値を埋め込む。localizeReason 側が regex で
- * 日本語化する。
- */
+/** Embeds diagnostic values per failure route — a bare `capReason` like `lot-size-round` alone doesn't show raw qty/stop/budget. `localizeReason` regex-matches this for the Japanese UI text. */
 function buildSizingRejectReason(
   sizing: import('./pullbackSizing').PullbackSizingResult,
   ctx: { lotSize: number; entryPrice: number },

@@ -8,13 +8,9 @@ import { createDb } from '../db/tradeJournalRepo'
 import type { NotificationEvent, NotificationSeverity } from './Notifier'
 
 /**
- * `notification_emit_log` table の R/W (#141)。
- *
- * `LoggingNotifier` (notify するたびに 1 行 INSERT する notifier 装飾) と
- * dashboard `/dashboard/alerts` view の SELECT で使う。
- *
- * ここは pure な D1 アクセス層なので env binding 自体の有無は呼び出し側の
- * 責務 (`env.DB` 不在時は呼ばない / NoopNotifier に委譲する)。
+ * `notification_emit_log` table の R/W。`LoggingNotifier` (notify のたびに
+ * 1 行 INSERT) と dashboard `/dashboard/alerts` の SELECT で使う。pure な
+ * D1 アクセス層 — `env.DB` の有無チェックは呼び出し側の責務。
  */
 export interface NotificationEmitLogParams {
   event: NotificationEvent
@@ -26,12 +22,8 @@ export interface NotificationEmitLogParams {
   now?: () => Date
 }
 
-/**
- * D1 への 1 行 INSERT。失敗は throw しない (caller が握りつぶす)。
- *
- * 通知ログは「あれば便利」レイヤなので、D1 が一時的に落ちても webhook 送信
- * 自体は成功させたい — caller が必ず try/catch する前提で設計している。
- */
+// Throws on failure by design — callers wrap this so a D1 outage doesn't
+// also fail the webhook send this log entry is describing.
 export async function insertNotificationEmit(
   db: D1Database,
   params: NotificationEmitLogParams,
@@ -60,28 +52,22 @@ function toInsertRow(
 function pickSymbol(event: NotificationEvent): string | null {
   if (event.type === 'TRADE') return event.symbol
   if (event.type === 'ERROR') return event.symbol ?? null
-  // SUMMARY は銘柄非依存の集計通知なので symbol は常に null。
   return null
 }
 
 function pickCause(event: NotificationEvent): string | null {
   if (event.type === 'ERROR') return event.cause ?? null
   if (event.type === 'STATE_CHANGE') return event.field
-  // SUMMARY は LoggingNotifier が D1 INSERT 自体を skip する (push 専用) ので
-  // ここには来ない。防御的に null (TRADE と同じ扱い)。
+  // SUMMARY never reaches here in practice (LoggingNotifier skips its
+  // INSERT), but falls back to null defensively rather than throwing.
   return null
 }
 
 export interface LoadAlertOptions {
-  /**
-   * 表示上限。dashboard 既定 100。最大 500 (D1 query を爆発させない)。
-   */
+  /** Clamped to 500 regardless of input (see `clampLimit`); default 100. */
   limit?: number
-  /**
-   * severity フィルタ (例: `['critical', 'warning']`)。空配列 / undefined なら全件。
-   */
+  /** Empty/undefined = no severity filter. */
   severities?: NotificationSeverity[]
-  /** event_type フィルタ ('TRADE' / 'ERROR' / 'STATE_CHANGE')。空なら全件。 */
   eventType?: NotificationEvent['type']
   /** cursor: id < before で古い方へページング。 */
   before?: number
@@ -89,12 +75,6 @@ export interface LoadAlertOptions {
 
 export type AlertRow = NotificationEmitLogRow
 
-/**
- * dashboard `/dashboard/alerts` 用 SELECT。timestamp DESC で最新から limit
- * 件返す。severity と eventType は両方指定された場合 AND で組み合わせる
- * (CodeRabbit #210): UI 側で両 filter の同時選択 URL が成立可能なため、
- * data 側でも両方を反映して silently drop しないようにする。
- */
 export async function loadRecentAlerts(
   db: D1Database,
   options: LoadAlertOptions = {},
@@ -103,9 +83,8 @@ export async function loadRecentAlerts(
   const drizzle = createDb(db)
   let query = drizzle.select().from(notificationEmitLog).$dynamic()
   const conditions: SQL[] = [
-    // SUMMARY は push 専用化 (LoggingNotifier が INSERT を skip) したが、
-    // それ以前に書かれた行が D1 に残っている。alerts view は異常・約定・
-    // 設定変更の記録に限るので、既存行も読み出しから恒久除外する。
+    // Excludes pre-existing SUMMARY rows too, not just new ones — the
+    // alerts view is scoped to anomalies/fills/config changes only.
     ne(notificationEmitLog.eventType, 'SUMMARY'),
   ]
   if (options.eventType) {
@@ -120,9 +99,8 @@ export async function loadRecentAlerts(
   if (conditions.length > 0) {
     query = query.where(conditions.length === 1 ? conditions[0] : and(...conditions))
   }
-  // `waitUntil` 配下の INSERT が前後すると id 順は実発生順とずれることが
-  // ある。timestamp (ISO 文字列) DESC を first key にし、同 timestamp は
-  // id DESC で tiebreak する (CodeRabbit #210)。
+  // id order can lag actual occurrence order under concurrent `waitUntil`
+  // inserts, so timestamp is the primary sort key with id as tiebreaker.
   return await query
     .orderBy(desc(notificationEmitLog.timestamp), desc(notificationEmitLog.id))
     .limit(limit)

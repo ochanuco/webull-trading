@@ -6,41 +6,28 @@ import { resolveAccessToken } from './resolveAccessToken'
 import { toWebullPlaceOrderRequest } from './mapper'
 
 /**
- * 銘柄の Webull JP 取扱チェック (#461)。
+ * Checks whether Webull JP will accept orders for a symbol, using Preview
+ * Order (`POST /openapi/account/orders/preview`) as the primary signal.
  *
- * **実測で確定した Preview Order (`POST /openapi/account/orders/preview`) の性質
- * (2026-06-11)**:
- *   - 実在しない symbol (ZZZZ) は `OAUTH_OPENAPI_PARAM_ERR`
- *     ("invalid market,symbol,instrument_type") で拒否 → **銘柄マスタの存在検証は
- *     している**
- *   - 一方、本番 place が TICKER_IS_DENY で拒否した USMV は preview 200 + 見積を
- *     返した → **発注 allowlist (deny list) までは検証しない** (または deny list が
- *     日次で変わる)。**preview 200 から「取引可能」は主張できない**
+ * Preview validates that the symbol exists in the instrument master (an
+ * unknown symbol gets `OAUTH_OPENAPI_PARAM_ERR`) but not the orderable/deny
+ * list — USMV returned a 200 quote from preview yet was denied at
+ * production place with TICKER_IS_DENY. So a 200 here never means
+ * "tradable", only "not obviously blocked".
  *
- * 出せる判定:
- *   - 'denied'  : (a) 全 variant が銘柄不正 PARAM_ERR (= マスタに不存在 or
- *                 market/type 不一致)、(b) preview が TICKER_IS_DENY を返した、
- *                 (c) 呼び出し側 (admin endpoint) が過去の deny 実績
- *                 (symbol_config.notes の #460 マーカー) を検出した場合
- *   - 'unknown' : preview は通った/エラーだが確定情報なし。「見積もり可」でも
- *                 発注可否は保証しない (USMV の前例)。登録はブロックしない
- *   - 'unavailable': 設定不足 / broker 不達 (判定プロセス自体が走れず)
+ * Verdicts: 'denied' (invalid symbol, TICKER_IS_DENY, or a caller-supplied
+ * known past deny), 'unknown' (preview succeeded or errored without a
+ * definitive signal — does not block registration), 'unavailable' (the
+ * check itself couldn't run).
  */
 type TradabilityVerdict = 'denied' | 'unknown' | 'unavailable'
 
-/**
- * 銘柄単位の恒久拒否コード判定。Webull は `OAUTH_OPENAPI_` prefix 付き/なしの
- * 両方の表記が観測されているため suffix で判定する (CodeRabbit #466)。
- */
+/** Webull emits both `OAUTH_OPENAPI_`-prefixed and bare `TICKER_IS_DENY` codes; match by suffix to catch both. */
 function isTickerDenyCode(errorCode: string | null): boolean {
   return errorCode !== null && errorCode.endsWith('TICKER_IS_DENY')
 }
 
-/**
- * 「銘柄が不正」型の PARAM_ERR か (ZZZZ 実測: message が
- * "Parameter error, invalid market,symbol,instrument_type, value: ..." の形)。
- * 他フィールド起因の PARAM_ERR と区別するため 'symbol' を含むものに限定する。
- */
+/** Narrows PARAM_ERR to the "invalid symbol" case so other-field errors aren't misread as a nonexistent ticker. */
 function isInvalidSymbolParamError(r: TradabilityVariantResult): boolean {
   return (
     r.errorCode !== null &&
@@ -55,19 +42,19 @@ interface TradabilityVariantResult {
   status: number | null
   errorCode: string | null
   message: string | null
-  /** 判定根拠の確認用 (200 偽陽性の調査 #461)。先頭 300 chars。 */
+  /** First 300 chars of the response body, for auditing false-positive 200s. */
   bodyExcerpt?: string
 }
 
 export interface TradabilityResult {
   verdict: TradabilityVerdict
   /**
-   * UI 表示分岐用の判定根拠。
-   * known_deny: 過去の実発注 deny 実績 / ticker_deny: preview が deny を返却 /
-   * not_listed: instrument 照会で不存在 (#475) / instrument_status: instrument
-   * status が CO/NT (#475) / invalid_symbol: preview が銘柄不正 / quote_ok:
-   * 見積もり成功 (保証なし) / preview_error: 判定材料にならないエラー /
-   * unreachable: 不達・設定不足
+   * known_deny: caller-supplied prior deny record. ticker_deny: this preview
+   * call got TICKER_IS_DENY. not_listed: instrument lookup found nothing.
+   * instrument_status: instrument status is CO/NT. invalid_symbol: preview
+   * rejected the symbol itself. quote_ok: preview succeeded (not a
+   * tradability guarantee — see the USMV note above). preview_error: preview
+   * responded but inconclusively. unreachable: broker unreachable or misconfigured.
    */
   reason:
     | 'known_deny'
@@ -78,19 +65,20 @@ export interface TradabilityResult {
     | 'quote_ok'
     | 'preview_error'
     | 'unreachable'
-  /** operator 向けの 1 行説明。 */
+  /** One-line operator-facing explanation. */
   detail: string
   variants: TradabilityVariantResult[]
   /**
-   * instrument 照会 (#475) の正規化結果。lookup 不実施 (JP 銘柄) / error 時は
-   * null。UI が status / overnight / leveraged 等のフラグ表示に使う。
+   * Normalized instrument lookup result; null when lookup wasn't run (JP
+   * symbols) or errored. Used by the UI for status/overnight/leverage flags.
    */
   instrument: WebullInstrument | null
 }
 
 /**
- * Preview Order に試す body shape 候補 (#461)。確定したら 1 つに絞る。
- * broker/probe (診断ページ) と form チェックの両方がこれを共有する。
+ * Candidate Preview Order body shapes, shared by the broker/probe
+ * diagnostic page and the form check. Collapse to one once Webull's
+ * expected shape is confirmed.
  */
 export function buildPreviewOrderVariants(
   symbol: string,
@@ -110,7 +98,7 @@ export function buildPreviewOrderVariants(
   }
   return [
     {
-      // production place (v1 mapper) と同形: client_order_id + MARKET + limit cap
+      // Same shape as production place (v1 mapper): client_order_id + MARKET + limit cap.
       label: 'v1-place-shape',
       body: toWebullPlaceOrderRequest(
         {
@@ -126,8 +114,7 @@ export function buildPreviewOrderVariants(
       ),
     },
     {
-      // JP preview docs (preview-order-v2) の field 集合: client_order_id なし、
-      // v2 session enum
+      // Field set from the JP preview-order-v2 docs: no client_order_id, v2 session enum.
       label: 'v2-fields-market',
       body: {
         new_orders: [
@@ -163,15 +150,14 @@ const PREVIEW_TIMEOUT_MS = 10_000
 interface CheckInput {
   symbol: string
   market: 'US' | 'JP'
-  /** preview の limit cap。未指定は 100 (shape 確定までの placeholder)。 */
+  /** Limit cap sent to preview; defaults to 100 as a placeholder until the shape is confirmed. */
   price?: number
-  /** test seam。default は globalThis.fetch。 */
   fetcher?: typeof fetch
   /**
-   * instrument 照会の結果 (#475)。fetch の orchestration は呼び出し側 (admin
-   * endpoint) が行い、ここは verdict 合成だけ担う。Promise を渡すと preview と
-   * 並列に解決する。未注入 (JP 銘柄 = API 非対応) は preview のみで判定する
-   * 従来動作。
+   * Instrument lookup result, fetched by the caller — this function only
+   * combines it into the verdict. Pass a Promise to run it in parallel with
+   * preview; omit for JP symbols (unsupported by that API), which falls
+   * back to preview-only.
    */
   instrument?: InstrumentLookupResult | Promise<InstrumentLookupResult>
 }
@@ -230,11 +216,10 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
             errorCode = typeof parsed.error_code === 'string' ? parsed.error_code : null
             message = typeof parsed.message === 'string' ? parsed.message : null
           } catch {
-            // 非 JSON 応答は status だけで判定
+            // Non-JSON response — fall through and judge by status alone.
           }
-          // HTTP 200 でも batch 系 API は per-order エラーを body に埋めることが
-          // ある (本番 place の deny と staging preview 200 の矛盾調査 #461)。
-          // top-level の error_code に加え body 全文も走査する。
+          // Batch-style APIs can embed a per-order error in the body even on
+          // HTTP 200, so scan the full text in addition to the top-level error_code.
           if (errorCode === null && /TICKER_IS_DENY/.test(text)) {
             errorCode = 'OAUTH_OPENAPI_TICKER_IS_DENY'
           }
@@ -262,12 +247,11 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
       }
     }),
   )
-  // preview fetch を起動した後に lookup を await する (両者は並列に走る)。
+  // Runs in parallel with the preview fetch above (already in flight).
   const lookup = input.instrument === undefined ? undefined : await input.instrument
   const instrument = lookup?.outcome === 'found' ? lookup.instrument : null
   const results = await resultsPromise
 
-  // 確定 NG (1): preview が deny を返した場合。
   if (results.some((r) => isTickerDenyCode(r.errorCode))) {
     return {
       verdict: 'denied',
@@ -277,9 +261,9 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
       instrument,
     }
   }
-  // 確定 NG (2): instrument 照会 (#475、documented API) でマスタに不存在。
-  // preview の結果と矛盾しても「取引しない」側に倒す。lookup の error は
-  // ここに来ない (not_found は 200 + 空配列のみ) ので過剰 fail-closed にならない。
+  // Trust "not found" over a contradicting preview — fail closed. Lookup
+  // errors never reach here (only a real empty-array 200 sets not_found),
+  // so this doesn't over-trigger on transient lookup failures.
   if (lookup?.outcome === 'not_found') {
     return {
       verdict: 'denied',
@@ -289,10 +273,9 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
       instrument,
     }
   }
-  // 確定 NG (3): instrument status が「取引可」以外 (#475)。
-  // OC=Tradable / CO=Liquidate only / NT=Non-Tradable (公式 MCP の enum)。
-  // CO は新規 BUY 不可なので登録ブロック対象。未知の status 値は deny しない
-  // (enum 拡張で全銘柄が止まる事故を避ける。発注側には #460 の事後ガード)。
+  // CO (liquidate-only) blocks new BUY registration same as NT. Unknown
+  // status values are NOT denied here — an enum extension must not halt
+  // every symbol; the place-order path has its own after-the-fact guard.
   if (instrument?.status === 'CO' || instrument?.status === 'NT') {
     return {
       verdict: 'denied',
@@ -303,8 +286,7 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
     }
   }
   const responding = results.filter((r) => r.status !== null)
-  // 確定 NG (4): 応答した全 variant が「銘柄不正」PARAM_ERR (= マスタに不存在
-  // or market/instrument_type の組合せ不正。ZZZZ 実測パターン)。
+  // All responding variants agree the symbol itself is invalid.
   if (responding.length > 0 && responding.every((r) => isInvalidSymbolParamError(r))) {
     return {
       verdict: 'denied',
@@ -314,8 +296,7 @@ export async function checkTradability(env: Env, input: CheckInput): Promise<Tra
       instrument,
     }
   }
-  // 200 = 見積もり成功。ただし発注 allowlist は検証されない (USMV は status=OC
-  // のまま本番 place が deny された前例) ので「取引可能」とは言わない。
+  // 200 means the quote succeeded — not a tradability guarantee (see the USMV note above).
   if (results.some((r) => r.status === 200 && r.errorCode === null)) {
     const statusNote =
       instrument?.status === 'OC'

@@ -19,9 +19,7 @@ const sellIntent: OrderIntent = {
   side: 'SELL',
 }
 
-// #251 / #256: Place Order body schema version の差分テスト。
-// v1 (default / 現挙動) と v2 (新 OpenAPI docs) の body shape を検証。
-describe('toWebullPlaceOrderRequest', () => {
+describe('toWebullPlaceOrderRequest (#251 / #256: v1 vs v2 Place Order body shape)', () => {
   describe('v1 (default / 現挙動)', () => {
     it('produces the legacy shape with limit_price + support_trading_session=N + no combo_type', () => {
       const body = toWebullPlaceOrderRequest(intent, 'v1', 'acct-1')

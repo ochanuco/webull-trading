@@ -1,10 +1,8 @@
 /**
- * 売買ライフサイクル計測 (issue #709 Phase 2) — D1 / Yahoo から素材を集めて
- * `lifecycleMetrics.ts` の pure 関数群に流し込む loader/assembler。
- *
- * 読み取り専用: strategy/risk/execution には一切書き込まない。D1 query は
- * `routes/dashboard/charts/loaders.ts` と同じ `db.prepare().bind().all()`
- * 流儀 (drizzle は使わない — 既存 dashboard loader との一貫性を優先)。
+ * Read-only loader/assembler: gathers raw material from D1 and Yahoo and
+ * feeds it into `lifecycleMetrics.ts`'s pure functions. Never writes to
+ * strategy/risk/execution state. Uses `db.prepare().bind().all()` directly
+ * rather than drizzle, matching `routes/dashboard/charts/loaders.ts`.
  */
 import type { Env } from '../../config/env'
 import type { DailyBar } from '../strategy/indicators'
@@ -98,7 +96,7 @@ export interface LifecycleReport {
 const NOTE =
   '日足は Yahoo (query1.finance.yahoo.com) 由来。直近の exit / SKIP は先の営業日 bar がまだ無いためフォワード指標の n が減る。'
 
-/** `admin.ts` の `estimateLookbackDays` と同じ考え方 (calendar→trading day 換算 + buffer)。5y (#709 ブリーフ「上限5yで十分」) で cap。 */
+/** Same calendar→trading-day conversion + buffer as `admin.ts`'s `estimateLookbackDays`. Capped at 5 years. */
 const MAX_LOOKBACK_DAYS = 1825
 
 function estimateLookbackDays(earliestIso: string | null, now: Date): number {
@@ -148,9 +146,8 @@ async function loadAllFills(db: D1Database): Promise<LifecycleFill[]> {
     if (!r.symbol || r.filled_price === null) continue
     const price = Number(r.filled_price)
     const qty = r.filled_qty === null ? Number.NaN : Number(r.filled_qty)
-    // 0 株・負値・非有限の行はここで落とす — round trip のペアリングや
-    // turnover に混ざると件数・金額が静かに歪む (broker の異常応答が
-    // reconcile で書かれた場合の防御)。
+    // Guards against a broker anomaly reconciled into the journal silently
+    // skewing round-trip pairing and turnover downstream.
     if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(qty) || qty <= 0) continue
     fills.push({
       symbol: r.symbol.toUpperCase(),
@@ -208,10 +205,10 @@ async function loadAvgEquityUsd(db: D1Database): Promise<number | null> {
 }
 
 /**
- * `${symbol}|${NY YYYY-MM-DD}` → 最終観測 status。テーブル全体を id 昇順で
- * 舐めて上書きすれば「その日最後の観測」が残る (#709 Phase 1 の producer は
- * 5 分 cron で複数回書く)。Phase 2 時点でテーブルは小さい想定 (観測データ
- * まだ少ない、#709 ブリーフ) なのでフィルタ無しの全件走査で十分。
+ * `${symbol}|${NY YYYY-MM-DD}` → last-observed status. The producer writes
+ * multiple times per day (5-minute cron); scanning id-ascending and
+ * overwriting naturally keeps the last one. Unfiltered full-table scan —
+ * fine while the table stays small.
  */
 async function loadExtendedHoursStatusBySymbolNyDay(db: D1Database): Promise<Map<string, string>> {
   const result = await db
@@ -227,7 +224,6 @@ async function loadExtendedHoursStatusBySymbolNyDay(db: D1Database): Promise<Map
   return map
 }
 
-/** カテゴリ別 + 'ALL' の forward return 行を組み立てる。 */
 function buildForwardReturnRows(
   entries: ReadonlyArray<{ category: ExitReasonCategory; forward: ReturnType<typeof computeForwardReturns> }>,
 ): ForwardReturnRow[] {
@@ -302,11 +298,10 @@ function buildSkipOutcomeRows(
 }
 
 /**
- * 過去 decision / fill から売買ライフサイクルレポートを組み立てる。
- *
- * fetch 方針: symbol ごとに Yahoo daily bars を 1 回だけ取得する。個別 symbol
- * の fetch 失敗はその symbol が絡む round trip / skip のフォワード系だけ null
- * に落とし (`meta.barFetchFailedSymbols` に記録)、レポート全体は throw しない。
+ * Assembles the lifecycle report from past decisions/fills. Fetches Yahoo
+ * daily bars once per symbol; a per-symbol fetch failure only nulls out
+ * that symbol's forward-looking metrics (recorded in
+ * `meta.barFetchFailedSymbols`) instead of failing the whole report.
  */
 export async function loadLifecycleReport(
   env: Env,
@@ -330,7 +325,6 @@ export async function loadLifecycleReport(
   const classifiedTrips = classifyRoundTrips(trips, sellReasonByClientOrderId)
   const skipSignals = dedupSkipSignalsByDay(rawSkipSignals)
 
-  // fetch 対象 symbol: round trip (entry/exit 両方) + SKIP。
   const symbols = new Set<string>()
   for (const t of trips) symbols.add(t.symbol)
   for (const s of skipSignals) symbols.add(s.symbol)

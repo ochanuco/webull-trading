@@ -87,9 +87,8 @@ async function createTradingService(
   universe: SymbolUniverse,
   global: LoadedGlobalConfig,
 ): Promise<TradingService> {
-  // Phase B: trade client は DO 由来 token を優先 (fallback で env)。decide()
-  // のときも resolve するが、broker call 自体は execute() で初めて発火するので
-  // 余計な network call にはならない (DO は同一 isolate 内で cache 済)。
+  // resolveAccessToken only reads DO/env state, so calling it eagerly from
+  // decide() as well as execute() adds no broker network call.
   const execution = global.dryRun
     ? new MockExecution()
     : new WebullExecution(
@@ -113,9 +112,6 @@ async function createTradingService(
       staleQuoteMs: global.staleQuoteMs,
       gapRejectPct: global.gapRejectPct,
       drawdownKillThreshold: global.drawdownKillThreshold,
-      // #77 portfolio exposure gate. `total_capital_*` null disables the
-      // check for that currency. `symbolCurrency` is required to route the
-      // ceiling to the correct budget (USD vs JPY).
       maxPortfolioExposurePct: global.maxPortfolioExposurePct,
       totalCapitalUsd: global.totalCapitalUsd,
       totalCapitalJpy: global.totalCapitalJpy,
@@ -130,17 +126,15 @@ function toTradingConfig(
   global: LoadedGlobalConfig,
   envTradingEnabled: string | undefined,
 ): TradingConfig {
-  // 通貨別の max_order_notional を symbol の currency で選ぶ。universe に
-  // 未登録の symbol は URL の 4 桁数字ヒューリスティックにフォールバックする
-  // (validation は RiskPolicy の allowedSymbols で別途弾かれる)。
+  // Symbols missing from the universe fall back to a 4-digit-ticker
+  // heuristic for JPY vs USD; RiskPolicy.allowedSymbols rejects them anyway,
+  // so a wrong guess here only affects which notional ceiling is reported.
   const upperSymbol = request.symbol.toUpperCase()
   const currency = universe.symbolCurrency[upperSymbol] ?? (/^\d{4}$/.test(upperSymbol) ? 'JPY' : 'USD')
   const maxOrderNotional =
     currency === 'JPY' ? global.maxOrderNotionalJpy : global.maxOrderNotionalUsd
   return {
     dryRun: global.dryRun,
-    // env=false が DB=true を上書きする (#276)。`/trade/execute` から発注
-    // しようとした operator も env override を尊重して reject される。
     tradingEnabled: resolveTradingEnabled(global.tradingEnabled, envTradingEnabled),
     allowedSymbols: universe.allowedSymbols,
     maxOrderNotional,

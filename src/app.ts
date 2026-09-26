@@ -5,7 +5,6 @@ import { auditLogger } from './infrastructure/logger/AuditLogger'
 import { accessJwtMiddleware } from './middleware/accessJwt'
 import { health } from './routes/health'
 import { trade } from './routes/trade'
-// Webull routes (Phase 2 append)
 import { webull } from './routes/webull'
 import { BrokerRequestError, TradingError, ValidationError } from './shared/errors'
 import type { ErrorHandler } from 'hono'
@@ -48,16 +47,14 @@ export function createApp() {
   app.use('/trade/*', accessJwtMiddleware())
   app.route('/health', health)
   app.route('/trade', trade)
-  // Webull routes (Phase 2 append)
   app.use('/webull/*', accessJwtMiddleware())
   app.route('/webull', webull)
   app.use('/admin/*', accessJwtMiddleware())
   app.route('/admin', admin)
   app.use('/dashboard/*', accessJwtMiddleware())
   app.route('/dashboard', dashboard)
-  // Read-only MCP server (#553 append)。/dashboard と同じ Access JWT 検証を
-  // 通す (service token も同じ検証を通過する)。ワイルドカード `/mcp/*` は
-  // `/mcp` 単一 path に効かない router があるため base path にも明示的に張る。
+  // Both '/mcp' and '/mcp/*' are registered: some routers don't match a
+  // wildcard against the bare base path.
   app.use('/mcp', accessJwtMiddleware({ audience: 'mcp' }))
   app.use('/mcp/*', accessJwtMiddleware({ audience: 'mcp' }))
   app.route('/mcp', mcp)

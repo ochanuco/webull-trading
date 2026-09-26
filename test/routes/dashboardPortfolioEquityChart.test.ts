@@ -82,10 +82,8 @@ describe('ホームの資産推移チャート', () => {
     expect(body).toContain('総資産チャート')
     expect(body).toContain('id="portfolio-equity-chart"')
     expect(body).toContain('window.__equityChartData')
-    // Both USD and JPY series should be flagged on at least one row.
     expect(body).toContain('"hasUsd":true')
     expect(body).toContain('"hasJpy":true')
-    // Range tabs for the chart.
     expect(body).toContain('/dashboard?range=30d')
     expect(body).toContain('/dashboard?range=90d')
     expect(body).toContain('/dashboard?range=365d')
@@ -121,7 +119,6 @@ describe('ホームの資産推移チャート', () => {
     // default = 90d → limit = 90
     expect(spy).toHaveBeenCalledWith(expect.anything(), { limit: 90 })
     const body = await res.text()
-    // The 90d tab should be active.
     expect(body).toMatch(/class="tab tab-active"[^>]*href="\/dashboard\?range=90d"/)
   })
 
@@ -149,7 +146,6 @@ describe('ホームの資産推移チャート', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // ページ自体は 200 で描画され、チャートだけが "データ無し" に退避する。
     expect(body).toContain('まだ roll-daily 実行履歴がありません')
   })
 })

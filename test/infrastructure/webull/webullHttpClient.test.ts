@@ -39,9 +39,6 @@ function createClient(fetchFn: typeof fetch, timeoutMs?: number): WebullHttpClie
 
 describe('WebullHttpClient', () => {
   it('signs using pathname only (query stays in canonical sorted pairs, not the path prefix)', async () => {
-    // Regression: previously we passed `pathname + search` to auth.createHeaders,
-    // which duplicated `account_id` in the canonical string (once inside the path,
-    // once in the sorted pairs) and triggered Webull 401 UNAUTHORIZED.
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ client_order_id: 'c', order_id: 'o' }), { status: 200 }),
     )
@@ -105,9 +102,7 @@ describe('WebullHttpClient', () => {
       'Content-Type': 'application/json',
       host: 'broker.example.test',
       'x-app-key': 'app-key',
-      // signing algo は **x-version base** で決まる (#21 Phase B follow-up):
-      // x-version=v1 → SHA1 / v2 → SHA256。default tradeVersion は v1 なので
-      // SHA1 が選ばれる。
+      // Algorithm is x-version-based (#21 Phase B); default tradeVersion=v1 selects SHA1.
       'x-signature-algorithm': 'HMAC-SHA1',
       'x-signature-version': '1.0',
       'x-signature-nonce': expect.any(String),
@@ -154,17 +149,13 @@ describe('WebullHttpClient', () => {
     expect(u.pathname).toBe('/openapi/account/orders/history')
     expect(u.searchParams.get('account_id')).toBe('acct-1')
     expect(u.searchParams.get('page_size')).toBe('50')
-    // 1-indexed `page` param emitted on every request (#139). Even the
-    // single-page default case sends `page=1` so the broker has consistent
-    // semantics across single- and deep-lookup callers.
+    // 1-indexed and sent even on this single-page default call (#139), so the
+    // broker sees consistent semantics across single- and deep-lookup callers.
     expect(u.searchParams.get('page')).toBe('1')
     expect(detail?.status).toBe('FILLED')
   })
 
-  // #139: pagination. When the target coid is not on page 1 but is on page 2
-  // and the caller opts into `maxPages=2`, the client walks both pages and
-  // returns the match from page 2.
-  it('findOrderByClientId walks subsequent pages when maxPages > 1 and the target is on page 2', async () => {
+  it('findOrderByClientId walks subsequent pages when maxPages > 1 and the target is on page 2 (#139)', async () => {
     const pageSize = 2
     const pageRows: Record<string, unknown[]> = {
       '1': [
@@ -184,20 +175,15 @@ describe('WebullHttpClient', () => {
     const client = createClient(fetchMock)
     const detail = await client.findOrderByClientId('target-coid', { maxPages: 3, pageSize })
     expect(detail?.status).toBe('FILLED')
-    // Page 1 was scanned (no match), page 2 returned the match — loop stops.
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const requestedPages = fetchMock.mock.calls.map((call) =>
       new URL(String(call[0])).searchParams.get('page'),
     )
     expect(requestedPages).toEqual(['1', '2'])
-    // page_size is forwarded as requested.
     expect(new URL(String(fetchMock.mock.calls[0]![0])).searchParams.get('page_size')).toBe('2')
   })
 
-  // #139: bounded sweep. With `maxPages=2` we must not request page 3 even
-  // when the broker keeps returning full pages — caller's quota stays
-  // proportional to the cap they asked for.
-  it('findOrderByClientId stops at maxPages even when broker keeps returning full pages', async () => {
+  it('findOrderByClientId stops at maxPages even when broker keeps returning full pages (#139)', async () => {
     const pageSize = 2
     const fullPage = [
       { client_order_id: 'fill-1', status: 'PENDING' },
@@ -209,7 +195,6 @@ describe('WebullHttpClient', () => {
     const client = createClient(fetchMock)
     const detail = await client.findOrderByClientId('never-matches', { maxPages: 2, pageSize })
     expect(detail).toBeUndefined()
-    // Exactly maxPages requests, never page 3.
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const requestedPages = fetchMock.mock.calls.map((call) =>
       new URL(String(call[0])).searchParams.get('page'),
@@ -217,11 +202,8 @@ describe('WebullHttpClient', () => {
     expect(requestedPages).toEqual(['1', '2'])
   })
 
-  // #139: a short page (rows.length < pageSize) signals end-of-history, so we
-  // stop early and don't pay for further empty page calls.
-  it('findOrderByClientId stops early when the broker returns a short page', async () => {
+  it('findOrderByClientId stops early when the broker returns a short page (#139: rows.length < pageSize signals end-of-history)', async () => {
     const pageSize = 50
-    // Single row returned — far short of pageSize=50 → loop must not request page 2.
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify([{ client_order_id: 'unrelated' }]), { status: 200 }),
     )
@@ -251,10 +233,7 @@ describe('WebullHttpClient', () => {
     expect(await client.findOrderByClientId('missing')).toBeUndefined()
   })
 
-  // #251 / #253: 新 OpenAPI docs では order-history が wrapper 形式
-  // ({client_order_id, combo_type, orders[]}) で返るので、normalizer が
-  // wrapper を flat 形式に projection することを確認。
-  it('findOrderByClientId handles new wrapper response shape ({client_order_id, orders: [...]})', async () => {
+  it('findOrderByClientId handles new wrapper response shape ({client_order_id, orders: [...]}) (#251/#253)', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify([
@@ -284,14 +263,11 @@ describe('WebullHttpClient', () => {
     expect(detail?.status).toBe('FILLED')
     expect(detail?.filled_quantity).toBe('4')
     expect(detail?.filled_price).toBe('125.00')
-    // total_quantity → quantity に正規化されてること
     expect(detail?.quantity).toBe('4')
     expect(detail?.total_quantity).toBe('4')
   })
 
   it('findOrderByClientId handles legacy flat response shape (no orders[] wrapper)', async () => {
-    // 旧 shape は normalizer が pass-through すること (= 既存 callers が引き
-    // 続き動く backward compat)
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify([
@@ -307,10 +283,9 @@ describe('WebullHttpClient', () => {
     expect(detail?.status).toBe('FILLED')
   })
 
-  // CodeRabbit #261 finding 1: wrapper の `orders[]` が空のケース。
-  // partial detail (client_order_id だけ持つ) を返すと incomplete data が
-  // caller に渡るので、normalizer は空オブジェクト → find で skip される。
-  it('findOrderByClientId returns undefined when wrapper has empty orders[]', async () => {
+  // A partial detail (client_order_id only) would hand the caller incomplete
+  // data, so the normalizer treats this as an empty object, skipped by find().
+  it('findOrderByClientId returns undefined when wrapper has empty orders[] (CodeRabbit #261 finding 1)', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify([
@@ -324,14 +299,11 @@ describe('WebullHttpClient', () => {
     expect(await client.findOrderByClientId('empty-wrapper')).toBeUndefined()
   })
 
-  // CodeRabbit #261 finding 2: top-level に client_order_id が無く inner 側
-  // にあるパターン。normalizer は inner.client_order_id を fallback として使う。
-  it('findOrderByClientId falls back to inner client_order_id when top-level is missing', async () => {
+  it('findOrderByClientId falls back to inner client_order_id when top-level is missing (CodeRabbit #261 finding 2)', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify([
           {
-            // top-level に client_order_id が無いケース (新 docs で稀にあり得る)
             combo_type: 'NORMAL',
             orders: [
               {
@@ -353,7 +325,7 @@ describe('WebullHttpClient', () => {
     expect(detail).toBeDefined()
     expect(detail?.client_order_id).toBe('inner-only-1')
     expect(detail?.symbol).toBe('SOXL')
-    expect(detail?.quantity).toBe('8') // total_quantity → quantity 正規化
+    expect(detail?.quantity).toBe('8')
     expect(detail?.status).toBe('FILLED')
   })
 
@@ -465,9 +437,8 @@ describe('WebullHttpClient', () => {
   })
 
   it('includes the JSON response body in the 4xx error message (Webull reject reason)', async () => {
-    // 417 with a typical Webull error envelope. Without this the operator only
-    // sees "status 417" in cron logs and cannot tell whether the rejection is
-    // ORDER_INVALID_QTY, MARKET_CLOSED, etc.
+    // Without this, cron logs would only show "status 417" with no way to
+    // tell ORDER_INVALID_QTY from MARKET_CLOSED etc.
     const body = JSON.stringify({
       code: 'ORDER_INVALID_QTY',
       message: 'requested quantity exceeds available holding',
@@ -486,9 +457,8 @@ describe('WebullHttpClient', () => {
   })
 
   it('includes the plain-text response body in the 5xx retried-out error message', async () => {
-    // A fresh Response per call — `Response.text()` consumes the body, so
-    // returning the same instance across retries would make later attempts
-    // see `<failed to read body>` instead of the real upstream message.
+    // A fresh Response per call: `.text()` consumes the body, so reusing one
+    // instance across retries would make later attempts see a stale/empty read.
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockImplementation(async () => new Response('Internal Server Error', { status: 500 }))
@@ -502,8 +472,6 @@ describe('WebullHttpClient', () => {
   })
 
   it('truncates oversized error bodies to keep log lines bounded', async () => {
-    // 10KB HTML page from a CDN — we keep at most 1000 chars + the truncation
-    // marker so the log line cannot blow up.
     const huge = 'A'.repeat(10_000)
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -514,9 +482,8 @@ describe('WebullHttpClient', () => {
     expect(err).toBeInstanceOf(BrokerServerError)
     const msg = (err as Error).message
     expect(msg).toContain('...[truncated]')
-    // The truncated body itself ends at 1000 'A's; the full message has
-    // additional surrounding text but should not contain anywhere near the
-    // original 10K characters.
+    // Message has surrounding text beyond the 1000-char body, so check a
+    // margin above it rather than an exact length.
     expect(msg).not.toContain('A'.repeat(1100))
     expect(msg).toContain('A'.repeat(1000))
   })
@@ -573,15 +540,12 @@ describe('WebullHttpClient', () => {
     const client = createClient(fetchMock)
     const err = await client.placeOrder(intent).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(BrokerClientError)
-    // The body is embedded after `status 400: ` and `readErrorBody` caps it
-    // at ERROR_BODY_MAX_CHARS (=1000) plus a `...[truncated]` marker so the
-    // upstream Webull error code stays visible without log explosion.
+    // readErrorBody caps the body at ERROR_BODY_MAX_CHARS (1000) + a `...[truncated]` marker.
     const message = (err as Error).message
     const bodyIdx = message.indexOf('status 400: ')
     expect(bodyIdx).toBeGreaterThan(-1)
     const bodyPart = message.slice(bodyIdx + 'status 400: '.length)
     expect(bodyPart).toContain('...[truncated]')
-    // 1000-char cap + the literal "...[truncated]" suffix (14 chars).
     expect(bodyPart.length).toBeLessThanOrEqual(1000 + '...[truncated]'.length)
   })
 
@@ -666,7 +630,6 @@ describe('WebullHttpClient', () => {
       .fn<typeof fetch>()
       .mockResolvedValue(new Response('boom', { status: 500 }))
     const client = createClient(fetchMock)
-    // 500 retries 3x then surfaces as BrokerServerError — must propagate to caller.
     await expect(client.getAvailableQtyForSymbol('SOXL')).rejects.toThrow(BrokerServerError)
   })
 
@@ -688,9 +651,6 @@ describe('WebullHttpClient', () => {
     expect(init?.body).toBeUndefined()
   })
 
-  // #257: trade/account endpoint path の env override 経路。default は旧 path、
-  // env で新 path を指定すると getPositions / findOrderByClientId / placeOrder
-  // 全部が新 path に切替わる。
   describe('path env override (#257)', () => {
     it('uses default /openapi/account/* paths when no override is provided', async () => {
       const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -711,7 +671,7 @@ describe('WebullHttpClient', () => {
     })
 
     it('honours WEBULL_PATH_POSITIONS / WEBULL_PATH_ORDERS_HISTORY / WEBULL_PATH_ORDERS_PLACE env overrides', async () => {
-      // mockImplementation で毎回新しい Response を返す (body を二度読みしないため)
+      // mockImplementation returns a fresh Response per call (this client makes 3).
       const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
         new Response(JSON.stringify({ client_order_id: 'test-coid', order_id: 'oid-1' }), { status: 200 }),
       )
@@ -735,9 +695,7 @@ describe('WebullHttpClient', () => {
       expect(new URL(fetchMock.mock.calls[2]![0] as string).pathname).toBe('/openapi/trade/order/place')
     })
 
-    it('rejects override values that are not absolute paths (security: prevent base URL bypass)', async () => {
-      // 絶対 URL や相対値だと WEBULL_TRADE_API_BASE を bypass されるリスクがあるので、
-      // `/` で始まらない値は default fallback (CodeRabbit #264)。
+    it('rejects override values that are not absolute paths (security: prevent base URL bypass) (CodeRabbit #264)', async () => {
       const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
         new Response(JSON.stringify([]), { status: 200 }),
       )
@@ -747,7 +705,6 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
           WEBULL_TRADE_API_BASE: 'https://broker.example.test',
-          // 絶対 URL や 相対 path は reject されて default fallback
           WEBULL_PATH_POSITIONS: 'https://attacker.example.com/positions',
           WEBULL_PATH_ORDERS_HISTORY: 'orders/history',
         },
@@ -769,7 +726,6 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
           WEBULL_TRADE_API_BASE: 'https://broker.example.test',
-          // 空文字 / whitespace-only は "未設定" 扱い (broken request 回避)
           WEBULL_PATH_POSITIONS: '   ',
           WEBULL_PATH_ORDERS_HISTORY: '',
         },
@@ -780,7 +736,6 @@ describe('WebullHttpClient', () => {
     })
   })
 
-  // #258: trade/account routes の x-version env override
   describe('trade x-version env override (#258)', () => {
     it('defaults to x-version: v1 when WEBULL_TRADE_VERSION is unset', async () => {
       let captured: Headers | undefined
@@ -833,8 +788,8 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct',
           WEBULL_TRADE_API_BASE: 'https://broker.example.test',
-          // 任意文字列 / 空 / whitespace は v1 fallback (auth signing が壊れる
-          // のを防ぐ strict allow-list)
+          // Strict allow-list (only v1/v2 pass through) — anything else falling
+          // through unchecked would break auth signing.
           WEBULL_TRADE_VERSION: 'v3',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
@@ -844,7 +799,6 @@ describe('WebullHttpClient', () => {
     })
   })
 
-  // #256: Place Order body schema version の env override
   describe('place order schema env override (#256)', () => {
     it('defaults to v1 schema (account_id in query, support_trading_session=N, limit_price sent)', async () => {
       let capturedUrl: URL | undefined
@@ -914,13 +868,12 @@ describe('WebullHttpClient', () => {
           WEBULL_APP_SECRET: 's',
           WEBULL_ACCOUNT_ID_JP_CASH: 'acct-1',
           WEBULL_TRADE_API_BASE: 'https://broker.example.test',
-          // 任意文字列 / 空 は v1 fallback (broken body 防止)
+          // Anything else falls back to v1 rather than risk sending a broken body.
           WEBULL_PLACE_ORDER_SCHEMA: 'v3',
         },
         { fetchFn: fetchMock, retry: { maxAttempts: 1, baseDelayMs: 0, multiplier: 1, jitter: 0 } },
       )
       await client.placeOrder(intent)
-      // v1 fallback の挙動を確認
       expect(capturedBody.new_orders[0].support_trading_session).toBe('N')
       expect(capturedBody.account_id).toBeUndefined()
     })

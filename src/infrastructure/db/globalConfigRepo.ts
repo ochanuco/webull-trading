@@ -8,18 +8,19 @@ export interface GlobalConfigSnapshot {
   tradingEnabled: boolean
   marketHoursCheck: boolean
   /**
-   * #session-window-gate: true で開場 30 分前〜引けの窓外は戦略 cron を skip
-   * (市場ごと判定)。default false = 従来通り常時評価。
+   * True skips the strategy cron outside the open-30min-before-to-close
+   * window (per market). Default false = evaluate at all times.
    */
   sessionWindowGateEnabled: boolean
   /**
-   * @deprecated Phase E で通貨別 `maxOrderNotionalUsd` / `maxOrderNotionalJpy`
-   * に移行。互換目的でロード時も読み出しているが Risk gate は通貨別値を使う。
+   * @deprecated Superseded by the currency-specific `maxOrderNotionalUsd` /
+   * `maxOrderNotionalJpy`. Still loaded for compatibility, but the Risk
+   * gate reads the currency-specific fields.
    */
   maxOrderNotional: number
   maxOrderNotionalUsd: number
   maxOrderNotionalJpy: number
-  /** 総資本 USD。null なら portfolio exposure check を skip。 */
+  /** Null skips the portfolio exposure check. */
   totalCapitalUsd: number | null
   totalCapitalJpy: number | null
   maxPortfolioExposurePct: number
@@ -28,7 +29,6 @@ export interface GlobalConfigSnapshot {
   gapRejectPct: number
   spreadLimitPctUs: number
   spreadLimitPctJp: number
-  /** Pullback 戦略のデフォルト rule。#118 で hardcoded → D1 化。 */
   pullbackDefaultStopPct: number
   pullbackDefaultTakeProfitPct: number
   pullbackDefaultTimeStopDays: number
@@ -36,93 +36,99 @@ export interface GlobalConfigSnapshot {
   pullbackDefaultPullbackMin: number
   pullbackDefaultMinReturn50d: number
   pullbackDefaultRequireAboveSma50: boolean
-  /** ATR multiplier for vol-adaptive stop。default 2.0。 */
+  /** ATR multiplier for vol-adaptive stop. Default 2.0. */
   pullbackDefaultKAtr: number
-  /** 過熱ガード: SMA50 上方乖離がこの比率超で BUY 見送り (#strategy-overextension-guards)。 */
+  /** BUY skipped when the SMA50 upside deviation exceeds this ratio. */
   pullbackDefaultMaxSma50DeviationPct: number
-  /** ボラ過熱ガード: atr20/baselineAtr20 がこの比率超で BUY 見送り。 */
+  /** BUY skipped when atr20/baselineAtr20 exceeds this ratio. */
   pullbackDefaultMaxAtrRatio: number
-  /** Stop 幅の上限 = |価格 * takeProfitPct| * これ (#stop-rr-cap)。0 で無効。 */
+  /** Stop width cap = `|price * takeProfitPct| * this`. 0 disables the cap. */
   pullbackDefaultMaxStopToTpRatio: number
-  /** 売買コスト見積りの料率 (#trade-cost)。0 で従来どおり gross PnL。 */
+  /** Estimated trading cost rate. 0 keeps gross PnL unchanged. */
   feePctOfNotional: number
-  /** 売買コスト見積りの 1 注文固定費 (銘柄通貨建て)。 */
+  /** Estimated fixed cost per order, in the symbol's currency. */
   feeFixedPerOrder: number
-  /** baseline ATR の作り方 (#atr-baseline-window)。不正値は 'percentile'。 */
+  /** How the baseline ATR is built. An invalid DB value falls back to 'percentile'. */
   atrBaselineMode: AtrBaselineMode
-  /** Base risk fraction per trade (0.4% default)。#23 Lane 2。 */
+  /** Base risk fraction per trade. Default 0.4%. */
   riskBasePerTradePct: number
-  /** drawdown がこの閾値 (負) 未満で size を 0.5× に (-0.05 default)。 */
+  /** Size scaled to 0.5x once drawdown drops below this (negative) threshold. */
   riskDdHalfThreshold: number
-  /** drawdown がこの閾値 (負) 未満で size を 0 に (-0.10 default)。 */
+  /** Size scaled to 0 once drawdown drops below this (negative) threshold. */
   riskDdHaltThreshold: number
-  /**
-   * VIX regime filter (issue #196 3/3)。`^VIX` 最新値がこの閾値超で BUY size を
-   * `vixWarningSizeScale` 倍に縮小 (default 25 → x0.5)。
-   */
+  /** BUY size scaled by `vixWarningSizeScale` once `^VIX` exceeds this threshold. */
   vixWarningThreshold: number
-  /** VIX がこの閾値超で BUY 全停止 (sizeScale=0)。default 30。 */
+  /** BUY halted entirely (sizeScale=0) once VIX exceeds this threshold. */
   vixCriticalThreshold: number
-  /** warning 領域の size 倍率。default 0.5。 */
   vixWarningSizeScale: number
   /**
-   * 条件連動配分の cash fallback 自動発注 (#452 Layer 3)。default false
-   * (fail-closed): off の間は判定・表示のみで退避先への自動 BUY は出さない。
+   * Cash-fallback auto-BUY for the conditional allocation layer. Default
+   * false (fail-closed): while off, the gate only evaluates and displays,
+   * never places an automatic BUY into the fallback symbol.
    */
   cashFallbackOrdersEnabled: boolean
   /**
-   * 退避先 (cash fallback) 銘柄の需要連動自動 SELL (#452 follow-up)。'off'
-   * (default) / 'observe' (log のみ) / 'enforce'。enum 外の DB 値は 'off' に
-   * 倒す (gate 無効が安全側、newsShockMode と同じ規約)。BUY 側
-   * (`cashFallbackOrdersEnabled`) とは独立に切替可能。
+   * Demand-linked auto-SELL of cash-fallback holdings. 'off' (default) /
+   * 'observe' (log only) / 'enforce'. An out-of-enum DB value falls back to
+   * 'off' (gate disabled is the safe side). Toggled independently of the
+   * BUY side (`cashFallbackOrdersEnabled`).
    */
   cashFallbackSellMode: 'off' | 'observe' | 'enforce'
   /**
-   * ペアレジーム layer (#472)。'off' (default) / 'observe' (log のみ) /
-   * 'enforce'。enum 外の DB 値は 'off' に倒す (gate 無効 = 従来挙動が安全側)。
+   * Pair-regime layer. 'off' (default) / 'observe' (log only) / 'enforce'.
+   * An out-of-enum DB value falls back to 'off'.
    */
   pairRegimeMode: 'off' | 'observe' | 'enforce'
-  /** Schmitt 閾値 (1x proxy 基準、#472)。順序検証は pairRegime 側 (破壊→unknown)。 */
+  /** Schmitt-trigger thresholds (1x proxy basis). Ordering is validated on the pairRegime side. */
   pairRegimeThetaBullEnter: number
   pairRegimeThetaBullExit: number
   pairRegimeThetaBearEnter: number
   pairRegimeThetaBearExit: number
   /**
-   * News shock gate (issue #196 follow-up、news-shock-gate PR 2)。'off'
-   * (default) / 'observe' (trace のみ) / 'enforce'。enum 外の DB 値は 'off'
-   * に倒す (gate 無効が安全側、pairRegimeMode と同じ規約)。
+   * News-shock gate. 'off' (default) / 'observe' (trace only) / 'enforce'.
+   * An out-of-enum DB value falls back to 'off', same convention as
+   * `pairRegimeMode`.
    */
   newsShockMode: 'off' | 'observe' | 'enforce'
-  /** ratio (直近 max / baseline median) がこれを超えると warning。default 2.3 (GDELT 12ヶ月実測 p90)。 */
+  /** Warning once (recent max / baseline median) exceeds this ratio. Default 2.3 (GDELT 12mo p90). */
   newsShockWarnRatio: number
-  /** ratio がこれを超え、かつ tone 条件充足で critical。default 4.4 (同 p99)。 */
+  /** Critical once the ratio exceeds this and the tone condition is also met. Default 4.4 (p99). */
   newsShockBlockRatio: number
-  /** warning 領域の size 倍率。default 0.5。 */
   newsShockWarnSizeScale: number
-  /** critical 判定に要求する tone 低下幅 (baselineTone - latestTone)。default 1.5。 */
+  /** Tone drop (baselineTone - latestTone) required for a critical verdict. */
   newsShockToneDropThreshold: number
-  /** true (default) で critical 判定に tone 低下 AND 条件を要求する。 */
+  /** True (default) requires the tone-drop condition in addition to the ratio for critical. */
   newsShockRequireTone: boolean
-  /** baseline (median 母集団) の trailing 日数。default 7。 */
+  /** Trailing window (days) for the baseline median population. */
   newsShockBaselineDays: number
-  /** baseline サンプル数の下限。未満なら unknown (insufficient_baseline)。default 200。 */
+  /** Below this sample count, the baseline is 'unknown' (insufficient_baseline). */
   newsShockMinSamples: number
-  /** ratio 分子側 (直近 max) の窓 (分)。default 120。 */
+  /** Window (minutes) for the ratio's numerator (recent max). */
   newsShockWindowMin: number
-  /** 最新観測がこれより古ければ unknown (unavailable) 扱い。default 90 (分)。 */
+  /** Latest observation older than this (minutes) is treated as unknown (unavailable). */
   newsShockMaxAgeMin: number
   /**
-   * attention 観測 (GDELT producer) が不可用/不足のときの fail-open/closed
-   * 切替。'fail_open' (default) | 'block_buy' (operator escape hatch)。
+   * Fail-open/closed switch for when the attention observation feed (GDELT
+   * producer) is unavailable or insufficient. 'fail_open' (default) |
+   * 'block_buy' (operator escape hatch).
    */
   attentionStalePolicy: 'fail_open' | 'block_buy'
   /**
-   * Extended-hours (pre-market) gate (issue #709 Phase 6)。`extended_hours_observation`
-   * (Phase 1 producer) の当日 WARNING/STOP_AT_OPEN_CANDIDATE を BUY sizing に
-   * 反映する。'off' (default) / 'observe' (trace のみ) / 'enforce'。enum 外の
-   * DB 値は 'off' に倒す (gate 無効が安全側、newsShockMode と同じ規約)。
+   * Extended-hours (pre-market) gate: folds `extended_hours_observation`'s
+   * same-day WARNING/STOP_AT_OPEN_CANDIDATE into BUY sizing. 'off' (default)
+   * / 'observe' (trace only) / 'enforce'. An out-of-enum DB value falls
+   * back to 'off', same convention as `newsShockMode`.
    */
   extendedHoursGateMode: 'off' | 'observe' | 'enforce'
+}
+
+const ATR_BASELINE_MODES = ['overlap', 'exclude-recent', 'percentile'] as const
+
+/** An out-of-enum value falls back to 'percentile', the empirically best default. */
+function sanitizeAtrBaselineMode(value: string | null | undefined): AtrBaselineMode {
+  return (ATR_BASELINE_MODES as readonly string[]).includes(value ?? '')
+    ? (value as AtrBaselineMode)
+    : 'percentile'
 }
 
 /**
@@ -130,15 +136,6 @@ export interface GlobalConfigSnapshot {
  * before the initial seed is applied). Matches the previous env-var defaults
  * so existing deployments keep the same behaviour through the cutover.
  */
-const ATR_BASELINE_MODES = ['overlap', 'exclude-recent', 'percentile'] as const
-
-/** enum 外は 'percentile' (= 実測で最良かつ既定) に倒す。 */
-function sanitizeAtrBaselineMode(value: string | null | undefined): AtrBaselineMode {
-  return (ATR_BASELINE_MODES as readonly string[]).includes(value ?? '')
-    ? (value as AtrBaselineMode)
-    : 'percentile'
-}
-
 export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   dryRun: true,
   tradingEnabled: false,
@@ -197,13 +194,15 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
 })
 
 /**
- * Dashboard overview パネル表示設定 (#dashboard-mf-layout)。`global_config.overview_panels`
- * の CSV を読み書きする。表示専用なので `GlobalConfigSnapshot` / cron 経路には通さず、
- * dashboard だけが参照する独立 read/write。
+ * Dashboard overview panel visibility, stored as CSV in
+ * `global_config.overview_panels`. Display-only: never routed through
+ * `GlobalConfigSnapshot` or the cron path, read/written by the dashboard
+ * alone.
+ *
+ * A saved CSV is respected as-is rather than reconciled against this
+ * default — a panel added here later stays off for operators until they
+ * next save the settings form.
  */
-// #dashboard-ia: status (資産サマリ帯) / positions (保有ポジション) を additive に
-// 追加。未設定 (列 NULL/空) の default は全表示。operator が保存済みの CSV は
-// そのまま尊重する (新 key は再保存まで OFF)。
 const OVERVIEW_PANELS_DEFAULT = 'status,positions,kpi,equity,composition,recent'
 
 export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<string> {
@@ -216,19 +215,18 @@ export async function loadOverviewPanelsCsv(db: DrizzleD1Database): Promise<stri
     const v = rows[0]?.value
     return typeof v === 'string' && v.trim().length > 0 ? v : OVERVIEW_PANELS_DEFAULT
   } catch {
-    // 列未 migration / D1 エラーは全表示 default に倒す (overview は描画継続)。
+    // Missing migration or any D1 error falls back to show-all, so the
+    // overview still renders.
     return OVERVIEW_PANELS_DEFAULT
   }
 }
 
 /**
- * overview_panels を upsert で書く。row 未 seed でも作れ、同時 POST でも INSERT
- * 主キー衝突しない (CodeRabbit #397)。
- *
- * 旧値 read と write を **同一 D1 batch (= 1 transaction)** に束ね、監査ログ用の
- * `before` が write と原子境界を共有するようにする (CodeRabbit #397 2nd round:
- * 別操作だと同時更新で before/after がズレ誤監査になる)。`before` を返す。
- * 他列は schema default 任せ。
+ * Upserts `overview_panels`, creating the row if unseeded (no primary-key
+ * collision under concurrent POSTs). Reads the previous value and writes
+ * the new one inside a single D1 batch (one transaction), so the audit
+ * log's `before` can't drift from the actual prior state under a
+ * concurrent update. Returns that `before` value.
  */
 export async function setOverviewPanels(
   db: DrizzleD1Database,
@@ -255,17 +253,11 @@ export async function setOverviewPanels(
 }
 
 /**
- * VIX 値の application-level validation。
- *
- * 0015 migration は ALTER TABLE ADD COLUMN しか実行しておらず CHECK 制約は
- * 将来の table-rebuild migration で一括投入予定 (schema.ts 参照)。それまでの
- * 補完として、`loadGlobalConfig` が返す前にここで範囲・順序を検証する。
- *
- * 違反時は **fail-closed = defaults fallback**:
- * - cron 全停止より既知 default で動かす方が POC では安全
- * - warn ログに違反 field / 値 / 期待範囲を出して運用で検知できるようにする
- *
- * CodeRabbit #216 6th round 対応。
+ * Application-level validation for VIX values, filling in for the DB CHECK
+ * constraints that the ALTER-TABLE-only migration doesn't carry (see
+ * schema.ts). A violation falls back to defaults rather than letting cron
+ * run on an out-of-range value, and logs the violating field/value/expected
+ * range so it's visible in operation.
  */
 function validateVixConfig(
   config: GlobalConfigSnapshot,
@@ -323,17 +315,12 @@ function validateVixConfig(
 }
 
 /**
- * News shock config の application-level validation (news-shock-gate PR 2)。
- * `validateVixConfig` と同じ層防御: 0042 migration は ALTER TABLE ADD COLUMN
- * のみで DB CHECK を持たないため、範囲・順序をここで検証する。
- *
- * enum field (`newsShockMode` / `attentionStalePolicy`) はここでは扱わない —
- * `pairRegimeMode` と同じく、呼び出し側 (`loadGlobalConfig` の row マッピング)
- * で enum 外の値を安全側 default に inline で倒す。ここは数値 field の
- * 範囲・順序だけを見る。
- *
- * 違反時は該当する **数値 field のみ** defaults へ差し替える (mode はここでは
- * 変更しない)。cron 全停止より既知 default で動かす方が安全という判断。
+ * Same application-level validation as `validateVixConfig`, for news-shock
+ * config: same ALTER-TABLE-only migration gap, so range/ordering is
+ * checked here. Enum fields (`newsShockMode` / `attentionStalePolicy`) are
+ * out of scope — those are sanitized inline where `loadGlobalConfig` maps
+ * the row, same as `pairRegimeMode`. A violation replaces only the
+ * offending numeric fields with defaults; mode fields are untouched here.
  */
 function validateNewsShockConfig(
   config: GlobalConfigSnapshot,
@@ -419,27 +406,17 @@ export async function loadGlobalConfig(
   db: DrizzleD1Database,
   requestId?: string,
 ): Promise<GlobalConfigSnapshot> {
-  // VIX 列 (vix_warning_threshold / vix_critical_threshold / vix_warning_size_scale)
-  // は migration 0015 で追加。pre-0015 deploy / ALTER 適用前の D1 では `select` 自体が
-  // SQL レベルで失敗するため、`row.vixXxx ?? defaults` の null fallback では救えない。
-  // ここでは query 境界を try/catch で囲み、「missing column」を文字列マッチで検知して
-  // defaults を返す段階デプロイ救済を行う (POC 用フォールバック)。それ以外のエラーは
-  // 上に再 throw して fail-closed を維持する。
+  // A column added by a later migration (vix_*, news_shock_*,
+  // attention_stale_policy, extended_hours_gate_mode) makes the SELECT
+  // itself fail at the SQL level on a pre-migration D1, not just come back
+  // null — a `row.field ?? default` fallback can't catch that. This
+  // try/catch detects the specific missing-column error text and returns
+  // defaults instead; anything else rethrows to keep fail-closed.
   //
-  // Regex は **schema-missing 限定**で組む: `vix_` 単独マッチを許すと非スキーマ
-  // 障害メッセージに `vix_` が偶然含まれただけで fail-open 化するリスクがあるため、
-  // SQLite 系の `no such column: vix_*` か、`vix_<col> not found / does not exist /
-  // unknown column` 形式に絞る (CodeRabbit 2nd round 指摘)。
-  //
-  // news-shock-gate PR 2: 0042 migration (`news_shock_*` / `attention_stale_policy`)
-  // 未適用の環境でも同じ「SELECT が SQL レベルで落ちる」罠を踏む。同じ
-  // schema-missing 限定パターンで `news_shock_` / `attention_stale_policy` も
-  // 拾う (単純な `news_shock` 部分一致は他エラーに偶然含まれた場合の fail-open
-  // リスクがあるため避け、`no such column:` / `not found|does not exist|unknown
-  // column` 形式に絞る — vix と同じ規約)。
-  // #709 Phase 6: 0045 (`extended_hours_gate_mode`) 未適用の環境でも同じ罠を
-  // 踏むため列名を追加 — 漏らすと legacy fallback に到達せず loadGlobalConfig
-  // ごと落ち、strategy cron 全体が止まる。
+  // The pattern is deliberately narrow (schema-missing only): matching a
+  // bare column-name substring would fail-open on an unrelated error that
+  // happens to mention it, so this only matches SQLite's `no such column:`
+  // form or a `<col> not found/does not exist/unknown column` form.
   const MISSING_COLUMN_PATTERN =
     '(?:vix_[a-z_]*|news_shock_[a-z_]*|attention_stale_policy|extended_hours_gate_mode)'
   let rows: GlobalConfigRow[]
@@ -458,11 +435,9 @@ export async function loadGlobalConfig(
           message,
         }),
       )
-      // 段階デプロイ救済: VIX 3 列だけ defaults で埋め、他の列は legacy row から
-      // 読み出す。`{ ...GLOBAL_CONFIG_DEFAULTS }` で全部上書きすると
-      // `tradingEnabled: false` のような既存運用値が `tradingEnabled: true` (default)
-      // で踏み潰されるリスクがある。明示的に vix_ 以外の列だけを select し、
-      // defaults と shallow-merge する。
+      // Shallow-merges defaults onto a legacy row rather than replacing the
+      // whole snapshot: `{ ...GLOBAL_CONFIG_DEFAULTS }` would stomp a real
+      // operator-set value (e.g. `tradingEnabled: false`) with the default.
       try {
         const legacyRows = await db
           .select({
@@ -529,31 +504,26 @@ export async function loadGlobalConfig(
             pullbackDefaultKAtr: legacyRow.pullbackDefaultKAtr,
             pullbackDefaultMaxSma50DeviationPct: legacyRow.pullbackDefaultMaxSma50DeviationPct,
             pullbackDefaultMaxAtrRatio: legacyRow.pullbackDefaultMaxAtrRatio,
-            // 0038 追加列 (#stop-rr-cap)。legacy path は default。
+            // Below: columns this legacy SELECT doesn't include (added by
+            // migrations after the one that's missing here), so each falls
+            // back to its default.
             pullbackDefaultMaxStopToTpRatio: GLOBAL_CONFIG_DEFAULTS.pullbackDefaultMaxStopToTpRatio,
-            // 0039 追加列 (#trade-cost)。legacy path は default (= gross PnL)。
             feePctOfNotional: GLOBAL_CONFIG_DEFAULTS.feePctOfNotional,
             feeFixedPerOrder: GLOBAL_CONFIG_DEFAULTS.feeFixedPerOrder,
-            // 0043 追加列 (#atr-baseline-window)。legacy path は default。
             atrBaselineMode: GLOBAL_CONFIG_DEFAULTS.atrBaselineMode,
             riskBasePerTradePct: legacyRow.riskBasePerTradePct,
             riskDdHalfThreshold: legacyRow.riskDdHalfThreshold,
             riskDdHaltThreshold: legacyRow.riskDdHaltThreshold,
-            // VIX 3 項目だけ defaults (列が存在しないので legacy row には無い)
             vixWarningThreshold: GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
             vixCriticalThreshold: GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
             vixWarningSizeScale: GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
-            // 0036 追加列 (#session-window-gate)。legacy path は default (false = 常時評価)。
             sessionWindowGateEnabled: GLOBAL_CONFIG_DEFAULTS.sessionWindowGateEnabled,
-            // 0030 追加列 (#452)。legacy path は default (false = 自動発注しない)。
             cashFallbackOrdersEnabled: GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
-            // 0031 追加列 (#472)。legacy path は default ('off' = gate 無効)。
             pairRegimeMode: GLOBAL_CONFIG_DEFAULTS.pairRegimeMode,
             pairRegimeThetaBullEnter: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullEnter,
             pairRegimeThetaBullExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBullExit,
             pairRegimeThetaBearEnter: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
             pairRegimeThetaBearExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
-            // 0042 追加列 (news-shock-gate PR 2)。legacy path は default ('off' = gate 無効)。
             newsShockMode: GLOBAL_CONFIG_DEFAULTS.newsShockMode,
             newsShockWarnRatio: GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
             newsShockBlockRatio: GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
@@ -565,15 +535,13 @@ export async function loadGlobalConfig(
             newsShockWindowMin: GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
             newsShockMaxAgeMin: GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
             attentionStalePolicy: GLOBAL_CONFIG_DEFAULTS.attentionStalePolicy,
-            // 0045 追加列 (#709 Phase 6)。legacy path は default ('off' = gate 無効)。
             extendedHoursGateMode: GLOBAL_CONFIG_DEFAULTS.extendedHoursGateMode,
-            // 0046 追加列 (#452 follow-up)。legacy path は default ('off' = 自動 SELL しない)。
             cashFallbackSellMode: GLOBAL_CONFIG_DEFAULTS.cashFallbackSellMode,
           }, requestId), requestId)
         }
       } catch (legacyError) {
-        // legacy fetch も失敗 → 想定外の double failure。ここまで来たら全 defaults
-        // で fail-open を選ぶ (cron 全停止より既知 default で動かす)。
+        // Legacy fetch also failed — an unexpected double failure. Fail
+        // open to full defaults rather than halting cron entirely.
         console.warn(
           JSON.stringify({
             event: 'global_config_legacy_load_failed',
@@ -582,7 +550,6 @@ export async function loadGlobalConfig(
           }),
         )
       }
-      // legacy row なし or legacy fetch 失敗 → 全 defaults
       return validateNewsShockConfig(validateVixConfig({ ...GLOBAL_CONFIG_DEFAULTS }, requestId), requestId)
     }
     throw error
@@ -621,24 +588,22 @@ export async function loadGlobalConfig(
     riskBasePerTradePct: row.riskBasePerTradePct,
     riskDdHalfThreshold: row.riskDdHalfThreshold,
     riskDdHaltThreshold: row.riskDdHaltThreshold,
-    // VIX 列は 0015 で追加。古い D1 (snapshot 取得失敗 / ALTER 直前 race) では
-    // undefined になり得るため、defaults へ畳む (snapshot 経由 read だが safety)。
-    // schema 自体の欠落は上の try/catch で defaults fallback する。
+    // Below: columns added by migrations after 0015. An older row can still
+    // have these `undefined` (ALTER-vs-read race, or a snapshot predating
+    // that migration) even though the try/catch above only catches the
+    // column being entirely absent from the schema — so every numeric one
+    // null-coalesces to its default, and every mode/enum one rejects an
+    // out-of-enum value to its safe ('off' / 'fail_open') default.
     vixWarningThreshold:
       row.vixWarningThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixWarningThreshold,
     vixCriticalThreshold:
       row.vixCriticalThreshold ?? GLOBAL_CONFIG_DEFAULTS.vixCriticalThreshold,
     vixWarningSizeScale:
       row.vixWarningSizeScale ?? GLOBAL_CONFIG_DEFAULTS.vixWarningSizeScale,
-    // 0036 で追加 (#session-window-gate)。古い D1 では undefined になり得るため
-    // default (false = 常時評価) へ畳む — 従来挙動側なので安全。
     sessionWindowGateEnabled:
       row.sessionWindowGateEnabled ?? GLOBAL_CONFIG_DEFAULTS.sessionWindowGateEnabled,
-    // 0030 で追加 (#452)。古い D1 では undefined になり得るため default (false =
-    // 自動発注しない) へ畳む — fail-closed 側なので安全。
     cashFallbackOrdersEnabled:
       row.cashFallbackOrdersEnabled ?? GLOBAL_CONFIG_DEFAULTS.cashFallbackOrdersEnabled,
-    // 0031 で追加 (#472)。mode は enum 検証して不正値は 'off' (gate 無効が安全側)。
     pairRegimeMode:
       row.pairRegimeMode === 'observe' || row.pairRegimeMode === 'enforce'
         ? row.pairRegimeMode
@@ -651,8 +616,6 @@ export async function loadGlobalConfig(
       row.pairRegimeThetaBearEnter ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
     pairRegimeThetaBearExit:
       row.pairRegimeThetaBearExit ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
-    // 0042 で追加 (news-shock-gate PR 2)。古い D1 (ALTER 直前 race / undefined) は
-    // default へ畳む。mode は enum 検証して不正値は 'off' (gate 無効が安全側)。
     newsShockMode:
       row.newsShockMode === 'observe' || row.newsShockMode === 'enforce' ? row.newsShockMode : 'off',
     newsShockWarnRatio: row.newsShockWarnRatio ?? GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
@@ -665,17 +628,11 @@ export async function loadGlobalConfig(
     newsShockMinSamples: row.newsShockMinSamples ?? GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
     newsShockWindowMin: row.newsShockWindowMin ?? GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
     newsShockMaxAgeMin: row.newsShockMaxAgeMin ?? GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
-    // attention_stale_policy は enum 検証。不正値は 'fail_open' (既存 gate 全体と
-    // 同じ判断が安全側) に倒す。
     attentionStalePolicy: row.attentionStalePolicy === 'block_buy' ? 'block_buy' : 'fail_open',
-    // 0045 で追加 (#709 Phase 6)。mode は enum 検証して不正値は 'off' (gate 無効
-    // が安全側、newsShockMode と同じ規約)。
     extendedHoursGateMode:
       row.extendedHoursGateMode === 'observe' || row.extendedHoursGateMode === 'enforce'
         ? row.extendedHoursGateMode
         : 'off',
-    // 0046 で追加 (#452 follow-up)。mode は enum 検証して不正値は 'off' (自動
-    // SELL しない側が安全、newsShockMode と同じ規約)。
     cashFallbackSellMode:
       row.cashFallbackSellMode === 'observe' || row.cashFallbackSellMode === 'enforce'
         ? row.cashFallbackSellMode

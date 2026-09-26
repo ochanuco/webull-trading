@@ -20,7 +20,7 @@ function fetcherReturning(bodies: Array<{ status: number; body: unknown }>): typ
   }) as typeof fetch
 }
 
-describe('checkTradability (#461 Preview Order)', () => {
+describe('checkTradability (Preview Order)', () => {
   it('verdict=unknown(quote_ok) when any variant returns 200 — 取引可能とは主張しない', async () => {
     const result = await checkTradability(env, {
       symbol: 'aapl',
@@ -116,7 +116,7 @@ describe('checkTradability (#461 Preview Order)', () => {
   })
 })
 
-describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾調査)', () => {
+describe('checkTradability 200 false-positive guard (production deny vs preview 200)', () => {
   it('HTTP 200 でも body に TICKER_IS_DENY が埋まっていれば denied', async () => {
     const result = await checkTradability(env, {
       symbol: 'USMV',
@@ -158,7 +158,7 @@ describe('checkTradability 200 偽陽性ガード (#461 本番 deny との矛盾
   })
 })
 
-describe('checkTradability × instrument 照会 (#475)', () => {
+describe('checkTradability × instrument lookup', () => {
   const okPreview = () =>
     fetcherReturning([
       { status: 200, body: { estimated_cost: '100.00', estimated_transaction_fee: '0' } },
@@ -264,7 +264,7 @@ describe('checkTradability × instrument 照会 (#475)', () => {
   })
 })
 
-describe('isTickerDenyCode (#466: prefix なし表記も deny 扱い)', () => {
+describe('isTickerDenyCode (bare, unprefixed code also counts as deny)', () => {
   it('bare TICKER_IS_DENY も denied になる', async () => {
     const result = await checkTradability(env, {
       symbol: 'USMV',

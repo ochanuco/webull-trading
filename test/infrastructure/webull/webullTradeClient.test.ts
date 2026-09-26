@@ -28,8 +28,8 @@ function fakeHttp(): { placeOrder: ReturnType<typeof vi.fn<PlaceOrderFn>> } {
 }
 
 describe('WebullTradeClient', () => {
-  // #21: live trade を produce してよいのは ENVIRONMENT='production' のときだけ。
-  // wrangler.jsonc::env.production.vars でハードコードされている前提。
+  // #21: live orders are produced only when ENVIRONMENT="production", set via
+  // wrangler.jsonc::env.production.vars.
   it('forwards placeOrder to the underlying client when ENVIRONMENT="production"', async () => {
     const http = fakeHttp()
     const client = new WebullTradeClient(http, { ENVIRONMENT: 'production' })
@@ -42,9 +42,8 @@ describe('WebullTradeClient', () => {
     expect(http.placeOrder).toHaveBeenCalledWith(intent)
   })
 
-  // staging / dev / unset / 任意文字列 → すべて fail-safe で reject。
-  // Webull JP は 1 user = 1 app なので staging と production で同じ API key を
-  // 共有する。コード側で broker に届く前に止めるのが防御の最後の砦。
+  // Webull JP is one app per user, so staging and production share the same
+  // API key — this in-code gate is the last line of defense before a broker call.
   it.each([
     ['staging', 'staging'],
     ['dev', 'dev'],
@@ -60,9 +59,7 @@ describe('WebullTradeClient', () => {
       expect(client.isLiveTradingEnabled).toBe(false)
 
       await expect(client.placeOrder(intent)).rejects.toBeInstanceOf(TradeDisabledError)
-      // The underlying http.placeOrder must NEVER be called — that's the whole
-      // point of this gate. Verifying it stays at zero is the load-bearing
-      // assertion of this test file.
+      // This file's load-bearing assertion: http.placeOrder must never be reached.
       expect(http.placeOrder).not.toHaveBeenCalled()
     },
   )
@@ -74,13 +71,11 @@ describe('WebullTradeClient', () => {
     await expect(client.placeOrder(intent)).rejects.toThrow(/staging/)
   })
 
-  it('treats whitespace-only ENVIRONMENT as unset (does not interpret as "production")', async () => {
-    // operator が wrangler.jsonc を空文字で上書き / secret で whitespace を入れた
-    // などのエッジで本番扱いされない事を locked。
+  it('trims surrounding whitespace before comparing ENVIRONMENT to "production"', async () => {
+    // Deliberately permissive: follows the accident of `wrangler secret put`
+    // picking up leading/trailing whitespace, rather than fail-closed on it.
     const http = fakeHttp()
     const client = new WebullTradeClient(http, { ENVIRONMENT: '  production  ' })
-    // 注意: trim 後の比較で 'production' と一致するので live を許可する。これは
-    // wrangler secret put で誤って前後 space を入れた事故をフォローする意図。
     expect(client.isLiveTradingEnabled).toBe(true)
 
     await client.placeOrder(intent)

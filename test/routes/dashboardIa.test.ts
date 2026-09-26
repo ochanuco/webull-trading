@@ -9,16 +9,8 @@ import { resolveActiveNavGroup } from '../../src/routes/dashboard/layout'
 import { tradesBody } from '../../src/routes/dashboard/trades'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
-/**
- * #dashboard-ia — 情報アーキテクチャ再編のスモーク。
- *
- * 1. グローバル nav: 日常 3 画面 (ホーム / 銘柄 / レビュー) + 管理 ▾ + 診断 ▾。
- *    判定ログ・アラート・監査・broker 診断・token は診断へ降格 (削除はしない)。
- * 2. レビュー subnav: 約定履歴 / 成績 / 実現損益の推移。診断ページは診断 subnav。
- * 3. ホーム統合: 資産サマリ帯 + スパークライン + 保有ポジション (DO あり /
- *    なしの graceful degrade)。
- */
-
+// 情報アーキテクチャ再編のスモーク: 日常 3 画面 (ホーム/銘柄/レビュー) + 管理▾/診断▾ dropdown、
+// レビュー/診断 subnav、ホームへの資産サマリ統合 (DO あり/なしの graceful degrade) を検証する。
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
 }))
@@ -46,7 +38,7 @@ vi.mock('../../src/infrastructure/notification/notificationEmitLog', () => ({
 const baseEnv = { ACCESS_DEV_BYPASS_USER: 'admin' }
 const authHeader = {}
 
-/** D1 直叩き loader (loadRecentFills 等) 用の空返し fake。 */
+// D1 直叩き loader (loadRecentFills 等) 用の空返し fake
 function fakeD1(): D1Database {
   const stmt = {
     bind() {
@@ -182,7 +174,6 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     // 資産系はホームに統合 → nav から外れる (URL 直アクセスは維持)
     expect(nav).not.toContain('href="/dashboard/positions"')
     expect(nav).not.toContain('href="/dashboard/portfolio"')
-    // ホームが active
     expect(nav).toContain('class="nav-link active" href="/dashboard"')
   })
 
@@ -210,7 +201,6 @@ describe('dashboard IA — global nav (#dashboard-ia)', () => {
     expect(await opsRes.text()).toContain('<summary class="nav-link active">管理 ▾</summary>')
     const diagRes = await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     expect(await diagRes.text()).toContain('診断 ▾</summary>')
-    // #dashboard-ia Phase 5: /positions /portfolio はホームへ統合済み → 302
     for (const path of ['/dashboard/positions', '/dashboard/portfolio']) {
       const res = await app.request(path, { headers: authHeader }, baseEnv)
       expect(res.status, path).toBe(302)
@@ -289,7 +279,6 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
     )
     const body = await res.text()
     expect((body.match(/<nav class="subnav">/g) ?? []).length).toBe(1)
-    // charts 自前 subnav の active (title 付き span) が出ている
     expect(body).toContain('class="subnav-link active"')
     expect(body).toContain('>成績<')
   })
@@ -319,19 +308,17 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // 1. 運転状態帯 (常時表示。実行モードと取引状態は隠せない)
+    // 運転状態帯は常時表示 (実行モードと取引状態は隠せない)
     expect(body).toContain('実行モード')
     expect(body).toContain('株価の鮮度')
     expect(body).toContain('取引 ON')
     expect(body).toContain('最終 cron')
     expect(body).toContain('未確認アラート')
-    // 2. 領域見出し
     expect(body).toContain('リスクと保有銘柄')
     expect(body).toContain('最近の活動')
-    // 3. リスクと保有銘柄 (KPI / 資産構成を畳んだ 1 枚)
+    // リスクと保有銘柄は KPI / 資産構成を畳んだ 1 枚
     expect(body).toContain('保有銘柄')
     expect(body).toContain('実効 stop は ATR と R:R 上限')
-    // 4. 直近の約定 + 導線リンク
     expect(body).toContain('直近の約定')
     expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('href="/dashboard/cron"')
@@ -366,7 +353,6 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).not.toContain('本日開始 equity')
     expect(body).not.toContain('home-equity-spark')
     expect(vi.mocked(loadUsdJpyRate)).not.toHaveBeenCalled()
-    // SYMBOL_STATE 不在 → 保有銘柄テーブルは出さず理由だけ出す
     expect(body).toContain('SYMBOL_STATE 未配線')
     // 運転状態帯は DO 不在でも出る (実行モード / 取引は D1 由来)
     expect(body).toContain('実行モード')
@@ -398,7 +384,6 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
     const res = await app.request('/dashboard?range=30d', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // スパークライン廃止で二重取得は無くなった (range 用の 1 回だけ)
     expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(loadPortfolioEquitySnapshots)).toHaveBeenCalledWith(env.DB, { limit: 30 })
     expect(body).not.toContain('id="home-equity-spark"')
@@ -433,8 +418,8 @@ describe('dashboard IA — CodeRabbit #559 対応', () => {
   })
 })
 
-// #dashboard-ia: 幅の上限は **ホームだけ**。銘柄チャートや判定マトリクスに
-// 効かせると、チャートがはみ出したりテーブルのヘッダが 1 文字ずつ折り返す。
+// 幅の上限はホームだけに効かせる。銘柄チャートや判定マトリクスに効かせると、
+// チャートがはみ出したりテーブルのヘッダが 1 文字ずつ折り返す。
 describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
@@ -462,9 +447,8 @@ describe('dashboard 幅の上限はホーム限定 (#dashboard-ia)', () => {
   })
 })
 
-// 列幅は「役割」で決める (#dashboard-ia)。1 行 1 レコードで読ませる表は
-// table.fit を付け、余りを吸う列だけ grow を持つ。短い列 (状態 / 数量 / 単価)
-// に幅が回ると値が縦に折り返す。
+// 1 行 1 レコードで読ませる表は table.fit を付け、余りを吸う列だけ grow を持つ。
+// 短い列 (状態/数量/単価) に幅が回ると値が縦に折り返す。
 describe('table.fit の列ルール (#dashboard-ia)', () => {
   beforeEach(() => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(makeGlobalConfigSnapshot())
@@ -498,7 +482,6 @@ describe('table.fit の列ルール (#dashboard-ia)', () => {
     )
     expect(html).toContain('<table class="fit">')
     expect(html).toContain('<th class="grow">状態</th>')
-    // 銘柄は折り返さない (grow を持たない) → ticker のみ表示で列幅も暴れない
     expect(html).not.toContain('<th class="grow">銘柄</th>')
     expect(html).toContain('<strong>SOXL</strong>')
   })

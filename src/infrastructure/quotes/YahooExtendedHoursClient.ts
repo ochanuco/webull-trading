@@ -1,25 +1,19 @@
 import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { toYahooSymbol } from './YahooBarClient'
 
-/**
- * Yahoo extended-hours (pre-market) 1-minute bar client (issue #709 Phase 1)。
- *
- * `YahooQuoteClient` / `YahooBarClient` と同じ `/v8/finance/chart` endpoint
- * (auth 不要) だが `includePrePost=true&interval=1m` で当日のプレマーケット
- * bar 列を取る。取引経路には接続しない参考観測専用 (`extendedHoursScheduler`
- * の doc comment 参照)。
- */
+// Observation-only client (not wired into the trading path — see
+// `extendedHoursScheduler`): fetches the current day's pre-market bars via
+// `includePrePost=true&interval=1m` on the same unauthenticated
+// `/v8/finance/chart` endpoint as YahooQuoteClient/YahooBarClient.
 
 const DEFAULT_BASE_URL = 'https://query1.finance.yahoo.com'
 const DEFAULT_TIMEOUT_MS = 5_000
-// Yahoo は anonymous request を 429 で弾くので browser-like UA を付ける
-// (YahooBarClient / YahooQuoteClient と同じ pattern)。
+// Yahoo returns 429 for requests without a browser-like UA.
 const DEFAULT_USER_AGENT = 'Mozilla/5.0'
-// `currentTradingPeriod.pre` が欠けたときの fallback 下限。`ts < regular.start`
-// だけだと `range=1d` レスポンスに前セッションの bar (regular/post) が混ざった
-// 場合に全部プレマーケット扱いになり `preMarketLow` が前日安値で汚染される。
-// US プレマーケットは 04:00 ET 開始 (開場 5.5h 前) なので 6h より古い bar は
-// 前セッション残りとみなして捨てる。
+// Fallback window when `currentTradingPeriod.pre` is missing. `ts <
+// regular.start` alone would misclassify prior-session bars as pre-market,
+// contaminating `preMarketLow` with the previous day's low. US pre-market
+// starts 04:00 ET (5.5h before open), so 6h is a safe cutoff.
 const PREMARKET_FALLBACK_LOOKBACK_SEC = 6 * 60 * 60
 
 export interface YahooExtendedHoursClientOptions {
@@ -96,14 +90,7 @@ export class YahooExtendedHoursClient {
     this.now = options.now ?? (() => new Date())
   }
 
-  /**
-   * `/v8/finance/chart/{symbol}?interval=1m&range=1d&includePrePost=true` を
-   * 叩き、当日のプレマーケット bar 列を返す。`currentTradingPeriod.pre` が
-   * あればその窓 `[start, end)` で bar を絞り込み、無ければ
-   * `[regular.start - 6h, regular.start)` の bar を pre-market とみなす
-   * フォールバックを使う。レスポンス欠損 (`result` 無し等) は null。
-   * fetch / HTTP / parse 失敗のみ throw する (`YahooQuoteClient` と同じ)。
-   */
+  /** Returns null on a missing/malformed response; only fetch/HTTP/parse failures throw. */
   async getPreMarketSeries(symbol: string): Promise<PreMarketSeries | null> {
     const yahooSymbol = toYahooSymbol(symbol)
     const url = new URL(`/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`, this.baseUrl)

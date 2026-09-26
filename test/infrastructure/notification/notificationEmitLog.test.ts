@@ -8,14 +8,6 @@ vi.mock('../../../src/infrastructure/db/tradeJournalRepo', () => ({
   createDb: vi.fn(),
 }))
 
-/**
- * `loadRecentAlerts` の filter 適用テスト (CodeRabbit #210)。
- *
- * drizzle-orm の SQL 生成自体は信頼するが、
- *   - SUMMARY の恒久除外 (`ne`) が常に適用される (filter 無しでも where が付く)
- *   - `eventType` / `severities` 指定は除外条件と AND で結合 (silently drop しない)
- * を build chain spy で検証する。
- */
 function fakeDrizzleChain(rows: AlertRow[]) {
   const query = {
     from: vi.fn(() => query),
@@ -34,7 +26,7 @@ function fakeDrizzleChain(rows: AlertRow[]) {
 
 const fakeD1 = {} as D1Database
 
-describe('loadRecentAlerts', () => {
+describe('loadRecentAlerts — SUMMARY permanent exclusion + eventType/severities AND-combine filters (CodeRabbit #210)', () => {
   it('applies eventType-only filter via eq()', async () => {
     const { db, query } = fakeDrizzleChain([])
     vi.mocked(createDb).mockReturnValue(db as unknown as ReturnType<typeof createDb>)
@@ -42,8 +34,8 @@ describe('loadRecentAlerts', () => {
     await loadRecentAlerts(fakeD1, { eventType: 'TRADE' })
 
     expect(query.where).toHaveBeenCalledTimes(1)
-    // eq() returns a SQL chunk — we only assert that exactly 1 condition
-    // was passed (i.e. not wrapped in and()).
+    // Deliberately shallow: eq() returns an opaque SQL chunk, so we only check
+    // that a single condition was passed (i.e. not wrapped in and()).
     const arg = query.where.mock.calls[0]![0]
     expect(arg).toBeDefined()
   })
@@ -71,9 +63,8 @@ describe('loadRecentAlerts', () => {
     expect(query.where).toHaveBeenCalledTimes(1)
     const condition = query.where.mock.calls[0]![0] as { queryChunks?: unknown[] } | undefined
     expect(condition).toBeDefined()
-    // drizzle-orm の and() は SQL オブジェクトを返し、内部に複数の SQL chunk を
-    // 持つ。ここでは `queryChunks` 配列の存在 (= 単一条件ではなく結合) を
-    // 軽く確認するに留める。
+    // Deliberately shallow: and()'s SQL object holds multiple chunks, so a
+    // present `queryChunks` array is enough evidence of a combined condition.
     expect(condition && 'queryChunks' in condition).toBe(true)
   })
 
@@ -83,9 +74,8 @@ describe('loadRecentAlerts', () => {
 
     await loadRecentAlerts(fakeD1, {})
 
-    // push 専用化 (LoggingNotifier が INSERT を skip) 以前に書かれた SUMMARY
-    // 行が D1 に残っていても alerts view に出ないよう、`ne(eventType,
-    // 'SUMMARY')` が無条件で付く。
+    // Unconditional ne(eventType, 'SUMMARY'), so any SUMMARY rows written
+    // before push-only INSERT-skipping existed still can't leak into the view.
     expect(query.where).toHaveBeenCalledTimes(1)
     expect(query.where.mock.calls[0]![0]).toBeDefined()
   })
@@ -101,12 +91,6 @@ describe('loadRecentAlerts', () => {
   })
 })
 
-/**
- * `insertNotificationEmit` の event → row マッピング (`pickSymbol` /
- * `pickCause`) の直接テスト。SUMMARY (news-shock-gate follow-up) は
- * LoggingNotifier が INSERT 自体を skip するためここには通常来ないが、
- * 直接呼ばれた場合に TRADE 同様 symbol/cause=null で壊れないことを固定する。
- */
 function fakeInsertChain(captured: { row?: NotificationEmitLogInsert }) {
   const chain = {
     values: vi.fn(async (row: NotificationEmitLogInsert) => {
@@ -120,7 +104,7 @@ function fakeInsertChain(captured: { row?: NotificationEmitLogInsert }) {
   }
 }
 
-describe('insertNotificationEmit — event to row mapping', () => {
+describe('insertNotificationEmit — event to row mapping (direct pickSymbol/pickCause call; SUMMARY normally never reaches here since LoggingNotifier skips its INSERT)', () => {
   it('maps a SUMMARY event to symbol=null and cause=null (push-only type)', async () => {
     const captured: { row?: NotificationEmitLogInsert } = {}
     const { db } = fakeInsertChain(captured)

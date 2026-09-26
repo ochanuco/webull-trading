@@ -10,71 +10,55 @@ import {
 import type { PairRegimeEntry } from '../../trading/strategy/pairRegime'
 
 export interface SymbolUniverse {
-  /** active=1 のみ。cron / risk gate の評価対象。 */
+  /** active=1 only — the cron/risk-gate evaluation set. */
   allowedSymbols: string[]
   /**
-   * active=0 (一時停止扱い) の symbols。dashboard 表示専用 — operator が
-   * disable 経緯を確認できるよう grayed-out で picker / table に出す。
-   * cron / risk gate からは参照されない (= 評価対象は allowedSymbols のみ)。
+   * active=0 symbols, for dashboard display only (grayed-out, so operators
+   * can see disable history). Never read by cron/risk gate.
    */
   inactiveSymbols: string[]
   symbolMaxNotional: Record<string, number>
   symbolCurrency: Record<string, SymbolCurrency>
-  /** symbol → 'US' | 'JP'。dashboard が JP 銘柄表示を切り替えるのに使う。 */
+  /** Used by the dashboard to switch JP-symbol display. */
   symbolMarket: Record<string, SymbolMarket>
-  /** symbol → 人間可読 name (symbol_config.name、null は map に不在)。 */
+  /** Absent key = no name set (not a null value). */
   symbolName: Record<string, string>
-  /**
-   * symbol → notes (symbol_config.notes)。disable 理由などの自由 text。
-   * dashboard が disabled 銘柄の tooltip 表示に使う。null / 空文字は map に不在。
-   */
+  /** Free-text notes (e.g. disable reason), shown as a dashboard tooltip. Absent when null/empty. */
   symbolNotes: Record<string, string>
-  /**
-   * symbol → time_stop_days override (1-365 整数)。空 map のキーは
-   * global_config.pullback_default_time_stop_days を使う (fall-through、#316)。
-   */
+  /** Missing key falls through to `global_config.pullback_default_time_stop_days`. */
   symbolTimeStopDaysOverride: Record<string, number>
-  /**
-   * symbol → k_atr override (0.5-5.0 float)。空 map のキーは
-   * global_config.pullback_default_k_atr を使う (fall-through、#316)。
-   */
+  /** Missing key falls through to `global_config.pullback_default_k_atr`. */
   symbolKAtrOverride: Record<string, number>
-  /**
-   * symbol → budget_alloc_pct (0<pct<=1)。空 map のキーは従来の risk-% sizing。
-   * fixed-% 予算配分モード (#budget-alloc)。
-   */
+  /** Missing key means the symbol still uses risk-% sizing instead of fixed-% budget allocation. */
   symbolBudgetAllocPct: Record<string, number>
-  /**
-   * symbol → lot_size (売買単位、integer >= 1)。NULL は map に不在
-   * (= cron sizing が fail-closed)。blanket default に倒さない (#symbol-lot-size)。
-   */
+  /** Missing key fails closed in cron sizing rather than falling back to a blanket default lot size. */
   symbolLotSize: Record<string, number>
-  /** symbol → stop_pct override (負 fraction)。NULL は不在 (= global default)。#exit-atr */
+  /** Missing key = global default stop_pct. */
   symbolStopPctOverride: Record<string, number>
-  /** symbol → take_profit_pct override (正 fraction)。NULL は不在 (= global default)。 */
+  /** Missing key = global default take_profit_pct. */
   symbolTakeProfitPctOverride: Record<string, number>
-  /** intraday_only=true の symbol 集合 (#intraday-only)。false は不在。 */
+  /** Only symbols with intraday_only=true are present. */
   symbolIntradayOnly: Record<string, boolean>
   /**
-   * symbol → role (#452)。NULL は不在 (= 従来挙動)。enum 外の DB 直書きは
-   * 'unknown' (= entry 抑止、fail-closed)。
+   * Missing key = legacy behavior. A DB value outside the enum maps to
+   * 'unknown', which fails closed by suppressing entry.
    */
   symbolRole: Record<string, SymbolRoleValue>
-  /** Entry gate override (#452 Layer 2a)。不在キーは role preset → global default。 */
+  /** Entry-gate overrides; a missing key falls through role preset → global default. */
   symbolPullbackMaxOverride: Record<string, number>
   symbolPullbackMinOverride: Record<string, number>
   symbolMinReturn50dOverride: Record<string, number>
   symbolMaxAtrRatioOverride: Record<string, number>
   symbolMaxSma50DeviationPctOverride: Record<string, number>
   symbolRequireAboveSma50Override: Record<string, boolean>
-  /** entry_required=true の集合 (#452 Layer 3)。false は不在。 */
+  /** Only symbols with entry_required=true are present. */
   symbolEntryRequired: Record<string, boolean>
-  /** always_active=true の集合 (#452、cash_parking 用)。false は不在。 */
+  /** Only symbols with always_active=true are present (used for cash-parking symbols). */
   symbolAlwaysActive: Record<string, boolean>
-  /** symbol → 退避先 symbol (#452)。不在 = 退避しない。 */
+  /** Missing key = no cash-fallback symbols configured. */
   symbolCashFallback: Record<string, string[]>
   inversePairs: Record<string, string>
-  /** regime 有効化済みペア (#472)。misconfig は invalidConfig 付き (= unknown 扱い)。 */
+  /** Regime-enabled pairs only; a misconfigured pair carries `invalidConfig` and is treated as unknown. */
   pairRegimes: PairRegimeEntry[]
   source: 'd1'
 }
@@ -85,9 +69,8 @@ interface UniverseEnv {
 
 /**
  * Loads the symbol universe from D1 (`symbol_config` / `inverse_pairs`).
- *
- * D1 binding is **required** (Phase E で env fallback を削除)。未 bind は
- * setup ミスなので明示的に throw する。
+ * `env.DB` is required — throws rather than falling back, since a missing
+ * binding is a setup mistake that should fail closed.
  */
 export async function loadSymbolUniverse(env: UniverseEnv): Promise<SymbolUniverse> {
   if (!env.DB) {

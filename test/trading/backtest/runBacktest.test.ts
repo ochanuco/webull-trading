@@ -59,18 +59,15 @@ describe('runBacktest', () => {
   })
 
   it('produces no trades when bars are pure downtrend (no BUY signal)', async () => {
-    // Constant 1% daily decline → trend return < 0 → entry.trend_50d_return fails → HOLD.
-    // (trace 識別子 `entry.trend_50d_return` は #318 後も historical 維持、実 lookback は 20d。)
+    // trace 識別子 `entry.trend_50d_return` は #318 後も historical 維持、実 lookback は 20d
     const bars = buildBars(100, Array(120).fill(0.99))
     const result = await runBacktest(bars, BASE_PARAMS)
     expect(result.totalTrades).toBe(0)
     expect(result.totalPnl).toBe(0)
-    // Equity should stay at initialCash because no position is ever opened.
     expect(result.equityCurve.at(-1)?.equity).toBe(BASE_PARAMS.initialCash)
   })
 
   it('opens a position then closes via take-profit on a deep pullback + recovery', async () => {
-    // 60-day uptrend warmup, then a single ~-5% pullback day, then strong rally.
     const warmup = buildBars(100, Array(60).fill(1.01))
     const last = warmup[warmup.length - 1]!.close
     const pullbackDay: DailyBar = {
@@ -80,8 +77,7 @@ describe('runBacktest', () => {
       low: last * 0.94,
       close: last * 0.95, // -5% pullback to trigger BUY (in [-6%, -3%])
     }
-    // After BUY, simulate a +10% recovery over the next few days to trigger TP (>=7%).
-    const rally = buildBars(pullbackDay.close, [1.04, 1.04, 1.04], '2025-04-02')
+    const rally = buildBars(pullbackDay.close, [1.04, 1.04, 1.04], '2025-04-02') // +10% to trigger TP (>=7%)
     const bars = [...warmup, pullbackDay, ...rally]
     const result = await runBacktest(bars, BASE_PARAMS)
     expect(result.totalTrades).toBeGreaterThanOrEqual(1)
@@ -119,9 +115,7 @@ describe('runBacktest', () => {
       low: last * 0.94,
       close: last * 0.95,
     }
-    // After entry, hold flat (~+0.5% drift) so neither TP nor STOP fires before
-    // we run out of bars. timeStopDays=10 default is also avoided by a short
-    // tail.
+    // flat drift avoids TP/STOP, and the short tail stays under the default timeStopDays=10
     const flat = buildBars(pullbackDay.close, [1.005, 1.005, 1.005], '2025-04-02')
     const bars = [...warmup, pullbackDay, ...flat]
     const result = await runBacktest(bars, BASE_PARAMS)
@@ -144,7 +138,6 @@ describe('runBacktest', () => {
     const result = await runBacktest(bars, BASE_PARAMS)
     const sum = result.trades.reduce((acc, t) => acc + t.realizedPnl, 0)
     expect(result.totalPnl).toBeCloseTo(sum, 6)
-    // After all trades closed, ending equity should be roughly initialCash + totalPnl.
     expect(result.equityCurve.at(-1)?.equity).toBeCloseTo(
       BASE_PARAMS.initialCash + result.totalPnl,
       4,
@@ -161,8 +154,7 @@ describe('runBacktest', () => {
       low: last * 0.94,
       close: last * 0.95,
     }
-    // Hold flat for many bars so neither TP nor STOP fires. Use a very small
-    // timeStopDays=2 so TIME_STOP triggers before END_OF_DATA.
+    // flat bars avoid TP/STOP; timeStopDays=2 ensures TIME_STOP fires before END_OF_DATA
     const flat = buildBars(pullbackDay.close, Array(15).fill(1.001), '2025-04-02')
     const bars = [...warmup, pullbackDay, ...flat]
     const result = await runBacktest(bars, {
@@ -189,7 +181,6 @@ describe('computeSharpe', () => {
   })
 
   it('returns positive for a positive mean / non-zero variance', () => {
-    // Simulate ~+0.1%/d ± noise.
     const returns = [0.001, 0.002, 0.0005, 0.0015, 0.001, 0.0005, 0.0012]
     const sharpe = computeSharpe(returns)
     expect(sharpe).toBeGreaterThan(0)

@@ -6,16 +6,10 @@ import {
 import type { NewsShockGateDecision } from '../../../src/trading/risk/newsShockGate'
 
 /**
- * `moreConservativeNewsShockDecision` (probe 別 decision の合成) の単体テスト
- * (news-shock-gate follow-up)。
- *
- * 主眼は rank 変更の回帰ガード: `NEWS_SHOCK_SEVERITY_RANK` が
- * `{ unknown: 0, normal: 1, warning: 2, critical: 3 }` になったことで、
- * sizeScale が同点 (1.0) の unknown と normal では normal が勝つ
- * (= 片方の probe が sparse/degenerate で恒常的に unknown でも、もう片方の
- * probe が normal であれば合成結果が normal になり、regime 変化が観測できる
- * ようになる)。`attentionStalePolicy='block_buy'` の unknown (sizeScale=0) は
- * sizeScale 優先比較で先に勝つため、fail-closed 挙動は変わらない。
+ * 回帰ガード: `NEWS_SHOCK_SEVERITY_RANK = { unknown: 0, normal: 1, warning: 2, critical: 3 }` により
+ * sizeScale 同点 (1.0) では unknown より normal が勝つ — 片方の probe が恒常的に unknown でも
+ * もう片方が normal なら regime 変化が観測できる。block_buy の unknown (sizeScale=0) は
+ * sizeScale 優先比較で先に勝つため fail-closed 挙動には影響しない。
  */
 
 const ASOF = '2026-04-25T12:00:00.000Z'

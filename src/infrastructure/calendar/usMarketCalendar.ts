@@ -1,34 +1,16 @@
 /**
- * NYSE (US equity) session-day calendar (issue #319)。
- *
- * 22:00 UTC の daily roll cron は「今日 NY が close した」事を前提に
- * `dailyRealizedPnl` を畳むが、土日 / NYSE 祝日にも cron 自体は発火するため
- * 「実際には立会が無かった日」に roll を 1 回足してしまう。`isNyseSessionDay`
- * を pre-check に挟む事で、real session boundary でない日は roll を skip し、
- * `lastRolledAt` の連続性を保つ。
- *
- * Approach (POC):
- *   - 外部 API に依存せず、`src/trading/domain/tradingCalendar.ts` の
- *     `NYSE_CLOSURES` (single source of truth, #354) + weekday 判定。
- *   - 範囲外 (e.g. 2028 以降) を引いた場合は呼び出し側で fail-closed 判断できる
- *     よう `isWithinSupportedRange` を分けて公開する。
- *
- * Holiday data 自体の更新は `tradingCalendar.ts` 側で行う。当 module は
- * tz-aware (America/New_York) な session-day 判定のみを責務にする。
- * `NYSE_SUPPORTED_YEARS` だけは hard-coded data の有効範囲という
- * このファイル固有の不変条件なので local に持つ。
+ * NYSE (US equity) session-day calendar. Holiday data itself lives in
+ * `src/trading/domain/tradingCalendar.ts`'s `NYSE_CLOSURES` (single source
+ * of truth) — this module only adds tz-aware (America/New_York) classification.
  */
 
 import { NYSE_CLOSURES } from '../../trading/domain/tradingCalendar'
 
-/** Hard-coded holiday data の有効年セット。範囲外は呼び出し側で fail-closed。 */
-const NYSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026])
+// Fail-closed on years not yet added here, rather than trusting NYSE_CLOSURES
+// alone — an un-added future year must not silently be treated as tradable.
+const NYSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026, 2027])
 
-// formatToParts ベースで year / month / day を抜く理由 (#349):
-// `Intl.DateTimeFormat#format` の出力区切り・順序は ECMA-402 上 implementation-
-// dependent。Cloudflare Workers (V8/ICU) では `en-CA` で実測 YYYY-MM-DD だが、
-// runtime 更新 / 別 ICU build で drift する可能性があるため
-// `formatToParts` で part を取って自前で組み立てる。
+// formatToParts avoids relying on `.format()`'s ICU-build-dependent ordering.
 const NY_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'America/New_York',
   year: 'numeric',
@@ -61,34 +43,16 @@ function extractNyYmdParts(date: Date): YmdParts | null {
   return { ymd: `${year}-${month}-${day}`, year: yearInt }
 }
 
-/**
- * `date` (UTC instant) を America/New_York の "YYYY-MM-DD" に format。
- * DST は `Intl.DateTimeFormat` が解決するので worker side で扱う必要なし。
- *
- * formatToParts ベースなので runtime / locale 差で出力が drift しない (#349)。
- * 抽出失敗 (Invalid Date 等) は空文字を返す — caller は `isNyseSessionDay`
- * で fail-closed (false) になる。
- */
 export function formatNyYmd(date: Date): string {
   return extractNyYmdParts(date)?.ymd ?? ''
 }
 
-/**
- * `date` 時点の NY 暦日が NYSE supported range (hard-coded list) に
- * 含まれているか。false の年は呼び出し側で safe-default (skip) する。
- */
 export function isWithinSupportedRange(date: Date): boolean {
   const parts = extractNyYmdParts(date)
   if (!parts) return false
   return NYSE_SUPPORTED_YEARS.has(parts.year)
 }
 
-/**
- * `date` 時点の NY 暦日が NYSE の session day (= 月-金 かつ holiday でない) か。
- *
- * Supported range 外 (e.g. 2027) は `false` を返す。日付計算は完全に
- * `Intl.DateTimeFormat` に委任しているので caller 側の tz 補正は不要。
- */
 export function isNyseSessionDay(date: Date): boolean {
   if (!isWithinSupportedRange(date)) return false
   const ymd = formatNyYmd(date)

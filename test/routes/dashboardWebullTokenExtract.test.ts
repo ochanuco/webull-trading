@@ -2,14 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { extractTokenFromPaste } from '../../src/routes/dashboard'
 
 describe('extractTokenFromPaste (#21 Phase B follow-up)', () => {
-  // happy path: operator が token 文字列だけ貼った
   // ダミー値 (`test_token_*`) を使う事で secret scanner ノイズを避ける (CodeRabbit #328)
   it('returns the token when only the token line is pasted', () => {
     const result = extractTokenFromPaste('test_token_normal_single_line')
     expect(result).toEqual({ ok: true, token: 'test_token_normal_single_line' })
   })
 
-  // 出力丸ごと貼り付け: issue-token script の典型的な NORMAL 化時の出力
   it('strips [issue-token] diagnostic lines and wrangler instruction bullets', () => {
     const paste = `[issue-token] base URL: https://api.webull.co.jp
 [issue-token] step 1/3: POST /openapi/auth/token/create
@@ -36,14 +34,12 @@ test_token_normal_full_output_paste`
     expect(result).toEqual({ ok: true, token: 'test_token_with_crlf' })
   })
 
-  // negative: empty / whitespace-only
   it('errors when nothing meaningful is pasted', () => {
     const result = extractTokenFromPaste('  \n\n\n  ')
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toMatch(/not found/)
   })
 
-  // negative: only diagnostic lines (operator copied output before NORMAL)
   it('errors when only diagnostic lines are present (operator Ctrl+C\'d before NORMAL)', () => {
     const paste = `[issue-token] base URL: ...
 [issue-token] step 1/3: ...
@@ -57,7 +53,6 @@ test_token_normal_full_output_paste`
     }
   })
 
-  // negative: 2 つ以上の non-diagnostic 行 — 何が token か曖昧
   // 候補プレビューは URL に乗らない (CodeRabbit #328): 件数だけ返す。
   it('errors when multiple candidate lines remain (ambiguous)', () => {
     const paste = `[issue-token] foo

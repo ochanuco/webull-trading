@@ -15,22 +15,13 @@ import {
 } from './shared'
 import { BROKER_ERROR_LABELS, extractBrokerErrorCode } from './trades'
 
-/**
- * `?limit=N` を 1〜500 の範囲に丸める。`/dashboard/alerts` 専用 (cron 系の
- * `clampLimit` は既定 50 / max 200 で別ロール)。
- */
+// Own clamp, not the cron `clampLimit`: this view's default/max (100/500) differ from cron's (50/200).
 export function clampAlertLimit(raw: string | undefined): number {
   const n = raw === undefined ? 100 : Number.parseInt(raw, 10)
   if (!Number.isFinite(n) || n <= 0) return 100
   return Math.min(n, 500)
 }
 
-/**
- * `c.req.url` から `URLSearchParams` を取り出す。filter pill が他の query
- * (例: `limit=500`) を保持するために使う (CodeRabbit #210)。
- *
- * URL 構築失敗時は空 URLSearchParams にフォールバック。
- */
 export function parseAlertsQuery(rawUrl: string): URLSearchParams {
   try {
     return new URL(rawUrl).searchParams
@@ -51,8 +42,8 @@ export function parseSeverityFilter(raw: string | undefined): NotificationSeveri
     )
 }
 
-// SUMMARY は push 専用 (LoggingNotifier が emit log への INSERT を skip する)
-// ため、この view には出てこない — filter にも並べない。
+// Excludes SUMMARY: LoggingNotifier skips the emit-log INSERT for it (push-only), so it never
+// appears in this view and offering it as a filter would just be a dead option.
 const EVENT_TYPE_VALUES: ReadonlyArray<NotificationEvent['type']> = [
   'TRADE',
   'ERROR',
@@ -70,37 +61,26 @@ export interface AlertsBodyArgs {
   limit: number
   severityFilter: NotificationSeverity[]
   eventTypeFilter: NotificationEvent['type'] | undefined
-  /** 現在の query string。filter pill が他の param (limit 等) を保持するために使う。 */
+  /** Preserves other params (e.g. limit) when building filter pill hrefs. */
   currentQuery: URLSearchParams
-  /** symbol 列の表示を JP 銘柄向け 番号-会社名 形式にするための universe (load 失敗は null)。 */
+  /** Used to render JP symbols as "number - company name"; null when the universe load failed. */
   universe?: SymbolUniverse | null
   before?: number
   hasMore?: boolean
 }
 
-/**
- * `/dashboard/alerts` の HTML 本文 (#141)。
- *
- *   - severity ピル (critical / warning / info / 全件) で絞り込み
- *   - event type ピル (TRADE / ERROR / STATE_CHANGE / 全件) で絞り込み
- *   - 表示は最新 100 件 (`?limit=N` で 1〜500)
- *   - 行クリックで Slack/Discord に出したのと同じ message を JST 時刻と一緒に確認
- */
-/** severity → 日本語 pill (#alerts-trades-ui)。cls は共通 .pill variant (layout.ts)。 */
 const ALERT_SEVERITY_PILLS: Record<string, { ja: string; cls: string }> = {
   critical: { ja: '重大', cls: 'err' },
   warning: { ja: '警告', cls: 'warn' },
   info: { ja: '情報', cls: 'info' },
 }
 
-/** event type → 日本語。 */
 const ALERT_EVENT_LABELS: Record<string, string> = {
   ERROR: 'エラー',
   TRADE: '売買',
   STATE_CHANGE: '設定変更',
 }
 
-/** 長い message は先頭を出して残りを <details> に畳む閾値。 */
 const ALERT_MESSAGE_FOLD = 160
 
 export function alertsBody(args: AlertsBodyArgs): string {
@@ -119,15 +99,13 @@ export function alertsBody(args: AlertsBodyArgs): string {
       const symbolCell = r.symbol
         ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</strong></a>`
         : '<span class="muted">—</span>'
-      // broker エラーは error_code を短い日本語にして先頭へ。message 全文は
-      // 長ければ畳む (enum / 原文は grep 突き合わせ用に details に保持)。
       const code = r.eventType === 'ERROR' ? extractBrokerErrorCode(r.message) : null
       const shortLabel = code ? (BROKER_ERROR_LABELS[code] ?? code) : null
       const messageBody =
         r.message.length > ALERT_MESSAGE_FOLD
           ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
           : esc(r.message)
-      // <details> (block) を含み得るので外側は div (CodeRabbit #469)。
+      // div, not span: the message body can contain a block-level <details>.
       const messageCell = `${shortLabel ? `<span class="pill err">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
       const causeCell = r.cause
         ? `<code style="font-size:11px">${esc(r.cause)}</code>`
@@ -182,14 +160,6 @@ function buildAlertBaseHref(
   return `/dashboard/alerts?${params.join('&')}`
 }
 
-/**
- * `/dashboard/alerts` の severity / eventType filter ピルを描画する。
- *
- * `currentQuery` の他 param (例: `limit=500`) は preserve したまま、対象 key
- * のみを差し替える / 削除する (CodeRabbit #210)。
- *
- * Exported for unit test (URL preservation).
- */
 export function renderAlertFilterPills(
   active: NotificationSeverity[],
   activeEventType: NotificationEvent['type'] | undefined,
@@ -202,7 +172,7 @@ export function renderAlertFilterPills(
     const qs = next.toString()
     return qs.length === 0 ? '/dashboard/alerts' : `/dashboard/alerts?${qs}`
   }
-  // trades / cron の view 切替と同じ .chip 見た目に統一 (#dashboard-design)。
+  // Reuses the .chip look from the trades/cron view toggles for visual consistency.
   const pill = (label: string, href: string, isActive: boolean): string =>
     `<a href="${esc(href)}" class="chip${isActive ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
   const sev = [

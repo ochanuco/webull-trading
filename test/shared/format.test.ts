@@ -58,9 +58,6 @@ describe('escapeHtml (#284)', () => {
   })
 
   it('escapes ampersand FIRST so existing entities are not double-broken into literals', () => {
-    // 入力 `&lt;` は文字列 4 文字。出力では `&` だけが先頭 escape され
-    // 残りは literal で保つ (`&amp;lt;`)。これにより `&lt;` の literal 表示
-    // と「あとから `<` が湧いて出る」誤解釈を区別できる。
     expect(escapeHtml('&lt;')).toBe('&amp;lt;')
   })
 })

@@ -1,10 +1,6 @@
 import type { PendingOrderLock, PendingSettlement, SymbolState } from './types'
 
-/**
- * The subset of {@link SymbolStateDO} that TradingService and reconcileFills
- * need. Exposing it as an interface keeps both testable without a Durable
- * Object runtime.
- */
+/** Interface (not the {@link SymbolStateDO} class) so callers are testable without a Durable Object runtime. */
 export interface PositionStore {
   getState(symbol: string): Promise<SymbolState>
   lockPendingOrder(
@@ -19,12 +15,7 @@ export interface PositionStore {
   addPendingSettlement(symbol: string, settlement: PendingSettlement): Promise<SymbolState>
   setCooldown(symbol: string, untilIso: string): Promise<SymbolState>
   seedSettledCash(symbol: string, amount: number): Promise<SymbolState>
-  /**
-   * Operator-driven position override. Used to manually reconcile DO state
-   * against broker truth (e.g. corrupted `position.qty` from a past
-   * reconcile race) and from the SELL_QTY_EXCEED fallback path to force
-   * `position=null` after the fallback closes the broker-side holding.
-   */
+  /** Operator-driven reconcile against broker truth; also used by the SELL_QTY_EXCEED fallback to force `position=null`. */
   overridePosition(
     symbol: string,
     args: {

@@ -6,9 +6,9 @@ import type {
 } from '../../../src/infrastructure/webull/dto'
 
 describe('WebullReadClient', () => {
-  // #21: read facade は HTTP client への単純な passthrough。重要なのは
-  // **write メソッドが型にも実装にも存在しない** こと。コードレビューで
-  // この test を見て「placeOrder が無い」が一目で分かるよう、明示的に確認。
+  // #21: the safety-critical part isn't the passthrough, it's that no write
+  // method exists on this facade's type or implementation — asserted
+  // explicitly so a reviewer sees "no placeOrder" at a glance.
   it('exposes only the read methods and does not expose placeOrder', () => {
     const dummy = {
       listSubscriptions: vi.fn(),
@@ -30,9 +30,7 @@ describe('WebullReadClient', () => {
     expect('placeOrder' in client).toBe(false)
   })
 
-  // Forwarding sanity: getPositions must hit the underlying client. Without
-  // this the facade could be a no-op and tests of consumers would still pass
-  // against mocks.
+  // Without this, the facade could silently be a no-op and consumer tests would still pass against mocks.
   it('forwards getPositions to the underlying http client', async () => {
     const positions: WebullPositionDto[] = [
       { symbol: 'AAPL', available_quantity: '5' } as WebullPositionDto,

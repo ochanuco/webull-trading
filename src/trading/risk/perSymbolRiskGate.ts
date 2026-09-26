@@ -1,34 +1,15 @@
 /**
- * Per-symbol risk gate (pure, except one observability `console.warn` when the
- * spread guard is skipped for a bid/ask-less quote source — see gate 4 / #411).
+ * Pure per-symbol entry/exit gate (one observability `console.warn` exception
+ * when the spread guard is skipped for a bid/ask-less quote source).
  *
- * 7 つの per-symbol guard を一つの pure function に集約する。manual
- * `/trade/execute` 経路 (TradingService) と cron (`runPullbackScheduler`) の
- * 両方が同じ判定を通るよう unify する目的 (issue #138)。
+ * Unifies the guards previously duplicated between manual `/trade/execute`
+ * (TradingService) and the cron scheduler. All gates except cooldown are
+ * BUY-only: SELL/exit always proceeds through stale quotes, wide spreads,
+ * large gaps, or an out-of-band JP price so a stop-out is never blocked by
+ * bad market data.
  *
- * 含まれる gate:
- *   1. settled cash (BUY only): notional > settledCash で reject
- *   2. inverse pair (BUY only): inverse 銘柄の保有が残っていれば reject
- *   3. quote freshness (BUY only / halt fallback): lastQuote.fetchedAt が staleQuoteMs を超えれば reject
- *   4. spread guard (BUY only): 異常 / spread% が limit 超で reject。bid/ask 欠損は
- *      source 次第 — Yahoo 等 bid/ask 非対応 source は適用外で通す、それ以外は fail-closed (issue #411)
- *   5. gap re-eval (BUY only): avgPrice と lastQuote.price の |gap| > gapRejectPct で reject
- *   6. JP 値幅制限 (BUY only): JP 銘柄かつ band 外 limit price で reject
- *   7. (option) cooldown: state.cooldownUntil が未来なら reject
- *
- * Gate 3-6 は **エントリ抑止** が目的なので BUY only。SELL/exit (stop hit / 損切り)
- * は stale quote / wide spread / 大 gap / JP band 外でも実行を優先する
- * (= 損切りが永久 block されて position 塩漬けにならないように)。
- *
- * 含まれない gate (orchestrator 層が直接持つ):
- *   - portfolio-wide drawdown kill
- *   - tradingDisabledUntil
- *   - pending lock TTL (副作用持ちなので呼び出し側に残す)
- *   - bucket cap (cron 側で pre-scan が必要)
- *
- * Inverse pair 評価は同期化のため、呼び出し側が事前に inverse 銘柄の SymbolState
- * を読み出して `inverseState` として渡す責務を負う (cron は per-symbol loop の
- * 中で fetch、TradingService は async wrapper で fetch)。
+ * Inverse-pair evaluation needs the paired symbol's SymbolState fetched
+ * synchronously by the caller and passed in as `inverseState`.
  */
 import type { QuoteSnapshot, SymbolState } from '../state/types'
 import { inferWebullMarket } from '../../infrastructure/webull/mapper'
@@ -36,14 +17,10 @@ import { YAHOO_QUOTE_SOURCE } from '../../infrastructure/quotes/YahooQuoteClient
 import { isWithinJpPriceBand } from './jpPriceBand'
 import { computeSpreadPct } from './spreadGuard'
 
-/**
- * Quote source が構造的に bid/ask を持たない (= spread を計算できない) もの。
- * Yahoo `/v8/chart` meta は bid/ask を返さない (PR #334 で default 化)。これらの
- * source で bid/ask 欠損は「異常」ではなく「仕様」なので、spread guard を
- * **適用外 (skip)** にして発注を通す (degraded but tradeable)。Webull 等 bid/ask を
- * 返すべき source での欠損は従来通り fail-closed。Webull market-data 復活で
- * bid/ask が実データになれば本 set を空にして本来運用へ戻す (issue #411 = 案B)。
- */
+// Sources that structurally never return bid/ask (e.g. Yahoo's chart meta).
+// Missing bid/ask here is expected, not anomalous, so the spread guard is
+// skipped rather than fail-closed; any other source's missing bid/ask still
+// fail-closes as a data anomaly.
 const QUOTE_SOURCES_WITHOUT_BID_ASK: ReadonlySet<string> = new Set([YAHOO_QUOTE_SOURCE])
 
 export interface PerSymbolRiskInput {
@@ -73,25 +50,21 @@ export interface PerSymbolRiskConfig {
   inversePairs: Record<string, string>
   /** Per-market spread limits as fractions of mid (e.g. 0.0025 = 0.25%). */
   spreadLimits: { US: number; JP: number }
-  /** lastQuote.fetchedAt より古い経過時間 (ms) を超えれば halt 扱い。 */
+  /** Max age (ms) of lastQuote.fetchedAt before it's treated as halted/stale. */
   staleQuoteMs: number
-  /** position.avgPrice と lastQuote.price の |gap| 比率閾値。 */
+  /** Reject threshold for |lastQuote.price - position.avgPrice| / avgPrice. */
   gapRejectPct: number
   /**
-   * `true` のとき state.cooldownUntil の評価も行う。manual TradingService 経路
-   * は従来 applyStateGate 内で評価していたので互換のため有効化、cron 経路は
-   * Strategy.decide() が同等判定を持つので冗長。両方 true でも behaviour 一致。
+   * Enable cooldown evaluation. The cron path's Strategy.decide() already
+   * enforces cooldown, so it passes false; the manual TradingService path
+   * passes true to keep its pre-existing behavior.
    */
   evaluateCooldown?: boolean
 }
 
 export interface PerSymbolRiskDecision {
   approved: boolean
-  /**
-   * Approved=false のときの reject 理由。複数 gate が同時に reject しても
-   * **最初に当たった一つだけ** を返す (既存 TradingService の挙動と同じ:
-   * `appendReason` で 1 回 return)。cron 側 dashboard も先勝ちで表示する。
-   */
+  /** Only the first gate to reject is reported, even if several would. */
   reasons: string[]
 }
 
@@ -103,7 +76,6 @@ export function evaluatePerSymbolRisk(
 ): PerSymbolRiskDecision {
   const { state, side, symbol, now, intentNotional, intentPrice } = input
 
-  // 1. cooldown (option): TradingService 互換のため最初に評価。
   if (config.evaluateCooldown && state.cooldownUntil) {
     const until = new Date(state.cooldownUntil).getTime()
     if (Number.isFinite(until) && until > now.getTime()) {
@@ -111,17 +83,15 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 2. settled cash (BUY only)。settledCash=0 は未 seed 扱いで skip。
   if (side === 'BUY' && state.settledCash > 0 && intentNotional > state.settledCash) {
     return reject(
       `insufficient settled cash: notional ${intentNotional} exceeds settledCash ${state.settledCash}`,
     )
   }
 
-  // 3. inverse pair (BUY only)。呼び出し側が pre-fetch した inverseState を見る。
-  //    (#315) この check が SOXL/SOXS を「regime hedge」として運用するための
-  //    要 — 同時に両建てになる dead-money 状態を構造的に発生させない。一方を
-  //    SELL し終わってから他方の BUY が通る、交互運用が前提。
+  // Keeps a regime-hedge pair (e.g. SOXL/SOXS) from being held both-long at
+  // once, which would be structurally dead money — one side must SELL out
+  // before the other's BUY is allowed through.
   if (side === 'BUY') {
     const inverseSymbol = config.inversePairs[symbol.toUpperCase()]
     if (inverseSymbol && input.inverseState) {
@@ -134,9 +104,6 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 4. halt / stale quote (BUY only)。SELL は stale でも exit 実行を優先する
-  //    (stop hit / 損切りが stale quote で永久に block されないように)。
-  //    lastQuote=null は未 seed 扱いで skip (POC 後方互換)。
   if (side === 'BUY' && state.lastQuote) {
     const ageMs = now.getTime() - new Date(state.lastQuote.fetchedAt).getTime()
     if (!Number.isFinite(ageMs) || ageMs > config.staleQuoteMs) {
@@ -146,9 +113,6 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 5. spread guard (BUY only)。SELL/exit は wide spread でも実行優先。
-  //    bid/ask 欠損は source 次第: Yahoo 等 bid/ask 非対応 source は適用外で通し、
-  //    それ以外 (Webull 等) は fail-closed (issue #411 で恒久対応 = Webull bid/ask)。
   if (side === 'BUY') {
     const spreadReason = evaluateSpreadGate(symbol, state.lastQuote, config.spreadLimits, now)
     if (spreadReason !== null) {
@@ -156,8 +120,6 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 6. gap re-eval (BUY only)。SELL は大 gap (= stop hit) こそ fire させたい。
-  //    open position が無い / avgPrice が不正なら skip。
   if (side === 'BUY') {
     const gapReason = evaluateGap(state, config.gapRejectPct)
     if (gapReason !== null) {
@@ -165,8 +127,6 @@ export function evaluatePerSymbolRisk(
     }
   }
 
-  // 7. JP price band (BUY only)。SELL/exit は band 外でも通す。
-  //    JP 銘柄かつ lastQuote 有りで limit が band 外なら reject。
   if (
     side === 'BUY' &&
     inferWebullMarket(symbol) === 'JP' &&
@@ -195,10 +155,8 @@ function evaluateSpreadGate(
   const bid = lastQuote.bid
   const ask = lastQuote.ask
   if (bid === undefined || ask === undefined) {
-    // 案A (issue #411): bid/ask を構造的に持たない source (Yahoo) では spread を
-    // 適用外にして通す。それ以外 (Webull 等) の欠損は異常なので fail-closed 継続。
     if (QUOTE_SOURCES_WITHOUT_BID_ASK.has(lastQuote.source)) {
-      // 安全弁を一段緩めるので observability に明示 (構造化ログ)。
+      // Logged because this is a safety guard being relaxed, not a routine skip.
       console.warn(
         JSON.stringify({
           event: 'spread_guard_skipped_no_bidask',
@@ -217,19 +175,16 @@ function evaluateSpreadGate(
     return 'spread invalid: crossed book, non-finite, or non-positive bid/ask'
   }
   if (spreadPct > limit) {
-    // 臨時休場 (服喪・緊急閉場) はカレンダーのルール計算 (tradingCalendar #547)
-    // で書けず session window gate をすり抜ける。その場合はこの spread reject が
-    // バックストップになるため、quote 鮮度を併記して「板が古い = 閉場中の可能性」
-    // が reason 単体で読めるようにする。
+    // An unscheduled market closure isn't representable in the trading
+    // calendar and slips past the session-window gate; this reject is the
+    // backstop, and appending quote staleness lets the reason alone hint
+    // "stale book, market likely closed" without a separate lookup.
     return `spread ${(spreadPct * 100).toFixed(3)}% exceeds ${market} limit ${(limit * 100).toFixed(3)}%${formatQuoteStaleness(lastQuote.asOf, now)}`
   }
   return null
 }
 
-/**
- * `" (quote asOf <ISO>, <N>h stale)"` suffix (#547)。asOf 欠落 / parse 不能は
- * 空文字を返し、reason は従来形のまま。clock skew による負値は 0.0h に clamp。
- */
+// Clock skew producing a negative age is clamped to 0.0h.
 function formatQuoteStaleness(asOf: string | undefined, now: Date): string {
   if (!asOf) return ''
   const asOfMs = new Date(asOf).getTime()

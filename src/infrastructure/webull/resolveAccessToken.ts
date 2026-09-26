@@ -3,44 +3,43 @@ import { WebullTokenStateClient } from '../../trading/state/WebullTokenStateClie
 import type { WebullTokenStatus } from './WebullTokenClient'
 
 /**
- * どの経路で token を引いたかの診断ラベル (probe / log 用)。token 値そのものは
- * 漏らさず、source だけ surface する事で「DO 由来 NORMAL を送ってるのに broker
- * が reject」「そもそも token が undefined」を切り分ける。
+ * Diagnostic label for which path resolved the token (probe/log only — never
+ * the token value itself), so a broker-side reject can be told apart from
+ * "no token was ever sent".
  */
 export type AccessTokenSource =
-  /** DO NORMAL token を使った (正常な production path)。 */
+  /** Normal production path. */
   | 'do_normal'
-  /** DO に state はあるが NORMAL じゃない (PENDING/INVALID/EXPIRED) → env fallback or none。 */
+  /** DO state exists but isn't NORMAL (PENDING/INVALID/EXPIRED). */
   | 'do_non_normal'
-  /** DO は bound だが state が null (seed されてない) → env fallback or none。 */
+  /** DO is bound but has no state yet (never seeded). */
   | 'do_empty'
-  /** DO 読込で throw → env fallback or none。 */
+  /** DO read threw. */
   | 'do_error'
-  /** DO 未 bind → env fallback or none。 */
+  /** No DO binding configured. */
   | 'do_unbound'
-  /** env.WEBULL_ACCESS_TOKEN を使った (Phase A bootstrap)。 */
+  /** Used env.WEBULL_ACCESS_TOKEN (bootstrap path before the DO is seeded). */
   | 'env'
-  /** どこからも取れなかった (header 欠落、broker が 401 INVALID_TOKEN で reject される)。 */
+  /** No token available from any source; the broker rejects with 401 INVALID_TOKEN. */
   | 'none'
 
 export interface ResolvedAccessToken {
   token: string | undefined
-  /** どの source から取得 (してない場合は理由を含む)。 */
   source: AccessTokenSource
-  /** DO 読込が試みられた場合の生 status (debug 用、token 値ではない)。 */
+  /** Raw DO status when a DO read was attempted (debug only, not the token). */
   doStatus?: WebullTokenStatus | null
 }
 
 /**
- * Resolve the active `x-access-token` value at call time (#21 Phase B).
+ * Resolve the active `x-access-token` value at call time.
  *
  * Resolution order:
  *   1. **DO state** (`WEBULL_TOKEN_STATE`) when bound AND state is `NORMAL`
  *      — the DO is the runtime source of truth, kept refreshed by the cron
  *      handler so it never goes stale silently.
- *   2. **`WEBULL_ACCESS_TOKEN` env** when DO is empty / non-NORMAL — Phase A
- *      bootstrap path. operator can still drop a freshly issued token here
- *      via `wrangler secret put` before the DO has been seeded.
+ *   2. **`WEBULL_ACCESS_TOKEN` env** when DO is empty / non-NORMAL — bootstrap
+ *      path. operator can still drop a freshly issued token here via
+ *      `wrangler secret put` before the DO has been seeded.
  *   3. `undefined` — no token available; callers proceed unsigned and the
  *      broker returns `INVALID_TOKEN` (visible failure, not silent skip).
  *
@@ -76,9 +75,8 @@ export async function resolveAccessTokenWithSource(env: Env): Promise<ResolvedAc
         doResolution = { source: 'do_non_normal', doStatus: state.status }
       }
     } catch (error) {
-      // DO 自体が落ちてるケース (binding mismatch / runtime error)。env fallback に
-      // 抜けて静かに degrade させるよりは、明示的に log を残して原因追跡を可能に
-      // する。env が無ければ undefined を返して上位の broker call が 401 で気付く。
+      // Logged (not swallowed) so a broken DO binding is diagnosable instead
+      // of silently degrading to env fallback.
       console.warn(
         JSON.stringify({
           event: 'webull_token_do_unreachable',

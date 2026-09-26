@@ -7,19 +7,9 @@ export interface PortfolioState {
   appliedClientOrderIds: string[]
   /** ISO timestamp until which the kill switch blocks submits, or `null` when inactive. */
   tradingDisabledUntil: string | null
-  /**
-   * ISO timestamp of the last `rollDaily()` execution, or `null` when the
-   * portfolio has never been rolled. Used by the EOD auto-rollover cron and
-   * the runStrategyCron pre-flight to detect stale rollovers (issue #140).
-   */
+  /** ISO timestamp of the last `rollDaily()`, or `null` if never rolled; used to detect a stale rollover. */
   lastRolledAt: string | null
-  /**
-   * Currently-open BUY notional in USD across all symbols. BUY fills add to
-   * this, SELL fills subtract. Clamped to >= 0 to avoid drift when SELLs
-   * run ahead of their BUYs (e.g. seeded position). Read by the portfolio
-   * exposure gate against `global_config.total_capital_usd *
-   * max_portfolio_exposure_pct` (#77).
-   */
+  /** Currently-open BUY notional in USD across all symbols; read by the portfolio exposure gate. */
   openExposureUsd: number
   /** JPY counterpart of {@link openExposureUsd}. Independent budget. */
   openExposureJpy: number

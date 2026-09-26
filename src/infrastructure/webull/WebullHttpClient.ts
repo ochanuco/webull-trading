@@ -16,59 +16,38 @@ export interface WebullClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
   /**
-   * Webull **trade** API host (account / assets / orders)。JP 本番では
-   * `api.webull.co.jp`、JP UAT では `jp-openapi-alb.uat.webullbroker.com`
-   * (ALB が trade/quotes/events を 1 ホストに束ねる)。未設定 / 空 / whitespace
-   * なら JP prod default (`DEFAULT_TRADE_API_BASE`) に fallback、env が
-   * explicit にセットされてれば override (#21)。
+   * Trade API host. JP prod: `api.webull.co.jp`. JP UAT (one ALB fronting
+   * trade/quotes/events): `jp-openapi-alb.uat.webullbroker.com`. Falls back
+   * to `DEFAULT_TRADE_API_BASE` when unset/blank.
    */
   WEBULL_TRADE_API_BASE?: string
-  /**
-   * 2FA 経由で発行された `x-access-token` 値 (#21)。設定時のみ `x-access-token`
-   * ヘッダを emit、signature には含めない。未設定でも client 自体は作れる
-   * (broker 側で 401 が出れば運用時に発覚する)。
-   */
+  /** x-access-token issued via 2FA; emitted as a header only, never part of the signature. */
   WEBULL_ACCESS_TOKEN?: string
   /**
-   * JP CASH account ID. On the Webull JP tenant this is a multi-currency
-   * cash account that holds BOTH JPY and USD positions (the probe confirmed
-   * pre-existing AAPL / NVDA / MSFT positions alongside 1570 / 7011), so
-   * every order — US and JP — routes here. The US_MARGIN account was
-   * dropped because leveraged ETFs (SOXL / SOXS) are rejected with
-   * SECURITY_NOT_SUPPORT_MARGIN_TRADE regardless of margin_type, and we
-   * have no intent to run margin-leveraged trades from this POC.
+   * JP CASH account ID — a multi-currency cash account holding both JPY and
+   * USD positions, so every order (US and JP) routes here. US_MARGIN was
+   * rejected: leveraged ETFs (SOXL/SOXS) get SECURITY_NOT_SUPPORT_MARGIN_TRADE
+   * on it regardless of margin_type, and this POC runs no margin trades.
    */
   WEBULL_ACCOUNT_ID_JP_CASH?: string
   /**
-   * #257: trade/account endpoint path の env override。新 OpenAPI docs
-   * (#251) で `/openapi/account/*` → `/openapi/assets/*` /
-   * `/openapi/trade/order/*` への drift があり、staging で env を切替えて
-   * 段階移行できるようにする。default は現行 path、未設定なら従来挙動。
-   *
-   * 旧 → 新の対応:
-   *   /openapi/account/positions       → /openapi/assets/positions
-   *   /openapi/account/orders/history  → /openapi/trade/order/history
-   *   /openapi/account/orders/place    → /openapi/trade/order/place
-   *
-   * 旧/新ともに alias で 200 が返ることは probe で確認済 (PR #262)。
+   * Path override for staged migration to the new OpenAPI routes:
+   *   /openapi/account/positions      → /openapi/assets/positions
+   *   /openapi/account/orders/history → /openapi/trade/order/history
+   *   /openapi/account/orders/place   → /openapi/trade/order/place
+   * Both old and new paths return 200; default stays on the old path.
    */
   WEBULL_PATH_POSITIONS?: string
   WEBULL_PATH_ORDERS_HISTORY?: string
   WEBULL_PATH_ORDERS_PLACE?: string
-  /** #415: Account Balance path override。default `/openapi/account/balance` (v1)。 */
+  /** Account Balance path override; default `/openapi/account/balance` (v1). */
   WEBULL_PATH_ACCOUNT_BALANCE?: string
   /**
-   * #258: trade/account routes に送る x-version ヘッダ値。default 'v1'
-   * (= 現行挙動)、'v2' に opt-in 可能。新 docs では v2 推奨だが旧/新 path
-   * とも v1 alias が動いてるので staging で切替え試験できる。
-   * 未設定 / 空 / whitespace のみ / 'v1'/'v2' 以外 → 'v1' fallback。
+   * x-version sent to trade/account routes. Both old and new paths accept
+   * v1 (default); 'v2' is opt-in. Invalid/unset values fall back to 'v1'.
    */
   WEBULL_TRADE_VERSION?: string
-  /**
-   * #256: Place Order body schema version。'v1' (default / 現挙動) か 'v2'
-   * (新 OpenAPI docs)。受理値は 'v1' / 'v2' のみ allow-list、それ以外は
-   * 'v1' fallback。
-   */
+  /** Place Order body schema: 'v1' (default) or 'v2'. Invalid values fall back to 'v1'. */
   WEBULL_PLACE_ORDER_SCHEMA?: string
 }
 
@@ -87,27 +66,15 @@ interface WebullHttpClientOptions {
   timeoutMs?: number
   retry?: WebullRetryOptions
   fetchFn?: typeof fetch
-  /** #257: trade/account endpoint path overrides。default は旧 path。 */
+  /** Endpoint path overrides for staged migration to the new OpenAPI routes; default is the old path. */
   positionsPath?: string
   ordersHistoryPath?: string
   ordersPlacePath?: string
-  /**
-   * #415: Account Balance endpoint path。default は v1 `/openapi/account/balance`
-   * (JP probe で 200 確認)。`tradeVersion='v2'` 運用なら `/openapi/assets/balance`
-   * を env で指定する (同 shape を返す)。
-   */
+  /** Default v1 `/openapi/account/balance`; pair with tradeVersion='v2' to point at `/openapi/assets/balance` (same shape). */
   accountBalancePath?: string
-  /**
-   * #258: trade/account routes に送る x-version ヘッダ値。default 'v1' (= 現行
-   * 挙動)、env で 'v2' に opt-in 可能。新 OpenAPI docs では v2 必須化の方向だが
-   * v1 でも alias 受理されてるので staging で env 切替えて検証する。
-   */
+  /** x-version for trade/account routes. Both old and new paths accept v1; 'v2' is opt-in. */
   tradeVersion?: string
-  /**
-   * #256: Place Order body schema version。'v1' (default / 現挙動) か 'v2'
-   * (新 OpenAPI docs)。v2 だと combo_type=NORMAL、session=CORE、
-   * limit_price (MARKET) 省略、account_id を body 側へ移動する。
-   */
+  /** See {@link PlaceOrderSchemaVersion} for the v1/v2 body differences. */
   placeOrderSchema?: PlaceOrderSchemaVersion
 }
 
@@ -118,10 +85,9 @@ const DEFAULT_ACCOUNT_BALANCE_PATH = '/openapi/account/balance'
 const DEFAULT_TRADE_VERSION = 'v1'
 const DEFAULT_PLACE_ORDER_SCHEMA: PlaceOrderSchemaVersion = 'v1'
 /**
- * Webull JP **production** trade host (#21)。値は SDK の region 定義に書かれた
- * 公開情報なのでハードコード。UAT (`jp-openapi-alb.uat.webullbroker.com`) は
- * 非公開なので `WEBULL_TRADE_API_BASE` env で override する運用。
- * source: webull-openapi-python-sdk `webull/core/data/endpoints.json` region=jp。
+ * JP production trade host — public per the SDK's region config
+ * (webull-openapi-python-sdk `endpoints.json`, region=jp). UAT's host isn't
+ * public, so it's env-overridden via `WEBULL_TRADE_API_BASE` instead.
  */
 const DEFAULT_TRADE_API_BASE = 'https://api.webull.co.jp'
 
@@ -143,8 +109,7 @@ export class WebullHttpClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.host = new URL(this.baseUrl).host
     this.timeoutMs = options.timeoutMs ?? 5000
-    // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
-    // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
+    // Unbound global fetch throws "Illegal invocation" in Workers.
     this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
     this.retry = {
       maxAttempts: options.retry?.maxAttempts ?? 3,
@@ -171,10 +136,7 @@ export class WebullHttpClient {
     })
   }
 
-  /**
-   * 口座の現金残高・買付余力を取得 (#415)。`account_currency_assets[]` に通貨別
-   * `buying_power` が入る。発注前の共有プール pre-trade ゲートで使う。
-   */
+  /** `account_currency_assets[]` carries buying_power per currency; used by the pre-trade gate. */
   async getAccountBalance(): Promise<WebullAccountBalanceDto> {
     return this.request<WebullAccountBalanceDto>('GET', this.accountBalancePath, {
       query: { account_id: this.requireAccountId() },
@@ -182,27 +144,11 @@ export class WebullHttpClient {
   }
 
   /**
-   * Fetch the current status of a previously-placed order by its client-side
-   * idempotency key.
-   *
-   * `/openapi/account/orders/detail` returns 404 on the JP UAT tenant, so we
-   * sweep `/openapi/account/orders/history` and filter client-side. Default is
-   * a single-page lookup (50 rows) to preserve cron-poll behaviour. Callers
-   * that need deeper history (e.g. operator-driven deep lookup, reconcile
-   * retry) can pass `{ maxPages: N }` for a bounded multi-page sweep — the
-   * loop stops as soon as the target coid is found, the broker returns a
-   * short page (less than `pageSize`), or `maxPages` has been visited (#139).
-   *
-   * Webull `/openapi/account/orders/history` accepts a 1-indexed `page` query
-   * param. Pages are walked sequentially (1, 2, ...) so we do not re-query
-   * page 1 if the caller wants `maxPages=2`. Iterating in serial keeps quota
-   * usage proportional to need; with no docs on a server-side hard cap, the
-   * caller is responsible for setting `maxPages` to a sane bound (default 1).
-   *
-   * 新 OpenAPI docs (#251) では response が wrapper 形式 (`{client_order_id,
-   * combo_type, orders[]}`) に変わってる。\`normalizeOrderHistoryRow\` で
-   * wrapper / flat 双方を flat な \`WebullOrderDetailDto\` に正規化するので
-   * callers (reconcileFills 等) は signature を変えずに済む (#253)。
+   * Finds a previously-placed order by its client-side idempotency key.
+   * `/openapi/account/orders/detail` 404s on the JP UAT tenant, so this
+   * sweeps `/openapi/account/orders/history` instead and filters
+   * client-side. Normalizes both the legacy flat shape and the newer
+   * `{orders: [...]}` wrapper via {@link normalizeOrderHistoryRow}.
    */
   async findOrderByClientId(
     clientOrderId: string,
@@ -230,23 +176,18 @@ export class WebullHttpClient {
         )
         if (normalized.client_order_id === clientOrderId) return normalized
       }
-      // A short page means we have reached the tail of broker-side history —
-      // there is nothing more to sweep, so stop early instead of paying the
-      // cost of a final empty request that we know will not match.
+      // Short page means we've hit the tail of broker history — stop instead
+      // of paying for a request we know won't match.
       if (rows.length < pageSize) return undefined
     }
     return undefined
   }
 
   /**
-   * Fetch the account's open positions. Used by the SELL_QTY_EXCEED fallback
-   * in the cron path: when Webull rejects a SELL because the requested qty
-   * is greater than `available_quantity` (e.g. DO state drifted above broker
-   * truth), the scheduler re-fetches available qty here and retries the
-   * SELL with the broker-side ground truth.
-   *
-   * Endpoint and field names follow the official Webull OpenAPI reference:
-   * https://developer.webull.com/apis/docs/reference/account-position/
+   * Powers the SELL_QTY_EXCEED fallback: when Webull rejects a SELL because
+   * the requested qty exceeds `available_quantity` (e.g. DO state drifted
+   * above broker truth), the scheduler re-fetches here and retries against
+   * broker-side ground truth.
    */
   async getPositions(): Promise<WebullPositionDto[]> {
     return this.request<WebullPositionDto[]>('GET', this.positionsPath, {
@@ -255,18 +196,9 @@ export class WebullHttpClient {
   }
 
   /**
-   * Resolve the broker-side `available_quantity` for a single symbol. Wraps
-   * `getPositions()` and keeps the Webull DTO interpretation (case-insensitive
-   * symbol match, `available_quantity` parsing) inside the infrastructure
-   * layer so the application-side scheduler only sees a `number | null`.
-   *
-   * - Position match found AND `available_quantity` parses to a finite number
-   *   (including 0) → that number is returned.
-   * - Position match found but `available_quantity` is missing / non-numeric
-   *   → `null`.
-   * - No matching symbol on the account → `null`.
-   * - `getPositions()` throws → the error is rethrown (caller decides how to
-   *   handle the SELL fallback failure).
+   * Resolves broker-side `available_quantity` for a symbol, keeping the DTO
+   * interpretation (case-insensitive match, string→number parsing) inside
+   * the infrastructure layer so callers only see `number | null`.
    */
   async getAvailableQtyForSymbol(symbol: string): Promise<number | null> {
     const target = symbol.toUpperCase()
@@ -280,12 +212,7 @@ export class WebullHttpClient {
   }
 
   async placeOrder(intent: OrderIntent): Promise<WebullPlaceOrderResponseDto> {
-    // Single CASH account handles both US and JP (multi-currency cash
-    // account). v2 endpoint — JP UAT rejects the v1 `/trade/order/place`
-    // body shape with ILLEGAL_PARAMETER.
-    //
-    // #256: schema が v2 のときは account_id を body 側に移動 (新 docs)、
-    //   query には付けない。v1 (default) は従来どおり query。
+    // v2 moves account_id into the body (new docs); v1 keeps it in the query.
     const accountId = this.requireAccountId()
     const body = toWebullPlaceOrderRequest(intent, this.placeOrderSchema, accountId)
     const query: Record<string, string> =
@@ -321,9 +248,7 @@ export class WebullHttpClient {
         query,
         body: payload,
         host: resolvedUrl.host,
-        // Webull SDK sets x-version=v1 for the documented trade/account routes.
-        // 新 OpenAPI docs (#251 / #258) では v2 必須化の方向。env override
-        // (`WEBULL_TRADE_VERSION`) で staging 切替え可能、default は v1。
+        // Both old and new OpenAPI routes accept v1; v2 is opt-in via WEBULL_TRADE_VERSION.
         version: this.tradeVersion,
       })
     } catch (error) {
@@ -389,11 +314,6 @@ export class WebullHttpClient {
         return (await response.json()) as T
       }
 
-      // Capture response body for error diagnostics. Webull typically returns
-      // `{ code: "...", message: "..." }` JSON on errors, but some failures
-      // come from upstream CDN / proxies as HTML or plain text (502 etc.), so
-      // use `text()` rather than `json()` to keep the raw body either way.
-      // Truncate to avoid memory blowup on huge HTML error pages.
       const bodyText = await readErrorBody(response)
 
       lastStatus = response.status
@@ -403,14 +323,9 @@ export class WebullHttpClient {
       )
 
       if (response.status >= 400 && response.status < 500) {
-        // 4xx is the caller's fault or an auth/rate-limit problem — do not
-        // retry. Map to the narrowest error subclass so downstream handlers
-        // can treat 401/429 differently from 400. Include the response body
-        // in the surfaced message so logs show why Webull rejected the
-        // request (e.g. 417 with `ORDER_INVALID_QTY`) and so callers can
-        // detect Webull-specific error codes like
-        // `OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY` (used by the SELL
-        // fallback in pullbackScheduler) by string-matching on the message.
+        // Not retried — caller/auth/rate-limit fault. The body stays in the
+        // message so callers can string-match broker codes like
+        // OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY (used by the SELL fallback).
         throw brokerErrorForStatus(
           response.status,
           `Webull request failed permanently with status ${response.status}: ${bodyText}`,
@@ -433,9 +348,8 @@ export class WebullHttpClient {
     }
 
     if (lastStatus !== undefined) {
-      // Retries exhausted on a 5xx. Surface as a server-class error so alerts
-      // can distinguish "Webull is down" from "we sent a bad request". Include
-      // the last response body so the log explains *why* the upstream gave up.
+      // Server-class error after exhausting retries — lets alerts distinguish
+      // "Webull is down" from a bad request; body explains why it gave up.
       throw brokerErrorForStatus(
         lastStatus,
         `Webull request failed after ${this.retry.maxAttempts} attempts with last status ${lastStatus}: ${lastBody ?? '<no body>'}`,
@@ -475,20 +389,12 @@ export function createWebullHttpClient(
     fetchFn?: typeof fetch
     timeoutMs?: number
     retry?: WebullRetryOptions
-    /**
-     * Runtime-resolved `x-access-token` (#21 Phase B)。`resolveAccessToken(env)`
-     * の戻り値を caller が await して渡す形。指定があれば `env.WEBULL_ACCESS_TOKEN`
-     * を上書き (= DO 由来の値を優先)。
-     */
+    /** Runtime-resolved token (from resolveAccessToken); overrides env.WEBULL_ACCESS_TOKEN when provided. */
     accessToken?: string
   },
 ): WebullHttpClient {
-  // #257: env で trade/account path を上書き可能。受理条件:
-  //   - 文字列であること
-  //   - trim 後が非空
-  //   - `/` で始まる絶対パス (= WEBULL_TRADE_API_BASE を bypass する絶対 URL を弾く、
-  //     CodeRabbit #264 finding)
-  // 上記を満たさない場合は undefined を返して default path にフォールバック。
+  // Overrides must be absolute paths starting with '/' — otherwise a caller
+  // could smuggle a full URL and bypass WEBULL_TRADE_API_BASE entirely.
   const trim = (v: string | undefined): string | undefined => {
     if (typeof v !== 'string') return undefined
     const t = v.trim()
@@ -496,26 +402,20 @@ export function createWebullHttpClient(
     if (!t.startsWith('/')) return undefined
     return t
   }
-  // #258: x-version は 'v1' / 'v2' のみ allow-list 受理。それ以外 (空 /
-  // whitespace / 不正値) は undefined を返して default ('v1') に fallback。
-  // 任意文字列を通すと broker auth signing が壊れるため strict validation。
+  // Strict allow-list: an arbitrary value here breaks broker auth signing.
   const validateVersion = (v: string | undefined): string | undefined => {
     if (typeof v !== 'string') return undefined
     const t = v.trim()
     if (t === 'v1' || t === 'v2') return t
     return undefined
   }
-  // #256: Place Order body schema version の strict allow-list 受理。
-  // 'v1' / 'v2' 以外 (空 / whitespace / 任意文字列) は undefined → default 'v1'。
-  // 任意文字列を通すと broken body schema を broker に送って order が壊れる。
+  // Strict allow-list: an arbitrary value here sends a broken body schema and corrupts the order.
   const validateOrderSchema = (v: string | undefined): PlaceOrderSchemaVersion | undefined => {
     if (typeof v !== 'string') return undefined
     const t = v.trim()
     if (t === 'v1' || t === 'v2') return t
     return undefined
   }
-  // env 空 / undefined / whitespace は JP prod default に fallback。env が
-  // 明示的にセットされてれば override (UAT / 将来 region 用)。
   const baseUrl = env.WEBULL_TRADE_API_BASE?.trim() || DEFAULT_TRADE_API_BASE
   return new WebullHttpClient({
     auth: new WebullAuth({
@@ -566,12 +466,9 @@ function wait(delayMs: number): Promise<void> {
 }
 
 /**
- * Read an upstream error response body for diagnostics. Use `text()` rather
- * than `json()` because non-JSON bodies are common (CDN HTML 502 pages, plain
- * text proxy errors). The body is truncated to keep log lines bounded — the
- * Webull error envelope `{code, message}` is well within this limit, and any
- * larger blob is most likely an HTML error page that is not worth keeping in
- * full.
+ * Reads the error body as text, not JSON — Webull errors are usually
+ * `{code, message}` JSON, but upstream CDN/proxy failures can return HTML or
+ * plain text. Truncated so a large HTML error page doesn't blow up the log line.
  */
 const ERROR_BODY_MAX_CHARS = 1000
 
@@ -604,22 +501,12 @@ function buildRequestUrl(baseUrl: string, path: string, query?: Record<string, s
 }
 
 /**
- * 新 OpenAPI docs (#251 / #253) の order-history / order-detail wrapper shape:
- *   { client_order_id, combo_type, orders: [...inner...] }
- * 旧 (現行 callers が想定する) flat shape:
- *   { client_order_id, side, status, filled_quantity, ... }
- *
- * row が `orders[]` を持っていれば wrapper と判定:
- *   - `orders[0]` が存在 → flat shape に projection (`total_quantity` →
- *     `quantity` も合わせてコピー)。多 leg / combo は POC scope 外なので
- *     `orders[0]` のみ採用 (combo_type !== 'NORMAL' なら呼び出し側 reconciler
- *     が detect)。
- *   - `orders[]` が空 → 「対象 order が存在しない」状態として **空オブジェクト**
- *     を返す (CodeRabbit #261)。partial detail (client_order_id だけ持つ) を
- *     返すと findOrderByClientId が誤 match して、status/side 等を持たない
- *     incomplete row を caller に渡してしまうため。
- *
- * 旧 flat shape の row はそのまま返す (互換)。
+ * Normalizes both the legacy flat order-history shape and the newer
+ * `{client_order_id, combo_type, orders: [...]}` wrapper into the flat DTO
+ * callers expect. Combo/multi-leg orders are out of scope, so only
+ * `orders[0]` is used. Empty/missing `orders[]` returns `{}` rather than a
+ * partial row (client_order_id only) — a partial row would false-match in
+ * findOrderByClientId's coid comparison.
  */
 function normalizeOrderHistoryRow(
   raw: WebullOrderHistoryWrapperDto | WebullOrderDetailDto,
@@ -631,14 +518,10 @@ function normalizeOrderHistoryRow(
   }
   const inner = wrapper.orders[0]
   if (inner === undefined || inner === null) {
-    // wrapper.orders が空 / 不在 → 「対象なし」 sentinel として空オブジェクトを返す
-    // (caller の find は clientOrderId !== undefined で match しないので skip)。
     return {} as WebullOrderDetailDto
   }
-  // top-level の client_order_id を最優先 (wrapper 側が canonical)、inner の同
-  // フィールドは fallback。
   const clientOrderId = wrapper.client_order_id ?? inner.client_order_id
-  // 新 `total_quantity` を `quantity` にコピー (consumer は `quantity` を読む)。
+  // New API uses total_quantity; callers read quantity, so alias it.
   const quantity = inner.quantity ?? inner.total_quantity
   return {
     ...inner,

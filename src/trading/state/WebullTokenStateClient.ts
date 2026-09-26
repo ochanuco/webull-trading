@@ -3,11 +3,6 @@ import type { WebullTokenState, WebullTokenStateDO } from './WebullTokenStateDO'
 
 const SINGLETON_NAME = 'default'
 
-/**
- * Thin adapter that hides the {@link DurableObjectNamespace}/stub plumbing
- * from callers. Always addresses `idFromName('default')` because the token
- * is account-wide (#21 Phase B).
- */
 export class WebullTokenStateClient {
   constructor(private readonly namespace: DurableObjectNamespace<WebullTokenStateDO>) {}
 
