@@ -11,11 +11,12 @@ import {
   createNewsHeadlineEvalRepo,
 } from '../../infrastructure/db/newsHeadlineEvalRepo'
 import type { NewsHeadlineEvalRow } from '../../infrastructure/db/schema'
-import { NEWS_HEADLINE_EVAL_SOURCE } from './headlineEvalScheduler'
 
 export type HeadlineEvalSnapshot =
   | {
       available: true
+      /** Which feed produced this row (`yahoo_finance_rss` / `google_news_rss`) — the collector can fall back mid-run. */
+      source: string
       evaluatedAt: string
       ageMin: number
       status: string
@@ -37,6 +38,7 @@ export function buildHeadlineEvalSnapshot(
   if (!row) return { available: false, reason: 'no_row' }
   return {
     available: true,
+    source: row.source,
     evaluatedAt: row.evaluatedAt,
     ageMin: Math.round((now.getTime() - Date.parse(row.evaluatedAt)) / 60_000),
     status: row.status,
@@ -59,10 +61,7 @@ export async function loadHeadlineEvalSnapshot(
 ): Promise<HeadlineEvalSnapshot> {
   try {
     const repo = createNewsHeadlineEvalRepo(createNewsHeadlineEvalDb(db))
-    const row = await repo.fetchLatest({
-      source: NEWS_HEADLINE_EVAL_SOURCE,
-      atOrBeforeIso: now.toISOString(),
-    })
+    const row = await repo.fetchLatest({ atOrBeforeIso: now.toISOString() })
     return buildHeadlineEvalSnapshot(row, now)
   } catch (error) {
     console.warn(

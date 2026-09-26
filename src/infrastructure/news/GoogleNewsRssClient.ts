@@ -1,8 +1,11 @@
 /**
  * Google News RSS client for the market-headline observe-only collector.
- * Workers has no DOMParser, so the feed is parsed with regex over the raw
- * XML text rather than an XML/DOM library.
+ * Fallback source: production cron egress IPs get a 503 bot-block page from
+ * Google intermittently, so `headlineEvalScheduler` tries Yahoo Finance
+ * first and only falls back here on a Yahoo fetch failure.
  */
+import { dedupeAndCapHeadlines, parseRssItems, type RssHeadline } from './rssHeadlineParser'
+
 const RSS_BASE_URL = 'https://news.google.com/rss/search'
 // Bare `nasdaq` pulls MarketBeat's "(NASDAQ:XXX) price target" stream, and social posts leak in
 // via caption matches; both crowd out index-level headlines within the 20-item cap.
@@ -14,12 +17,7 @@ const DEFAULT_TIMEOUT_MS = 20_000
 const BODY_SNIPPET_MAX_CHARS = 200
 const MAX_HEADLINES = 20
 
-export interface GoogleNewsHeadline {
-  title: string
-  source: string | null
-  /** ISO UTC, parsed from the item's `pubDate`; null when missing/unparseable. */
-  publishedAt: string | null
-}
+export type GoogleNewsHeadline = RssHeadline
 
 export interface GoogleNewsRssClientOptions {
   timeoutMs?: number
@@ -113,26 +111,6 @@ async function bodySnippet(response: Response): Promise<string> {
   return text.slice(0, BODY_SNIPPET_MAX_CHARS)
 }
 
-const ITEM_RE = /<item\b[^>]*>([\s\S]*?)<\/item>/gi
-const TITLE_RE = /<title\b[^>]*>([\s\S]*?)<\/title>/i
-const PUBDATE_RE = /<pubDate\b[^>]*>([\s\S]*?)<\/pubDate>/i
-const SOURCE_RE = /<source\b[^>]*>([\s\S]*?)<\/source>/i
-const CDATA_RE = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/
-
-function decodeXmlText(raw: string): string {
-  const cdataMatch = CDATA_RE.exec(raw)
-  const text = cdataMatch ? cdataMatch[1]! : raw
-  return text
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&#x27;/gi, "'")
-    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCharCode(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCharCode(parseInt(code, 16)))
-    .replace(/&amp;/g, '&') // last: avoids double-decoding e.g. `&amp;lt;` into `<`
-    .trim()
-}
-
 /** Google appends ` - <Source>` to the title; stripped only on an exact match so real title text isn't mangled. */
 function stripSourceSuffix(title: string, source: string | null): string {
   if (!source) return title
@@ -140,52 +118,10 @@ function stripSourceSuffix(title: string, source: string | null): string {
   return title.endsWith(suffix) ? title.slice(0, -suffix.length) : title
 }
 
-function parsePubDate(raw: string | undefined): string | null {
-  if (!raw) return null
-  const ms = Date.parse(raw)
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null
-}
-
-function normalizeTitle(title: string): string {
-  return title.trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
-function dedupeAndCap(items: GoogleNewsHeadline[]): GoogleNewsHeadline[] {
-  const sorted = [...items].sort((a, b) => {
-    const at = a.publishedAt ? Date.parse(a.publishedAt) : -Infinity
-    const bt = b.publishedAt ? Date.parse(b.publishedAt) : -Infinity
-    return bt - at
-  })
-  const seen = new Set<string>()
-  const out: GoogleNewsHeadline[] = []
-  for (const item of sorted) {
-    const key = normalizeTitle(item.title)
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(item)
-    if (out.length >= MAX_HEADLINES) break
-  }
-  return out
-}
-
 export function parseGoogleNewsRss(xml: string): GoogleNewsHeadline[] {
-  const items: GoogleNewsHeadline[] = []
-  ITEM_RE.lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = ITEM_RE.exec(xml)) !== null) {
-    const block = match[1]!
-    const titleMatch = TITLE_RE.exec(block)
-    if (!titleMatch) continue
-    const rawTitle = decodeXmlText(titleMatch[1]!)
-    if (!rawTitle) continue
-
-    const sourceMatch = SOURCE_RE.exec(block)
-    const source = sourceMatch ? decodeXmlText(sourceMatch[1]!) : null
-
-    const pubDateMatch = PUBDATE_RE.exec(block)
-    const publishedAt = parsePubDate(pubDateMatch ? decodeXmlText(pubDateMatch[1]!) : undefined)
-
-    items.push({ title: stripSourceSuffix(rawTitle, source), source, publishedAt })
-  }
-  return dedupeAndCap(items)
+  const items = parseRssItems(xml).map((item) => ({
+    ...item,
+    title: stripSourceSuffix(item.title, item.source),
+  }))
+  return dedupeAndCapHeadlines(items, MAX_HEADLINES)
 }
