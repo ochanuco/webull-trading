@@ -12,12 +12,9 @@ function mockFetch(responseBody: unknown, init: ResponseInit = { status: 200 }):
   ) as unknown as typeof fetch
 }
 
-/**
- * Bid/ask are blockers for spread guard (#38-D / #53). These tests pin the
- * tolerant parsing of bid/ask fields regardless of the upstream UAT key
- * naming, while keeping them strictly optional so existing quote feed paths
- * keep working when the broker does not return them.
- */
+// Bid/ask are blockers for the spread guard (#38-D / #53): parsing must
+// tolerate varying upstream key names while staying strictly optional so
+// existing quote feed paths keep working when the broker omits them.
 describe('WebullQuoteClient.getSnapshots bid/ask', () => {
   it('includes bid and ask when both are positive', async () => {
     const fetchFn = mockFetch({

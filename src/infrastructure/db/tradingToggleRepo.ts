@@ -9,19 +9,11 @@ export interface TradingToggleResult {
 }
 
 /**
- * Apply a kill-switch toggle (issue #276)。
- *
- * 1. `global_config.trading_enabled` の現在値を読む (before snapshot)
- * 2. `enabled` で上書き UPDATE
- * 3. `trading_toggle_history` に append (timestamp / actor / before / after /
- *    reason / requestId)
- *
- * Returns the before/after snapshot for log emission. Throws if D1 binding is
- * missing or the UPDATE fails — fail-closed (toggle が DB に書けなかったのに
- * 200 返しちゃう sit を避ける)。
- *
- * No-op detection は呼出側に任せる: same-value toggle でも history は残す
- * (operator が「無駄な ON ボタン押した」を audit で見たいケースもあるため)。
+ * Applies a kill-switch toggle: reads the before value, updates
+ * `global_config.trading_enabled`, and appends a `trading_toggle_history`
+ * row. Throws on any failure instead of swallowing it — a write that fails
+ * must not report success. Always appends history, even for a same-value
+ * toggle, so a no-op press still shows up in the audit trail.
  */
 export async function applyTradingToggle(
   db: DrizzleD1Database,
@@ -49,9 +41,8 @@ export async function applyTradingToggle(
       .set({ tradingEnabled: args.enabled, updatedAt: nowIso })
       .where(eq(globalConfig.id, 'default'))
   } else {
-    // 初回 (= row 未 seed)。`/admin/trading/toggle` が seed も担当することで
-    // 「runtime に DB 未投入で toggle 不能」を回避。`updatedAt` 必須 / 他列は
-    // schema default (dry_run=true, trading_enabled は arg, など) に任せる。
+    // First-ever call: seed the row here instead of requiring it be
+    // pre-seeded, so toggling isn't blocked on manual DB setup.
     await db.insert(globalConfig).values({
       id: 'default',
       tradingEnabled: args.enabled,
@@ -78,11 +69,7 @@ export async function applyTradingToggle(
   }
 }
 
-/**
- * Wraps a raw `D1Database` binding into a drizzle instance suitable for
- * `applyTradingToggle`. Kept as a thin helper so callers don't need to import
- * drizzle directly.
- */
+/** Thin wrapper so callers don't need to import drizzle directly. */
 export function createTradingToggleDb(d1: D1Database): DrizzleD1Database {
   return drizzle(d1)
 }

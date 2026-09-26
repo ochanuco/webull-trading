@@ -4,39 +4,24 @@ import type {
   NotificationSeverity,
 } from './Notifier'
 
-/**
- * Webhook POST の打ち切り時間。Slack/Discord は通常 1 秒未満で応答するので
- * 10 秒は十分な余裕。cron の他タスク (portfolio roll 等) と同じ tick に
- * 相乗りしているため、無応答の webhook で isolate を長く占有しない。
- */
+// Bounded so an unresponsive webhook can't pin the isolate — cron shares
+// this tick with other tasks (portfolio roll, etc).
 const WEBHOOK_TIMEOUT_MS = 10_000
 
 export interface WebhookNotifierOptions {
-  /** Slack incoming webhook URL。空 / undefined なら Slack には送らない。 */
+  /** Empty/undefined skips Slack. */
   slackUrl?: string
-  /** Discord webhook URL。空 / undefined なら Discord には送らない。 */
+  /** Empty/undefined skips Discord. */
   discordUrl?: string
-  /**
-   * dashboard の base URL (例: `https://webull-trading.example.workers.dev`)。
-   * ERROR 通知に symbol がある場合のみ `/dashboard/charts?...` link を付ける。
-   * TRADE 通知は約定結果を読みやすく保つため link を付けない。
-   */
+  /** Only ERROR notifications with a symbol get a `/dashboard/charts?...` link; TRADE notifications never do. */
   dashboardBaseUrl?: string
-  /**
-   * 注入可能な fetch (test 用)。未指定ならグローバル `fetch`。
-   */
   fetchImpl?: typeof fetch
 }
 
 /**
- * Slack / Discord webhook 通知の concrete 実装 (#199)。
- *
- * 設計:
- *   - Slack POST body: `{ text: "..." }`
- *   - Discord POST body: `{ content: "..." }` (key 名が違う点に注意)
- *   - 両方の URL が設定されていれば **両方に並列送信**
- *   - 個別 POST が失敗しても他方は止めない (Promise.allSettled)
- *   - 全失敗でも throw しない (`silent fallback`、cron を fail させない)
+ * Slack (`{ text }`) / Discord (`{ content }`) webhook notifier. Both
+ * targets are posted in parallel via `Promise.allSettled` so one failing
+ * doesn't block the other, and `notify()` never throws.
  */
 export class WebhookNotifier implements Notifier {
   private readonly slackUrl?: string
@@ -99,11 +84,7 @@ export class WebhookNotifier implements Notifier {
     }
   }
 
-  /**
-   * Slack/Discord に送るのと同じ message 文字列を組み立てる。`LoggingNotifier`
-   * が D1 `notification_emit_log.message` 列に同じ表現を残すために public に
-   * 露出している (#141)。テスト用にも便利。
-   */
+  /** Public so `LoggingNotifier` can persist the same text to `notification_emit_log.message`. */
   formatMessage(event: NotificationEvent): string {
     if (event.type === 'TRADE') {
       return formatTradeMessage(event)
@@ -152,11 +133,8 @@ function formatTradeMessage(event: TradeEvent): string {
   return `${icon} ${event.symbol} 売却\n${event.qty}株 @ $${formatPrice(event.price)}\n\n実現損益: $${formatPnl(event.realizedPnl)}${ratePart}${modeLine}`
 }
 
-/**
- * realizedPnl は売買コスト控除後。exit notional - net PnL を投入資本相当額とみなし、
- * 通知用のネット損益率を算出する。追加の position 情報を event に持たせず、
- * Discord 上で「結局いくら勝ち負けしたか」を割合でも把握できるようにする。
- */
+// Backs out capital basis from (exit notional - realizedPnl) rather than
+// requiring entry price on the event, since TRADE events don't carry position history.
 function realizedPnlRate(realizedPnl: number, qty: number, exitPrice: number): number | null {
   if (!Number.isFinite(realizedPnl) || !Number.isFinite(qty) || !Number.isFinite(exitPrice)) return null
   const exitNotional = qty * exitPrice

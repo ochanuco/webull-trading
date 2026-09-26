@@ -3,32 +3,23 @@ import { buildSignedHeaders } from './WebullAuth'
 import { resolveAccessToken } from './resolveAccessToken'
 
 /**
- * Webull JP Market Data API の死活監視 (#475、旧 checkMarketDataReachability)。
- *
- * 旧実装は「market data = `data-api.webull.co.jp` (TCP 沈黙)」前提で、その host
- * に listener が立った瞬間を通知する設計だった。しかし JP docs の再読 + 実測
- * (PR #474) で **production host は trade host (`api.webull.co.jp`) + x-version
- * v2 で既に稼働中** と判明 — 存在しない host を見張っていたことになる。
- *
- * 新実装は documented endpoint (`GET /openapi/market-data/stock/snapshot`,
- * v2 署名) を AAPL で叩き、**200 が返らなくなったら** caller (22:00 UTC daily
- * cron) が warn 通知する。quote/bars の Webull 回帰 (#475) の前提カナリア。
+ * Health probe for the Webull JP Market Data API: polls the documented
+ * snapshot endpoint via the trade host + v2 signing. The caller (daily cron)
+ * alerts on non-200. Do not repoint this at `data-api.webull.co.jp` — that
+ * host never answers in production, only the trade host does.
  */
 
 const SNAPSHOT_PATH = '/openapi/market-data/stock/snapshot'
 const DEFAULT_TRADE_API_BASE = 'https://api.webull.co.jp'
 const DEFAULT_TIMEOUT_MS = 10_000
-/** UAT 含む全環境で quote 権限が確認済みの probe 用銘柄。 */
+/** Confirmed to have quote entitlement in every environment including UAT. */
 const PROBE_SYMBOL = 'AAPL'
 
 export interface MarketDataHealthResult {
-  /** snapshot が HTTP 200 を返したか。 */
   healthy: boolean
-  /** HTTP status (応答があった場合)。 */
   status: number | null
-  /** fetch 開始から完了 (or abort) まで。 */
   msTaken: number
-  /** unhealthy のときの理由 (timeout / 非200 / credentials 未設定 等)。 */
+  /** Reason when unhealthy: timeout, non-200 status, or missing credentials. */
   error: string | null
 }
 

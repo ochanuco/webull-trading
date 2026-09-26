@@ -1,20 +1,15 @@
 import { sql } from 'drizzle-orm'
 import { check, index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
-/**
- * Schema-level max for pullbackDefaultTimeStopDays. Exported so chart window
- * logic can stay consistent with DB constraint.
- */
+/** Max for pullbackDefaultTimeStopDays; exported so chart window logic matches the DB constraint. */
 export const MAX_TIME_STOP_DAYS = 365
 
 /**
- * append-only trade decision / order lifecycle log. A single row per logical
- * event (`decision` → `intent` → `pre_submit` → `post_submit` → `fill` /
- * `exit`). Column shape is intentionally flat — schema mirrors
- * {@link TradeJournalRecord} in src/infrastructure/logger/tradeJournal.ts
- * so we can straight-map records into rows without adapter logic.
- *
- * 振り返り用 SELECT 例は docs/db-operations.md 参照。
+ * Append-only trade decision / order lifecycle log, one row per logical
+ * event (`decision` -> `intent` -> `pre_submit` -> `post_submit` -> `fill` /
+ * `exit`). Flat column shape mirrors {@link TradeJournalRecord} in
+ * src/infrastructure/logger/tradeJournal.ts so records map straight to rows
+ * without adapter logic. SELECT examples: docs/db-operations.md.
  */
 export const tradeJournal = sqliteTable('trade_journal', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -41,10 +36,9 @@ export const tradeJournal = sqliteTable('trade_journal', {
   filledPrice: real('filled_price'),
   realizedPnl: real('realized_pnl'),
   /**
-   * 売買コストの見積り (#trade-cost)。SELL 行に往復分 (entry + exit) を入れる。
-   * `realized_pnl` は **この額を引いた net**。broker が実費を返さないので
-   * `global_config.fee_pct_of_notional` / `fee_fixed_per_order` からの推定値。
-   * NULL = コスト未設定 (= realized_pnl は gross) か、旧データ。
+   * 売買コスト見積り (round-trip、SELL 行のみ)。`realized_pnl` はこの額を
+   * 引いた net。broker が実費を返さないため global_config の fee 設定から
+   * 推定。NULL = 未設定 (realized_pnl は gross) または旧データ。
    */
   estimatedCost: real('estimated_cost'),
   holdDays: real('hold_days'),
@@ -52,35 +46,21 @@ export const tradeJournal = sqliteTable('trade_journal', {
   errorClass: text('error_class'),
   errorMessage: text('error_message'),
   /**
-   * ISO timestamp when the FILLED row was successfully applied to the DO
-   * layer (SymbolStateDO position / PortfolioStateDO realized PnL / cooldown).
-   * NULL means apply has not yet succeeded — either because broker_status is
-   * not yet FILLED, or because a previous DO apply attempt threw.
-   *
-   * Acts as an idempotent-apply ledger for `reconcileFills`: rows where
-   * `broker_status='FILLED' AND state_applied_at IS NULL` are picked up by
-   * the next reconcile tick (or the `?retryStateApply=1` repair mode) and
-   * re-attempted. Once stamped, the row is never re-applied, even if it is
-   * re-selected.
-   *
-   * Closes the split-brain that issue #142 tracked: D1 row was marked FILLED
-   * but the DO position never updated because the DO call threw between the
-   * UPDATE and the apply.
+   * ISO timestamp when this FILLED row's DO-layer apply (SymbolStateDO
+   * position / PortfolioStateDO realized PnL / cooldown) succeeded. NULL
+   * means not yet applied (status not FILLED yet, or a prior apply threw).
+   * Acts as an idempotent-apply ledger for `reconcileFills`: NULL rows with
+   * a fill-carrying `broker_status` are retried every tick; once stamped, a
+   * row is never re-applied even if re-selected.
    */
   stateAppliedAt: text('state_applied_at'),
   /**
-   * Last DO-apply error message captured while attempting to apply this
-   * FILLED row. NULL when apply has never failed (or has succeeded since the
-   * last failure). Only useful in conjunction with `state_applied_at IS NULL`
-   * — a non-NULL value with `state_applied_at` set means the most recent
-   * attempt eventually succeeded after a prior failure.
+   * Last DO-apply error for this row. NULL = never failed, or succeeded
+   * since. Non-NULL with `state_applied_at` set means a prior failure
+   * eventually succeeded — only meaningful paired with `state_applied_at`.
    */
   stateApplyError: text('state_apply_error'),
-  /**
-   * Number of DO-apply attempts (success or failure). Bumped on every retry.
-   * Used by ops to spot rows stuck in a retry loop (`attempts >> 1` with
-   * `state_applied_at IS NULL` is an alert signal).
-   */
+  /** DO-apply attempt count, bumped on each retry; `attempts >> 1` with `state_applied_at IS NULL` is a stuck-row alert signal. */
   stateApplyAttempts: integer('state_apply_attempts').notNull().default(0),
 })
 
@@ -88,118 +68,87 @@ export type TradeJournalRow = typeof tradeJournal.$inferSelect
 export type TradeJournalInsert = typeof tradeJournal.$inferInsert
 
 /**
- * Per-symbol universe + trading policy. Replaces `ALLOWED_SYMBOLS` and
- * `SYMBOL_MAX_NOTIONAL` env vars so changes do not require redeploy. Operator
- * edits via `wrangler d1 execute "INSERT / UPDATE ..."`. See
- * docs/db-operations.md for recipes.
+ * Per-symbol universe + trading policy. Replaces `ALLOWED_SYMBOLS` /
+ * `SYMBOL_MAX_NOTIONAL` env vars so changes don't require redeploy — operator
+ * edits via `wrangler d1 execute`, see docs/db-operations.md.
  *
- * `active = 0` で一時停止扱い (ALLOWED_SYMBOLS から外れる)。`max_notional`
- * が NULL なら global の MAX_ORDER_NOTIONAL 上限に丸める (fall-through)。
+ * `active=0` = suspended (drops out of the effective allowlist). Most
+ * `*Override` columns are NULL = fall through to the `global_config`
+ * default; several intentionally skip a DB range CHECK (SQLite can't ALTER
+ * ADD CHECK on an existing column) and rely on admin-parse validation
+ * instead — noted per column only where the range itself matters.
  */
 export const symbolConfig = sqliteTable(
   'symbol_config',
   {
     symbol: text('symbol').primaryKey(),
-    /** 人間可読な銘柄名 (例: "Direxion Daily Semiconductor Bull 3X"、トヨタ自動車)。運用時の識別用。 */
     name: text('name'),
     market: text('market').notNull(), // 'US' | 'JP'
     /**
-     * 取引通貨 ISO 4217 ('USD' / 'JPY' ...)。notional を global cap と比較する時の
-     * 基準。market と独立に持つのは将来 HKD ADR 等への拡張を見越してのこと。
+     * ISO 4217 通貨コード。notional を通貨別 global cap と比較する基準。
+     * market と独立に持つ理由: 将来の HKD ADR 等、market と 1:1 でない通貨への拡張。
      */
     currency: text('currency').notNull().default('USD'),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
     maxNotional: real('max_notional'),
     notes: text('notes'),
-    /**
-     * 個別銘柄 override (NULL = global_config の default を使う、整数 1-365)。
-     * 3x leveraged ETF 等で短い hold が望ましいケース用 (#316)。
-     */
+    /** Per-symbol override (NULL = global_config default; integer 1-365). */
     timeStopDaysOverride: integer('time_stop_days_override'),
-    /**
-     * 個別銘柄 override (NULL = global_config の default を使う、float 0.5-5.0)。
-     * 高ボラ銘柄で stop を緩めるケース用 (#316)。
-     */
+    /** Per-symbol override (NULL = global_config default; float 0.5-5.0). */
     kAtrOverride: real('k_atr_override'),
     /**
-     * 予算配分 fraction (NULL = 従来の risk-% sizing、0<pct<=1)。指定されると
-     * fixed-% 配分モードで `notional = min(total_capital * pct, max_notional)` で
-     * sizing する (#budget-alloc)。小口座で高額レバ ETF を建てる用。range CHECK は
-     * SQLite ALTER 制約で付けず admin parse + 将来 rebuild で担保。
+     * 予算配分 fraction (NULL = 従来の risk-% sizing、0<pct<=1)。設定時は
+     * fixed-% モード: `notional = min(total_capital * pct, max_notional)`。
      */
     budgetAllocPct: real('budget_alloc_pct'),
     /**
-     * 売買単位 (1 注文の最小ロット = 1単元の株数 / ETF の口数)。NULL = 未設定。
-     * **fallback しない**: cron sizing は NULL を fail-closed (発注見送り) として扱う
-     * (誤った blanket 100/1 で過大・過小発注しないため #symbol-lot-size)。US 株/ETF・
-     * JP ETF は通常 1、JP 個別株は 100。フォームは Yahoo `quoteType`/market から推奨値を
-     * プリフィルするが、確定値は手入力必須。range CHECK は SQLite ALTER 制約を避け
-     * admin parse + 将来 rebuild で担保 (budget_alloc_pct と同方針)。
+     * 1 注文の最小ロット数 (US 株/ETF・JP ETF は通常 1、JP 個別株は 100)。
+     * NULL は blanket 100/1 へフォールバックしない: cron sizing は NULL を
+     * fail-closed (発注見送り) として扱う — 誤ったフォールバックは過大/過小発注
+     * につながる。フォームは推奨値をプリフィルするが確定値は手入力必須。
      */
     lotSize: integer('lot_size'),
-    /**
-     * 損切り fraction override (NULL = global_config.pullback_default_stop_pct、負値)。
-     * 3x レバ ETF 等でボラに合わせ stop を広げる用 (#exit-atr)。range CHECK は SQLite
-     * ALTER 制約を避け admin parse で担保 (k_atr_override と同方針)。
-     */
+    /** Override for pullback_default_stop_pct (NULL = use global default; negative fraction). */
     stopPctOverride: real('stop_pct_override'),
-    /**
-     * 利食い fraction override (NULL = global default、正値)。R:R を銘柄別に調整する用。
-     */
+    /** Override for take-profit fraction (NULL = global default; positive). */
     takeProfitPctOverride: real('take_profit_pct_override'),
-    /**
-     * intraday-only (true = オーバーナイト持ち越さず US 引け前に強制クローズ)。
-     * default false。3x レバ ETF の寄りギャップ stop-out 回避用 (#intraday-only)。
-     */
+    /** true = forced close before US market close instead of holding overnight. */
     intradayOnly: integer('intraday_only', { mode: 'boolean' }).notNull().default(false),
     /**
-     * 銘柄ロール (#452 Layer 1)。'cash_parking' | 'core_trend' | 'leveraged_trend' |
-     * 'low_volatility' | 'sector_trend' | 'inverse_hedge'。NULL = 従来挙動
-     * (既存 4 銘柄の挙動変更ゼロを保証する fallback)。初期有効化は
-     * cash_parking / core_trend / leveraged_trend の 3 つで、それ以外の role と
-     * **enum 外の不正値は entry 抑止 (fail-closed、BUY を生成しない)**。
-     * enum CHECK は SQLite ALTER 制約を避け admin parse + repo 検証で担保。
+     * 銘柄ロール: 'cash_parking' | 'core_trend' | 'leveraged_trend' |
+     * 'low_volatility' | 'sector_trend' | 'inverse_hedge'。NULL = 従来挙動。
+     * enum 外の値は entry 抑止 (fail-closed、BUY を生成しない)。
      */
     role: text('role'),
     /**
-     * Entry gate の per-symbol override (#452 Layer 2a、#449)。NULL = role preset →
-     * global_config の pullback_default_* の順で fall-through。レバ ETF 向け global
-     * 閾値が非レバ銘柄で歪むのを銘柄単位で吸収する。range CHECK は admin parse +
-     * repo 検証で担保 (budget_alloc_pct と同方針)。
-     *
-     * 押し目深度バンド: pullback_max は 0 に近い側 (例 -0.03)、pullback_min は
-     * 深い側 (例 -0.06)。max < min の不整合バンドは「常に entry 不成立」になる
-     * だけで発注は出ない (fail-closed)。
+     * Entry gate per-symbol override (NULL = role preset -> global_config
+     * pullback_default_* fall-through). pullbackMax is the shallow bound
+     * (e.g. -0.03), pullbackMin the deep bound (e.g. -0.06); an inverted
+     * band (max < min) just yields zero eligible entries, not an error.
      */
     pullbackMaxOverride: real('pullback_max_override'),
     pullbackMinOverride: real('pullback_min_override'),
-    /** トレンド条件 override (NULL = global default、fraction、#452)。 */
+    /** Trend-condition override (NULL = global default; fraction). */
     minReturn50dOverride: real('min_return_50d_override'),
-    /** ボラ過熱ガード override (NULL = global default、ratio > 0、#452)。 */
+    /** Volatility-overheat guard override (NULL = global default; ratio > 0). */
     maxAtrRatioOverride: real('max_atr_ratio_override'),
-    /** 過伸長ガード override (NULL = global default、fraction > 0、#452)。 */
+    /** Overextension-guard override (NULL = global default; fraction > 0). */
     maxSma50DeviationPctOverride: real('max_sma50_deviation_pct_override'),
-    /** SMA50 上抜け必須条件 override (NULL = global default、boolean、#452)。 */
+    /** Require-above-SMA50 override (NULL = global default; boolean). */
     requireAboveSma50Override: integer('require_above_sma50_override', { mode: 'boolean' }),
     /**
-     * 条件連動配分 (#452 Layer 3 / #450)。true = entry gate (ENTRY/HALF) 通過を
-     * 実配分 (active weight) の必須条件にする。未通過の間は active=0 になり、
-     * 浮いた配分は `cash_fallback_symbol` へ退避される。false (default) =
-     * 従来どおり `budget_alloc_pct` の枠が常時有効。
+     * true = entry gate (ENTRY/HALF) 通過を実配分の必須条件にする。未通過の間は
+     * active=0 になり、浮いた配分は cashFallbackSymbols へ退避される。false
+     * (default) = budget_alloc_pct の枠が常時有効。
      */
     entryRequired: integer('entry_required', { mode: 'boolean' }).notNull().default(false),
-    /**
-     * cash_parking 用 (#452)。true = entry 判定に関わらず常時 target = active。
-     * pullback gate を通らない待機資金 ETF (SGOV 等) の配分先として使う。
-     */
+    /** true = target is always active regardless of entry gate (cash-parking symbols like SGOV that bypass the pullback gate). */
     alwaysActive: integer('always_active', { mode: 'boolean' }).notNull().default(false),
     /**
-     * entry_required 銘柄が条件未通過のときの退避先 symbol 群 (#496 多分岐)。
-     * JSON 配列 text (例 '["SGOV","USMV"]')。複数なら**等分割**で流す。
-     * NULL / 空配列 = 退避しない (浮いた分は現金のまま)。同一通貨の銘柄のみ
-     * 有効 — 通貨が異なる先の取り分は配分計算時に skip (fail-closed、現金待機)。
-     * 退避先への**自動発注は global_config.cash_fallback_orders_enabled (default
-     * false) を on にするまで行わない** (判定・表示のみ)。
+     * entry_required 銘柄が条件未通過のときの退避先 (JSON 配列 text、例
+     * '["SGOV","USMV"]')。複数は等分割。NULL/空 = 退避しない。通貨が異なる
+     * 退避先は配分計算で skip (fail-closed、現金待機)。実際の自動発注は
+     * global_config.cash_fallback_orders_enabled が on になるまで行わない。
      */
     cashFallbackSymbols: text('cash_fallback_symbols'),
     updatedAt: text('updated_at').notNull(),
@@ -225,37 +174,21 @@ export type SymbolConfigInsert = typeof symbolConfig.$inferInsert
 
 /**
  * Structurally anti-correlated pairs (SOXL/SOXS, TQQQ/SQQQ 等)。相手 symbol
- * で position を抱えている間の BUY を拒否するために使う (#38-A inverse-pair
- * correlation cap の env 置換)。
- *
- * 1 方向だけ書き込めば十分 — repo 側で bidirectional に展開する。
- *
- * **戦略意図 (#315 regime hedge 明文化)**: 同 sector の 3x leveraged ETF を
- * 同時 universe に入れる構成は dead-money リスクを生む可能性があったが、
- * この table 経由で「inverse 相手に open position がある間は BUY 不可」を強制
- * する事で 1 銘柄 active な regime hedge として動作する。SOXL pullback で entry
- * → trend 続行で hold、regime 反転で SELL → クールダウン後に SOXS 側 entry、
- * の交互運用を想定。
+ * の open position がある間 BUY を拒否するために使う。1 方向だけ書けば十分 —
+ * repo 側で bidirectional に展開する。
  */
 export const inversePairs = sqliteTable('inverse_pairs', {
   symbol: text('symbol').primaryKey(),
   inverse: text('inverse').notNull(),
   /**
-   * ペアレジーム layer (#472) の per-pair opt-in。0 のペアは挙動完全不変。
-   * 1 にする場合は regime_proxy_symbol / regime_bull_symbol が必須 — repo 検証で
-   * 不備があれば該当ペアは zone=unknown (両側 BUY block) に倒す (fail-closed)。
+   * Per-pair opt-in (0 = unchanged legacy behavior). 1 requires
+   * regime_proxy_symbol / regime_bull_symbol; repo validation failure
+   * falls back to zone=unknown (fail-closed, blocks BUY both sides).
    */
   regimeEnabled: integer('regime_enabled', { mode: 'boolean' }).notNull().default(false),
-  /**
-   * レジームスコアの計算対象 (#472 review: **非レバ原資産 ETF** を推奨。例:
-   * SOXL/SOXS → SOXX、TQQQ/SQQQ → QQQ)。universe 登録不要 — regime 評価は
-   * ペア単位で daily bars を独立 fetch する。
-   */
+  /** Regime-score input symbol (unleveraged underlying recommended, e.g. SOXX for SOXL/SOXS). Not required in the trading universe — fetched independently per pair. */
   regimeProxySymbol: text('regime_proxy_symbol'),
-  /**
-   * ペアのどちらがブル側かの明示 (#472)。convention (symbol 列 = ブル) に
-   * 頼らない。symbol か inverse のどちらかと一致しなければ misconfig。
-   */
+  /** Explicit bull-side symbol for the pair (does not assume `symbol` column = bull). Must equal `symbol` or `inverse`, else misconfigured. */
   regimeBullSymbol: text('regime_bull_symbol'),
   updatedAt: text('updated_at').notNull(),
 })
@@ -264,12 +197,11 @@ export type InversePairRow = typeof inversePairs.$inferSelect
 export type InversePairInsert = typeof inversePairs.$inferInsert
 
 /**
- * Singleton global risk / lifecycle config。`id = 'default'` の 1 行のみ。
- * 運用者が `wrangler d1 execute` で UPDATE して runtime 変更する (実発注
- * ON / drawdown 閾値 / kill-switch 等)。env var 側と完全一致のフィールド
- * を持ち、Worker 起動時に loadGlobalConfig で取得する。
- *
- * drawdown_kill_threshold は負の float (例: -0.02 = -2%)。
+ * Singleton global risk / lifecycle config, one row (`id='default'`).
+ * Operator UPDATEs via `wrangler d1 execute` for runtime changes (trading
+ * on/off, drawdown threshold, kill-switch, ...); loaded at Worker start via
+ * `loadGlobalConfig`. `drawdownKillThreshold` is a negative fraction
+ * (e.g. -0.02 = -2%).
  */
 export const globalConfig = sqliteTable(
   'global_config',
@@ -279,9 +211,9 @@ export const globalConfig = sqliteTable(
     tradingEnabled: integer('trading_enabled', { mode: 'boolean' }).notNull().default(false),
     marketHoursCheck: integer('market_hours_check', { mode: 'boolean' }).notNull().default(false),
     /**
-     * #session-window-gate: true で開場 (US 09:30 ET / JP 08:30 → 09:00 JST) の
-     * 30 分前〜引けの窓外は戦略 cron の評価そのものを skip。false (default) は
-     * 従来通り常時評価。
+     * true = skip strategy cron evaluation entirely outside [open - 30min,
+     * close] (US 09:30 ET / JP 08:30-09:00 JST). false (default) = always
+     * evaluate.
      */
     sessionWindowGateEnabled: integer('session_window_gate_enabled', { mode: 'boolean' })
       .notNull()
@@ -297,9 +229,9 @@ export const globalConfig = sqliteTable(
     /** 総資本 (JPY)。NULL なら portfolio exposure check は skip。 */
     totalCapitalJpy: real('total_capital_jpy'),
     /**
-     * 同時保有エクスポージャー上限 = total_capital * max_portfolio_exposure_pct。
-     * 両通貨共通で、各通貨の `open_exposure` が通貨別 `total_capital` の
-     * この比率を超える新規 BUY は reject。
+     * Concurrent-exposure cap = total_capital * max_portfolio_exposure_pct
+     * per currency; new BUYs that would push open_exposure past this
+     * fraction of total_capital are rejected.
      */
     maxPortfolioExposurePct: real('max_portfolio_exposure_pct').notNull().default(0.6),
     drawdownKillThreshold: real('drawdown_kill_threshold').notNull().default(-0.02),
@@ -307,9 +239,9 @@ export const globalConfig = sqliteTable(
     gapRejectPct: real('gap_reject_pct').notNull().default(0.03),
     spreadLimitPctUs: real('spread_limit_pct_us').notNull().default(0.0025),
     spreadLimitPctJp: real('spread_limit_pct_jp').notNull().default(0.006),
-    // Pullback 戦略のデフォルト rule パラメタ。per-symbol は symbol_config 側で
-    // 個別 override 予定 (未実装、fall-through でここの値が全銘柄に効く)。
-    // DB 化の狙いは "tune するのに PR / deploy 不要" (#118)。
+    // Pullback strategy defaults; symbolConfig's per-symbol *Override columns
+    // fall through to these when NULL. DB-backed so tuning doesn't need a
+    // PR/deploy.
     pullbackDefaultStopPct: real('pullback_default_stop_pct').notNull().default(-0.04),
     pullbackDefaultTakeProfitPct: real('pullback_default_take_profit_pct').notNull().default(0.07),
     pullbackDefaultTimeStopDays: integer('pullback_default_time_stop_days').notNull().default(10),
@@ -324,133 +256,103 @@ export const globalConfig = sqliteTable(
      */
     pullbackDefaultKAtr: real('pullback_default_k_atr').notNull().default(2.0),
     /**
-     * 過熱ガード (#strategy-overextension-guards): `(price-sma50)/sma50` がこの比率超
-     * で BUY 見送り。+3x レバ ETF の blowoff 高値掴み回避。POC default 0.60 (+60%)。
+     * Overextension guard: BUY skipped when `(price-sma50)/sma50` exceeds
+     * this fraction (avoids blowoff-top entries on 3x leveraged ETFs).
+     * POC default 0.60 (+60%).
      */
     pullbackDefaultMaxSma50DeviationPct: real('pullback_default_max_sma50_deviation_pct')
       .notNull()
       .default(0.6),
-    /**
-     * ボラ過熱ガード: `atr20/baselineAtr20` がこの比率超で BUY 見送り。POC default 1.5。
-     */
+    /** Volatility-overheat guard: BUY skipped when atr20/baselineAtr20 exceeds this ratio. Default 1.1. */
     pullbackDefaultMaxAtrRatio: real('pullback_default_max_atr_ratio').notNull().default(1.1),
     /**
-     * Stop 幅の上限 = |avgPrice * take_profit_pct| * これ (#stop-rr-cap)。ATR 連動
-     * stop が利確幅に対して一方的に広がるのを止め、R:R に下限を作る (2.0 なら
-     * R:R >= 0.5)。0 で無効 = ATR 連動そのまま (従来挙動)。
+     * Stop-width cap = |avgPrice * take_profit_pct| * this value, bounding
+     * how far the ATR-adaptive stop can widen relative to take-profit (2.0
+     * -> R:R >= 0.5). 0 disables the cap (ATR stop unbounded).
      */
     pullbackDefaultMaxStopToTpRatio: real('pullback_default_max_stop_to_tp_ratio')
       .notNull()
       .default(2.0),
-    /**
-     * 売買コスト見積り (#trade-cost)。約定代金に対する料率。realized PnL を
-     * net 化するのに使う。0 = 従来どおり gross。
-     */
+    /** Fee rate applied to notional, used to net realized PnL. 0 = gross (legacy). */
     feePctOfNotional: real('fee_pct_of_notional').notNull().default(0),
-    /** 1 注文あたりの固定費 (銘柄通貨建て)。0 で無効。 */
+    /** Fixed per-order fee (symbol's currency). 0 = disabled. */
     feeFixedPerOrder: real('fee_fixed_per_order').notNull().default(0),
     /**
-     * baseline ATR の作り方 (#atr-baseline-window)。過熱ガード
-     * (`pullback_default_max_atr_ratio`) の分母を決める。
+     * Baseline ATR window for the overheat guard's denominator
+     * (`pullback_default_max_atr_ratio`). enum validated at loader (invalid
+     * -> `percentile`).
      *
-     * - `percentile` (既定): その銘柄自身の atr20 分布の p80。銘柄ごとのボラ
-     *   水準に依存せず「その銘柄として高ボラか」を測る。閾値 1.1 が実測の推奨
-     * - `overlap`: 直近 60 本平均。**分母が分子を内包する**ため比率が動かず、
-     *   閾値を何にしても発火しない (実測: 全設定でトレード数が同一だった)
-     * - `exclude-recent`: 直近 20 本を除いた平均。比率は素直だが閾値 0.3 の差で
-     *   成績が 4 倍振れ、ノイズを拾いやすい
-     *
-     * enum 検証は loader 側 (不正値は `percentile` に倒す)。
+     * - `percentile` (default): symbol's own atr20 p80 — measures "high vol
+     *   for this symbol" independent of its baseline vol level.
+     * - `overlap`: trailing-60 mean. Denominator overlaps the numerator so
+     *   the ratio barely moves and the guard never fires at any threshold.
+     * - `exclude-recent`: trailing-60 mean excluding the last 20. Ratio
+     *   moves cleanly but is noise-sensitive — small threshold changes swing
+     *   results sharply.
      */
     atrBaselineMode: text('atr_baseline_mode').notNull().default('percentile'),
-    /**
-     * Base risk fraction per trade (0.4% default)。drawdown scale を掛けた値が
-     * pullbackSizing に渡る。#23 Lane 2。
-     */
+    /** Base risk fraction per trade (0.4% default); scaled by drawdown before reaching pullbackSizing. */
     riskBasePerTradePct: real('risk_base_per_trade_pct').notNull().default(0.004),
     /** drawdown がこの閾値 (負) 未満になると size を halfScaleFactor に。-0.05 既定。 */
     riskDdHalfThreshold: real('risk_dd_half_threshold').notNull().default(-0.05),
     /** drawdown がこの閾値 (負) 未満になると size を 0 に (halt)。-0.10 既定。 */
     riskDdHaltThreshold: real('risk_dd_halt_threshold').notNull().default(-0.10),
     /**
-     * VIX regime filter (issue #196 3/3)。`^VIX` 最新値がこの閾値を超えたら
-     * BUY size を `vix_warning_size_scale` 倍に縮小 (default 25 → x0.5)。
-     * 25 以下は normal (size scale 1.0)、SELL は閾値関係なく通す。
+     * VIX regime filter: BUY size scaled to vix_warning_size_scale when
+     * `^VIX` exceeds this (default 25 -> x0.5). At/below = normal (scale
+     * 1.0); SELL is never gated by VIX.
      */
     vixWarningThreshold: real('vix_warning_threshold').notNull().default(25.0),
-    /**
-     * VIX が `vix_critical_threshold` を超えたら BUY を全停止 (sizeScale=0)。
-     * SELL は VIX 関係なく通す (= existing position の exit を妨げない)。
-     * default 30。
-     */
+    /** BUY fully halted (sizeScale=0) above this VIX level; SELL unaffected (never blocks an exit). Default 30. */
     vixCriticalThreshold: real('vix_critical_threshold').notNull().default(30.0),
-    /**
-     * VIX warning 領域 (warning < VIX <= critical) で適用する size 倍率。
-     * default 0.5 (= 半分に縮小)。0..1 で運用想定。
-     */
+    /** Size multiplier applied in the VIX warning band (warning < VIX <= critical). Default 0.5. */
     vixWarningSizeScale: real('vix_warning_size_scale').notNull().default(0.5),
     /**
-     * ペアレジーム layer (#472)。'off' (default) | 'observe' (log のみ、gate
-     * しない) | 'enforce'。enum 検証は loader 側 — 不正値は 'off' に倒す
-     * (= gate 無効が安全側)。
+     * Pair-regime layer: 'off' (default) | 'observe' (log only, no gating) |
+     * 'enforce'. Loader-validated; invalid values fall back to 'off'
+     * (disabled gate is the safe default).
      */
     pairRegimeMode: text('pair_regime_mode').notNull().default('off'),
     /**
-     * Schmitt trigger 閾値 (#472、1x 非レバ proxy 基準)。順序制約
-     * bear_enter < bear_exit < bull_exit < bull_enter は SQLite ALTER で
-     * table-level CHECK を足せないため admin parse + runtime 検証で担保
-     * (順序破壊を検出したら該当ペアは zone=unknown)。
+     * Schmitt-trigger thresholds (1x unleveraged proxy basis). Must satisfy
+     * bear_enter < bear_exit < bull_exit < bull_enter; validated at
+     * admin-parse/runtime (not a DB CHECK — added via ALTER, can't add
+     * table-level CHECK). An order violation falls back to zone=unknown.
      */
     pairRegimeThetaBullEnter: real('pair_regime_theta_bull_enter').notNull().default(0.03),
     pairRegimeThetaBullExit: real('pair_regime_theta_bull_exit').notNull().default(0.01),
     pairRegimeThetaBearEnter: real('pair_regime_theta_bear_enter').notNull().default(-0.04),
     pairRegimeThetaBearExit: real('pair_regime_theta_bear_exit').notNull().default(-0.015),
     /**
-     * Dashboard overview パネルの表示 ON/OFF (#dashboard-mf-layout)。有効パネル
-     * key の CSV。表示専用設定なので trading config (`GlobalConfigSnapshot`) には
-     * 通さず、dashboard が専用 read (`loadOverviewPanels`) で参照する。
-     * key: kpi / equity / composition / recent。default は全表示。
+     * CSV of enabled dashboard overview panel keys (kpi/equity/composition/
+     * recent). Display-only — deliberately excluded from `GlobalConfigSnapshot`
+     * (trading config) and read separately via `loadOverviewPanels`. Default
+     * shows all panels.
      */
     overviewPanels: text('overview_panels').notNull().default('kpi,equity,composition,recent'),
     /**
-     * 条件連動配分の cash fallback 自動発注 (#452 Layer 3 / #450)。**default false
-     * (fail-closed)**: off の間は target/active の判定・表示のみ行い、退避先
-     * (SGOV 等) への自動 BUY は出さない。DRY_RUN + staging で検証してから
-     * `wrangler d1 execute "UPDATE global_config SET cash_fallback_orders_enabled=1"`
-     * で有効化する。on でも DRY_RUN / TRADING_ENABLED / risk gate は全部効く。
+     * Cash-fallback auto-order gate; default false (fail-closed) — off means
+     * target/active is computed and displayed but no BUY is placed toward
+     * fallback symbols. On does not bypass DRY_RUN / TRADING_ENABLED / risk
+     * gates.
      */
     cashFallbackOrdersEnabled: integer('cash_fallback_orders_enabled', { mode: 'boolean' })
       .notNull()
       .default(false),
     /**
-     * News shock gate (issue #196 follow-up、news-shock-gate PR 2)。GDELT の
-     * 報道量急増 + トーン悪化を検知し BUY size を縮小/停止する。'off' (default) |
-     * 'observe' (trace のみ、qty 不変) | 'enforce'。enum 外の DB 値は 'off' に
-     * 倒す (gate 無効が安全側、pairRegimeMode と同じ規約)。ALTER ADD COLUMN で
-     * 追加するため DB CHECK は付けない (vix_* が rebuild 前に取っていたのと同じ
-     * 方針 — 検証は `globalConfigRepo` の runtime sanitize に寄せる)。
+     * News-shock gate: shrinks/halts BUY size on a GDELT report-volume spike
+     * + tone deterioration. 'off' (default) | 'observe' (trace only) |
+     * 'enforce'. Invalid DB values fall back to 'off'. No DB CHECK (added
+     * via ALTER ADD COLUMN) — validated in globalConfigRepo's runtime sanitize.
      */
     newsShockMode: text('news_shock_mode').notNull().default('off'),
-    /**
-     * ratio (直近 max / baseline median) がこれを超えると warning 領域
-     * (size を `news_shock_warn_size_scale` 倍に縮小)。default 2.3 — GDELT
-     * 12ヶ月実測 (356点、`timelinevol`) の p90 (0.832) が baseline median
-     * (0.363) の約 2.29x だったことに由来 (上位約10%を warning とする)。
-     */
+    /** Warning threshold: (recent max / baseline median) ratio above this shrinks BUY size by news_shock_warn_size_scale. Default 2.3. */
     newsShockWarnRatio: real('news_shock_warn_ratio').notNull().default(2.3),
-    /**
-     * ratio がこれを超え、かつ tone 低下 AND 条件 (requireTone=true 時) を
-     * 満たすと critical (BUY 全停止)。default 4.4 — 同実測の p99 (1.598) が
-     * baseline median の約 4.40x だったことに由来 (上位約1%を critical とする)。
-     */
+    /** Critical threshold: ratio above this AND (if requireTone) a tone drop halts BUY entirely. Default 4.4. */
     newsShockBlockRatio: real('news_shock_block_ratio').notNull().default(4.4),
     /** warning 領域の size 倍率。default 0.5。 */
     newsShockWarnSizeScale: real('news_shock_warn_size_scale').notNull().default(0.5),
-    /**
-     * critical 判定に要求する tone 低下幅 (baselineTone - latestTone)。
-     * 報道量が増えただけ (ポジティブなニュース) で BUY を止めないための AND 条件。
-     * default 1.5。
-     */
+    /** Tone-drop magnitude (baselineTone - latestTone) required for critical, so a volume spike alone (e.g. positive news) doesn't halt BUY. Default 1.5. */
     newsShockToneDropThreshold: real('news_shock_tone_drop_threshold').notNull().default(1.5),
     /** true (default) で critical 判定に tone 低下 AND 条件を要求する。 */
     newsShockRequireTone: integer('news_shock_require_tone', { mode: 'boolean' })
@@ -471,28 +373,29 @@ export const globalConfig = sqliteTable(
      */
     attentionStalePolicy: text('attention_stale_policy').notNull().default('fail_open'),
     /**
-     * Extended-hours (pre-market) gate (issue #709 Phase 6)。`extended_hours_observation`
-     * (Phase 1 producer) の当日 WARNING/STOP_AT_OPEN_CANDIDATE を BUY sizing に
-     * 反映する。'off' (default) | 'observe' (trace のみ) | 'enforce'。enum 外の
-     * DB 値は 'off' に倒す (gate 無効が安全側、newsShockMode と同じ規約)。
-     * ALTER ADD COLUMN で追加するため DB CHECK は付けない (news_shock_mode 等と
-     * 同じ方針 — 検証は `globalConfigRepo` の runtime sanitize に寄せる)。
+     * Extended-hours (pre-market) gate: applies same-day WARNING/
+     * STOP_AT_OPEN_CANDIDATE from extended_hours_observation to BUY sizing.
+     * 'off' (default) | 'observe' (trace only) | 'enforce'. Invalid DB
+     * values fall back to 'off'; no DB CHECK (ALTER-added column),
+     * validated in globalConfigRepo's runtime sanitize.
      */
     extendedHoursGateMode: text('extended_hours_gate_mode').notNull().default('off'),
     /**
-     * 退避先 (cash fallback) 銘柄の需要連動自動 SELL (#452 follow-up)。退避元が
-     * 保有 or BUY を試みた ("demand" あり) tick でだけ、退避先の active weight
-     * 超過分を部分 SELL して本体戦略へ資金を戻す。'off' (default) | 'observe'
-     * (trace/log のみ) | 'enforce'。enum 外の DB 値は 'off' に倒す (gate 無効が
-     * 安全側、newsShockMode と同じ規約)。BUY 側 (`cashFallbackOrdersEnabled`)
-     * とは独立の flag — SELL だけ先に enforce する運用も想定する。
+     * Cash-fallback demand-linked auto-SELL: on ticks where the fallback
+     * source attempts a BUY ("demand"; holding alone does not count —
+     * avoids a sell-then-buyback round trip), partially sells the fallback
+     * symbol's excess over active weight back to the source strategy.
+     * 'off' (default) | 'observe' | 'enforce'. Invalid DB values fall back
+     * to 'off'. Independent of cashFallbackOrdersEnabled (the BUY-side
+     * flag) — SELL can be enforced first.
      */
     cashFallbackSellMode: text('cash_fallback_sell_mode').notNull().default('off'),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
-    // DB レベルで typo / 桁違いの UPDATE を弾く。上限値は POC としての上限
-    // (例: 1 回の発注で $10M は明らかに誤入力) を想定。
+    // Catches a typo/wrong-magnitude UPDATE at the DB level; the upper
+    // bound is a POC sanity ceiling (e.g. $10M on a single order is
+    // obviously a mistake).
     maxOrderNotionalRange: check(
       'global_config_max_order_notional_range',
       sql`${t.maxOrderNotional} > 0 AND ${t.maxOrderNotional} <= 10000000`,
@@ -565,12 +468,11 @@ export const globalConfig = sqliteTable(
       'global_config_pullback_default_k_atr_range',
       sql`${t.pullbackDefaultKAtr} > 0 AND ${t.pullbackDefaultKAtr} <= 10`,
     ),
-    // 過熱ガード 2 列 (max_sma50_deviation_pct / max_atr_ratio) は 0015(vix) と同様、
-    // ALTER ADD COLUMN で追加するため DB CHECK は付けない (SQLite 制約)。範囲の
-    // 妥当性はゲートが本質的に fail-safe (異常値でも BUY を抑制する方向) なため、
-    // 将来の table-rebuild migration でまとめて CHECK 投入予定。
-    // 相対関係を DB で縛る: min > max だと BUY 条件を満たす pullback 幅が
-    // 空集合になり戦略が静かに停止する。runtime UPDATE の typo 防止。
+    // No DB CHECK for max_sma50_deviation_pct / max_atr_ratio (ALTER-added
+    // columns, SQLite can't add a table-level CHECK afterward) — the gate
+    // itself is fail-safe on bad values (suppresses BUY, doesn't block).
+    // This CHECK guards the relative order: min > max would silently zero
+    // out eligible entries.
     pullbackDefaultPullbackWindowOrder: check(
       'global_config_pullback_default_pullback_window_order',
       sql`${t.pullbackDefaultPullbackMin} <= ${t.pullbackDefaultPullbackMax}`,
@@ -620,10 +522,9 @@ export type GlobalConfigRow = typeof globalConfig.$inferSelect
 export type GlobalConfigInsert = typeof globalConfig.$inferInsert
 
 /**
- * Per-symbol decision log from `runPullbackScheduler`。1 row per
- * (cron fire × symbol)。HOLD / BUY / SELL / SKIP / REJECT / ERROR 全ルートを残す。
- * #128。運用で銘柄単位の診断 (なぜ BUY が出ないのか) に使う。
- * 7 日 TTL で quote feed cron が cleanup 同梱予定。
+ * Per-symbol decision log from `runPullbackScheduler` (one row per cron
+ * fire x symbol), covering all routes: HOLD / BUY / SELL / SKIP / REJECT /
+ * ERROR. Used for per-symbol diagnosis of why a BUY did or didn't fire.
  */
 export const strategyDecisionLog = sqliteTable(
   'strategy_decision_log',
@@ -644,22 +545,23 @@ export const strategyDecisionLog = sqliteTable(
     /** indicators snapshot JSON (debug 用、optional) */
     indicatorsJson: text('indicators_json'),
     /**
-     * BUY/SELL 成立時の client_order_id。dashboard が trade_journal と JOIN
-     * して realized_pnl を引くためのキー (#143)。HOLD/SKIP/REJECT/ERROR は null。
+     * client_order_id set on BUY/SELL rows; join key for dashboard to pull
+     * realized_pnl from trade_journal. NULL for HOLD/SKIP/REJECT/ERROR.
      */
     clientOrderId: text('client_order_id'),
     /**
-     * 判定トレース JSON (`DecisionTraceStep[]`)。どのレイヤー(gate)を通り、
-     * どこで採用/却下されたかの順序付きログ。dashboard が「入力→ロジック層→出力」の
-     * ラダー可視化に使う (#decision-trace)。migration 前の行 / 一部経路は NULL。
+     * Ordered decision trace (`DecisionTraceStep[]`) of which gate/layer
+     * accepted or rejected the signal; renders as an input->logic->output
+     * ladder on the dashboard. NULL for pre-migration rows or paths that
+     * don't emit a trace.
      */
     traceJson: text('trace_json'),
   },
   (t) => ({
-    // `/dashboard/cron?symbol=X` は WHERE symbol=? ORDER BY id DESC で読む。
-    // (symbol, id) の複合 index で drop-in covering (CodeRabbit #132)。
+    // `/dashboard/cron?symbol=X` reads WHERE symbol=? ORDER BY id DESC — this
+    // composite index covers it directly.
     symbolIdIdx: index('strategy_decision_log_symbol_id_idx').on(t.symbol, t.id),
-    // trade_journal との JOIN 用 (#143)。
+    // Join key for trade_journal lookups.
     clientOrderIdIdx: index('strategy_decision_log_coid_idx').on(t.clientOrderId),
   }),
 )
@@ -668,19 +570,14 @@ export type StrategyDecisionLogRow = typeof strategyDecisionLog.$inferSelect
 export type StrategyDecisionLogInsert = typeof strategyDecisionLog.$inferInsert
 
 /**
- * `Notifier.notify()` で push 通知を送った全イベントを書き出す append-only
- * ログ (#141)。dashboard `/dashboard/alerts` の active alerts view が
- * `severity = 'critical' | 'warning'` を timestamp DESC で読む。
+ * Append-only log of every event `Notifier.notify()` sent, independent of
+ * webhook delivery success (audit trail survives a down/unset webhook).
+ * `/dashboard/alerts` reads severity IN ('critical','warning') ORDER BY
+ * timestamp DESC.
  *
- * 役割:
- *   - operator が dashboard を見れば「直近 100 件の critical / warning」を
- *     一覧できる
- *   - Webhook が落ちていた / 未設定でも D1 だけは残る (audit trail)
- *   - Workers Logs retention を超える長期保全までは expectation しない (POC)。
- *     長期保全は Logpush to R2 (follow-up) でカバー想定。
- *
- * `severity` は free-form text にしておく (DB CHECK 制約は drizzle-kit で
- * 後から追加可能)。production の値域は `NotificationSeverity` 型で縛る。
+ * `severity` stays free-form text (DB CHECK constraints are awkward to add
+ * later via drizzle-kit); the value domain is enforced at the type level by
+ * `NotificationSeverity`.
  */
 export const notificationEmitLog = sqliteTable(
   'notification_emit_log',
@@ -699,17 +596,17 @@ export const notificationEmitLog = sqliteTable(
     message: text('message').notNull(),
   },
   (t) => ({
-    // dashboard `/dashboard/alerts` は ORDER BY timestamp DESC, id DESC で読む。
-    // `waitUntil` 配下の INSERT が前後して id 順と発生順がずれるケースを
-    // tiebreak で吸収するため、timestamp を first key にする (CodeRabbit #210)。
+    // ORDER BY timestamp DESC, id DESC. timestamp leads (not id) because
+    // out-of-order `waitUntil` INSERTs can make id order diverge from
+    // actual event order; id is the tiebreak.
     timestampIdIdx: index('notification_emit_log_timestamp_id_idx').on(t.timestamp, t.id),
-    // severity フィルタ + timestamp DESC ソートを 1 本でカバー。
+    // Covers severity filter + timestamp DESC sort in one index.
     severityTimestampIdIdx: index('notification_emit_log_severity_timestamp_id_idx').on(
       t.severity,
       t.timestamp,
       t.id,
     ),
-    // event type 別フィルタ ('strategy_cron_error' のような cause も同 index で覆える)。
+    // Covers event-type filter (also serves cause values like 'strategy_cron_error').
     eventTypeTimestampIdIdx: index('notification_emit_log_event_type_timestamp_id_idx').on(
       t.eventType,
       t.timestamp,
@@ -722,13 +619,14 @@ export type NotificationEmitLogRow = typeof notificationEmitLog.$inferSelect
 export type NotificationEmitLogInsert = typeof notificationEmitLog.$inferInsert
 
 /**
- * `global_config` の重要 field の前回値スナップショット (#141)。
- * cron tick で global_config を読む際にこの table と比較し、
- * `dry_run` true→false や `trading_enabled` false→true 等の遷移を検知して
- * STATE_CHANGE 通知を出す。
+ * Previous-value snapshot of key `global_config` fields. Each cron tick
+ * diffs the fresh read against this table to detect transitions (e.g.
+ * dry_run true->false, trading_enabled false->true) and fire a
+ * STATE_CHANGE notification.
  *
- * `key` PRIMARY KEY 1 行 / field なので `INSERT OR REPLACE` で更新する。
- * 値は JSON.stringify で保存 (boolean / number / string / null を一律扱う)。
+ * One row per field (`key` primary key), updated via `INSERT OR REPLACE`.
+ * `value` is `JSON.stringify`'d so boolean/number/string/null share one
+ * column type.
  */
 export const configStateSnapshot = sqliteTable('config_state_snapshot', {
   /** field 名 (例: `dry_run`, `trading_enabled`). */
@@ -743,12 +641,10 @@ export type ConfigStateSnapshotRow = typeof configStateSnapshot.$inferSelect
 export type ConfigStateSnapshotInsert = typeof configStateSnapshot.$inferInsert
 
 /**
- * Per-symbol earnings calendar (issue #196 1/3)。entry を avoid させる用途
- * の risk gate ソース。`earningsGate` が evalDate ± freezeBusinessDays を
- * 範囲で読み、該当日があれば BUY を reject する (シグナル源ではなく avoid 用)。
- *
- * POC では外部 API 取得は別 issue で、`/admin/earnings/seed` 経由で operator が
- * 手動 seed する想定。`UNIQUE (symbol, earnings_date)` で重複 insert は弾く。
+ * Per-symbol earnings calendar; risk-gate source for avoiding entries.
+ * `earningsGate` reads evalDate +/- freezeBusinessDays and rejects BUY if a
+ * matching date exists (avoid-only, not a signal source). Operator-seeded
+ * via `/admin/earnings/seed`; `UNIQUE (symbol, earnings_date)` blocks dupes.
  */
 export const earningsCalendar = sqliteTable(
   'earnings_calendar',
@@ -756,10 +652,7 @@ export const earningsCalendar = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     /** 銘柄コード (例: 'AAPL', '7203')。upper-case 前提で repo 側が正規化する。 */
     symbol: text('symbol').notNull(),
-    /**
-     * 決算発表日 ISO date "YYYY-MM-DD"。BMO (Before Market Open) / AMC
-     * (After Market Close) の区別は POC では持たない (±N 営業日窓で十分粗い)。
-     */
+    /** Earnings date ISO "YYYY-MM-DD". No BMO/AMC distinction — the +/-N business-day window is coarse enough without it. */
     earningsDate: text('earnings_date').notNull(),
     /** 自由 text。'Q2 2026' / 'BMO' / news source 等を operator が任意で残す。 */
     notes: text('notes'),
@@ -768,9 +661,9 @@ export const earningsCalendar = sqliteTable(
       .default(sql`(datetime('now'))`),
   },
   (t) => ({
-    // 同一銘柄 × 同一日の重複を物理的に防ぐ。bulk seed は INSERT OR IGNORE で skip。
-    // unique index は gate の (symbol, earnings_date) range read もカバーするので
-    // 通常の index は別建てしない (drop-in covering)。
+    // Physically blocks (symbol, earnings_date) dupes; bulk seed uses
+    // INSERT OR IGNORE. Also covers the gate's (symbol, earnings_date)
+    // range read, so no separate plain index is added.
     symbolDateUnique: uniqueIndex('earnings_calendar_symbol_date_unique').on(t.symbol, t.earningsDate),
   }),
 )
@@ -779,36 +672,25 @@ export type EarningsCalendarRow = typeof earningsCalendar.$inferSelect
 export type EarningsCalendarInsert = typeof earningsCalendar.$inferInsert
 
 /**
- * Macro economic event calendar (issue #196 2/3)。`earningsCalendar` と
- * 同じく avoid 用 risk gate のソース。FOMC / CPI / NFP / PCE / GDP / ISM 等の
- * 重要発表 当日 ±N 時間に被る BUY エントリを `macroEventGate` が凍結する
- * (シグナル源ではない、BUY を *止める* だけ)。
+ * Macro economic event calendar; same avoid-only risk-gate role as
+ * `earningsCalendar`. `macroEventGate` freezes BUY entries within +/-N
+ * hours of FOMC/CPI/NFP/PCE/GDP/ISM etc. (halts entries, not a signal
+ * source). Operator-seeded via `/admin/macro-events/seed`;
+ * `UNIQUE (event_type, event_date)` blocks dupes.
  *
- * POC では外部 API 取得は別 issue で、`/admin/macro-events/seed` 経由で
- * operator が手動 seed する想定。`UNIQUE (event_type, event_date)` で同一
- * event の重複 insert を物理的に弾く。
- *
- * `event_time` (HH:MM ET) は optional — 未設定なら「当日全日凍結」、設定
- * されていれば 発表時刻 ± N 時間で window 判定 (簡略 ET tz: `Intl.DateTimeFormat`
- * with `America/New_York`)。
+ * `event_time` (HH:MM ET) is optional: unset freezes the whole day, set
+ * freezes +/-N hours around it (ET via `Intl.DateTimeFormat` with
+ * `America/New_York`).
  */
 export const macroEventCalendar = sqliteTable(
   'macro_event_calendar',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    /**
-     * Event 種別 (例: 'FOMC' / 'CPI' / 'NFP' / 'PCE' / 'GDP' / 'ISM')。
-     * upper-case 前提で repo 側が正規化する。reason 文字列に含めるので
-     * operator が dashboard で読みやすい短い記号を使う。
-     */
+    /** Event type ('FOMC'/'CPI'/'NFP'/'PCE'/'GDP'/'ISM' etc.), upper-cased by the repo. Included in the gate's reason string, so keep it short. */
     eventType: text('event_type').notNull(),
     /** 発表日 ISO date "YYYY-MM-DD" (ET base — 米国経済指標の慣習)。 */
     eventDate: text('event_date').notNull(),
-    /**
-     * 発表時刻 ISO time "HH:MM" (ET base、24h)。NULL なら時刻不明 = 当日全日
-     * 凍結扱い (例: 一部 ISM / GDP の正確な分単位が事前未確定なケース)。
-     * 例: CPI '08:30', FOMC '14:00', NFP '08:30'。
-     */
+    /** Release time "HH:MM" ET, 24h. NULL = unknown time, freezes the whole day. E.g. CPI '08:30', FOMC '14:00'. */
     eventTime: text('event_time'),
     /** 自由 text。'June FOMC' / 'June CPI release' / source 等。 */
     notes: text('notes'),
@@ -830,18 +712,19 @@ export type MacroEventCalendarRow = typeof macroEventCalendar.$inferSelect
 export type MacroEventCalendarInsert = typeof macroEventCalendar.$inferInsert
 
 /**
- * Append-only audit trail of state-changing admin POST calls (#274). One row per
- * mutation: `before_json` / `after_json` are `JSON.stringify`'d snapshots of the
- * affected resource so dashboard can render diffs without re-fetching state.
+ * Append-only audit trail of state-changing admin POST calls. One row per
+ * mutation; `before_json` / `after_json` are `JSON.stringify`'d snapshots of
+ * the affected resource so dashboard can render diffs without re-fetching
+ * state.
  *
- * Rows are written by `recordChange()` only when before != after — pure no-op
- * calls (e.g. seed-cash with the same amount) are skipped to keep the table
- * focused on actual changes.
+ * `recordChange()` only writes when before != after — a no-op call (e.g.
+ * seed-cash with the same amount) is skipped.
  *
- * `actor` is the basic-auth username, falling back to `'ai-agent'` when the
- * header is missing or unparseable. `target_key` is a free-form short string
- * (e.g. `symbol=SOXL` / `portfolio=daily`) so a single endpoint with multiple
- * resources (`/earnings/seed`) can still group rows.
+ * `actor` is the CF Access JWT principal (SSO email or service token
+ * common_name, set by `accessJwt` middleware) — `extractActor` throws
+ * rather than silently defaulting if it's missing. `target_key` is a
+ * free-form short string (e.g. `symbol=SOXL`) so one endpoint covering
+ * multiple resources can still group rows.
  */
 export const configAuditLog = sqliteTable(
   'config_audit_log',
@@ -856,8 +739,8 @@ export const configAuditLog = sqliteTable(
     requestId: text('request_id'),
   },
   (t) => ({
-    // dashboard `/dashboard/audit` は timestamp DESC で読む。id を tiebreak に
-    // 含めて同 timestamp の順序を安定化 (notification_emit_log 相当の対応)。
+    // `/dashboard/audit` reads ORDER BY timestamp DESC; id is the tiebreak
+    // for same-timestamp rows (same pattern as notification_emit_log).
     timestampIdIdx: index('config_audit_log_timestamp_id_idx').on(t.timestamp, t.id),
     actorTimestampIdIdx: index('config_audit_log_actor_timestamp_id_idx').on(
       t.actor,
@@ -876,15 +759,15 @@ export type ConfigAuditLogRow = typeof configAuditLog.$inferSelect
 export type ConfigAuditLogInsert = typeof configAuditLog.$inferInsert
 
 /**
- * Runtime kill-switch toggle history (issue #276)。`global_config.trading_enabled`
- * は単一行で「現在値」、こちらは append-only で「いつ誰が何故 ON/OFF にしたか」
- * を残す。full audit log は #274 で別途扱う想定なので、ここでは kill-switch の
- * before/after/reason に絞る最小スキーマ。
+ * Append-only kill-switch toggle history. `global_config.trading_enabled`
+ * holds only the current value; this table keeps who/when/why for every
+ * ON/OFF transition. Scoped to kill-switch before/after/reason only — the
+ * general admin audit trail is `configAuditLog`.
  */
 export const tradingToggleHistory = sqliteTable('trading_toggle_history', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   timestamp: text('timestamp').notNull(),
-  /** basic-auth user (admin endpoint 経由は username, dashboard 経由も同様)。 */
+  /** CF Access JWT principal (see `accessJwt` middleware / `extractActor`). */
   actor: text('actor'),
   /** 切替前の trading_enabled。NULL は初回 toggle (snapshot 不能) のみ想定。 */
   before: integer('before', { mode: 'boolean' }),
@@ -899,19 +782,18 @@ export type TradingToggleHistoryRow = typeof tradingToggleHistory.$inferSelect
 export type TradingToggleHistoryInsert = typeof tradingToggleHistory.$inferInsert
 
 /**
- * Daily portfolio equity snapshot (1 row per `rollDaily()` execution). Persists
- * `PortfolioStateDO.dailyStartEquity` over time so the `/dashboard/portfolio`
- * page can render the "真の総資産チャート" — cash + holdings — rather than the
- * `/dashboard/charts?tab=overview` curve which only sums `trade_journal.realized_pnl`.
+ * Daily portfolio equity snapshot, one row per `rollDaily()` call. Persists
+ * `PortfolioStateDO.dailyStartEquity` over time so `/dashboard/portfolio`
+ * can chart true total assets (cash + holdings), unlike the
+ * `/dashboard/charts?tab=overview` curve which only sums
+ * `trade_journal.realized_pnl`.
  *
- * USD / JPY are kept as separate columns so multi-currency snapshots can be
- * recorded without ad-hoc JSON. The DO today stores a single `dailyStartEquity`
- * number; today this populates USD by default with JPY left NULL until the DO
- * is split per-currency (out of scope of this PR). Either column may be NULL.
+ * USD/JPY are separate columns (not JSON) so multi-currency snapshots don't
+ * need ad-hoc parsing; either may be NULL — today only USD is populated,
+ * pending a per-currency DO split.
  *
- * One row per roll-daily call. We do NOT dedupe within a day — multiple
- * manual rolls on the same day intentionally produce multiple rows so the
- * audit trail keeps every transition.
+ * Never deduped within a day: repeated manual rolls intentionally produce
+ * multiple rows so the audit trail keeps every transition.
  */
 export const portfolioEquitySnapshot = sqliteTable(
   'portfolio_equity_snapshot',
@@ -939,20 +821,18 @@ export type PortfolioEquitySnapshotRow = typeof portfolioEquitySnapshot.$inferSe
 export type PortfolioEquitySnapshotInsert = typeof portfolioEquitySnapshot.$inferInsert
 
 /**
- * Webull OpenAPI の「実発注できる銘柄」allowlist キャッシュ (#460)。
+ * Cache of Webull OpenAPI's actually-orderable-symbol allowlist, sourced
+ * from `GET /trade/instrument/tradable/list` (the OpenAPI-tradable set,
+ * distinct from the consumer app's trading universe). `instrument/stock/list`'s
+ * `status` field can't distinguish deny (both denied and allowed symbols
+ * show `OC`), so this allowlist is the only pre-trade signal for it.
  *
- * 元データは `GET /trade/instrument/tradable/list` (x-version v1, no `/openapi`
- * prefix, app-level 署名のみで access token 不要)。これは口座が **OpenAPI 経由で
- * 実際に発注できる銘柄の全集合** で、コンシューマアプリの取扱 universe とは別物。
- * deny 実証済みの USMV は不在、実運用中の SOXL/SOXS/SQQQ/TQQQ は在籍することを
- * 本番資格情報で確認済み (2026-06-12)。instrument/stock/list の `status` (USMV も
- * VUG も OC) では deny を区別できないので、この allowlist が唯一の事前判定路。
- *
- * **物理削除しない (upsert only)**: 自動売買で使用中の銘柄が tradable/list から
- * 消えても行は残す (`currently_tradable=false` にするだけ)。理由は (1) reconcile /
- * 履歴追跡が壊れない、(2) `true→false` 遷移自体が「保有中銘柄が取扱停止された」
- * 監視シグナルになる。発注は止めず警告レイヤーとして使い、最終防衛は #460 の
- * 発注後 417 TICKER_IS_DENY 自動 disable のまま。
+ * Upsert-only, never physically deleted: a symbol dropping out of
+ * tradable/list just flips `currently_tradable=false`. This keeps
+ * reconcile/history intact and makes the `true->false` transition itself a
+ * monitoring signal (a held symbol just lost trading eligibility) without
+ * blocking orders — the real backstop is the post-417 `TICKER_IS_DENY`
+ * auto-disable path.
  */
 export const tradableInstrument = sqliteTable(
   'tradable_instrument',
@@ -983,31 +863,26 @@ export type TradableInstrumentRow = typeof tradableInstrument.$inferSelect
 export type TradableInstrumentInsert = typeof tradableInstrument.$inferInsert
 
 /**
- * News/crowd attention observation store (issue #196 follow-up — newsShockGate /
- * crowdEuphoriaGate risk gates). Append-only time series shared across sources:
- * `source` discriminates GDELT report-volume/tone (this PR) from a future
- * YouTube upload-count producer so both land in one table without a
- * per-source schema fork.
- *
- * This PR is producer-only (`newsScheduler` writes on the 5-minute cron) —
- * there is no read path from strategy/risk code yet. The gate that reads
- * this table is a later PR (trading path change is zero here, see plan doc).
+ * Append-only news/crowd attention observation time series, shared across
+ * sources via the `source` column (GDELT report-volume/tone today; room for
+ * e.g. a YouTube upload-count producer without a schema fork). Written by
+ * `newsScheduler` on the 5-minute cron, read by `newsShockGate`.
  *
  * `UNIQUE (source, probe_key, metric, bucket_at)` is the idempotent-backfill
- * mechanism: GDELT's `timespan=1d` request returns ~96 buckets every tick, so
- * each tick does a full bulk-insert-ignore over all of them. A missed tick
- * (cron failure, cold start) self-heals on the next tick — already-seen
- * buckets just collide on the unique index and are skipped, never duplicated.
+ * mechanism: GDELT's `timespan=1d` request returns ~96 buckets every tick,
+ * so each tick bulk-insert-ignores all of them. A missed tick self-heals on
+ * the next one — already-seen buckets collide on the unique index and are
+ * skipped, never duplicated.
  */
 export const attentionObservation = sqliteTable(
   'attention_observation',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    /** データソース。'gdelt' (報道量/トーン、このPR) / 'youtube' (投稿本数、将来PR)。 */
+    /** Data source: 'gdelt' (report volume/tone) or 'youtube' (upload count, not yet implemented). */
     source: text('source').notNull(),
     /** probe 定義のキー (`newsProbes.ts` のコード定数と一致)。 */
     probeKey: text('probe_key').notNull(),
-    /** 'volume' (報道量%) / 'tone' (平均トーン) / 'upload_count' (投稿本数、将来PR)。 */
+    /** 'volume' (report-volume %) / 'tone' (mean tone) / 'upload_count' (not yet implemented). */
     metric: text('metric').notNull(),
     /** 観測 bucket の ISO UTC (GDELT timeline の `date` を正規化した値)。 */
     bucketAt: text('bucket_at').notNull(),
@@ -1017,9 +892,9 @@ export const attentionObservation = sqliteTable(
     requestId: text('request_id'),
   },
   (t) => ({
-    // 冪等 backfill の要 (上記コメント参照)。`macroEventCalendar` と同様、この
-    // unique index が gate (将来PR) の trailing-window range read もカバーする
-    // ので別建ての plain index は追加しない (drop-in covering)。
+    // Idempotent-backfill key (see table doc). Also covers newsShockGate's
+    // trailing-window range read, like macroEventCalendar, so no separate
+    // plain index is added.
     sourceProbeMetricBucketUnique: uniqueIndex(
       'attention_observation_source_probe_metric_bucket_unique',
     ).on(t.source, t.probeKey, t.metric, t.bucketAt),
@@ -1030,13 +905,12 @@ export type AttentionObservationRow = typeof attentionObservation.$inferSelect
 export type AttentionObservationInsert = typeof attentionObservation.$inferInsert
 
 /**
- * Extended-hours (pre-market) reference observation table (issue #709 Phase 1).
- *
- * `extendedHoursScheduler` writes this on the US pre-market cron window
- * ([open-90min, open)) from Yahoo's `/v8/finance/chart` extended-hours bars.
- * This table is **producer-only** — strategy/risk/execution never read it,
- * and the producer never writes `lastQuote` / `QuoteSnapshot` / SymbolStateDO.
- * The values are a reference line for operators only (see dashboard note).
+ * Extended-hours (pre-market) reference observation table. Written by
+ * `extendedHoursScheduler` on the US pre-market cron window
+ * ([open-90min, open)) from Yahoo's `/v8/finance/chart` bars, and read by
+ * `extendedHoursGate` (gated by `global_config.extended_hours_gate_mode`).
+ * The producer itself never writes `lastQuote` / `QuoteSnapshot` /
+ * SymbolStateDO.
  */
 export const extendedHoursObservation = sqliteTable(
   'extended_hours_observation',

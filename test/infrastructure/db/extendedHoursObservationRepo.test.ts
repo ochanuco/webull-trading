@@ -25,9 +25,10 @@ describe('createExtendedHoursObservationRepo.insertMany', () => {
     expect(insert).not.toHaveBeenCalled()
   })
 
-  it('chunks 7 rows per multi-row INSERT (D1 100-bound-param guard, 13 columns)', async () => {
-    // 10 = CHUNK(7) + 端数(3) — チャンク境界をまたぐ件数を維持する。
-    const records = Array.from({ length: 10 }, (_, i) => record({ symbol: `SYM${i}` }))
+  it('chunks 7 rows per multi-row INSERT (D1 100-bound-param guard, 13 columns), crossing the chunk boundary at a 3-row remainder', async () => {
+    const CHUNK_SIZE = 7
+    const REMAINDER = 3
+    const records = Array.from({ length: CHUNK_SIZE + REMAINDER }, (_, i) => record({ symbol: `SYM${i}` }))
     const valuesCalls: unknown[][] = []
     const insert = vi.fn(() => ({
       values: vi.fn((v: unknown[]) => {
@@ -39,9 +40,9 @@ describe('createExtendedHoursObservationRepo.insertMany', () => {
     const repo = createExtendedHoursObservationRepo(db)
     const result = await repo.insertMany(records)
     expect(valuesCalls).toHaveLength(2)
-    expect(valuesCalls[0]).toHaveLength(7)
-    expect(valuesCalls[1]).toHaveLength(3)
-    expect(result).toEqual({ inserted: 10 })
+    expect(valuesCalls[0]).toHaveLength(CHUNK_SIZE)
+    expect(valuesCalls[1]).toHaveLength(REMAINDER)
+    expect(result).toEqual({ inserted: CHUNK_SIZE + REMAINDER })
     for (const call of valuesCalls) {
       expect(call.length * 13).toBeLessThanOrEqual(100)
     }
@@ -65,9 +66,8 @@ describe('createExtendedHoursObservationRepo.insertMany', () => {
 
 describe('createExtendedHoursObservationRepo.latestPerSymbol / recent', () => {
   it('latestPerSymbol issues a single query (bound params must not scale with symbol count)', async () => {
-    // MAX(id) 抽出を別クエリにすると ids が銘柄数ぶん bound parameter を消費し
-    // D1 の 100 個上限を超え得る — サブクエリ 1 本 (= select 呼び出し 1 回) で
-    // あることを回帰保証する。
+    // A separate MAX(id) query would burn one bound param per symbol, risking
+    // D1's 100-param limit — must stay a single select() call.
     const rows = [{ id: 5, symbol: 'AAPL' }, { id: 9, symbol: 'SOXL' }]
     const whereFn = vi.fn(() => ({ orderBy: vi.fn(() => Promise.resolve(rows)) }))
     const select = vi.fn(() => ({ from: vi.fn(() => ({ where: whereFn })) }))

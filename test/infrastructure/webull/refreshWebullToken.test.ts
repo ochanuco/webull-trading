@@ -137,7 +137,6 @@ describe('refreshWebullToken', () => {
     const result = await refreshWebullToken(env, { tokenClient })
 
     expect(result.refreshed).toBe(true)
-    // createToken was called with undefined (no existing token to pass)
     expect(tokenClient.createToken).toHaveBeenCalledWith(undefined)
   })
 

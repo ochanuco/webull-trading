@@ -12,8 +12,8 @@ function mockJson(body: unknown, status = 200): Response {
 }
 
 describe('YahooQuoteClient', () => {
-  // #21 follow-up: dashboard / log で source 識別に使う label を locked。
-  // 'yahoo-snapshot' / 'webull-snapshot' の 2 値しか想定してないので drift 防止。
+  // Locked: dashboard/log source labels only ever take 'yahoo-snapshot' or
+  // 'webull-snapshot' (#21 follow-up); this guards against label drift.
   it('exposes source = "yahoo-snapshot"', () => {
     const client = new YahooQuoteClient()
     expect(client.source).toBe(YAHOO_QUOTE_SOURCE)
@@ -49,8 +49,7 @@ describe('YahooQuoteClient', () => {
     ])
   })
 
-  // JP symbol は Yahoo convention で `.T` suffix を付ける必要あり。
-  // YahooBarClient と同じ `toYahooSymbol` を再利用してる事の locked。
+  // Locked: reuses the same `toYahooSymbol` helper as YahooBarClient.
   it('appends `.T` suffix to JP symbols on the wire', async () => {
     let capturedPath: string | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL) => {
@@ -75,8 +74,7 @@ describe('YahooQuoteClient', () => {
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
-  // Yahoo は batch snapshot を持たないので per-symbol fan-out。N requests = N
-  // fetches を保証 (= 並列で Promise.all される)。
+  // Yahoo has no batch snapshot endpoint, hence one fetch per symbol.
   it('fans out one fetch per symbol', async () => {
     const fetchFn = vi.fn(async () =>
       mockJson({
@@ -88,8 +86,8 @@ describe('YahooQuoteClient', () => {
     expect(fetchFn).toHaveBeenCalledTimes(3)
   })
 
-  // 個別失敗は skip (= 配列から除外) する事を locked。strategy cron 側は per-symbol
-  // で「結果あり/なし」を見て fallback / skip 判定するため。
+  // Locked: the strategy cron makes its fallback/skip decision per symbol based
+  // on whether a result is present, so one failure must not abort the batch.
   it('drops symbols whose individual fetch errors (does not abort the whole batch)', async () => {
     const fetchFn = vi.fn(async (input: Request | string | URL) => {
       const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -105,7 +103,6 @@ describe('YahooQuoteClient', () => {
     expect(results.map((r) => r.symbol)).toEqual(['OK1', 'OK2'])
   })
 
-  // meta.regularMarketPrice が無い (delisted / typo / API drift) ケースを除外。
   it('drops symbols whose response is missing regularMarketPrice', async () => {
     const fetchFn = vi.fn(async () =>
       mockJson({
@@ -117,7 +114,6 @@ describe('YahooQuoteClient', () => {
     expect(results).toEqual([])
   })
 
-  // 非正の price (Yahoo が一時的に 0 を返すケース) も除外。
   it('drops symbols whose regularMarketPrice is zero or negative', async () => {
     const fetchFn = vi.fn(async () =>
       mockJson({
@@ -129,8 +125,8 @@ describe('YahooQuoteClient', () => {
     expect(results).toEqual([])
   })
 
-  // regularMarketTime が無い場合は now() を fallback として asOf に使う
-  // (Webull 側と同じ挙動)。staling 判定が後段で動くので date があれば足りる。
+  // Same fallback behavior as the Webull client; a downstream staleness check
+  // only needs a usable date, not a from-upstream timestamp specifically.
   it('falls back to now() when regularMarketTime is missing', async () => {
     const fixedNow = new Date('2026-05-20T15:00:00.000Z')
     const fetchFn = vi.fn(async () =>

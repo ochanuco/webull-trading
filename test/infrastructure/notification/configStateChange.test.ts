@@ -31,6 +31,12 @@ describe('classifySeverity', () => {
   it('trading_enabled true → false is info', () => {
     expect(classifySeverity('tradingEnabled', true, false)).toBe('info')
   })
+  it('market_hours_check true → false (after-hours fence removed) is critical', () => {
+    expect(classifySeverity('marketHoursCheck', true, false)).toBe('critical')
+  })
+  it('market_hours_check false → true (after-hours fence added) is info', () => {
+    expect(classifySeverity('marketHoursCheck', false, true)).toBe('info')
+  })
   it('session_window_gate_enabled true → false (fence removed) is critical', () => {
     expect(classifySeverity('sessionWindowGateEnabled', true, false)).toBe('critical')
   })

@@ -1,14 +1,7 @@
 const DEFAULT_BASE_URL = 'https://api.gdeltproject.org'
-/**
- * GDELT は素で遅い。本番で 5s (quote/bar client からの流用) にしていたところ、
- * 全 tick が `The operation was aborted` で失敗し 1 件も蓄積できていなかった。
- * 実測でもレート制限応答を返すだけで 20s 超かかることがある。
- *
- * quote/bar の 5s が短いのは、あれが取引判断のクリティカルパスに居て「古い値で
- * 発注するより落ちる方が安全」だから。GDELT はその経路に居ない — producer は
- * cron/alarm 側で非同期に回り、gate は D1 を読むだけなので、待っても取引は
- * 止まらない。取り逃がす方が損。
- */
+// Longer than quote/bar clients' 5s: GDELT can take 20s+ even on a
+// rate-limit response, and unlike quotes it isn't on the order-decision
+// critical path (the gate only reads D1), so waiting doesn't block trading.
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_TIMESPAN = '1d'
 /** `response.text()` truncation cap for error messages (avoid logging huge HTML bodies). */
@@ -49,11 +42,7 @@ export class GdeltFetchError extends Error {
   }
 }
 
-/**
- * HTTP-level failure: non-2xx status, or a 200 whose body isn't the JSON we
- * expect (GDELT is observed to return HTML / plain-text bodies with a 200
- * status under some failure modes, not just on 429).
- */
+/** HTTP-level failure: non-2xx status, or a 200 whose body isn't the JSON we expect. */
 export class GdeltResponseError extends Error {
   readonly status: number
   readonly bodySnippet: string
@@ -67,19 +56,10 @@ export class GdeltResponseError extends Error {
 }
 
 /**
- * GDELT DOC 2.0 API client (`https://api.gdeltproject.org/api/v2/doc/doc`).
- * No authentication — this is a public, unauthenticated endpoint. Structure
- * mirrors {@link ../quotes/YahooBarClient.ts} (`fetchFn` / `timeoutMs`
- * injected for testability, `AbortController` timeout, `fetch.bind(globalThis)`
- * so the Workers runtime doesn't throw "Illegal invocation").
- *
- * Confirmed-by-probe defensive requirements (see plan doc):
- *   - Rate limit is 1req/5s. Exceeding it returns HTTP 429 with a **plain
- *     text** body (not JSON).
- *   - Even a 200 can carry a non-JSON body (HTML error page observed in the
- *     wild) — `response.ok` alone is not sufficient. `content-type` must be
- *     checked before calling `.json()`, or the call throws a native
- *     `SyntaxError` instead of a typed, loggable error.
+ * GDELT DOC 2.0 API client (`https://api.gdeltproject.org/api/v2/doc/doc`),
+ * unauthenticated. A 200 response doesn't guarantee a JSON body (rate-limit
+ * / upstream errors can return HTML with status 200), so content-type is
+ * checked before `.json()` to avoid an untyped `SyntaxError`.
  */
 export class GdeltDocClient {
   private readonly baseUrl: string
@@ -137,9 +117,6 @@ export class GdeltDocClient {
       )
     }
 
-    // 200 does not guarantee a JSON body (rate-limit / upstream error pages
-    // have been observed with a 200 status) — check content-type before
-    // calling .json(), which would otherwise throw an untyped SyntaxError.
     const contentType = response.headers.get('content-type') ?? ''
     if (!contentType.toLowerCase().includes('application/json')) {
       const snippet = await bodySnippet(response)
@@ -160,14 +137,7 @@ async function bodySnippet(response: Response): Promise<string> {
   return text.slice(0, BODY_SNIPPET_MAX_CHARS)
 }
 
-/**
- * Maps GDELT's `{ timeline: [{ series, data: [{ date, value }] }] }` shape
- * into our flat point list. We only ever request a single `mode`, so the
- * first series is the one we asked for. Forgiving normalization (mirrors
- * `BarClient.normalizeBars` / `YahooBarClient`'s drop-invalid-rows policy):
- * unparseable dates and non-finite values are dropped point-by-point rather
- * than failing the whole batch.
- */
+// Only one `mode` is ever requested, so the first series is always the one asked for.
 function normalizeTimeline(json: GdeltTimelineResponse): GdeltTimelinePoint[] {
   const data = json.timeline?.[0]?.data
   if (!Array.isArray(data)) return []

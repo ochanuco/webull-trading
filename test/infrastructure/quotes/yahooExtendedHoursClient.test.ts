@@ -8,7 +8,7 @@ function mockJson(body: unknown, status = 200): Response {
   })
 }
 
-/** pre 07:00-07:30 ET (EDT) を UTC epoch秒に固定した fixture (2025-05-20)。 */
+// Fixed pre-market window 07:00-07:30 ET (EDT), as UTC epoch seconds (2025-05-20).
 const PRE_START = 1747738800 // 2025-05-20T07:00:00-04:00 (ET) -> 11:00Z
 const PRE_END = 1747740600 // 2025-05-20T07:30:00-04:00 (ET) -> 11:30Z
 const REGULAR_START = PRE_END
@@ -54,7 +54,6 @@ describe('YahooExtendedHoursClient', () => {
                 previousClose: 100,
                 currentTradingPeriod: { pre: { start: PRE_START, end: PRE_END }, regular: { start: REGULAR_START } },
               },
-              // 1つ目: pre 開始前 (除外) / 2,3つ目: pre 窓内 / 4つ目: pre.end ちょうど (除外、half-open)
               timestamp: [PRE_START - 60, PRE_START, PRE_START + 60, PRE_END],
               indicators: {
                 quote: [{ close: [98, 99, 100, 101], low: [97, 98.5, 99.5, 100.5] }],
@@ -71,8 +70,6 @@ describe('YahooExtendedHoursClient', () => {
   })
 
   it('falls back to [regular.start - 6h, regular.start) when currentTradingPeriod.pre is missing', async () => {
-    // 1つ目: 6h lookback より古い前セッション bar (除外) / 2つ目: 窓内 /
-    // 3つ目: regular.start ちょうど (除外)
     const STALE = REGULAR_START - 7 * 60 * 60
     const fetchFn = vi.fn(async () =>
       mockJson({

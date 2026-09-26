@@ -32,13 +32,7 @@ describe('groupSymbolsByCategory', () => {
 })
 
 describe('WebullQuoteClient.getSnapshots', () => {
-  // Regression for #84/#85/#86/#87/#88: the combination of path + x-version is
-  // fragile against developer.webull.com's v2 docs vs what the SDK actually
-  // ships. Lock both so any future drift is caught here instead of at runtime.
-  it('defaults to v2 /openapi/market-data/stock/snapshot with x-version: v2 + extend/overnight params', async () => {
-    // Confirmed against the JP UAT tenant via stdlib probe (#84). v1
-    // `/market-data/snapshot` returns 404; v2 `/market-data/stock/snapshot`
-    // returns 200 with extend_hour_required + overnight_required present.
+  it('defaults to v2 /openapi/market-data/stock/snapshot with x-version: v2 + extend/overnight params (#84/#85/#86/#87/#88)', async () => {
     let capturedUrl: URL | undefined
     let capturedHeaders: Headers | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
@@ -55,10 +49,6 @@ describe('WebullQuoteClient.getSnapshots', () => {
     expect(capturedHeaders?.get('x-version')).toBe('v2')
   })
 
-  // Negative: show the assertions above are not trivially satisfied — if the
-  // default path were accidentally changed (e.g. back to the v2 stock variant
-  // docs), overriding quotePath produces a different pathname. This guards
-  // against a regression where DEFAULT_QUOTE_PATH drifts silently.
   it('honours quotePath override (proves the default assertion is meaningful)', async () => {
     let capturedUrl: URL | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL) => {
@@ -78,9 +68,6 @@ describe('WebullQuoteClient.getSnapshots', () => {
   })
 
   it('sends category as the underscored identifier (US_STOCK / US_ETF)', async () => {
-    // Wire format confirmed by developer.webull.com example
-    // (`category=US_STOCK`) and Python SDK EasyEnum.__str__ = self.name.
-    // An earlier hypothesis of space-separated wire format was incorrect.
     const fetchFn = vi.fn(async (input: Request | string | URL) => {
       const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       const url = new URL(urlStr)

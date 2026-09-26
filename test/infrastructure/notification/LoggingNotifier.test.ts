@@ -8,11 +8,8 @@ import type {
   NotificationEvent,
 } from '../../../src/infrastructure/notification/Notifier'
 
-/**
- * D1 binding を最小限 mock する: drizzle-orm の `insert(...).values(...)` を
- * 通すだけで良い。createDb → drizzle(d1) は drizzle-orm/d1 が呼ぶので、
- * ここでは prepare → first/all を呼ばない経路 (insert のみ) をスタブする。
- */
+// Only the insert path (prepare().bind().run()) needs stubbing here — LoggingNotifier
+// never calls first()/all(), so those exist only to satisfy the D1Database type.
 function fakeD1(opts: { onInsert?: () => void; throwOnInsert?: Error } = {}): D1Database {
   const stmt = {
     bind: () => stmt,
@@ -114,7 +111,7 @@ describe('LoggingNotifier', () => {
     warnSpy.mockRestore()
   })
 
-  it('still resolves when D1 INSERT throws (silent fallback)', async () => {
+  it('still resolves and still calls the inner notifier when D1 INSERT throws (silent fallback, with a warn logged)', async () => {
     const inner = fakeInner()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const db = fakeD1({ throwOnInsert: new Error('D1 timeout') })
@@ -127,9 +124,7 @@ describe('LoggingNotifier', () => {
     await expect(
       lg.notify({ type: 'ERROR', message: 'x', severity: 'warning' }),
     ).resolves.toBeUndefined()
-    // 内部で warn が出る (DB 失敗の log)
     expect(warnSpy).toHaveBeenCalled()
-    // inner notifier は呼ばれている
     expect(inner.calls).toHaveLength(1)
     warnSpy.mockRestore()
   })

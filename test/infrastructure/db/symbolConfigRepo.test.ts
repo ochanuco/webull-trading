@@ -7,8 +7,7 @@ import {
 } from '../../../src/infrastructure/db/symbolConfigRepo'
 
 function fakeDb(rows: unknown[]) {
-  // loadSymbolConfig は WHERE active=... を外したので、`from` 直後で resolve する
-  // (active=0 / 1 両方を読んで repo 側で振り分ける)。
+  // loadSymbolConfig has no WHERE active=...; it reads both flags and partitions itself.
   return {
     select() {
       return {
@@ -49,7 +48,7 @@ describe('loadSymbolConfig', () => {
     expect(result.symbolMaxNotional).toEqual({ C: 100 })
   })
 
-  it('exposes per-symbol market and name maps for dashboard display', async () => {
+  it('exposes per-symbol market and name maps for dashboard display, omitting null/blank names (display layer falls back to the symbol itself)', async () => {
     const rows = [
       { symbol: 'aapl', name: 'Apple Inc.', market: 'US', active: true, maxNotional: null },
       { symbol: '7974', name: '任天堂', market: 'JP', active: true, maxNotional: null },
@@ -65,8 +64,6 @@ describe('loadSymbolConfig', () => {
       NONAME: 'US',
       EMPTY: 'JP',
     })
-    // null / 空白だけの name は map に含めない (defensive、display 層が
-    // formatSymbolDisplay で symbol そのままに fallback)。
     expect(result.symbolName).toEqual({
       AAPL: 'Apple Inc.',
       '7974': '任天堂',
@@ -83,9 +80,8 @@ describe('loadSymbolConfig', () => {
     expect(result.symbolMarket).toEqual({ X: 'US', Y: 'US' })
   })
 
-  // dashboard が disabled (active=0) を grayed-out で表示するために、active=0 の
-  // symbol も読み込んで `inactiveSymbols` / `symbolNotes` に振り分ける。
-  // cron / risk gate は引き続き `allowedSymbols` のみを参照する (= 評価対象は変えない)。
+  // active=0 rows are read too (for the dashboard's grayed-out display), but
+  // cron/risk gate still only ever consume allowedSymbols.
   it('partitions rows into allowedSymbols / inactiveSymbols by active flag', async () => {
     const rows = [
       { symbol: 'soxl', name: 'SOXL', market: 'US', active: true, maxNotional: 50000, notes: null },
@@ -96,12 +92,10 @@ describe('loadSymbolConfig', () => {
     const result = await loadSymbolConfig(fakeDb(rows))
     expect(result.allowedSymbols).toEqual(['SOXL', '7203'])
     expect(result.inactiveSymbols).toEqual(['SOXS', '9697'])
-    // notes は active=0 / 1 両方の銘柄分が含まれる (active=1 で notes 設定済の運用も想定)
     expect(result.symbolNotes).toEqual({
       SOXS: 'pair removed 2026-04-20',
       '9697': 'liquidity dropped',
     })
-    // currency / market map は active=0 含めて全銘柄分
     expect(result.symbolMarket).toEqual({ SOXL: 'US', SOXS: 'US', '7203': 'JP', '9697': 'JP' })
   })
 
@@ -155,8 +149,8 @@ import {
 } from '../../../src/infrastructure/db/symbolConfigRepo'
 
 describe('updateBudgetAllocPct', () => {
-  // findSymbolConfig は select().from().where().limit()。update().set().where() の
-  // 呼び出し有無を記録する最小 mock。
+  // Records whether update().set().where() was called, after the
+  // select().from().where().limit() lookup findSymbolConfig performs.
   function fakeDb2(current: number | null) {
     let updates = 0
     const sel = () => ({
@@ -190,9 +184,9 @@ describe('updateBudgetAllocPct', () => {
   })
 })
 
-// setInversePair / deleteInversePairsForSymbol / createSymbolPair 用の最小 mock。
-// insert().values() / delete().where() は即実行で Promise を返し、batch は待つだけ。
-// select は findSymbolConfig 用に「存在する symbol」集合でフィルタ返却する。
+// Shared fake for setInversePair / deleteInversePairsForSymbol / createSymbolPair:
+// insert/delete resolve immediately and record an op; select() reports whether
+// the extracted symbol is in `existingSymbols` (for findSymbolConfig lookups).
 function fakeWriteDb(existingSymbols: string[] = []) {
   const present = new Set(existingSymbols.map((s) => s.toUpperCase()))
   const ops: string[] = []
@@ -308,7 +302,6 @@ describe('createSymbolPair', () => {
     const { db, ops } = fakeWriteDb(['SOXS'])
     const res = await createSymbolPair(db, writeInput('SOXL'), 'SOXS', 't')
     expect(res).toEqual({ primary: 'created', counterpartCreated: false })
-    // counterpart SOXS は既存なので再作成しない
     expect(ops).not.toContain('insert:symbol:SOXS')
     expect(ops.some((o) => o === 'insert:pair:SOXL->SOXS')).toBe(true)
   })
@@ -324,8 +317,8 @@ describe('loadSymbolConfig role / entry overrides (#452)', () => {
       { symbol: 'sgov', market: 'US', active: true, maxNotional: null, role: 'cash_parking' },
       { symbol: 'qqq', market: 'US', active: true, maxNotional: null, role: 'core_trend' },
       { symbol: 'tqqq', market: 'US', active: true, maxNotional: null, role: 'leveraged_trend' },
-      // typo した role は 'unknown' に正規化 (= downstream が entry 抑止)。
-      // NULL 扱いに倒すと既定 gate で発注され得るため fail-closed 側に倒す。
+      // A typo'd role normalizes to 'unknown' (suppresses entry downstream);
+      // falling back to NULL instead would let the default gate trade it.
       { symbol: 'oops', market: 'US', active: true, maxNotional: null, role: 'cash_praking' },
       { symbol: 'soxl', market: 'US', active: true, maxNotional: null, role: null },
       { symbol: 'blank', market: 'US', active: true, maxNotional: null, role: '  ' },
@@ -378,8 +371,8 @@ describe('loadSymbolConfig role / entry overrides (#452)', () => {
 })
 
 describe('deactivateSymbolForBrokerDeny (#460)', () => {
-  // select (findSymbolConfig) と update を備えた最小 fake。update の set 内容を
-  // in-memory rows に反映し、呼び出し回数も記録する。
+  // select() backs findSymbolConfig; update() applies its `set` values onto
+  // the in-memory row and records each call for assertion.
   function fakeRwDb(rows: Array<Record<string, unknown>>) {
     const updates: Array<Record<string, unknown>> = []
     const db = {

@@ -7,31 +7,27 @@ export interface WebullAccountDto {
 }
 
 /**
- * 口座資産・買付余力 (`/openapi/account/balance` v1 / `/openapi/assets/balance` v2、
- * #415)。JP 本番 probe で確認した shape:
- *   { total_asset_currency:'JPY', total_cash_balance:'100000',
- *     account_currency_assets:[{currency:'JPY', cash_balance, buying_power, ...},
- *                              {currency:'USD', ...}] }
- * 数値は全て string-encoded (OpenAPI 共通)。buying_power は **通貨別** に
- * `account_currency_assets[]` に入る。mapper/reader 側で数値化する。
+ * Balance response (`/openapi/account/balance` v1 or `/openapi/assets/balance`
+ * v2). Numbers are string-encoded (OpenAPI convention); buying_power is
+ * per-currency, inside `account_currency_assets[]`.
  */
 interface WebullAccountCurrencyAssetDto {
   currency?: string
   cash_balance?: string
   buying_power?: string
-  /** v2 (`/openapi/assets/balance`) のみ。v1 では欠落。 */
+  /** v2 only; absent in v1. */
   market_value?: string
   unrealized_profit_loss?: string
 }
 
 export interface WebullAccountBalanceDto {
-  /** 口座基準通貨 (例 'JPY')。 */
+  /** Account base currency (e.g. 'JPY'). */
   total_asset_currency?: string
   total_cash_balance?: string
-  /** v2 のみ。 */
+  /** v2 only. */
   total_market_value?: string
   total_unrealized_profit_loss?: string
-  /** 通貨別の現金 / 買付余力。POC: JPY + USD。 */
+  /** Per-currency cash / buying power. POC: JPY + USD. */
   account_currency_assets?: WebullAccountCurrencyAssetDto[]
 }
 
@@ -45,21 +41,9 @@ export interface WebullSubscriptionDto {
 export type WebullMarket = 'US' | 'JP'
 
 /**
- * Place Order body schema。#251 / #256 で v1 (旧 SDK) と v2 (新 OpenAPI docs)
- * の差分対応のため、両方を許容する shape を持つ。version の選択は env
- * (\`WEBULL_PLACE_ORDER_SCHEMA\`) で行い、mapper が schema 別の body を構築する。
- *
- * v1 (default / 現挙動):
- *   - limit_price 必須 (MARKET orders にも safety cap として送る)
- *   - support_trading_session: 'N'
- *   - combo_type は無し
- *   - account_id は query param 側
- *
- * v2 (新 docs / opt-in):
- *   - limit_price は LIMIT/STOP_LOSS_LIMIT のときのみ required
- *   - support_trading_session enum は \`NIGHT/ALL/CORE/ALL_DAY\` (旧 'N' は廃止)
- *   - combo_type 必須 (\`'NORMAL'\` for non-combo single-leg)
- *   - account_id は body へ
+ * Covers both v1 and v2 Place Order body shapes; see
+ * {@link toWebullPlaceOrderRequest} in mapper.ts for which fields each
+ * version sends.
  */
 interface WebullV2OrderEntry {
   client_order_id: string
@@ -67,28 +51,26 @@ interface WebullV2OrderEntry {
   instrument_type: 'EQUITY'
   market: WebullMarket
   order_type: 'LIMIT' | 'MARKET'
-  /** v1 必須 (MARKET でも safety cap)、v2 で MARKET は省略可。 */
+  /** v1: required even for MARKET (safety cap). v2: omitted for MARKET. */
   limit_price?: string
   quantity: string
-  /** v1: 'N'、v2: 'CORE' (新 enum)。 */
+  /** v1: 'N'. v2: 'CORE' (new enum). */
   support_trading_session: string
   side: 'BUY' | 'SELL'
   /**
-   * ロングの開閉を明示する。v1 / v2 両スキーマで必須。
-   * 未送信時に Webull JP が SELL を空売り開始とみなし、キャッシュ口座で
-   * 417 CASH_ACCOUNT_NOT_ALLOW_SELL_SHORT を返した実績あり (v1 本番, 2026-06-25)。
-   * BUY → 'OPEN'、SELL → 'CLOSE' を常に送る。
+   * Required in both schemas — omitted, Webull JP treats a SELL as opening a
+   * short and rejects it with 417 CASH_ACCOUNT_NOT_ALLOW_SELL_SHORT in a cash account.
    */
   open_or_close: 'OPEN' | 'CLOSE'
   time_in_force: 'DAY'
   entrust_type: 'QTY'
   account_tax_type: 'GENERAL' | 'SPECIFIC'
-  /** v2 のみ。combo / multi-leg 未対応 POC では常に 'NORMAL'。 */
+  /** v2 only; always 'NORMAL' since combo/multi-leg orders are out of scope. */
   combo_type?: 'NORMAL'
 }
 
 export interface WebullPlaceOrderRequestDto {
-  /** v2 で account_id を body 側に持つ場合に使用。v1 では未送信。 */
+  /** v2 only — account_id lives in the body; v1 sends it via query instead. */
   account_id?: string
   new_orders: [WebullV2OrderEntry]
 }
@@ -100,32 +82,26 @@ export interface WebullPlaceOrderResponseDto {
 }
 
 /**
- * One row of the Webull positions response. Spec ambiguity #251: the older
- * `/openapi/account/positions` SDK returned `quantity_total` / `avg_cost`,
- * but the new docs (`/openapi/assets/positions` →
- * https://developer.webull.co.jp/apis/docs/reference/account-position.md)
- * use `quantity` / `cost_price`. JP UAT は実際の probe で **新名前** で返す。
- *
- * 旧 SDK 互換のため両方 optional として持ち、reader 側 (`parseBrokerAvg`,
- * `parseBrokerQty` 等) は新→旧の順で読む defensive parsing にする。新規 reader
- * を書くときも同じヘルパを通すこと。
- *
- * 全 field は string-encoded number / string (= OpenAPI 共通の数値文字列方針)。
- * mapper 層で数値化してから infrastructure 層を出る。
+ * One row of the positions response (all fields are string-encoded numbers,
+ * per OpenAPI convention). The old SDK returned `quantity_total` /
+ * `avg_cost`; the new docs use `quantity` / `cost_price`, and JP UAT returns
+ * the new names. Both are kept optional — readers like `parseBrokerAvg` /
+ * `parseBrokerQty` parse new-then-old for compatibility; follow the same
+ * pattern for new readers.
  */
 export interface WebullPositionDto {
   /** Ticker. Webull returns it as the canonical form (e.g. `SOXL`, `1570`). */
   symbol?: string
-  /** 新 docs: total holding (informational). */
+  /** New docs: total holding (informational). */
   quantity?: string
-  /** 旧 SDK 互換: 新 docs では `quantity` に rename。 */
+  /** Legacy SDK name; renamed to `quantity` in the new docs. */
   quantity_total?: string
-  /** Available-to-sell holding. May be < total when shares are reserved by
-   *  an in-flight SELL. SELL fallback uses **this** value. 新旧 docs 共通。 */
+  /** Available-to-sell holding; may be less than total when shares are
+   *  reserved by an in-flight SELL. Used by the SELL fallback. */
   available_quantity?: string
-  /** 新 docs: average cost basis (informational; not used by SELL fallback). */
+  /** New docs: average cost basis (informational; not used by SELL fallback). */
   cost_price?: string
-  /** 旧 SDK 互換: 新 docs では `cost_price` に rename。 */
+  /** Legacy SDK name; renamed to `cost_price` in the new docs. */
   avg_cost?: string
   /** Currency on the position. POC: USD/JPY only. */
   currency?: string
@@ -134,17 +110,11 @@ export interface WebullPositionDto {
 }
 
 /**
- * Per-fill leg inside a Webull order detail. Field names follow the
- * openapi-java-sdk `v2.OrderHistory.Item` mirror — keep them as free strings
- * (the OpenAPI surface returns numeric-as-string consistently). Only the
- * fields we actually consume are typed; unknown ones are tolerated.
- *
- * Note: the official doc does not formally declare `filled_price` /
- * `filled_quantity` here, but the production US tenant returns them and
- * `pickFilledPrice` averages across them. The JP UAT tenant has been
- * observed returning `filled_price=10` as a stub on otherwise-realistic
- * orders (see `webull_order_detail_raw` log in reconcileFills) — that is
- * the trigger for the sanity-ratio guard in `resolveFilledPrice`.
+ * Per-fill leg inside an order detail. Field names follow the
+ * openapi-java-sdk `v2.OrderHistory.Item` mirror; only consumed fields are
+ * typed, others are tolerated. The JP UAT tenant has been seen returning a
+ * stub `filled_price=10` on otherwise-realistic fills — see the sanity-ratio
+ * guard in `resolveFilledPrice`.
  */
 interface WebullOrderItemDto {
   order_id?: string
@@ -157,15 +127,11 @@ interface WebullOrderItemDto {
 }
 
 /**
- * Shape returned by GET /openapi/account/orders/detail (v1) — flat 形式。
- * Fields mirror openapi-java-sdk's `v2.OrderHistory`.
- *
- * 新 docs (#251 / #253) では order-history / order-detail が wrapper 形式に
- * なる:
- *   { client_order_id, combo_type, orders: [...inner...] }
- * ここでは `findOrderByClientId` 内で wrapper を正規化して同じ flat 形式に
- * 落とし込むため、callers (reconcileFills 等) の signature は変えない。
- * 新名前 `total_quantity` は `quantity` に正規化される。
+ * Shape returned by `GET /openapi/account/orders/detail` (v1, flat). Fields
+ * mirror openapi-java-sdk's `v2.OrderHistory`. The newer order-history/detail
+ * endpoints wrap this in `{client_order_id, combo_type, orders: [...]}` —
+ * `findOrderByClientId` normalizes both shapes into this flat DTO, so callers
+ * (reconcileFills etc.) keep the same signature.
  */
 export interface WebullOrderDetailDto {
   client_order_id?: string
@@ -177,12 +143,10 @@ export interface WebullOrderDetailDto {
   limit_price?: string
   stop_price?: string
   quantity?: string
-  /** 新 docs での名前。normalizer が `quantity` にコピーするので consumer は
-   *  従来通り `quantity` を読めば良い (両方持ってても矛盾しない)。 */
+  /** New docs' name for quantity; the normalizer copies it into `quantity`. */
   total_quantity?: string
   filled_quantity?: string
-  /** 新 docs では top-level に持つ。flat 表現でも optional として持っておき、
-   *  items[] が空のケースで `resolveFilledPrice` が参照できるよう保持。 */
+  /** Present at top level in the new docs; kept here too so `resolveFilledPrice` can read it when `items[]` is empty. */
   filled_price?: string
   // Webull order lifecycle statuses: NEW, PARTIALLY_FILLED, FILLED,
   // CANCELLED, REJECTED, EXPIRED, etc. Keep as free string for forward-compat.
@@ -192,12 +156,9 @@ export interface WebullOrderDetailDto {
 }
 
 /**
- * 新 docs (#251) の order-history / order-detail wrapper shape:
- *   { client_order_id, combo_type, orders: [WebullOrderDetailDto] }
- *
- * 通常 1 つの client_order_id に対し orders[] は単一エントリ (combo / leg は
- * POC スコープ外)。\`findOrderByClientId\` 内の \`normalizeOrderHistoryRow\` で
- * 平坦化して \`WebullOrderDetailDto\` として扱う。
+ * Wrapper shape from the newer order-history/detail endpoints;
+ * `findOrderByClientId` flattens it into {@link WebullOrderDetailDto} via
+ * `normalizeOrderHistoryRow`.
  */
 export interface WebullOrderHistoryWrapperDto {
   client_order_id?: string

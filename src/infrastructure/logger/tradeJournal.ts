@@ -46,10 +46,7 @@ let sink: LogSink = (line) => {
   console.log(line)
 }
 
-/**
- * For tests only: redirect trade-journal output to a custom sink.
- * Returns a restore function that puts the previous sink back.
- */
+/** Test-only: redirects output to `next`, returning a restore function. */
 export function setTradeJournalSink(next: LogSink): () => void {
   const previous = sink
   sink = next
@@ -66,16 +63,9 @@ export interface TradeJournalDbContext {
 
 let dbContext: TradeJournalDbContext | undefined
 
-/**
- * Attach a D1-backed sink in addition to {@link setTradeJournalSink}. The
- * journal always emits its JSON line (console.log by default); when a DB
- * context is set, every record is also fire-and-forget inserted via
- * `ctx.waitUntil` so the Worker does not have to await the DB write.
- *
- * Intended to be set once at Worker handler entry (`scheduled` / middleware)
- * and cleared on exit. Concurrency across fetch / scheduled is accepted risk
- * in this POC — both paths always write to the same D1 schema.
- */
+// Set once at Worker handler entry and cleared on exit. Concurrent fetch /
+// scheduled invocations sharing this module-level context is an accepted
+// POC risk — both paths write to the same D1 schema either way.
 export function setTradeJournalDbContext(context: TradeJournalDbContext | undefined): void {
   dbContext = context
 }

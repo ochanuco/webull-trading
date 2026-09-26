@@ -4,23 +4,16 @@ import { resolveAccessToken } from './resolveAccessToken'
 import { createWebullReadClient } from './WebullReadClient'
 
 /**
- * `WebullAccountBalanceDto.account_currency_assets` から USD 建て資産
- * (`cash_balance + market_value`) を抽出する純関数 (#EOD equity auto-seed)。
+ * Extracts USD-denominated equity (`cash_balance + market_value`) from the
+ * USD entry in `account_currency_assets`. JPY entries are always ignored —
+ * `dailyStartEquity` is USD-denominated, and mixing in JPY would corrupt the
+ * risk gate's drawdown denominator.
  *
- * `dailyStartEquity` は USD 建てのため、JPY エントリは常に無視する
- * (JPY を混ぜると通貨単位が混在し、円建て値が USD 分母として drawdown risk
- * gate に食われる事故が再発する — 本 issue の発端そのもの)。
- *
- * fail-safe: 以下のいずれかに該当すれば呼び出し側が re-seed を skip できる
- * よう `null` を返す (捏造しない、roll 済みの値を維持させる)。
- *   - `account_currency_assets` が無い / 空配列
- *   - USD エントリが無い (currency は trim + upper-case で正規化して比較)
- *   - `market_value` が欠落 (v1 `/openapi/account/balance` は `market_value` を
- *     返さない仕様 — `WebullAccountCurrencyAssetDto` 参照。v1 のみ稼働している
- *     環境では常に null になり、旧経路の手動 seed が維持される)
- *   - `cash_balance` / `market_value` のいずれかが非有限 (NaN/Infinity) または負
- *   - 合計が 0 以下 (0 は「未 seed」扱いの fallback 経路と衝突するため異常値
- *     として扱う)
+ * Returns `null` (never a fabricated value) on any ambiguous input: missing
+ * assets, no USD entry, missing `market_value` (the v1 balance shape doesn't
+ * return it), non-finite/negative amounts, or a total ≤ 0 (0 is reserved for
+ * the "not yet seeded" fallback path). Callers skip the re-seed and keep the
+ * last rolled value.
  */
 export function usdEquityFromBalance(balance: WebullAccountBalanceDto): number | null {
   const assets = balance.account_currency_assets
@@ -45,15 +38,11 @@ export function usdEquityFromBalance(balance: WebullAccountBalanceDto): number |
 }
 
 /**
- * `usdEquityFromBalance` の live 経路をまとめた helper (CodeRabbit review
- * #574: raw Webull DTO を trading 層に漏らさないための境界)。
- * `resolveAccessToken(env)` → `createWebullReadClient(env, { accessToken })`
- * → `getAccountBalance()` → `usdEquityFromBalance()` を一括で行う。
- *
- * - token 解決 / broker fetch が失敗した場合はそのまま例外を投げる (呼び出し
- *   側 = `runPortfolioRoll` が `broker_fetch_failed` として catch する設計)。
- * - broker からは 200 で返ってきたが USD 建て資産を parse できない場合は
- *   `usdEquityFromBalance` 同様 `null` を返す (捏造しない)。
+ * Live path for {@link usdEquityFromBalance}: resolves the token, fetches
+ * the balance, and normalizes it — keeps the raw Webull DTO out of the
+ * trading layer. Token/fetch failures throw (caller `runPortfolioRoll`
+ * catches as `broker_fetch_failed`); a 200 that can't be parsed to USD
+ * returns `null`, same as `usdEquityFromBalance`.
  */
 export async function fetchUsdEquity(env: Env): Promise<number | null> {
   const accessToken = await resolveAccessToken(env)

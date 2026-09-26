@@ -3,26 +3,21 @@ import { buildSignedHeaders } from './WebullAuth'
 import { resolveAccessToken } from './resolveAccessToken'
 
 /**
- * Webull JP の取扱可能銘柄リスト取得 (`GET /trade/instrument/tradable/list`、#460)。
+ * Webull JP tradable-instruments list (`GET /trade/instrument/tradable/list`).
  *
- * **実測で確定した呼び出し規約 (2026-06-12 probe)**:
- *   - host は trade host (`api.webull.co.jp`)、**`x-version: v1`**、かつ
- *     **`/openapi` prefix なし** の `/trade/instrument/tradable/list`。
- *     `/openapi` 付きや v2 は `404 Route Not Found` になる (gateway routing)。
- *   - app-level 署名のみで叩ける (account_id / access token 不要)。token は
- *     `instrumentLookup` と同様に best-effort で乗せるが必須ではない。
- *   - レスポンスは `{ hasNext, instruments: [{ symbol, instrument_id,
- *     security_id, name, currency, exchange_code, ... }] }`。
- *   - ページングは `last_security_id` (= 直前ページ末尾の `security_id`)。
- *   - rate limit がきつい: throttle 無しで連続 ~30 req 叩くと
- *     `429 TOO_MANY_REQUESTS`。本実装は per-page throttle + 429 backoff で凌ぐ。
+ * Trade host, x-version: v1, and no `/openapi` prefix — the `/openapi`-prefixed
+ * or v2 form 404s at the gateway. App-level signing is enough (no account_id
+ * / access token required; a token is attached best-effort like
+ * `instrumentLookup`). Paginates via `last_security_id` (the prior page's
+ * trailing `security_id`). The rate limit is tight enough that unthrottled
+ * requests hit 429 within ~30 calls, so this throttles per-page and backs
+ * off on 429.
  *
- * 返り値は正規化済み instrument の配列と、ページング完走可否。途中で打ち切った
- * (`complete=false`) 場合、呼び出し側は **既存 allowlist を消さない** こと
- * (部分結果で currently_tradable を false に倒すと誤検知になる)。
+ * Callers must not clear the existing allowlist on a partial result
+ * (`complete=false`) — that would misread as every symbol having disappeared.
  */
 
-/** 正規化済み tradable instrument。raw JSON はこの層から外に出さない。 */
+/** Normalized tradable instrument; raw JSON never leaves this layer. */
 export interface TradableInstrumentEntry {
   symbol: string
   instrumentId: string | null
@@ -33,18 +28,13 @@ export interface TradableInstrumentEntry {
 
 export interface FetchTradableInstrumentsResult {
   outcome: 'ok' | 'error'
-  /** 取得できた instrument (重複は symbol で除去済み)。 */
+  /** Deduplicated by symbol. */
   instruments: TradableInstrumentEntry[]
-  /** hasNext=false まで読み切れたか。false の場合は部分結果。 */
+  /** Whether pagination reached hasNext=false; false means a partial result. */
   complete: boolean
-  /** 取得ページ数 (監視用)。 */
   pages: number
-  /**
-   * 続きがある場合の次回 `last_security_id` (チャンク分割の再開カーソル)。
-   * complete=true なら undefined。maxPages 打ち切り or error 時に設定される。
-   */
+  /** Resume cursor (next last_security_id); undefined when complete=true, set on a maxPages cutoff or error. */
   nextCursor?: string
-  /** outcome='error' のときの詳細。 */
   error?: string
   status?: number | null
 }
@@ -53,20 +43,18 @@ const TRADABLE_PATH = '/trade/instrument/tradable/list'
 const DEFAULT_TRADE_API_BASE = 'https://api.webull.co.jp'
 const PAGE_SIZE = 100
 const REQUEST_TIMEOUT_MS = 10_000
-/** per-page throttle。~50 req/min に収めて 429 を避ける。 */
+/** Targets ~50 req/min to stay under the 429 threshold. */
 const DEFAULT_THROTTLE_MS = 1_200
-/** 429 を踏んだ時の待機。 */
 const RATE_LIMIT_BACKOFF_MS = 15_000
-/** 暴走 / 無限ページング防止の hard cap (現状 ~50 ページ)。 */
+/** Hard cap against a runaway/infinite pagination loop. */
 const MAX_PAGES = 200
-/** 429 を連続で踏んだ場合の打ち切り回数。 */
 const MAX_RATE_LIMIT_RETRIES = 4
 
 function asString(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null
 }
 
-/** Webull の instrument_id / security_id は末尾 `.000000` 付きで返る。整数部だけ残す。 */
+/** Webull returns instrument_id / security_id with a trailing .000000 — keep only the integer part. */
 function trimDecimalId(v: unknown): string | null {
   const s = asString(v)
   if (s === null) return null
@@ -75,25 +63,19 @@ function trimDecimalId(v: unknown): string | null {
 }
 
 interface FetchInput {
-  /** test seam。default は globalThis.fetch。 */
   fetcher?: typeof fetch
-  /** test seam。default は setTimeout ベースの sleep。 */
   sleep?: (ms: number) => Promise<void>
-  /** test seam。default DEFAULT_THROTTLE_MS。 */
   throttleMs?: number
   /**
-   * 各ページ取得直後に呼ばれる callback (#460 逐次保存)。そのページ分の
-   * 正規化済み entries を渡す。逐次 upsert する事で (1) 全件待たずに表示へ
-   * 反映でき、(2) 途中中断しても部分結果が DB に残る。throw しても sweep は
-   * 続行する (1 ページの保存失敗で全体を落とさない fail-safe)。
+   * Called right after each page is normalized, with that page's entries.
+   * Enables incremental upsert (a partial result is still visible/persisted)
+   * and does not abort the sweep if it throws — one page's save failure
+   * shouldn't kill the whole run.
    */
   onPage?: (entries: TradableInstrumentEntry[], pageIndex: number) => Promise<void>
-  /** 再開カーソル (前回の nextCursor)。指定すると `last_security_id` から続ける。 */
+  /** Resume cursor (a prior nextCursor); continues from that `last_security_id`. */
   startCursor?: string
-  /**
-   * このチャンクで取得する最大ページ数 (再開可能分割用)。到達したら
-   * complete=false + nextCursor を返して打ち切る。未指定は MAX_PAGES。
-   */
+  /** Cap on pages fetched in this chunk; hitting it returns complete=false + nextCursor instead of continuing. Defaults to MAX_PAGES. */
   maxPages?: number
 }
 
@@ -122,7 +104,6 @@ export async function fetchTradableInstruments(
   const sleep = input.sleep ?? defaultSleep
   const throttleMs = input.throttleMs ?? DEFAULT_THROTTLE_MS
 
-  // symbol で dedup (Map で last-write-wins)。
   const bySymbol = new Map<string, TradableInstrumentEntry>()
   let lastSecurityId: string | undefined = input.startCursor
   let pages = 0
@@ -131,7 +112,6 @@ export async function fetchTradableInstruments(
 
   for (;;) {
     if (pages >= pageLimit) {
-      // チャンク上限 (再開可能分割) or hard cap 到達。部分結果 + 再開カーソルを返す。
       return {
         outcome: 'ok',
         instruments: [...bySymbol.values()],
@@ -246,12 +226,11 @@ export async function fetchTradableInstruments(
       pageEntries.push(entry)
     }
 
-    // 逐次保存 (#460)。保存失敗は 1 ページ分だけ握り潰して sweep 継続。
     if (input.onPage && pageEntries.length > 0) {
       try {
         await input.onPage(pageEntries, pages - 1)
       } catch {
-        // 部分保存失敗は致命でない (次の sweep / 後続ページで回復)。
+        // Non-fatal — the next sweep or a later page recovers it.
       }
     }
 
