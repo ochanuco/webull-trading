@@ -683,12 +683,8 @@ export async function runStrategyCron(
       ? { mode: global.newsShockMode, decision: newsShockDecision }
       : undefined
 
-  // Loaded independent of newsShockMode/JEV_HEADLINE_EVAL_ENABLED — a plain
-  // D1 read never affects sizing, so there's no reason to gate it behind
-  // either flag the way newsShockGateOption is. Recorded per decision below
-  // so a later Jev evaluation can compare against what was actually visible
-  // at decision time, instead of joining by timestamp after the fact and
-  // risking a row that didn't exist yet.
+  // Recorded per decision rather than joined by timestamp later: the collector fires on the same
+  // quarter-hours, so a later join could pick a row that did not exist yet when this decision ran.
   const headlineEvalSnapshot = env.DB
     ? await loadHeadlineEvalSnapshot(env.DB, new Date(), options.requestId)
     : undefined
