@@ -94,11 +94,11 @@ export class BreakoutMomentumStrategy {
 function entryDecision(input: MomentumInput, rule: MomentumRule, trace: DecisionTraceStep[]): Signal {
   const ind = input.indicators
 
-  if (ind.return50d <= rule.minReturn) {
-    trace.push(step('entry.trend_20d_return', false, ind.return50d, '>', rule.minReturn))
-    return hold(input, `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn} trend threshold`, trace)
+  if (ind.return20d <= rule.minReturn) {
+    trace.push(step('entry.trend_20d_return', false, ind.return20d, '>', rule.minReturn))
+    return hold(input, `20d return ${ind.return20d.toFixed(4)} <= ${rule.minReturn} trend threshold`, trace)
   }
-  trace.push(step('entry.trend_20d_return', true, ind.return50d, '>', rule.minReturn))
+  trace.push(step('entry.trend_20d_return', true, ind.return20d, '>', rule.minReturn))
 
   if (rule.requireAboveSma50 && ind.price <= ind.sma50) {
     trace.push(step('entry.above_sma50', false, ind.price, '>', ind.sma50))
@@ -126,7 +126,7 @@ function entryDecision(input: MomentumInput, rule: MomentumRule, trace: Decision
   }
   trace.push(step('entry.breakout', true, ind.price, '>=', breakoutLevel))
   trace.push(step('entry.adopt_buy', true, ind.price, '>=', breakoutLevel))
-  return buy(input, `breakout: price ${ind.price.toFixed(4)} >= ${breakoutLevel.toFixed(4)} (20d high ${ind.breakoutHigh20.toFixed(4)}, 20d return ${ind.return50d.toFixed(4)})`, trace)
+  return buy(input, `breakout: price ${ind.price.toFixed(4)} >= ${breakoutLevel.toFixed(4)} (20d high ${ind.breakoutHigh20.toFixed(4)}, 20d return ${ind.return20d.toFixed(4)})`, trace)
 }
 
 function exitDecision(

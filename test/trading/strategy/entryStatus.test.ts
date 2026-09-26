@@ -11,8 +11,8 @@ import {
 const baseIndicators = (): PullbackIndicators => ({
   price: 100,
   sma50: 90,
-  return50d: 0.2,
-  high20d: 104,
+  return20d: 0.2,
+  high10d: 104,
   atr20: 1.0,
   baselineAtr20: 1.0,
 })
@@ -43,7 +43,7 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   it('HALF when the only failing gate is pullback depth within the tolerance band', () => {
     // pullback = (100-107)/107 = -0.0654、min -0.06 より深いが -0.072 以内 → HALF。
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), high20d: 107 },
+      { ...baseIndicators(), high10d: 107 },
       rule(),
     )
     expect(result.status).toBe('HALF')
@@ -53,7 +53,7 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   it('WATCH when a single degree gate fails beyond the tolerance band', () => {
     // pullback = (100-110)/110 = -0.0909、許容バンド -0.072 を超えて外れる
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), high20d: 110 },
+      { ...baseIndicators(), high10d: 110 },
       rule(),
     )
     expect(result.status).toBe('WATCH')
@@ -61,9 +61,9 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   })
 
   it('WATCH when the single failing gate is a regime gate (trend), even if marginal', () => {
-    // 「程度もの」以外 (トレンド / SMA50 / 過伸長 / high20d) は僅差でも HALF にしない。
+    // 「程度もの」以外 (トレンド / SMA50 / 過伸長 / high20d_valid) は僅差でも HALF にしない。
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), return50d: 0.079 },
+      { ...baseIndicators(), return20d: 0.079 },
       rule(),
     )
     expect(result.status).toBe('WATCH')
@@ -72,7 +72,7 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
 
   it('WATCH when two gates fail', () => {
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), return50d: 0.05, atr20: 1.65 },
+      { ...baseIndicators(), return20d: 0.05, atr20: 1.65 },
       rule(),
     )
     expect(result.status).toBe('WATCH')
@@ -82,7 +82,7 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   it('NG when three or more gates fail', () => {
     // trend / above_sma50 / pullback_deep が同時に落ちる局面。
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), price: 80, return50d: 0.05 },
+      { ...baseIndicators(), price: 80, return20d: 0.05 },
       rule(),
     )
     expect(result.status).toBe('NG')
@@ -92,7 +92,7 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
 
   it('does not grant HALF when the degree-gate threshold is 0 (degenerate band, fail-closed)', () => {
     const result = deriveEntryStatusFromIndicators(
-      { ...baseIndicators(), price: 104.5, high20d: 104, sma50: 95 },
+      { ...baseIndicators(), price: 104.5, high10d: 104, sma50: 95 },
       rule({ pullbackMax: 0 }),
     )
     expect(result.status).not.toBe('HALF')

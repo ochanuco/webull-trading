@@ -17,7 +17,7 @@ describe('computePullbackIndicators', () => {
     expect(computePullbackIndicators(makeBars([1, 2, 3]))).toBeNull()
   })
 
-  it('computes sma50 / return50d (20d) / high20d (10d) / low20d from the tail window', () => {
+  it('computes sma50 / return20d (20d) / high10d (10d) / low20d from the tail window', () => {
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const result = computePullbackIndicators(makeBars(closes))
     expect(result).not.toBeNull()
@@ -25,11 +25,11 @@ describe('computePullbackIndicators', () => {
     expect(r.price).toBe(159)
     // sma50 = average of closes 110..159 = (110+159)/2 = 134.5
     expect(r.sma50).toBeCloseTo(134.5, 4)
-    // #318: return lookback は名前に反し 20 営業日。last vs closes[-20]=140 → (159-140)/140
-    expect(r.return50d).toBeCloseTo((159 - 140) / 140, 4)
-    // #318: high lookback は名前に反し 10 営業日。最新 10 closes 150..159 → max = 159*1.01
-    expect(r.high20d).toBeCloseTo(159 * 1.01, 4)
-    // low20d は変更なし (20 日窓、dashboard 表示用)。最新 20 closes 140..159 → min = 140*0.99
+    // last vs closes[-20]=140 → (159-140)/140
+    expect(r.return20d).toBeCloseTo((159 - 140) / 140, 4)
+    // latest 10 closes 150..159 → max = 159*1.01
+    expect(r.high10d).toBeCloseTo(159 * 1.01, 4)
+    // latest 20 closes 140..159 → min = 140*0.99
     expect(r.low20d).toBeCloseTo(140 * 0.99, 4)
     // #momentum: 当日を除く直近20日の終値高値。closes[-21..-1]=139..158 → max=158 (当日159は除外)
     expect(r.breakoutHigh20).toBe(158)
@@ -60,8 +60,8 @@ describe('computePullbackIndicators', () => {
       const r = computePullbackIndicators(bars, 200)!
       expect(r.price).toBe(200)
       expect(r.sma50).toBeCloseTo(dailyOnly.sma50, 4)
-      expect(r.return50d).toBeCloseTo(dailyOnly.return50d, 4)
-      expect(r.high20d).toBeCloseTo(dailyOnly.high20d, 4)
+      expect(r.return20d).toBeCloseTo(dailyOnly.return20d, 4)
+      expect(r.high10d).toBeCloseTo(dailyOnly.high10d, 4)
       expect(r.low20d).toBeCloseTo(dailyOnly.low20d, 4)
       expect(r.atr20).toBeCloseTo(dailyOnly.atr20, 4)
       expect(r.baselineAtr20).toBeCloseTo(dailyOnly.baselineAtr20, 4)

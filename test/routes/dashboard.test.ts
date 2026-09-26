@@ -1954,11 +1954,12 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
     expect(html).not.toContain('前日比')
   })
 
-  it('サブ行に SMA50/high20d/low20d (最新の indicator 付き point から)', () => {
+  it('サブ行に SMA50/high10d/low20d (最新の indicator 付き point から)', () => {
     const html = renderPriceHeader(fakeChartWith([pt(100, true), pt(110)]))
     expect(html).toContain('SMA50')
     expect(html).toContain('60.00')
-    expect(html).toContain('high20d')
+    expect(html).toContain('high10d:')
+    expect(html).not.toContain('high20d:')
     expect(html).toContain('105.00')
   })
 
@@ -1994,9 +1995,9 @@ import {
   type PullbackIndicators,
 } from '../../src/trading/strategy/strategies/PullbackUptrendStrategy'
 
-// TEST_DEFAULT_RULE: band = high20d×[0.94, 0.97], sma50 floor。
+// TEST_DEFAULT_RULE: band = high10d×[0.94, 0.97], sma50 floor。
 function indFor(overrides: Partial<PullbackIndicators>): PullbackIndicators {
-  return { price: 95, sma50: 90, return50d: 0.12, high20d: 100, atr20: 1, baselineAtr20: 1, ...overrides }
+  return { price: 95, sma50: 90, return20d: 0.12, high10d: 100, atr20: 1, baselineAtr20: 1, ...overrides }
 }
 
 describe('renderChartDecisionTrace (チャート判定点クリック時のラダー HTML)', () => {
@@ -2319,8 +2320,8 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
     })
 
     it('未保有 + buyable: 入場条件充足の結論', () => {
-      // TEST_DEFAULT_RULE: 押し目帯 = high20d(100)×[0.94, 0.97] = [94, 97]、
-      // price=95 は帯内 + sma50(90) 上 + return50d(0.12)≥0.08 で buyable。
+      // TEST_DEFAULT_RULE: 押し目帯 = high10d(100)×[0.94, 0.97] = [94, 97]、
+      // price=95 は帯内 + sma50(90) 上 + return20d(0.12)≥0.08 で buyable。
       const view = buildBuyabilityView(
         [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ price: 95 }) }],
         TEST_DEFAULT_RULE,
@@ -2572,7 +2573,7 @@ describe('renderBuyabilityPanel (入場まで あとどれくらい / いつ頃)
 
   it('価格非依存ブロック (トレンド不足) は「価格を動かすだけでは入場不可」', () => {
     const view = buildBuyabilityView(
-      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ return50d: 0.02 }) }],
+      [{ timestamp: '2026-06-06T14:00:00.000Z', indicators: indFor({ return20d: 0.02 }) }],
       TEST_DEFAULT_RULE,
     )
     const html = renderBuyabilityPanel(view)

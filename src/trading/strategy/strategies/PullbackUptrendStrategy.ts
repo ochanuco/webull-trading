@@ -6,10 +6,10 @@ import { resolveStopDistance } from '../stopDistance'
 export interface PullbackIndicators {
   price: number
   sma50: number
-  /** 20-day return (trend filter). Named `return50d` for storage/dashboard compat. */
-  return50d: number
-  /** 10-day reference high for pullback entries. Named `high20d` for storage/dashboard compat. */
-  high20d: number
+  /** 20-day return (trend filter). */
+  return20d: number
+  /** 10-day reference high for pullback entries. */
+  high10d: number
   atr20: number
   baselineAtr20: number
 }
@@ -256,17 +256,17 @@ export class PullbackUptrendStrategy {
     // promotion candidates, so their HOLDs carry holdCause='entry_gate' plus
     // a fresh deriveEntryStatusFromIndicators snapshot for the scheduler.
 
-    if (ind.return50d <= rule.minReturn50d) {
-      trace.push(step('entry.trend_50d_return', false, ind.return50d, '>', rule.minReturn50d))
+    if (ind.return20d <= rule.minReturn50d) {
+      trace.push(step('entry.trend_50d_return', false, ind.return20d, '>', rule.minReturn50d))
       return hold(
         input,
-        `20d return ${ind.return50d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`,
+        `20d return ${ind.return20d.toFixed(4)} <= ${rule.minReturn50d} trend threshold`,
         trace,
         'entry_gate',
         deriveEntryStatusFromIndicators(ind, rule),
       )
     }
-    trace.push(step('entry.trend_50d_return', true, ind.return50d, '>', rule.minReturn50d))
+    trace.push(step('entry.trend_50d_return', true, ind.return20d, '>', rule.minReturn50d))
 
     if (rule.requireAboveSma50 && ind.price <= ind.sma50) {
       trace.push(step('entry.above_sma50', false, ind.price, '>', ind.sma50))
@@ -307,13 +307,13 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('entry.vol_not_elevated', true, atrRatio, '<=', rule.maxAtrRatio))
 
-    if (ind.high20d <= 0) {
-      trace.push(step('entry.high20d_valid', false, ind.high20d, '>', 0))
+    if (ind.high10d <= 0) {
+      trace.push(step('entry.high20d_valid', false, ind.high10d, '>', 0))
       return hold(input, 'invalid 10d high', trace, 'entry_gate', deriveEntryStatusFromIndicators(ind, rule))
     }
-    trace.push(step('entry.high20d_valid', true, ind.high20d, '>', 0))
+    trace.push(step('entry.high20d_valid', true, ind.high10d, '>', 0))
 
-    const pullback = (ind.price - ind.high20d) / ind.high20d
+    const pullback = (ind.price - ind.high10d) / ind.high10d
     if (pullback > rule.pullbackMax) {
       trace.push(step('entry.pullback_not_too_shallow', false, pullback, '<=', rule.pullbackMax))
       return hold(
@@ -338,7 +338,7 @@ export class PullbackUptrendStrategy {
     }
     trace.push(step('entry.pullback_not_too_deep', true, pullback, '>=', rule.pullbackMin))
     trace.push(step('entry.adopt_buy', true, pullback, 'between', [rule.pullbackMin, rule.pullbackMax]))
-    return buy(input, `pullback ${pullback.toFixed(4)} in uptrend (20d return ${ind.return50d.toFixed(4)})`, trace)
+    return buy(input, `pullback ${pullback.toFixed(4)} in uptrend (20d return ${ind.return20d.toFixed(4)})`, trace)
   }
 }
 

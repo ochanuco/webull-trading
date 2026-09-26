@@ -32,10 +32,10 @@ function goodEntryInput(): PullbackInput {
   return {
     symbol: 'AAPL',
     indicators: {
-      price: 96, // 4% pullback from high20d=100
+      price: 96, // 4% pullback from high10d=100
       sma50: 90,
-      return50d: 0.12,
-      high20d: 100,
+      return20d: 0.12,
+      high10d: 100,
       atr20: 1.5,
       baselineAtr20: 1.5,
     },
@@ -77,9 +77,9 @@ describe('PullbackUptrendStrategy entry', () => {
     expect(signal.trace?.find((step) => step.label === 'entry.adopt_buy')?.label_ja).toBe('買い採用')
   })
 
-  it('HOLDs when 50d return is below the +8% trend threshold', () => {
+  it('HOLDs when 20d return is below the +8% trend threshold', () => {
     const input = goodEntryInput()
-    input.indicators.return50d = 0.05
+    input.indicators.return20d = 0.05
     const signal = strategy.decide(input)
     expect(signal.action).toBe('HOLD')
     expect(signal.trace?.at(-1)).toMatchObject({
@@ -91,7 +91,7 @@ describe('PullbackUptrendStrategy entry', () => {
   it('HOLDs when price is at or below sma50', () => {
     const input = goodEntryInput()
     input.indicators.price = 89
-    input.indicators.high20d = 100
+    input.indicators.high10d = 100
     expect(strategy.decide(input).action).toBe('HOLD')
   })
 
@@ -278,7 +278,7 @@ describe('PullbackUptrendStrategy exit priority', () => {
   function withPosition(price: number, holdBusinessDays = 0): PullbackInput {
     return {
       symbol: 'AAPL',
-      indicators: { price, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },
+      indicators: { price, sma50: 0, return20d: 0, high10d: 0, atr20: 0, baselineAtr20: 0 },
       position: openPosition,
       pendingOrder: null,
       cooldownUntil: null,
@@ -316,7 +316,7 @@ describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
   const strategy = new PullbackUptrendStrategy(LEVERAGED_RULE)
   const buildExit = (price: number, atr20: number): PullbackInput => ({
     symbol: 'TQQQ',
-    indicators: { price, sma50: 0, return50d: 0, high20d: 0, atr20, baselineAtr20: 1 },
+    indicators: { price, sma50: 0, return20d: 0, high10d: 0, atr20, baselineAtr20: 1 },
     position: openPosition, // avgPrice 100
     pendingOrder: null,
     cooldownUntil: null,
@@ -386,7 +386,7 @@ describe('PullbackUptrendStrategy per-symbol override', () => {
   it('SELLs SOXL at hold=5 days where default rule would still hold', () => {
     const signal = strategy.decide({
       symbol: 'SOXL',
-      indicators: { price: 101, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },
+      indicators: { price: 101, sma50: 0, return20d: 0, high10d: 0, atr20: 0, baselineAtr20: 0 },
       position: openPosition,
       pendingOrder: null,
       cooldownUntil: null,
@@ -400,7 +400,7 @@ describe('PullbackUptrendStrategy per-symbol override', () => {
   it('SELLs SOXL on the tighter -3% stop', () => {
     const signal = strategy.decide({
       symbol: 'SOXL',
-      indicators: { price: 96.5, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },
+      indicators: { price: 96.5, sma50: 0, return20d: 0, high10d: 0, atr20: 0, baselineAtr20: 0 },
       position: openPosition,
       pendingOrder: null,
       cooldownUntil: null,

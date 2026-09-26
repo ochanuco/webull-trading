@@ -668,7 +668,7 @@ export function renderPriceHeader(
   const subItems: Array<[string, string]> = latest
     ? [
         ['SMA50', fmt(latest.sma50)],
-        ['high20d', fmt(latest.high20d)],
+        ['high10d', fmt(latest.high20d)],
         ['low20d', fmt(latest.low20d)],
       ]
     : []
