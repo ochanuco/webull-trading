@@ -478,36 +478,12 @@ describe('loadGlobalConfig — news shock validation (CHECK 制約 補完)', () 
     const db = fakeDbWithRow({
       ...baseRow,
       newsShockMode: 'enforce',
-      newsShockWarnRatio: 2.3,
-      newsShockBlockRatio: 4.4,
       newsShockWarnSizeScale: 0.5,
     })
     const result = await loadGlobalConfig(db, 'req-news-ok')
     expect(result.newsShockMode).toBe('enforce')
-    expect(result.newsShockWarnRatio).toBe(2.3)
-    expect(result.newsShockBlockRatio).toBe(4.4)
+    expect(result.newsShockWarnSizeScale).toBe(0.5)
     expect(warnSpy).not.toHaveBeenCalled()
-    warnSpy.mockRestore()
-  })
-
-  it('falls back to defaults when warnRatio > blockRatio (order violation)', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const db = fakeDbWithRow({
-      ...baseRow,
-      newsShockWarnRatio: 10,
-      newsShockBlockRatio: 2,
-    })
-    const result = await loadGlobalConfig(db, 'req-news-order')
-    expect(result.newsShockWarnRatio).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio)
-    expect(result.newsShockBlockRatio).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio)
-    expect(warnSpy).toHaveBeenCalledTimes(1)
-    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
-    expect(logged.event).toBe('global_config_news_shock_validation_failed')
-    expect(
-      logged.violations.some(
-        (v: { field: string }) => v.field === 'newsShockWarnRatio/newsShockBlockRatio',
-      ),
-    ).toBe(true)
     warnSpy.mockRestore()
   })
 
@@ -517,14 +493,8 @@ describe('loadGlobalConfig — news shock validation (CHECK 制約 補完)', () 
     const result = await loadGlobalConfig(db, 'req-news-scale')
     expect(result.newsShockWarnSizeScale).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale)
     expect(warnSpy).toHaveBeenCalledTimes(1)
-    warnSpy.mockRestore()
-  })
-
-  it('falls back to defaults when newsShockMinSamples is not a positive integer', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const db = fakeDbWithRow({ ...baseRow, newsShockMinSamples: -5 })
-    const result = await loadGlobalConfig(db, 'req-news-samples')
-    expect(result.newsShockMinSamples).toBe(GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples)
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
+    expect(logged.event).toBe('global_config_news_shock_validation_failed')
     warnSpy.mockRestore()
   })
 

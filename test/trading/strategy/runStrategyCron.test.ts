@@ -62,6 +62,7 @@ vi.mock('../../../src/infrastructure/db/newsHeadlineEvalRepo', () => ({
   createNewsHeadlineEvalDb: vi.fn(() => ({}) as unknown),
   createNewsHeadlineEvalRepo: vi.fn(() => ({
     insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
     fetchLatest: vi.fn().mockResolvedValue(null),
   })),
 }))
@@ -641,13 +642,13 @@ describe('runStrategyCron', () => {
     }
   })
 
-  describe('news shock gate wiring (news-shock-gate PR 2)', () => {
-    /** `sqlite_master` probe で `attention_observation` だけ ready、他は未存在扱いの fake D1。 */
+  describe('news shock gate wiring (jev source swap)', () => {
+    /** `sqlite_master` probe で `news_headline_eval` だけ ready、他は未存在扱いの fake D1。 */
     function fakeDbWithAttentionReady(): D1Database {
       return {
         prepare: vi.fn((sql: string) => ({
           first: vi.fn(async () =>
-            sql.includes("name='attention_observation'") ? { ok: 1 } : null,
+            sql.includes("name='news_headline_eval'") ? { ok: 1 } : null,
           ),
         })),
       } as unknown as D1Database
@@ -727,7 +728,7 @@ describe('runStrategyCron', () => {
       expect(opts.newsShockGate).toBeUndefined()
     })
 
-    it('omits the newsShockGate option and warns when attention_observation table is missing (mode=enforce)', async () => {
+    it('omits the newsShockGate option and warns when news_headline_eval table is missing (mode=enforce)', async () => {
       const firstSpy = vi.fn(async () => null)
       const fakeDb = {
         prepare: vi.fn(() => ({ first: firstSpy })),
@@ -751,12 +752,12 @@ describe('runStrategyCron', () => {
 
     // #619: mock は globalConfigRepo の DB-side sanitize を経由しないため、
     // loadNewsShockDecision 自身の NaN 防御が単独で効くことを確認する回帰ガード。
-    it('completes without throwing when newsShockBaselineDays is NaN (misconfigured DB value, #619)', async () => {
+    it('completes without throwing when newsShockWarnSizeScale is NaN (misconfigured DB value, #619)', async () => {
       vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
-        makeGlobalConfigSnapshot({ newsShockMode: 'enforce', newsShockBaselineDays: Number.NaN }),
+        makeGlobalConfigSnapshot({ newsShockMode: 'enforce', newsShockWarnSizeScale: Number.NaN }),
       )
       const result = await runStrategyCron(envWithHealthyPortfolio(fakeDbWithAttentionReady()), {
-        requestId: 'req-news-nan-baseline',
+        requestId: 'req-news-nan-scale',
       })
       expect(result.summary).toBeDefined()
       expect(result.analysis.schema).toBe('strategy_cron_analysis.v1')
@@ -1420,6 +1421,7 @@ describe('runStrategyCron', () => {
     it('does not change scheduler options, decisions, or qty whether a shock=0.99 row exists or not', async () => {
       vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
         insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
         fetchLatest: vi.fn().mockResolvedValue(null),
       })
       const resultWithoutRow = await runStrategyCron(env)
@@ -1428,6 +1430,7 @@ describe('runStrategyCron', () => {
 
       vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
         insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
         fetchLatest: vi.fn().mockResolvedValue(headlineRow()),
       })
       const resultWithRow = await runStrategyCron(env)
@@ -1442,6 +1445,7 @@ describe('runStrategyCron', () => {
     it('attaches the available snapshot to analysis.headlineEval when a row exists', async () => {
       vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
         insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
         fetchLatest: vi.fn().mockResolvedValue(headlineRow()),
       })
       const result = await runStrategyCron(env)
@@ -1453,6 +1457,7 @@ describe('runStrategyCron', () => {
     it('reports available:false reason:no_row on analysis.headlineEval when no row exists', async () => {
       vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
         insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
         fetchLatest: vi.fn().mockResolvedValue(null),
       })
       const result = await runStrategyCron(env)
@@ -1462,6 +1467,7 @@ describe('runStrategyCron', () => {
     it('persists the snapshot as headlineEvalJson on every decision record emitted via onDecision', async () => {
       vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
         insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
         fetchLatest: vi.fn().mockResolvedValue(headlineRow()),
       })
       await runStrategyCron(env)
@@ -1479,6 +1485,7 @@ describe('runStrategyCron', () => {
     it('still writes headlineEvalJson:null (not omitted) on a decision record when no row exists', async () => {
       vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
         insertIgnore: vi.fn(),
+        fetchSince: vi.fn(),
         fetchLatest: vi.fn().mockResolvedValue(null),
       })
       await runStrategyCron(env)

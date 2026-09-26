@@ -68,50 +68,49 @@
 
 ## ニュースショック gate
 
-`attention_observation` (GDELT 由来) を baseline と比較して急騰を検知する。
+`news_headline_eval` (Yahoo Finance RSS / Google News RSS フォールバック +
+`typesafe/jev` 分類) の最新行を見て急落を検知する。旧 GDELT ベース (baseline
+median 比の ratio) は撤去済み — 閾値は shock スコア (0〜1) 直接比較。
 
 | フィールド | 既定 | 意味 |
 |---|---|---|
 | `news_shock_mode` | `'off'` | `off` / `observe` (log のみ) / `enforce` |
-| `news_shock_warn_ratio` | `2.3` | baseline median 比でこれ超 → warning (12ヶ月実測の p90 由来) |
-| `news_shock_block_ratio` | `4.4` | 同、これ超 → BUY block (上位約 1%) |
 | `news_shock_warn_size_scale` | `0.5` | warning 帯での size 倍率 |
-| `news_shock_tone_drop_threshold` | `1.5` | tone 悪化の閾値 |
-| `news_shock_require_tone` | `1` | tone が取れないとき shock 判定を成立させない |
-| `news_shock_baseline_days` | `7` | baseline の対象日数 |
-| `news_shock_min_samples` | `200` | baseline 成立に必要な最小サンプル数 |
-| `news_shock_window_min` | `120` | 評価窓 (分) |
-| `news_shock_max_age_min` | `90` | 観測値の許容鮮度 (分) |
-| `attention_stale_policy` | `'fail_open'` | 観測が古い時の扱い。`fail_open` / `block_buy` |
+| `attention_stale_policy` | `'fail_open'` | 観測が古い/欠測の時の扱い。`fail_open` / `block_buy` |
 
-baseline median は **非ゼロ値のみ**で算出する。`market_selloff` のような
-sparse probe (平時ニュースが無く volume=0 の時間帯が大半) を全点 (ゼロ込み)
-で median を取ると常に 0 になり ratio が意味を失う — baseline サンプル数
-(`news_shock_min_samples` の判定対象) 自体はゼロ込みのまま、median 計算だけ
-非ゼロ値に絞る。
+regime 判定 (コード定数、DB 設定なし — 校正データが揃うまで暫定値):
+
+- 最新行が無い / 45 分より古い / `status ≠ 'ok'` → `unknown`
+- `shock >= 0.8` かつ `direction === 'risk_off'` → `critical` (BUY 全停止)
+- `shock >= 0.5` → `warning` (`news_shock_warn_size_scale` で縮小)
+- それ以外 → `normal`
 
 `news_shock_mode` が `off` 以外の間は、regime 遷移時の STATE_CHANGE 通知
 (Slack/Discord) に加えて、22:00 UTC の日次 cron (portfolio roll と相乗り) が
-合成 regime + probe 別の判定を日本語で配信する。
+現在の regime + 直近24時間の収集状況 (OK/エラー件数、最大 shock とその時刻・
+方向) を日本語で配信する。
 
 regime 遷移通知は **受け手がアクションを取れる遷移だけ** 流す:
 warning / critical への突入と、そこからの解除のみ (日本語見出し付き)。
-'unknown' はデータ欠測 (GDELT 反映遅延・producer 障害) であって市場状態では
-ないため、unknown の間は snapshot 更新ごとスキップし、normal↔unknown の
-フラップや欠測回復 (unknown→normal) は通知しない。データ欠測の状況は
-日次サマリ側で観測時刻・遅延として届く。regime 変化が無くて
-も毎日届くので、閾値が実データに対して妥当かの校正材料になる。
-サマリは push 専用で `notification_emit_log` には残らない (dashboard の
-alerts view は異常・約定・設定変更の記録に限る)。
+'unknown' はデータ欠測 (collector 障害・鮮度切れ) であって市場状態ではない
+ため、unknown の間は snapshot 更新ごとスキップし、normal↔unknown のフラップ
+や欠測回復 (unknown→normal) は通知しない。データ欠測の状況は日次サマリ側で
+コレクターの OK/エラー件数として届く。regime 変化が無くても毎日届くので、
+閾値が実データに対して妥当かの校正材料になる。サマリは push 専用で
+`notification_emit_log` には残らない (dashboard の alerts view は異常・約定・
+設定変更の記録に限る)。
 
-日次サマリは strategy tick と違い **最新観測時点** (`latest_observation`) で
-評価する。GDELT の集計反映は実測 1〜7 時間遅れるため、now 基準だと
-`news_shock_max_age_min` (既定 90 分) の鮮度チェックにほぼ常に落ちて
-「判定不能」しか出ない — サマリでは観測時刻と遅延を併記し、届いている
-データの範囲でどう判定されるかを届ける。strategy tick (発注経路) は従来通り
-now 基準のままで、古い観測の扱いは `attention_stale_policy` に従う —
-既定の `fail_open` では BUY を絞らず、`block_buy` に倒している場合は
-stale な観測が新規 BUY を停止する。
+日次サマリも strategy tick と同じ **now 基準**で評価する — headline collector
+は 15 分ごとに動くため GDELT のような時間単位の遅延が無く、両者で基準を分け
+る必要が無くなった。古い観測の扱いは `attention_stale_policy` に従う — 既定
+の `fail_open` では BUY を絞らず、`block_buy` に倒している場合は stale な
+観測が新規 BUY を停止する。
+
+> 旧 GDELT 版にあった `news_shock_warn_ratio` / `news_shock_block_ratio` /
+> `news_shock_tone_drop_threshold` / `news_shock_require_tone` /
+> `news_shock_baseline_days` / `news_shock_min_samples` /
+> `news_shock_window_min` / `news_shock_max_age_min` の 8 フィールドは
+> コードから参照しなくなった (D1 列は残置、書いても無視される)。
 
 ## per-symbol / テーブル由来の制御
 

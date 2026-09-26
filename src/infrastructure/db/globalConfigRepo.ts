@@ -90,26 +90,11 @@ export interface GlobalConfigSnapshot {
    * `pairRegimeMode`.
    */
   newsShockMode: 'off' | 'observe' | 'enforce'
-  /** Warning once (recent max / baseline median) exceeds this ratio. Default 2.3 (GDELT 12mo p90). */
-  newsShockWarnRatio: number
-  /** Critical once the ratio exceeds this and the tone condition is also met. Default 4.4 (p99). */
-  newsShockBlockRatio: number
+  /** size scale applied in the warning regime (shock >= 0.5). Default 0.5. */
   newsShockWarnSizeScale: number
-  /** Tone drop (baselineTone - latestTone) required for a critical verdict. */
-  newsShockToneDropThreshold: number
-  /** True (default) requires the tone-drop condition in addition to the ratio for critical. */
-  newsShockRequireTone: boolean
-  /** Trailing window (days) for the baseline median population. */
-  newsShockBaselineDays: number
-  /** Below this sample count, the baseline is 'unknown' (insufficient_baseline). */
-  newsShockMinSamples: number
-  /** Window (minutes) for the ratio's numerator (recent max). */
-  newsShockWindowMin: number
-  /** Latest observation older than this (minutes) is treated as unknown (unavailable). */
-  newsShockMaxAgeMin: number
   /**
-   * Fail-open/closed switch for when the attention observation feed (GDELT
-   * producer) is unavailable or insufficient. 'fail_open' (default) |
+   * Fail-open/closed switch for when the latest `news_headline_eval` row is
+   * missing, stale, or a non-'ok' attempt. 'fail_open' (default) |
    * 'block_buy' (operator escape hatch).
    */
   attentionStalePolicy: 'fail_open' | 'block_buy'
@@ -180,15 +165,7 @@ export const GLOBAL_CONFIG_DEFAULTS: GlobalConfigSnapshot = Object.freeze({
   pairRegimeThetaBearEnter: -0.04,
   pairRegimeThetaBearExit: -0.015,
   newsShockMode: 'off',
-  newsShockWarnRatio: 2.3,
-  newsShockBlockRatio: 4.4,
   newsShockWarnSizeScale: 0.5,
-  newsShockToneDropThreshold: 1.5,
-  newsShockRequireTone: true,
-  newsShockBaselineDays: 7,
-  newsShockMinSamples: 200,
-  newsShockWindowMin: 120,
-  newsShockMaxAgeMin: 90,
   attentionStalePolicy: 'fail_open',
   extendedHoursGateMode: 'off',
 })
@@ -315,67 +292,25 @@ function validateVixConfig(
 }
 
 /**
- * Same application-level validation as `validateVixConfig`, for news-shock
- * config: same ALTER-TABLE-only migration gap, so range/ordering is
- * checked here. Enum fields (`newsShockMode` / `attentionStalePolicy`) are
- * out of scope — those are sanitized inline where `loadGlobalConfig` maps
- * the row, same as `pairRegimeMode`. A violation replaces only the
- * offending numeric fields with defaults; mode fields are untouched here.
+ * Same application-level validation as `validateVixConfig`: same
+ * ALTER-TABLE-only migration gap, so range checking is done here.
+ * `newsShockMode` / `attentionStalePolicy` are out of scope — those are
+ * sanitized inline where `loadGlobalConfig` maps the row, same as
+ * `pairRegimeMode`.
  */
 function validateNewsShockConfig(
   config: GlobalConfigSnapshot,
   requestId: string | undefined,
 ): GlobalConfigSnapshot {
   const violations: Array<{ field: string; value: unknown; expected: string }> = []
-  const {
-    newsShockWarnRatio,
-    newsShockBlockRatio,
-    newsShockWarnSizeScale,
-    newsShockToneDropThreshold,
-    newsShockBaselineDays,
-    newsShockMinSamples,
-    newsShockWindowMin,
-    newsShockMaxAgeMin,
-  } = config
+  const { newsShockWarnSizeScale } = config
 
-  if (!(newsShockWarnRatio > 0 && newsShockWarnRatio <= 100)) {
-    violations.push({ field: 'newsShockWarnRatio', value: newsShockWarnRatio, expected: '>0 and <=100' })
-  }
-  if (!(newsShockBlockRatio > 0 && newsShockBlockRatio <= 100)) {
-    violations.push({ field: 'newsShockBlockRatio', value: newsShockBlockRatio, expected: '>0 and <=100' })
-  }
-  if (newsShockWarnRatio > newsShockBlockRatio) {
-    violations.push({
-      field: 'newsShockWarnRatio/newsShockBlockRatio',
-      value: { warn: newsShockWarnRatio, block: newsShockBlockRatio },
-      expected: 'warn <= block',
-    })
-  }
   if (!(newsShockWarnSizeScale >= 0 && newsShockWarnSizeScale <= 1)) {
     violations.push({
       field: 'newsShockWarnSizeScale',
       value: newsShockWarnSizeScale,
       expected: '>=0 and <=1',
     })
-  }
-  if (!(newsShockToneDropThreshold >= 0 && newsShockToneDropThreshold <= 100)) {
-    violations.push({
-      field: 'newsShockToneDropThreshold',
-      value: newsShockToneDropThreshold,
-      expected: '>=0 and <=100',
-    })
-  }
-  if (!(Number.isInteger(newsShockBaselineDays) && newsShockBaselineDays > 0 && newsShockBaselineDays <= 365)) {
-    violations.push({ field: 'newsShockBaselineDays', value: newsShockBaselineDays, expected: 'integer >0 and <=365' })
-  }
-  if (!(Number.isInteger(newsShockMinSamples) && newsShockMinSamples > 0 && newsShockMinSamples <= 1_000_000)) {
-    violations.push({ field: 'newsShockMinSamples', value: newsShockMinSamples, expected: 'integer >0 and <=1000000' })
-  }
-  if (!(Number.isInteger(newsShockWindowMin) && newsShockWindowMin > 0 && newsShockWindowMin <= 10_080)) {
-    violations.push({ field: 'newsShockWindowMin', value: newsShockWindowMin, expected: 'integer >0 and <=10080 (1 week in minutes)' })
-  }
-  if (!(Number.isInteger(newsShockMaxAgeMin) && newsShockMaxAgeMin > 0 && newsShockMaxAgeMin <= 10_080)) {
-    violations.push({ field: 'newsShockMaxAgeMin', value: newsShockMaxAgeMin, expected: 'integer >0 and <=10080 (1 week in minutes)' })
   }
 
   if (violations.length > 0) {
@@ -388,14 +323,7 @@ function validateNewsShockConfig(
     )
     return {
       ...config,
-      newsShockWarnRatio: GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
-      newsShockBlockRatio: GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
       newsShockWarnSizeScale: GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale,
-      newsShockToneDropThreshold: GLOBAL_CONFIG_DEFAULTS.newsShockToneDropThreshold,
-      newsShockBaselineDays: GLOBAL_CONFIG_DEFAULTS.newsShockBaselineDays,
-      newsShockMinSamples: GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
-      newsShockWindowMin: GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
-      newsShockMaxAgeMin: GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
     }
   }
 
@@ -525,15 +453,7 @@ export async function loadGlobalConfig(
             pairRegimeThetaBearEnter: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearEnter,
             pairRegimeThetaBearExit: GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
             newsShockMode: GLOBAL_CONFIG_DEFAULTS.newsShockMode,
-            newsShockWarnRatio: GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
-            newsShockBlockRatio: GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
             newsShockWarnSizeScale: GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale,
-            newsShockToneDropThreshold: GLOBAL_CONFIG_DEFAULTS.newsShockToneDropThreshold,
-            newsShockRequireTone: GLOBAL_CONFIG_DEFAULTS.newsShockRequireTone,
-            newsShockBaselineDays: GLOBAL_CONFIG_DEFAULTS.newsShockBaselineDays,
-            newsShockMinSamples: GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
-            newsShockWindowMin: GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
-            newsShockMaxAgeMin: GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
             attentionStalePolicy: GLOBAL_CONFIG_DEFAULTS.attentionStalePolicy,
             extendedHoursGateMode: GLOBAL_CONFIG_DEFAULTS.extendedHoursGateMode,
             cashFallbackSellMode: GLOBAL_CONFIG_DEFAULTS.cashFallbackSellMode,
@@ -618,16 +538,7 @@ export async function loadGlobalConfig(
       row.pairRegimeThetaBearExit ?? GLOBAL_CONFIG_DEFAULTS.pairRegimeThetaBearExit,
     newsShockMode:
       row.newsShockMode === 'observe' || row.newsShockMode === 'enforce' ? row.newsShockMode : 'off',
-    newsShockWarnRatio: row.newsShockWarnRatio ?? GLOBAL_CONFIG_DEFAULTS.newsShockWarnRatio,
-    newsShockBlockRatio: row.newsShockBlockRatio ?? GLOBAL_CONFIG_DEFAULTS.newsShockBlockRatio,
     newsShockWarnSizeScale: row.newsShockWarnSizeScale ?? GLOBAL_CONFIG_DEFAULTS.newsShockWarnSizeScale,
-    newsShockToneDropThreshold:
-      row.newsShockToneDropThreshold ?? GLOBAL_CONFIG_DEFAULTS.newsShockToneDropThreshold,
-    newsShockRequireTone: row.newsShockRequireTone ?? GLOBAL_CONFIG_DEFAULTS.newsShockRequireTone,
-    newsShockBaselineDays: row.newsShockBaselineDays ?? GLOBAL_CONFIG_DEFAULTS.newsShockBaselineDays,
-    newsShockMinSamples: row.newsShockMinSamples ?? GLOBAL_CONFIG_DEFAULTS.newsShockMinSamples,
-    newsShockWindowMin: row.newsShockWindowMin ?? GLOBAL_CONFIG_DEFAULTS.newsShockWindowMin,
-    newsShockMaxAgeMin: row.newsShockMaxAgeMin ?? GLOBAL_CONFIG_DEFAULTS.newsShockMaxAgeMin,
     attentionStalePolicy: row.attentionStalePolicy === 'block_buy' ? 'block_buy' : 'fail_open',
     extendedHoursGateMode:
       row.extendedHoursGateMode === 'observe' || row.extendedHoursGateMode === 'enforce'

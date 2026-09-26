@@ -811,7 +811,7 @@ export async function runPullbackScheduler(
               traceStep(
                 'risk.news_shock',
                 !wouldReduce,
-                newsDecision.ratio ?? null,
+                newsDecision.shock ?? null,
                 undefined,
                 undefined,
                 `${newsDecision.reason}${observeNote}`,
@@ -829,7 +829,7 @@ export async function runPullbackScheduler(
             indicatorsJson: JSON.stringify(toIndicatorWireKeys(indicators)),
             trace: appendTrace(
               signal.trace,
-              traceStep('risk.news_shock', false, newsDecision.ratio ?? null, '<=', null, newsDecision.reason),
+              traceStep('risk.news_shock', false, newsDecision.shock ?? null, '<=', null, newsDecision.reason),
             ),
           })
           continue
