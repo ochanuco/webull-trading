@@ -1,12 +1,6 @@
 /**
- * Observe-only market-headline collector: fetches recent US market
- * headlines, classifies them with the `typesafe/jev` Workers AI model, and
- * logs every attempt to `news_headline_eval` — including empty/failed ones,
- * so gaps in coverage show up in the data rather than only in logs. Read by
- * nothing in strategy/risk/execution; this is purely a labeled-dataset
- * producer. Wired off the same 5-minute cron branch as `newsScheduler`, but
- * only acts on the UTC quarter-hour so it runs at 15-minute resolution.
- * Never throws — fetch/AI/DB failures are logged and swallowed.
+ * Failed and empty slots are stored as rows, not just logged: the evaluation needs the
+ * coverage gap rate, and logs are not retained long enough to measure it.
  */
 import type { Env } from '../../config/env'
 import {

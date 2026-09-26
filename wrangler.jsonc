@@ -133,9 +133,7 @@
         // `global_config.extended_hours_gate_mode` (既定 off) が別途握る。
         // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
         "EXTENDED_HOURS_OBSERVATION_ENABLED": "true",
-        // jev headline eval PR: Google News 見出しを typesafe/jev で分類し
-        // news_headline_eval に蓄積する observe-only producer の opt-in flag。
-        // 取引経路からは参照されない — gate 化する前のラベル付きデータ収集用。
+        // news_headline_eval の収集 flag。取引経路からは参照されない。
         "JEV_HEADLINE_EVAL_ENABLED": "true"
       },
       "routes": [
@@ -204,9 +202,7 @@
         // `global_config.extended_hours_gate_mode` (既定 off) で別に握っており、
         // observe (shadow) で妥当性を見てから enforce に上げる。
         "EXTENDED_HOURS_OBSERVATION_ENABLED": "true",
-        // jev headline eval PR: 5分 cron の 15分スロットごとに Google News 見出しを
-        // typesafe/jev で分類し news_headline_eval に蓄積する producer の opt-in
-        // flag。取引経路からは参照されない — gate 化する前のラベル付きデータ収集用。
+        // news_headline_eval の収集 flag。取引経路からは参照されない。
         "JEV_HEADLINE_EVAL_ENABLED": "true"
       },
       "routes": [

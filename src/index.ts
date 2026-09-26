@@ -433,11 +433,9 @@ export default {
         })
         .catch(() => undefined),
     )
-    // Same isolation pattern as the news scheduler above: wired independent of
-    // quote/reconcile/strategy so a Google News / Workers AI outage can't
-    // propagate into the trading path. Observe-only — read by nothing here.
+    // Keyed off scheduledTime, not wall clock: a late start past :x0/:x5 would otherwise miss its 15-minute slot.
     ctx.waitUntil(
-      runHeadlineEvalScheduler({ env, requestId })
+      runHeadlineEvalScheduler({ env, requestId, now: () => new Date(event.scheduledTime) })
         .then((summary) => {
           if (!summary.ran) return
           console.log(

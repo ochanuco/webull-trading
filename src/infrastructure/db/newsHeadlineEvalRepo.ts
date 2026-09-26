@@ -36,7 +36,6 @@ export interface NewsHeadlineEvalRepo {
   insertIgnore(record: NewsHeadlineEvalRecord): Promise<{ inserted: boolean }>
 }
 
-/** Wraps a Worker `env.DB` into a drizzle-typed client. */
 export function createNewsHeadlineEvalDb(d1: D1Database): NewsHeadlineEvalDb {
   return drizzle(d1)
 }

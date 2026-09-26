@@ -4,8 +4,11 @@
  * XML text rather than an XML/DOM library.
  */
 const RSS_BASE_URL = 'https://news.google.com/rss/search'
+// Bare `nasdaq` pulls MarketBeat's "(NASDAQ:XXX) price target" stream, and social posts leak in
+// via caption matches; both crowd out index-level headlines within the 20-item cap.
 export const GOOGLE_NEWS_QUERY =
-  '("stock market" OR "wall street" OR "S&P 500" OR nasdaq OR "dow jones") when:1h'
+  '("stock market" OR "wall street" OR "S&P 500" OR "Nasdaq Composite" OR "dow jones")' +
+  ' -site:marketbeat.com -site:facebook.com -site:instagram.com -site:x.com when:1h'
 const DEFAULT_TIMEOUT_MS = 20_000
 /** `response.text()` truncation cap for error messages (avoid logging huge HTML bodies). */
 const BODY_SNIPPET_MAX_CHARS = 200
@@ -116,7 +119,6 @@ const PUBDATE_RE = /<pubDate\b[^>]*>([\s\S]*?)<\/pubDate>/i
 const SOURCE_RE = /<source\b[^>]*>([\s\S]*?)<\/source>/i
 const CDATA_RE = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/
 
-/** Strips a CDATA wrapper (if present) and decodes the XML entities Google's feed uses. */
 function decodeXmlText(raw: string): string {
   const cdataMatch = CDATA_RE.exec(raw)
   const text = cdataMatch ? cdataMatch[1]! : raw
@@ -148,7 +150,6 @@ function normalizeTitle(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
-/** Newest first, deduped by normalized title, capped at `MAX_HEADLINES`. */
 function dedupeAndCap(items: GoogleNewsHeadline[]): GoogleNewsHeadline[] {
   const sorted = [...items].sort((a, b) => {
     const at = a.publishedAt ? Date.parse(a.publishedAt) : -Infinity
