@@ -2009,7 +2009,7 @@ const TRACE_LABEL_JA: Record<string, string> = {
   'risk.macro_event': 'マクロイベントゲート',
   'risk.per_symbol_gate': '銘柄別リスクゲート',
   'risk.vix_regime': 'VIX レジーム判定',
-  'risk.news_shock': 'ニュース過熱ゲート',
+  'risk.news_shock': 'ニュース急落ゲート',
   'risk.extended_hours': '時間外 (プレマーケット) 警戒ゲート',
   'risk.role_entry_suppressed': 'ロール entry 抑止 (#452)',
   'entry.half_status': '段階判定 HALF (0.5x、#452)',
