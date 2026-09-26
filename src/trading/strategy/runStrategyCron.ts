@@ -633,7 +633,7 @@ export async function runStrategyCron(
   // `loadNewsShockDecision`/`evaluateNewsShockGate`: an unexpected throw
   // here still must not take down the whole tick, so it fails open (no
   // gate injected) rather than fail-closed on BUY sizing.
-  const newsShockLoadResult =
+  const newsShockDecision =
     env.DB && newsShockGateReady && global.newsShockMode !== 'off'
       ? await loadNewsShockDecision(env.DB, global, options.requestId, new Date()).catch((err) => {
           console.warn(
@@ -646,14 +646,11 @@ export async function runStrategyCron(
           return undefined
         })
       : undefined
-  // Only the multi-probe composite feeds BUY sizing; per-probe decisions
-  // (`probes`) are for the daily summary notification only.
-  const newsShockDecision = newsShockLoadResult?.combined
   if (newsShockDecision) {
     analysis = { ...analysis, newsShock: newsShockDecision }
   }
   if (newsShockDecision && newsShockDecision.regime !== 'unknown') {
-    // 'unknown' means missing data (GDELT lag/producer outage), not a
+    // 'unknown' means missing data (collector outage / stale row), not a
     // market state, so the unknown->normal recovery transition alone is
     // suppressed — recovering from a data gap isn't itself actionable news.
     const mode = global.newsShockMode === 'enforce' ? 'enforce' : 'observe'

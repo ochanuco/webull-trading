@@ -1,7 +1,7 @@
 /**
- * Thin repo over `extended_hours_observation`. Producer-only, like
- * `attentionObservationRepo`: strategy/risk/execution never read this
- * table, only `extendedHoursScheduler` (write) and the dashboard (read).
+ * Thin repo over `extended_hours_observation`. Producer-only: strategy/risk/
+ * execution never read this table, only `extendedHoursScheduler` (write)
+ * and the dashboard (read).
  */
 import { desc, sql } from 'drizzle-orm'
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'

@@ -344,6 +344,13 @@
       "when": 1790430896105,
       "tag": "0048_add_headline_eval_to_strategy_decision_log",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1790439119132,
+      "tag": "0049_drop_attention_observation",
+      "breakpoints": true
     }
   ]
 }
