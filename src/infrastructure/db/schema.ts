@@ -940,3 +940,55 @@ export const extendedHoursObservation = sqliteTable(
 
 export type ExtendedHoursObservationRow = typeof extendedHoursObservation.$inferSelect
 export type ExtendedHoursObservationInsert = typeof extendedHoursObservation.$inferInsert
+
+/**
+ * Observe-only Google News headline + `typesafe/jev` classification log.
+ * Written by `headlineEvalScheduler` on the 15-minute slot boundary of the
+ * quote-reconcile cron; read by nothing in strategy/risk/execution — this
+ * table exists to build a labeled dataset before any gate ever consumes it.
+ * One row per attempt (including empty/fetch/AI failures) so gaps in
+ * coverage are visible in the data itself, not just in logs.
+ *
+ * `UNIQUE (source, evaluated_at)` caps writes at one row per 15-minute slot
+ * per source, mirroring `attentionObservation`'s idempotent-backfill target.
+ */
+export const newsHeadlineEval = sqliteTable(
+  'news_headline_eval',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** 評価対象スロットの ISO UTC (15分境界)。 */
+    evaluatedAt: text('evaluated_at').notNull(),
+    /** データソース識別子。今のところ 'google_news_rss' のみ。 */
+    source: text('source').notNull(),
+    query: text('query').notNull(),
+    headlineCount: integer('headline_count').notNull(),
+    /** Array<{ title, source, publishedAt }> の JSON。 */
+    headlinesJson: text('headlines_json').notNull(),
+    /** 'ok' / 'no_headlines' / 'fetch_error' / 'jev_error'。 */
+    status: text('status').notNull(),
+    error: text('error'),
+    model: text('model'),
+    shock: real('shock'),
+    direction: text('direction'),
+    directionConfidence: real('direction_confidence'),
+    severity: real('severity'),
+    severityConfidence: real('severity_confidence'),
+    scope: text('scope'),
+    scopeConfidence: real('scope_confidence'),
+    /** jev の answers 生データ (JSON)。 */
+    answersJson: text('answers_json'),
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    latencyMs: integer('latency_ms'),
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    sourceEvaluatedAtUnique: uniqueIndex('news_headline_eval_source_evaluated_at_unique').on(
+      t.source,
+      t.evaluatedAt,
+    ),
+  }),
+)
+
+export type NewsHeadlineEvalRow = typeof newsHeadlineEval.$inferSelect
+export type NewsHeadlineEvalInsert = typeof newsHeadlineEval.$inferInsert

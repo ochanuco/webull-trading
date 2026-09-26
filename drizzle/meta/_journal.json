@@ -330,6 +330,13 @@
       "when": 1789053678849,
       "tag": "0046_add_cash_fallback_sell_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1790429699960,
+      "tag": "0047_add_news_headline_eval",
+      "breakpoints": true
     }
   ]
 }
