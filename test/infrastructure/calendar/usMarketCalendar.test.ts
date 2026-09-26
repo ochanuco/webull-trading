@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { NYSE_CLOSURES } from '../../../src/trading/domain/tradingCalendar'
 import {
   formatNyYmd,
   isNyseSessionDay,
@@ -21,22 +22,33 @@ describe('formatNyYmd', () => {
     expect(formatNyYmd(new Date('2026-03-08T07:01:00Z'))).toBe('2026-03-08')
   })
 
-  it('throws on an unparseable date instead of the documented empty-string fail-closed result (suspected bug, see report)', () => {
+  it('throws RangeError on an unparseable date', () => {
     expect(() => formatNyYmd(new Date('not-a-date'))).toThrow(RangeError)
   })
 })
 
 describe('isWithinSupportedRange', () => {
+  it('supports every year that has closure data, so a year added to NYSE_CLOSURES cannot be left unsupported', () => {
+    const years = new Set([...NYSE_CLOSURES].map((ymd) => ymd.slice(0, 4)))
+    for (const year of years) {
+      expect(isWithinSupportedRange(new Date(`${year}-06-15T12:00:00Z`)), year).toBe(true)
+    }
+  })
+
+  it('accepts 2027', () => {
+    expect(isWithinSupportedRange(new Date('2027-06-15T12:00:00Z'))).toBe(true)
+  })
+
   it('accepts a year in NYSE_SUPPORTED_YEARS', () => {
     expect(isWithinSupportedRange(new Date('2026-06-15T12:00:00Z'))).toBe(true)
   })
 
   it('rejects a year outside NYSE_SUPPORTED_YEARS', () => {
     expect(isWithinSupportedRange(new Date('2025-06-15T12:00:00Z'))).toBe(false)
-    expect(isWithinSupportedRange(new Date('2027-06-15T12:00:00Z'))).toBe(false)
+    expect(isWithinSupportedRange(new Date('2028-06-15T12:00:00Z'))).toBe(false)
   })
 
-  it('throws on an unparseable date instead of rejecting it (suspected bug, see report)', () => {
+  it('throws RangeError on an unparseable date', () => {
     expect(() => isWithinSupportedRange(new Date('not-a-date'))).toThrow(RangeError)
   })
 })
@@ -60,10 +72,10 @@ describe('isNyseSessionDay', () => {
   })
 
   it('is false outside NYSE_SUPPORTED_YEARS even for an otherwise ordinary weekday', () => {
-    expect(isNyseSessionDay(new Date('2027-06-15T15:00:00Z'))).toBe(false)
+    expect(isNyseSessionDay(new Date('2028-06-15T15:00:00Z'))).toBe(false)
   })
 
-  it('throws on an unparseable date instead of failing closed (suspected bug, see report)', () => {
+  it('throws RangeError on an unparseable date', () => {
     expect(() => isNyseSessionDay(new Date('not-a-date'))).toThrow(RangeError)
   })
 })

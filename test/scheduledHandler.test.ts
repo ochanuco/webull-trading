@@ -277,7 +277,7 @@ describe('runPortfolioRoll (issue #140)', () => {
       const fixture = makeStore({ before: baseState, after: baseState })
       await runPortfolioRoll(baseEnv, 'req-out-of-range', {
         portfolioStoreFactory: () => fixture.store,
-        now: () => new Date('2027-04-21T22:00:00.000Z'),
+        now: () => new Date('2028-04-21T22:00:00.000Z'),
       })
       expect(fixture.calls).toBe(0)
       expectSkippedWithReason(/out of supported range/)

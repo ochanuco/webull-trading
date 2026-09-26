@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { TSE_CLOSURES } from '../../../src/trading/domain/tradingCalendar'
 import {
   formatJpYmd,
   isTseSessionDay,
@@ -11,22 +12,33 @@ describe('formatJpYmd', () => {
     expect(formatJpYmd(new Date('2026-01-01T20:00:00Z'))).toBe('2026-01-02')
   })
 
-  it('throws on an unparseable date instead of the documented empty-string fail-closed result (suspected bug, see report)', () => {
+  it('throws RangeError on an unparseable date', () => {
     expect(() => formatJpYmd(new Date('not-a-date'))).toThrow(RangeError)
   })
 })
 
 describe('isWithinSupportedRange', () => {
+  it('supports every year that has closure data, so a year added to TSE_CLOSURES cannot be left unsupported', () => {
+    const years = new Set([...TSE_CLOSURES].map((ymd) => ymd.slice(0, 4)))
+    for (const year of years) {
+      expect(isWithinSupportedRange(new Date(`${year}-06-15T03:00:00Z`)), year).toBe(true)
+    }
+  })
+
+  it('accepts 2027', () => {
+    expect(isWithinSupportedRange(new Date('2027-06-15T03:00:00Z'))).toBe(true)
+  })
+
   it('accepts a year in TSE_SUPPORTED_YEARS', () => {
     expect(isWithinSupportedRange(new Date('2026-06-15T03:00:00Z'))).toBe(true)
   })
 
   it('rejects a year outside TSE_SUPPORTED_YEARS', () => {
     expect(isWithinSupportedRange(new Date('2025-06-15T03:00:00Z'))).toBe(false)
-    expect(isWithinSupportedRange(new Date('2027-06-15T03:00:00Z'))).toBe(false)
+    expect(isWithinSupportedRange(new Date('2028-06-15T03:00:00Z'))).toBe(false)
   })
 
-  it('throws on an unparseable date instead of rejecting it (suspected bug, see report)', () => {
+  it('throws RangeError on an unparseable date', () => {
     expect(() => isWithinSupportedRange(new Date('not-a-date'))).toThrow(RangeError)
   })
 })
@@ -56,10 +68,10 @@ describe('isTseSessionDay', () => {
   })
 
   it('is false outside TSE_SUPPORTED_YEARS even for an otherwise ordinary weekday', () => {
-    expect(isTseSessionDay(new Date('2027-06-15T03:00:00Z'))).toBe(false)
+    expect(isTseSessionDay(new Date('2028-06-15T03:00:00Z'))).toBe(false)
   })
 
-  it('throws on an unparseable date instead of failing closed (suspected bug, see report)', () => {
+  it('throws RangeError on an unparseable date', () => {
     expect(() => isTseSessionDay(new Date('not-a-date'))).toThrow(RangeError)
   })
 })

@@ -8,7 +8,7 @@ import { NYSE_CLOSURES } from '../../trading/domain/tradingCalendar'
 
 // Fail-closed on years not yet added here, rather than trusting NYSE_CLOSURES
 // alone — an un-added future year must not silently be treated as tradable.
-const NYSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026])
+const NYSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026, 2027])
 
 // formatToParts avoids relying on `.format()`'s ICU-build-dependent ordering.
 const NY_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
