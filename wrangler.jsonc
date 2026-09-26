@@ -122,18 +122,14 @@
         // #475③: bars も staging のみ Webull primary (canary)。^VIX / JP /
         // 障害時は Yahoo に自動 fallback。
         "BAR_SOURCE": "webull",
-        // newsShockGate PR 1: GDELT の報道量 / トーンを attention_observation に
-        // 蓄積する producer の opt-in flag。取引経路からは参照されない観測専用で、
-        // gate 本体は `global_config.news_shock_mode` (既定 off) が別途握る。
-        // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
-        "NEWS_ATTENTION_ENABLED": "true",
         // #709 Phase 1: US プレマーケット帯に Yahoo 時間外 1 分足を
         // extended_hours_observation に蓄積する producer の opt-in flag。
         // 取引経路からは参照されない観測専用 — gate 本体は
         // `global_config.extended_hours_gate_mode` (既定 off) が別途握る。
         // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
         "EXTENDED_HOURS_OBSERVATION_ENABLED": "true",
-        // news_headline_eval の収集 flag。取引経路からは参照されない。
+        // news_headline_eval の収集 flag。newsShockGate (`global_config.news_shock_mode`,
+        // 既定 off) が読む唯一のソースなので、mode を off から動かす前に有効化が必要。
         "JEV_HEADLINE_EVAL_ENABLED": "true"
       },
       "routes": [
@@ -191,18 +187,14 @@
         // quoteScheduler)。quote と bars を揃える。
         "QUOTE_SOURCE": "webull",
         "BAR_SOURCE": "webull",
-        // newsShockGate PR 1: 5分 cron で GDELT を 1 リクエストずつ叩き
-        // attention_observation に蓄積する producer の opt-in flag。
-        // これ自体は取引判断に影響しない — gate は `global_config.news_shock_mode`
-        // (既定 off) で別に握っており、閾値を実データで校正するまで off のまま。
-        "NEWS_ATTENTION_ENABLED": "true",
         // #709 Phase 1: 5分 cron の US プレマーケット帯 (開場90分前〜開場) だけ
         // Yahoo 時間外 1 分足を extended_hours_observation に蓄積する producer の
         // opt-in flag。これ自体は取引判断に影響しない — gate は
         // `global_config.extended_hours_gate_mode` (既定 off) で別に握っており、
         // observe (shadow) で妥当性を見てから enforce に上げる。
         "EXTENDED_HOURS_OBSERVATION_ENABLED": "true",
-        // news_headline_eval の収集 flag。取引経路からは参照されない。
+        // news_headline_eval の収集 flag。newsShockGate (`global_config.news_shock_mode`、
+        // 既定 off、本番は observe) が読む唯一のソース — off のままなら取引判断には影響しない。
         "JEV_HEADLINE_EVAL_ENABLED": "true"
       },
       "routes": [

@@ -138,27 +138,25 @@ export function localizeReason(en: string | null | undefined): string {
   // reason in place. unavailable/insufficient_baseline only reject when
   // attention_stale_policy='block_buy'.
   s = s.replace(
-    /^risk: news_shock_critical: ([\d.]+)x(?: tone-([\d.]+))?\s*\(block\)$/,
-    (_m, ratio, tone) =>
-      `発注スキップ: ニュース過熱で緊急停止 (報道量 baseline比 ${ratio}倍${tone ? `、論調悪化 ${tone}` : ''})`,
+    /^risk: news_shock_critical: shock=([\d.]+) direction=(\S+) age=(\d+)m \(block\)$/,
+    (_m, shock, direction, age) =>
+      `発注スキップ: ニュース急落シグナルで新規買い停止 (Jev shock ${shock}・${direction}、${age}分前の判定)`,
   )
   s = s.replace(
-    /^risk: news_shock_warning: ([\d.]+)x \(size x([\d.]+)\)(?: \(qty rounded to 0, lot=(\d+)\))?$/,
-    (_m, ratio, scale, lot) =>
-      `発注スキップ: ニュース過熱で発注数量縮小 (報道量 baseline比 ${ratio}倍、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
+    /^risk: news_shock_warning: shock=([\d.]+) direction=(\S+) age=(\d+)m \(size x([\d.]+)\)(?: \(qty rounded to 0, lot=(\d+)\))?$/,
+    (_m, shock, direction, age, scale, lot) =>
+      `発注スキップ: ニュース悪化シグナルで発注数量縮小 (Jev shock ${shock}・${direction}、${age}分前の判定、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
   )
   s = s.replace(
-    /^risk: news_shock_unavailable_fallback_normal$/,
-    '発注スキップ: ニュース観測データ不足 (block_buy 設定により新規買い停止)',
-  )
-  s = s.replace(
-    /^risk: news_shock_insufficient_baseline: (\d+)\/(\d+)$/,
-    (_m, count, min) =>
-      `発注スキップ: ニュース baseline サンプル不足 (${count}/${min}件、block_buy 設定により新規買い停止)`,
-  )
-  s = s.replace(
-    /^risk: news_shock_degenerate_baseline: all-zero$/,
-    '発注スキップ: ニュース baseline が全点ゼロ (block_buy 設定により新規買い停止)',
+    /^risk: news_shock_unavailable_(no_row|stale: [\w.]+min|status: \S+|no_shock)$/,
+    (_m, cause: string) => {
+      const detail = cause.startsWith('stale')
+        ? `判定が古い ${cause.replace(/^stale: /, '').replace('min', '分')}前`
+        : cause.startsWith('status')
+          ? `見出し取得/判定失敗 ${cause.replace(/^status: /, '')}`
+          : '判定データなし'
+      return `発注スキップ: ニュース判定不能 (${detail}、block_buy 設定により新規買い停止)`
+    },
   )
 
   // === Scheduler inline ===

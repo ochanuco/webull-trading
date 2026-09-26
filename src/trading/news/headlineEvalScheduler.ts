@@ -23,8 +23,8 @@ import {
   type JevClassifyResult,
 } from '../../infrastructure/news/jevHeadlineClassifier'
 
-export const NEWS_HEADLINE_EVAL_SOURCE_YAHOO = 'yahoo_finance_rss'
-export const NEWS_HEADLINE_EVAL_SOURCE_GOOGLE = 'google_news_rss'
+const NEWS_HEADLINE_EVAL_SOURCE_YAHOO = 'yahoo_finance_rss'
+const NEWS_HEADLINE_EVAL_SOURCE_GOOGLE = 'google_news_rss'
 const SLOT_MINUTES = 15
 /** Total length cap when both sources fail and their messages are combined into one error column. */
 const COMBINED_ERROR_MAX_CHARS = 500
