@@ -13,6 +13,7 @@ import { refreshWebullToken } from './infrastructure/webull/refreshWebullToken'
 import { resolveAccessToken } from './infrastructure/webull/resolveAccessToken'
 import { createWebullReadClient } from './infrastructure/webull/WebullReadClient'
 import { runExtendedHoursObservation } from './trading/quotes/extendedHoursScheduler'
+import { runHeadlineEvalScheduler } from './trading/news/headlineEvalScheduler'
 import { runNewsScheduler } from './trading/news/newsScheduler'
 import { runNewsShockDailySummary } from './trading/news/newsShockDailySummary'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
@@ -427,6 +428,23 @@ export default {
               persisted: summary.persisted,
               statuses: summary.statuses,
               errors: summary.errors,
+            }),
+          )
+        })
+        .catch(() => undefined),
+    )
+    // Keyed off scheduledTime, not wall clock: a late start past :x0/:x5 would otherwise miss its 15-minute slot.
+    ctx.waitUntil(
+      runHeadlineEvalScheduler({ env, requestId, now: () => new Date(event.scheduledTime) })
+        .then((summary) => {
+          if (!summary.ran) return
+          console.log(
+            JSON.stringify({
+              event: 'headline_eval_scheduler_run',
+              requestId,
+              status: summary.status,
+              headlineCount: summary.headlineCount,
+              inserted: summary.inserted,
             }),
           )
         })

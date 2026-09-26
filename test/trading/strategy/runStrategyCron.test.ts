@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadGlobalConfigFrom } from '../../../src/infrastructure/db/globalConfigLoader'
 import { loadSymbolUniverse } from '../../../src/infrastructure/db/symbolUniverse'
 import {
+  createNewsHeadlineEvalDb,
+  createNewsHeadlineEvalRepo,
+} from '../../../src/infrastructure/db/newsHeadlineEvalRepo'
+import type { NewsHeadlineEvalRow } from '../../../src/infrastructure/db/schema'
+import { logStrategyDecision } from '../../../src/infrastructure/logger/strategyDecisionLog'
+import {
   emitStaleRollWarningIfNeeded,
   resolvePortfolioForRiskScale,
   runStrategyCron,
@@ -50,6 +56,21 @@ vi.mock('../../../src/infrastructure/db/attentionObservationRepo', () => ({
     purgeOlderThan: vi.fn(),
   })),
 }))
+// headlineEval の読み込みは D1 read のみ (sizing には影響しない observe-only) なので、
+// newsShock と同じ理由で repo を mock して重い実 D1 plumbing を避ける。
+vi.mock('../../../src/infrastructure/db/newsHeadlineEvalRepo', () => ({
+  createNewsHeadlineEvalDb: vi.fn(() => ({}) as unknown),
+  createNewsHeadlineEvalRepo: vi.fn(() => ({
+    insertIgnore: vi.fn(),
+    fetchLatest: vi.fn().mockResolvedValue(null),
+  })),
+}))
+// logStrategyDecision の呼び出し内容 (headlineEvalJson の有無) を検証するための spy。
+vi.mock('../../../src/infrastructure/logger/strategyDecisionLog', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../src/infrastructure/logger/strategyDecisionLog')>()
+  return { ...actual, logStrategyDecision: vi.fn() }
+})
 
 const env = {
   DB: {} as D1Database,
@@ -1326,6 +1347,148 @@ describe('runStrategyCron', () => {
       const calls = vi.mocked(runPullbackScheduler).mock.calls
       expect(calls.length).toBe(1) // pass 1 のみ、halt 中は SELL pass 2 も止まる
       expect(result.entryHaltReason).toBeDefined()
+    })
+  })
+
+  describe('headline eval snapshot (observe-only, jev-headline-collection follow-up)', () => {
+    function headlineRow(overrides: Partial<NewsHeadlineEvalRow> = {}): NewsHeadlineEvalRow {
+      return {
+        id: 1,
+        evaluatedAt: '2026-09-26T12:00:00.000Z',
+        source: 'google_news_rss',
+        query: '("stock market") when:1h',
+        headlineCount: 3,
+        headlinesJson: '[]',
+        status: 'ok',
+        error: null,
+        model: 'jev-1.13.0',
+        shock: 0.99,
+        direction: 'risk_off',
+        directionConfidence: 1,
+        severity: 4,
+        severityConfidence: 1,
+        scope: 'broad_us_market',
+        scopeConfidence: 1,
+        answersJson: '{}',
+        inputTokens: 1,
+        outputTokens: 1,
+        latencyMs: 1,
+        requestId: null,
+        ...overrides,
+      }
+    }
+
+    // Fields that could plausibly carry a headlineEval-driven branch (sizing,
+    // gating, symbol selection). Excludes per-call closures/repo handles
+    // (onDecision, onTickerDeny, sanityFailedCooldown, earningsGate.repo,
+    // macroEventGate.repo, notifier, positionStore, barClient, execution)
+    // whose object identity differs across calls regardless of this change.
+    const SIZING_RELEVANT_KEYS = [
+      'symbols',
+      'equity',
+      'symbolLotSizeMap',
+      'symbolCapMap',
+      'maxOrderNotional',
+      'symbolBudgetAllocPctMap',
+      'budgetBasisJpy',
+      'fxJpyPerSymbolCcy',
+      'intradayOnlySymbols',
+      'defaultRule',
+      'rulesMap',
+      'entrySuppressedSymbols',
+      'atrBaselineMode',
+      'tradeCost',
+      'halfEntrySymbols',
+      'momentumSymbols',
+      'riskPerTradePct',
+      'perSymbolRisk',
+      'vixDecision',
+      'newsShockGate',
+      'extendedHoursGate',
+      'cashRebalanceQuantityMap',
+      'cashRebalanceSellQuantityMap',
+    ] as const
+
+    function comparableSchedulerCalls(): unknown[] {
+      return vi.mocked(runPullbackScheduler).mock.calls.map(([opts]) => {
+        const picked: Record<string, unknown> = {}
+        for (const key of SIZING_RELEVANT_KEYS) picked[key] = (opts as unknown as Record<string, unknown>)[key]
+        return picked
+      })
+    }
+
+    it('does not change scheduler options, decisions, or qty whether a shock=0.99 row exists or not', async () => {
+      vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
+        insertIgnore: vi.fn(),
+        fetchLatest: vi.fn().mockResolvedValue(null),
+      })
+      const resultWithoutRow = await runStrategyCron(env)
+      const callsWithoutRow = comparableSchedulerCalls()
+      vi.mocked(runPullbackScheduler).mockClear()
+
+      vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
+        insertIgnore: vi.fn(),
+        fetchLatest: vi.fn().mockResolvedValue(headlineRow()),
+      })
+      const resultWithRow = await runStrategyCron(env)
+      const callsWithRow = comparableSchedulerCalls()
+
+      expect(callsWithRow).toEqual(callsWithoutRow)
+      expect(resultWithRow.summary).toEqual(resultWithoutRow.summary)
+      expect(resultWithRow.skipReason).toEqual(resultWithoutRow.skipReason)
+      expect(resultWithRow.entryHaltReason).toEqual(resultWithoutRow.entryHaltReason)
+    })
+
+    it('attaches the available snapshot to analysis.headlineEval when a row exists', async () => {
+      vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
+        insertIgnore: vi.fn(),
+        fetchLatest: vi.fn().mockResolvedValue(headlineRow()),
+      })
+      const result = await runStrategyCron(env)
+      expect(result.analysis.headlineEval).toEqual(
+        expect.objectContaining({ available: true, shock: 0.99, status: 'ok', headlineCount: 3 }),
+      )
+    })
+
+    it('reports available:false reason:no_row on analysis.headlineEval when no row exists', async () => {
+      vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
+        insertIgnore: vi.fn(),
+        fetchLatest: vi.fn().mockResolvedValue(null),
+      })
+      const result = await runStrategyCron(env)
+      expect(result.analysis.headlineEval).toEqual({ available: false, reason: 'no_row' })
+    })
+
+    it('persists the snapshot as headlineEvalJson on every decision record emitted via onDecision', async () => {
+      vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
+        insertIgnore: vi.fn(),
+        fetchLatest: vi.fn().mockResolvedValue(headlineRow()),
+      })
+      await runStrategyCron(env)
+      const opts = lastSchedulerOptions()
+      await opts.onDecision?.({ symbol: 'SOXL', decision: 'HOLD', reason: 'no signal' })
+
+      expect(vi.mocked(logStrategyDecision)).toHaveBeenCalledTimes(1)
+      const [, record] = vi.mocked(logStrategyDecision).mock.calls[0]!
+      expect(record.headlineEvalJson).toBeTruthy()
+      expect(JSON.parse(record.headlineEvalJson as string)).toEqual(
+        expect.objectContaining({ available: true, shock: 0.99, status: 'ok' }),
+      )
+    })
+
+    it('still writes headlineEvalJson:null (not omitted) on a decision record when no row exists', async () => {
+      vi.mocked(createNewsHeadlineEvalRepo).mockReturnValueOnce({
+        insertIgnore: vi.fn(),
+        fetchLatest: vi.fn().mockResolvedValue(null),
+      })
+      await runStrategyCron(env)
+      const opts = lastSchedulerOptions()
+      await opts.onDecision?.({ symbol: 'SOXL', decision: 'HOLD', reason: 'no signal' })
+
+      const [, record] = vi.mocked(logStrategyDecision).mock.calls[0]!
+      expect(record.headlineEvalJson).toBe(
+        JSON.stringify({ available: false, reason: 'no_row' }),
+      )
     })
   })
 })
