@@ -8,6 +8,66 @@ import type {
 // this tick with other tasks (portfolio roll, etc).
 const WEBHOOK_TIMEOUT_MS = 10_000
 
+interface ErrorCauseInfo {
+  /** Japanese headline, e.g. "株価取得が連続で失敗". */
+  headline: string
+  /** What the bot does about it, e.g. "5分ごとに自動で再試行しています". */
+  impact: string
+  /** Operator action, when one exists. Omitted causes skip the 要対応 line. */
+  action?: string
+}
+
+// `event.cause` stays a machine key for notification_emit_log / brokerErrorSurge / dashboard
+// alerts — this table only controls the human-facing text, never the key itself.
+const ERROR_CAUSE_INFO: Record<string, ErrorCauseInfo> = {
+  quote_feed_partial: { headline: '株価取得が連続で失敗', impact: '5分ごとに自動で再試行しています' },
+  quote_feed: { headline: '株価取得が連続で失敗', impact: '5分ごとに自動で再試行しています' },
+  reconcile_fills_partial: { headline: '約定照合で一部失敗', impact: '次回の照合 (5分後) で再試行します' },
+  reconcile_fills: {
+    headline: '約定照合が異常終了',
+    impact: 'この回の約定反映は行われていません',
+    action: 'ダッシュボードで注文と建玉を確認',
+  },
+  strategy_cron: {
+    headline: '売買判定が異常終了',
+    impact: 'この回の判定・発注は実行されていません',
+    action: 'Workers のログを確認',
+  },
+  webull_token_refresh: {
+    headline: 'Webull トークン更新に失敗',
+    impact: '期限が切れると発注・照会が止まります',
+    action: '`pnpm run issue-token` → `POST /admin/webull-token/seed`',
+  },
+  webull_market_data_unhealthy: {
+    headline: 'Webull 市場データ API が異常',
+    impact: '銘柄の取扱可否チェックが効かない可能性があります',
+  },
+  portfolio_halted: { headline: '売買停止中 (ポートフォリオ停止)', impact: '新規の判定・発注をスキップしています' },
+  drawdown_kill: {
+    headline: '売買停止: ドローダウン上限に到達',
+    impact: '新規の判定・発注をスキップしています',
+    action: '損益を確認して再開を判断',
+  },
+  no_bridge_state: {
+    headline: '売買停止: 状態ストア未接続',
+    impact: '判定・発注をスキップしています',
+    action: 'Durable Object binding の設定を確認',
+  },
+  exit_unavailable_while_holding: {
+    headline: '保有中の決済判定ができません',
+    impact: 'この回の売却判定はスキップ、建玉は保持したままです',
+    action: 'チャートで値動きを確認',
+  },
+  'bar fetch': { headline: '日足の取得に失敗', impact: 'この銘柄の今回の判定をスキップしました' },
+  broker_4xx: { headline: '発注エラー (リクエスト拒否)', impact: '注文状況をダッシュボードで確認してください' },
+  broker_429: { headline: '発注エラー (レート制限)', impact: '注文状況をダッシュボードで確認してください' },
+  broker_5xx: { headline: '発注エラー (Webull 側障害)', impact: '注文状況をダッシュボードで確認してください' },
+  broker_other: { headline: '発注エラー', impact: '注文状況をダッシュボードで確認してください' },
+  'broker submit': { headline: '発注エラー', impact: '注文状況をダッシュボードで確認してください' },
+}
+
+const DEFAULT_ERROR_CAUSE_INFO: ErrorCauseInfo = { headline: '内部エラー', impact: 'ログを確認してください' }
+
 export interface WebhookNotifierOptions {
   /** Empty/undefined skips Slack. */
   slackUrl?: string
@@ -99,13 +159,15 @@ export class WebhookNotifier implements Notifier {
     if (event.type === 'SUMMARY') {
       return `${severityIcon(event.severity ?? 'info')} ${event.message}`
     }
-    const sym = event.symbol ?? 'global'
-    const causePart = event.cause ? ` (${event.cause})` : ''
+    const info = (event.cause ? ERROR_CAUSE_INFO[event.cause] : undefined) ?? DEFAULT_ERROR_CAUSE_INFO
     const icon = severityIcon(event.severity ?? 'warning')
-    const label = event.severity === 'critical' ? 'CRITICAL' : 'cron error'
-    const head = `${icon} ${label}: ${sym} — ${event.message}${causePart}`
+    const symbolPart = event.symbol ? `：${event.symbol}` : ''
+    const lines = [`${icon} ${info.headline}${symbolPart}`, info.impact]
+    if (info.action) lines.push(`要対応: ${info.action}`)
+    lines.push('', `詳細: ${event.message}`)
     const link = event.symbol ? this.dashboardLinkFor(event.symbol) : undefined
-    return link ? `${head}\n${link}` : head
+    if (link) lines.push(link)
+    return lines.join('\n')
   }
 
   private dashboardLinkFor(symbol: string): string | undefined {

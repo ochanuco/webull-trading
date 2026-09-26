@@ -225,24 +225,26 @@ describe('WebhookNotifier', () => {
     expect(slackBody.text).toContain('https://dash.example.com/dashboard/charts?tab=symbol&symbol=AAPL')
   })
 
-  it('renders ERROR with severity=critical using a critical icon and CRITICAL label', async () => {
+  it('renders a critical-cause ERROR with headline, 要対応 line, and 詳細 line, no (cause) suffix', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
 
     await notifier.notify({
       type: 'ERROR',
-      message: 'cron skipped: portfolio_halted',
-      cause: 'portfolio_halted',
+      message: 'drawdown -6.2%',
+      cause: 'drawdown_kill',
       severity: 'critical',
     })
 
     const body = JSON.parse(String(calls[0]?.init.body))
-    expect(body.text).toContain('🚨')
-    expect(body.text).toContain('CRITICAL')
-    expect(body.text).toContain('portfolio_halted')
+    expect(body.text).toBe(
+      '🚨 売買停止: ドローダウン上限に到達\n新規の判定・発注をスキップしています\n要対応: 損益を確認して再開を判断\n\n詳細: drawdown -6.2%',
+    )
+    expect(body.text).not.toContain('CRITICAL')
+    expect(body.text).not.toContain('(drawdown_kill)')
   })
 
-  it('renders ERROR with default severity=warning', async () => {
+  it('renders a cause with no action entry without a 要対応 line', async () => {
     const { fn, calls } = makeFetch()
     const notifier = new WebhookNotifier({ slackUrl: 'https://hooks.slack.test/x', fetchImpl: fn })
 
@@ -255,8 +257,29 @@ describe('WebhookNotifier', () => {
 
     const body = JSON.parse(String(calls[0]?.init.body))
     expect(body.text).toContain('⚠️')
-    expect(body.text).toContain('cron error')
+    expect(body.text).toContain('日足の取得に失敗：NVDA')
+    expect(body.text).not.toContain('要対応')
+    expect(body.text).not.toContain('cron error')
     expect(body.text).not.toContain('CRITICAL')
+    expect(body.text).not.toContain('(bar fetch)')
+    expect(body.text).toContain('詳細: upstream 500')
+  })
+
+  it('falls back to 内部エラー headline for an unknown/undefined cause', () => {
+    const notifier = new WebhookNotifier({})
+    const withUnknownCause = notifier.formatMessage({
+      type: 'ERROR',
+      message: 'something broke',
+      cause: 'totally_unknown_cause',
+    })
+    const withoutCause = notifier.formatMessage({
+      type: 'ERROR',
+      message: 'something broke',
+    })
+
+    expect(withUnknownCause).toContain('内部エラー')
+    expect(withUnknownCause).toContain('ログを確認してください')
+    expect(withoutCause).toContain('内部エラー')
   })
 
   it('renders STATE_CHANGE event with critical icon and field/from/to', async () => {
@@ -336,7 +359,8 @@ describe('WebhookNotifier', () => {
       severity: 'critical',
     })
     expect(text).toContain('🚨')
-    expect(text).toContain('CRITICAL')
-    expect(text).toContain('reconcile fails')
+    expect(text).toContain('約定照合が異常終了')
+    expect(text).toContain('要対応: ダッシュボードで注文と建玉を確認')
+    expect(text).toContain('詳細: reconcile fails')
   })
 })

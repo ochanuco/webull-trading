@@ -16,6 +16,11 @@ import { runExtendedHoursObservation } from './trading/quotes/extendedHoursSched
 import { runNewsScheduler } from './trading/news/newsScheduler'
 import { runNewsShockDailySummary } from './trading/news/newsShockDailySummary'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
+import {
+  QUOTE_FEED_ALL_KEY,
+  reconcileQuoteFeedFailureStreak,
+  toQuoteFeedFailureItems,
+} from './trading/quotes/quoteFeedFailureStreak'
 import { runQuoteFeed } from './trading/quotes/quoteScheduler'
 import { reconcileFills } from './trading/reconciliation/reconcileFills'
 import { runStrategyCron } from './trading/strategy/runStrategyCron'
@@ -79,7 +84,7 @@ export default {
                 createNotifier(env, { requestId })
                   .notify({
                     type: 'ERROR',
-                    message: `Webull token refresh failed: ${summary.failureReason}. Run \`pnpm run issue-token\` and POST /admin/webull-token/seed.`,
+                    message: `Webull token refresh failed: ${summary.failureReason}`,
                     cause: 'webull_token_refresh',
                     severity: 'critical',
                   })
@@ -293,25 +298,17 @@ export default {
           )
           // A per-category throw inside getSnapshots() only lands in summary.errors — the
           // overall promise still resolves — so without this, a persistent per-symbol failure
-          // stays invisible. Promoted to a warning notify here, under a distinct
-          // cause='quote_feed_partial' so it doesn't get conflated with a full quote_feed throw.
-          if (summary.errors.length > 0) {
-            const summaryMsg = summary.errors
-              .slice(0, 3)
-              .map((e) => `[${e.category}] ${e.message}`)
-              .join(' | ')
-            const tail = summary.errors.length > 3 ? ` (+${summary.errors.length - 3} more)` : ''
-            ctx.waitUntil(
-              createNotifier(env, { requestId })
-                .notify({
-                  type: 'ERROR',
-                  message: `quote_feed partial failure (${summary.errors.length} error(s)): ${summaryMsg}${tail}`,
-                  cause: 'quote_feed_partial',
-                  severity: 'warning',
-                })
-                .catch(() => undefined),
-            )
-          }
+          // stays invisible. Notifying every tick instead would page on transient platform
+          // blips (e.g. a Durable Object storage reset) that the next 5-minute tick recovers.
+          ctx.waitUntil(
+            reconcileQuoteFeedFailureStreak({
+              db: env.DB,
+              notifier: createNotifier(env, { requestId }),
+              items: toQuoteFeedFailureItems(summary.errors),
+              cause: 'quote_feed_partial',
+              requestId,
+            }).catch(() => undefined),
+          )
         },
         (error) => {
           const message = error instanceof Error ? error.message : String(error)
@@ -324,14 +321,13 @@ export default {
           )
           // Warning, not critical: distinguishes a full quote_feed throw from a per-symbol skip.
           ctx.waitUntil(
-            createNotifier(env, { requestId })
-              .notify({
-                type: 'ERROR',
-                message,
-                cause: 'quote_feed',
-                severity: 'warning',
-              })
-              .catch(() => undefined),
+            reconcileQuoteFeedFailureStreak({
+              db: env.DB,
+              notifier: createNotifier(env, { requestId }),
+              items: [{ key: QUOTE_FEED_ALL_KEY, display: message }],
+              cause: 'quote_feed',
+              requestId,
+            }).catch(() => undefined),
           )
         },
       ),
