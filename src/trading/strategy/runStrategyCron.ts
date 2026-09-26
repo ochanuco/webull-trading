@@ -60,6 +60,7 @@ import {
   NEWS_SHOCK_REGIME_RANK,
 } from '../risk/newsShockDecision'
 import { isExtendedHoursGateReady, loadExtendedHoursGateDecisions } from '../risk/extendedHoursGate'
+import { loadHeadlineEvalSnapshot, type HeadlineEvalSnapshot } from '../news/headlineEvalSnapshot'
 import { resolveTradingEnabled } from '../runtime/killSwitch'
 import {
   evaluateStrategyWindow,
@@ -177,6 +178,8 @@ interface StrategyCronAnalysis {
   vix?: VixRegimeFilterDecision
   /** News shock gate decision; undefined when `news_shock_mode='off'` or the table isn't migrated. Computed once per tick and shared by both currency runs. */
   newsShock?: NewsShockGateDecision
+  /** Latest `news_headline_eval` row visible at decision time; observe-only, never gates sizing. Computed once per tick and shared by both currency runs. */
+  headlineEval?: HeadlineEvalSnapshot
   runs: Array<{
     currency: SymbolCurrency
     /** null when `total_capital_usd/jpy` is unset — risk-% sizing fails closed on capital-unset. */
@@ -680,6 +683,17 @@ export async function runStrategyCron(
       ? { mode: global.newsShockMode, decision: newsShockDecision }
       : undefined
 
+  // Loaded independent of newsShockMode/JEV_HEADLINE_EVAL_ENABLED — a plain
+  // D1 read never affects sizing, so there's no reason to gate it behind
+  // either flag the way newsShockGateOption is. Recorded per decision below
+  // so a later Jev evaluation can compare against what was actually visible
+  // at decision time, instead of joining by timestamp after the fact and
+  // risking a row that didn't exist yet.
+  const headlineEvalSnapshot = env.DB
+    ? await loadHeadlineEvalSnapshot(env.DB, new Date(), options.requestId)
+    : undefined
+  analysis = { ...analysis, headlineEval: headlineEvalSnapshot }
+
   // Same readiness pattern as the gates above; mode is checked first so an
   // idle ('off') gate skips the readiness query itself, not just the load.
   const extendedHoursGateReady =
@@ -958,6 +972,7 @@ export async function runStrategyCron(
           requestId: options.requestId,
           ...record,
           traceJson: trace && trace.length > 0 ? JSON.stringify(trace) : null,
+          headlineEvalJson: headlineEvalSnapshot ? JSON.stringify(headlineEvalSnapshot) : null,
         }),
     })
     summary.evaluated += sub.evaluated
@@ -1175,6 +1190,7 @@ export async function runStrategyCron(
             requestId: options.requestId,
             ...record,
             traceJson: trace && trace.length > 0 ? JSON.stringify(trace) : null,
+            headlineEvalJson: headlineEvalSnapshot ? JSON.stringify(headlineEvalSnapshot) : null,
           }),
       })
       summary.evaluated += sub.evaluated

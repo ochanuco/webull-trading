@@ -18,7 +18,7 @@ import {
   type JevClassifyResult,
 } from '../../infrastructure/news/jevHeadlineClassifier'
 
-const SOURCE = 'google_news_rss'
+export const NEWS_HEADLINE_EVAL_SOURCE = 'google_news_rss'
 const SLOT_MINUTES = 15
 
 export interface HeadlineEvalSummary {
@@ -86,7 +86,7 @@ export async function runHeadlineEvalScheduler(
       const repo = createNewsHeadlineEvalRepo(createNewsHeadlineEvalDb(db))
       const { inserted } = await repo.insertIgnore({
         evaluatedAt,
-        source: SOURCE,
+        source: NEWS_HEADLINE_EVAL_SOURCE,
         query: GOOGLE_NEWS_QUERY,
         headlineCount: headlines.length,
         headlinesJson: JSON.stringify(headlines),

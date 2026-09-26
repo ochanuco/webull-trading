@@ -68,3 +68,49 @@ describe('createNewsHeadlineEvalRepo.insertIgnore', () => {
     expect(inserted.requestId).toBeNull()
   })
 })
+
+function makeFakeSelectDb(rows: unknown[]) {
+  const whereArgs: unknown[] = []
+  const limitArgs: unknown[] = []
+  const selectBuilder = {
+    from: vi.fn(() => ({
+      where: vi.fn((arg: unknown) => {
+        whereArgs.push(arg)
+        return {
+          orderBy: vi.fn(() => ({
+            limit: vi.fn((n: unknown) => {
+              limitArgs.push(n)
+              return Promise.resolve(rows)
+            }),
+          })),
+        }
+      }),
+    })),
+  }
+  const db = { select: vi.fn(() => selectBuilder) } as unknown as NewsHeadlineEvalDb
+  return { db, whereArgs, limitArgs }
+}
+
+describe('createNewsHeadlineEvalRepo.fetchLatest', () => {
+  it('returns the single row when one matches', async () => {
+    const row = { id: 1, source: 'google_news_rss', evaluatedAt: '2026-09-26T12:00:00.000Z' }
+    const { db, limitArgs } = makeFakeSelectDb([row])
+    const repo = createNewsHeadlineEvalRepo(db)
+    const result = await repo.fetchLatest({
+      source: 'google_news_rss',
+      atOrBeforeIso: '2026-09-26T12:15:00.000Z',
+    })
+    expect(result).toBe(row)
+    expect(limitArgs).toEqual([1])
+  })
+
+  it('returns null when nothing matches', async () => {
+    const { db } = makeFakeSelectDb([])
+    const repo = createNewsHeadlineEvalRepo(db)
+    const result = await repo.fetchLatest({
+      source: 'google_news_rss',
+      atOrBeforeIso: '2026-09-26T12:15:00.000Z',
+    })
+    expect(result).toBeNull()
+  })
+})

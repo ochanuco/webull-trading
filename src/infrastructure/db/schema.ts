@@ -556,6 +556,12 @@ export const strategyDecisionLog = sqliteTable(
      * don't emit a trace.
      */
     traceJson: text('trace_json'),
+    /**
+     * `HeadlineEvalSnapshot` JSON (news_headline_eval row visible at decision
+     * time, or an `available:false` reason). Observe-only, never read by
+     * sizing/gates — recorded for a later point-in-time Jev evaluation.
+     */
+    headlineEvalJson: text('headline_eval_json'),
   },
   (t) => ({
     // `/dashboard/cron?symbol=X` reads WHERE symbol=? ORDER BY id DESC — this
