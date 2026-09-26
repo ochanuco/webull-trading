@@ -6,7 +6,7 @@
  */
 const MODEL_ID = 'typesafe/jev'
 
-export const QUESTIONS = {
+const QUESTIONS = {
   shock: {
     type: 'noul',
     instructions:
@@ -55,7 +55,7 @@ export interface JevAi {
   run(model: string, input: unknown): Promise<unknown>
 }
 
-export interface JevAnswers {
+interface JevAnswers {
   shock: number | null
   direction: string | null
   directionConfidence: number | null
@@ -110,7 +110,7 @@ function snippet(value: unknown): string {
   }
 }
 
-export function parseJevResponse(raw: unknown): JevClassifyResult {
+function parseJevResponse(raw: unknown): JevClassifyResult {
   if (!isRecord(raw)) {
     return { ok: false, error: `jev response is not an object: ${snippet(raw)}` }
   }
