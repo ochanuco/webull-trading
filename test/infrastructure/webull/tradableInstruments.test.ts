@@ -30,14 +30,13 @@ function pagedFetcher(pages: { hasNext: boolean; instruments: unknown[] }[]): ty
   }) as typeof fetch
 }
 
-describe('fetchTradableInstruments (#460 tradable/list)', () => {
-  it('複数ページを読み切って正規化・dedup する', async () => {
+describe('fetchTradableInstruments (tradable/list)', () => {
+  it('複数ページを読み切って正規化・dedup する (last-write-wins; instrument_id の末尾 .000000 は除去)', async () => {
     const result = await fetchTradableInstruments(env, {
       sleep: noSleep,
       fetcher: pagedFetcher([
         { hasNext: true, instruments: [row('SOXL', '1001'), row('SOXS', '1002')] },
-        // 2 ページ目の SOXL は **別 payload** (security_id 9999)。dedup が
-        // last-write-wins である事を明示的に固定する。+ 新規 TQQQ、hasNext=false。
+        // SOXL reappears with a different payload (security_id 9999) to pin last-write-wins dedup.
         { hasNext: false, instruments: [row('SOXL', '9999'), row('TQQQ', '1003')] },
       ]),
     })
@@ -47,8 +46,6 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
     const symbols = result.instruments.map((i) => i.symbol).sort()
     expect(symbols).toEqual(['SOXL', 'SOXS', 'TQQQ'])
     const soxl = result.instruments.find((i) => i.symbol === 'SOXL')
-    // last-write-wins: 2 ページ目の値 (91329999) になる (91321001 ではない)。
-    // instrument_id の末尾 .000000 は除去済み。
     expect(soxl?.instrumentId).toBe('91329999')
   })
 
@@ -74,7 +71,6 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
     expect(result.outcome).toBe('ok')
     expect(result.complete).toBe(true)
     expect(result.instruments).toHaveLength(1)
-    // 429 backoff の sleep が少なくとも 1 回呼ばれた。
     expect(sleep).toHaveBeenCalled()
   })
 
@@ -109,7 +105,6 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
   })
 
   it('maxPages で打ち切り → complete=false + nextCursor を返す', async () => {
-    // 各ページ hasNext=true。maxPages=2 で 2 ページ取って打ち切る。
     let i = 0
     const fetcher = (async () => {
       i += 1
@@ -121,7 +116,6 @@ describe('fetchTradableInstruments (#460 tradable/list)', () => {
     const result = await fetchTradableInstruments(env, { sleep: noSleep, fetcher, maxPages: 2 })
     expect(result.complete).toBe(false)
     expect(result.pages).toBe(2)
-    // nextCursor = 2 ページ目の security_id。
     expect(result.nextCursor).toBe('1002')
   })
 

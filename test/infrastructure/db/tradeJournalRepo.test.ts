@@ -56,13 +56,26 @@ describe('insertJournalRecord', () => {
   })
 })
 
-/**
- * Stubs the drizzle chain `db.select({...}).from(...).where(...)` to return
- * `rows` and capture each phase for assertions. The repo treats the awaited
- * `where(...)` value as the array.
- */
+function collectSqlStrings(node: unknown, acc: string[] = []): string[] {
+  if (node == null) return acc
+  if (typeof node === 'string') {
+    acc.push(node)
+    return acc
+  }
+  if (Array.isArray(node)) {
+    for (const n of node) collectSqlStrings(n, acc)
+    return acc
+  }
+  if (typeof node === 'object') {
+    const obj = node as Record<string, unknown>
+    if ('value' in obj) acc.push(String(obj.value))
+    if ('queryChunks' in obj) collectSqlStrings(obj.queryChunks, acc)
+  }
+  return acc
+}
+
 function fakeCountChain(rows: Array<{ count: number }>) {
-  const where = vi.fn(async () => rows)
+  const where = vi.fn(async (_condition: unknown) => rows)
   const from = vi.fn(() => ({ where }))
   const select = vi.fn(() => ({ from }))
   const db = { select } as unknown as ReturnType<
@@ -107,11 +120,6 @@ describe('hasRecentSanityFailure', () => {
   })
 
   it('uses the injected `now` to compute the cutoff timestamp', async () => {
-    // The repo issues `gte(timestamp, cutoff)` where cutoff = now - withinMs.
-    // We don't introspect the SQL fragment here — drizzle wraps it — but we
-    // confirm the call is shaped (select → from → where) with the injected
-    // `now` and that the count is propagated. End-to-end cutoff parity is
-    // covered indirectly by the scheduler test (cooldown active vs lapsed).
     const { drizzle } = await import('drizzle-orm/d1')
     const { db, where } = fakeCountChain([{ count: 1 }])
     vi.mocked(drizzle).mockReturnValue(db as never)
@@ -122,5 +130,18 @@ describe('hasRecentSanityFailure', () => {
     })
     expect(result).toBe(true)
     expect(where).toHaveBeenCalledTimes(1)
+  })
+
+  it('matches state_apply_error containing either sanity_failed or repair_skipped_invalid_row', async () => {
+    const { drizzle } = await import('drizzle-orm/d1')
+    const { db, where } = fakeCountChain([{ count: 1 }])
+    vi.mocked(drizzle).mockReturnValue(db as never)
+
+    await hasRecentSanityFailure({} as D1Database, 'AAPL', 30 * 60_000)
+
+    const condition = collectSqlStrings(where.mock.calls[0]![0]).join(' ')
+    expect(condition).toContain('%sanity_failed%')
+    expect(condition).toContain('%repair_skipped_invalid_row%')
+    expect(condition).toMatch(/\bor\b/)
   })
 })

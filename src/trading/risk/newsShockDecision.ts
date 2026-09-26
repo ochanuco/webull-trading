@@ -1,12 +1,7 @@
 /**
- * `attention_observation` (news attention producer, PR 1) から news shock gate
- * の合成 decision を組み立てる層 (news-shock-gate PR 2、`runStrategyCron.ts`
- * から抽出)。D1 read (`attentionObservationRepo`) と複数 probe の merge を
- * 担い、pure な判定ロジック本体 (`evaluateNewsShockGate`) とは分離する。
- *
- * `runStrategyCron.ts` から切り出した理由: 日次サマリ通知 (news-shock-gate
- * follow-up) など、strategy tick 以外からも同じ「D1 read → probe 別評価 →
- * 合成」ロジックを再利用する必要が出たため。
+ * Builds a news-shock decision from `attention_observation` rows: D1 read
+ * plus per-probe merge, kept separate from the pure decision logic in
+ * `evaluateNewsShockGate` so other callers (e.g. daily summary) can reuse it.
  */
 import {
   DEFAULT_NEWS_SHOCK_CONFIG,
@@ -19,12 +14,7 @@ import {
 import { createAttentionObservationDb, createAttentionObservationRepo } from '../../infrastructure/db/attentionObservationRepo'
 import { NEWS_PROBES } from '../../infrastructure/news/newsProbes'
 
-/**
- * `attention_observation` (news attention producer, PR 1) が当該 D1 で
- * migrate 済みかを判定する (news-shock-gate PR 2)。`isMacroEventCalendarReady`
- * と同じ理由 — 未 migrate な preview / 新環境では gate を無効化して
- * fail-closed の連鎖 reject / D1 read エラーを回避する。
- */
+/** Guards against an unmigrated D1 (preview / new env) — treat as not-ready rather than throwing. */
 export async function isNewsShockGateReady(db: D1Database): Promise<boolean> {
   try {
     const row = await db
@@ -38,7 +28,7 @@ export async function isNewsShockGateReady(db: D1Database): Promise<boolean> {
   }
 }
 
-/** severity 判定用の news shock regime ランク (0=normal/unknown, 1=warning, 2=critical)。 */
+/** Severity rank for logging/display (0=normal/unknown, 1=warning, 2=critical). */
 export const NEWS_SHOCK_REGIME_RANK: Record<NewsShockRegime, number> = {
   unknown: 0,
   normal: 0,
@@ -46,20 +36,12 @@ export const NEWS_SHOCK_REGIME_RANK: Record<NewsShockRegime, number> = {
   critical: 2,
 }
 
-/**
- * ratio > severity の観点で「どちらがより保守的 (BUY を絞る側) か」を選ぶための
- * rank。unknown は fail-open の「データ無し」を表すだけで、それ自体が
- * critical/warning より保守的な意味を持つわけではない — sizeScale が同点
- * (1.0) の時、データに裏付けられた normal を合成結果として優先する
- * (news-shock-gate follow-up: 旧 rank では unknown が normal より上位だったため、
- * 片方の probe が sparse/degenerate で恒常的に unknown になると、もう片方が
- * normal でも合成結果が unknown に固定され続け、regime 変化が一切発生しない
- * = STATE_CHANGE 通知が永久に飛ばないバグの原因だった)。
- *
- * `attentionStalePolicy='block_buy'` の unknown は sizeScale=0 になるため、
- * sizeScale 優先の比較 (`moreConservativeNewsShockDecision` 内の最初の分岐)
- * で先に勝つ — つまりこの rank 変更後も fail-closed 運用時の挙動は変わらない。
- */
+// unknown ranks below normal (not above): on a sizeScale tie (both 1.0), a
+// data-backed normal wins over a stale/degenerate unknown. Otherwise one
+// chronically sparse probe pins the combined regime at unknown forever and
+// STATE_CHANGE notifications never fire even when the other probe moves.
+// A block_buy unknown (sizeScale=0) still wins on the sizeScale comparison
+// below, so fail-closed behavior is unaffected by this rank.
 const NEWS_SHOCK_SEVERITY_RANK: Record<NewsShockRegime, number> = {
   unknown: 0,
   normal: 1,
@@ -72,12 +54,9 @@ export function isNewsShockRegime(value: unknown): value is NewsShockRegime {
 }
 
 /**
- * 2 つの probe 決定のうち、より保守的 (BUY を絞る側) な方を選ぶ。GDELT probe
- * は `trump_macro` / `market_selloff` の複数本あり (`newsProbes.ts`)、
- * このリポジトリでは「どちらか一方でも過熱を検知したら BUY を絞る」方針
- * (per-symbol gate の AND-of-rejects と同じ layered defense の考え方) を
- * とる。sizeScale が小さい方を優先し、同点なら regime の severity rank
- * (critical > warning > normal > unknown) で決める。
+ * Picks the more conservative (smaller sizeScale) of two probe decisions,
+ * breaking ties by regime severity. Multiple probes can each independently
+ * trip BUY-size scaling; any one of them doing so should win (AND-of-rejects).
  */
 export function moreConservativeNewsShockDecision(
   a: NewsShockGateDecision,
@@ -88,29 +67,22 @@ export function moreConservativeNewsShockDecision(
 }
 
 /**
- * `attention_observation` (GDELT producer, PR 1) から直近観測を D1 read し、
- * `evaluateNewsShockGate` で regime decision を返す (news-shock-gate PR 2)。
+ * D1-reads recent observations for each of `NEWS_PROBES` and evaluates them
+ * with `evaluateNewsShockGate`, returning the combined (more conservative)
+ * decision plus each probe's own decision for per-probe display.
  *
- * **D1 read のみ。fetch は一切呼ばない** — 15分間隔の strategy tick cron に
- * 外部 API 呼び出しを足さないという安全上の絶対条件の core。GDELT への実際の
- * fetch は別 cron (`newsScheduler`, 5分間隔) の producer 側の責務。
- *
- * `NEWS_PROBES` (`trump_macro` / `market_selloff`) を両方評価し、より保守的な
- * 方 (`moreConservativeNewsShockDecision`) を tick の decision として返す
- * (`combined`)。probe 別の decision も `probes` として返す — 日次サマリ通知
- * (news-shock-gate follow-up) が「どの probe がどう判定したか」を1行ずつ
- * 表示するために必要。D1 read が failure した probe は観測なし (= fail-open)
- * として扱う — D1 障害で strategy tick 全体を落とさないため。
+ * Never calls fetch itself — GDELT ingestion is a separate producer cron.
+ * A D1 read failure for a probe is treated as no observation (fail-open)
+ * rather than failing the whole strategy tick.
  *
  * `evaluateAt`:
- *   - `'now'` (default): strategy tick 用。asOf = now で評価するため、GDELT の
- *     反映遅延 (実測 1〜7 時間) が `maxAgeMin` を超えていると unavailable に
- *     倒れる — リアルタイム判定としてはそれが正しい (古い観測で BUY を絞らない)。
- *   - `'latest_observation'`: 日次サマリ等の表示用。probe ごとに最新 volume
- *     観測の bucket 時刻を asOf にして評価する。「データが届いている範囲では
- *     どう判定されるか」を見るためのもので、staleness check を実質バイパス
- *     するため **取引経路 (strategy tick) では使わないこと**。probe に観測が
- *     1 点も無い場合は now で評価する (= unavailable に倒れる)。
+ *   - `'now'` (default): for the strategy tick. GDELT's own ingestion delay
+ *     (observed 1-7h) can exceed `maxAgeMin` and fall back to unavailable —
+ *     correct for a live trading decision, which shouldn't act on stale data.
+ *   - `'latest_observation'`: evaluates each probe as of its own latest
+ *     volume bucket, bypassing the staleness check. Display-only (e.g. daily
+ *     summary) — do not use on the trading path. Falls back to `'now'` when
+ *     a probe has no observations at all.
  */
 export async function loadNewsShockDecision(
   db: D1Database,
@@ -143,15 +115,10 @@ export async function loadNewsShockDecision(
     maxAgeMin: global.newsShockMaxAgeMin,
     attentionStalePolicy: global.attentionStalePolicy,
   }
-  // global_config の生値 (`newsShockBaselineDays` 等) は DB UPDATE の typo で
-  // NaN / 非数になり得る。sanitize 前の値で `sinceIso` を計算すると
-  // `new Date(NaN).toISOString()` が RangeError を throw し、この関数の
-  // 呼び出し元 (strategy tick 全体) まで例外が伝播してしまう (CodeRabbit
-  // PR #619 review)。`evaluateNewsShockGate` 内部でも sanitize されるが、
-  // それより前に行う `sinceIso` 計算はその保護の外にあるため、ここで
-  // sanitize 済みの値を使う (以降 sinceIso 計算・evaluateNewsShockGate への
-  // 引き渡しは sane のみを使う。evaluateNewsShockGate 内部で再度 sanitize
-  // されるが冪等なので問題ない)。
+  // Sanitize before computing sinceIso below: an unsanitized NaN
+  // baselineDays (e.g. a bad global_config UPDATE) would make
+  // `new Date(NaN).toISOString()` throw here, upstream of the sanitize
+  // that evaluateNewsShockGate does internally.
   const config = sanitizeNewsShockConfig(rawConfig)
   const asOf = now.toISOString()
   const sinceIso = new Date(now.getTime() - config.baselineDays * 24 * 60 * 60_000).toISOString()
@@ -166,9 +133,9 @@ export async function loadNewsShockDecision(
         repo.fetchRecent({ source: 'gdelt', probeKey: probe.key, metric: 'volume', sinceIso }),
         repo.fetchRecent({ source: 'gdelt', probeKey: probe.key, metric: 'tone', sinceIso }),
       ])
-      // 'latest_observation': この probe の最新 volume bucket を評価基準時刻に
-      // する。sinceIso (fetch 窓) は now 起点のままなので、遅延分だけ baseline
-      // 窓の最古側が数時間欠けるが、7 日窓に対して誤差の範囲。
+      // sinceIso (the fetch window) still anchors on `now`, not `probeAsOf`,
+      // so the baseline's oldest edge can be short a few hours' worth of
+      // rows — negligible against a 7-day baseline window.
       const probeAsOf =
         evaluateAt === 'latest_observation' ? (latestBucketAtOrNull(volumeRows, now) ?? asOf) : asOf
       input = {
@@ -177,8 +144,6 @@ export async function loadNewsShockDecision(
         asOf: probeAsOf,
       }
     } catch (err) {
-      // D1 read 失敗は「観測なし」扱い (evaluateNewsShockGate が fail-open で
-      // unknown/unavailable に倒す)。cron 本体には伝播させない。
       console.warn(
         JSON.stringify({
           event: 'news_shock_observation_fetch_failed',
@@ -193,24 +158,15 @@ export async function loadNewsShockDecision(
     probes.push({ probeKey: probe.key, decision })
     combined = combined === undefined ? decision : moreConservativeNewsShockDecision(combined, decision)
   }
-  // NEWS_PROBES が空 (あり得ないが defensive) なら unavailable 相当を返す。
   return {
+    // NEWS_PROBES is never empty in practice; this is just a typed fallback
+    // for the loop producing no combined value.
     combined: combined ?? evaluateNewsShockGate({ volumeObservations: [], toneObservations: [], asOf }, config),
     probes,
   }
 }
 
-/**
- * news_shock_regime の STATE_CHANGE 通知に載せる人間向け見出し (ユーザー
- * フィードバック: 「アクションが取れない通知は流しても無意味」)。
- *
- * - warning / critical への突入: 何が起きたか (報道量倍率) + bot が何を
- *   する/しないか (mode 依存) を 1 文で言う。
- * - normal への復帰: 解除。from='unknown' からの normal 復帰はデータ欠測の
- *   回復であって市場シグナルではないため、呼び出し側 (`shouldNotify`) で
- *   通知ごと抑制する前提 — ここでは見出しを作らない (undefined)。
- * - 想定外の組は undefined を返し、既定の `state change: ...` 表示に落とす。
- */
+/** Human-readable headline for a `news_shock_regime` STATE_CHANGE notification; undefined falls back to the default "state change: ..." display. */
 export function buildNewsShockRegimeHeadline(
   from: NewsShockRegime,
   to: NewsShockRegime,
@@ -224,8 +180,7 @@ export function buildNewsShockRegimeHeadline(
     return `ニュース急落シグナル: 報道量が${ratioText}に急増・論調悪化 — ${action}`
   }
   if (to === 'warning') {
-    // 「警戒」等の severity ラベルは書かない — アイコン (⚠️) が伝えるため
-    // 重複する (ユーザーフィードバック)。
+    // No separate severity label (e.g. 警戒) — the ⚠️ icon already conveys it.
     const action =
       mode === 'enforce'
         ? `新規買い数量を縮小します (x${decision.sizeScale})`
@@ -235,14 +190,12 @@ export function buildNewsShockRegimeHeadline(
   if (to === 'normal' && (from === 'warning' || from === 'critical')) {
     return `ニュース過熱シグナル解除 — 平常に戻りました (現在${ratioText})`
   }
+  // unknown→normal is data recovery, not a market signal — shouldNotify
+  // suppresses that transition entirely, so no headline is needed here.
   return undefined
 }
 
-/**
- * now 以前で最新の bucket_at を返す (無ければ null)。未来時刻の row (時計ずれ /
- * 汚染データ) は評価基準時刻に採用しない — `evaluateNewsShockGate` 側の
- * window/baseline フィルタも asOf 以前しか見ないため整合する。
- */
+/** Latest bucket_at at or before `now`; null if none. Future-dated rows (clock skew / bad data) are ignored to stay consistent with evaluateNewsShockGate's own asOf-bounded filters. */
 function latestBucketAtOrNull(rows: Array<{ bucketAt: string }>, now: Date): string | null {
   let latest: string | null = null
   let latestMs = Number.NEGATIVE_INFINITY

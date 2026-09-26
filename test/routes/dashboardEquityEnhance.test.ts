@@ -14,8 +14,7 @@ vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
 }))
 
-// overview タブの QQQ ベンチマークは Yahoo fetch (network 依存)。テストでは
-// 常に失敗させて「series 省略 + 注記のみ」の fail-graceful 経路を検証する。
+// QQQ ベンチマークの Yahoo fetch を常に失敗させ、fail-graceful 経路 (series 省略+注記のみ) を検証する
 vi.mock('../../src/infrastructure/quotes/YahooBarClient', () => ({
   YahooBarClient: class {
     async getDailyBars(): Promise<never> {
@@ -224,20 +223,16 @@ describe('GET /dashboard/charts?tab=overview (equity enhance SSR)', () => {
     const res = await app.request('/dashboard/charts?tab=overview', {}, env as never)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // チャート枠 + 期間別テーブル + 月次チャート
     expect(body).toContain('id="equity-chart"')
     expect(body).toContain('id="dd-chart"')
     expect(body).toContain('期間別リターン')
     expect(body).toContain('id="monthly-chart"')
     expect(body).toContain('1週間')
     expect(body).toContain('年初来')
-    // Yahoo mock 失敗 → ベンチマーク series 無し、注記のみ (fail-graceful)
     expect(body).toContain('取得失敗のため非表示')
     expect(body).not.toContain('QQQ 騰落率 (% 右軸) — 意味の異なる系列')
-    // マーカー payload (safeJsonScript) に fill が乗っている
     expect(body).toContain('oid-sell-1')
     expect(body).toContain('"markers"')
-    // クリック遷移先 (実装済みの trades フィルタ)
     expect(body).toContain('/dashboard/trades?clientOrderId=')
   })
 

@@ -4,11 +4,9 @@ import type { Env } from '../src/config/env'
 import type { PortfolioState } from '../src/trading/state/portfolioTypes'
 import type { PortfolioStore } from '../src/trading/state/PortfolioStore'
 
-// Issue #140: EOD rollover helper の挙動を検証する。`src/index.ts` の
-// `scheduled()` 内でこの helper が `event.cron === '0 22 * * *'` のときだけ
-// 呼ばれる構造になっている (cron ルーティング自体は src/index.ts の `if`
-// 分岐そのものが仕様 — runtime test は wrangler 経由でしか書けないので
-// helper の側に焦点を絞る)。
+// src/index.ts の scheduled() は cron === '0 22 * * *' の時だけこの helper を呼ぶ。
+// cron ルーティング自体の runtime test は wrangler 経由でしか書けないため、
+// helper の側に焦点を絞る (Issue #140)。
 
 const baseEnv = {
   DRY_RUN: 'true',
@@ -56,9 +54,8 @@ function makeStore(opts: {
   } as { store: PortfolioStore; calls: number }
 }
 
-// Broker equity re-seed tests need to observe `seedDailyStartEquity` calls
-// separately from `rollDaily`, so this variant of the fixture captures the
-// re-seed amount instead of ignoring it like `makeStore` above.
+// Broker re-seed tests need to observe seedDailyStartEquity separately from
+// rollDaily, so this variant captures the re-seed amount instead of ignoring it.
 function makeStoreWithSeedCapture(opts: {
   before: PortfolioState
   after: PortfolioState
@@ -95,9 +92,8 @@ describe('runPortfolioRoll (issue #140)', () => {
   let logSpy: ReturnType<typeof vi.spyOn>
   let warnSpy: ReturnType<typeof vi.spyOn>
   let errorSpy: ReturnType<typeof vi.spyOn>
-  // Issue #319: roll は calendar-aware で skip するため、helper test 群は
-  // NY/JP 両方 session day である瞬間を固定で渡す (Wed 2026-04-22 22:00 UTC =
-  // NY 18:00 Wed / JP 翌日 Thu)。
+  // roll は calendar-aware で skip するため (#319)、helper test 群は NY/JP 両方
+  // session day である瞬間を固定で渡す。
   const nowOnSessionDay = (): Date => new Date('2026-04-22T22:00:00.000Z')
   beforeEach(() => {
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
@@ -178,8 +174,7 @@ describe('runPortfolioRoll (issue #140)', () => {
       updatedAt: '2026-04-25T22:00:00.000Z',
     }
     const fixture = makeStore({ before, after: before, throwOnRoll: new Error('DO unreachable') })
-    // resolve = silent fallback。reject にならないこと自体が cron を fail に
-    // させない仕様の根拠。
+    // resolve (not reject) is itself the spec: cron must not fail on this path.
     await expect(
       runPortfolioRoll(baseEnv, 'req-3', {
         portfolioStoreFactory: () => fixture.store,
@@ -196,8 +191,7 @@ describe('runPortfolioRoll (issue #140)', () => {
     expect(payload).toMatchObject({ event: 'portfolio_roll_error', message: 'DO unreachable' })
   })
 
-  // Issue #319: calendar-aware skip。22:00 UTC cron は実 session boundary
-  // でない日 (土日 / NYSE holiday / TSE holiday) には roll を skip する。
+  // 22:00 UTC cron は実 session boundary でない日 (土日/NYSE holiday/TSE holiday) では skip する
   describe('calendar-aware skip (issue #319)', () => {
     const baseState: PortfolioState = {
       dailyStartEquity: 10_000,
@@ -283,17 +277,16 @@ describe('runPortfolioRoll (issue #140)', () => {
       const fixture = makeStore({ before: baseState, after: baseState })
       await runPortfolioRoll(baseEnv, 'req-out-of-range', {
         portfolioStoreFactory: () => fixture.store,
-        now: () => new Date('2027-04-21T22:00:00.000Z'),
+        now: () => new Date('2028-04-21T22:00:00.000Z'),
       })
       expect(fixture.calls).toBe(0)
       expectSkippedWithReason(/out of supported range/)
     })
   })
 
-  // Shared fixture for the two describe blocks below — both exercise the
-  // post-rollDaily() side effects (broker re-seed / D1 snapshot) against the
-  // same before/after roll transition, so a single `rollBefore`/`rollAfter`
-  // pair avoids duplicating the PortfolioState literals (CodeRabbit #574).
+  // Shared by the two describe blocks below, which both exercise post-rollDaily()
+  // side effects (broker re-seed / D1 snapshot) against the same transition,
+  // avoiding duplicated PortfolioState literals (CodeRabbit #574).
   const rollBefore: PortfolioState = {
     dailyStartEquity: 10_000,
     dailyRealizedPnl: -50,
@@ -315,12 +308,10 @@ describe('runPortfolioRoll (issue #140)', () => {
     updatedAt: '2026-04-25T22:00:00.000Z',
   }
 
-  // Broker equity auto-reseed: EOD roll re-seeds `dailyStartEquity` from the
-  // Webull balance API so the drawdown gate's denominator tracks the real
-  // account instead of a stale manual seed. The broker orchestration itself
-  // (token resolve -> read client -> getAccountBalance -> parse) lives in
-  // `fetchUsdEquity` (infrastructure/webull) — these tests only stub that
-  // single seam, per the `RunPortfolioRollDeps.fetchUsdEquity` override.
+  // EOD roll re-seeds dailyStartEquity from the Webull balance API so the drawdown
+  // gate's denominator tracks the real account instead of a stale manual seed. The
+  // broker orchestration lives in fetchUsdEquity (infrastructure/webull); these tests
+  // only stub that single seam via RunPortfolioRollDeps.fetchUsdEquity.
   describe('broker equity re-seed (dailyStartEquity auto-seed)', () => {
     function warnLogsMatching(reasonSubstring: string): Record<string, unknown>[] {
       return warnSpy.mock.calls

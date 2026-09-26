@@ -138,8 +138,6 @@ describe('GdeltDocClient.getTimeline', () => {
     const gdeltError = error as GdeltResponseError
     expect(gdeltError.status).toBe(200)
     expect(gdeltError.bodySnippet).toContain('Something went wrong upstream')
-    // Must not have attempted response.json() on the HTML body — that would
-    // surface as a generic SyntaxError instead of our typed error.
     expect(error).not.toBeInstanceOf(SyntaxError)
   })
 

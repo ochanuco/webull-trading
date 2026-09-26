@@ -4,11 +4,6 @@ import type { PortfolioState } from './portfolioTypes'
 
 const SINGLETON_NAME = 'default'
 
-/**
- * Thin adapter from {@link DurableObjectNamespace} to {@link PortfolioStore}.
- * Always routes to a single DO instance (`idFromName('default')`) because
- * portfolio state is account-wide.
- */
 export class PortfolioStateClient implements PortfolioStore {
   constructor(private readonly namespace: DurableObjectNamespace<PortfolioStateDO>) {}
 

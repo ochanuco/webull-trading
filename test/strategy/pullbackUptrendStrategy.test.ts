@@ -32,10 +32,10 @@ function goodEntryInput(): PullbackInput {
   return {
     symbol: 'AAPL',
     indicators: {
-      price: 96, // 4% pullback from high20d=100
+      price: 96, // 4% pullback from high10d=100
       sma50: 90,
-      return50d: 0.12,
-      high20d: 100,
+      return20d: 0.12,
+      high10d: 100,
       atr20: 1.5,
       baselineAtr20: 1.5,
     },
@@ -77,9 +77,9 @@ describe('PullbackUptrendStrategy entry', () => {
     expect(signal.trace?.find((step) => step.label === 'entry.adopt_buy')?.label_ja).toBe('買い採用')
   })
 
-  it('HOLDs when 50d return is below the +8% trend threshold', () => {
+  it('HOLDs when 20d return is below the +8% trend threshold', () => {
     const input = goodEntryInput()
-    input.indicators.return50d = 0.05
+    input.indicators.return20d = 0.05
     const signal = strategy.decide(input)
     expect(signal.action).toBe('HOLD')
     expect(signal.trace?.at(-1)).toMatchObject({
@@ -91,12 +91,11 @@ describe('PullbackUptrendStrategy entry', () => {
   it('HOLDs when price is at or below sma50', () => {
     const input = goodEntryInput()
     input.indicators.price = 89
-    input.indicators.high20d = 100
+    input.indicators.high10d = 100
     expect(strategy.decide(input).action).toBe('HOLD')
   })
 
-  // #strategy-overextension-guards: SMA50 上方乖離が上限超 → 過熱で見送り。
-  it('HOLDs (overextended) when price is too far above sma50', () => {
+  it('HOLDs (overextended) when price is too far above sma50 (#strategy-overextension-guards)', () => {
     const input = goodEntryInput()
     input.indicators.sma50 = 50 // price 96 → deviation +92% > default 0.6
     const signal = strategy.decide(input)
@@ -105,8 +104,7 @@ describe('PullbackUptrendStrategy entry', () => {
     expect(signal.trace?.at(-1)).toMatchObject({ label: 'entry.not_overextended', passed: false })
   })
 
-  // #strategy-overextension-guards: 直近 ATR が baseline 比で過大 → ボラ過熱で見送り。
-  it('HOLDs (volatility elevated) when atr20 exceeds maxAtrRatio of baseline', () => {
+  it('HOLDs (volatility elevated) when atr20 exceeds maxAtrRatio of baseline (#strategy-overextension-guards)', () => {
     const input = goodEntryInput()
     input.indicators.atr20 = 4 // baselineAtr20=1.5 → ratio 2.67 > default 1.5
     const signal = strategy.decide(input)
@@ -150,9 +148,8 @@ describe('PullbackUptrendStrategy entry', () => {
   })
 })
 
-// #reentry: 前回売値からの再エントリー価格ガード。窓内 (既定 3 営業日) は前回売値
-// −1ATR 以上安くないと買い直さない。窓外 / 情報欠落は素通り (fail-open)。
-describe('PullbackUptrendStrategy re-entry price guard', () => {
+// 窓内 (既定 3 営業日) は前回売値 −1ATR 以上安くないと買い直さない。窓外 / 情報欠落は fail-open。
+describe('PullbackUptrendStrategy re-entry price guard (#reentry)', () => {
   const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
 
   it('HOLDs when re-buying within the window at/above (last exit - 1 ATR)', () => {
@@ -182,12 +179,8 @@ describe('PullbackUptrendStrategy re-entry price guard', () => {
     expect(strategy.decide(input).action).toBe('BUY')
   })
 
-  // #660 (CodeRabbit follow-up): lastExitAt は #582 で先行導入済みだが
-  // lastExitPrice は本フィールドの新規追加なので、deploy 直前のガード窓内に
-  // exit した銘柄は lastExitAt はあるのに lastExitPrice が無い移行期の state
-  // になりうる。ここを fail-open (無条件 BUY 許可) にすると、まさにガードで
-  // 守るべき窓内で無防備に買い直せてしまう。窓内なら価格不明でも entry を
-  // 保留する (fail-closed)。
+  // #660: lastExitAt (#582) はあるが lastExitPrice が無い移行期 state がありうる。
+  // 窓内で fail-open にすると守るべきガードが無防備になるため fail-closed で保留する。
   it('fail-closes (HOLDs) when lastExitPrice is unknown but the exit was within the guard window', () => {
     const input = goodEntryInput()
     input.lastExitPrice = null
@@ -202,7 +195,6 @@ describe('PullbackUptrendStrategy re-entry price guard', () => {
     })
   })
 
-  // 窓経過後は lastExitPrice が無くても自然に fail-open へ戻る (恒久 block ではない)。
   it('BUYs once the guard window elapses even when lastExitPrice is still unknown', () => {
     const input = goodEntryInput()
     input.lastExitPrice = null
@@ -210,8 +202,7 @@ describe('PullbackUptrendStrategy re-entry price guard', () => {
     expect(strategy.decide(input).action).toBe('BUY')
   })
 
-  // businessDaysSinceExit が無い (= lastExitAt も無い、一度も exit していない
-  // 銘柄) は窓の内外を判定しようがないので、従来どおり無条件で fail-open。
+  // 窓の内外を判定する情報自体が無いので無条件で fail-open。
   it('is fail-open when businessDaysSinceExit is unknown (never exited)', () => {
     const input = goodEntryInput()
     input.lastExitPrice = 96
@@ -227,12 +218,6 @@ describe('PullbackUptrendStrategy re-entry price guard', () => {
   })
 })
 
-// #658: strategy が HOLD の原因 (holdCause) と、entry_gate 由来なら 4 段階判定
-// スナップショット (entryStatus) を申告する。scheduler の HALF 昇格判定はこれを
-// 再計算せずそのまま使うため、行動可否 guard (cooldown / 再エントリー価格ガード)
-// が誤って 'entry_gate' に分類されると HALF 昇格の絶対 veto が崩れる
-// (実害: 2026-07-29 SQQQ — 再エントリーガード由来の HOLD が指標のみの再導出で
-// BUY 0.5x に昇格した)。
 describe('PullbackUptrendStrategy holdCause (#658)', () => {
   const strategy = new PullbackUptrendStrategy(TEST_DEFAULT_RULE)
 
@@ -257,9 +242,7 @@ describe('PullbackUptrendStrategy holdCause (#658)', () => {
   })
 
   it('structural gate HOLD within the HALF tolerance band is holdCause=entry_gate with a HALF entryStatus', () => {
-    // Same fixture as "HOLDs when pullback is deeper than -6%": only
-    // pullback_deep fails (-7% vs -6% threshold), and -7% is within the
-    // ±20% tolerance band (-7.2%) → HALF.
+    // -7% pullback: only pullback_deep fails, within the ±20% tolerance band (-7.2%) → HALF
     const input = goodEntryInput()
     input.indicators.price = 93 // -7% pullback
     const signal = strategy.decide(input)
@@ -271,9 +254,7 @@ describe('PullbackUptrendStrategy holdCause (#658)', () => {
   })
 
   it('structural gate HOLD outside the HALF tolerance band is holdCause=entry_gate with a WATCH entryStatus', () => {
-    // Same fixture as "HOLDs when pullback is shallower than -3%": only
-    // pullback_shallow fails (-1% vs -3% threshold), and -1% is outside the
-    // ±20% tolerance band (-2.4%) → WATCH, no halfGate.
+    // -1% pullback: only pullback_shallow fails, outside the ±20% tolerance band (-2.4%) → WATCH
     const input = goodEntryInput()
     input.indicators.price = 99 // -1% pullback
     const signal = strategy.decide(input)
@@ -297,7 +278,7 @@ describe('PullbackUptrendStrategy exit priority', () => {
   function withPosition(price: number, holdBusinessDays = 0): PullbackInput {
     return {
       symbol: 'AAPL',
-      indicators: { price, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },
+      indicators: { price, sma50: 0, return20d: 0, high10d: 0, atr20: 0, baselineAtr20: 0 },
       position: openPosition,
       pendingOrder: null,
       cooldownUntil: null,
@@ -335,7 +316,7 @@ describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
   const strategy = new PullbackUptrendStrategy(LEVERAGED_RULE)
   const buildExit = (price: number, atr20: number): PullbackInput => ({
     symbol: 'TQQQ',
-    indicators: { price, sma50: 0, return50d: 0, high20d: 0, atr20, baselineAtr20: 1 },
+    indicators: { price, sma50: 0, return20d: 0, high10d: 0, atr20, baselineAtr20: 1 },
     position: openPosition, // avgPrice 100
     pendingOrder: null,
     cooldownUntil: null,
@@ -344,8 +325,7 @@ describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
   })
 
   it('ATR widens the stop: -4% loss does NOT trigger when atr stop is -5%', () => {
-    // atr20=2, kAtr 2.5 → atrStopDist=5 (=-5%) > pctStopDist=3 → 実効 stop -5%。
-    // price 96 (pnl -4%) は -5% に届かず HOLD。固定 -3% pct stop なら誤発火していた。
+    // atrStopDist 5 (=-5%) > pctStopDist 3 → 実効 stop -5%。固定 -3% pct stop なら誤発火していた。
     const signal = strategy.decide(buildExit(96, 2))
     expect(signal.action).toBe('HOLD')
   })
@@ -370,11 +350,9 @@ describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
     expect(signal.reason).toMatch(/stop-loss/)
   })
 
-  // #stop-rr-cap: LEVERAGED_RULE は TP +5% / ratio 2.0 → stop 上限は -10%。
-  // 高 ATR 銘柄で stop が TP の何倍にも広がる (SOXL 実測 -44% vs TP +7%) のを止める。
-  it('caps the ATR stop at takeProfitPct * maxStopToTpRatio', () => {
-    // atr20=10, kAtr 2.5 → atrStopDist=25 (=-25%) だが cap は 5*2=10 (=-10%)。
-    // pnl -12% は cap 後の -10% を割るので SELL。cap 無しなら HOLD だった。
+  it('caps the ATR stop at takeProfitPct * maxStopToTpRatio (#stop-rr-cap)', () => {
+    // LEVERAGED_RULE: TP +5% × ratio 2.0 → cap -10%。atrStopDist は -25% だが cap 後 -10%。
+    // pnl -12% は cap 後の -10% を割るので SELL (cap 無しなら HOLD だった)。
     const signal = strategy.decide(buildExit(88, 10))
     expect(signal.action).toBe('SELL')
     expect(signal.reason).toMatch(/tp-cap/)
@@ -385,8 +363,7 @@ describe('PullbackUptrendStrategy exit ATR-linked stop (#exit-atr)', () => {
     expect(strategy.decide(buildExit(92, 10)).action).toBe('HOLD')
   })
 
-  // dashboard の「損切り -X%」表示は HOLD reason から作られるので、名目ではなく
-  // 実効 stop を出す (名目 -3% と実効 -5% がズレたまま表示されていた)。
+  // dashboard の損切り表示は HOLD reason から作られるため、名目ではなく実効 stop を出す
   it('HOLD reason reports the effective stop, not the nominal stopPct', () => {
     const signal = strategy.decide(buildExit(99, 2)) // 実効 stop -5%
     expect(signal.action).toBe('HOLD')
@@ -409,7 +386,7 @@ describe('PullbackUptrendStrategy per-symbol override', () => {
   it('SELLs SOXL at hold=5 days where default rule would still hold', () => {
     const signal = strategy.decide({
       symbol: 'SOXL',
-      indicators: { price: 101, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },
+      indicators: { price: 101, sma50: 0, return20d: 0, high10d: 0, atr20: 0, baselineAtr20: 0 },
       position: openPosition,
       pendingOrder: null,
       cooldownUntil: null,
@@ -423,7 +400,7 @@ describe('PullbackUptrendStrategy per-symbol override', () => {
   it('SELLs SOXL on the tighter -3% stop', () => {
     const signal = strategy.decide({
       symbol: 'SOXL',
-      indicators: { price: 96.5, sma50: 0, return50d: 0, high20d: 0, atr20: 0, baselineAtr20: 0 },
+      indicators: { price: 96.5, sma50: 0, return20d: 0, high10d: 0, atr20: 0, baselineAtr20: 0 },
       position: openPosition,
       pendingOrder: null,
       cooldownUntil: null,

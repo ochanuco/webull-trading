@@ -23,18 +23,14 @@ import {
 
 const STATE_KEY = 'state'
 
-/**
- * Per-symbol state held in a Durable Object. Instance id must be derived from
- * the symbol (e.g. `SYMBOL_STATE.idFromName(symbol)`) so all reads/writes for
- * the same ticker land on the same object.
- */
+/** Callers must address this DO via `idFromName(symbol)` so all reads/writes for one ticker land on the same object. */
 export class SymbolStateDO extends DurableObject<object> {
   private readonly transitionCtx: TransitionContext = { now: () => new Date() }
 
   async getState(symbol: string): Promise<SymbolState> {
     const state = await this.load(symbol)
-    // Defensive roll-forward: if asOf day is past any pending settleDate,
-    // move those amounts into settledCash immediately.
+    // Rolls on every read (not just on write) so a caller never observes a
+    // matured pendingSettlement that hasn't moved into settledCash yet.
     const rolled = rollSettlements(state, this.transitionCtx.now().toISOString(), this.transitionCtx)
     if (rolled !== state) {
       await this.save(rolled)
@@ -119,11 +115,8 @@ export class SymbolStateDO extends DurableObject<object> {
   }
 
   /**
-   * Operator override for a corrupted `position`. Logs a structured audit
-   * record (`event: 'symbol_state_position_override'`) with the previous
-   * and new position so the trail is recoverable from log tail. Caller is
-   * expected to be the Basic-auth-protected admin route — DO surface alone
-   * is not a security boundary.
+   * The DO surface alone is not a security boundary — callers must come
+   * through the Basic-auth-protected admin route.
    */
   async overridePosition(
     symbol: string,
@@ -158,14 +151,13 @@ export class SymbolStateDO extends DurableObject<object> {
 
   private async load(symbol: string): Promise<SymbolState> {
     const stored = await this.ctx.storage.get<SymbolState>(STATE_KEY)
-    // Check symbol matches; if mismatch, overwrite with correct empty state
     if (stored !== undefined && stored.symbol === symbol) {
       return this.normalize(stored)
     }
-    // Mismatched or missing: return empty and clear storage
     const empty = emptySymbolState(symbol, this.transitionCtx.now)
     if (stored !== undefined) {
-      // Clear mismatched state
+      // Guards against a DO instance backing the wrong symbol (e.g. an
+      // idFromName mixup) silently keeping another ticker's state.
       await this.ctx.storage.put(STATE_KEY, empty)
     }
     return empty
@@ -181,9 +173,6 @@ export class SymbolStateDO extends DurableObject<object> {
       Array.isArray((state as { appliedClientOrderIds?: unknown }).appliedClientOrderIds)
         ? state.appliedClientOrderIds
         : []
-    // #reentry: lastExitAt / lastExitPrice は後付けフィールド。旧 state には
-    // 欠落しているので読み込み時に null へ正規化し、永続データを型
-    // (string | null / number | null) と揃える。
     return {
       ...state,
       appliedClientOrderIds,

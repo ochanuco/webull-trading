@@ -2,30 +2,6 @@ import type { MiddlewareHandler } from 'hono'
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose'
 import type { Env } from '../config/env'
 
-/**
- * Cloudflare Access JWT verification middleware (#29).
- *
- * Cloudflare attaches `Cf-Access-Jwt-Assertion` at edge for any request that
- * passed the Access application policy. We verify the signature against the
- * team's JWKS endpoint and check the AUD claim matches the configured
- * application AUD tag. On success we expose the principal via `c.set('actor',
- * ...)` so the audit log layer can attribute the mutation to a real identity
- * (SSO email or service token common_name) instead of a hard-coded 'ai-agent'.
- *
- * Failure modes are all 401:
- *   - missing CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD config (fail-closed; an
- *     unconfigured prod must not silently allow requests)
- *   - missing or unparseable Cf-Access-Jwt-Assertion
- *   - JWKS fetch / signature verify failure
- *   - AUD claim mismatch
- *   - expired JWT (jose enforces exp by default)
- *
- * Dev bypass: when `ACCESS_DEV_BYPASS_USER` is set AND `CF_ACCESS_TEAM_DOMAIN`
- * is unset (= no real Access in front of us, i.e. `wrangler dev`), we skip
- * verification and set actor to the bypass value. Both conditions must hold
- * so accidentally setting the bypass in prod (where team domain is mandatory)
- * cannot disable auth.
- */
 export interface AccessJwtVariables {
   actor: string
 }
@@ -69,14 +45,14 @@ function pickActor(payload: AccessClaims): string {
   return 'unknown'
 }
 
-/**
- * `audience: 'mcp'` は /mcp 専用の Access application (path 限定 + Service Auth
- * policy) の AUD (`CF_ACCESS_MCP_AUD`) を検証する。専用 app を分けるのは、
- * service token の届く範囲を read-only な /mcp に限定するため (メインの
- * trading app に Service Auth を足すと token で /admin の書き込み系まで
- * 通ってしまう)。`CF_ACCESS_MCP_AUD` 未設定時は `CF_ACCESS_AUD` に fallback
- * (メイン app に Service Auth policy を足す運用も許容する)。
- */
+// `audience: 'mcp'` verifies against a separate Access application's AUD (CF_ACCESS_MCP_AUD),
+// not the main app's — scoping a service token's reach to the read-only /mcp app instead of
+// letting it also pass the main trading app's Access check, which would reach /admin writes.
+// Falls back to CF_ACCESS_AUD when CF_ACCESS_MCP_AUD is unset, for setups that add the Service
+// Auth policy to the main app instead of a dedicated one.
+//
+// Every failure path returns 401, including missing CF_ACCESS_TEAM_DOMAIN/AUD config — an
+// unconfigured deployment must not silently allow requests through.
 export function accessJwtMiddleware(opts?: { audience?: 'default' | 'mcp' }): MiddlewareHandler<{
   Bindings: Env
   Variables: AccessJwtVariables

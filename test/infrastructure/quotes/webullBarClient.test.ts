@@ -19,11 +19,7 @@ function mockJsonResponse(body: unknown, status = 200) {
 }
 
 describe('WebullBarClient.getDailyBars', () => {
-  // Regression: v2 /market-data/stock/bars returns `time` as
-  // "2026-04-17T04:00:00.000+0000"; a prior normalizer only looked at
-  // `date` / `trade_time`, so every bar was dropped and Pullback saw
-  // "insufficient bars for indicators" even on 200 OK.
-  it('parses v2 `time` field (ISO w/ offset) as a YYYY-MM-DD date', async () => {
+  it('parses v2 `time` field (ISO w/ offset) as a YYYY-MM-DD date, sorted oldest-first', async () => {
     const fetchFn = vi.fn(async () =>
       mockJsonResponse([
         {
@@ -51,21 +47,13 @@ describe('WebullBarClient.getDailyBars', () => {
     const bars = await client.getDailyBars('SOXL', 2)
 
     expect(bars).toHaveLength(2)
-    // Oldest first by date
     expect(bars[0]?.date).toBe('2026-04-16')
     expect(bars[1]?.date).toBe('2026-04-17')
     expect(bars[1]?.close).toBeCloseTo(94.68)
   })
 
 
-  // Regression for #84-style drift: default endpoint + Java-SDK-matching
-  // query field names (`timespan` + `count`, NOT `period` + `limit`).
-  // Historical default `/market-data/candles` + `period/limit` silently
-  // drops every bar request because it has the wrong path AND wrong params.
-  it('defaults to v2 /openapi/market-data/stock/bars with timespan=D + count + x-version: v2', async () => {
-    // Confirmed via stdlib probe (#84): v1 `/market-data/bars` → 404,
-    // v2 `/market-data/stock/bars` → 417 UNSUPPORTED_TIMESPAN (path valid).
-    // Accepted timespan set: {M1, M5, M15, M30, M60, M120, M240, D, W, M, Y}.
+  it('defaults to v2 /openapi/market-data/stock/bars with timespan=D + count + x-version: v2, not the old /market-data/candles + period/limit shape (#84)', async () => {
     let capturedUrl: URL | undefined
     let capturedHeaders: Headers | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL, init?: RequestInit) => {
@@ -84,13 +72,12 @@ describe('WebullBarClient.getDailyBars', () => {
     expect(capturedUrl?.searchParams.get('count')).toBe('30')
     expect(capturedUrl?.searchParams.get('period')).toBeNull()
     expect(capturedUrl?.searchParams.get('limit')).toBeNull()
-    // 新 OpenAPI docs (#251 / #255) で required 扱い、default 'true' を明示送信
+    // Newer OpenAPI docs (#251/#255) mark this required, so 'true' is sent explicitly.
     expect(capturedUrl?.searchParams.get('real_time_required')).toBe('true')
     expect(capturedHeaders?.get('x-version')).toBe('v2')
   })
 
-  // Category routing mirrors WebullQuoteClient: SOXL/SOXS are ETFs, 4-digit
-  // (7203) and alphanumeric (285A) TSE codes are JP.
+  // Category routing mirrors WebullQuoteClient's symbol-shape rules.
   it('routes SOXL→US_ETF, AAPL→US_STOCK, 285A→JP_STOCK on the wire', async () => {
     const captured: string[] = []
     const fetchFn = vi.fn(async (input: Request | string | URL) => {
@@ -107,8 +94,8 @@ describe('WebullBarClient.getDailyBars', () => {
     expect(captured).toEqual(['US_ETF', 'US_STOCK', 'JP_STOCK'])
   })
 
-  // Negative: honouring `barsPath` override proves the default assertion above
-  // would actually catch a drift of DEFAULT barsPath back to `/market-data/candles`.
+  // Proves the default-path assertion above would actually catch a drift back
+  // to the old barsPath, by showing an explicit override is honored instead.
   it('honours barsPath override (default-assertion sanity)', async () => {
     let capturedPath: string | undefined
     const fetchFn = vi.fn(async (input: Request | string | URL) => {

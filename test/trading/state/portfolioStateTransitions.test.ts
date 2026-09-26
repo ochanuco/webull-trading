@@ -108,7 +108,7 @@ describe('portfolioStateTransitions', () => {
   })
 
   describe('rollDaily', () => {
-    it('rolls dailyRealizedPnl into nextStart and stamps lastRolledAt', () => {
+    it('rolls dailyRealizedPnl into nextStart and stamps lastRolledAt == updatedAt (#140)', () => {
       const seeded = {
         ...emptyPortfolioState(fixedNow),
         dailyStartEquity: 10_000,
@@ -118,7 +118,6 @@ describe('portfolioStateTransitions', () => {
       expect(before).toBe(seeded)
       expect(after.dailyStartEquity).toBe(9_750)
       expect(after.dailyRealizedPnl).toBe(0)
-      // issue #140: lastRolledAt は updatedAt と同じ ISO に set される
       expect(after.lastRolledAt).toBe('2026-04-21T10:00:00.000Z')
       expect(after.updatedAt).toBe('2026-04-21T10:00:00.000Z')
     })
@@ -135,9 +134,7 @@ describe('portfolioStateTransitions', () => {
     })
   })
 
-  // #77: per-currency open BUY exposure tracker. BUY adds notional, SELL
-  // subtracts (clamp >=0). USD and JPY are independent budgets.
-  describe('applyFillExposure', () => {
+  describe('applyFillExposure — per-currency open BUY exposure tracker, clamped >= 0 (#77)', () => {
     it('BUY adds notional to the matching currency openExposure', () => {
       const s0 = emptyPortfolioState(fixedNow)
       const s1 = applyFillExposure(

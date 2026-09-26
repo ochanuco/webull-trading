@@ -1,31 +1,17 @@
 /**
  * 取引所カレンダー (JP 東証 / US NYSE)。
  *
- * US (NYSE) の全日休場・半日取引 (13:00 ET close) は #547 でルール計算
- * (`isUsMarketHoliday` / `isUsMarketEarlyCloseDay`) に移行済みで年次メンテ不要。
- * JP は 2026 / 2027 分だけ static テーブルで持つ。POC 運用を続けるなら
- * **JP の 2028 以降を追記する** こと (下の HOLIDAYS テーブル参照)。
- *
- * `isTradingDay` / `nextTradingDay` / `countTradingDaysBetween` の祝日判定は
- * UTC 日付基準 (時刻成分は無視)。市場ローカル暦日 (ET / JST) 基準の関数
- * (`isUsMarketHoliday` / `evaluateStrategyWindow` 等) は各 doc comment 参照。
+ * US は祝日・半日取引をルール計算する (`isUsMarketHoliday` / `isUsMarketEarlyCloseDay`)
+ * ので年次メンテ不要。JP は規則性がなく static テーブルのまま — 2028 以降を運用入り前に
+ * 下の HOLIDAYS.JP へ追記すること。
  */
 
 export type TradingMarket = 'JP' | 'US'
 
 const MS_PER_DAY = 86_400_000
 
-// TODO(annual): JP の 2028 以降の祝日を運用入り前に追記する。
-// JP: 東証休業日 (国民の祝日 + 振替休日 + 年始 1/1–1/3 + 大晦日 12/31)
-// US NYSE: 9 祝日 + Good Friday。土日と重なる祝日は observed day (振替) を入れる。
-//   ※ US の単一情報源は #547 でルール計算 (`isUsMarketHoliday`) に移った。
-//   この US set は infrastructure 層の `NYSE_CLOSURES` re-export (#354) 向けに
-//   残しており、ルールとの整合はテストで担保する (tradingCalendar.test.ts)。
-//
-// JP テーブルは market holiday set の単一情報源 (#354)。
-// `src/infrastructure/calendar/{us,jp}MarketCalendar.ts` の tz-aware
-// session-day check も `NYSE_CLOSURES` / `TSE_CLOSURES` re-export を経由して
-// 同じデータを参照する。
+// HOLIDAYS.US はルール計算 (isUsMarketHolidayYmd) との一致をテストで担保するだけの
+// NYSE_CLOSURES re-export 用データで、判定の単一情報源ではない。
 export const HOLIDAYS: Record<TradingMarket, ReadonlySet<string>> = {
   JP: new Set<string>([
     // 2026
@@ -90,16 +76,11 @@ export const HOLIDAYS: Record<TradingMarket, ReadonlySet<string>> = {
     '2027-09-06', // Labor Day
     '2027-11-25', // Thanksgiving
     '2027-12-24', // Christmas observed (Dec 25 is Sat)
-    // 2027-12-31 は休場にしない: NYSE Rule 7.2 (年末の営業最終日は 1/1 が土曜
-    // でも開ける)。実例: 2022-01-01 (土) に対し 2021-12-31 は通常立会だった。
+    // 2027-12-31 は休場にしない: NYSE Rule 7.2 (年末の営業最終日は 1/1 が土曜でも開ける)。
   ]),
 }
 
-/**
- * `HOLIDAYS` の market 別 alias。infrastructure 層の tz-aware session-day check
- * が import するためだけに公開する (#354)。新しい消費者は `isTradingDay` /
- * `isUsMarketHoliday` 等の関数 API を使うこと (US はルール計算が単一情報源、#547)。
- */
+/** infra 層の tz-aware session-day check が import するための re-export。新規消費者は `isTradingDay` / `isUsMarketHoliday` 等の関数 API を使うこと。 */
 export const NYSE_CLOSURES: ReadonlySet<string> = HOLIDAYS.US
 export const TSE_CLOSURES: ReadonlySet<string> = HOLIDAYS.JP
 
@@ -112,14 +93,9 @@ function isWeekend(date: Date): boolean {
   return dow === 0 || dow === 6
 }
 
-// ---------------------------------------------------------------------------
-// US (NYSE) ルール計算カレンダー (#547)
-//
-// 静的テーブルの年次追記を不要にするため、休場・半日取引を規則から導出する。
-// 臨時休場 (服喪・災害等の unscheduled closure) は規則で書けないため対象外 —
-// その日は評価が走ってしまうが、閉場で板が更新されず spread gate
-// (perSymbolRiskGate) が stale quote を reject するのがバックストップ。
-// ---------------------------------------------------------------------------
+// 臨時休場 (弔意休場等の unscheduled closure) はルール化できないため対象外 —
+// その日は評価が走ってしまうが、板が更新されず spread gate (perSymbolRiskGate)
+// が stale quote を reject するのがバックストップ。
 
 /** proleptic Gregorian の曜日 (0=Sun .. 6=Sat)。month は 1–12。 */
 function dayOfWeek(year: number, month: number, day: number): number {
@@ -159,10 +135,9 @@ function computeGoodFriday(year: number): { month: number; day: number } {
  * 振替付き固定祝日 (New Year 1/1, Juneteenth 6/19, Independence 7/4,
  * Christmas 12/25)。土曜に当たる年は前日金曜、日曜に当たる年は翌月曜が休場。
  *
- * 例外 (NYSE Rule 7.2): 1/1 が土曜の年は前年 12/31 (金) へ振替**しない**
- * (年末の営業最終日は開ける。実例: 2022-01-01 が土曜で 2021-12-31 は通常立会)。
- * 下の判定では「前日金曜」候補が day 0 となり構造的にマッチしないため、
- * 追加分岐なしでこの例外を満たす。
+ * 例外 (NYSE Rule 7.2): 1/1 が土曜の年は前年 12/31 (金) へ振替しない (年末の
+ * 営業最終日は開ける) — 下の判定では「前日金曜」候補が day 0 になり構造的に
+ * マッチしないため、追加分岐なしでこの例外を満たす。
  */
 const US_FIXED_HOLIDAYS: ReadonlyArray<{ month: number; day: number }> = [
   { month: 1, day: 1 },
@@ -170,6 +145,11 @@ const US_FIXED_HOLIDAYS: ReadonlyArray<{ month: number; day: number }> = [
   { month: 7, day: 4 },
   { month: 12, day: 25 },
 ]
+
+/** `day` が月の第 `n` 週の曜日 (7 日区切りの帯) に入っているか。 */
+function isNthWeekdayOfMonth(day: number, n: number): boolean {
+  return day > (n - 1) * 7 && day <= n * 7
+}
 
 /**
  * NYSE 全日休場判定のルール本体。year/month/day は **America/New_York の暦日**
@@ -181,27 +161,27 @@ function isUsMarketHolidayYmd(year: number, month: number, day: number): boolean
   for (const holiday of US_FIXED_HOLIDAYS) {
     if (holiday.month !== month) continue
     if (day === holiday.day && dow >= 1 && dow <= 5) return true
-    if (day === holiday.day - 1 && dow === 5) return true // 祝日が土曜 → 前日金曜が休場
-    if (day === holiday.day + 1 && dow === 1) return true // 祝日が日曜 → 翌月曜が休場
+    const isObservedFridayBeforeSaturdayHoliday = day === holiday.day - 1 && dow === 5
+    const isObservedMondayAfterSundayHoliday = day === holiday.day + 1 && dow === 1
+    if (isObservedFridayBeforeSaturdayHoliday || isObservedMondayAfterSundayHoliday) return true
   }
   if (dow === 1) {
-    if (month === 1 && day >= 15 && day <= 21) return true // MLK Day (1月第3月曜)
-    if (month === 2 && day >= 15 && day <= 21) return true // Presidents' Day (2月第3月曜)
-    if (month === 5 && day >= 25) return true // Memorial Day (5月最終月曜)
-    if (month === 9 && day <= 7) return true // Labor Day (9月第1月曜)
+    const isMlkDay = month === 1 && isNthWeekdayOfMonth(day, 3)
+    const isPresidentsDay = month === 2 && isNthWeekdayOfMonth(day, 3)
+    const isMemorialDay = month === 5 && day >= 25 // 5月最終月曜
+    const isLaborDay = month === 9 && day <= 7 // 9月第1月曜
+    if (isMlkDay || isPresidentsDay || isMemorialDay || isLaborDay) return true
   }
-  if (dow === 4 && month === 11 && day >= 22 && day <= 28) return true // Thanksgiving (11月第4木曜)
+  const isThanksgiving = dow === 4 && month === 11 && isNthWeekdayOfMonth(day, 4)
+  if (isThanksgiving) return true
   const goodFriday = computeGoodFriday(year)
   return month === goodFriday.month && day === goodFriday.day
 }
 
 /**
  * NYSE 半日取引 (13:00 ET close) 判定のルール本体 (暦日は ET、month 1–12)。
- *  - 7/3: 7/4 が火〜金の年 (= 7/3 が月〜木)。7/4 が土曜の年の 7/3 は全日休場
- *    (振替) 側なので対象外、7/4 が月曜の年の 7/3 は日曜で対象外
- *  - 感謝祭翌日 (11月第4木曜の翌金曜)
- *  - 12/24: 12/25 が火〜金の年 (= 12/24 が月〜木)。12/25 が土曜の年の 12/24 は
- *    全日休場 (振替) 側なので対象外
+ * 7/3・12/24 はそれぞれ 7/4・12/25 が火〜金の年のみ対象 — 土曜観測日は全日休場側、
+ * 日曜観測日は非対象になる。感謝祭翌金曜は無条件。
  */
 function isUsMarketEarlyCloseYmd(year: number, month: number, day: number): boolean {
   const dow = dayOfWeek(year, month, day)
@@ -211,20 +191,12 @@ function isUsMarketEarlyCloseYmd(year: number, month: number, day: number): bool
   return false
 }
 
-/**
- * `date` (UTC instant) の America/New_York 暦日を数値 y/m/d で返す。
- * `Intl.DateTimeFormat#formatToParts` ベース (DST 自動解決。format() の出力
- * 文字列に依存しないのは #349 と同じ理由)。抽出失敗は null。
- */
+/** `date` の America/New_York 暦日を y/m/d で返す。抽出失敗 (invalid Date 等) は null。 */
 function extractEtYmd(date: Date): { year: number; month: number; day: number } | null {
   return extractLocalYmd(date, 'America/New_York')
 }
 
-/**
- * `date` (UTC instant) の `timeZone` 暦日を数値 y/m/d で返す (`extractEtYmd` の
- * 汎用版、`nextSessionOpen` (#661) が任意市場 timeZone で使う)。
- * `Intl.DateTimeFormat#formatToParts` ベース (DST 自動解決)。抽出失敗は null。
- */
+/** `date` の `timeZone` 暦日を y/m/d で返す (`extractEtYmd` の汎用版)。抽出失敗は null。 */
 function extractLocalYmd(
   date: Date,
   timeZone: string,
@@ -245,53 +217,37 @@ function extractLocalYmd(
   return { year, month, day }
 }
 
-/**
- * `date` 時点の **America/New_York 暦日** が NYSE 全日休場 (祝日 + 振替) なら
- * true (#547)。固定日 + 振替 / 第n月曜 / Memorial / Thanksgiving / Good Friday
- * (Computus) をルール計算するので年次テーブル追記は不要。土日は false
- * (observed day のみ休場扱い)。臨時休場は対象外 — spread gate がバックストップ
- * (上のセクションコメント参照)。
- */
+/** `date` 時点の ET 暦日が NYSE 全日休場なら true。土日は false (observed day のみ休場扱い)。 */
 export function isUsMarketHoliday(date: Date): boolean {
   const ymd = extractEtYmd(date)
   if (ymd === null) return false
   return isUsMarketHolidayYmd(ymd.year, ymd.month, ymd.day)
 }
 
-/**
- * `date` 時点の ET 暦日が NYSE 半日取引 (13:00 ET close) 日なら true (#547)。
- * 対象: 7/3 (7/4 が平日の年) / 感謝祭翌日 / 12/24 (12/25 が平日の年)。
- */
+/** `date` 時点の ET 暦日が NYSE 半日取引 (13:00 ET close) 日なら true。 */
 export function isUsMarketEarlyCloseDay(date: Date): boolean {
   const ymd = extractEtYmd(date)
   if (ymd === null) return false
   return isUsMarketEarlyCloseYmd(ymd.year, ymd.month, ymd.day)
 }
 
-/**
- * 指定 market の営業日なら true。土日 + 祝日で false。
- */
+/** 指定 market の営業日なら true。土日 + 祝日で false。 */
 export function isTradingDay(date: Date, market: TradingMarket): boolean {
-  // invalid Date は getUTC*() が NaN になり土日/祝日判定をすり抜けて「営業日」
-  // 側 (fail-open) に落ちるため、先に弾く (fail-closed)。
+  // invalid Date は getUTC*() が NaN を返し、素通しすると「営業日」側 (fail-open)
+  // に落ちる — 先に弾いて fail-closed にする。
   if (!Number.isFinite(date.getTime())) return false
   if (isWeekend(date)) return false
   if (market === 'US') {
-    // US は従来どおり UTC 日付基準のままルール判定へ委譲 (#547)。static set
-    // 参照と同じ semantics を保ちつつ、テーブル切れ (2028 以降) が無くなる。
     return !isUsMarketHolidayYmd(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate())
   }
   const ymd = toYmdUtc(date)
   return !HOLIDAYS[market].has(ymd)
 }
 
-/**
- * 指定日の**翌**営業日を返す。土日・祝日を連続してスキップする。
- * 祝日テーブルが尽きた年を跨ぐ場合も、土日判定だけはそのまま動く。
- */
+/** 指定日の翌営業日を返す。祝日テーブルが尽きた年でも土日判定は機能し続ける。 */
 export function nextTradingDay(date: Date, market: TradingMarket): Date {
   let cursor = new Date(date.getTime() + MS_PER_DAY)
-  // 祝日テーブル不足 / 連休で無限ループしないよう上限を設ける (31 日分)。
+  // 祝日テーブル不足 / 連休で無限ループしないよう上限を設ける。
   for (let i = 0; i < 31; i += 1) {
     if (isTradingDay(cursor, market)) return cursor
     cursor = new Date(cursor.getTime() + MS_PER_DAY)
@@ -299,11 +255,7 @@ export function nextTradingDay(date: Date, market: TradingMarket): Date {
   return cursor
 }
 
-/**
- * `fromIso` の翌日から `to` (両端含む / half-open: to まで) までを走査し、
- * 営業日の数を返す。`fromIso` が invalid なら 0。祝日・土日は除外。
- * `openedAt` がいつで `now` が現在時刻、という保有日数計算に使う。
- */
+/** `fromIso` の翌日から `to` まで (half-open) の営業日数。`fromIso` が invalid なら 0。 */
 export function countTradingDaysBetween(
   fromIso: string,
   to: Date,
@@ -325,11 +277,7 @@ export function countTradingDaysBetween(
   return count
 }
 
-/**
- * symbol から market を推定する軽量版。infrastructure 層の
- * `inferWebullMarket` と同じ規則 (4 桁数字は JP / それ以外は US)。
- * domain が infrastructure に依存しないよう独立に持つ。
- */
+/** symbol から market を推定する軽量版 (4 桁数字は JP、それ以外は US)。domain 層が infra に依存しないよう独立に持つ。 */
 export function inferTradingMarket(symbol: string): TradingMarket {
   return /^\d{4}$/.test(symbol) ? 'JP' : 'US'
 }
@@ -337,19 +285,15 @@ export function inferTradingMarket(symbol: string): TradingMarket {
 /** US NYSE レギュラー引け = 16:00 ET (分換算)。 */
 const US_REGULAR_CLOSE_ET_MINUTES = 16 * 60
 
-/** US NYSE 半日取引の引け = 13:00 ET (分換算、#547)。 */
+/** US NYSE 半日取引の引け = 13:00 ET (分換算)。 */
 const US_EARLY_CLOSE_ET_MINUTES = 13 * 60
 
 /**
- * `now` が **US 取引日かつ NYSE 引けの `minutesBeforeClose` 分前〜引け**
- * の窓内なら true (#intraday-only)。レバ ETF をオーバーナイト持ち越さず引け前に
- * 強制クローズするのに使う。半日取引日 (感謝祭翌日等) は引けを 13:00 ET に
- * 短縮して判定する (#547)。
+ * `now` が US 取引日かつ NYSE 引けの `minutesBeforeClose` 分前〜引けの窓内なら true。
+ * 半日取引日は引けを 13:00 ET とみなす。
  *
- * ET wall-clock は `Intl.DateTimeFormat('America/New_York')` で取得し DST 自動対応
- * (macroEventGate と同手法)。引け窓は 13:00/16:00 ET どちらでも午後 ET なので
- * UTC 日付 == ET 日付 (深夜跨ぎ無し) → `isTradingDay(now,'US')` と半日取引判定を
- * UTC 日付基準で使って問題ない。
+ * 引け窓は常に午後 ET のため UTC 日付 == ET 日付 (深夜跨ぎ無し) — `isTradingDay(now,'US')`
+ * と半日取引判定を UTC 日付基準のまま使ってよい。
  */
 export function isWithinUsCloseWindow(now: Date, minutesBeforeClose: number): boolean {
   if (!Number.isFinite(minutesBeforeClose) || minutesBeforeClose <= 0) return false
@@ -376,11 +320,8 @@ export function isWithinUsCloseWindow(now: Date, minutesBeforeClose: number): bo
 
 /**
  * 市場ごとのレギュラーセッション (開場 / 引け、市場ローカル分換算)。
- * - US NYSE: 09:30–16:00 ET (半日取引日は 13:00 ET 引け、#547)
- * - JP TSE : 09:00–15:30 JST (引けは 2024-11-05 に 15:30 へ延長後の値)
- *
- * lunch break (JP 11:30–12:30) は POC 未対応 — 窓内扱いで評価は走る
- * (発注は marketHoursCheck / 板で自然に抑制される)。
+ * JP の lunch break (11:30–12:30) は未対応 — 窓内扱いのまま評価は走るが、
+ * 発注自体は marketHoursCheck / 板が抑制する。
  */
 const MARKET_SESSION: Record<
   TradingMarket,
@@ -391,9 +332,8 @@ const MARKET_SESSION: Record<
 }
 
 /**
- * #session-window-gate の判定結果 (#547)。
- * - 'market_holiday': 全日休場 (US はルール計算、JP は HOLIDAYS static テーブル。
- *   土日は恒常的で operator への情報量が無いため従来通り 'outside_window')
+ * セッション窓ゲートの判定結果。
+ * - 'market_holiday': 全日休場 (土日は恒常的で operator への情報量が無いため 'outside_window' のまま)
  * - 'in_window': 取引日かつ [開場 - minutesBeforeOpen, 引け)
  * - 'outside_window': それ以外 (窓外 / 土日 / 引数不正は fail-closed で窓外扱い)
  */
@@ -409,11 +349,7 @@ type SessionLocalTime = {
   minute: number
 }
 
-/**
- * `now` の market ローカル暦日・曜日・時刻を `Intl.DateTimeFormat` 1 回で抽出する
- * (`evaluateStrategyWindow` / `isWithinRegularSession` 共通)。抽出失敗
- * (invalid Date 等) は null — 呼び出し側は fail-closed (窓外扱い) にする。
- */
+/** `now` の market ローカル暦日・曜日・時刻を `Intl.DateTimeFormat` 1 回で抽出する。抽出失敗は null — 呼び出し側は fail-closed (窓外扱い) にする。 */
 function extractSessionLocalTime(now: Date, market: TradingMarket): SessionLocalTime | null {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: MARKET_SESSION[market].timeZone,
@@ -454,17 +390,12 @@ function isMarketHolidayLocalYmd(market: TradingMarket, year: number, month: num
 }
 
 /**
- * `now` が **当該 market の取引日かつ「開場 `minutesBeforeOpen` 分前〜引け」**
- * の窓のどこに居るかを返す (#session-window-gate)。戦略 cron を開場前まで停止する
- * ゲートに使う (窓外は評価そのものを skip)。US の半日取引日は引けを 13:00 ET に
- * 短縮する (#547)。
+ * `now` が当該 market の取引日かつ「開場 `minutesBeforeOpen` 分前〜引け」の窓の
+ * どこに居るかを返す。US の半日取引日は引けを 13:00 ET とみなす。
  *
- * `isWithinUsCloseWindow` と異なり **開場側 (朝)** も判定するため、市場ローカルの
- * 日付・曜日・時刻をすべて `Intl.DateTimeFormat(timeZone)` から 1 回で抽出する。
- * 理由: JP 朝 (08:30 JST = 前日 23:30 UTC) は UTC 日付がズレるので、UTC 基準の
- * `isTradingDay` では曜日・祝日判定を誤る。祝日は **市場ローカル日付** で判定する
- * (US はルール計算で年次メンテ不要、JP は HOLIDAYS static — 2026/2027 を保持、
- * 範囲外は曜日判定のみに degrade)。DST は `Intl` が自動解決する。
+ * `isWithinUsCloseWindow` と異なり開場側 (朝) も判定するため、日付・曜日・時刻を
+ * 市場ローカル timezone から 1 回で抽出する — JP 朝 (08:30 JST = 前日 23:30 UTC)
+ * は UTC 日付がズレるので、UTC 基準の `isTradingDay` では曜日・祝日判定を誤る。
  */
 export function evaluateStrategyWindow(
   now: Date,
@@ -488,10 +419,7 @@ export function evaluateStrategyWindow(
     : 'outside_window'
 }
 
-/**
- * `now` が窓内 ('in_window') なら true。休場と窓外の区別が要らない呼び出し側
- * 向けの薄い wrapper (#session-window-gate)。
- */
+/** `now` が窓内 ('in_window') なら true。休場と窓外の区別が要らない呼び出し側向けの薄い wrapper。 */
 export function isWithinStrategyWindow(
   now: Date,
   market: TradingMarket,
@@ -501,13 +429,10 @@ export function isWithinStrategyWindow(
 }
 
 /**
- * `now` が **当該 market のレギュラーセッション内** ([開場, 引け)、取引日限定)
- * なら true。`evaluateStrategyWindow` と異なり pre-open 待機窓
- * (`minutesBeforeOpen`) を持たない — BUY 発注をレギュラーセッション開場後に
- * 限定する専用ゲート。寄り前に決定した MARKET 注文は寄り値と大きく乖離した
- * 価格で約定し得るため (実例: SOXS 9/4 寄り前 51.60 判断 → 寄り 49.53 約定)、
- * 「窓が開いていれば評価してよい」(`evaluateStrategyWindow`) と「発注してよい」
- * を分離する。
+ * `now` が当該 market のレギュラーセッション内 ([開場, 引け)、取引日限定) なら true。
+ * `evaluateStrategyWindow` と異なり pre-open 待機窓を持たない — 寄り前の MARKET
+ * 注文は寄り値と乖離して約定し得るため、「窓が開いていれば評価してよい」
+ * (`evaluateStrategyWindow`) と「発注してよい」をこの関数で分離する。
  */
 export function isWithinRegularSession(now: Date, market: TradingMarket): boolean {
   const local = extractSessionLocalTime(now, market)
@@ -524,11 +449,7 @@ export function isWithinRegularSession(now: Date, market: TradingMarket): boolea
   return localMinutes >= session.openMinutes && localMinutes < closeMinutes
 }
 
-/**
- * 市場ローカル暦日 y/m/d (proleptic Gregorian) に `delta` 日を加減した y/m/d を
- * 返す。UTC 固定 placeholder Date (`dayOfWeek` と同じ手法) で純粋な暦日カウンタ
- * として使うだけなので DST の影響を受けない。
- */
+/** 市場ローカル暦日 y/m/d に `delta` 日を加減する。UTC 固定 placeholder Date (`dayOfWeek` と同じ手法) を使うので DST の影響を受けない。 */
 function addCalendarDays(
   year: number,
   month: number,
@@ -539,11 +460,7 @@ function addCalendarDays(
   return { year: dt.getUTCFullYear(), month: dt.getUTCMonth() + 1, day: dt.getUTCDate() }
 }
 
-/**
- * 市場ローカル暦日 y/m/d が指定 market の取引日か (`isTradingDay` の市場ローカル
- * 版)。US はルール計算 (`isUsMarketHolidayYmd`)、JP は `HOLIDAYS.JP` static
- * テーブル — `evaluateStrategyWindow` と同じ流儀 (市場ローカル日付で祝日判定)。
- */
+/** 市場ローカル暦日 y/m/d が指定 market の取引日か (`isTradingDay` の市場ローカル版)。 */
 function isTradingDayLocalYmd(market: TradingMarket, year: number, month: number, day: number): boolean {
   const dow = dayOfWeek(year, month, day)
   if (dow === 0 || dow === 6) return false
@@ -552,13 +469,10 @@ function isTradingDayLocalYmd(market: TradingMarket, year: number, month: number
 }
 
 /**
- * 「ローカル日付 y-m-d の `minutes` (分換算、0=00:00) を `timeZone` で解釈した
- * UTC instant」を返す。offset 推測を 2 回反復して収束させる方式
- * (`Intl.DateTimeFormat` で毎回レンダリングし直し、目標とのズレを補正) — 事前に
- * offset テーブルを持たずに DST を自動解決できる。
- *
- * 収束は 2 回で十分: 1 回目で概ね正しい offset (稀に DST 境界を跨いで再ズレ) に
- * 収束し、2 回目でその再ズレも解消する。
+ * ローカル日付 y-m-d の `minutes` (分換算、0=00:00) を `timeZone` で解釈した UTC
+ * instant を返す。事前に offset テーブルを持たず、レンダリング結果とのズレを
+ * 補正する反復で DST を解決する。2 回で収束する: 1 回目で概ね正しい offset に、
+ * 2 回目で DST 境界を跨いだ場合の再ズレも解消する。
  */
 function zonedTimeToUtc(year: number, month: number, day: number, minutes: number, timeZone: string): Date {
   const targetHour = Math.floor(minutes / 60)
@@ -588,31 +502,24 @@ function zonedTimeToUtc(year: number, month: number, day: number, minutes: numbe
 }
 
 /**
- * exit cooldown の解除時刻正規化用 (#661): `date` の**市場ローカル暦日より後**
- * の、最初の取引日の**セッション開場時刻** (UTC instant) を返す。
+ * `date` の市場ローカル暦日より後の、最初の取引日のセッション開場時刻 (UTC
+ * instant) を返す。`date` 当日が取引日かつ寄り前でも、必ず翌取引日以降の寄りを
+ * 返す。
  *
- * 背景: 旧来は cooldown 解除時刻に `nextTradingDay` (24h ずつ進めて時刻は保持)
- * を使っていたため、実効長が exit 時刻に依存していた (引け際 exit ≈ 1 セッション
- * 分の cooldown、寄り直後 exit ≈ ほぼ 0)。本関数は常に「翌営業日の寄り」を返す
- * ことでこの依存をなくす。
+ * `nextTradingDay` ベースの旧方式 (24h ずつ加算し元の時刻を保持) だと cooldown の
+ * 実効長が exit 時刻に依存してしまう (引け際 exit ≈ 1 セッション分、寄り直後
+ * exit ≈ ほぼ 0) — 本関数は常に「翌営業日の寄り」を返すことでこの依存を断つ。
  *
- * `date` 当日の寄りは返さない — `date` の市場ローカル日付が取引日かつ寄り前
- * (例: US 08:00 ET) であっても、必ず翌取引日以降の寄りを返す。
- *
- * 祝日・土日 skip は市場ローカル暦日基準 (`evaluateStrategyWindow` と同じ流儀)。
- * `nextTradingDay`/`isTradingDay` は **UTC 日付基準**なので JP 夜間 (UTC 日付が
- * 市場ローカル日付とズレる、`evaluateStrategyWindow` の doc comment 参照) には
- * 使えない — 本関数は市場ローカル暦日で日送りしてから開場時刻を UTC instant に
- * 変換する (`zonedTimeToUtc`)。
- *
- * 探索上限は `nextTradingDay` と同じ 31 iteration + fail-safe (祝日テーブル
- * 不足 / 連休で無限ループしない)。
+ * `nextTradingDay`/`isTradingDay` は UTC 日付基準のため JP 夜間 (UTC 日付が市場
+ * ローカル日付とズレる) には使えない — 市場ローカル暦日で日送りしてから開場
+ * 時刻を UTC instant に変換する (`zonedTimeToUtc`)。
  */
 export function nextSessionOpen(date: Date, market: TradingMarket): Date {
   const session = MARKET_SESSION[market]
   const start = extractLocalYmd(date, session.timeZone)
   if (start === null) return new Date(NaN)
   let cursor = addCalendarDays(start.year, start.month, start.day, 1)
+  // 祝日テーブル不足 / 連休で無限ループしないよう上限を設ける。
   for (let i = 0; i < 31; i += 1) {
     if (isTradingDayLocalYmd(market, cursor.year, cursor.month, cursor.day)) {
       return zonedTimeToUtc(cursor.year, cursor.month, cursor.day, session.openMinutes, session.timeZone)

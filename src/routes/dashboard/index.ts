@@ -29,11 +29,10 @@ import { SymbolStateClient } from '../../trading/state/SymbolStateClient'
 import { loadUsdJpyRate } from '../../infrastructure/quotes/fxRate'
 import type { SymbolState } from '../../trading/state/types'
 import { YahooBarClient } from '../../infrastructure/quotes/YahooBarClient'
-// #293 calendar events management UI (earnings + macro)。dashboard 側に form
-// 受け handler を置くのは admin/seed が JSON 専用で `application/x-www-form-urlencoded`
-// を受けない (= HTML form から直接 POST できない) ため。バリデーション失敗時に
-// 入力値を保持したまま再描画する必要があり、PRG redirect だと echo が崩れる。
-// repo 呼び出し + rate-limit + writeAuditLog は admin route と同じ部品を再利用。
+// The dashboard owns its own form-POST handlers rather than forwarding to
+// admin/seed, which is JSON-only (application/x-www-form-urlencoded can't
+// reach it directly). A validation failure re-renders with the input echoed
+// back, which a PRG redirect can't do.
 import {
   createEarningsCalendarDb,
   createEarningsCalendarRepo,
@@ -46,9 +45,8 @@ import {
 } from '../../infrastructure/calendar/macroEventCalendarRepo'
 import { earningsCalendar, macroEventCalendar } from '../../infrastructure/db/schema'
 import { extractActor } from '../../infrastructure/db/configAuditLog'
-// #21 Phase B follow-up: Webull token 管理 UI (seed / status / refresh)。
-// admin/webull-token は JSON API、こちらは HTML form + redirect で operator が
-// browser から完結できるようにする (DevTools fetch を強要しない)。
+// admin/webull-token is a JSON API; this HTML form + redirect lets an
+// operator finish the whole flow from the browser without DevTools.
 import { refreshWebullToken } from '../../infrastructure/webull/refreshWebullToken'
 import { WebullAuth } from '../../infrastructure/webull/WebullAuth'
 import { WebullTokenClient } from '../../infrastructure/webull/WebullTokenClient'
@@ -120,31 +118,17 @@ export type { TradePnlRow } from './charts/quality'
 export { prevDailyClose, renderAllocationLine, renderBuyabilityPanel, renderConclusionValue, renderDecisionPlotCaption, renderEffectiveRuleChips, renderJudgmentSummaryGrid, renderLatestDecisionValue, renderPositionSummaryValue, renderPriceHeader, renderStrategyParamsPanel, renderSymbolPolicyLine, renderSymbolTab, renderSymbolViewSubnav } from './charts/symbol'
 export { assignPairColors, computeBudgetUsage, orderRowsByPair, pairRoles, symbolMapEditorBody } from './symbols'
 
-/**
- * /charts の subnav (#remove-grid): チャート専用 subnav は廃止し、overview
- * (実現損益の推移) / quality (成績) は約定履歴と同じ「レビュー」
- * subnav に統一する (画面によってメニュー構成が変わる混乱を避ける)。
- * 個別銘柄タブは「銘柄」nav + 銘柄レールが導線なので subnav なし。
- */
+// overview/quality use the same review subnav as trades (one menu shape per
+// screen instead of a charts-only one). The symbol tab gets none — its nav
+// path is the symbol group + rail, not a subnav.
 function chartsPageSubnav(tab: ReturnType<typeof parseChartsTab>): string {
   if (tab === 'overview') return renderAnalysisSubnav('equity')
   if (tab === 'quality') return renderAnalysisSubnav('quality')
   return ''
 }
 
-/**
- * Read-only operator dashboard (#121). Server-rendered HTML via Hono — no
- * client JS, no build step. Protected by the same basic-auth middleware as
- * /admin. Every page renders defensively: if a binding (D1 / DO) is missing
- * we surface "unavailable" rather than 500, so a partially-configured env
- * still yields a usable landing.
- */
-
-/**
- * 運転状態帯のシグナル (#dashboard-ia)。判定ログの最新時刻で cron の生存を、
- * 直近 24h の通知件数でアラート状況を表す。**ack (確認済み) の概念はまだ無い**
- * ので「未確認」は 24h 件数で代用している。
- */
+// There's no "acknowledged" concept yet, so the alert count for the last
+// 24h stands in for "unread".
 async function loadHomeRunSignals(db: D1Database): Promise<HomeRunSignals> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
   const [cronRow, alertRows] = await Promise.all([
@@ -167,7 +151,6 @@ async function loadHomeRunSignals(db: D1Database): Promise<HomeRunSignals> {
   return { lastCronAt: cronRow?.timestamp ?? null, alertCritical, alertWarning }
 }
 
-/** 直近 30 日の勝敗と発注エラー件数 (最近の活動フッター)。 */
 async function loadActivityStats(
   db: D1Database,
 ): Promise<{ wins: number; losses: number; errors: number }> {
@@ -189,10 +172,8 @@ async function loadActivityStats(
   }
 }
 
-/**
- * 銘柄ごとの最新 atr20 (判定ログの indicators_json)。実効 stop の算出に使う。
- * 判定ログが無い銘柄は不在 → 呼び出し側が pct stop に fallback する。
- */
+// A symbol absent from the result (no decision log row yet) is the
+// caller's cue to fall back to a percentage-based stop.
 async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>()
   if (symbols.length === 0) return out
@@ -210,16 +191,14 @@ async function loadLatestAtr20(db: D1Database, symbols: string[]): Promise<Map<s
         out.set(r.symbol.toUpperCase(), parsed.atr20)
       }
     } catch {
-      // 壊れた JSON は無視 (stop 距離が出ないだけで画面は描ける)
+      // Malformed JSON just leaves this symbol without a stop distance.
     }
   }
   return out
 }
 
-/**
- * 保有銘柄ごとの「実効 stop までの距離」。cron と同じ `resolveStopDistance` を
- * 通すので、表示値と実際に切られる水準がズレない。
- */
+// Runs through the same resolveStopDistance cron uses, so the displayed
+// distance never drifts from where the position would actually be stopped out.
 function buildStopDistances(
   positions: Array<{ sym: string; state: SymbolState | null }>,
   atr20Map: Map<string, number>,
@@ -251,6 +230,10 @@ function buildStopDistances(
   return out
 }
 
+// Server-rendered HTML via Hono, no client build step, same basic-auth
+// middleware as /admin. Every page renders defensively: a missing binding
+// (D1/DO) surfaces "unavailable" instead of a 500, so a partially
+// configured env still yields a usable landing.
 export const dashboard = new Hono<DashboardBindings>()
   .use('*', rateLimit('DASHBOARD'))
   .use('*', async (c, next) => {
@@ -274,10 +257,9 @@ export const dashboard = new Hono<DashboardBindings>()
           c.env.PORTFOLIO_STATE
             ? new PortfolioStateClient(c.env.PORTFOLIO_STATE).getPortfolio().catch(() => null)
             : Promise.resolve(null),
-          // #dashboard-ia Phase 3: スパークラインは資産推移チャートと重複する
-          // ので廃止し、スナップショット取得は range 用の 1 回だけになった。
           safeLoadPortfolioSnapshots(c.env.DB, range),
-          // USDJPY は資産サマリ帯表示用。DO 不在 (帯を出さない) なら fetch 自体を省略。
+          // Skipped entirely (not just discarded) when PORTFOLIO_STATE is
+          // absent, since the summary band that needs it won't render either.
           c.env.PORTFOLIO_STATE
             ? loadUsdJpyRate().catch(() => null)
             : Promise.resolve(null),
@@ -294,9 +276,8 @@ export const dashboard = new Hono<DashboardBindings>()
             : Promise.resolve([] as Array<{ sym: string; state: SymbolState | null; error: string | null }>),
           loadLatestStrategyPrices(c.env.DB, allDisplaySymbols),
           loadRecentFills(c.env.DB, 8),
-          // #dashboard-ia: 運転状態帯 (最終 cron / アラート件数) と
-          // 最近の活動フッター (勝敗 / 発注エラー)。いずれも best-effort で、
-          // 失敗しても home 全体は描画する。
+          // Both best-effort: a failure here degrades to a missing widget,
+          // not a failed home page.
           loadHomeRunSignals(c.env.DB).catch(() => null),
           loadActivityStats(c.env.DB).catch(() => null),
           loadLatestAtr20(c.env.DB, allDisplaySymbols).catch(() => new Map<string, number>()),
@@ -320,8 +301,8 @@ export const dashboard = new Hono<DashboardBindings>()
         stopDistances: buildStopDistances(positions, atr20Map, strategyParamsFromGlobal(global), universe),
         vixRegime,
         dryRun: global.dryRun,
-        // env TRADING_ENABLED の deploy-gate を反映した effective 値 (CodeRabbit #397:
-        // 上部バナーと同じ resolveTradingEnabled を通し、生 DB 値との食い違いを防ぐ)。
+        // Same resolveTradingEnabled the top banner uses, so this never
+        // disagrees with the banner about whether trading is actually on.
         tradingEnabled: resolveTradingEnabled(global.tradingEnabled, c.env.TRADING_ENABLED),
         universe,
       }
@@ -330,16 +311,9 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, 'ダッシュボード', unavailable(messageOf(err))))
     }
   })
-  /**
-   * #dashboard-ia Phase 5: 保有ポジションはホームの「リスクと保有銘柄」に統合済み。
-   * 旧 URL (ブックマーク / 過去の通知リンク) は 302 で送る。JSON export は
-   * AI / スクリプト向けにそのまま残す。
-   */
+  // Holdings moved into home's "risk and holdings" section; this redirect
+  // keeps old bookmarks/notification links working. JSON export stays.
   .get('/positions', (c) => c.redirect('/dashboard', 302))
-  /**
-   * positions の JSON export (#dashboard-json-api)。read-only GET のみ。
-   * schema / envelope 規約は shared.ts の `exportMeta` docstring 参照。
-   */
   .get('/positions/json', async (c) => {
     if (!c.env.DB || !c.env.SYMBOL_STATE) {
       return jsonPretty(
@@ -353,23 +327,18 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty({ error: 'positions_json_export_failed', message: messageOf(err) }, 500)
     }
   })
-  /**
-   * #dashboard-ia Phase 5: 口座サマリはホームの「運転状態」+「リスクと保有銘柄」に
-   * 統合済み。累積 realized PnL の推移はレビュー (`/dashboard/charts`)。
-   */
   .get('/portfolio', (c) => c.redirect('/dashboard', 302))
   .get('/trades', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '約定履歴', unavailable('DB not bound'), renderAnalysisSubnav('trades')))
     }
-    // クエリ解釈 + journal query は /trades/json と共用 (#dashboard-json-api)。
     const q = parseTradesQuery((key) => c.req.query(key))
     const db = createDb(c.env.DB)
-    // universe を並行 load して銘柄表示を「番号-会社名」(JP) に整形。
-    // load 失敗時は `null` を tradesBody に渡し、symbol そのまま表示で fallback。
+    // universe load failure falls back to `null`, which renders the raw
+    // symbol instead of "番号-会社名" formatting.
     const [rows, universe] = await Promise.all([
-      // hasMore 判定のため 1 行余分に取る (limit + 1)。
-      loadTradeJournalRows(db, { ...q, limit: q.limit + 1 }),
+      loadTradeJournalRows(db, { ...q, limit: q.limit + 1 }), // +1 to detect hasMore
+
       loadSymbolUniverse(c.env).catch(() => null),
     ])
     const hasMore = rows.length > q.limit
@@ -386,10 +355,6 @@ export const dashboard = new Hono<DashboardBindings>()
       ),
     )
   })
-  /**
-   * trades の JSON export (#dashboard-json-api)。SSR と同じクエリ解釈 + 同じ
-   * journal query を通し、rows は trade_journal の row そのまま返す。
-   */
   .get('/trades/json', async (c) => {
     if (!c.env.DB) {
       return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
@@ -402,13 +367,8 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty({ error: 'trades_json_export_failed', message: messageOf(err) }, 500)
     }
   })
-  /**
-   * 売買ライフサイクル計測 (#709 Phase 2)。exit reason 別成績 / フォワード
-   * リターン / SKIP 後の MFE-MAE / 時間外警戒 × SL 突合 / コスト・DD・turnover
-   * を過去 decision / fill から再現可能に集計する read-only 分析ページ。
-   * `loadLifecycleReport` は Yahoo fetch も含むため、他 JSON export より
-   * レイテンシが乗る (symbol 数 × 1 fetch、並列)。
-   */
+  // loadLifecycleReport does a Yahoo fetch per symbol (parallel), so this
+  // page carries more latency than the other JSON exports.
   .get('/lifecycle', async (c) => {
     const subnav = renderAnalysisSubnav('lifecycle')
     if (!c.env.DB) {
@@ -418,8 +378,6 @@ export const dashboard = new Hono<DashboardBindings>()
       const report = await loadLifecycleReport(c.env)
       return c.html(renderLayout(c, 'ライフサイクル', lifecycleBody(report), subnav))
     } catch (err) {
-      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
-      // (cron / alerts と同じ自己保護パターン)。
       return c.html(renderLayout(c, 'ライフサイクル', unavailable(messageOf(err)), subnav))
     }
   })
@@ -447,8 +405,6 @@ export const dashboard = new Hono<DashboardBindings>()
       renderLayout(c, '設定', configBody(global, universe, parseOverviewPanels(panelsCsv))),
     )
   })
-  // #dashboard-mf-layout: overview パネル ON/OFF を保存。HTML form (checkbox 複数) →
-  // 有効 key を CSV 化して global_config に書き、PRG で /dashboard/config に戻る。
   .post('/config/overview-panels', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '設定', unavailable('DB not bound')))
@@ -460,10 +416,10 @@ export const dashboard = new Hono<DashboardBindings>()
       .map(String)
       .filter((s) => (ALL_OVERVIEW_PANELS as readonly string[]).includes(s))
     const csv = Array.from(new Set(selected)).join(',')
-    // CodeRabbit #397: global_config への永続変更なので before/after + requestId を
-    // 構造化ログに残す (audit 追跡)。display 設定なので config_audit_log table までは使わない。
-    // before は setOverviewPanels の batch (= write と同一 transaction) から取得し
-    // 同時更新でも監査がズレないようにする。
+    // A structured log entry, not a config_audit_log row — this is a
+    // display setting, not config worth a DB audit trail. `before` comes
+    // from setOverviewPanels' own write transaction so a concurrent update
+    // can't produce a mismatched before/after pair.
     const { before } = await setOverviewPanels(db, csv, new Date().toISOString())
     console.log(
       JSON.stringify({
@@ -476,16 +432,10 @@ export const dashboard = new Hono<DashboardBindings>()
     )
     return c.redirect('/dashboard/config', 303)
   })
-  /**
-   * 銘柄チャートタブの client 側初期化スクリプト (#charts-symbol-redesign)。
-   * 元は `renderSymbolTab` のインライン `<script>` (約1200行/70KB) だったものを
-   * 静的ファイル化して外出しした実体 (`symbolChartScript.ts`)。銘柄切替の
-   * たびに同一内容を再送していたのを、ブラウザキャッシュ (`Cache-Control` +
-   * `ETag` / `If-None-Match` の 304) に乗せて省く。
-   *
-   * 認証は他 `/dashboard/*` route と同じ (このファイル冒頭の Access 由来
-   * middleware 配下)。内容は request に依存しない定数なので DB / env は不要。
-   */
+  // Extracted from renderSymbolTab's former inline <script> (~1200 lines)
+  // so the browser can cache it (ETag/If-None-Match) instead of re-sending
+  // the same content on every symbol switch. Content is request-independent,
+  // so no DB/env access is needed here.
   .get('/static/symbol-chart.js', (c) => {
     const ifNoneMatch = c.req.header('if-none-match')
     const headers = {
@@ -500,15 +450,8 @@ export const dashboard = new Hono<DashboardBindings>()
       'content-type': 'text/javascript; charset=utf-8',
     })
   })
-  /**
-   * チャート銘柄タブの JSON export (#dashboard-json-api)。SSR の symbol タブと
-   * 同じ loader (`loadSymbolChart` + `loadDecisionRows`) / 同じ effective rule
-   * (`strategyParamsFromGlobal` → `buildSymbolRules`) を通す。
-   *
-   * Hono の path マッチは完全一致なので理論上 `/charts` に食われないが、route は
-   * 定義順マッチのため、将来 `/charts/:sub` 系が生えた時の取り違え事故を避けて
-   * `/charts` より前に定義しておく (JSON が返ることはテストで担保)。
-   */
+  // Hono matches routes in definition order, so this must stay defined
+  // before `/charts` — otherwise a future `/charts/:sub` route could shadow it.
   .get('/charts/symbol/json', async (c) => {
     if (!c.env.DB) {
       return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
@@ -522,10 +465,10 @@ export const dashboard = new Hono<DashboardBindings>()
         loadSymbolUniverse(c.env),
         loadGlobalConfigFrom(c.env, c.get('requestId')),
       ])
-      // SSR symbol タブと同じ effective rule 解決 (global → role preset →
-      // override)。SSR が universe 外 symbol を default symbol に差し替えるのと
-      // 違い、こちらは要求 symbol をそのまま使う (未知 symbol は空チャートで
-      // 返る — API 利用者には 404 より「空データ」の方が判別しやすい)。
+      // Unlike SSR (which substitutes a default symbol for one outside the
+      // universe), this uses the requested symbol as-is: an unknown symbol
+      // returns an empty chart, which an API caller can distinguish more
+      // easily than a 404 substituted for a different symbol.
       const defaultEntryRule: SymbolRule = strategyParamsFromGlobal(global)
       const effectiveRules = buildSymbolRules(defaultEntryRule, universe)
       const entryRule = effectiveRules[symbol] ?? defaultEntryRule
@@ -537,8 +480,7 @@ export const dashboard = new Hono<DashboardBindings>()
         timeStopDays: entryRule.timeStopDays,
       }
       const chart = await loadSymbolChart(c.env, symbol, rules)
-      // 判定履歴は SSR と同じ loader / 同じ件数 (直近 30)。load 失敗 (migration
-      // 未適用等) はチャート本体を巻き込まず空配列に落とす (SSR と同挙動)。
+      // A load failure here degrades to no decisions, not a failed chart.
       const decisionRows = await loadDecisionRows(createDb(c.env.DB), { symbol, limit: 30 }).catch(
         () => [],
       )
@@ -560,22 +502,19 @@ export const dashboard = new Hono<DashboardBindings>()
     }
     try {
       const tab = parseChartsTab(c.req.query('tab'))
-      // 各 tab で必要な D1 query だけ走らせる軽量化:
-      // - overview: equity (drawdown は equity から派生)
-      // - quality:  pnls (= stats / histogram) + decisions
-      // - symbol:   universe + symbolChart
+      // Each tab only runs the D1 queries it needs (overview: equity;
+      // quality: pnls + decisions; symbol: universe + symbolChart).
       if (tab === 'overview') {
-        // マーカー load 失敗 (一時的 D1 エラー等) は equity curve 本体を
-        // 巻き込まず空配列 fallback (マーカー無しで描画)。
         const [equity, tradeMarkers] = await Promise.all([
           loadEquityCurve(c.env.DB),
           loadEquityTradeMarkers(c.env.DB).catch(() => [] as EquityTradeMarker[]),
         ])
-        // QQQ ベンチマークは Yahoo fetch (network 依存) なので route 側で行い、
-        // `loadEquityCurve` は D1-pure を保つ。取得失敗は null → renderer が
-        // series を省略して注記だけ出す (チャート自体は壊さない fail-graceful)。
-        // 取得期間の先頭は equity / マーカー両方の最古日 (BUY だけで realized
-        // PnL が未確定の初期期間にもベンチマーク線を伸ばすため)。
+        // The QQQ benchmark fetch happens here (not inside loadEquityCurve)
+        // to keep that function D1-pure; a fetch failure falls back to null
+        // and the renderer just omits the series rather than failing the
+        // whole chart. The range starts at the earliest of equity/marker
+        // dates so the benchmark line still covers the early BUY-only
+        // period where realized PnL isn't settled yet.
         const firstDates = [equity[0]?.date, tradeMarkers[0]?.date].filter(
           (d): d is string => d !== undefined,
         )
@@ -625,21 +564,19 @@ export const dashboard = new Hono<DashboardBindings>()
           ),
         )
       }
-      // ?from / ?to (ISO UTC) で chart x-axis のズーム範囲を URL に持つ。
-      // 銘柄切替を跨いで zoom range を維持。
+      // tab === 'symbol'. ?from/?to keep the x-axis zoom range in the URL
+      // so it survives a symbol switch.
       const zoomFrom = parseIsoTimestamp(c.req.query('from'))
       const zoomTo = parseIsoTimestamp(c.req.query('to'))
-      // tab === 'symbol'
       const symbolParam = c.req.query('symbol')?.toUpperCase().trim() || undefined
-      // サブビュー (#charts-symbol-redesign): ?view=detail で判定履歴/戦略パラ
-      // メータのサブタブへ、未指定は chart (fold 内サマリ + チャート)。
       const symbolView = parseSymbolView(c.req.query('view'))
       const [universe, global] = await Promise.all([
         loadSymbolUniverse(c.env),
         loadGlobalConfigFrom(c.env, c.get('requestId')),
       ])
-      // 表示候補: active + inactive 銘柄。focusSymbol は inactive でも valid と扱う
-      // (operator が chart で inactivate 後の動向を確認できるよう)。default は active を優先。
+      // Inactive symbols are still valid focus targets — an operator needs
+      // to see how a symbol behaved after inactivating it. Active symbols
+      // just take priority when picking a default.
       const allDisplaySymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
       const allDisplaySet = new Set(allDisplaySymbols)
       const allowed = new Set(universe.allowedSymbols)
@@ -650,19 +587,16 @@ export const dashboard = new Hono<DashboardBindings>()
           : defaultSymbol && allowed.has(defaultSymbol)
             ? defaultSymbol
             : universe.allowedSymbols[0] ?? universe.inactiveSymbols[0] ?? null
-      // global_config の pullback default (パネルの「銘柄別」タグの比較基準)。
-      // 組み立ては /charts/symbol/json と共用の helper に寄せる (#dashboard-json-api)。
       const globalParams: StrategyParamsSnapshot = strategyParamsFromGlobal(global)
-      // cron と同じ effective rule — global default → role preset → per-symbol
-      // override (#452)。drift するとダッシュボードの入場ライン / stop・TP
-      // preview / パラメータ表が cron 判定とずれるので必ず buildSymbolRules を
-      // 共用する。以前はパラメータ表とチャート overlay が global 値のままで、
-      // 銘柄管理の override が反映されない見た目バグがあった (operator 指摘)。
+      // Must share buildSymbolRules with cron's effective-rule resolution
+      // (global default -> role preset -> per-symbol override); previously
+      // the params table and chart overlay stayed on the global value and
+      // silently ignored a symbol's override, drifting from what cron
+      // actually applied.
       const defaultEntryRule: SymbolRule = { ...globalParams }
       const effectiveRules = buildSymbolRules(defaultEntryRule, universe)
       const entryRule: SymbolRule =
         (focusSymbol ? effectiveRules[focusSymbol] : undefined) ?? defaultEntryRule
-      // パネル / チャート overlay は focus symbol の適用値で描く。
       const strategyParams: StrategyParamsSnapshot = { ...entryRule }
       const rules: SymbolChartRules = {
         pullbackMax: strategyParams.pullbackMax,
@@ -671,16 +605,12 @@ export const dashboard = new Hono<DashboardBindings>()
         takeProfitPct: strategyParams.takeProfitPct,
         timeStopDays: strategyParams.timeStopDays,
       }
-      // SymbolStateDO の position が ground truth (avgPrice / openedAt が
-      // partial fill / position add も反映済)。trade_journal からの derive は
-      // 直近 BUY 単体しか拾えないので fallback 専用。
-      //
-      // symbolChart (D1 + Yahoo) / ペアレジーム判定 (Yahoo proxy bars) / 判定
-      // 履歴 (D1) は互いに独立 (どれも focusSymbol / universe / global /
-      // entryRule だけが入力で、他の結果を参照しない) なので Promise.all で
-      // 並列化する (#charts-symbol-redesign — 銘柄切替の高速化)。
-      // ペアレジーム対象の pair 検索自体は同期処理なので Promise.all の外で
-      // 先に済ませ、実際に fetch が要るケース (invalidConfig 無し) だけ非同期にする。
+      // symbolChart, pair-regime evaluation, and decision history are
+      // mutually independent (each takes only focusSymbol/universe/global/
+      // entryRule, none reads another's result), so they run in parallel.
+      // The pair lookup itself is synchronous and happens outside the
+      // Promise.all — only the cases that actually need a fetch
+      // (no invalidConfig) go async.
       const pair =
         focusSymbol && global.pairRegimeMode !== 'off'
           ? universe.pairRegimes.find(
@@ -689,11 +619,9 @@ export const dashboard = new Hono<DashboardBindings>()
           : undefined
       const [symbolChart, pairRegimeDecision, decisionRows] = await Promise.all([
         focusSymbol ? loadSymbolChart(c.env, focusSymbol, rules) : Promise.resolve(null),
-        // ペアレジーム (#472): focus symbol が regime 有効ペアの一員なら、cron と
-        // 同じ pure 関数で zone を評価して表示する (mode=off では出さない)。
-        // proxy bars fetch は dashboard 表示専用の短 TTL キャッシュ経由
-        // (`cachedDashboardJson`) — cron が使う YahooBarClient 呼び出し自体には
-        // 手を入れていない。
+        // Evaluates the same pure zone function cron uses. The proxy-bars
+        // fetch goes through a dashboard-only short-TTL cache
+        // (cachedDashboardJson) without touching cron's own YahooBarClient call.
         pair === undefined
           ? Promise.resolve<PairRegimeDecision | null>(null)
           : pair.invalidConfig !== null
@@ -729,8 +657,6 @@ export const dashboard = new Hono<DashboardBindings>()
                   asOfDate: null,
                   reason: `proxy bars fetch failed: ${messageOf(err)}`,
                 })),
-        // 判定履歴 (#decisions-chart-unify): 戦略判定ページと同じ loader を共用。
-        // 失敗 (migration 未適用等) はチャート本体を巻き込まず空表示に落とす。
         focusSymbol && c.env.DB
           ? loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(() => [])
           : Promise.resolve([]),
@@ -743,16 +669,15 @@ export const dashboard = new Hono<DashboardBindings>()
               mode: global.pairRegimeMode,
             }
           : null
-      // zoom range: ?from / ?to が valid (from < to) ならそれを使う、なければ
-      // chart の最終 point から逆算で「直近 7 日」をデフォルト。理由:
-      // - 60 日全体表示は trend / pin / SMA50 が見えづらい (#15 で指摘)
-      // - 7 日は cron / 押し目 / 直近 fill 確認に最適な daily-trader の窓
-      // - lastTimestamp 基準なので休場や POC 開始直後でも broken にならない
+      // Defaults to the last 7 days (counted back from the chart's last
+      // point, so it doesn't break on a closed market or right after POC
+      // launch) when ?from/?to aren't both valid. The full 60-day view
+      // makes trend/pin/SMA50 hard to read; 7 days matches the window an
+      // operator actually checks cron/pullback/recent fills against.
       const zoom = computeZoomRange(zoomFrom, zoomTo, symbolChart)
       const buyability = symbolChart?.evalIndicators?.length
         ? buildBuyabilityView(symbolChart.evalIndicators, entryRule)
         : null
-      // 段階判定 (#452 PR 2): 7 gates から ENTRY/HALF/WATCH/NG を導出して表示。
       const entryStatus = buyability?.current ? deriveEntryStatus(buyability.current) : null
       const symbolBodyArgs: ChartsBodySymbol = {
         tab,
@@ -778,10 +703,9 @@ export const dashboard = new Hono<DashboardBindings>()
             }
           : null,
       }
-      // クライアント側銘柄切替 (partial swap, #charts-symbol-redesign Phase C):
-      // `#symbol-main` の内側 HTML だけを返す (レイアウト/レール/echarts CDN・
-      // static script は既にブラウザにロード済み前提で再送しない)。都度
-      // fetch する想定なので cache しない。
+      // A client-side symbol swap: returns only #symbol-main's inner HTML,
+      // assuming the layout/rail/echarts CDN/static script are already
+      // loaded in the browser. Fetched on every switch, so not cached.
       if (c.req.query('partial') === '1') {
         return c.html(renderSymbolMainInner(symbolBodyArgs), 200, { 'cache-control': 'no-store' })
       }
@@ -790,7 +714,7 @@ export const dashboard = new Hono<DashboardBindings>()
           c,
           'チャート',
           renderSymbolTab(symbolBodyArgs),
-          '', // 個別銘柄タブは「銘柄」nav + 銘柄レールが導線 (#remove-grid で charts subnav 廃止)
+          '', // no subnav — the symbol tab's nav path is the symbol group + rail
         ),
       )
     } catch (err) {
@@ -801,8 +725,6 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return jsonPretty({ error: 'db_not_bound', message: 'DB binding is not configured' }, 503)
     }
-    // 本体は MCP `get_cron_decisions` と共用の runCronJsonExport (#553)。
-    // route からは requestId / decisionId のみ渡す — 移設前と出力 byte 一致。
     try {
       const { payload, status } = await runCronJsonExport(createDb(c.env.DB), {
         requestId: c.req.query('requestId'),
@@ -821,13 +743,12 @@ export const dashboard = new Hono<DashboardBindings>()
     const limit = clampLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
     const symbolFilter = c.req.query('symbol')?.toUpperCase().trim() || undefined
-    // trades の「判定→」から飛んでくる注文単位の絞り込み (#nav-links)。
     const clientOrderIdFilter = c.req.query('clientOrderId')?.trim() || undefined
-    // 休場時間帯の行 (手動 run 等) は既定で隠す (#cron-session-filter)。
-    // `?session=all` で全時間帯表示。SQL では時刻×市場×祝日の判定が書けない
-    // (DST もある) ので、開場行が limit 件そろうまでカーソルを進めながら
-    // フェッチする (loadDecisionRowsInSession) — ページの表示件数と次ページ
-    // カーソルを表示行に一致させる。
+    // Open-market rows only by default (?session=all shows the rest). Time x
+    // market x holiday x DST can't be expressed as SQL, so
+    // loadDecisionRowsInSession advances the cursor batch by batch until
+    // enough open rows are found, keeping the page size and next cursor in
+    // sync with what's actually shown.
     const sessionFilter = c.req.query('session') === 'all' ? ('all' as const) : ('open' as const)
     const db = createDb(c.env.DB)
     try {
@@ -855,10 +776,11 @@ export const dashboard = new Hono<DashboardBindings>()
             page.hasMore,
             clientOrderIdFilter,
             sessionFilter,
-            // 次ページカーソル: ページが limit 件で埋まったときは表示末尾
-            // (表示と切れ目なく続く)。埋まらなかったとき (走査打ち切り / データ
-            // 末尾) は走査末尾 — 走査済み窓内の開場行は全て表示済みなので、
-            // 表示末尾から再走査すると同じ休場行を舐め直して空ページを挟むだけ。
+            // A full page continues seamlessly from its last displayed row.
+            // A short page (scan cut off / end of table) instead continues
+            // from the last row scanned — re-scanning from the displayed
+            // end would just walk the same closed-market rows again into an
+            // empty page.
             page.rows.length >= limit
               ? page.rows[page.rows.length - 1]!.id
               : page.lastScannedId,
@@ -867,24 +789,18 @@ export const dashboard = new Hono<DashboardBindings>()
         ),
       )
     } catch (err) {
-      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
-      // (CodeRabbit #132)。段階的デプロイ時の自己保護。
       return c.html(renderLayout(c, '戦略判定', unavailable(messageOf(err)), cronSubnav))
     }
   })
-  /**
-   * Broker probe UI: 同一 origin の `/admin/broker/probe` を browser の fetch で
-   * 呼び、生 JSON を整形表示する小さい form ページ。/dashboard/* と /admin/* は
-   * 同じ Cloudflare Access policy で保護されてるので、ブラウザに残ってる Access
-   * cookie がそのまま流用される (再 prompt なし)。サーバー側は probe を
-   * proxy せず、純粋にフォーム + 表示器を返すだけ (= 認証ヘッダの転送ロジック
-   * 不要、責務分離)。
-   */
+  // Renders a form + display shell only; the browser's own fetch hits
+  // /admin/broker/probe directly (same origin, same Access policy, so the
+  // existing Access cookie carries over without a re-prompt). The server
+  // never proxies the probe call itself — no auth-header forwarding needed.
   .get('/broker-probe', async (c) => {
     const symbol = (c.req.query('symbol') ?? 'AAPL').trim().toUpperCase() || 'AAPL'
     const category = (c.req.query('category') ?? 'US_STOCK').trim().toUpperCase() || 'US_STOCK'
-    // symbol_config 全銘柄 (active + inactive) をリンク候補として渡す。DB が未
-    // 設定 / load 失敗時は null fallback で UI は保有銘柄 + AAPL control のみ。
+    // Null on missing DB/load failure — the UI still works with just held
+    // symbols + the AAPL control.
     const universe = c.env.DB
       ? await loadSymbolUniverse(c.env).catch(() => null)
       : null
@@ -924,8 +840,6 @@ export const dashboard = new Hono<DashboardBindings>()
         ),
       )
     } catch (err) {
-      // 0012 migration 未適用 (= notification_emit_log テーブル無し) を
-      // 500 にせず unavailable に落とす。段階的デプロイ時の自己保護。
       return c.html(renderLayout(c, 'アラート', unavailable(messageOf(err)), renderDiagSubnav('alerts')))
     }
   })
@@ -965,17 +879,11 @@ export const dashboard = new Hono<DashboardBindings>()
         ),
       )
     } catch (err) {
-      // 0016 migration 未適用 (= config_audit_log テーブル無し) を 500 にせず
-      // unavailable に落とす。段階的デプロイ時の自己保護 (alerts と同パターン)。
       return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err))))
     }
   })
-  /**
-   * 銘柄管理 (#292) — symbol_config CRUD UI。
-   *
-   * list / new / edit の 3 ページのみ render する read 系。POST は
-   * `/admin/symbol-config[/...]` に form submit → 303 redirect で戻る (PRG)。
-   */
+  // Renders list/new/edit only; writes go to /admin/symbol-config[/...] via
+  // form submit and a 303 redirect back (PRG).
   .get('/symbols', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理', unavailable('DB not bound')))
@@ -984,15 +892,15 @@ export const dashboard = new Hono<DashboardBindings>()
       const [rows, inversePairs, pairRegimes, tradable] = await Promise.all([
         loadAllSymbolConfigRows(c.env.DB),
         loadInversePairs(createDb(c.env.DB)).catch(() => ({}) as Record<string, string>),
-        // 関係マップ用 (#symbol-relation-map)。読めなくても一覧は出す。
+        // A load failure here still lets the list render, just without the
+        // relation map / allowlist badges (empty map = every symbol unknown).
         loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => []),
-        // #460: OpenAPI 取扱可能銘柄 allowlist。読めなくても一覧は出す (空 map = 全 unknown)。
         loadTradableAllowlist(createDb(c.env.DB)).catch(
           () => new Map() as Awaited<ReturnType<typeof loadTradableAllowlist>>,
         ),
       ])
-      // 関係マップの縦軸 = 投入金額 (DO position の qty × avgPrice、ground truth)。
-      // 取得失敗・position 無しは 0 (最下段)。fx は表示位置の換算のみに使う。
+      // Relation map's vertical axis is committed cost (DO position qty x
+      // avgPrice, the ground truth). A missing position sorts to 0 (bottom).
       const mapAmounts: Record<string, { native: string; jpy: number }> = {}
       if (c.env.SYMBOL_STATE) {
         const stateClient = new SymbolStateClient(c.env.SYMBOL_STATE)
@@ -1005,7 +913,8 @@ export const dashboard = new Hono<DashboardBindings>()
             if (!pos || pos.qty <= 0) return
             const cost = pos.qty * pos.avgPrice
             if (r.currency === 'USD') {
-              // fx 不達時は概算 150 で位置決めだけ行う (表示専用、tooltip は native 額)。
+              // A missing rate falls back to an approximate 150 for
+              // positioning only — the displayed native amount is unaffected.
               mapAmounts[sym] = {
                 native: `$${cost.toFixed(0)}`,
                 jpy: cost * (usdJpy ?? 150),
@@ -1044,12 +953,9 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理', unavailable(messageOf(err))))
     }
   })
-  /**
-   * 配分マップの編集キャンバス (#symbol-relation-map)。Drawflow で銘柄カードを
-   * 並べ、線を引く = 退避先を設定 (entry_required も ON)、線を消す = 解除、
-   * カード内の % input = 予算配分の更新。変更は都度 confirm → admin API →
-   * reload (canvas 状態と DB の drift を作らない最小実装)。
-   */
+  // Each canvas change (draw/erase a fallback line, edit a % input) confirms
+  // and applies immediately through the admin API, then reloads — no local
+  // canvas state that could drift from the DB.
   .get('/symbols/map', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, '配分マップ編集', unavailable('DB not bound')))
@@ -1060,7 +966,6 @@ export const dashboard = new Hono<DashboardBindings>()
         () => ({}) as Record<string, string>,
       )
       const pairRegimes = await loadPairRegimeConfigs(createDb(c.env.DB)).catch(() => [])
-      // #460: OpenAPI 取扱 allowlist (キャンバスの取扱バッジ用)。
       const tradable = await loadTradableAllowlist(createDb(c.env.DB)).catch(
         () => new Map() as Awaited<ReturnType<typeof loadTradableAllowlist>>,
       )
@@ -1090,9 +995,8 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.DB) {
       return c.html(renderLayout(c, '銘柄管理 - 新規追加', unavailable('DB not bound')))
     }
-    // global default は placeholder 表示 (#316) — operator が「空欄なら何の値が
-    // 適用されるか」を一目で把握できるようにする。読込失敗は fallback null で
-    // placeholder 無表示にする (form 自体は出す)。
+    // A load failure falls back to null, which just hides the placeholder
+    // rather than blocking the form itself.
     const globalDefaults = await loadGlobalConfigFrom(c.env, c.get('requestId'))
       .then((g) => ({
         timeStopDays: g.pullbackDefaultTimeStopDays,
@@ -1130,7 +1034,6 @@ export const dashboard = new Hono<DashboardBindings>()
         () => ({}) as Record<string, string>,
       )
       const currentInverse = inversePairs[symbol] ?? null
-      // #460: OpenAPI 取扱 allowlist status (edit は symbol 確定なので server 描画)。
       const tradableStatus = await getTradableStatusForSymbol(createDb(c.env.DB), symbol).catch(
         () => 'unknown' as const,
       )
@@ -1145,29 +1048,19 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.html(renderLayout(c, '銘柄管理 - 編集', unavailable(messageOf(err))))
     }
   })
-  /**
-   * 銘柄単位ビューの canonical 短縮 URL (#nav-links)。実体はチャート銘柄タブ
-   * (判定 pin / ラダー / fill / 設定リンクを持つ) なので redirect で寄せる。
-   * `/symbols/new` / `/symbols/map` / `/symbols/:symbol/edit` より後に定義する
-   * こと (Hono は定義順マッチ)。
-   */
+  // Must be defined after /symbols/new, /symbols/map, /symbols/:symbol/edit
+  // — Hono matches routes in definition order, and this catch-all would
+  // otherwise shadow them.
   .get('/symbols/:symbol', (c) => {
     const symbol = (c.req.param('symbol') ?? '').trim().toUpperCase()
     if (symbol.length === 0) return c.redirect('/dashboard/symbols')
     return c.redirect(`/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbol)}`)
   })
-  /**
-   * #293 — earnings + macro event calendar 管理 UI。
-   *
-   * `earnings_calendar` / `macro_event_calendar` への手動 add / delete を
-   * Web UI で行えるようにする。両 calendar とも risk gate のソース
-   * (`earningsGate` / `macroEventGate`) なので, operator が dashboard 経由で
-   * 直接管理できる必要がある (AI agent 経由の curl だけだと運用効率が悪い)。
-   *
-   * 範囲は now-30d 〜 now+30d (直近+近未来の "実際に gate が見る窓") を表示。
-   * 過去 30 日以前 / 365 日以降は dashboard では出さない (operator の関心外
-   * + 一覧の長さを抑える); 必要なら admin GET endpoint で直接読める。
-   */
+  // earnings_calendar / macro_event_calendar feed the earningsGate /
+  // macroEventGate risk gates, so an operator needs to manage them without
+  // going through an AI-agent curl call. Shows only now-30d..now+30d — the
+  // window the gates actually read; older/further rows are reachable via
+  // the admin GET endpoint but omitted here to keep the list short.
   .get('/events', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
@@ -1198,17 +1091,9 @@ export const dashboard = new Hono<DashboardBindings>()
         ),
       )
     } catch (err) {
-      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
-      // (他 dashboard page と同じ defensive 姿勢)。
       return c.html(renderLayout(c, 'イベント', unavailable(messageOf(err))))
     }
   })
-  /**
-   * earnings 1 行 seed form 受け。HTML form は JSON を送らないので
-   * `application/x-www-form-urlencoded` を parse → 1 件配列に wrap → 既存
-   * repo の `bulkUpsert` を呼ぶ。バリデーション失敗時は再描画 + 入力 echo
-   * (PRG redirect だと form の値が失われる)。
-   */
   .post('/events/earnings/seed', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
@@ -1254,8 +1139,8 @@ export const dashboard = new Hono<DashboardBindings>()
         macroEcho: null,
       })
     }
-    // 保存は成功したが non-blocking warning (universe 外 symbol 等) があれば
-    // PRG redirect を捨てて再描画 (= 200) し、警告を operator に見せる。
+    // A non-blocking warning (e.g. symbol outside the universe) trades the
+    // PRG redirect for a re-render, so the operator actually sees it.
     if (validation.warning) {
       return await renderEventsWithNotice(c, {
         section: 'earnings',
@@ -1264,11 +1149,7 @@ export const dashboard = new Hono<DashboardBindings>()
     }
     return c.redirect('/dashboard/events', 303)
   })
-  /**
-   * earnings 1 行 delete form 受け。HTML form は DELETE method を送れないので
-   * POST を companion endpoint として用意 (admin の DELETE と独立に, dashboard
-   * 内で完結させる)。rate-limit + audit log は admin と同等に適用。
-   */
+  // A companion POST endpoint, since an HTML form can't send DELETE.
   .post('/events/earnings/:id/delete', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
@@ -1307,7 +1188,6 @@ export const dashboard = new Hono<DashboardBindings>()
     )
     return c.redirect('/dashboard/events', 303)
   })
-  /** macro 1 行 seed form 受け。挙動は earnings と対称。 */
   .post('/events/macro/seed', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
@@ -1356,7 +1236,6 @@ export const dashboard = new Hono<DashboardBindings>()
     }
     return c.redirect('/dashboard/events', 303)
   })
-  /** macro 1 行 delete form 受け。 */
   .post('/events/macro/:id/delete', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, 'イベント', unavailable('DB not bound')))
@@ -1395,26 +1274,17 @@ export const dashboard = new Hono<DashboardBindings>()
     )
     return c.redirect('/dashboard/events', 303)
   })
-  /**
-   * #21 Phase B follow-up: Webull `x-access-token` 管理 UI。
-   *
-   * - GET                    : 現状表示 (status / expires / tokenHint / 各タイムスタンプ) + seed form + refresh button
-   * - POST /seed             : form の token 文字列を broker で再 verify (`checkToken`) してから DO 書込
-   * - POST /refresh          : `refreshWebullToken(env, {force:true})` を叩いて DO を更新
-   *
-   * いずれも token plaintext は HTML に乗せない (head/tail だけの tokenHint)。
-   * Cache-Control: no-store 付与で browser / 中間 cache を防ぐ。
-   * writeAuditLog 経由で D1 に "誰がいつ" の trail を残す (CodeRabbit #326 同等)。
-   */
+  // Token plaintext never reaches the HTML (only a head/tail tokenHint);
+  // Cache-Control: no-store keeps it out of browser/intermediate caches.
   .get('/webull-token', async (c) => {
     c.header('Cache-Control', 'no-store')
     if (!c.env.WEBULL_TOKEN_STATE) {
       return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured')))
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
-    // DO read 失敗を「DO 空」と区別する (CodeRabbit #327)。前者は障害、後者は
-    // 初期状態。混同すると operator が「seed されてないだけ」と誤判断して
-    // 不要な seed 操作を試みる事故が起きる。
+    // Distinguishes a DO read failure (an outage) from a genuinely empty DO
+    // (never seeded) — conflating them would have an operator mistake a
+    // real failure for "just needs seeding" and skip investigating it.
     let state: WebullTokenState | null = null
     let stateError: string | null = null
     try {
@@ -1445,10 +1315,10 @@ export const dashboard = new Hono<DashboardBindings>()
     if (rawPaste.length === 0) {
       return c.redirect('/dashboard/webull-token?error=token+is+required', 303)
     }
-    // issue-token script の出力丸ごと貼り付けても OK にする。stderr の
-    // diagnostic ("[issue-token] ...") や wrangler suggest 行 ("pnpm wrangler
-    // ...") を strip、残った 1 行が NORMAL token。複数行残ったら曖昧として
-    // error にする (operator に何を貼ったか判別させる)。
+    // Accepts pasting the issue-token script's full output, not just the
+    // token: strips stderr diagnostics and the wrangler suggestion line,
+    // then requires exactly one line left over. More than one surviving
+    // line is treated as ambiguous rather than guessed at.
     const extraction = extractTokenFromPaste(rawPaste)
     if (!extraction.ok) {
       return c.redirect(
@@ -1464,8 +1334,9 @@ export const dashboard = new Hono<DashboardBindings>()
       }),
       baseUrl: c.env.WEBULL_TRADE_API_BASE?.trim() || 'https://api.webull.co.jp',
     })
-    // operator 貼り付け値が NORMAL かを broker で再確認。期限切れ / PENDING を
-    // DO に保存させないため (TOC-TOU 防御、admin endpoint と同じ理由)。
+    // Re-verifies against the broker rather than trusting the pasted value,
+    // so an expired/PENDING token can't get written to the DO (TOC-TOU —
+    // same reasoning as the admin endpoint).
     let dto: Awaited<ReturnType<typeof tokenClient.checkToken>>
     try {
       dto = await tokenClient.checkToken(rawToken)
@@ -1479,9 +1350,9 @@ export const dashboard = new Hono<DashboardBindings>()
       )
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
-    // store.seedToken が throw した場合に 500 で落とさず `?error=` で UI に
-    // 戻す (CodeRabbit #327)。getState 失敗は audit log の before が null に
-    // なるだけなので無害、引き続き catch で抑制。
+    // A seedToken throw redirects to ?error= instead of a 500. A getState
+    // failure just leaves the audit log's `before` as null, so it stays
+    // caught-and-ignored here too.
     try {
       const before = await store.getState().catch(() => null)
       const seeded = await store.seedToken({
@@ -1510,9 +1381,11 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!c.env.WEBULL_TOKEN_STATE) {
       return c.redirect('/dashboard/webull-token?error=WEBULL_TOKEN_STATE+binding+is+not+configured', 303)
     }
-    // refreshWebullToken 自体は throw しない (内部で catch して failureReason に
-    // 詰める) 設計だが、念のため try で囲み、失敗系は ?error= に乗せる
-    // (CodeRabbit #327: failureReason ありを notice 緑バナーに混ぜない)。
+    // refreshWebullToken normally catches its own errors into
+    // failureReason rather than throwing; this try/catch is a backstop so a
+    // genuine throw still redirects to ?error= instead of a 500, and a
+    // failureReason still routes to the error banner rather than the
+    // success notice below.
     let summary: Awaited<ReturnType<typeof refreshWebullToken>>
     try {
       summary = await refreshWebullToken(c.env, { force: true })
@@ -1549,14 +1422,12 @@ export const dashboard = new Hono<DashboardBindings>()
         303,
       )
     }
-    // skip は正常系 (期限まで余裕あり等)。緑 notice で OK。
+    // A skip (e.g. plenty of time left before expiry) is normal, not an error.
     const why = summary.skippedReason ?? 'no change'
     return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`refresh: ${why}`)}`, 303)
   })
-  /**
-   * 時間外参考観測 (#709 Phase 1)。`extendedHoursScheduler` (producer) が
-   * 書いた `extended_hours_observation` を読むだけの read-only view。
-   */
+  // Read-only view over extended_hours_observation, written by
+  // extendedHoursScheduler (the producer).
   .get('/extended-hours', async (c) => {
     const subnav = renderDiagSubnav('extendedHours')
     if (!c.env.DB) {
@@ -1573,8 +1444,6 @@ export const dashboard = new Hono<DashboardBindings>()
         renderLayout(c, '時間外参考', extendedHoursBody({ sessionYmd, latest, recent }), subnav),
       )
     } catch (err) {
-      // migration 未適用 / 一時的な D1 エラーで 500 にせず unavailable に落とす
-      // (他 dashboard page と同じ defensive 姿勢)。
       return c.html(renderLayout(c, '時間外参考', unavailable(messageOf(err)), subnav))
     }
   })

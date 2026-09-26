@@ -1,83 +1,32 @@
 /**
- * News shock gate (issue #196 follow-up, newsShockGate PR 2)。
+ * Scales down or blocks BUY size when recent GDELT report volume spikes vs.
+ * baseline. SELL always passes through unscaled — never blocks an exit.
  *
- * GDELT の報道量 (`volume`) / 平均トーン (`tone`) の trailing 観測から、
- * 「直近の報道が baseline に対して急増している」局面を検知し BUY size を
- * 縮小 / 停止する **size scaling 系** filter。`vixRegimeFilter.ts` と同じ
- * 型・reason 形式・防御的正規化の構造を踏襲する。
- *
- * scope:
- *   - in: BUY の `intent.quantity` を倍率調整 (1.0 / warnSizeScale / 0.0)
- *   - out: SELL は常に通す (existing position の exit を妨げない)
- *   - out: 観測データの取得 (fetch) はこの module の責務外。呼び出し側
- *     (`runStrategyCron`) が D1 read で観測を集め、この pure function に渡す。
- *     **このファイルは fetch を一切呼ばない** (strategy tick に外部 API 呼び出しを
- *     足さないという安全上の絶対条件の core)。
- *
- * 判定:
- *   ratio = max(直近 windowMin 分の volume) / median(直近 baselineDays 分の
- *   **非ゼロ** volume)
- *   - ratio > blockRatio かつ (tone 条件を満たす、または requireTone=false):
- *     regime='critical', sizeScale=0
- *   - ratio > warnRatio: regime='warning', sizeScale=warnSizeScale
- *     (tone 条件が未充足で critical から降格した場合もこの分岐に落ちる —
- *     「報道量が増えただけ (ポジティブなニュース) で BUY を止めない」ため)
- *   - それ以外: regime='normal', sizeScale=1.0
- *
- * baseline median を非ゼロ値だけで取る理由: `market_selloff` のような sparse
- * probe は平時ニュースが無い時間帯が大半で volume=0 が 8 割超を占める。全点
- * (ゼロ込み) で median を取ると常に 0 になり、ratio が発散 → 旧実装では
- * 「degenerate data」として fail-open (regime='unknown') に倒していたため、
- * この probe は恒常的に unknown のままだった。ratio の意味は「直近 window
- * max が、平時の**非ゼロ報道量**の典型値の何倍か」であり、報道が無い時間帯の
- * ゼロは baseline の代表値計算からは除外するのが正しい (windowMax 側は
- * ゼロを含めたまま — 直近が静かなら ratio=0 で 'normal' になるのは意図通り)。
- *
- * tone AND 条件 (`requireTone=true` の時のみ critical に追加で要求):
- *   baselineTone (baseline 窓の median) − latestTone (直近1点) >= toneDropThreshold
- *
- * fail-open (GDELT producer 障害 / baseline 未成熟):
- *   - 観測が無い / 最新観測が maxAgeMin より古い → regime='unknown',
- *     reason='news_shock_unavailable_fallback_normal'
- *   - baseline サンプル数 (ゼロ込み、データ可用性チェック) が minSamples 未満 →
- *     regime='unknown', reason='news_shock_insufficient_baseline: <count>/<minSamples>'
- *   - baseline サンプルは十分だが非ゼロ値が 1 点も無い (全点ゼロ) → regime='unknown',
- *     reason='news_shock_degenerate_baseline: all-zero'
- *   上記いずれも既定 (`attentionStalePolicy='fail_open'`) では sizeScale=1.0。
- *   operator が `attentionStalePolicy='block_buy'` に倒した場合のみ sizeScale=0
- *   (fail-closed escape hatch — `vixRegimeFilter.ts` の fail-open 判断とは
- *   別に、attention データの可用性だけを明示的に fail-closed へ倒せる)。
+ * Never calls fetch: the caller does the D1 read (`newsShockDecision.ts`)
+ * and passes observations in, so this stays a pure function and adds no
+ * external call to the strategy tick.
  */
 
 export type NewsShockRegime = 'normal' | 'warning' | 'critical' | 'unknown'
 
-/** operator が attention データ不可用時の挙動を明示的に選べる escape hatch。 */
+/** fail_open (default): unknown regime keeps sizeScale=1.0. block_buy: unknown blocks BUY too. */
 type AttentionStalePolicy = 'fail_open' | 'block_buy'
 
 export interface NewsShockGateConfig {
-  /** ratio > これで warning 領域 (size を warnSizeScale 倍に縮小)。default 2.3 (GDELT 12ヶ月実測 p90)。 */
   warnRatio: number
-  /** ratio > これ **かつ** tone 条件充足で critical (BUY 全停止)。default 4.4 (同 p99)。 */
   blockRatio: number
-  /** warning 領域の size 倍率。default 0.5。0..1 で運用想定。 */
   warnSizeScale: number
-  /** critical に要求する tone 低下幅 (baselineTone - latestTone)。default 1.5。 */
   toneDropThreshold: number
-  /** true (default) なら critical 判定に tone 低下 AND 条件を要求する。 */
   requireTone: boolean
-  /** baseline (median 母集団) の trailing 日数。default 7。 */
   baselineDays: number
-  /** baseline サンプル数の下限。未満なら 'unknown' (insufficient_baseline)。default 200。 */
   minSamples: number
-  /** ratio 分子側 (直近 max) の窓 (分)。default 120。 */
   windowMin: number
-  /** 最新観測がこれより古ければ 'unknown' (unavailable) 扱い。default 90 (分)。 */
   maxAgeMin: number
-  /** unknown 判定時の fail-open / fail-closed 切替。default 'fail_open'。 */
   attentionStalePolicy: AttentionStalePolicy
 }
 
 export const DEFAULT_NEWS_SHOCK_CONFIG: NewsShockGateConfig = {
+  // warnRatio/blockRatio calibrated from trailing 12mo GDELT p90/p99.
   warnRatio: 2.3,
   blockRatio: 4.4,
   warnSizeScale: 0.5,
@@ -90,63 +39,43 @@ export const DEFAULT_NEWS_SHOCK_CONFIG: NewsShockGateConfig = {
   attentionStalePolicy: 'fail_open',
 }
 
-/** 1 point の報道量観測。`attention_observation` (metric='volume') の row 相当。 */
+/** Maps to `attention_observation` rows with metric='volume'. */
 export interface NewsShockVolumeObservation {
-  /** 観測 bucket の ISO UTC。 */
   bucketAt: string
   value: number
 }
 
-/** 1 point のトーン観測。`attention_observation` (metric='tone') の row 相当。 */
+/** Maps to `attention_observation` rows with metric='tone'. */
 export interface NewsShockToneObservation {
   bucketAt: string
   value: number
 }
 
 export interface NewsShockGateInput {
-  /** trailing baselineDays 分をカバーする volume 観測 (順不同で可)。呼び出し側は `fetchRecent` の結果をそのまま渡してよい。 */
+  /** Should cover the trailing `baselineDays`; order doesn't matter. */
   volumeObservations: NewsShockVolumeObservation[]
-  /** trailing baselineDays 分をカバーする tone 観測。requireTone=false なら空配列で可。 */
+  /** May be empty when `requireTone=false`. */
   toneObservations: NewsShockToneObservation[]
-  /** 評価基準時刻 (ISO UTC)。呼び出し側の cron tick 時刻。 */
   asOf: string
 }
 
 export interface NewsShockGateDecision {
   regime: NewsShockRegime
-  /**
-   * size を倍率調整。1.0 (normal / unknown fail-open) / warnSizeScale (warning) /
-   * 0.0 (critical = block、または unknown かつ attentionStalePolicy='block_buy')。
-   */
+  /** 1.0 (normal / unknown fail-open) / warnSizeScale (warning) / 0.0 (critical, or unknown + block_buy). */
   sizeScale: number
-  /**
-   * 通知 / log 用の説明 (英文 canonical、表示層で日本語化)。形式:
-   *   - `news_shock_normal: 1.4x`
-   *   - `news_shock_warning: 2.8x (size x0.5)`
-   *   - `news_shock_critical: 5.1x tone-2.3 (block)`
-   *   - `news_shock_unavailable_fallback_normal`
-   *   - `news_shock_insufficient_baseline: 84/200`
-   *   - `news_shock_degenerate_baseline: all-zero`
-   */
+  /** Canonical English reason string for logs/notifications; see tests for the exact per-regime formats. */
   reason: string
-  /** 算出された ratio (直近 max / baseline median)。算出不能時は null。 */
+  /** windowMax / baselineMedian. null when not computed (unknown regime). */
   ratio: number | null
-  /** baselineTone - latestTone。tone 未算出時は null。 */
+  /** baselineTone - latestTone. null when tone wasn't computed. */
   toneDrop: number | null
-  /** 評価基準時刻 (input.asOf のエコー)。 */
   asOf: string
 }
 
 /**
- * Pure function — attention 観測 + config から regime decision を返す。
- *
- * 呼び出し側で D1 read (`attentionObservationRepo.fetchRecent`) を済ませて
- * 観測配列を渡す。**fetch は呼ばない** — 15分間隔の strategy tick cron に外部 API
- * 呼び出しを足さないという安全上の絶対条件の core。
- *
- * config が壊れている (NaN / 順序逆転 / sizeScale が 0..1 範囲外 / enum 外) 場合は
- * `DEFAULT_NEWS_SHOCK_CONFIG` の対応 field に倒す (`vixRegimeFilter.sanitizeConfig`
- * と同じ layered defense — DB UPDATE typo で gate が暴発しないようにする)。
+ * A config with NaN / inverted thresholds / out-of-range values (e.g. a D1
+ * UPDATE typo) is sanitized field-by-field back to `DEFAULT_NEWS_SHOCK_CONFIG`
+ * rather than rejected outright.
  */
 export function evaluateNewsShockGate(
   input: NewsShockGateInput,
@@ -156,20 +85,18 @@ export function evaluateNewsShockGate(
   const asOf = input.asOf
   const asOfMs = Date.parse(asOf)
   if (!Number.isFinite(asOfMs)) {
-    // asOf 自体が壊れている呼び出し側バグ。fail-open で unknown に倒す。
+    // Malformed asOf from the caller — fail open rather than throwing mid-tick.
     return unavailableDecision(sane, asOf)
   }
 
   const volumes = filterFinite(input.volumeObservations)
   const tones = filterFinite(input.toneObservations)
 
-  // 1) staleness: 最新観測が maxAgeMin より古い / 観測なし → unavailable。
   const latestBucketMs = maxBucketMs(volumes, asOfMs)
   if (latestBucketMs === null || asOfMs - latestBucketMs > sane.maxAgeMin * 60_000) {
     return unavailableDecision(sane, asOf)
   }
 
-  // 2) baseline サンプル数チェック。
   const baselineSinceMs = asOfMs - sane.baselineDays * 24 * 60 * 60_000
   const baselineValues = volumes
     .filter((o) => {
@@ -180,18 +107,18 @@ export function evaluateNewsShockGate(
   if (baselineValues.length < sane.minSamples) {
     return insufficientBaselineDecision(sane, asOf, baselineValues.length)
   }
-  // 非ゼロ値だけで median を取る (module doc 参照)。sparse probe は平時ゼロが
-  // 大半のため、ゼロ込みの median は常に 0 になり ratio が意味を失う。
+  // Median over non-zero values only: a sparse probe is quiet (volume=0)
+  // more than 80% of the time, so a median over all points is always 0 and
+  // the ratio diverges. Zero windows still count on the window-max side —
+  // a quiet recent window correctly ratios to 0 / 'normal'.
   const positiveBaselineValues = baselineValues.filter((v) => v > 0)
   const baselineMedian = median(positiveBaselineValues)
   if (!Number.isFinite(baselineMedian)) {
-    // 非ゼロ値の median の NaN 化は「正の値が 1 点も無い (全点ゼロ)」場合のみ
-    // (median([]) === NaN)。baselineMedian <= 0 は positiveBaselineValues が
-    // 全点 > 0 である以上、理論上到達しない — NaN guard のみ残す。
+    // Only reachable when every baseline value is zero (median([]) === NaN);
+    // kept as a guard rather than assumed unreachable.
     return degenerateBaselineDecision(sane, asOf)
   }
 
-  // 3) window 側 (直近 windowMin 分) の max。
   const windowSinceMs = asOfMs - sane.windowMin * 60_000
   const windowValues = volumes
     .filter((o) => {
@@ -200,14 +127,12 @@ export function evaluateNewsShockGate(
     })
     .map((o) => o.value)
   if (windowValues.length === 0) {
-    // staleness check を通過していれば通常起きないが、maxAgeMin > windowMin の
-    // config だと理論上あり得る。defensive に unavailable へ倒す。
+    // Only reachable with a misconfigured maxAgeMin > windowMin; defensive fail-open.
     return unavailableDecision(sane, asOf)
   }
   const windowMax = Math.max(...windowValues)
   const ratio = windowMax / baselineMedian
 
-  // 4) tone drop (baseline median tone - 直近1点の tone)。データ不足なら null。
   const toneDrop = computeToneDrop(tones, baselineSinceMs, asOfMs)
 
   if (ratio > sane.blockRatio) {
@@ -222,7 +147,8 @@ export function evaluateNewsShockGate(
         asOf,
       }
     }
-    // ratio は block 域だが tone 条件未充足 → 報道量急増のみでは止めず warning 止まり。
+    // Ratio alone doesn't escalate to critical — a volume spike without a
+    // tone drop reads as heavy positive coverage, not a shock; warning only.
     return {
       regime: 'warning',
       sizeScale: sane.warnSizeScale,
@@ -278,12 +204,6 @@ function insufficientBaselineDecision(
   }
 }
 
-/**
- * baseline サンプル数は minSamples を満たすが、非ゼロ値が 1 点も無い (全点
- * ゼロ) 場合の fail-open 決定。`insufficientBaselineDecision` と同じ
- * fail-open / fail-closed 挙動 (`attentionStalePolicy` 依存) だが、reason を
- * 分けて「データが少なすぎる」と「データはあるが全部ゼロ」を区別できるようにする。
- */
 function degenerateBaselineDecision(sane: NewsShockGateConfig, asOf: string): NewsShockGateDecision {
   return {
     regime: 'unknown',
@@ -308,10 +228,6 @@ function maxBucketMs(
   return max
 }
 
-/**
- * baseline 窓内の tone median と、baseline 窓内でもっとも新しい 1 点 (latest) の
- * 差分。どちらかが算出できなければ null (= tone AND 条件は満たされない扱い)。
- */
 function computeToneDrop(
   tones: NewsShockToneObservation[],
   baselineSinceMs: number,
@@ -342,17 +258,10 @@ function median(values: number[]): number {
 }
 
 /**
- * config を default に倒して安全圏に正規化する。狙い: DB の UPDATE で入った
- * typo (e.g. warnRatio=NaN, warnSizeScale=2.5) で news shock 経路が暴発しない
- * ようにする (`vixRegimeFilter.sanitizeConfig` と同じ layered defense)。
- *
- * export する理由 (CodeRabbit PR #619 review): 呼び出し側 (`runStrategyCron`
- * の `loadNewsShockDecision`) が `config.baselineDays` の生値を使って
- * `sinceIso` を計算しており、`evaluateNewsShockGate` 内部の sanitize では
- * その計算を保護できなかった (NaN が `new Date(NaN).toISOString()` で
- * `RangeError` を throw する経路)。呼び出し側で先に sanitize した値を使う
- * ことで防ぐ。`evaluateNewsShockGate` は引き続き内部で同じ関数を呼ぶ
- * (二重 sanitize は冪等なので問題ない)。
+ * Exported (not just called internally) because `loadNewsShockDecision`
+ * needs the sanitized `baselineDays` before it computes `sinceIso`, ahead
+ * of calling `evaluateNewsShockGate` — which sanitizes again internally.
+ * Calling it twice is safe: it's idempotent.
  */
 export function sanitizeNewsShockConfig(config: NewsShockGateConfig): NewsShockGateConfig {
   const warnRatioRaw = isPositiveFinite(config.warnRatio)
@@ -361,8 +270,8 @@ export function sanitizeNewsShockConfig(config: NewsShockGateConfig): NewsShockG
   const blockRatioRaw = isPositiveFinite(config.blockRatio)
     ? config.blockRatio
     : DEFAULT_NEWS_SHOCK_CONFIG.blockRatio
-  // warn > block (順序逆転) は defensive に両方 default へ倒す (vix と同じ判断:
-  // 中途半端な部分適用より明確な default の方が運用的に分かりやすい)。
+  // Inverted (warn > block) resets both to defaults rather than one — a
+  // half-applied fix is harder to reason about operationally than a clean default.
   const ordered = warnRatioRaw <= blockRatioRaw
   const warnRatio = ordered ? warnRatioRaw : DEFAULT_NEWS_SHOCK_CONFIG.warnRatio
   const blockRatio = ordered ? blockRatioRaw : DEFAULT_NEWS_SHOCK_CONFIG.blockRatio

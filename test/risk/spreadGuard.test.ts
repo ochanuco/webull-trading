@@ -3,7 +3,6 @@ import { computeSpreadPct, isSpreadWithinLimit } from '../../src/trading/risk/sp
 
 describe('computeSpreadPct', () => {
   it('returns (ask-bid)/mid for a normal book', () => {
-    // bid 99.9, ask 100.1 -> mid 100, spread 0.2, pct 0.002
     const pct = computeSpreadPct(99.9, 100.1)
     expect(pct).not.toBeNull()
     expect(pct!).toBeCloseTo(0.002, 10)
@@ -35,17 +34,14 @@ describe('computeSpreadPct', () => {
 
 describe('isSpreadWithinLimit', () => {
   it('returns true when spread is within limit', () => {
-    // spread 0.2% <= 0.25% limit
     expect(isSpreadWithinLimit(99.9, 100.1, 0.0025)).toBe(true)
   })
 
   it('returns true when spread equals limit exactly', () => {
-    // 99.875 / 100.125 -> mid 100, spread 0.25, pct 0.0025
     expect(isSpreadWithinLimit(99.875, 100.125, 0.0025)).toBe(true)
   })
 
   it('returns false when spread exceeds limit', () => {
-    // 99.85 / 100.15 -> pct 0.003 > 0.0025
     expect(isSpreadWithinLimit(99.85, 100.15, 0.0025)).toBe(false)
   })
 

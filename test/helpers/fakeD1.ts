@@ -1,8 +1,4 @@
-/**
- * 空返しの D1 fake。dashboard の SSR は複数の loader を並列に叩くので、
- * 「クエリは通るが行は無い」状態を作れれば描画自体は検証できる。
- * 行の内容を検証したいテストは loader を vi.mock する側で組む。
- */
+// Empty-row D1 fake; tests that need row content mock the loader instead.
 export function fakeD1(): D1Database {
   const stmt = {
     bind() {

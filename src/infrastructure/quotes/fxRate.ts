@@ -1,17 +1,14 @@
-// USD/JPY スポットレート取得 (#budget-jpy-base-fx)。予算配分を口座(円)単一プールで
-// 扱うため、USD 銘柄の「目標円 → USD notional」換算に使う。
-//
-// Yahoo `/v8/finance/chart/USDJPY=X` の `meta.regularMarketPrice` を読む
-// (YahooBarClient と同 endpoint / UA 規約)。実マネー sizing に効くので **fail-safe**:
-// fetch 失敗・非有限・サニティレンジ外は `null` を返し (throw しない)、呼び出し側で
-// USD 予算銘柄を fail-closed (発注しない) させる。誤レートでの過大発注を防ぐ。
+// Used to convert JPY budget allocation into USD notional for USD symbols.
+// Fail-safe by design, since it feeds real-money sizing: fetch failure,
+// non-finite, or out-of-range results all return null (never throw) so
+// callers fail-closed rather than size against a bad rate.
 
 const DEFAULT_BASE_URL = 'https://query1.finance.yahoo.com'
 const DEFAULT_TIMEOUT_MS = 5_000
 const DEFAULT_USER_AGENT = 'Mozilla/5.0'
 const FX_SYMBOL = 'USDJPY=X'
-// USD/JPY の妥当レンジ。歴史的に 75〜160 程度。異常値 (0 / 桁違い / 取り違え) を弾く
-// 安全マージンとして広めに 50〜500 を採用。範囲外は誤データとみなし null。
+// Historical range is ~75-160; 50-500 gives a wide safety margin against
+// bad data (zero, wrong magnitude, wrong pair) while never rejecting a real rate.
 const MIN_RATE = 50
 const MAX_RATE = 500
 
@@ -30,10 +27,7 @@ interface YahooChartMetaResponse {
   }
 }
 
-/**
- * USD/JPY (1 USD = N JPY) の最新レートを返す。取得不能 / 異常値は `null`。
- * 例外は投げない (cron / sizing 経路を巻き添えにしない fail-safe)。
- */
+/** 1 USD = N JPY. Never throws — see module header for the fail-safe rationale. */
 export async function loadUsdJpyRate(options: UsdJpyRateOptions = {}): Promise<number | null> {
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS

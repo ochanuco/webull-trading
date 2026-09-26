@@ -1,13 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createApp } from '../../src/app'
 
-/**
- * Inline <script> の構文回帰テスト。dashboard の JS は TS テンプレートリテラル
- * 内に手書きされており、`\n` (TS で実改行に展開) と `\\n` (rendered JS の
- * escape) の取り違えで **ページ全体の click handler が無音で死ぬ** 事故が
- * 実際に起きた (#462 後の staging で broker-probe が全ボタン無反応)。
- * 抽出した script を `new Function` で parse して構文エラーを CI で検出する。
- */
+// dashboard の JS は TS テンプレートリテラル内に手書きされており、`\n` と `\\n` の
+// 取り違えで click handler が無音で死ぬ。抽出した script を `new Function` で parse
+// して構文エラーを CI で検出する。
 const baseEnv = { ACCESS_DEV_BYPASS_USER: 'admin' }
 
 async function inlineScriptsOf(path: string): Promise<string[]> {

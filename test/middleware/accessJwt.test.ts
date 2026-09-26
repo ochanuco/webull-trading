@@ -8,14 +8,6 @@ import {
   type AccessJwtVariables,
 } from '../../src/middleware/accessJwt'
 
-/**
- * Issue #29 — Cloudflare Access JWT middleware.
- *
- * We sign tokens with a locally-generated RS256 key, expose the matching JWK
- * via a stubbed `fetch`, and assert the middleware accepts / rejects each
- * shape. Each test resets the JWKS in-memory cache to keep cases independent.
- */
-
 const TEAM_DOMAIN = 'https://team.cloudflareaccess.test'
 const AUD = 'aud-tag-abc'
 const JWKS_URL = `${TEAM_DOMAIN}/cdn-cgi/access/certs`
@@ -239,7 +231,7 @@ describe('accessJwtMiddleware (#29)', () => {
 
       const res = await app.request(
         '/protected/x',
-        {}, // no JWT
+        {},
         {
           CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
           CF_ACCESS_AUD: AUD,

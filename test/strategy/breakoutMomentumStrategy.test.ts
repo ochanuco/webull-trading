@@ -16,8 +16,8 @@ function goodEntry(): MomentumInput {
     indicators: {
       price: 101,
       sma50: 95,
-      return50d: 0.06,
-      high20d: 101,
+      return20d: 0.06,
+      high10d: 101,
       low20d: 88,
       atr20: 1.5,
       baselineAtr20: 1.5,
@@ -49,7 +49,7 @@ describe('BreakoutMomentumStrategy entry', () => {
   })
 
   it('トレンド未達 (return20d <= minReturn) は HOLD', () => {
-    expect(decideEntry((i) => { i.indicators.return50d = 0.03 }).action).toBe('HOLD')
+    expect(decideEntry((i) => { i.indicators.return20d = 0.03 }).action).toBe('HOLD')
   })
 
   it('price <= sma50 は HOLD', () => {

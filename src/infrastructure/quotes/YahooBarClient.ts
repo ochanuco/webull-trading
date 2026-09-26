@@ -76,10 +76,8 @@ export class YahooBarClient implements BarClient {
 
   async getDailyBars(symbol: string, lookback: number): Promise<DailyBar[]> {
     if (!Number.isInteger(lookback) || lookback <= 0) {
-      // rangeForLookback assumes a positive bucket, and `slice(-0)` /
-      // `slice(-NaN)` both silently return the full array rather than the
-      // requested window. Fail fast with a descriptive error so callers can't
-      // accidentally ask for "all bars".
+      // `slice(-0)` / `slice(-NaN)` silently return the full array instead
+      // of throwing, which would look like "all bars" to the caller.
       throw new RangeError(
         `YahooBarClient.getDailyBars: lookback must be a positive integer, got ${lookback}`,
       )
@@ -124,17 +122,11 @@ export class YahooBarClient implements BarClient {
     return bars
   }
 
-  /**
-   * 15 分足 (またはその他 intraday) bars を取得。Yahoo `interval=15m` の
-   * range 上限は 60d。dashboard chart の candlestick / 短期 trend 可視化用。
-   * trend / SMA50 等の indicator は引き続き daily で計算するので getDailyBars
-   * と用途を分ける。timestamp は ISO UTC (秒精度)。
-   */
   async getIntradayBars(symbol: string, interval: IntradayInterval): Promise<IntradayBar[]> {
     const yahooSymbol = toYahooSymbol(symbol)
     const url = new URL(`/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`, this.baseUrl)
     url.searchParams.set('interval', interval)
-    url.searchParams.set('range', '60d')
+    url.searchParams.set('range', '60d') // Yahoo's ceiling for sub-daily intervals
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
     let response: Response
@@ -165,10 +157,7 @@ export class YahooBarClient implements BarClient {
   }
 }
 
-/**
- * Intraday 用 normalize。daily と違い `slice(-lookback)` の trim は不要
- * (Yahoo intraday は元から 60d 程度なので)。timestamp は秒精度 ISO UTC を保持。
- */
+// Unlike normalizeYahooChart, no `slice(-lookback)` — callers get whatever Yahoo returns for the range.
 function normalizeIntradayChart(json: YahooChartResponse): IntradayBar[] {
   const result = json.chart?.result?.[0]
   const timestamps = result?.timestamp
@@ -222,13 +211,7 @@ function rangeForLookback(lookback: number): string {
   return '5y'
 }
 
-/**
- * Map Yahoo's columnar response into our row-based `DailyBar[]`. Yahoo
- * returns Unix-second timestamps and parallel OHLC arrays; skip any row
- * where one of the OHLC values is null (holidays, dividend adjustments).
- * Output is oldest-first, already the order Yahoo emits, to match the
- * downstream indicator expectations.
- */
+// Maps Yahoo's columnar response (parallel OHLC arrays + Unix-second timestamps) into row-based `DailyBar[]`.
 function normalizeYahooChart(json: YahooChartResponse, lookback: number): DailyBar[] {
   const result = json.chart?.result?.[0]
   const timestamps = result?.timestamp
@@ -246,14 +229,9 @@ function normalizeYahooChart(json: YahooChartResponse, lookback: number): DailyB
     const high = highs[i]
     const low = lows[i]
     const close = closes[i]
-    // Drop any row that fails the repo-wide "price > 0 and finite" guarantee
-    // (rejects null, NaN, Infinity, zero, and negatives in one guard).
     if (!isPositiveFinite(open) || !isPositiveFinite(high) || !isPositiveFinite(low) || !isPositiveFinite(close)) {
       continue
     }
-    // Sanity check: Yahoo occasionally ships adjusted rows where `low > high`
-    // around dividend events. A bar with that invariant broken is unreliable
-    // for downstream indicators (ATR, etc.), so skip it.
     if (low > high) continue
     const ts = timestamps[i]
     if (typeof ts !== 'number' || !Number.isFinite(ts)) continue
@@ -261,8 +239,6 @@ function normalizeYahooChart(json: YahooChartResponse, lookback: number): DailyB
     bars.push({ date, open, high, low, close })
   }
 
-  // Yahoo returns oldest-first; enforce the invariant and cap to lookback
-  // so callers get the shape they asked for.
   bars.sort((a, b) => a.date.localeCompare(b.date))
   return bars.slice(-lookback)
 }

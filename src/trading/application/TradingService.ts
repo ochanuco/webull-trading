@@ -41,59 +41,26 @@ export interface TradeCallContext {
 
 export interface TradingServiceOptions {
   positionStore?: PositionStore
-  /**
-   * Portfolio-level state (daily equity / realized PnL / kill switch). Separate
-   * from {@link PositionStore} because drawdown is account-wide, not per-symbol.
-   */
+  /** Account-wide equity / realized PnL / kill switch — separate from {@link PositionStore}, which is per-symbol. */
   portfolioStore?: PortfolioStore
-  /**
-   * Drawdown threshold as a fraction of `dailyStartEquity`. When
-   * `dailyRealizedPnl / dailyStartEquity <= threshold`, the kill switch arms
-   * and rejects every submit until EOD. Default -0.02 (i.e. -2%).
-   */
+  /** Fraction of `dailyStartEquity`; the kill switch arms and rejects every submit until EOD once `dailyRealizedPnl / dailyStartEquity` falls to or below this. Default -0.02. */
   drawdownKillThreshold?: number
   /** How long a pending-order lock stays live before a new submit can replace it. */
   pendingLockTtlMs?: number
-  /**
-   * Bidirectional map of structurally anti-correlated symbols. If SYMBOL_STATE
-   * shows an open position for the inverse, BUY is rejected (P&L decay trap).
-   */
+  /** Bidirectional map of structurally anti-correlated symbols. An open position in the inverse blocks a BUY (P&L decay trap). */
   inversePairs?: Record<string, string>
-  /**
-   * Per-market spread limits (fraction of mid price). A submit is rejected if
-   * `(ask - bid) / mid` exceeds the market's limit. Defaults to US 0.25% and
-   * JP 0.60% — US liquid-name depth is tighter than JP individual names.
-   */
+  /** Per-market spread ceiling as a fraction of mid price; a submit is rejected once `(ask - bid) / mid` exceeds it. Default US 0.25% / JP 0.60%. */
   spreadLimits?: { US: number; JP: number }
-  /**
-   * Quote 鮮度の上限 (ms)。`state.lastQuote.fetchedAt` からの経過時間が
-   * この値を超えていれば halt 相当として reject する (POC freshness fallback)。
-   */
+  /** Max age (ms) of `state.lastQuote.fetchedAt` before a submit is rejected as if halted. */
   staleQuoteMs?: number
-  /**
-   * 寄り付きギャップ re-eval の閾値 (ratio, e.g. 0.03 = 3%)。open position の
-   * avgPrice と lastQuote.price の gap が |pct| を超えれば reject。
-   */
+  /** Reject threshold (ratio) for the gap between an open position's avgPrice and `lastQuote.price`. */
   gapRejectPct?: number
-  /**
-   * Portfolio-wide BUY exposure ceiling expressed as a fraction of
-   * per-currency total capital. The gate rejects a BUY when
-   * `openExposure[currency] + orderNotional > totalCapital[currency] *
-   * maxPortfolioExposurePct`. Default 0.6 (= 60%). #77.
-   */
+  /** Portfolio-wide BUY exposure ceiling as a fraction of per-currency total capital; rejects when `openExposure[currency] + orderNotional` would exceed it. Default 0.6. */
   maxPortfolioExposurePct?: number
-  /**
-   * Account-wide capital baseline per currency. `null` for either side
-   * disables the exposure gate for that currency (= POC fail-open default
-   * when the operator has not seeded a number yet). #77.
-   */
+  /** Account-wide capital baseline per currency. `null` disables the exposure gate for that currency (fail-open until an operator seeds a value). */
   totalCapitalUsd?: number | null
   totalCapitalJpy?: number | null
-  /**
-   * Symbol → currency lookup populated from `symbol_config`. Required by
-   * the portfolio exposure gate; the gate falls back to a JP 4-digit
-   * heuristic when the map is missing or the symbol is unknown. #77.
-   */
+  /** Symbol → currency lookup from `symbol_config`, used by the portfolio exposure gate; falls back to a JP 4-digit heuristic when missing. */
   symbolCurrency?: Record<string, 'USD' | 'JPY'>
   now?: () => Date
 }
@@ -270,10 +237,8 @@ export class TradingService {
     const now = this.now()
     const state = await this.positionStore.getState(symbol)
 
-    // Portfolio-level drawdown kill switch & tradingDisabled は per-symbol gate
-    // ではなく account-wide なので applyStateGate に残す (issue #138 unify
-    // scope は per-symbol 側のみ)。pending-lock 取得前に評価して、kill
-    // 状態でロックが取られないようにする。
+    // Evaluated before the pending-order lock below so a kill-switched or
+    // drawdown-halted account never takes a lock it can't use.
     if (this.portfolioStore) {
       const portfolio = await this.portfolioStore.getPortfolio()
       if (
@@ -303,11 +268,9 @@ export class TradingService {
         }
       }
 
-      // #77 portfolio exposure ceiling. Only applies to BUY (SELL reduces
-      // exposure). Skipped when `total_capital_<currency>` is unset (null) —
-      // POC default = "operator has not seeded a capital baseline yet, leave
-      // the gate disabled rather than fail-close all entries with a 0
-      // ceiling". USD and JPY budgets are independent.
+      // SELL reduces exposure, so only BUY is checked. An unset
+      // `total_capital_<currency>` leaves the gate disabled rather than
+      // fail-closing every entry against an unseeded 0 ceiling.
       if (decision.orderIntent.side === 'BUY') {
         const currency = this.resolveSymbolCurrency(decision.orderIntent.symbol)
         const totalCapital = currency === 'USD' ? this.totalCapitalUsd : this.totalCapitalJpy
@@ -329,8 +292,7 @@ export class TradingService {
       }
     }
 
-    // Per-symbol gate を pure function に集約 (issue #138 — cron 側と unify)。
-    // inverse pair の SymbolState は同期 pure 関数で必要なので事前に fetch。
+    // Fetched up front because evaluatePerSymbolRisk is a synchronous pure function.
     const inverseSymbol = decision.orderIntent.side === 'BUY'
       ? this.inversePairs[symbol.toUpperCase()]
       : undefined
@@ -384,10 +346,9 @@ export class TradingService {
     const upper = symbol.toUpperCase()
     const mapped = this.symbolCurrency[upper]
     if (mapped === 'USD' || mapped === 'JPY') return mapped
-    // Fallback heuristic kept consistent with `routes/trade.ts`:
-    // 4-digit numeric ticker → JPY, anything else → USD. The gate only
-    // triggers when `total_capital_<currency>` is set, so a misclassified
-    // symbol on an unseeded currency still routes through (= no false reject).
+    // Matches `routes/trade.ts`'s heuristic. The gate only fires when
+    // `total_capital_<currency>` is set, so a misclassified symbol on an
+    // unseeded currency still routes through rather than false-rejecting.
     return /^\d{4}$/.test(upper) ? 'JPY' : 'USD'
   }
 

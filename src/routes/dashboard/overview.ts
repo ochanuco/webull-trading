@@ -9,17 +9,6 @@ import { type EquityRange, renderPortfolioEquityChart, renderVixRegimeCell } fro
 import { pickFreshQuote } from './positions'
 import { displaySymbol, esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
 
-/**
- * ホームの表示領域 (#dashboard-ia Phase 3)。
- *
- * 旧実装は 6 パネル (status / kpi / equity / positions / composition / recent)
- * だったが、6 種類の情報ではなく **同じ数字の別表現**が並んでいた (status と
- * kpi で開始 equity と実現損益が重複、positions と composition は同じ保有銘柄の
- * 別表現)。3 領域に畳んで重複を消した。
- *
- * **運転状態は panel ではない** — 常に最上段に出す。実行モード / 取引 ON-OFF /
- * 判定と株価の鮮度は、隠せると事故に直結するため設定対象から外している。
- */
 export type OverviewPanel = 'risk' | 'activity'
 
 export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = ['risk', 'activity']
@@ -29,11 +18,8 @@ export const OVERVIEW_PANEL_LABELS: Record<OverviewPanel, string> = {
   activity: '最近の活動 (直近の約定 + 資産推移)',
 }
 
-/**
- * 旧 panel key → 新領域。operator が保存済みの CSV をそのまま解釈できるよう
- * 読み替える (設定を作り直させない)。`status` は運転状態へ畳まれ、常時表示に
- * なったので対応先を持たない。
- */
+// Maps old panel keys to their new area so a previously saved CSV keeps working without the
+// operator having to reconfigure. `status` has no target: it's now always shown, not a panel.
 const LEGACY_PANEL_MAP: Record<string, OverviewPanel | null> = {
   status: null,
   kpi: 'risk',
@@ -43,7 +29,7 @@ const LEGACY_PANEL_MAP: Record<string, OverviewPanel | null> = {
   recent: 'activity',
 }
 
-/** CSV を有効領域集合へ。不正値は無視、空 (未設定/全部不正) は全表示。 */
+/** Invalid tokens are dropped; an empty or fully-invalid result falls back to all panels. */
 export function parseOverviewPanels(csv: string | null | undefined): Set<OverviewPanel> {
   const set = new Set<OverviewPanel>()
   let sawLegacy = false
@@ -58,8 +44,8 @@ export function parseOverviewPanels(csv: string | null | undefined): Set<Overvie
       if (mapped !== null) set.add(mapped)
     }
   }
-  // 旧 CSV が `status` だけ (= 運転状態のみ表示) だった場合、新モデルでは
-  // 運転状態が常時表示なので領域ゼロになる。全表示に倒す方が意図に近い。
+  // An old CSV of just `status` maps to zero areas now that it's always shown; falling back to
+  // all panels is closer to the operator's original intent than showing nothing.
   if (set.size === 0 && sawLegacy) return new Set(ALL_OVERVIEW_PANELS)
   return set.size === 0 ? new Set(ALL_OVERVIEW_PANELS) : set
 }
@@ -132,12 +118,9 @@ interface OpenPositionView {
   pnlPct: number | null
 }
 
-/**
- * overview「最近の約定」用の直近 fill ロード。post_submit 行は side が null
- * (writer は pre_submit にしか入れない) なので client_order_id で pre_submit と
- * self-JOIN して side を引く (loadSymbolChart と同方針)。pre_submit が無い古い fill は
- * realized_pnl の有無から推測 (null=BUY / 非null=SELL)。
- */
+// post_submit rows never carry `side` (only pre_submit does), so this self-joins on
+// client_order_id to recover it — same approach as loadSymbolChart. A pre_submit-less legacy
+// fill falls back to inferring side from whether realized_pnl is set (null=BUY, set=SELL).
 export async function loadRecentFills(
   db: D1Database,
   limit: number,
@@ -193,18 +176,8 @@ function collectOpenPositions(data: OverviewData): OpenPositionView[] {
   return out
 }
 
-/**
- * 資産サマリ帯 (#dashboard-ia 最上段): /portfolio の要約をカード 1 枚に横並び。
- * PORTFOLIO_STATE DO 不在 (portfolio === null) は帯を省略し、スパークラインも
- * データ無しなら section ごと消える (graceful)。
- */
-/**
- * 運転状態 (#dashboard-ia Phase 3): ホーム最上段の固定帯。
- *
- * 「いま安全に動いているか」だけを載せる。実行モード / 取引 ON-OFF /
- * 株価の鮮度は隠せない (設定対象外)。equity 系の数字は下の領域に譲り、ここは
- * 状態表示に徹する。
- */
+// Not configurable/hideable like the panels below: mode, trading on/off, and quote freshness
+// stay visible because hiding them risks an operator missing an unsafe state.
 function renderRunStatePanel(data: OverviewData): string {
   const mode = data.dryRun
     ? { text: 'DRY-RUN', tone: 'hold' as const }
@@ -235,10 +208,8 @@ function renderRunStatePanel(data: OverviewData): string {
   </div>`
 }
 
-/**
- * ISO 時刻 → 相対表示 + 鮮度の色。`staleMin` を超えたら警告色にする。
- * cron は 15 分周期なので既定 20 分、quote は stale_quote_ms 既定に合わせ 15 分。
- */
+// Callers pick staleMin to match their own cadence: 20min for the 15min cron cycle (some
+// slack), 15min for quotes to match global_config.stale_quote_ms's default.
 function renderRelativeAge(
   iso: string | null,
   staleMin: number,
@@ -251,10 +222,8 @@ function renderRelativeAge(
   return { html: esc(text), tone: min >= staleMin ? 'hold' : 'live' }
 }
 
-/**
- * 保有・監視銘柄の中で **最も新しい** 株価の取得時刻を相対表示する。
- * quote feed が止まると全銘柄で同時に古くなるので、最新 1 件で足りる。
- */
+// Reports the newest quote across all held/watched symbols: if the quote feed stops, every
+// symbol goes stale together, so the freshest one is representative of the whole feed's health.
 function latestQuoteFreshness(data: OverviewData): { html: string; tone: 'live' | 'hold' | 'plain' } {
   let latest: number | null = null
   for (const r of data.positions) {
@@ -269,7 +238,6 @@ function latestQuoteFreshness(data: OverviewData): { html: string; tone: 'live' 
     if (Number.isFinite(t) && (latest === null || t > latest)) latest = t
   }
   if (latest === null) return { html: '<span class="muted">—</span>', tone: 'plain' }
-  // 15 分は global_config.stale_quote_ms の既定 (halt 判定と同じ線)。
   return renderRelativeAge(new Date(latest).toISOString(), 15)
 }
 
@@ -278,14 +246,6 @@ export function kpiCard(label: string, value: string, sub?: string, subClass?: s
   return `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${value}</div>${subHtml}</div>`
 }
 
-/**
- * リスクと保有銘柄 (#dashboard-ia): 保有銘柄テーブル + エクスポージャー + 買付余力。
- *
- * 旧ホームは KPI カード / 保有ポジション表 / 資産構成の 3 枚に分かれていたが、
- * 保有銘柄 2-3 件の口座では同じデータを 3 回見せているだけだった。1 枚に畳み、
- * **各保有銘柄が実効 stop からどれだけ離れているか**という、表からは読めなかった
- * 情報を状態列として足す。
- */
 function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): string {
   const exposurePill = renderExposurePill(data, open)
   if (!data.symbolStateBound) {
@@ -355,7 +315,7 @@ function renderRecentPanel(data: OverviewData): string {
   const recentTable = data.recentTrades.length
     ? `<table class="fit"><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table>`
     : '<p class="muted">約定履歴がありません。</p>'
-  // 実行モード / 取引 / VIX は運転状態帯に移したのでここでは繰り返さない。
+  // Mode / trading / VIX live in renderRunStatePanel now — not repeated here.
   return `<div class="panel">
     <div class="panel-title" style="display:flex;justify-content:space-between;align-items:baseline"><span>直近の約定</span><span style="font-weight:400;font-size:12px"><a href="/dashboard/cron">判定ログ →</a></span></div>
     ${recentTable}
@@ -364,18 +324,15 @@ function renderRecentPanel(data: OverviewData): string {
   </div>`
 }
 
-/** 直近 30 日の成績サマリ (勝ち / 負け / 発注エラー)。未取得なら空文字。 */
+/** Renders nothing (not a placeholder) when activityStats hasn't been loaded. */
 function activityFooter(data: OverviewData): string {
   const st = data.activityStats
   if (st === null) return ''
   return `<p class="muted" style="font-size:12px;margin:10px 0 0">直近 30 日 ・ 勝ち ${st.wins} / 負け ${st.losses} ・ 発注エラー ${st.errors}</p>`
 }
 
-/**
- * 口座買付余力バッジ (#415)。SSR はブロックせず、client-side で `/admin/buying-power`
- * を fetch して通貨別 buying_power を描画する (broker-probe と同じく CF Access cookie
- * 流用)。取得失敗は ⚠ 表示でページは壊さない。ホーム / 銘柄設定の両方で使う。
- */
+// Fetched client-side (not SSR) so a slow/failed /admin/buying-power call never blocks the
+// page render; a failure degrades to a ⚠ badge instead of breaking the page.
 export function buyingPowerBadge(): string {
   return `<div id="buying-power-badge" class="panel" style="display:flex;align-items:center;gap:8px;font-size:13px;padding:10px 14px">
     <strong>買付余力</strong> <span class="muted">読込中…</span>
@@ -409,12 +366,8 @@ export function buyingPowerBadge(): string {
   </script>`
 }
 
-/**
- * ECharts CDN の `<script src>` タグ重複除去 (CodeRabbit #559)。status
- * (スパークライン) と equity (資産推移チャート) はどちらも単独 ON で成立する
- * 必要があるため各自 CDN タグを持つ — 両方 ON のときだけここで 2 個目以降を
- * 落とす (同一 src の二重ロードはキャッシュされるが parse/execute が無駄)。
- */
+// Each ECharts-using panel embeds its own CDN <script> tag so it works standalone; this
+// collapses duplicates when more than one is enabled at once, to skip the redundant parse/exec.
 function dedupeEchartsCdnTag(html: string): string {
   const tag = `<script src="${ECHARTS_CDN}" defer></script>`
   const parts = html.split(tag)
@@ -422,7 +375,6 @@ function dedupeEchartsCdnTag(html: string): string {
   return parts[0] + tag + parts.slice(1).join('')
 }
 
-/** 領域の区切り見出し (#dashboard-ia Phase 3)。 */
 function areaLabel(text: string): string {
   return `<div class="area-label">${esc(text)}</div>`
 }
@@ -431,16 +383,13 @@ export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
 
-  // 1. 運転状態 — 常時表示。設定で隠せない。
   sections.push(renderRunStatePanel(data))
 
-  // 2. リスクと保有銘柄 — 保有銘柄テーブル 1 枚に集約 (KPI / 資産構成の重複を排除)。
   if (data.panels.has('risk')) {
     sections.push(areaLabel('リスクと保有銘柄'))
     sections.push(renderRiskPanel(data, open))
   }
 
-  // 3. 最近の活動
   if (data.panels.has('activity')) {
     sections.push(areaLabel('最近の活動'))
     sections.push(renderRecentPanel(data))

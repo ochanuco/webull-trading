@@ -12,12 +12,10 @@ import type {
 } from './dto'
 
 /**
- * Read-only facade over {@link WebullHttpClient} (#21)。trade API への access を
- * `WebullTradeClient` に一本化する設計の片割れで、こちらは副作用のない GET 系
- * (positions / orders history / account profile / subscriptions) のみを expose。
- * `placeOrder` は型レベルで触れない (= read 用途のコードが誤って write を呼ぶ
- * 事故を防ぐ。Webull JP の 1 user = 1 app 制約で staging/prod が同じ API key を
- * 共有するため、コード側の type system で write を gate する)。
+ * Read-only facade over {@link WebullHttpClient}; `placeOrder` is deliberately
+ * not exposed here so read-path code cannot call it by accident — Webull JP's
+ * 1-user-1-app constraint means staging and prod share one API key, so this
+ * gate has to hold at the type level, not just by runtime convention.
  */
 export class WebullReadClient {
   constructor(private readonly http: WebullHttpClient) {}
@@ -54,7 +52,5 @@ export function createWebullReadClient(
   env: WebullClientEnv,
   options?: Parameters<typeof createWebullHttpClient>[1],
 ): WebullReadClient {
-  // `options.accessToken` は Phase B の resolveAccessToken 由来。WebullHttpClient
-  // に thru で渡す (env.WEBULL_ACCESS_TOKEN は DO 未投入時の fallback)。
   return new WebullReadClient(createWebullHttpClient(env, options))
 }

@@ -1,6 +1,7 @@
 import type { Env } from '../../../config/env'
 import { MAX_TIME_STOP_DAYS } from '../../../infrastructure/db/schema'
 import { type EvalIndicatorPoint } from '../../../trading/strategy/entryDistance'
+import { toIndicatorWireKeys } from '../../../trading/strategy/indicators'
 import type { PullbackIndicators } from '../../../trading/strategy/strategies/PullbackUptrendStrategy'
 import { SymbolStateClient } from '../../../trading/state/SymbolStateClient'
 import { YahooBarClient } from '../../../infrastructure/quotes/YahooBarClient'
@@ -8,15 +9,9 @@ import { cachedDashboardJson } from './dashboardBarsCache'
 import { type DecisionRow, cronDecisionJson, renderChartDecisionTrace } from '../cron'
 import { currencyOfSymbol, exportMeta, messageOf, parseJsonObject } from '../shared'
 
-/**
- * 銘柄チャートで focus する銘柄を決める (#158 Phase 4)。
- * クエリ ?symbol=X が universe にあればそれ、無ければ「直近で BUY/SELL
- * fill のあった銘柄」、それも無ければ universe の先頭。
- *
- * 「実際に売買したことがある銘柄」を優先する理由: トレーダーが
- * 「rule の解釈が現実と合ってるか」を最初に見たいのは、エントリーが
- * あった銘柄だから。
- */
+// Prefers the most recently filled symbol over the universe's first entry:
+// a trader opening this chart wants to check "did the rule interpretation
+// match reality" against a symbol that actually traded.
 export async function pickDefaultSymbol(db: D1Database): Promise<string | null> {
   const result = await db
     .prepare(
@@ -42,41 +37,28 @@ export interface SymbolChartMarker {
   price: number
   qty: number | null
   realizedPnl: number | null
-  /**
-   * fill 元注文の client_order_id。fill マーカー → 取引ジャーナル
-   * (/dashboard/trades?clientOrderId=...) への逆リンクに使う。
-   * additive フィールドなので optional: 古い fixture では省略され、
-   * client 側は null 同等 (リンク非表示) で扱う。
-   */
+  /** Links to `/dashboard/trades?clientOrderId=`; optional/null on older rows that predate the column. */
   clientOrderId?: string | null
 }
 
 /**
- * BUY → SELL で閉じた 1 往復の保有区間 (#chart-markers)。チャート上に
- * 「この期間持っていて、結果 +X / -Y だった」を薄背景 (markArea) で見せる。
- * オープン中の保有 (BUY のみで未決済) は含めない — 右端まで塗ると
- * 「そこで決済した」ように誤読されるため、既存の position 線に任せる。
+ * One closed BUY→SELL round-trip, drawn as a markArea. Excludes open
+ * positions (BUY with no matching SELL) — shading through the chart's
+ * right edge would misread as "closed here", so the position line handles
+ * that case instead.
  */
 export interface ClosedTradeSpan {
-  /** 区間開始 = 保有を開いた BUY fill の timestamp (ISO UTC) */
   openTimestamp: string
-  /** 区間終了 = 決済 SELL fill の timestamp (ISO UTC) */
   closeTimestamp: string
-  /** 決済 SELL の realized PnL。旧 fill 等で欠損なら null (中立色で描画) */
+  /** Realized PnL of the closing SELL; null on older fills that predate the column. */
   realizedPnl: number | null
 }
 
-/**
- * fills (時系列昇順) から closed round-trip を組む。`deriveOpenPosition` と
- * 同じ突合方針の閉区間版:
- * - フラット状態で最初に現れた BUY を区間開始にする。連続 BUY (position add /
- *   partial fill 分割) は開始点を動かさない — 「持ち始めた時点」から塗るのが
- *   保有区間の意味論として正しい
- * - SELL は全量決済とみなして区間を閉じる (POC 戦略は分割売りしない)。
- *   realizedPnl はその SELL の値を採用
- * - BUY 先行の無い SELL (手動売却の残骸 / データ欠損) は区間にしない
- * - 末尾が BUY で終わる未決済分は返さない (上記 doc comment の通り)
- */
+// A run of consecutive BUYs (position add / split fill) doesn't move the
+// span's start — the first BUY is when the position was opened, and that's
+// what should be shaded. A SELL closes the span outright (POC strategy
+// never partial-sells). A SELL with no preceding BUY (manual trade, data
+// gap) is dropped rather than treated as a span.
 export function pairClosedTrades(fills: SymbolChartMarker[]): ClosedTradeSpan[] {
   const spans: ClosedTradeSpan[] = []
   let openStart: string | null = null
@@ -96,86 +78,69 @@ export function pairClosedTrades(fills: SymbolChartMarker[]): ClosedTradeSpan[] 
 }
 
 /**
- * チャート上にプロットする「cron 判定イベント」1 件 (#decision-trace 連携)。
- * 文字ログ (戦略判定テーブル) とグラフを 1 画面で同期させるための要素。
- * eval 時刻 (`timestamp`) × eval 価格 (`price`) に色分けの点を打ち、点クリックで
- * `ladderHtml` (= 既存 `renderDecisionLadder` の出力) を脇のパネルに表示する。
- *
- * HOLD (保有継続 / 様子見の定常状態) は省き、判定が動いた BUY/SELL/SKIP/REJECT/
- * ERROR のみを載せる。価格線・fill ピン・position/preview 線が HOLD 状態は既に表現済み。
+ * A cron decision event plotted on the chart, syncing it with the strategy
+ * decisions table. HOLD is excluded — the price line, fill pins, and
+ * position/preview lines already represent that steady state, so only
+ * BUY/SELL/SKIP/REJECT/ERROR are plotted.
  */
 export interface SymbolChartDecision {
-  /** strategy_decision_log の行 id。点の一意キー兼デバッグ用。 */
   id: number
-  timestamp: string // ISO UTC (eval 時刻)
-  /** eval 時の評価価格 (= strategy_decision_log.price)。y 位置に使う。 */
+  timestamp: string // ISO UTC (eval time)
   price: number
   decision: 'BUY' | 'SELL' | 'SKIP' | 'REJECT' | 'ERROR'
-  /** 生 reason (英語)。tooltip では localize して表示。 */
+  /** Raw (English) reason; localized in the tooltip. */
   reason: string | null
   /**
-   * server-side で事前レンダリングした判定トレース・ラダー HTML
-   * (`renderDecisionLadder` 出力、trace 無し行は最小フォールバック)。
-   * client は click でこの文字列を innerHTML へ挿すだけ (JS 側にラダー描画
-   * ロジックを複製せず単一の真実源を保つ)。値はすべて `esc()` 済みの自前 markup。
+   * Pre-rendered ladder HTML (`renderDecisionLadder` output) that the
+   * client drops straight into innerHTML on click, rather than duplicating
+   * the ladder rendering logic in JS. Already `esc()`-escaped.
    */
   ladderHtml: string
 }
 
 export interface SymbolChartPosition {
-  /** 平均取得単価 (= 直近 BUY filled_price、partial fill / add は未対応 POC) */
+  /** Latest BUY's filled_price; partial fills / position adds aren't averaged in (POC). */
   avgPrice: number
-  /** entry timestamp (JST 表示用文字列) */
+  /** Entry timestamp, formatted for JST display. */
   openedAt: string
   /**
-   * 保有数量 (#charts-symbol-redesign Phase C)。additive フィールド — 追加前の
-   * consumer (MCP `get_symbol_chart` / `/dashboard/charts/symbol/json`) は
-   * このフィールドを無視するだけで壊れない。`fetchDoPosition` は DO 由来の
-   * 実 qty、`deriveOpenPosition` は直近 BUY fill の qty を積む。どちらの
-   * ソースも欠測しうるので optional + null 許容 (欠測時は表示側で qty 行を省略)。
+   * Optional/nullable: sourced from either `fetchDoPosition` (real DO qty)
+   * or `deriveOpenPosition` (latest BUY's qty), both of which can come back
+   * without it. Consumers predating this field ignore it safely.
    */
   qty?: number | null
 }
 
 export interface SymbolChartRules {
-  /** -0.03 = -3% (押し目浅すぎ閾値) */
+  /** -0.03 = -3% (pullback-too-shallow threshold) */
   pullbackMax: number
-  /** -0.15 = -15% (押し目深すぎ閾値) */
+  /** -0.15 = -15% (pullback-too-deep threshold) */
   pullbackMin: number
-  /** -0.04 = -4% (損切ライン) */
+  /** -0.04 = -4% (stop-loss line) */
   stopPct: number
-  /** 0.07 = +7% (利食ライン) */
+  /** 0.07 = +7% (take-profit line) */
   takeProfitPct: number
-  /** 営業日。chart の SQL window 計算に使う (chart logic では非使用) */
+  /** Business days; used for the chart's SQL window, not by the chart logic itself. */
   timeStopDays: number
 }
 
-/**
- * Chart window の上限日数。schema の MAX_TIME_STOP_DAYS (365) から計算。
- * timeStopDays が大きくても肥大化を防ぐ。
- * MAX_TIME_STOP_DAYS=365 → 2*365+4 = 734 カレンダー日。
- */
+// Ceiling on the chart window so a large timeStopDays can't blow it up:
+// MAX_TIME_STOP_DAYS=365 → 2*365+4 = 734 calendar days.
 const MAX_WINDOW_DAYS = Math.ceil(MAX_TIME_STOP_DAYS * 2 + 4)
 
-/**
- * Chart SQL の window 日数を timeStopDays から動的に決める。
- * 営業日 N → カレンダー N×7/5 + 祝日バッファ + 安全マージン ≈ 2N+4。
- * timeStopDays=10 → 24 日。年末年始 / 大型連休跨ぎでも entry 取りこぼさない。
- * floor=14, ceiling=MAX_WINDOW_DAYS で clamp してカレンダー window の肥大化を防ぐ。
- */
+// ~2N+4 calendar days per N business days covers weekends plus a holiday
+// buffer, so a run spanning New Year's or Golden Week doesn't miss its
+// entry. Floored at 14 and capped at MAX_WINDOW_DAYS.
 export function computeChartWindowDays(timeStopDays: number): number {
   const dynamic = Math.ceil(timeStopDays * 2 + 4)
   return Math.min(Math.max(dynamic, 14), MAX_WINDOW_DAYS)
 }
 
-/**
- * チャートに重ねる判定点の上限 (最新側から採用)。payload サイズ (各点が
- * 事前レンダリングのラダー HTML を持つ) と視認性のガード。HOLD を除いた
- * BUY/SELL/SKIP/REJECT/ERROR のみが対象なので通常はこの上限に届かない。
- */
+// Guards payload size — each plotted point carries a pre-rendered ladder
+// HTML string. Rarely hit in practice since HOLD (the bulk of eval rows)
+// is excluded from the plotted set below.
 export const MAX_CHART_DECISIONS = 250
 
-/** チャート判定点として描画する decision 種別 (HOLD は定常状態なので除外)。 */
 const CHART_PLOTTED_DECISIONS: ReadonlySet<string> = new Set(['BUY', 'SELL', 'SKIP', 'REJECT', 'ERROR'])
 
 interface PivotPoint {
@@ -186,23 +151,19 @@ interface PivotPoint {
 }
 
 /**
- * 直線セグメント。
- *
- * 旧仕様 (pivot ベース) では `pivots` は「採用した 2 swing pivot」だったが、
- * 現仕様 (linear regression) では `pivots[0]` = 線の左端、`pivots[1]` = 同じ
- * slope 上の参照点 (densify では未使用) を入れる。`end` は線の右端 (= chart
- * 最新 timestamp 上の外挿点)。`densifyTrendLine` は `pivots[0]` と `end` の
- * 2 点だけを使うため、両用途で同じ型が再利用できる。
+ * `pivots[0]` is the line's left end and `end` its right end (extrapolated
+ * to the chart's latest timestamp) under the current linear-regression fit.
+ * `pivots[1]` is unused by `densifyTrendLine` — kept equal to `end` only so
+ * this type still fits the older pivot-based shape.
  */
 export interface TrendLineSegment {
   pivots: [PivotPoint, PivotPoint]
   end: { timestamp: string; price: number }
 }
 
-/** 15 分足 OHLC (Yahoo intraday bars 由来)、candlestick 描画用 */
+/** 15-minute OHLC (Yahoo intraday bars), for candlestick rendering. */
 interface OhlcBar {
-  /** ISO UTC (Yahoo intraday は秒精度の bar 開始時刻) */
-  timestamp: string
+  timestamp: string // ISO UTC (Yahoo intraday bar-open time, second precision)
   open: number
   high: number
   low: number
@@ -213,61 +174,31 @@ export interface SymbolChartData {
   symbol: string
   points: SymbolChartPoint[]
   markers: SymbolChartMarker[]
-  /** 現保有 (BUY → SELL がまだない) ならその情報、なければ null */
+  /** Current holding (BUY with no matching SELL yet), or null if flat. */
   position: SymbolChartPosition | null
   rules: SymbolChartRules
-  /**
-   * 直近 30 日 daily close の最小二乗 (linear regression) で fit した
-   * 「価格の中心トレンド線」。データ点が 2 未満なら null。
-   *
-   * 旧仕様 (resistanceLine / supportLine の上下 2 本) は、ローソク足の上下を
-   * flat に走る形で「価格の中心を辿る」という user の期待と乖離していた。
-   * regression で価格中央を best-fit する形に変更。
-   */
+  /** Linear-regression fit of the last 30 days' daily closes; null if fewer than 2 points. */
   trendLine: TrendLineSegment | null
-  /** Yahoo 日次 OHLC、candlestick 描画用 (空配列 = Yahoo fetch 失敗) */
+  /** Yahoo daily OHLC for the candlestick; empty means the Yahoo fetch failed. */
   intradayBars: OhlcBar[]
   /**
-   * 最新の cron-eval point (= strategy_decision_log 由来) の price。
-   * Yahoo daily filler を含めず、merge 前 cron-eval の末尾を採用する。
-   *
-   * preview stop/TP の virtualAvg はこの値を使う。`points` 末尾は
-   * Yahoo filler だと「古い日次 close」になる可能性があり、preview に使うと
-   * 「実 strategy 評価で参照していない過去価格」で線が引かれて誤解を招く。
-   * cron eval 履歴が無い (= strategy_decision_log が空) 場合は null。
+   * Price of the latest cron-eval point (pre-merge, so Yahoo daily filler
+   * is excluded). Used for the preview stop/TP line: `points`' own tail can
+   * be a Yahoo filler point (an old daily close the strategy never actually
+   * evaluated against), which would draw the preview off a price the
+   * strategy didn't see. Null when strategy_decision_log has no rows.
    */
   latestCronPrice: number | null
-  /** `latestCronPrice` の timestamp (ISO Z)。preview line の to-end 用。null 時 preview 描画スキップ。 */
+  /** Timestamp of `latestCronPrice`; null skips the preview line entirely. */
   latestCronTimestamp: string | null
-  /**
-   * チャートに重ねる cron 判定イベント (BUY/SELL/SKIP/REJECT/ERROR、HOLD 除外)。
-   * 文字ログ↔グラフ同期用 (#decision-trace)。最新側 `MAX_CHART_DECISIONS` 件まで。
-   * 追加 (additive) フィールドなので optional: 古い fixture / grid payload では
-   * 省略され、レンダラ側は `|| []` で安全に扱う。
-   */
+  /** Optional/additive — renderers fall back to `|| []` for fixtures predating this field. */
   decisions?: SymbolChartDecision[]
-  /**
-   * 入場距離 (#entry-distance) 計算用の、直近 (日次ユニーク) 評価指標列。
-   * 各 cron 評価の完全な `PullbackIndicators` を時系列昇順で保持。route 側で
-   * full rule と合わせて `buildBuyabilityView` に渡す。additive で optional。
-   */
+  /** Optional/additive — renderers fall back to `|| []` for fixtures predating this field. */
   evalIndicators?: EvalIndicatorPoint[]
-  /**
-   * BUY → SELL で閉じた保有区間 (markArea 描画用、#chart-markers)。
-   * additive で optional: 古い fixture / payload では省略され、client 側は
-   * `|| []` で安全に扱う。
-   */
+  /** Optional/additive — renderers fall back to `|| []` for fixtures predating this field. */
   holdingSpans?: ClosedTradeSpan[]
 }
 
-/**
- * 直近 200 件の strategy_decision_log と全 fill markers + 現保有 + ルール閾値を返す。
- * - sma50 / high20d は indicators_json から抜く (JSON.parse 失敗は null fallback)
- * - timestamp は DB 上の UTC ISO をそのまま保持し、ECharts time axis に渡す。
- *   JST 表示は client 側 Intl.DateTimeFormat (Asia/Tokyo) でやる
- * - position は SymbolStateDO の値を最優先 (partial fill / position add 対応)、
- *   binding 無し or 失敗時は trade_journal からの derive にフォールバック
- */
 export async function loadSymbolChart(
   env: Env,
   symbol: string,
@@ -278,10 +209,9 @@ export async function loadSymbolChart(
   const windowDays = computeChartWindowDays(rules.timeStopDays)
   const [logsResult, fillsResult, doPosition] = await Promise.all([
     db
-      // 動的 window: timeStopDays から computeChartWindowDays(N) で計算
-      // (default 10 営業日 → 24 カレンダー日)。祝日 / 連休跨ぎでも entry を
-      // 取りこぼさない。strftime で右辺を ISO UTC 形式 ("...T...:...Z") に
-      // 揃える (default datetime() の空白区切りでは stored ISO と境界がぶれる)。
+      // strftime formats the bound side as ISO UTC ("...T...:...Z") to match
+      // the stored format — SQLite's default datetime() uses a space
+      // separator, which would misalign the >= comparison at the boundary.
       .prepare(
         `SELECT id, timestamp, price, decision, reason, indicators_json, trace_json
          FROM strategy_decision_log
@@ -300,9 +230,9 @@ export async function loadSymbolChart(
         trace_json: string | null
       }>(),
     db
-      // post_submit 行は side が null (writer は pre_submit にしか side を入れない)。
-      // client_order_id で pre_submit と self-JOIN して side を引く。古い fill で
-      // pre_submit が無い場合は realized_pnl の有無から推測 (null=BUY, 非 null=SELL)。
+      // post_submit rows never carry `side` (only pre_submit does), so it's
+      // joined in here; resolveFillSide falls back to inferring it from
+      // realized_pnl for older fills with no matching pre_submit row.
       .prepare(
         `SELECT
            ps.timestamp AS timestamp,
@@ -331,7 +261,7 @@ export async function loadSymbolChart(
       }>(),
     fetchDoPosition(env, symbol),
   ])
-  const logs = logsResult.results ?? [] // SQL は既に ASC で返している
+  const logs = logsResult.results ?? []
   const points: SymbolChartPoint[] = logs
     .filter((r) => r.price !== null && Number.isFinite(Number(r.price)))
     .map((r) => {
@@ -344,10 +274,6 @@ export async function loadSymbolChart(
         low20d: indicators.low20d,
       }
     })
-  // 判定点 (文字ログ↔グラフ同期 #decision-trace): HOLD を除く BUY/SELL/SKIP/REJECT/
-  // ERROR を eval 時刻 × eval 価格でチャートに重ねる。各点はクリック時に出す
-  // ラダー HTML を server-side で事前レンダリング (renderDecisionLadder 流用)。
-  // 最新側 MAX_CHART_DECISIONS 件に cap (各点が HTML を持つため payload ガード)。
   const decisions: SymbolChartDecision[] = logs
     .filter(
       (r) =>
@@ -365,11 +291,10 @@ export async function loadSymbolChart(
     }))
     .slice(-MAX_CHART_DECISIONS)
 
-  // 入場距離 (#entry-distance) 用: 完全な指標を JST 日ごと最後の評価で集約し
-  // 直近 MAX_EVAL_INDICATOR_DAYS 日を残す。日次集約は sma50/high20d/return50d が
-  // 日次指標であり、5 分 cron の intraday 重複を除いて「入場までの距離推移」を
-  // きれいに見せるため。Map は挿入順 (= 日の初出順 = 時系列) を保ち、同日キーは
-  // 後続 (= その日の最後の評価) で値が上書きされる。
+  // sma50/high20d/return50d are daily indicators, so this collapses the
+  // 5-minute cron's intraday duplicates to one (the day's last) eval per
+  // JST day — insertion order tracks first-seen-day order, and a later
+  // same-day eval simply overwrites the map entry.
   const evalByDay = new Map<string, EvalIndicatorPoint>()
   for (const r of logs) {
     const indicators = parseFullIndicators(r.indicators_json)
@@ -392,36 +317,30 @@ export async function loadSymbolChart(
       realizedPnl: r.realized_pnl === null ? null : Number(r.realized_pnl),
       clientOrderId: r.client_order_id ?? null,
     }))
-  // DO query の結果が undefined = binding 無し or fetch 失敗 → derive にフォールバック
+  // undefined (no binding, or the DO call failed) falls back to deriving
+  // position from fills rather than reporting "no position".
   const position = doPosition !== undefined ? doPosition : deriveOpenPosition(markers)
 
-  // Yahoo daily bars (60日) と intraday 15m bars は互いに独立した fetch
-  // (どちらも symbol だけが入力で、片方の結果を他方が参照しない) なので
-  // Promise.all で並列化する (#charts-symbol-redesign — 銘柄切替の逐次 await
-  // 2 本を並列化して待ち時間を短縮)。cronLastTs は points (DB 由来、既に
-  // fetch 済み) だけから決まるので、どちらの fetch より先に計算できる。
+  // Independent fetches (each keyed only on symbol), run in parallel.
+  // cronLastTs depends only on `points` (already in hand), so it's
+  // computed before either fetch resolves.
   //
-  // dashboard 表示専用の短 TTL キャッシュ (`cachedDashboardJson`, TTL 300秒)
-  // を両方の fetch にかける。取引 cron が使う YahooBarClient / fetchYahoo
-  // BarsForChart 自体には手を入れず、ここ (dashboard loader 層) の呼び出し
-  // だけをラップするので cron の判断データ鮮度には影響しない。
+  // Both go through the dashboard-only cache (`cachedDashboardJson`) —
+  // display cadence, not cron's own Yahoo calls, so this can't affect
+  // trading data freshness.
   const cronLastTs = points.length > 0 ? points[points.length - 1]!.timestamp : null
   const [yahooBarsRaw, intradayFetch] = await Promise.all([
-    // Yahoo daily bars 60 日: chart 全体の price line + pivot 検出に使う。
-    // Yahoo fetch 失敗時は cron-eval points のみで描画 (短い price line になるが
-    // 致命的ではない)。
+    // A failed fetch degrades to cron-eval points only (shorter price line,
+    // not fatal) — see the empty-array catch below.
     cachedDashboardJson('dailyBars60', { symbol }, () => fetchYahooBarsForChart(symbol, 60), {
-      // fetch 失敗の空配列 fallback は cache しない (outage 中に毎回リトライできる
-      // ようにする — 5分キャッシュで復旧検知を遅らせたくない)。
+      // Not cached when empty, so an outage can recover within the next
+      // request rather than being pinned for a full TTL.
       shouldCache: (v) => v.length > 0,
     }),
-    // candlestick: 15 分足 (intraday) を Yahoo から fetch。旧 1h 足は「1日 ≈ 7本」
-    // でスカスカだった (operator 指摘)。category 軸化で overnight gap は詰まる
-    // ようになり、barWidth も auto にしたため 15m の旧懸念 (gap 後の clustering)
-    // は解消済。Yahoo intraday range 制限 60d は 15m でもカバー可能。
-    // 戦略 cron は従来通り 60m を使う (pullbackScheduler 側、ここは表示専用)。
-    // 失敗 (network 等) なら空配列で fallback (candle 自体スキップ)。RangeError
-    // (caller contract 違反) のみ再送出して呼出元の catch まで伝える。
+    // Strategy cron still evaluates on 60m bars (pullbackScheduler); this
+    // 15m fetch is display-only. RangeError signals a caller-contract bug
+    // and is re-thrown; any other failure (network, etc.) degrades to an
+    // empty array so the candlestick is simply skipped.
     (async (): Promise<Array<{ timestamp: string; open: number; high: number; low: number; close: number }>> => {
       try {
         return await cachedDashboardJson(
@@ -439,29 +358,17 @@ export async function loadSymbolChart(
   const yahooBars =
     cronLastTs == null ? yahooBarsRaw : yahooBarsRaw.filter((b) => b.timestamp <= cronLastTs)
 
-  // 最新 cron-eval point (= 実 strategy 評価で使った値) を merge 前に snapshot。
-  // mergedPoints[末尾] は Yahoo daily filler の可能性があり (cron 停止中 / 古い銘柄)、
-  // preview stop/TP に使うと「strategy 上は触ってない過去 Yahoo 値」で線が引かれて
-  // 誤解を招く。preview は cron eval 履歴がある時だけ描く方針 → null フィールドで
-  // 「描画スキップ」シグナルにする。
+  // Snapshotted pre-merge — see SymbolChartData.latestCronPrice for why.
   const { latestCronPrice, latestCronTimestamp } = selectLatestCronSnapshot(points)
 
-  // Yahoo bar を points にマージして全期間 price line を実現。同 timestamp で
-  // 既に cron-eval point があればそちらを優先 (indicators が乗っているため)。
-  // Yahoo bar 由来の point は indicators フィールド全 null。
   const mergedPoints = mergeYahooAndCronPoints(yahooBars, points)
   const lastTimestamp =
     mergedPoints.length > 0 ? mergedPoints[mergedPoints.length - 1]!.timestamp : null
 
-  // 価格トレンド: 直近 30 暦日 (regime shift を跨がない短期) の daily close
-  // を最小二乗で fit した linear regression line。pivot ベース (上値抵抗 /
-  // 下値支持) は candle の「上下を flat に走る bound 線」になりやすく、user
-  // 期待である「ローソク足の中心を辿る trend」を表現できなかったため、close
-  // の重心を通る best-fit 1 本に置き換えた (#190 系の見直し)。
-  //
-  // データ source: Yahoo daily が ≥5 本あればそれ、不足なら cron-eval 由来の
-  // 日次 close fallback。30 日に満たないデータでも残っている分すべて使う
-  // (< 2 なら null 返却 → 描画スキップ)。
+  // 30 calendar days keeps the fit inside one regime. Prefers Yahoo daily
+  // closes when there are at least 5; below that, falls back to cron-eval
+  // closes (still all it has, even under 30 days — computeLinearRegressionLine
+  // returns null itself below 2 points).
   const TREND_WINDOW_DAYS = 30
   const trendCutoffMs = lastTimestamp
     ? new Date(lastTimestamp).getTime() - TREND_WINDOW_DAYS * 24 * 3600 * 1000
@@ -480,11 +387,8 @@ export async function loadSymbolChart(
         lastTimestamp,
       )
     : null
-  // candlestick: 15 分足 (intraday)。上の Promise.all で並列 fetch 済み
-  // (`intradayFetch`、失敗時は既に空配列 fallback 済み / RangeError は
-  // Promise.all の reject 経由で loadSymbolChart 呼出元まで伝播済み)。
-  // lastTimestamp フィルタ: chart x 軸範囲を超える bar (将来に出るはずの bar)
-  // を除外。lastTimestamp が無いときは全件採用。
+  // Drops bars newer than the last cron eval, so the candlestick can't show
+  // a bar past what the chart's other series (price/decision points) cover.
   const intradayBars: OhlcBar[] = (
     cronLastTs == null ? intradayFetch : intradayFetch.filter((b) => b.timestamp <= cronLastTs)
   ).map((b) => ({
@@ -506,26 +410,15 @@ export async function loadSymbolChart(
     latestCronTimestamp,
     decisions,
     evalIndicators,
-    // closed round-trip の保有区間 (markArea 用)。markers は SQL の id ASC で
-    // 時系列昇順が保証されているのでそのまま突合できる。
+    // markers is already id-ASC (time-ascending) from the SQL, which is
+    // what pairClosedTrades requires to pair BUY/SELL correctly.
     holdingSpans: pairClosedTrades(markers),
   }
 }
 
-/**
- * cron-eval points の末尾 (= 実 strategy 評価で参照した最新価格) を取り出して
- * `{ latestCronPrice, latestCronTimestamp }` を返す。preview stop/TP は
- * Yahoo filler を含む `mergedPoints[末尾]` ではなくこちらを使う方針。
- *
- * - cron 履歴空 / 末尾 price 非有限 / 末尾 timestamp 不正 → 全 null
- *   (= preview 描画スキップのシグナル)。
- * - 末尾の price は >= 0 で finite なものだけ採用 (株価の sanity check)。
- *
- * 入力は merge 前 (= strategy_decision_log 由来) の SymbolChartPoint[] を想定。
- * 呼出側が誤って merged points を渡しても動くが、その場合は filler 末尾を
- * 拾うので preview の意図と乖離する。設計上、`loadSymbolChart` 内で merge
- * 前に呼ぶこと。
- */
+// Must be called with pre-merge (strategy_decision_log-only) points — see
+// SymbolChartData.latestCronPrice for why. Passing merged points still
+// works but silently picks up a Yahoo filler point instead.
 export function selectLatestCronSnapshot(
   cronPoints: SymbolChartPoint[],
 ): { latestCronPrice: number | null; latestCronTimestamp: string | null } {
@@ -541,23 +434,15 @@ export function selectLatestCronSnapshot(
   return { latestCronPrice: last.price, latestCronTimestamp: last.timestamp }
 }
 
-/**
- * Yahoo daily bars と cron-eval points をマージ。同 JST 日では cron-eval を
- * 優先 (indicators が乗っているため)、それ以外の日は Yahoo bar を price-only
- * の point として追加。timestamp 昇順で返す。
- */
 export function mergeYahooAndCronPoints(
   yahooBars: Array<{ jstDate: string; close: number; sma50?: number | null; timestamp: string }>,
   cronPoints: SymbolChartPoint[],
 ): SymbolChartPoint[] {
-  // 不正 timestamp の cron point は最初に除外。残すと ECharts time 軸 / chart
-  // 末尾判定 (lastTimestamp = mergedPoints[-1]) が壊れる。
+  // An invalid cron timestamp would break the ECharts time axis and the
+  // chart's own last-point lookup (lastTimestamp = mergedPoints[-1]).
   const validCronPoints = cronPoints.filter((p) =>
     Number.isFinite(new Date(p.timestamp).getTime()),
   )
-  // cron eval は同 JST 日の sma50 が null になりうる (古い row)。Yahoo 側で
-  // 算出した sma50 を JST 日キーで参照できるよう Map にしておく。同 JST 日
-  // 内の cron eval が複数あっても全部に同じ Yahoo SMA50 が振られる。
   const yahooSmaByJstDate = new Map<string, number | null>(
     yahooBars.map((b) => [b.jstDate, b.sma50 ?? null]),
   )
@@ -566,9 +451,9 @@ export function mergeYahooAndCronPoints(
       new Date(new Date(p.timestamp).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10),
     ),
   )
-  // Yahoo bar の SMA50 を cron point にも反映 (cron 側 indicators_json の sma50
-  // が null の古い row でも線が途切れない)。cron 側が既に sma50 を持っていれば
-  // それを優先 (より最新かつ rules と整合する)。
+  // Backfills sma50 from the Yahoo bar of the same JST day when the cron
+  // row's own indicators_json.sma50 is null (older rows), so the line
+  // doesn't break; a cron row that already has sma50 keeps its own value.
   const enrichedCronPoints: SymbolChartPoint[] = validCronPoints.map((p) => {
     if (p.sma50 != null) return p
     const jstDate = new Date(new Date(p.timestamp).getTime() + 9 * 3600 * 1000)
@@ -591,24 +476,16 @@ export function mergeYahooAndCronPoints(
   )
 }
 
-/**
- * Yahoo daily bars を chart 用に fetch (lookback 営業日)。timestamp は date
- * 部分 + 16:00 UTC (≈ 1:00 JST 翌日 ≈ "evening of date") で擬似生成、
- * trend line の傾き計算には相対精度として十分。
- *
- * エラー方針: caller contract 違反 (RangeError = lookback 不正) は呼出元の
- * 実装バグなので throw 再送出する。それ以外 (network / parse / 一時的
- * fetch 失敗) のみ空配列で fallback を呼出元に伝える。
- */
+// RangeError (invalid lookback) is a caller bug and is re-thrown; any other
+// failure (network, parse, transient) degrades to an empty array.
 export async function fetchYahooBarsForChart(
   symbol: string,
   lookback: number,
 ): Promise<Array<{ jstDate: string; open: number; high: number; low: number; close: number; sma50: number | null; timestamp: string }>> {
-  // warmup を足してから getDailyBars に渡す方式だと lookback=0 / 小さな負値で
-  // も内側の lookback (lookback+warmup) が正の整数になり validation を素通り
-  // してしまう (slice(-0)=slice(0) で warmup 区間が全部返る等)。caller contract
-  // を維持するためここで先に弾く。整数性は getDailyBars 側の `Number.isInteger`
-  // と整合させる。
+  // Rejected here rather than left to getDailyBars(lookback+warmup): once
+  // warmup is added, lookback=0 or a small negative becomes a positive
+  // inner value and slides past that validation (e.g. slice(-0) === slice(0)
+  // returns the whole warmup range instead of erroring).
   if (!Number.isInteger(lookback) || lookback <= 0) {
     throw new RangeError(
       `fetchYahooBarsForChart: lookback must be a positive integer, got ${lookback}`,
@@ -616,9 +493,8 @@ export async function fetchYahooBarsForChart(
   }
   const client = new YahooBarClient()
   try {
-    // SMA50 を「先頭の chart 表示日」から埋めたいので、表示 lookback に加えて
-    // SMA50 warmup の 50 日を上乗せして fetch する。表示時に lookback 件分を
-    // 末尾から切り出す。
+    // Fetches 50 extra days so SMA50 is populated from the first displayed
+    // day, then slices back down to `lookback` below.
     const warmup = 50
     const bars = await client.getDailyBars(symbol, lookback + warmup)
     const closes = bars.map((b) => b.close)
@@ -630,27 +506,19 @@ export async function fetchYahooBarsForChart(
       low: b.low,
       close: b.close,
       sma50: smaSeries[i] ?? null,
-      // JST 00:00 anchor: ECharts time axis (UTC) で JST formatter にかけると
-      // b.date と同じ JST カレンダー日に column が配置される。
-      // 旧実装 `${b.date}T16:00Z` だと JST 翌 01:00 に shift し、
-      // 例えば US bar "04/25" が JST 04/26 列に表示される回帰があった。
       timestamp: anchorJstMidnight(b.date),
     }))
-    // 表示は lookback 件分のみ (warmup 区間は SMA50 算出に使い切ったので破棄)。
-    // bars が要求件数より少ない (上場初日近辺など) ケースもそのまま素通し。
     return enriched.length > lookback ? enriched.slice(-lookback) : enriched
   } catch (err) {
-    // RangeError は呼出元コード側の lookback 不正 (実装ミス)。silent fallback で
-    // 隠さず再送出して dashboard handler の try/catch まで伝える。
+    // A RangeError here means the caller's lookback was invalid, which is
+    // a bug at the call site — rethrown rather than silently degraded.
     if (err instanceof RangeError) throw err
     return []
   }
 }
 
 /**
- * `values[i]` を window 期間の単純移動平均に変換。i < window-1 は null。
- * SMA50 に流用するが任意 window で使える素朴実装。NaN/Infinity が混じった
- * 場合 sum が壊れるので入力側で予め弾く前提。
+ * Simple moving average; `out[i]` is null while i < window-1. Assumes NaN/Infinity-free input.
  */
 export function computeRollingSma(values: number[], window: number): Array<number | null> {
   if (window <= 0) return values.map(() => null)
@@ -664,20 +532,12 @@ export function computeRollingSma(values: number[], window: number): Array<numbe
   return out
 }
 
-/**
- * "YYYY-MM-DD" を「その日の JST 00:00 = UTC -9h 前日 15:00」の ISO Z 文字列に。
- * 例: "2026-04-25" → "2026-04-24T15:00:00.000Z" (JST 04/25 00:00)。
- * Yahoo bar / 他のロジックとの timestamp 比較を Z 形式で揃えるため。
- */
 export function anchorJstMidnight(date: string): string {
   return new Date(`${date}T00:00:00+09:00`).toISOString()
 }
 
-/**
- * cron-eval price (Yahoo daily close を 15 分毎に複製したもの) を JST 日次で
- * dedupe して、その日の最終 cron eval を「日次 close」として採用。
- * trend line / pivot 検出は日足ベースで行うのが標準。
- */
+// Dedupes cron-eval prices (which just replay the Yahoo daily close every
+// 5 minutes) down to one close per JST day — the last eval of the day wins.
 export function aggregateDailyCloses(
   points: SymbolChartPoint[],
 ): Array<{ jstDate: string; close: number; timestamp: string }> {
@@ -686,42 +546,26 @@ export function aggregateDailyCloses(
     if (p.price == null || !Number.isFinite(p.price)) continue
     const ms = new Date(p.timestamp).getTime()
     if (!Number.isFinite(ms)) continue
-    // JST date = UTC + 9h、ISO の前 10 文字
     const jstDate = new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10)
-    // last write wins → その日の最終 cron eval
     byDay.set(jstDate, { jstDate, close: p.price, timestamp: p.timestamp })
   }
   return [...byDay.values()].sort((a, b) => (a.jstDate < b.jstDate ? -1 : 1))
 }
 
 /**
- * Daily close の最小二乗 (ordinary least squares) で価格中央を best-fit する
- * linear regression line を返す。「ローソク足の中心を辿るトレンド」を出すた
- * めの実装で、pivot ベースの上下 bound 線とは目的が違う。
+ * Ordinary-least-squares fit of `close` over time, reusing
+ * `TrendLineSegment`'s shape so `densifyTrendLine` can read it unchanged:
+ * `pivots[0]` is the line's start, `pivots[1]` just duplicates `end`
+ * (unused by densify, kept only so the type still holds two pivots).
  *
- * 戻り値の形は既存 `TrendLineSegment` を再利用 (densifyTrendLine が `pivots[0]`
- * と `end` の 2 点を読むだけ):
- * - `pivots[0]`: regression line 上の最古 sample timestamp 上の点 (= 線の左端)
- * - `pivots[1]`: 同じ slope を持つ参照点として `end` と同じ点を入れている
- *               (densify では未使用、互換のため形を保つ)
- * - `end`: `endTimestamp` (通常は chart の最新 timestamp) 上の外挿点
- *
- * 入力は `{ timestamp, close }` の配列 (順序不問、内部で時系列に並べる)。
- * 以下のケースで null:
- * - 有効な data point (Number.isFinite な timestamp / close) が 2 未満
- * - 全 sample が同 timestamp (slope 不定)
- * - `endTimestamp` が解釈不能
- * - 計算結果が NaN / Infinity
- *
- * regime filter は意図的に持たない: regression は close 全体の重心を取るので
- * 「別 regime の pivot」概念がそもそも存在しない。窓を 30 日程度に絞ること
- * が regime 跨ぎ対策を兼ねる。
+ * No regime filter: a regression takes the centroid of all samples, so
+ * there's no "pivot from a different regime" to exclude — the ~30-day
+ * window callers pass in is what keeps it inside one regime.
  */
 export function computeLinearRegressionLine(
   samples: ReadonlyArray<{ timestamp: string; close: number }>,
   endTimestamp: string,
 ): TrendLineSegment | null {
-  // 有効値のみ抽出 (NaN / Infinity / 不正 timestamp は除外)
   const points: Array<{ t: number; y: number; timestamp: string }> = []
   for (const s of samples) {
     const t = new Date(s.timestamp).getTime()
@@ -731,16 +575,15 @@ export function computeLinearRegressionLine(
     points.push({ t, y, timestamp: s.timestamp })
   }
   if (points.length < 2) return null
-  // 時系列で安定 sort (同 t は input 順を維持)
   points.sort((a, b) => a.t - b.t)
-  // 全 sample が同 timestamp なら slope 不定
   if (points[0]!.t === points[points.length - 1]!.t) return null
 
   const tEnd = new Date(endTimestamp).getTime()
   if (!Number.isFinite(tEnd)) return null
 
-  // OLS: y = a*t + b。t を「最古 sample 基準のオフセット」に正規化して
-  // epoch ms (~1.7e12) 由来の桁あふれを抑える (slope は同じ)。
+  // t is normalized to an offset from the earliest sample so the OLS sums
+  // don't lose precision to the epoch-ms magnitude (~1.7e12); slope is
+  // unaffected by the shift.
   const t0 = points[0]!.t
   let sumT = 0
   let sumY = 0
@@ -763,18 +606,15 @@ export function computeLinearRegressionLine(
   const intercept = meanY - slope * meanT
   if (!Number.isFinite(slope) || !Number.isFinite(intercept)) return null
 
-  // 線の左端 = 最古 sample timestamp 上の regression y
   const startT = points[0]!.t
   const startY = intercept + slope * (startT - t0)
-  // 右端 = endTimestamp 上の regression y (将来 / 既知点いずれでも線形外挿)
   const endY = intercept + slope * (tEnd - t0)
   if (!Number.isFinite(startY) || !Number.isFinite(endY)) return null
 
   const startPoint: PivotPoint = {
     timestamp: points[0]!.timestamp,
     price: startY,
-    // type は描画上未使用。互換のため 'low' を入れておく (意味はない)
-    type: 'low',
+    type: 'low', // unused by rendering; arbitrary, kept only to satisfy the type
   }
   const endPoint: PivotPoint = {
     timestamp: endTimestamp,
@@ -788,27 +628,15 @@ export function computeLinearRegressionLine(
 }
 
 /**
- * Trend line を「描画用の密点列」に展開する。
+ * Expands a 2-point line into a dense `[[t, y], ...]` path. ECharts'
+ * dataZoom drops a line series entirely once either of its 2 points falls
+ * outside the zoomed range — `filterMode: 'weakFilter'` alone didn't fix
+ * every case seen in the field. Giving the series a point at every
+ * intradayBars timestamp (~1500 over 60 days) guarantees several points
+ * stay inside any zoom window, independent of filterMode.
  *
- * 背景: ECharts の dataZoom + 2 点 line series は「片方の点が zoom 範囲外
- * になると線が引かれない」既知挙動が widely 報告されている (issue #3637 系)。
- * #189 で `filterMode: 'weakFilter'` に変更したが、それでもユーザ環境で
- * trend line が描画されないケースが残った。
- *
- * 最も robust な解決策は line の data 自体を「常に zoom 範囲内に複数点が
- * 入る粒度」にすること。ここでは intradayBars (15m candle、60 日で ~1500 点)
- * の各 timestamp で trend line の y 値を線形補間して、`[[t, y], ...]` の
- * dense path に展開する。これで 5D (~120 点) や 1D zoom でも常に複数点が
- * visible になり filterMode 不問で確実に描画される。
- *
- * 線形外挿: trend line は本来両側に伸びる概念線なので、p1 より過去側 / end
- * より未来側の sample timestamp も同じ slope で外挿する (chart の見た目で
- * 線が早期に「途切れる」のを避ける)。
- *
- * Fallback: sampleTimestamps が空 (Yahoo intraday fetch 失敗時 = 0 件) の
- * とき、または line の 2 点が degenerate (t1 == t2) のときは 2 点
- * endpoint をそのまま返す (旧挙動 = 描画は zoom 不安定だが少なくとも
- * 全期間表示では出る)。
+ * Points outside [p1, end] are linearly extrapolated at the same slope, so
+ * the line doesn't visually stop short of the chart edge.
  */
 export function densifyTrendLine(
   line: TrendLineSegment | null,
@@ -821,56 +649,32 @@ export function densifyTrendLine(
   const y2 = line.end.price
   if (!Number.isFinite(t1) || !Number.isFinite(t2)) return null
   if (!Number.isFinite(y1) || !Number.isFinite(y2)) return null
-  // degenerate: 2 点が同 timestamp → 線の slope 不定。fallback で 2 点返し。
+  // Same timestamp on both points leaves the slope undefined.
   if (t1 === t2) return [[t1, y1], [t2, y2]]
   const slope = (y2 - y1) / (t2 - t1)
-  // sample timestamps を epoch ms に正規化、無効値は除外、unique + 昇順
   const tsSet = new Set<number>()
   for (const s of sampleTimestamps) {
     const t = typeof s === 'number' ? s : new Date(s).getTime()
     if (Number.isFinite(t)) tsSet.add(t)
   }
-  // line の 2 点も常に含めて「pivot / end ちょうどでの y」を保証
+  // Always include the line's own 2 points, so the exact pivot/end y is preserved.
   tsSet.add(t1)
   tsSet.add(t2)
   const sorted = Array.from(tsSet).sort((a, b) => a - b)
-  // sample 0 件 (intradayBars 空) のときは 2 点 fallback
+  // No samples (e.g. Yahoo intraday fetch failed) falls back to the 2 raw points.
   if (sorted.length < 2) return [[t1, y1], [t2, y2]]
   const out: Array<[number, number]> = []
   for (const t of sorted) {
     const y = y1 + slope * (t - t1)
     if (Number.isFinite(y)) out.push([t, y])
   }
-  // out が空になることは tsSet に t1/t2 を入れているのでまず無いが、
-  // 安全のため最終 fallback。
   if (out.length < 2) return [[t1, y1], [t2, y2]]
   return out
 }
 
 /**
- * 保有中の avg / stop / take-profit のような「水平線分」を「描画用の密点列」
- * に展開する (`densifyTrendLine` と同じ目的の slope=0 特殊化)。
- *
- * 背景: 旧実装では candlestick の `markLine` に [{coord:[fromTs,y]}, {coord:[toTs,y]}]
- * の 2 点だけを渡していたが、ECharts の dataZoom + markLine は trend line と
- * 同様に「片端が zoom 範囲外になると markLine 全体が描画されない」回帰が
- * 起きる (#190 / #191 の trend line と同根、issue #3637 系)。1D zoom in で
- * `openedAt` が範囲外になり avg / stop / TP が一斉に消えるユーザ報告に
- * 対応するため、本関数で fromTs〜toTs を intradayBars timestamps で密化した
- * `[[t, y], ...]` に展開し、独立 `type: 'line'` series として描画する。
- *
- * 仕様:
- * - 戻り値は ascending order の `[t, y]` 配列。`fromTs` と `toTs` は端点として
- *   常に含む (sample に存在しなくても)。`samples` のうち `[fromTs, toTs]`
- *   範囲内のものを併合してユニーク化 + 昇順 sort。
- * - 水平線なので y は常に `yValue` (一定)。
- * - `fromTs > toTs` の degenerate ケース (openedAt > 最新 timestamp、cron が
- *   未だ走っていない直後) は 2 点 fallback `[[fromTs, y], [toTs, y]]`。
- *   呼び元側で既に `endTs = max(latestTs, openedAt)` の clamp をかけている
- *   ため通常は通らないが防御。
- * - `yValue` / `fromTs` / `toTs` が NaN / Infinity / 不正 ISO string なら null
- *   (描画 skip)。
- * - `samples` の不正値 (NaN / non-ISO string) は除外。
+ * Same densify-for-dataZoom fix as `densifyTrendLine`, specialized to
+ * slope=0, for horizontal lines (avg cost, stop, take-profit).
  */
 export function densifyHorizontalLine(
   yValue: number,
@@ -882,11 +686,11 @@ export function densifyHorizontalLine(
   const a = typeof fromTs === 'number' ? fromTs : new Date(fromTs).getTime()
   const b = typeof toTs === 'number' ? toTs : new Date(toTs).getTime()
   if (!Number.isFinite(a) || !Number.isFinite(b)) return null
-  // degenerate: fromTs >= toTs。端点 2 点だけ返す (描画は実質 1 点と同等
-  // だが series.data が空にならないようにする)。
+  // fromTs >= toTs (e.g. openedAt after the latest timestamp, right after
+  // cron starts) — callers already clamp against this, but fall back to
+  // the 2 raw endpoints defensively rather than produce an empty series.
   if (a >= b) return [[a, yValue], [b, yValue]]
   const tsSet = new Set<number>()
-  // 端点を必ず含める
   tsSet.add(a)
   tsSet.add(b)
   for (const s of samples) {
@@ -899,15 +703,8 @@ export function densifyHorizontalLine(
   return sorted.map((t) => [t, yValue] as [number, number])
 }
 
-/**
- * fill 行の BUY/SELL を決定する。
- * - 1st: pre_submit 行から JOIN で取得した side ('BUY'/'SELL') を採用
- * - 2nd: それも無い場合は realized_pnl の有無で推測
- *   - realized_pnl が null = entry trade (= BUY)
- *   - realized_pnl が非 null = exit trade (= SELL、reconcileFills が
- *     `(filled_price - prior avg) * filled_qty` で計算する)
- * - 3rd (defensive): どちらでも判断できなければ BUY (entry が圧倒的多数)
- */
+// Falls back to inferring side from realized_pnl (set only on exits, by
+// reconcileFills) when there's no joined pre_submit row to read it from.
 export function resolveFillSide(
   preSide: string | null,
   realizedPnl: number | null,
@@ -917,10 +714,8 @@ export function resolveFillSide(
   return 'BUY'
 }
 
-/**
- * SymbolStateDO から現保有を引く。binding 無し / 失敗時は undefined を返して
- * 呼び元に「derive にフォールバックすべき」と伝える (null は「DO 上明示的に無保有」)。
- */
+// undefined (no binding, or the DO call failed) signals "fall back to
+// deriveOpenPosition"; null means the DO explicitly reports no position.
 export async function fetchDoPosition(
   env: Env,
   symbol: string,
@@ -939,10 +734,8 @@ export async function fetchDoPosition(
   }
 }
 
-/**
- * 直近 fills を時系列で巻き戻し、最後に「BUY → SELL」で閉じていなければ
- * 現保有とみなす。partial fill / position add は POC 未対応 (直近 BUY だけ採用)。
- */
+// Latest BUY not yet closed by a later SELL is the open position. Partial
+// fills / position adds aren't tracked (POC) — only the latest BUY counts.
 export function deriveOpenPosition(markers: SymbolChartMarker[]): SymbolChartPosition | null {
   let latestBuy: SymbolChartMarker | null = null
   for (const m of markers) {
@@ -964,11 +757,8 @@ interface ExtractedIndicators {
   low20d: number | null
 }
 
-/**
- * indicators_json から chart で使う数値を一括抽出。JSON.parse 失敗 / 数値外は null。
- * low20d は #158 follow-up で追加されたため、既存の indicators_json には未収録 →
- * 古い行は null fallback で grace 化。新しい cron 実行から徐々に出揃う。
- */
+// low20d was added after sma50/high20d, so older rows' indicators_json
+// simply lack it — null rather than an error, ages out as cron re-runs.
 function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
   if (!indicatorsJson) return { sma50: null, high20d: null, low20d: null }
   try {
@@ -990,11 +780,8 @@ function parseIndicators(indicatorsJson: string | null): ExtractedIndicators {
   }
 }
 
-/**
- * indicators_json から完全な `PullbackIndicators` を取り出す (#entry-distance)。
- * 入場距離計算は price/sma50/return50d/high20d/atr20/baselineAtr20 の全部が要る。
- * 1 つでも欠けて / 非有限なら null (= その評価日は距離計算に使わない)。
- */
+// Entry-distance calc needs all 6 fields; any one missing/non-finite drops
+// the whole eval day from consideration rather than computing with a gap.
 function parseFullIndicators(indicatorsJson: string | null): PullbackIndicators | null {
   if (!indicatorsJson) return null
   let obj: Record<string, unknown>
@@ -1007,24 +794,25 @@ function parseFullIndicators(indicatorsJson: string | null): PullbackIndicators 
     typeof v === 'number' && Number.isFinite(v) ? v : null
   const price = num(obj.price)
   const sma50 = num(obj.sma50)
-  const return50d = num(obj.return50d)
-  const high20d = num(obj.high20d)
+  // obj.return50d / obj.high20d are the stored wire keys (#see toIndicatorWireKeys);
+  // return20d/high10d are their in-memory names (actual lookback: 20d / 10d).
+  const return20d = num(obj.return50d)
+  const high10d = num(obj.high20d)
   const atr20 = num(obj.atr20)
   const baselineAtr20 = num(obj.baselineAtr20)
   if (
     price === null ||
     sma50 === null ||
-    return50d === null ||
-    high20d === null ||
+    return20d === null ||
+    high10d === null ||
     atr20 === null ||
     baselineAtr20 === null
   ) {
     return null
   }
-  return { price, sma50, return50d, high20d, atr20, baselineAtr20 }
+  return { price, sma50, return20d, high10d, atr20, baselineAtr20 }
 }
 
-/** 入場距離計算に残す日次ユニーク評価の最大日数 (直近側)。 */
 const MAX_EVAL_INDICATOR_DAYS = 20
 
 const JST_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
@@ -1034,7 +822,6 @@ const JST_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
   day: '2-digit',
 })
 
-/** ISO UTC timestamp を JST 日付キー ('YYYY-MM-DD') に。不正なら null。 */
 export function jstDayKey(iso: string): string | null {
   const t = new Date(iso).getTime()
   if (!Number.isFinite(t)) return null
@@ -1042,21 +829,15 @@ export function jstDayKey(iso: string): string | null {
 }
 
 /**
- * チャート銘柄タブの JSON export packet builder
- * (schema: `dashboard_chart_symbol_export.v1`, #dashboard-json-api)。
- *
- * SSR の銘柄タブと同じ loader (`loadSymbolChart` + `loadDecisionRows`) の結果を
- * そのまま機械可読化する。HTML 断片は含めない:
- * - `decisions[].ladderHtml` (事前レンダリング済みラダー HTML) は表示専用なので
- *   落とし、`chartDecisions` には構造化 field だけを残す。
- * - 判定履歴側の trace は `decisionHistory[].trace` に parse 済み object で入る
- *   (AI / スクリプトは raw JSON 文字列を再 parse しなくてよい)。
+ * Machine-readable form of the same data the SSR symbol tab renders. Drops
+ * `decisions[].ladderHtml` (pre-rendered display HTML, no use to a
+ * consumer) and parses `decisionHistory[].trace` into an object so callers
+ * don't have to re-parse the raw JSON string themselves.
  */
 export function buildSymbolChartPacket(chart: SymbolChartData, decisionRows: DecisionRow[]) {
   return {
     ...exportMeta('dashboard_chart_symbol_export.v1'),
     symbol: chart.symbol,
-    /** SSR チャート overlay と同じ effective rule (global → role preset → override)。 */
     rules: chart.rules,
     points: chart.points,
     markers: chart.markers,
@@ -1065,9 +846,14 @@ export function buildSymbolChartPacket(chart: SymbolChartData, decisionRows: Dec
     intradayBars: chart.intradayBars,
     latestCronPrice: chart.latestCronPrice,
     latestCronTimestamp: chart.latestCronTimestamp,
-    evalIndicators: chart.evalIndicators ?? [],
+    // return20d/high10d are in-memory names; the export echoes the historical
+    // return50d/high20d wire keys (#toIndicatorWireKeys) so existing consumers
+    // of dashboard_chart_symbol_export.v1 keep reading the same shape.
+    evalIndicators: (chart.evalIndicators ?? []).map((e) => ({
+      timestamp: e.timestamp,
+      indicators: toIndicatorWireKeys(e.indicators),
+    })),
     chartDecisions: (chart.decisions ?? []).map(({ ladderHtml: _ladderHtml, ...rest }) => rest),
-    // SSR の判定履歴テーブル (直近 30 件、#decisions-chart-unify) 相当。
     decisionHistory: decisionRows.map((r) => ({
       ...cronDecisionJson(r),
       requestId: r.requestId,

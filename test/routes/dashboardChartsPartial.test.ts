@@ -7,10 +7,8 @@ import { loadSymbolChart } from '../../src/routes/dashboard/charts/loaders'
 import type { SymbolChartData } from '../../src/routes/dashboard/charts/loaders'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
-// loadSymbolChart は D1 raw SQL / Yahoo / DO を内部で叩くため、route 契約
-// (partial 分岐 / __chartData 埋め込み) の検証には stub で十分。
-// /dashboard/charts/symbol/json の既存テスト (dashboardJsonApi.test.ts) と
-// 同じ mocking 方針を踏襲する。
+// loadSymbolChart は D1/Yahoo/DO を内部で叩くため route 契約の検証には stub で十分
+// (dashboardJsonApi.test.ts と同じ mocking 方針)
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
 }))
@@ -33,18 +31,14 @@ vi.mock('../../src/routes/dashboard/charts/loaders', async () => {
 const baseEnv = { ACCESS_DEV_BYPASS_USER: 'admin' }
 const authHeader = {}
 
-/**
- * `pickDefaultSymbol` (`/charts` route が focusSymbol 解決の前に必ず呼ぶ) 用の
- * 最小 D1 fake。常に空件数を返す — このテストでは常に明示 `?symbol=` を渡す
- * ので default 銘柄の解決結果自体は使わない。`loadSymbolChart` は別途 mock
- * 済みなので、D1 に投げる他クエリはここを通らない。
- */
+// `pickDefaultSymbol` 用の最小 D1 fake。テストは常に明示 `?symbol=` を渡すので
+// default 銘柄解決の結果自体は使わない。
 function fakeChartsDb(): D1Database {
   const stmt = { bind: () => stmt, all: async () => ({ results: [] }) }
   return { prepare: () => stmt } as unknown as D1Database
 }
 
-/** `loadDecisionRows` (drizzle 経由) 用の fake chain。dashboardJsonApi.test.ts と同じ形。 */
+// `loadDecisionRows` (drizzle 経由) 用の fake chain。dashboardJsonApi.test.ts と同じ形。
 function fakeCronDb(rows: unknown[]) {
   const query = {
     from: vi.fn(() => query),
@@ -91,17 +85,14 @@ describe('GET /dashboard/charts?tab=symbol&partial=1 (#charts-symbol-redesign Ph
     expect(res.status).toBe(200)
     expect(res.headers.get('cache-control')).toBe('no-store')
     const body = await res.text()
-    // フルページ限定の要素 (nav / rail / echarts CDN・static script) は含まない
     expect(body).not.toContain('<nav>')
     expect(body).not.toContain('class="symbol-rail"')
     expect(body).not.toContain('id="symbol-main"')
     expect(body).not.toContain('cdn.jsdelivr.net/npm/echarts')
     expect(body).not.toContain('/dashboard/static/symbol-chart.js')
-    // #symbol-main の内側 (サブナビ〜トレースパネル) は含む
     expect(body).toContain('class="symbol-subnav"')
     expect(body).toContain('id="symbol-chart"')
     expect(body).toContain('id="decision-trace-panel"')
-    // __chartData は type="application/json" の inert script として含む
     expect(body).toContain('<script type="application/json" id="__chartData">')
     expect(body).toContain('"symbol":"SOXL"')
   })

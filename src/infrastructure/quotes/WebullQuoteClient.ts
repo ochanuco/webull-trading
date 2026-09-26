@@ -2,13 +2,9 @@ import { BrokerRequestError, brokerErrorForStatus } from '../../shared/errors'
 import { WebullAuth } from '../webull/WebullAuth'
 import { inferWebullMarket } from '../webull/mapper'
 
-// Webull market-data snapshot endpoint only accepts equity/ETF categories.
-// JP_STOCK is NOT supported here — JP quotes require a separate API path we
-// haven't wired yet. See #84.
+// JP is intentionally excluded: the snapshot endpoint only accepts equity/ETF categories.
 export type WebullQuoteCategory = 'US_STOCK' | 'US_ETF'
 
-// Minimal US ETF allowlist for the POC universe. Expand or move to
-// symbol_config.category when universe grows.
 const US_ETF_SYMBOLS = new Set<string>(['SOXL', 'SOXS'])
 
 
@@ -23,21 +19,11 @@ export interface QuoteResult {
 export interface WebullQuoteClientEnv {
   WEBULL_APP_KEY?: string
   WEBULL_APP_SECRET?: string
-  /**
-   * Quotes host override。**JP 本番の Market Data API は trade host
-   * (`api.webull.co.jp`) + x-version v2 で稼働** (docs 明記 + PR #474 実測、
-   * #475)。「data-api.webull.co.jp に分離」は誤った前提だった。未設定 / 空 /
-   * whitespace なら trade host default に fallback。JP UAT (ALB 1 host 束ね)
-   * のみ explicit override を使う。
-   */
+  /** Falls back to `DEFAULT_QUOTES_API_BASE` when unset/blank; override for environments where quotes and trade hosts differ (e.g. UAT). */
   WEBULL_QUOTES_API_BASE?: string
-  /** 2FA 発行 `x-access-token` (#21)。詳細は `WebullClientEnv.WEBULL_ACCESS_TOKEN`。 */
+  /** See `WebullClientEnv.WEBULL_ACCESS_TOKEN`. */
   WEBULL_ACCESS_TOKEN?: string
-  /**
-   * Optional override for the snapshot endpoint path. Webull UAT endpoints are
-   * not finalised for this POC, so the path is kept configurable per
-   * environment. Defaults to {@link DEFAULT_QUOTE_PATH}.
-   */
+  /** Defaults to {@link DEFAULT_QUOTE_PATH}. */
   WEBULL_QUOTE_PATH?: string
 }
 
@@ -65,26 +51,11 @@ interface RawSnapshotEntry {
   ap?: number | string
 }
 
-// Confirmed working combination on the JP UAT tenant (our `WEBULL_QUOTES_API_BASE`
-// resolves to jp-openapi-alb.uat.webullbroker.com — the JP UAT ALB which serves
-// trade/quotes/events from a single host; JP 本番では `data-api.webull.co.jp`
-// に分離される):
-// - path `/openapi/market-data/stock/snapshot`
-// - x-version: v2
-// - category: US_ETF / US_STOCK (underscore — matches EasyEnum.__str__ = name)
-// - `extend_hour_required=false` + `overnight_required=false` REQUIRED
-//   (omitting them → 417 Expectation Failed; see probe trace in #84)
 const DEFAULT_QUOTE_PATH = '/openapi/market-data/stock/snapshot'
-/**
- * Webull JP **production** の Market Data API host (#475)。docs (market-data-api/
- * data-api) の明記どおり trade host と同一。旧値 `data-api.webull.co.jp` は
- * SDK region=jp の公開値だが TCP 無応答で、そもそも market-data を serve して
- * いなかった (2026-06-11 実測, PR #474)。UAT (1 ホスト束ね) は
- * `WEBULL_QUOTES_API_BASE` env で override する。
- */
+// Same host as the trade API in production; quotes and trade only diverge on UAT.
 const DEFAULT_QUOTES_API_BASE = 'https://api.webull.co.jp'
 
-/** QuoteSnapshot.source / spread guard の判定キー。 */
+/** `QuoteSnapshot.source` value; also the key the spread guard checks against. */
 export const WEBULL_QUOTE_SOURCE = 'webull-snapshot'
 
 /**
@@ -92,11 +63,6 @@ export const WEBULL_QUOTE_SOURCE = 'webull-snapshot'
  * HMAC canonical signing used by {@link WebullHttpClient}. Read-only
  * last-price + bid/ask + asOf so the cron handler can land a
  * {@link QuoteSnapshot} into each symbol's Durable Object.
- *
- * 2026-05-22 に deprecated 化 (market-data 未稼働と誤認、PR #334 で Yahoo へ) →
- * **2026-06-11 に解除** (#475): 正しい host (trade host + v2) で稼働確認済み。
- * `QUOTE_SOURCE=webull` で primary に戻る。bid/ask が実データになるため
- * spread guard (issue #411) が実数評価になる。
  */
 export class WebullQuoteClient {
   readonly source = WEBULL_QUOTE_SOURCE
@@ -110,8 +76,7 @@ export class WebullQuoteClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.quotePath = options.quotePath ?? DEFAULT_QUOTE_PATH
     this.timeoutMs = options.timeoutMs ?? 5000
-    // Workers の global `fetch` はメソッド呼び出し扱いで `this` を globalThis
-    // にひも付けないと "Illegal invocation" で落ちる。明示的に bind しておく。
+    // Unbound global `fetch` throws "Illegal invocation" in Workers.
     this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
     this.now = options.now ?? (() => new Date())
   }
@@ -119,9 +84,7 @@ export class WebullQuoteClient {
   async getSnapshots(symbols: string[], category: WebullQuoteCategory): Promise<QuoteResult[]> {
     if (symbols.length === 0) return []
 
-    // v2 snapshot requires `extend_hour_required` + `overnight_required` —
-    // omitting them returns 417 Expectation Failed. We don't want extended
-    // or overnight data for the Pullback strategy (daytime cash equity only).
+    // Both required by the server — omitting either returns 417 Expectation Failed.
     const query = {
       symbols: symbols.join(','),
       category,
@@ -137,12 +100,11 @@ export class WebullQuoteClient {
     try {
       authHeaders = await this.options.auth.createHeaders({
         method: 'GET',
-        // Signing is path-only; query is merged into canonical sorted pairs.
-        // Passing `pathname + search` would duplicate query params (see #80).
+        // path must be pathname-only: query is merged separately into the
+        // canonical sorted pairs, so passing `pathname + search` duplicates it.
         path: url.pathname,
         query,
         host: url.host,
-        // JP UAT only exposes the v2 snapshot; v1 /market-data/snapshot → 404.
         version: 'v2',
       })
     } catch (error) {
@@ -199,12 +161,10 @@ export function createWebullQuoteClient(
     fetchFn?: typeof fetch
     timeoutMs?: number
     now?: () => Date
-    /** Phase B: resolveAccessToken 由来の override (DO 優先)。 */
+    /** Overrides `env.WEBULL_ACCESS_TOKEN`; callers pass the DO-managed token when available. */
     accessToken?: string
   },
 ): WebullQuoteClient {
-  // env 空 / undefined / whitespace は JP prod default。env が明示されてれば
-  // override (UAT / 将来 region 用)。
   const baseUrl = env.WEBULL_QUOTES_API_BASE?.trim() || DEFAULT_QUOTES_API_BASE
   return new WebullQuoteClient({
     auth: new WebullAuth({
@@ -222,8 +182,7 @@ export function createWebullQuoteClient(
 
 export interface SymbolGrouping {
   grouped: Record<WebullQuoteCategory, string[]>
-  // Symbols that cannot be routed through the US snapshot endpoint
-  // (currently JP — tracked separately so callers can log / skip).
+  /** Symbols that can't route through the US snapshot endpoint (currently JP). */
   unsupported: string[]
 }
 

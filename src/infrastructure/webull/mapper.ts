@@ -2,16 +2,7 @@ import type { ExecutionResult } from '../../trading/domain/ExecutionResult'
 import type { OrderIntent } from '../../trading/domain/OrderIntent'
 import type { WebullMarket, WebullPlaceOrderRequestDto, WebullPlaceOrderResponseDto } from './dto'
 
-/**
- * Place Order body schema version (#251 / #256)。
- *
- * - 'v1' (default / 現挙動): 旧 SDK shape。\`support_trading_session='N'\`、
- *   \`limit_price\` は MARKET にも送る、\`account_id\` は query param 側、
- *   \`combo_type\` 無し。
- * - 'v2' (新 OpenAPI docs / opt-in): \`combo_type='NORMAL'\` 必須、
- *   \`support_trading_session='CORE'\` (旧 'N' は新 enum に無い)、MARKET 注文では
- *   \`limit_price\` を送らない、\`account_id\` を body へ。
- */
+/** Place Order body shape: 'v1' is the legacy SDK shape (default); 'v2' is the newer OpenAPI-documented shape (opt-in). */
 export type PlaceOrderSchemaVersion = 'v1' | 'v2'
 
 export function toWebullPlaceOrderRequest(
@@ -20,7 +11,7 @@ export function toWebullPlaceOrderRequest(
   accountId?: string,
 ): WebullPlaceOrderRequestDto {
   const symbol = intent.symbol.toUpperCase()
-  const isMarket = true // 現状 strategy は MARKET 注文のみ
+  const isMarket = true // MARKET is the only order type strategies submit today
   const baseEntry = {
     client_order_id: intent.clientOrderId,
     symbol,
@@ -29,7 +20,7 @@ export function toWebullPlaceOrderRequest(
     order_type: 'MARKET' as const,
     quantity: String(intent.quantity),
     side: intent.side,
-    // v1/v2 両スキーマで送る。未送信時に SELL が空売り開始と誤認されキャッシュ口座で 417。
+    // Required in both schemas: omitted, Webull treats a SELL as opening a short and 417s a cash account.
     open_or_close: (intent.side === 'BUY' ? 'OPEN' : 'CLOSE') as 'OPEN' | 'CLOSE',
     time_in_force: 'DAY' as const,
     entrust_type: 'QTY' as const,
@@ -37,28 +28,24 @@ export function toWebullPlaceOrderRequest(
   }
   if (schema === 'v2') {
     return {
-      // v2: account_id は body 側
       ...(accountId !== undefined ? { account_id: accountId } : {}),
       new_orders: [
         {
           ...baseEntry,
           combo_type: 'NORMAL',
-          // v2 enum: NIGHT/ALL/CORE/ALL_DAY ('N' は廃止)。POC は通常時間帯のみ → CORE。
+          // v2 enum has no 'N'; CORE is the regular-hours session (vs NIGHT/ALL/ALL_DAY).
           support_trading_session: 'CORE',
-          // v2 + MARKET: limit_price 不要 (LIMIT/STOP_LOSS_LIMIT のみ required)。
-          // 安全 cap が欲しい場合は order_type を LIMIT に変える別 PR 案件。
+          // v2 requires limit_price only for LIMIT/STOP_LOSS_LIMIT, not MARKET.
           ...(isMarket ? {} : { limit_price: intent.price.toFixed(3) }),
         },
       ],
     }
   }
-  // v1: 現行挙動。MARKET でも safety cap として limit_price を必ず送る。
   return {
     new_orders: [
       {
         ...baseEntry,
-        // sandbox の fill simulator が limit 注文を通さないので POC は MARKET。
-        // v1 schema は MARKET でも limit_price 必須 (safety cap)。
+        // v1 requires limit_price even for MARKET; doubles as a safety cap since the sandbox never fills LIMIT orders.
         limit_price: intent.price.toFixed(3),
         support_trading_session: 'N',
       },

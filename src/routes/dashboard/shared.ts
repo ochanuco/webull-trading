@@ -5,13 +5,6 @@ export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/**
- * `SymbolUniverse` から 番号/ticker - 会社名 表示文字列を返す薄い helper。
- * universe が無い (load 失敗等) ケースは symbol そのまま (= 既存挙動)。
- *
- * `URL ?symbol=7974` の routing は変更しない。表示テキストだけが
- * `7974-任天堂` / `AAPL-Apple Inc.` 形式に切り替わる。
- */
 export function displaySymbol(symbol: string, universe?: SymbolUniverse | null): string {
   if (!universe) return symbol
   const upper = symbol.toUpperCase()
@@ -21,24 +14,15 @@ export function displaySymbol(symbol: string, universe?: SymbolUniverse | null):
   })
 }
 
-/**
- * symbol が universe.inactiveSymbols (= active=0) に含まれていれば true。
- * `inactiveSymbols` は active=0 全般 (disable / pause 含む) なので "inactive"
- * と中立的に呼ぶ。universe が null / 未配線の時は false (= 既存挙動を変えない)。
- */
+// Named "inactive" not "disabled": active=0 covers both permanent disable
+// and temporary pause, and "disabled" would misdescribe the latter.
 export function isSymbolInactive(symbol: string, universe?: SymbolUniverse | null): boolean {
   if (!universe) return false
   const upper = symbol.toUpperCase()
   return universe.inactiveSymbols.includes(upper)
 }
 
-/**
- * inactive 銘柄の tooltip 用テキスト ("INACTIVE: <notes>" 形式)。notes が
- * 無ければ単に "INACTIVE"。HTML escape は呼び出し側の責任。
- *
- * `inactiveSymbols` は disable (恒久) と pause (一時停止) を区別しないため、
- * 中立的な "INACTIVE" を採用 (元の "DISABLED" は pause 銘柄を誤認させる)。
- */
+// Caller must HTML-escape the result.
 export function inactiveTooltip(symbol: string, universe?: SymbolUniverse | null): string {
   if (!universe) return ''
   const upper = symbol.toUpperCase()
@@ -78,14 +62,9 @@ export function renderPaginationNav(opts: {
   return `<nav style="margin-top:12px;display:flex;gap:8px;justify-content:center">${parts.join('')}</nav>`
 }
 
-/**
- * HTML entity escaper. Thin alias over shared `escapeHtml` (#284) — every
- * D1 / DO-derived string (symbol names, error messages, audit JSON, alerts
- * cause / message, …) passes through this before interpolation. Without it
- * an attacker who can write `notes` / `reason` / `before_json` could inject
- * a <script> that submits the kill-switch / seed-cash form on the
- * operator's session.
- */
+// Every D1/DO-derived string (notes, reason, before_json, ...) must pass
+// through this before interpolation, or a stored value can inject a
+// <script> that submits the kill-switch / seed-cash form as the operator.
 export const esc = escapeHtml
 
 export function fmtNumber(n: number | null | undefined, digits = 2): string {
@@ -133,36 +112,17 @@ export function jsonPretty(payload: unknown, status = 200): Response {
 }
 
 /**
- * dashboard JSON export の schema バージョニング規約 (#dashboard-json-api)。
- *
- * - schema 名は `dashboard_<page>_export.v<N>` 形式 (例: `dashboard_cron_export.v1`)。
- * - additive change (フィールド追加のみ) は同じ version のまま。
- * - 既存フィールドの型変更・意味変更・削除は破壊的変更なので v<N+1> に上げる。
- * - envelope は共通で `{ schema, exportedAt, filter?, rowCount?, ... }`:
- *   - `schema`     : 上記の versioned 識別子。AI / スクリプトが期待形を判別する鍵。
- *   - `exportedAt` : 生成時刻 (ISO UTC)。鮮度判断・キャッシュ判定用。
- *   - `filter`     : クエリ絞り込みを持つページのみ。「この JSON は何の部分集合か」を明示。
- *   - `rowCount`   : 主行配列を持つページのみ。truncation 検知用。
- * - secret になり得る値 (token / key / account_id) は絶対に載せない。
- *
- * packet builder (`buildXxxPacket`) はこの helper で envelope 共通部を作り、
- * ページ固有 field を続ける。「画面で見る内容 = AI に渡す JSON」を保つため、
- * packet は SSR と同じ loader の結果から pure に組み立てること。
+ * Envelope for dashboard JSON exports: `schema` is `dashboard_<page>_export.vN`
+ * (bump N only on a breaking field change, not an addition). Never put a
+ * secret (token/key/account_id) in an exported packet.
  */
 export function exportMeta(schema: string): { schema: string; exportedAt: string } {
   return { schema, exportedAt: new Date().toISOString() }
 }
 
-/**
- * 「JSON を開く」リンク + (任意で) AI 用全件コピーボタンを並べた小さな帯
- * (#dashboard-json-api)。SSR ページのヘッダ帯に置き、同じ内容の機械可読版へ
- * 1 クリックで到達できるようにする。
- *
- * `copyVarName` は `safeJsonScript` で埋めた copy payload のグローバル変数名。
- * non-null ならページ内に `renderLogCopyScript(copyVarName)` が既にいる前提で
- * `LOG_COPY_ALL_BTN` (id=log-copy-all) を並べる — 配線は script 側が id で拾う。
- * copy payload を持たないページは null (リンクのみ)。
- */
+// `copyVarName` non-null assumes `renderLogCopyScript(copyVarName)` is
+// already on the page — wiring to the copy-all button happens by DOM id,
+// not by any value this function returns.
 export function renderJsonToolbar(jsonHref: string, copyVarName: string | null): string {
   const copyBtn = copyVarName ? ` ${LOG_COPY_ALL_BTN}` : ''
   return `<div style="margin:0 0 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip">JSON を開く</a>${copyBtn}</div>`
@@ -177,12 +137,9 @@ export function parseJsonObject(value: string | null | undefined): unknown {
   }
 }
 
-/**
- * ログ行の「AI 用コピー」ボタン (#alerts-trades-ui)。raw 全 field の JSON +
- * 文脈ヘッダ (ページ / フィルタ / 生成時刻) をクリップボードに積む — ログを
- * そのまま AI に貼って相談する運用のため、表示で省略した情報も全部含める。
- * `varName` は safeJsonScript で埋めた `{ meta, rows }` payload のグローバル名。
- */
+// `varName` must be a `safeJsonScript(varName, { meta, rows, full? })`
+// payload already on the page — copies raw fields, including ones the
+// display table omits, so the row can be pasted to an AI as-is.
 export function renderLogCopyScript(varName: string): string {
   return `<script>
 (function () {
@@ -205,7 +162,7 @@ export function renderLogCopyScript(varName: string): string {
       done(ok);
     }
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      // permission 拒否などの reject 時も execCommand に落とす (CodeRabbit #469)。
+      // Permission can be denied at call time, not just be absent.
       navigator.clipboard.writeText(text).then(function () { done(true); }, fallbackExecCommand);
     } else {
       fallbackExecCommand();
@@ -218,7 +175,7 @@ export function renderLogCopyScript(varName: string): string {
   document.querySelectorAll('.log-copy-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var id = btn.getAttribute('data-id');
-      // 行コピーは payload.full (trace 等の重い field 含む完全版) を優先。
+      // payload.full carries fields (e.g. trace) trimmed from the display rows.
       var src = payload.full || payload.rows;
       var row = null;
       for (var i = 0; i < src.length; i++) {
@@ -243,13 +200,8 @@ export const LOG_COPY_ALL_BTN =
 export const logCopyRowBtn = (id: number): string =>
   `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 2px">📋</button>`
 
-/**
- * cooldownUntil をポートフォリオテーブル向けに整形。null または past timestamp
- * (admin /clear-cooldown で epoch 0 が書き込まれた状態等) は「解除済」
- * 扱いで em-dash を返す。strategy 側の `cooldownUntil > now` 判定と表示を
- * 整合させ、"1970-01-01 09:00:00 JST" がクールダウン列に残るように見える
- * 不具合を解消する (#145 admin clear-cooldown の副作用)。
- */
+// A past (or epoch-0) cooldownUntil renders as cleared, matching the
+// strategy's own `cooldownUntil > now` check rather than the raw timestamp.
 export function formatCooldown(cooldownUntil: string | null): string {
   if (!cooldownUntil) return '<span class="muted">—</span>'
   const ms = new Date(cooldownUntil).getTime()
@@ -293,11 +245,8 @@ export function fmtPriceCcy(v: number, currency: string | null): string {
   return `${mark}${v.toLocaleString('ja-JP', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
 }
 
-/**
- * 銘柄コードから通貨を推定する。JP 上場 ETF は 4 桁数字コード (1357 等) なので
- * 数字始まりは JPY、それ以外 (アルファベット ticker) は USD とみなす。symbolCurrency
- * マップが手元に無い表示経路 (判定トレース等) 用の軽量フォールバック。
- */
+// Heuristic fallback for call sites without a symbolCurrency map: JP-listed
+// ETFs use 4-digit numeric codes, so a leading digit means JPY.
 export function currencyOfSymbol(symbol: string): 'JPY' | 'USD' {
   return /^\d/.test(symbol.trim()) ? 'JPY' : 'USD'
 }

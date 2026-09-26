@@ -9,18 +9,8 @@ import {
   type NewsShockVolumeObservation,
 } from '../../../src/trading/risk/newsShockGate'
 
-/**
- * Tests for the news shock gate (issue #196 follow-up, PR 2)。
- *
- * 観点:
- *   - 境界値 (normal / warning / critical) と ratio の `>` 厳密不等号
- *   - tone AND 条件: 満たさなければ critical に昇格しない (warning 止まり)
- *   - stale (maxAgeMin 超過) / minSamples 不足 は fail-open (unknown, sizeScale=1.0)
- *   - `attentionStalePolicy='block_buy'` で unknown が block (sizeScale=0) になる
- *   - config 破損時は default へ倒れる (defensive sanitize)
- *   - この module は fetch を一切呼ばない (pure function — 呼び出しテストは
- *     runStrategyCron.test.ts の回帰ガードで担保)
- */
+// News shock gate (#196 follow-up, PR 2): pure function, no fetch — call-site wiring is
+// covered separately by runStrategyCron.test.ts's regression guard.
 
 const ASOF = '2026-04-25T12:00:00.000Z'
 const ASOF_MS = Date.parse(ASOF)
@@ -31,8 +21,7 @@ function makeBaselineVolumes(count = 200, value = 1): NewsShockVolumeObservation
   const stepMs = spanMs / count
   const out: NewsShockVolumeObservation[] = []
   for (let i = 0; i < count; i++) {
-    // 直近 (i=count-1) が asOf ちょうどにならないよう少し手前に置く。window (2h)
-    // 用の spike は呼び出し側で別途 asOf ちょうどに追加する。
+    // 最後の点も asOf より手前に置く — window (2h) 用の spike は呼び出し側で別途 asOf に追加する
     out.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
   }
   return out
@@ -218,15 +207,12 @@ describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', 
   })
 
   it('computes ratio from the non-zero baseline median when the baseline is sparse (mostly zero with some real observations)', () => {
-    // 300 点中 250 点が 0、50 点が 0.1 という sparse probe を模す
-    // (market_selloff の典型分布)。非ゼロ median = 0.1、window max = 0.5 → ratio = 5.0
+    // market_selloff の典型分布を模す: 非ゼロ median = 0.1、window max = 0.5 → ratio = 5.0
     const spanMs = 7 * 24 * 60 * 60_000
     const stepMs = spanMs / 300
     const baseline: NewsShockVolumeObservation[] = []
     for (let i = 0; i < 300; i++) {
-      // 古い (i が小さい = asOf から遠い) 50 点だけ非ゼロにする。直近 250 点は
-      // ゼロにして windowMin (2h) 内に非ゼロの baseline 点が紛れ込まないようにする
-      // (window は spike 側の観測専用にしたい)。
+      // 古い50点だけ非ゼロ、直近250点はゼロ (window はspike側の観測専用にしたいため)
       const value = i < 50 ? 0.1 : 0
       baseline.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
     }
@@ -242,7 +228,7 @@ describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', 
     }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.ratio).toBeCloseTo(5.0, 5)
-    // ratio 5.0 > blockRatio(4.4) かつ tone drop 条件も満たす → critical に escalate する。
+    // 5.0 > blockRatio(4.4) かつ tone drop 条件も満たす
     expect(decision.regime).toBe('critical')
     expect(decision.sizeScale).toBe(0)
   })
@@ -252,9 +238,7 @@ describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', 
     const stepMs = spanMs / 300
     const baseline: NewsShockVolumeObservation[] = []
     for (let i = 0; i < 300; i++) {
-      // 古い (i が小さい = asOf から遠い) 50 点だけ非ゼロにする。直近 250 点は
-      // ゼロにして windowMin (2h) 内に非ゼロの baseline 点が紛れ込まないようにする
-      // (window は spike 側の観測専用にしたい)。
+      // 古い50点だけ非ゼロ、直近250点はゼロ (window はspike側の観測専用にしたいため)
       const value = i < 50 ? 0.1 : 0
       baseline.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
     }
@@ -270,8 +254,7 @@ describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', 
   })
 
   it('falls back to unknown when the latest observation passes maxAgeMin but misses the narrower window', () => {
-    // windowMin=30 < maxAgeMin(default 90)。observation is 60min old: passes
-    // staleness (<=90) but falls outside the 30min window → defensive unknown.
+    // windowMin=30 < maxAgeMin(default 90); observation is 60min old
     const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, windowMin: 30 }
     const input: NewsShockGateInput = {
       volumeObservations: [
@@ -368,14 +351,9 @@ describe('evaluateNewsShockGate — defensive config sanitize', () => {
   })
 })
 
-/**
- * `sanitizeNewsShockConfig` の直接単体テスト (CodeRabbit PR #619 review)。
- * `runStrategyCron.loadNewsShockDecision` が `sinceIso` を計算する前に
- * この関数を呼んで sanitize 済みの値を使うようになったため、呼び出し側の
- * 契約 (「返り値の各 field は必ず有限/範囲内/順序が正しい」) を独立に保証する。
- * `evaluateNewsShockGate` 経由の間接テストは上の describe 群で既にカバー
- * 済みだが、export された関数そのものの入出力契約はここで直接固定する。
- */
+// sanitizeNewsShockConfig の直接単体テスト (#619): runStrategyCron が sinceIso 計算前に呼ぶため
+// 返り値の各 field が有限/範囲内/順序正しいという契約を独立に固定する
+
 describe('sanitizeNewsShockConfig', () => {
   it('returns the input unchanged when everything is already valid', () => {
     const sane = sanitizeNewsShockConfig(DEFAULT_NEWS_SHOCK_CONFIG)
@@ -387,7 +365,6 @@ describe('sanitizeNewsShockConfig', () => {
     const sane = sanitizeNewsShockConfig(config)
     expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
     expect(Number.isFinite(sane.baselineDays)).toBe(true)
-    // The whole point: sinceIso computed from this value must not blow up.
     expect(() => new Date(Date.now() - sane.baselineDays * 24 * 60 * 60_000).toISOString()).not.toThrow()
   })
 

@@ -1,16 +1,8 @@
 /**
- * `earnings_calendar` テーブルへの薄い repo。issue #196 の earnings gate 専用。
- *
- * - `fetchByRange` は gate (`evaluateEarningsGate`) からの read。range 指定で
- *   返すので、gate 側が ±N 営業日窓を計算して渡す。
- * - `bulkUpsert` は admin endpoint (POC では手動 seed) からの write。同一
- *   `(symbol, earnings_date)` は `INSERT OR IGNORE` で skip — operator が
- *   何度 seed しても安全。
- * - 結果は read 時に DB から戻った row そのまま (symbol は upper-case 正規化を
- *   write 側で済ませる方針)。
- *
- * 結果の dummy 化は repo 層では行わない。gate 層が「fetch 失敗 → fail-closed
- * (entry block)」を担う (POC fail-closed 原則)。
+ * `earnings_calendar` テーブルへの薄い repo。`fetchByRange` は gate
+ * (`evaluateEarningsGate`) からの日付範囲 read、`bulkUpsert` は admin seed
+ * からの write (`(symbol, earnings_date)` 重複は skip、何度 seed しても安全)。
+ * fetch 失敗時の fail-closed は repo 層でなく gate 層の責務。
  */
 import { and, asc, eq, gte, lte } from 'drizzle-orm'
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'
@@ -19,30 +11,21 @@ import { earningsCalendar, type EarningsCalendarRow } from '../db/schema'
 export type EarningsCalendarDb = DrizzleD1Database
 
 export interface EarningsCalendarRepo {
-  /**
-   * `[fromYmd, toYmd]` 両端を含む範囲で `symbol` の earnings 日を返す
-   * (date asc)。throws on D1 read failure — caller がここで fail-closed する。
-   */
+  /** `[fromYmd, toYmd]` inclusive. Throws on D1 read failure — caller fail-closes. */
   fetchByRange(symbol: string, fromYmd: string, toYmd: string): Promise<EarningsCalendarRow[]>
-  /** `symbol` の row 全件 (operator inspect 用)。 */
   fetchBySymbol(symbol: string): Promise<EarningsCalendarRow[]>
-  /**
-   * Upsert (実際は `INSERT OR IGNORE`) 配列。POC 段階では既存 row の更新は
-   * 行わない (operator が DELETE → INSERT で対応する想定)。重複 skip 数を返す。
-   */
+  /** Existing rows are never updated — operator re-seeds via DELETE + INSERT instead. */
   bulkUpsert(records: EarningsCalendarSeedInput[]): Promise<{ inserted: number; skipped: number }>
-  /** id 指定で 1 row 削除。存在しない id は false を返す。 */
   deleteById(id: number): Promise<boolean>
 }
 
 export interface EarningsCalendarSeedInput {
   symbol: string
-  /** ISO date "YYYY-MM-DD"。caller が validation 済みである前提。 */
+  /** ISO date "YYYY-MM-DD". */
   earningsDate: string
   notes?: string | null
 }
 
-/** Wraps a Worker `env.DB` into a drizzle-typed client (other repos と同形式)。 */
 export function createEarningsCalendarDb(d1: D1Database): EarningsCalendarDb {
   return drizzle(d1)
 }
@@ -74,15 +57,8 @@ export function createEarningsCalendarRepo(db: EarningsCalendarDb): EarningsCale
     },
 
     async bulkUpsert(records) {
-      // CodeRabbit #196 review: 1 row 1 INSERT は 1000 行で 1000 D1 writes/req
-      // 相当の subrequest を発生させ Worker 制限に当たる。`db.insert().values([...])`
-      // で multi-row INSERT (chunk) にまとめ、`onConflictDoNothing()` で UNIQUE
-      // 違反 row のみ skip する挙動は維持。drizzle d1 driver は VALUES (?,?), (?,?), ...
-      // の prepared statement を 1 statement で送るため、chunk あたり 1 subrequest。
-      //
-      // CHUNK は D1 の bound parameter 上限 (1 クエリ 100 個) から逆算する。
-      // multi-row INSERT の bind 数は `列数 × 行数` なので、3 列 → 100 / 3 = 33 行。
-      // 以前の 50 は 150 bind になり、34 件以上を一度に seed すると失敗していた。
+      // D1 caps bound parameters at 100/query; 3 columns × 33 rows ≈ 100.
+      // A prior CHUNK=50 (150 binds) failed once seeding more than 33 rows.
       let inserted = 0
       let skipped = 0
       if (records.length === 0) return { inserted, skipped }
@@ -101,7 +77,6 @@ export function createEarningsCalendarRepo(db: EarningsCalendarDb): EarningsCale
             target: [earningsCalendar.symbol, earningsCalendar.earningsDate],
           })
           .returning({ id: earningsCalendar.id })
-        // `result.length` = 実際に INSERT された row 数。差分が UNIQUE 違反 skip。
         const insertedInChunk = result.length
         inserted += insertedInChunk
         skipped += chunk.length - insertedInChunk

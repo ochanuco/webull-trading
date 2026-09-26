@@ -78,7 +78,7 @@ describe('lockPendingOrder', () => {
 })
 
 describe('recordFill', () => {
-  it('opens a long position from flat on BUY', () => {
+  it('opens a long position from flat on BUY without stamping lastExitAt/lastExitPrice', () => {
     const state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
     const next = recordFill(
       state,
@@ -93,7 +93,6 @@ describe('recordFill', () => {
     })
     expect(next.pendingOrder).toBeNull()
     expect(next.lastExecutedPrice).toBe(9)
-    // #reentry: BUY は手仕舞いではないので lastExitAt / lastExitPrice を刻まない。
     expect(next.lastExitAt).toBeNull()
     expect(next.lastExitPrice).toBeNull()
   })
@@ -107,14 +106,13 @@ describe('recordFill', () => {
     expect(state.position?.avgPrice).toBe(10)
   })
 
-  it('closes the position on a SELL that matches the qty', () => {
+  it('closes the position on a SELL that matches the qty, stamping lastExitAt/lastExitPrice from the fill', () => {
     let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
     state = recordFill(state, { side: 'BUY', qty: 2, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
     state = recordFill(state, { side: 'SELL', qty: 2, price: 12 }, { now: fixedNow('2026-04-18T11:00:00.000Z') })
 
     expect(state.position).toBeNull()
     expect(state.lastExecutedPrice).toBe(12)
-    // #reentry: 保有を閉じた SELL は lastExitAt / lastExitPrice を fill 時刻・価格で刻む。
     expect(state.lastExitAt).toBe('2026-04-18T11:00:00.000Z')
     expect(state.lastExitPrice).toBe(12)
   })
@@ -124,7 +122,6 @@ describe('recordFill', () => {
     state = recordFill(state, { side: 'BUY', qty: 3, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
     state = recordFill(state, { side: 'SELL', qty: 1, price: 12 }, { now: fixedNow('2026-04-18T11:00:00.000Z') })
 
-    // 部分 SELL は position が残る (2 株) → 手仕舞い扱いしない。
     expect(state.position?.qty).toBe(2)
     expect(state.lastExitAt).toBeNull()
     expect(state.lastExitPrice).toBeNull()
@@ -438,7 +435,7 @@ describe('overridePosition', () => {
     ).toThrow(/invalid qty/)
   })
 
-  it('does not touch lastExitPrice / lastExitAt / lastExecutedPrice (#660)', () => {
+  it('does not touch lastExitPrice / lastExitAt / lastExecutedPrice on a broker-side reconcile override', () => {
     let state = emptySymbolState('SOXL', fixedNow('2026-04-18T10:00:00.000Z'))
     state = recordFill(state, { side: 'BUY', qty: 2, price: 9 }, { now: fixedNow('2026-04-18T10:05:00.000Z') })
     state = recordFill(state, { side: 'SELL', qty: 2, price: 12 }, { now: fixedNow('2026-04-18T11:00:00.000Z') })
@@ -446,9 +443,7 @@ describe('overridePosition', () => {
     expect(state.lastExitAt).toBe('2026-04-18T11:00:00.000Z')
     expect(state.lastExecutedPrice).toBe(12)
 
-    // Broker-side liquidation / manual reconcile sets position back to a
-    // fresh long via override — the re-entry guard's reference fields must
-    // survive untouched (they must not be re-derived from this override).
+    // re-entry guard's reference fields must not be re-derived from a reconcile override
     const next = overridePosition(
       state,
       { qty: 5, avgPrice: 20, openedAt: null },
@@ -489,8 +484,7 @@ describe('overridePosition', () => {
       { side: 'BUY', qty: 8, price: 124.95 },
       { now: fixedNow('2026-04-19T10:00:00.000Z') },
     )
-    // avgPrice 0 / negative is normally invalid for qty>0, but on close we
-    // accept it because the operator's intent is "drop the position".
+    // invalid for qty>0, but accepted here since qty=0 means "drop the position"
     const next = overridePosition(
       state,
       { qty: 0, avgPrice: -999, openedAt: null },

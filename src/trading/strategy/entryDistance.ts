@@ -1,20 +1,10 @@
 import type { PullbackIndicators, SymbolRule } from './strategies/PullbackUptrendStrategy'
 
 /**
- * 「入場まであとどれくらい / いつ頃」可視化のための前向き距離計算
- * (#entry-distance)。`PullbackUptrendStrategy.entryDecision` の 7 ゲート連鎖を
- * **判定ではなく距離として**評価する:
- *
- *  - 各ゲートの現在値 vs 閾値 (checklist 用)
- *  - 最初に不成立になるゲート (= cron が見送る理由 = ボトルネック)
- *  - **今 BUY が成立する最寄り価格** (= 価格依存ゲートの交差区間のうち現価格に
- *    最も近い点)。価格非依存ゲート (トレンド / ボラ / high20d) が塞いでいる間は
- *    どんな価格でも入場できないので null。
- *
- * trace (#decision-trace) は early-exit で「最初に落ちたゲートまで」しか持たず、
- * 「あと価格がどれだけ動けば入場か」を出せない。本モジュールは全ゲートを
- * 評価して前向きの距離を出す点が異なる。entryDecision とゲート式・順序・
- * 既定値を一致させること (drift したら誤った入場ラインを描く)。
+ * 入場までの前向き距離。decision trace は最初に落ちたゲートで止まるため
+ * 「あと何%動けば入場か」を出せない — 本モジュールは全ゲートを評価して
+ * それを出す。ゲート式・順序・既定値は entryDecision と一致させること
+ * (drift すると誤った入場ラインを描く)。
  */
 
 type EntryGateKey =
@@ -30,31 +20,22 @@ export interface EntryGateStatus {
   key: EntryGateKey
   labelJa: string
   passed: boolean
-  /** ゲートが比較する指標の現在値 (ゲート固有の単位)。 */
   actual: number
-  /** 比較先の閾値。 */
   threshold: number
-  /** 人間可読の比較演算子 (例 '>', '<=')。 */
+  /** 比較演算子 (例 '>', '<=')。 */
   operator: string
-  /**
-   * 現在価格に依存するゲートか (= 価格が動けば成否が変わりうる)。
-   * trend / volatility / high20d_valid は価格非依存 (指標自体が変わらないと不変)。
-   */
+  /** 価格が動けば結果が変わるゲートか。trend/volatility/high20d_valid は価格非依存。 */
   priceDependent: boolean
 }
 
 export interface EntryDistance {
   buyable: boolean
   gates: EntryGateStatus[]
-  /** 最初に不成立になったゲート (= 見送りの直接要因)。buyable なら null。 */
+  /** 最初に不成立のゲート。buyable なら null。 */
   bindingGate: EntryGateStatus | null
-  /**
-   * 今 BUY が成立する最寄り価格。価格依存ゲートの交差区間のうち現価格に最も
-   * 近い点。価格非依存ゲートが塞いでいる / 価格区間が空 (構造的に同時成立不可)
-   * の場合は null (= 価格を動かすだけでは入場できない)。
-   */
+  /** BUY が成立する最寄り価格。価格非依存ゲートが塞ぐ、または交差区間が空なら null。 */
   entryPrice: number | null
-  /** 現価格→entryPrice の符号付き変化率 ((entryPrice - price) / price)。負 = 下落が必要。null = entryPrice null 時。 */
+  /** (entryPrice - price) / price。負 = 下落が必要。entryPrice が null なら null。 */
   priceMove: number | null
 }
 
@@ -71,21 +52,19 @@ const GATE_LABEL_JA: Record<EntryGateKey, string> = {
 const NEG_INF = Number.NEGATIVE_INFINITY
 const POS_INF = Number.POSITIVE_INFINITY
 
-/**
- * 単一スナップショットの入場距離。`entryDecision` と同じゲート式・順序で評価する。
- */
+/** `entryDecision` と同じゲート式・順序で評価する。 */
 export function computeEntryDistance(ind: PullbackIndicators, rule: SymbolRule): EntryDistance {
-  const { price, sma50, return50d, high20d, atr20, baselineAtr20 } = ind
+  const { price, sma50, return20d, high10d, atr20, baselineAtr20 } = ind
   const sma50Deviation = sma50 > 0 ? (price - sma50) / sma50 : 0
   const atrRatio = baselineAtr20 > 0 ? atr20 / baselineAtr20 : 0
-  const pullback = high20d > 0 ? (price - high20d) / high20d : 0
+  const pullback = high10d > 0 ? (price - high10d) / high10d : 0
 
   const gates: EntryGateStatus[] = [
     {
       key: 'trend',
       labelJa: GATE_LABEL_JA.trend,
-      passed: return50d > rule.minReturn50d,
-      actual: return50d,
+      passed: return20d > rule.minReturn50d,
+      actual: return20d,
       threshold: rule.minReturn50d,
       operator: '>',
       priceDependent: false,
@@ -93,7 +72,6 @@ export function computeEntryDistance(ind: PullbackIndicators, rule: SymbolRule):
     {
       key: 'above_sma50',
       labelJa: GATE_LABEL_JA.above_sma50,
-      // requireAboveSma50=false なら常に通過 (entryDecision と同じ)
       passed: !rule.requireAboveSma50 || price > sma50,
       actual: price,
       threshold: sma50,
@@ -121,8 +99,8 @@ export function computeEntryDistance(ind: PullbackIndicators, rule: SymbolRule):
     {
       key: 'high20d_valid',
       labelJa: GATE_LABEL_JA.high20d_valid,
-      passed: high20d > 0,
-      actual: high20d,
+      passed: high10d > 0,
+      actual: high10d,
       threshold: 0,
       operator: '>',
       priceDependent: false,
@@ -157,40 +135,33 @@ export function computeEntryDistance(ind: PullbackIndicators, rule: SymbolRule):
 }
 
 /**
- * 価格依存ゲートをすべて満たす価格区間の中で、現価格に最も近い点を返す。
- * 価格非依存ゲート (トレンド / ボラ / high20d) が 1 つでも落ちていれば、価格を
- * 動かしても入場できないので null。区間が空 (band が SMA50 帯と交わらない等)
- * でも null。
+ * 価格依存ゲートを全部満たす価格区間内で、現価格に最も近い点。価格非依存
+ * ゲートが1つでも落ちていれば null。交差区間が空でも null。
  */
 function resolveNearestEntryPrice(
   ind: PullbackIndicators,
   rule: SymbolRule,
   gates: EntryGateStatus[],
 ): number | null {
-  // 価格非依存ゲートが落ちている間は、いくら価格が動いても入場不可。
   const priceIndependentBlocked = gates.some((g) => !g.priceDependent && !g.passed)
   if (priceIndependentBlocked) return null
 
-  const { sma50, high20d } = ind
-  if (high20d <= 0) return null
+  const { sma50, high10d } = ind
+  if (high10d <= 0) return null
 
-  // band: [high20d*(1+pullbackMin), high20d*(1+pullbackMax)]
-  // pullbackMin < pullbackMax < 0 (例 -0.06 < -0.03) なので下端 < 上端。
-  const bandLow = high20d * (1 + rule.pullbackMin)
-  const bandHigh = high20d * (1 + rule.pullbackMax)
+  // pullbackMin < pullbackMax < 0 前提 (下端 < 上端)。
+  const bandLow = high10d * (1 + rule.pullbackMin)
+  const bandHigh = high10d * (1 + rule.pullbackMax)
 
-  // above_sma50 (require 時のみ下限): price > sma50
   const sma50Low = rule.requireAboveSma50 ? sma50 : NEG_INF
-  // overextension 上限: price <= sma50*(1+maxSma50DeviationPct)
   const overextHigh = sma50 > 0 ? sma50 * (1 + rule.maxSma50DeviationPct) : POS_INF
 
   const low = Math.max(bandLow, sma50Low)
   const high = Math.min(bandHigh, overextHigh)
-  if (low > high) return null // 同時成立する価格が存在しない (構造的にブロック)
+  if (low > high) return null
 
-  // 現価格に最も近い区間内の点 (= 最小の値動きで入場する価格)。
-  const clamped = Math.min(Math.max(ind.price, low), high)
-  return Number.isFinite(clamped) ? clamped : null
+  const nearestEntryPrice = Math.min(Math.max(ind.price, low), high)
+  return Number.isFinite(nearestEntryPrice) ? nearestEntryPrice : null
 }
 
 interface BuyabilityDistancePoint {
@@ -203,22 +174,15 @@ interface BuyabilityDistancePoint {
 type BuyabilityTrend = 'closing' | 'widening' | 'flat' | 'unknown'
 
 export interface BuyabilityView {
-  /** 最新評価の入場距離。評価ログが無ければ null。 */
+  /** 最新評価。評価ログが無ければ null。 */
   current: EntryDistance | null
-  /** 直近 (日次ユニーク) の距離推移。時系列昇順。 */
+  /** 直近 (日次ユニーク) の距離推移、時系列昇順。 */
   series: BuyabilityDistancePoint[]
-  /** 距離が縮小 (入場に近づく) / 拡大 / 横ばい / 判定不能。 */
+  /** 距離が縮小/拡大/横ばい/判定不能。 */
   trend: BuyabilityTrend
-  /**
-   * 参考 ETA (営業日)。直近の距離縮小ペースの線形外挿。**予測ではなく外挿の
-   * 参考値**。縮小傾向が無い / 点が足りない / 価格非依存ブロック時は null。
-   */
+  /** 縮小ペースの線形外挿 ETA (営業日、予測ではない)。縮小傾向なし/点不足/ブロック時は null。 */
   etaTradingDays: number | null
-  /**
-   * チャートに描く「参考の価格外挿線」(#entry-distance のグラフ表現)。直近価格の
-   * 線形フィットを未来へ延ばした傾き + 入場ライン到達 (交差) 情報。**予測ではなく
-   * 外挿**。entryPrice が無い (価格非依存ブロック) / 点が足りない時は null。
-   */
+  /** チャート用の価格外挿線 (予測ではない)。entryPrice が無い/点不足なら null。 */
   projection: EntryProjection | null
 }
 
@@ -265,10 +229,8 @@ function linregSlope(ys: number[]): number | null {
 }
 
 /**
- * チャート用の「参考 価格外挿線」を組み立てる (#entry-distance のグラフ表現)。
- * 直近 `TREND_WINDOW` 日の価格を線形フィットして傾きを取り、入場ライン
- * (current.entryPrice) との交差ステップを出す。**予測ではなく外挿**。
- * entryPrice が無い (価格非依存ブロック) / 価格点 < 2 なら null。
+ * 直近 `TREND_WINDOW` 日の価格を線形フィットし、入場ライン (entryPrice) との
+ * 交差ステップを出す (予測ではなく外挿)。entryPrice が無い/価格点が2未満なら null。
  */
 export function buildEntryProjection(
   evals: EvalIndicatorPoint[],
@@ -306,10 +268,7 @@ export interface EvalIndicatorPoint {
   indicators: PullbackIndicators
 }
 
-/**
- * 直近の評価指標列から入場距離ビューを組み立てる。`evals` は時系列昇順
- * (日次ユニーク推奨) を想定。
- */
+/** `evals` (時系列昇順、日次ユニーク推奨) から入場距離ビューを組み立てる。 */
 export function buildBuyabilityView(evals: EvalIndicatorPoint[], rule: SymbolRule): BuyabilityView {
   if (evals.length === 0) {
     return { current: null, series: [], trend: 'unknown', etaTradingDays: null, projection: null }
@@ -320,8 +279,7 @@ export function buildBuyabilityView(evals: EvalIndicatorPoint[], rule: SymbolRul
   })
   const current = computeEntryDistance(evals[evals.length - 1]!.indicators, rule)
 
-  // trend / ETA は「価格距離 (priceMove) が定義される評価日」のみで判定する。
-  // 価格非依存ブロック日 (priceMove=null) は対象外。
+  // priceMove が null (価格非依存ブロック) の評価日は trend/ETA の対象外。
   const recent = series.slice(-TREND_WINDOW).filter((p) => p.priceMove !== null)
   const gaps = recent.map((p) => Math.abs(p.priceMove as number))
   const { trend, etaTradingDays } = estimateTrendAndEta(gaps)
@@ -340,11 +298,10 @@ function estimateTrendAndEta(gaps: number[]): { trend: BuyabilityTrend; etaTradi
   const slope = linregSlope(gaps)
   if (slope === null) return { trend: 'flat', etaTradingDays: null }
   const lastGap = gaps[gaps.length - 1]!
-  // ほぼ横ばい (1 評価あたり 0.05% 未満の変化) は flat 扱い。
+  // 1 評価あたり 0.05% 未満の傾きは横ばい扱い (ノイズを widening/closing に誤分類しない)。
   const FLAT_EPS = 0.0005
   if (Math.abs(slope) < FLAT_EPS) return { trend: 'flat', etaTradingDays: null }
   if (slope >= 0) return { trend: 'widening', etaTradingDays: null }
-  // 縮小中: 現 gap を縮小ペースで割って 0 到達までのステップ数。
   const eta = lastGap / -slope
   if (!Number.isFinite(eta) || eta <= 0) return { trend: 'closing', etaTradingDays: null }
   return { trend: 'closing', etaTradingDays: eta }

@@ -10,7 +10,7 @@ const env = {
   WEBULL_APP_SECRET: 's'.repeat(32),
 } as unknown as Env
 
-// staging 実測 (2026-06-11, PR #474 probe) の USMV レコードそのまま。
+// Actual staging record from the PR #474 probe (2026-06-11), used verbatim.
 const USMV_ROW = {
   name: 'iShares MSCI USA Min Vol Factor ETF',
   category: 'US_STOCK',
@@ -36,7 +36,7 @@ function fetcherReturning(status: number, body: unknown): typeof fetch {
     })) as typeof fetch
 }
 
-describe('lookupInstrument (#475 instrument/stock/list v2)', () => {
+describe('lookupInstrument (instrument/stock/list v2)', () => {
   it('found: 実測レコードをドメイン型に正規化する', async () => {
     const result = await lookupInstrument(env, {
       symbol: 'usmv',

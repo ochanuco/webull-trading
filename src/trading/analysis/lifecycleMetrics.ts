@@ -1,12 +1,8 @@
 /**
- * 売買ライフサイクル計測 (issue #709 Phase 2) — pure functions のみ。
- *
- * D1 / fetch に一切依存しない: `lifecycleReport.ts` が D1 / YahooBarClient から
- * 集めた素材をここに渡し、集計結果を組み立てる。同じ入力には常に同じ出力を
- * 返す (決定的) — dashboard の再表示や JSON export で毎回同じ数字が出ることを
- * 保証するため。
- *
- * 取引経路 (strategy/risk/execution) には一切参照されない読み取り専用の分析。
+ * Pure functions only — no D1/fetch. `lifecycleReport.ts` gathers material
+ * from D1/YahooBarClient and passes it here; same input always yields the
+ * same output, so a dashboard re-render or JSON export is reproducible.
+ * Never referenced by the strategy/risk/execution path.
  */
 import type { DailyBar } from '../strategy/indicators'
 import { formatNyYmd } from '../../infrastructure/calendar/usMarketCalendar'
@@ -16,7 +12,7 @@ export interface LifecycleFill {
   side: 'BUY' | 'SELL'
   qty: number
   price: number
-  /** ISO UTC timestamp (trade_journal.timestamp)。 */
+  /** ISO UTC timestamp (`trade_journal.timestamp`). */
   at: string
   clientOrderId: string | null
   realizedPnl: number | null
@@ -29,7 +25,7 @@ export interface RoundTrip {
   exitAt: string
   entryPrice: number
   exitPrice: number
-  /** 決済 (SELL) fill の qty。POC は分割売り非対応なので entry qty と同じ想定。 */
+  /** The closing SELL fill's qty. Assumed equal to entry qty — POC doesn't support partial sells. */
   qty: number
   realizedPnl: number | null
   exitClientOrderId: string | null
@@ -45,7 +41,7 @@ export type ExitReasonCategory =
   | 'OTHER'
   | 'UNKNOWN'
 
-/** dashboard 表示 / 集計の走査順を固定するための決定的な並び。 */
+/** Fixed iteration order for dashboard display/aggregation. */
 export const EXIT_REASON_CATEGORY_ORDER: readonly ExitReasonCategory[] = [
   'TP',
   'SL',
@@ -62,13 +58,9 @@ export interface ClassifiedRoundTrip extends RoundTrip {
 }
 
 /**
- * fill 行の BUY/SELL を決定する。`routes/dashboard/charts/loaders.ts` の
- * `resolveFillSide` と同一ロジック。
- *
- * Why not import from loaders.ts: routes 層 (dashboard) から trading 層への
- * import は許容されるが、逆方向 (trading → routes) はレイヤー逆流になるため
- * 禁止 (#709 ブリーフ)。3 行の純関数を複製する方が、依存方向を守るコストより
- * 小さい。
+ * Same logic as `routes/dashboard/charts/loaders.ts`'s `resolveFillSide`,
+ * duplicated rather than imported: routes may import from trading, not the
+ * reverse, and this function is too small to justify a layering exception.
  */
 export function resolveFillSide(
   preSide: string | null,
@@ -80,15 +72,12 @@ export function resolveFillSide(
 }
 
 /**
- * fills (時系列昇順、複数銘柄混在可) から closed round-trip を組む。
- * `routes/dashboard/charts/loaders.ts` の `pairClosedTrades` と同じ仮定:
- * - フラット状態で最初に現れた BUY が区間開始 (連続 BUY は開始点を動かさない)
- * - 次の SELL で全量決済とみなして閉じる (部分売り非対応)
- * - BUY 先行の無い SELL (手動売却の残骸) は区間にしない
- * - 末尾の未決済 BUY は返さない
- *
- * 複数銘柄が混在する入力を想定し、銘柄ごとに独立した状態機械で処理してから
- * exitAt 昇順にまとめて返す (Map の挿入順ではなく時系列順で決定的にするため)。
+ * Pairs closed round-trips from fills (any order, multiple symbols mixed).
+ * Same assumptions as `routes/dashboard/charts/loaders.ts`'s
+ * `pairClosedTrades`: first BUY while flat opens the position, next SELL
+ * closes it fully, an orphan SELL is skipped, a trailing open BUY is
+ * dropped. Each symbol is a separate state machine; results are returned
+ * in exitAt order rather than map-insertion order.
  */
 export function pairRoundTrips(fills: readonly LifecycleFill[]): RoundTrip[] {
   const bySymbol = new Map<string, LifecycleFill[]>()
@@ -99,9 +88,9 @@ export function pairRoundTrips(fills: readonly LifecycleFill[]): RoundTrip[] {
   }
   const trips: RoundTrip[] = []
   for (const [symbol, symbolFills] of bySymbol) {
-    // 呼び出し側の SELECT 順 (id ASC) に依存しない — id 順と timestamp 順が
-    // 食い違う行があると BUY/SELL の対応がねじれ、全指標が静かに壊れるため
-    // ここで必ず at 昇順に揃える。
+    // Re-sorts rather than trusting caller order: a row where id order and
+    // timestamp order disagree would twist BUY/SELL pairing and silently
+    // corrupt every downstream metric.
     symbolFills.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
     let open: LifecycleFill | null = null
     for (const f of symbolFills) {
@@ -127,16 +116,11 @@ export function pairRoundTrips(fills: readonly LifecycleFill[]): RoundTrip[] {
 }
 
 /**
- * SELL exit の生 reason 文字列 → カテゴリ。実際の文言は
- * `PullbackUptrendStrategy.ts:181,201,212` (take-profit / stop-loss / time-stop)
- * と `pullbackScheduler.ts:870,915,945,1007` (cash allocation rebalance
- * BUY/SELL / intraday-only / pair regime flip) で確認済み (#709 ブリーフ、
- * #452 follow-up で SELL 側 rebalance reason を追加)。
- *
- * `reason` が null (= SELL fill の client_order_id が strategy_decision_log に
- * 見つからない、手動売却や migration 前データ) は UNKNOWN。既知パターンに
- * マッチしない reason (将来追加された exit ルート) は OTHER に落として合計が
- * 欠けないようにする。
+ * Categorizes a raw SELL exit reason string. Patterns mirror the strings
+ * the strategies and `pullbackScheduler.ts` actually emit. `null` (SELL
+ * fill's client_order_id not found in strategy_decision_log — manual sell
+ * or pre-migration data) maps to UNKNOWN; an unrecognized pattern (a
+ * future exit route) maps to OTHER rather than being dropped from totals.
  */
 export function classifyLiveExitReason(reason: string | null | undefined): ExitReasonCategory {
   if (!reason) return 'UNKNOWN'
@@ -149,11 +133,7 @@ export function classifyLiveExitReason(reason: string | null | undefined): ExitR
   return 'OTHER'
 }
 
-/**
- * round trip に exit reason カテゴリを付与する。`reasonByClientOrderId` は
- * strategy_decision_log の SELL 行 (`clientOrderId → reason`) から loader が
- * 事前に組んだ lookup。
- */
+/** `reasonByClientOrderId` is the loader's pre-built `clientOrderId → reason` lookup from strategy_decision_log's SELL rows. */
 export function classifyRoundTrips(
   trips: readonly RoundTrip[],
   reasonByClientOrderId: ReadonlyMap<string, string | null>,
@@ -175,17 +155,15 @@ export interface ExitReasonStat {
   winRate: number
   avgWin: number
   avgLoss: number
-  /** 1 trade あたり期待損益 (break-even 込みの全トレード平均)。 */
+  /** Expected P&L per trade, averaged over all trades including break-even. */
   expectancy: number
 }
 
 /**
- * reason カテゴリ別の勝率 / 平均利益 / 平均損失 / 期待値。realizedPnl が null
- * (旧データ欠損) の trip は集計から除外する。
- *
- * Why not import `computeTradeStats` from `routes/dashboard/charts/quality.ts`:
- * 同じ勝率/期待値の式だが、routes 層から trading 層への import は逆流になる
- * ため計算式を複製する (#709 ブリーフ)。
+ * Win rate / avg win / avg loss / expectancy per exit-reason category.
+ * Trips with `realizedPnl === null` (legacy data gap) are excluded. Same
+ * formulas as `routes/dashboard/charts/quality.ts`'s `computeTradeStats`,
+ * duplicated rather than imported for the same layering reason as `resolveFillSide`.
  */
 export function computeExitReasonStats(trips: readonly ClassifiedRoundTrip[]): ExitReasonStat[] {
   const byCategory = new Map<ExitReasonCategory, number[]>()
@@ -236,11 +214,7 @@ function utcDateOnly(iso: string): string {
   return iso.slice(0, 10)
 }
 
-/**
- * `dateIso` 時点以降で最初に現れる bar の index。「exit/entry の UTC 日付 <=
- * bar 日付」となる最初の bar を採用する (#709 ブリーフの営業日オフセット定義)。
- * 該当 bar が無い (= その日以降の bar がまだ取得できていない) 場合は null。
- */
+/** Index of the first bar on or after `dateIso`'s UTC date, or null if no such bar has been fetched yet. */
 function findBarIndexOnOrAfter(bars: readonly DailyBar[], dateIso: string): number | null {
   const date = utcDateOnly(dateIso)
   if (!date) return null
@@ -253,18 +227,17 @@ export interface ForwardReturns {
   r3: number | null
   r5: number | null
   r10: number | null
-  /** exit 後 10 営業日の最大上昇幅 (close 基準、high で見た上振れ)。 */
+  /** Max upside (high vs. base close) within 10 business days post-exit. */
   postExitMfe10: number | null
 }
 
 /**
- * exit 後 1/3/5/10 営業日リターン + post-exit MFE (10 営業日以内の最大上昇幅)。
- * 基準値は exit 日に対応する bar の close (= `findBarIndexOnOrAfter` が返す
- * index の bar)。r1/r3/r5/r10 はその offset の bar が無ければ null (bar 不足)。
- * postExitMfe10 は exit bar 自体が見つからないときのみ null — 見つかった場合は
- * 取得できている bar の範囲 (最大 10 本) で best-effort に計算する (r1..r10 の
- * ような「ちょうどその日」の値ではなく「その時点までの最大」なので、bar が
- * 10 本そろっていなくても部分集計に意味があるため)。
+ * 1/3/5/10-business-day returns and post-exit MFE, based off the exit-date
+ * bar's close. r1/r3/r5/r10 are null when that offset's bar isn't
+ * available yet. postExitMfe10 is null only when the exit bar itself is
+ * missing — otherwise it's a running max over whatever bars are available
+ * (up to 10), since a running max stays meaningful with a partial window
+ * unlike a fixed-offset return.
  */
 export function computeForwardReturns(
   trip: { exitAt: string },
@@ -288,11 +261,7 @@ export function computeForwardReturns(
   return { r1: ret(1), r3: ret(3), r5: ret(5), r10: ret(10), postExitMfe10: mfe }
 }
 
-/**
- * entry 直前 5 営業日の上昇率: entry 日の bar (index) と、その 5 本前の bar の
- * close を比較する。entry bar が見つからない、または前に 5 本の bar が無い
- * (上場直後 / データ不足) 場合は null。
- */
+/** Return from 5 bars before entry to the entry bar's close. Null if the entry bar or its 5 prior bars aren't available. */
 export function computePreEntryRunup(
   trip: { entryAt: string },
   bars: readonly DailyBar[],
@@ -306,7 +275,7 @@ export function computePreEntryRunup(
 
 export interface SkipSignal {
   symbol: string
-  /** ISO UTC timestamp (strategy_decision_log.timestamp)。 */
+  /** ISO UTC timestamp (`strategy_decision_log.timestamp`). */
   at: string
   reason: string | null
 }
@@ -321,14 +290,10 @@ export const SKIP_REASON_CATEGORY_ORDER: readonly SkipReasonCategory[] = [
 ]
 
 /**
- * SKIP reason の軽量分類。`routes/dashboard/charts/quality.ts` の
- * `categorizeSkipReason` (7 カテゴリ、UI 表示色分け込み) より粗い 4 分類 —
- * この画面が見たいのは「見送りの後どうなったか」であって SKIP の内訳自体では
- * ないため、判定観点 (停止系 / サイジング不可 / リスクゲート / その他) だけ
- * 揃えれば十分。
- *
- * Why not import from quality.ts: routes 層 → trading 層の import は逆流になる
- * ため、分類 prefix だけを軽量に複製する (#709 ブリーフ)。
+ * Coarser than `routes/dashboard/charts/quality.ts`'s `categorizeSkipReason`
+ * (7 UI-colored categories) — this report cares about what happened after a
+ * skip, not the skip breakdown itself, so halt/sizing/risk/other is enough.
+ * Duplicated rather than imported for the same layering reason as `resolveFillSide`.
  */
 export function classifySkipReason(reason: string | null | undefined): SkipReasonCategory {
   if (!reason) return 'OTHER'
@@ -338,11 +303,7 @@ export function classifySkipReason(reason: string | null | undefined): SkipReaso
   return 'OTHER'
 }
 
-/**
- * 15 分 cron で同日に連発する SKIP を (symbol, UTC 日付) ごとに最初の 1 件へ
- * dedup する。入力は timestamp 昇順を前提 (= 最初に見つかったものが「その日の
- * 最初の SKIP」になる)。
- */
+/** Keeps only the first SKIP per (symbol, UTC date), collapsing repeats from the 15-minute cron. Assumes input is timestamp-ascending. */
 export function dedupSkipSignalsByDay(signals: readonly SkipSignal[]): SkipSignal[] {
   const seen = new Set<string>()
   const out: SkipSignal[] = []
@@ -357,18 +318,13 @@ export function dedupSkipSignalsByDay(signals: readonly SkipSignal[]): SkipSigna
 }
 
 export interface SkipOutcome {
-  /** 見送り後 10 営業日以内の最大上昇幅 (high 基準)。 */
+  /** Max upside (high) within 10 business days post-skip. */
   mfe10: number | null
-  /** 見送り後 10 営業日以内の最大下落幅 (low 基準、負値)。 */
+  /** Max downside (low, negative) within 10 business days post-skip. */
   mae10: number | null
 }
 
-/**
- * 見送った signal のその後 10 営業日 MFE/MAE。基準値は SKIP 日に対応する bar
- * の close。`computeForwardReturns` の postExitMfe10 と同じ best-effort 方針
- * (bar が 10 本そろっていなくても取得できた範囲で計算)、SKIP bar 自体が
- * 見つからない場合のみ両方 null。
- */
+/** Same best-effort/partial-window behavior as `computeForwardReturns`'s postExitMfe10: null only if the SKIP-date bar itself is missing. */
 export function computeSkipOutcome(skip: SkipSignal, bars: readonly DailyBar[]): SkipOutcome {
   const idx = findBarIndexOnOrAfter(bars, skip.at)
   if (idx === null) return { mfe10: null, mae10: null }
@@ -396,19 +352,15 @@ export function avgNonNull(values: ReadonlyArray<number | null>): { n: number; a
 }
 
 export interface DrawdownResult {
-  /** peak からの最大下落幅 (正の USD 額)。トレードが無ければ 0。 */
+  /** Max decline from peak, in USD (positive). 0 if there are no trades. */
   maxDrawdownUsd: number
-  /** 最大 DD 発生時点の累積 peak (USD)。 */
+  /** Cumulative peak (USD) at the point of max drawdown. */
   peakUsd: number
-  /** 最大 DD 発生時点の累積値 (USD)。 */
+  /** Cumulative value (USD) at the point of max drawdown. */
   troughUsd: number
 }
 
-/**
- * round trip の realizedPnl を exit 時刻順に累積し、peak からの最大下落を
- * USD で返す。分母となる資本 (equity) を持たないので % は出さない
- * (#709 ブリーフ)。
- */
+/** Cumulates round-trip realizedPnl in exit order and returns the max peak-to-trough decline in USD. No equity denominator here, so no percentage. */
 export function computeDrawdown(trips: readonly RoundTrip[]): DrawdownResult {
   const sorted = [...trips].sort((a, b) => (a.exitAt < b.exitAt ? -1 : a.exitAt > b.exitAt ? 1 : 0))
   let cum = 0
@@ -434,14 +386,10 @@ export interface TurnoverResult {
   buyNotionalUsd: number
   sellNotionalUsd: number
   totalNotionalUsd: number
-  /** totalNotional / avgEquity。avgEquity が null / 0 以下なら null。 */
+  /** totalNotional / avgEquity. Null when avgEquity is null or <= 0. */
   turnoverRatio: number | null
 }
 
-/**
- * 全 fill の notional (price × qty) を BUY/SELL 別・合計で集計し、平均 equity
- * が取れれば turnover ratio (合計 notional / 平均 equity) も出す。
- */
 export function computeTurnover(
   fills: readonly LifecycleFill[],
   avgEquityUsd: number | null,
@@ -449,8 +397,8 @@ export function computeTurnover(
   let buyNotionalUsd = 0
   let sellNotionalUsd = 0
   for (const f of fills) {
-    // price/qty どちらかが 0・負値・非有限だと notional が意味を失う (負×負で
-    // 正になるケースも通ってしまう) ので、有限かつ > 0 の組だけ集計する。
+    // Requires both price and qty finite and > 0 — a negative*negative
+    // pair would otherwise pass as a positive notional.
     if (!Number.isFinite(f.price) || f.price <= 0 || !Number.isFinite(f.qty) || f.qty <= 0) continue
     const notional = f.price * f.qty
     if (!Number.isFinite(notional) || notional <= 0) continue
@@ -465,7 +413,7 @@ export function computeTurnover(
   return { buyNotionalUsd, sellNotionalUsd, totalNotionalUsd, turnoverRatio }
 }
 
-/** `estimated_cost` (SELL 行に往復分が入っている、#trade-cost) の単純合計。再計算はしない。 */
+/** Plain sum of `estimated_cost` (round-trip cost is stored on the SELL row). Does not recompute it. */
 export function sumEstimatedCost(fills: readonly LifecycleFill[]): number {
   let sum = 0
   for (const f of fills) {
@@ -475,14 +423,11 @@ export function sumEstimatedCost(fills: readonly LifecycleFill[]): number {
 }
 
 /**
- * stop-loss exit と同日の時間外参考観測 (`extended_hours_observation.status`)
- * を突き合わせる。`statusBySymbolNyDay` は loader が事前に組んだ
- * `${symbol}|${NY YYYY-MM-DD}` → status の lookup (その日の最終観測を想定)。
- * 観測が無い日は 'NO_OBSERVATION' に集計する。
- *
- * NY 暦日への変換は `formatNyYmd` (pure, Date 計算のみ) を使う — 時間外観測
- * 自体が NY セッション基準の producer (#709 Phase 1) なので、SL exit の UTC
- * timestamp も NY 日に揃えないと突き合わせがずれる。
+ * Cross-tabs stop-loss exits against same-day `extended_hours_observation.status`.
+ * `statusBySymbolNyDay` is the loader's `${symbol}|${NY YYYY-MM-DD}` → status
+ * lookup; a day with no observation counts as 'NO_OBSERVATION'. Converts
+ * the SL exit's UTC timestamp to an NY calendar date via `formatNyYmd`,
+ * since the observation producer itself keys on NY session date.
  */
 export function crossTabSlExitsWithExtendedHours(
   slExits: ReadonlyArray<{ symbol: string; exitAt: string }>,

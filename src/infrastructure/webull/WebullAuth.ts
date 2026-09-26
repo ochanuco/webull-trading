@@ -3,21 +3,9 @@ const WEBULL_SIGNATURE_VERSION = '1.0'
 export type SignerAlgorithm = 'HMAC-SHA1' | 'HMAC-SHA256'
 
 /**
- * Webull の signing algorithm は **x-version (= API version) を見て決まる**
- * 事を JP 本番 probe で実証 (#21 Phase B follow-up):
- *
- *   - v1 endpoint (`/openapi/account/*`) + SHA256 → 401 `SIGNATURE_ALGORITHM_NOT_SUPPORTED`
- *   - v2 endpoint (`/openapi/assets/*` / `/openapi/trade/*`) + SHA256 → signing 通過
- *     (broker は SHA256 を受理。別 layer で INVALID_TOKEN になる事はあるがそれは
- *      signature の問題ではない)
- *
- * Webull SDK は host base で switch する実装になってるが、SDK は host ごとに
- * 「使う endpoint version」を間接的に固定してるだけで、実態は version base。
- * 我々のコードは v1 / v2 両 path を probe / drift 比較するため、host base だと
- * v1 + 新 host で SHA256 を送って `SIGNATURE_ALGORITHM_NOT_SUPPORTED` になる
- * (PR #331 で踏んだバグ)。version base に切替えてこれを解消。
- *
- * version 未指定 (legacy caller) は SHA1 default (= v1 互換)。
+ * Selected by x-version, not host: the same host serves both v1 and v2
+ * endpoints, and picking by host once sent SHA256 to a v1 endpoint (401
+ * SIGNATURE_ALGORITHM_NOT_SUPPORTED). Unspecified version defaults to v1's SHA1.
  */
 export function pickSignerAlgorithm(version: string | undefined): SignerAlgorithm {
   return version === 'v2' ? 'HMAC-SHA256' : 'HMAC-SHA1'
@@ -34,12 +22,7 @@ export interface WebullAuthConfig {
   appKey?: string
   appSecret?: string
   version?: string
-  /**
-   * 2FA 経由で発行された `x-access-token` 値 (#21)。token flow は signature と
-   * 直交する supplemental auth (developer.webull.co.jp/apis/docs/authentication/token)。
-   * 設定があれば `createHeaders()` が `x-access-token` を返却 headers に乗せるが、
-   * canonical string には含めない (= 署名対象外)。
-   */
+  /** x-access-token issued via 2FA; supplemental to signing, not part of the canonical string. */
   accessToken?: string
 }
 
@@ -54,7 +37,7 @@ export interface BuildSignedHeadersInput {
   nonce?: string
   timestamp?: string
   version?: string
-  /** x-access-token (#21)。signing 対象外、設定があれば返却 headers に mix。 */
+  /** Supplemental auth token; excluded from the signature. */
   accessToken?: string
 }
 
@@ -119,12 +102,9 @@ export async function buildSignedHeaders({
     throw new Error(`Unsupported Webull signing method: ${method}`)
   }
 
-  // SDK の `default_signature_composer` と同等の signing header 集合。x-version /
-  // x-signature / x-access-token は canonical string から除外 (含めると signature
-  // が UNAUTHORIZED で reject される)。signing algorithm は **x-version base**
-  // で HMAC-SHA1 / HMAC-SHA256 を自動選択 (#21 Phase B follow-up、JP 本番 probe
-  // で v1=SHA1 / v2=SHA256 必須が判明)。host base ではない (SDK の host-based
-  // 実装は SDK 自身が version を間接固定してたから動いてただけ)。
+  // Mirrors the SDK's `default_signature_composer` header set. x-version /
+  // x-signature / x-access-token must stay out of the canonical string —
+  // including them gets the request rejected as UNAUTHORIZED.
   const algorithm = pickSignerAlgorithm(version)
   const signingHeaders = {
     host,
@@ -134,8 +114,7 @@ export async function buildSignedHeaders({
     'x-signature-version': WEBULL_SIGNATURE_VERSION,
     'x-timestamp': timestamp,
   }
-  // body hash は algorithm と pair で決まる: HMAC-SHA1 → MD5 / HMAC-SHA256 → SHA256
-  // (SDK の `_get_body_string` 参照)。signing canonical の最後に hex-upper を入れる。
+  // Body hash algorithm mirrors the signature algorithm: MD5 for SHA1, SHA256 for SHA256.
   const bodyHash =
     body === undefined || body.length === 0
       ? undefined
@@ -154,9 +133,7 @@ export async function buildSignedHeaders({
       ? await hmacSha256Base64(appSecret, encodedString)
       : await hmacSha1Base64(appSecret, encodedString)
 
-  // x-access-token は signature と同じく supplemental ヘッダ扱い (canonical
-  // string に含めない)。trim 後が空文字なら未設定として扱う = whitespace-only な
-  // secret 投入事故で「token あるつもり」になるのを防ぐ。
+  // Whitespace-only token treated as unset — avoids a false "token is set" state.
   const trimmedToken = accessToken?.trim()
   return {
     ...signingHeaders,
@@ -217,10 +194,7 @@ export async function hmacSha1Base64(secret: string, value: string): Promise<str
   return toBase64(signature)
 }
 
-/**
- * HMAC-SHA256 + base64 — JP 本番 host (SDK 上で `is_not_upgrade_api_host` が true)
- * の signing 用。secret は `<app_secret>&` の trailing `&` 付き (SHA1 と共通)。
- */
+/** Trailing '&' on the key matches the HMAC-SHA1 path — required by Webull's spec, not a typo. */
 export async function hmacSha256Base64(secret: string, value: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
@@ -233,10 +207,7 @@ export async function hmacSha256Base64(secret: string, value: string): Promise<s
   return toBase64(signature)
 }
 
-/**
- * SHA-256 hex (大文字)。SDK の `sha256_hex(content).upper()` と等価。HMAC-SHA256
- * 経路の body hash 用 (HMAC-SHA1 経路は MD5 を使う、`md5UpperHex` 参照)。
- */
+/** Body hash for the HMAC-SHA256 path; HMAC-SHA1 uses {@link md5UpperHex} instead. */
 export async function sha256UpperHex(value: string): Promise<string> {
   const input = new TextEncoder().encode(value)
   const digest = await crypto.subtle.digest('SHA-256', input)

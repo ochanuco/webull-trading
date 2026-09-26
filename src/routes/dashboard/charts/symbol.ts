@@ -13,11 +13,6 @@ import { type DecisionRow, localizeReason, renderDecisionTable } from '../cron'
 import { currencyOfSymbol, displaySymbol, esc, fmtJst, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive } from '../shared'
 import { SYMBOL_ROLE_LABELS, SYMBOL_ROLE_LABELS_SHORT } from '../symbols'
 
-/**
- * チャート銘柄タブ内の判定履歴 (#decisions-chart-unify)。戦略判定ページと同じ
- * renderer を共用し、チャート上の判定 pin と同じデータを表でも読めるようにする
- * (pin はクリックで 1 件ずつ、表はラダー・実 fill・AI コピーまで一覧)。
- */
 function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
   const rows = args.decisionRows ?? []
   if (rows.length === 0 || !args.focusSymbol) return ''
@@ -37,10 +32,6 @@ function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
   </div>`
 }
 
-/**
- * ペアレジーム行 (#472)。zone を日本語で表示し、score / proxy / 判定日を併記。
- * observe mode はその旨を明示 (gate していないことが分かるように)。
- */
 function renderPairRegimeLine(
   view: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null,
 ): string {
@@ -59,14 +50,8 @@ function renderPairRegimeLine(
   </div>`
 }
 
-/**
- * symbol タブ内サブナビ「チャート / 履歴・設定」(#charts-symbol-redesign)。
- * `renderAnalysisSubnav` (layout.ts) と同じ active/link の出し分けパターンを
- * 踏襲しつつ、`symbol=` を維持した動的 href が要るためこちらは専用実装。
- * ページ header の `.subnav` (topnav 2段目) とは別に、symbol タブ本文内
- * (`.symbol-main` の先頭) に埋め込む — `.symbol-subnav` で padding/border を
- * own control する (header 用 `.subnav` の左右 padding は本文には合わない)。
- */
+// Not renderAnalysisSubnav (layout.ts): this needs a dynamic href carrying
+// the current `symbol=`, which that shared helper doesn't support.
 const SYMBOL_VIEW_ITEMS: ReadonlyArray<{ key: SymbolTabView; label: string }> = [
   { key: 'chart', label: 'チャート' },
   { key: 'detail', label: '履歴・設定' },
@@ -82,7 +67,7 @@ export function renderSymbolViewSubnav(symbol: string, active: SymbolTabView): s
   return `<nav class="symbol-subnav">${items}</nav>`
 }
 
-/** decision → 日本語ラベル (#charts-symbol-redesign)。client script の DECISION_LABEL_JA と同じ語彙。 */
+/** Keep in sync with `DECISION_LABEL_JA` in symbolChartScript.ts (duplicated for server vs. client rendering). */
 const DECISION_LABEL_JA: Record<string, string> = {
   BUY: '買い',
   SELL: '売り',
@@ -92,7 +77,7 @@ const DECISION_LABEL_JA: Record<string, string> = {
   HOLD: '保有継続',
 }
 
-/** `renderDecisionTable` の色分けと揃える (#charts-symbol-redesign)。 */
+/** Keep in sync with `renderDecisionTable`'s pill coloring. */
 function decisionPillClass(decision: string): string {
   if (decision === 'BUY') return 'ok'
   if (decision === 'SELL' || decision === 'SKIP') return 'warn'
@@ -100,13 +85,7 @@ function decisionPillClass(decision: string): string {
   return 'neutral'
 }
 
-/**
- * 「入場/出口の結論」の凝縮版 (fold 内判断サマリ #1)。
- * - 保有中: avgPrice + effective stop/TP から「stop まで/TP まで」の現在価格
- *   起点の距離を出す (`renderBuyabilityPanel` とは独立の軽量計算)。
- * - 未保有: `renderBuyabilityPanel` の結論ロジックを 1 行に凝縮
- *   (buyable / 価格まであと X% / 価格でも不可)。
- */
+/** Holding: distance from current price to stop/TP. Not holding: condensed buyability verdict. */
 export function renderConclusionValue(
   buyability: BuyabilityView | null,
   position: SymbolChartPosition | null,
@@ -142,13 +121,7 @@ export function renderConclusionValue(
   }
 }
 
-/**
- * 「保有状態と PnL」(fold 内判断サマリ #2)。
- * qty (保有数量) は `SymbolChartData.position.qty` に載る (#charts-symbol-redesign
- * Phase C で追加、additive)。取得できた時だけ「保有数量｜含み損益 $」の行を
- * 足す — qty が null/undefined (derive 元 fill に qty が無い等) の銘柄は
- * 従来通り % 建てのみで、崩れず表示できる。
- */
+/** The qty/$-PnL line is added only when `position.qty` is present — older fills derived without qty still render, percent-only. */
 export function renderPositionSummaryValue(
   position: SymbolChartPosition | null,
   strategyParams: StrategyParamsSnapshot,
@@ -178,7 +151,7 @@ export function renderPositionSummaryValue(
     ${qtyLine}`
 }
 
-/** 「直近判定」(fold 内判断サマリ #3)。`decisionRows[0]` = 最新 (id DESC、#decisions-chart-unify と同じ順)。 */
+/** `rows[0]` is the latest decision — caller must supply rows ordered id DESC. */
 export function renderLatestDecisionValue(rows: DecisionRow[] | undefined): string {
   const row = rows?.[0]
   if (!row) return '<span class="muted">判定履歴なし</span>'
@@ -188,22 +161,13 @@ export function renderLatestDecisionValue(rows: DecisionRow[] | undefined): stri
     <div style="margin-top:2px">${esc(localizeReason(row.reason))}</div>`
 }
 
-/**
- * 「有効ルール」chips (fold 内判断サマリ #4)。`args.strategyParams` は
- * index.ts で `buildSymbolRules` を通した effective 値 (global → role preset →
- * 銘柄 override、#452) — symbol_config の raw override 表示ではない
- * (過去の「設定表示と実効値のドリフト」問題を再発させないための明示要件)。
- */
+/** `p` must be the resolved effective value (global → role preset → symbol override, via `buildSymbolRules`), not a raw symbol_config read — displaying raw config here previously drifted from what the strategy actually used. */
 export function renderEffectiveRuleChips(p: StrategyParamsSnapshot): string {
   const pct = (n: number): string => (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
   return `<span class="chip">stop ${esc(pct(p.stopPct))}</span> <span class="chip">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip">time-stop ${p.timeStopDays}営業日</span>`
 }
 
-/**
- * fold 内の判断サマリ grid (#charts-symbol-redesign)。チャート直下、
- * チャートビューの入口に置く 4 枚カード。symbolChart が無ければ空文字
- * (noData 分岐は呼び出し側で別処理)。
- */
+/** Returns '' when there's no chart data — the noData branch is handled by the caller instead. */
 export function renderJudgmentSummaryGrid(args: ChartsBodySymbol): string {
   const chart = args.symbolChart
   if (!chart) return ''
@@ -235,15 +199,12 @@ export function renderJudgmentSummaryGrid(args: ChartsBodySymbol): string {
 }
 
 /**
- * `__chartData` 埋め込み script (#charts-symbol-redesign Phase C)。
- * 通常の `safeJsonScript` (`<script>window.X = ...;</script>`) は実行系の
- * script なので `element.innerHTML = html` 経由で挿入しても実行されない
- * (ブラウザの仕様)。クライアント側銘柄切替 (partial swap) では毎回
- * `#symbol-main` を innerHTML で丸ごと差し替えるため、`type="application/json"`
- * の inert script にして client 側が `JSON.parse(el.textContent)` で読む —
- * フルページ初期表示・swap 後どちらも同じ読み方になり、`window.__chartData`
- * 代入の実行有無に依存しない。`<` の escape は HTML パーサが `</script>` を
- * 型に関わらずタグ終端として解釈するため、type を変えても引き続き必要。
+ * Not a normal executable `<script>` (`window.X = ...`): browsers don't run a
+ * `<script>` inserted via `innerHTML`, which client-side partial swap does on
+ * every symbol switch. `type="application/json"` is inert either way, so the
+ * client reads it with `JSON.parse(el.textContent)` consistently on both full
+ * page load and swap. The `<` escape stays regardless of `type`, since the
+ * HTML parser treats `</script>` as a tag terminator independent of it.
  */
 function chartDataScript(data: unknown): string {
   const json = JSON.stringify(data).replace(/</g, '\\u003c')
@@ -251,11 +212,8 @@ function chartDataScript(data: unknown): string {
 }
 
 /**
- * `#symbol-main` の内側 HTML (rail を含まない、#charts-symbol-redesign Phase C)。
- * フルページ (`renderSymbolTab`) と partial エンドポイント
- * (`GET /dashboard/charts?tab=symbol&...&partial=1`) の両方から呼ぶ共通部分。
- * chart データが無い銘柄では `__chartData` script 自体を出さない (client 側は
- * script 要素が無ければ chart 初期化をスキップする)。
+ * `#symbol-main` inner HTML, shared by the full page (`renderSymbolTab`) and
+ * the partial endpoint (`GET /dashboard/charts?tab=symbol&...&partial=1`).
  */
 export function renderSymbolMainInner(args: ChartsBodySymbol): string {
   const noData =
@@ -268,27 +226,21 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
       renderStrategyParamsPanel(args.strategyParams, args.strategyParamsGlobal)
     )
   }
-  // chart payload に displayName を注入。client 側の chart title / tooltip header
-  // は `sc.displayName || sc.symbol` で読む (US 銘柄は displayName === symbol)。
-  // evalIndicators は buyability を server で算出済みなので client へは送らない
-  // (入場までの距離は押し目ゾーン端ラベル / 外挿線で表現)。
+  // evalIndicators omitted: buyability is computed server-side, so the
+  // client doesn't need per-point indicator data.
   const symbolChartPayload = args.symbolChart
     ? (({ evalIndicators: _omit, ...rest }) => ({
         ...rest,
         displayName: displaySymbol(args.symbolChart!.symbol, args.universe),
       }))(args.symbolChart)
     : null
-  // 参考 価格外挿線 (#entry-distance のグラフ表現)。直近ペースを未来へ延ばした
-  // 「予測ではない外挿」。client は category 軸に未来スロットを足して描く。
   const projection = args.buyability?.projection ?? null
-  // 前日終値 (header の前日比とチャート点線の共通基準)。
+  // Single source for both the header's day-over-day diff and the chart's markLine.
   const prevClose = prevDailyClose(args.symbolChart)
   const prevCloseLabel =
     prevClose !== null
       ? `前日終値 ${fmtPriceCcy(prevClose, args.universe?.symbolCurrency[args.symbolChart!.symbol.toUpperCase()] ?? null)}`
       : null
-  // サブビュー (#charts-symbol-redesign): chart = 判断サマリ + チャート
-  // (fold 内で完結、既定)、detail = 判定履歴30件 + 戦略パラメータ (長物)。
   const view: SymbolTabView = args.view === 'detail' ? 'detail' : 'chart'
   const subnav = args.focusSymbol ? renderSymbolViewSubnav(args.focusSymbol, view) : ''
   const focusHeader = renderFocusSymbolHeader(args)
@@ -328,17 +280,14 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
 }
 
 export function renderSymbolTab(args: ChartsBodySymbol): string {
-  // client script (rail / サブナビの client 側銘柄切替 intercept を含む、
-  // #charts-symbol-redesign Phase C) はチャートデータの有無に関わらず常に
-  // ロードする — 最初に着地した銘柄が noData でも、レール経由でデータの
-  // ある銘柄に切り替えられる必要があるため (常時ロードしないと、その後の
-  // 銘柄切替で ECharts 自体が読み込まれておらず初期化できない)。
+  // Loads unconditionally even when this symbol has no chart data: the rail
+  // can switch to a symbol that does, and echarts must already be loaded for
+  // that client-side switch to initialize a chart.
   return `${wrapWithSymbolRail(args, renderSymbolMainInner(args))}
   <script src="${ECHARTS_CDN}" defer></script>
   <script src="${SYMBOL_CHART_STATIC_PATH}" defer></script>`
 }
 
-/** 段階判定 badge の配色 (#452 PR 2)。 */
 const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
   ENTRY: { label: 'ENTRY', bg: '#e6f6ec', fg: '#057a55' },
   HALF: { label: 'HALF 0.5x', bg: '#fff4e6', fg: '#b25000' },
@@ -351,10 +300,7 @@ function entryStatusBadgeHtml(status: EntryStatus): string {
   return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${b.bg};color:${b.fg};font-weight:700;font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
 }
 
-/**
- * target / active weight の並記 (#452 Layer 3)。target を持つ (or 退避を受けた)
- * 銘柄のみ 1 行出す。「設定上 5% だが現在は SGOV に退避中」を panel 上で見せる。
- */
+/** Renders nothing when `alloc` is undefined (symbol has no target weight and received no reroute). */
 export function renderAllocationLine(alloc: SymbolAllocation | undefined): string {
   if (!alloc) return ''
   const pct = (w: number) => `${Math.round(w * 1000) / 10}%`
@@ -366,10 +312,7 @@ export function renderAllocationLine(alloc: SymbolAllocation | undefined): strin
   return `<div style="font-size:11px;color:${color};margin-bottom:4px" title="${esc(alloc.reason)}">配分 target ${pct(alloc.targetWeight)}${arrow}${reroute}${rerouted}</div>`
 }
 
-/**
- * 個別銘柄タブのロール / 配分ポリシー行 (#452)。role も配分も未設定なら出さない
- * (従来挙動の銘柄でノイズにしない)。設定変更は編集フォームへのリンクで誘導。
- */
+/** Renders nothing when role/weight/entryRequired/alwaysActive/cashFallback are all unset, so unconfigured symbols show no noise. */
 export function renderSymbolPolicyLine(
   symbol: string | null,
   policy: SymbolPolicySummary | null,
@@ -407,11 +350,7 @@ export function renderSymbolPolicyLine(
   </div>`
 }
 
-/**
- * PullbackUptrendStrategy の TEST_DEFAULT_RULE と一致 (=コード上の default)。
- * チャートパネルで「default 値から変更されている項目」を ⚠ で flag するための
- * 比較対象。schema 側の default も同値 (pullback_default_*)。
- */
+/** Mirrors `PullbackUptrendStrategy.TEST_DEFAULT_RULE` — keep in sync; used only to flag values that differ from the code default. */
 const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
   stopPct: -0.04,
   takeProfitPct: 0.07,
@@ -428,22 +367,16 @@ const STRATEGY_DEFAULTS: StrategyParamsSnapshot = {
   reentryGuardBusinessDays: 3,
 }
 
-/**
- * チャート併置の戦略パラメータパネル (#168)。チャート上のラベル
- * (押し目 ×N、stop -4% 等) はオーバーレイ 4 本制限のため限定的なので、
- * 補助情報として全パラメータを一覧表示。default からの変更を ⚠ で強調し
- * 「設定の意図しない残存」(例: pullback_max=0 のデバッグ残骸) に運用者が
- * 気づきやすくする。
- */
+/** Flags values that differ from `STRATEGY_DEFAULTS` so a leftover debug override (e.g. `pullbackMax=0`) stands out. */
 export function renderStrategyParamsPanel(
   p: StrategyParamsSnapshot,
   globalParams?: StrategyParamsSnapshot,
 ): string {
   const flag = (current: number | boolean, def: number | boolean): string =>
     current === def ? '' : ' <span class="warn" title="default 値から変更">⚠</span>'
-  // effective 値が global と異なる = role preset / 銘柄管理の override 由来。
-  // 「銘柄管理で設定した値ではなく global が出ている」と誤読されないよう、
-  // 出どころを行内で明示する (operator 指摘)。
+  // Tags a row "symbol-specific" only when the effective value differs from
+  // global — without this, an override that happens to match global would
+  // read as an unmodified global value.
   const symbolTag = (key: keyof StrategyParamsSnapshot): string =>
     globalParams !== undefined && p[key] !== globalParams[key]
       ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:#e8f0fe;color:#1a56db" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
@@ -487,8 +420,8 @@ export function renderStrategyParamsPanel(
       flag: flag(p.pullbackMin, STRATEGY_DEFAULTS.pullbackMin),
     },
     {
-      // lookback の実体は 20 営業日 (#318)。field 名は global_config 列との互換で
-      // minReturn50d のまま、人間向け文言だけ 20 日に揃える。
+      // Field kept as `minReturn50d` for global_config column compat even
+      // though the actual lookback is 20 business days.
       label: '20日騰落率 閾値 (minReturn50d)',
       key: 'minReturn50d',
       current: pct(p.minReturn50d),
@@ -529,23 +462,12 @@ export function renderStrategyParamsPanel(
   </details>`
 }
 
-/**
- * チャート上に「現在の主要 indicator (price / SMA50 / high20d / low20d / atr20)」
- * を inline badge で表示。trader-strategist 助言で SMA50 を chart line から
- * 撤去 (15m chart の y軸を引き伸ばさないため) した代替表示。最新の cron-eval
- * point から取得し、null は em-dash (—) で fallback。
- */
 const JST_MD_FMT = new Intl.DateTimeFormat('ja-JP', {
   timeZone: 'Asia/Tokyo',
   month: 'numeric',
   day: 'numeric',
 })
 
-/**
- * 入場ゲートを「<左辺名> <実測> <記号> [<閾値名>] <閾値>」で整形 (#entry-distance /
- * #trace-readability)。左の値が何の数字かを名前で明示する。価格系は通貨記号 ($/¥)
- * 付き (currency 未指定なら $)。
- */
 function fmtGateValue(g: EntryGateStatus, currency: string | null = null): string {
   const sym = ({ '>': '>', '>=': '≥', '<': '<', '<=': '≤' } as Record<string, string>)[g.operator] ?? g.operator
   const price = (v: number): string => fmtPriceCcy(v, currency)
@@ -566,21 +488,14 @@ function fmtGateValue(g: EntryGateStatus, currency: string | null = null): strin
   }
 }
 
-/**
- * 「入場まで あとどれくらい / いつ頃」パネル (#entry-distance)。
- * - 結論 (buyable / 価格であと X% / 価格では不可+ボトルネック)
- * - 距離の推移 (mini bar、縮小/拡大トレンド)
- * - 参考 ETA (外挿・非予測の注記つき)
- * - 全ゲートの現在値 vs 閾値チェックリスト
- * buyability / current が無ければ空文字。
- */
 export interface BuyabilityPanelContext {
-  /** 段階判定 (#452 PR 2)。null = 出さない。 */
+  /** null = badge omitted. */
   entryStatus?: EntryStatusResult | null
-  /** 価格表示の通貨 ($/¥)。未指定なら $。 */
+  /** Defaults to $ when unset. */
   currency?: string | null
 }
 
+/** "How far until entry" panel: verdict headline, distance trend bars, extrapolated ETA, and the gate checklist. Returns '' without current buyability data. */
 export function renderBuyabilityPanel(
   buyability: BuyabilityView | null,
   ctx: BuyabilityPanelContext = {},
@@ -675,15 +590,13 @@ export function renderBuyabilityPanel(
     })
     .join('')
 
-  // --- 段階判定 badge + HALF 説明 (#452 PR 2) ---
+  // --- 段階判定 badge + HALF 説明 ---
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
     halfNote = `<div style="margin-top:6px;font-size:12px;color:#b25000">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
   }
 
-  // 距離の推移 (+ETA) と 入場ゲート は 2 列 (narrow 画面は .panel-row の
-  // media query で 1 列に落ちる)。
   return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
     <div style="font-size:13px;color:${headColor};margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${statusBadge}<span>${headline}</span></div>
     ${halfNote}
@@ -696,12 +609,7 @@ export function renderBuyabilityPanel(
   </div>`
 }
 
-/**
- * 判定点プロットの凡例 + 件数キャプション (#decision-trace のグラフ同期)。
- * decisions が空なら空文字。最新 `MAX_CHART_DECISIONS` 件に達していれば
- * truncation を明示する (silent cap を避ける)。色は chart 側 DECISION_COLORS
- * および取引品質タブと揃える。
- */
+/** Shows a truncation note once `decisions.length >= MAX_CHART_DECISIONS`, rather than silently capping. Colors mirror the chart's DECISION_COLORS. */
 export function renderDecisionPlotCaption(chart: SymbolChartData | null): string {
   const decisions = chart?.decisions ?? []
   if (decisions.length === 0) return ''
@@ -719,10 +627,6 @@ export function renderDecisionPlotCaption(chart: SymbolChartData | null): string
   </div>`
 }
 
-/**
- * 前日終値 (= 最終 daily point の 1 つ前の price)。比較・markLine 共用。
- * points が 2 点未満 / 非有限なら null。
- */
 export function prevDailyClose(chart: SymbolChartData | null): number | null {
   const pts = chart?.points ?? []
   if (pts.length < 2) return null
@@ -730,11 +634,6 @@ export function prevDailyClose(chart: SymbolChartData | null): number | null {
   return Number.isFinite(v) ? v : null
 }
 
-/**
- * Google Finance 風の価格ヘッダー: 大きい現在値 + 前日比 (%/絶対値)。
- * 日本式配色 (上昇=赤 / 下落=緑)。下段に SMA50 / high20d / low20d の小バッジ。
- * 現在値は latestCronPrice (直近 strategy 評価値)、無ければ最終 point の price。
- */
 export function renderPriceHeader(
   chart: SymbolChartData | null,
   universe?: SymbolUniverse | null,
@@ -769,7 +668,7 @@ export function renderPriceHeader(
   const subItems: Array<[string, string]> = latest
     ? [
         ['SMA50', fmt(latest.sma50)],
-        ['high20d', fmt(latest.high20d)],
+        ['high10d', fmt(latest.high20d)],
         ['low20d', fmt(latest.low20d)],
       ]
     : []
@@ -785,14 +684,9 @@ export function renderPriceHeader(
   ${sub ? `<p style="margin:2px 0 0">${sub}</p>` : ''}`
 }
 
-/**
- * 個別銘柄タブの銘柄レール (左固定)。旧 inline picker (「切替: <長い名前の列挙>」)
- * は full name の link が折り返して読みづらかったため、ticker + 小さい銘柄名の
- * 縦リストに変更。zoom 範囲は従来通り URL で伝搬する。
- */
 function renderSymbolRail(args: ChartsBodySymbol): string {
   if (args.availableSymbols.length === 0) return ''
-  // 銘柄切替時にズーム範囲を維持するため、現在の from/to をレール URL に伝搬
+  // Carries the current zoom range into rail links so switching symbols keeps it.
   const zoomQs = args.zoom
     ? `&from=${encodeURIComponent(args.zoom.from.toISOString())}&to=${encodeURIComponent(args.zoom.to.toISOString())}`
     : ''
@@ -817,21 +711,15 @@ function renderSymbolRail(args: ChartsBodySymbol): string {
   return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${items}</aside>`
 }
 
-/** レール + 本文の 2 カラム。レールが空 (銘柄ゼロ) なら本文のみ。 */
 function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
   const rail = renderSymbolRail(args)
-  // id="symbol-main" は Phase C (client 側銘柄切替) が innerHTML を差し替える
-  // 対象の安定 anchor (#charts-symbol-redesign)。rail 無し (銘柄ゼロ) の本文
-  // のみパスでも同じ id を持たせ、swap 対象を一貫させる。
+  // `id="symbol-main"` must stay stable even with no rail (zero symbols):
+  // the client swap target keys off this id regardless of layout.
   if (!rail) return `<div id="symbol-main">${content}</div>`
   return `<div class="symbol-layout">${rail}<div id="symbol-main" class="symbol-main">${content}</div></div>`
 }
 
-/**
- * 表示中銘柄の見出し行。active / inactive を問わず常に出す (モバイル等で
- * 左レールが見えない状況でも表示中銘柄が分かるように)。inactive 銘柄には
- * 注記 (cron 評価対象外) を付ける。
- */
+/** Always rendered (not just when the rail is hidden, e.g. mobile) so the viewed symbol is identifiable on its own. */
 function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   if (!args.focusSymbol) return ''
   const focusInactive = isSymbolInactive(args.focusSymbol, args.universe)
@@ -844,10 +732,6 @@ function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong>${note}</p>`
 }
 
-/**
- * チャートページのタブ dispatcher (#remove-grid で grid.ts から移設)。
- * 全タブ renderer に依存するため、最後発の symbol モジュールに置く。
- */
 export function chartsBody(args: ChartsBodyArgs): string {
   if (args.tab === 'overview') return renderOverviewTab(args)
   if (args.tab === 'quality') return renderQualityTab(args)

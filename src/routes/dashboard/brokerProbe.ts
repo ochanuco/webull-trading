@@ -1,27 +1,8 @@
 import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { displaySymbol, esc } from './shared'
 
-/**
- * Broker probe UI body: form + 結果表示器。submit で `/admin/broker/probe` を
- * 同一 origin の fetch (credentials: 'same-origin') で呼び、JSON を pre 整形
- * 表示。auth は browser の既存 Cloudflare Access cookie が流用される (#29 で
- * basic auth から Access に移行済)。
- *
- * Server-side proxy を介さず client-side fetch にしてる理由:
- *   - dashboard handler が admin endpoint を sub-fetch するには Access JWT を
- *     request から request へ転送する必要があり、責務が混ざる
- *   - client-side fetch なら browser の Access cookie が自然に流れる、ロジック単純
- *   - probe payload に Cache-Control: no-store が付いてるので browser cache
- *     にも残らない
- */
-/**
- * symbol → probe category 推定 (server-side)。client 側の inferCategory と同じ
- * ロジックを TS でも持つことで、universe を server-side render するときの
- * data-category 属性を正しく埋められる。
- *
- * - 4 桁数字 = JP_STOCK (`1570` だけ既知 ETF)
- * - US は `SOXL/SOXS/SPY/QQQ` を ETF 扱い、それ以外 STOCK
- */
+// Mirrors the client-side `inferCategory` in TS so server-rendered universe buttons get the
+// right `data-category` attribute without duplicating the category assignment differently.
 function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_STOCK' | 'US_ETF' {
   const upper = symbol.toUpperCase()
   if (/^\d{4}$/.test(upper)) {
@@ -34,12 +15,6 @@ function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_STOCK' 
   return 'US_STOCK'
 }
 
-/**
- * universe.allowedSymbols + inactiveSymbols を category 別にグルーピングして
- * クリック可能ボタン群を返す。inactive は薄色 + INACTIVE バッジで識別。
- * universe=null (DB 未設定 / load 失敗) は空文字 (UI から登録銘柄セクションは
- * 隠れず空のまま表示)。
- */
 function renderUniverseLinks(universe: SymbolUniverse | null): string {
   if (!universe) {
     return '<span class="muted" style="font-size:12px">universe ロード失敗 (DB 未設定 / 接続失敗)</span>'
@@ -49,7 +24,6 @@ function renderUniverseLinks(universe: SymbolUniverse | null): string {
   if (allSymbols.length === 0) {
     return '<span class="muted" style="font-size:12px">登録銘柄なし</span>'
   }
-  // category 別に分類して描画 (US_STOCK / US_ETF / JP_STOCK / JP_ETF の順)
   const groups: Record<string, string[]> = {
     US_STOCK: [],
     US_ETF: [],
@@ -86,15 +60,11 @@ export function brokerProbeBody(args: {
   category: string
   universe: SymbolUniverse | null
 }): string {
-  // #461 で刷新: raw JSON の縦積み → カード型のサマリ UI。
-  //   - 上段: 銘柄選択 (登録銘柄 / 保有 / control) + status + 再 probe
-  //   - 判定カード: Webull 取扱 (instrument 照会) / Webull quote / Yahoo quote / 買付余力
-  //   - 下段 <details>: drift 比較・raw レスポンス・meta (情報は落とさず格納)
-  // データ取得は従来どおり同一 origin の `/admin/broker/probe` を client fetch
-  // (Cloudflare Access cookie 流用、payload は no-store)。
-  // 自動 probe は URL に symbol+category がある時だけ (PR #250 の方針を維持)。
+  // Fetched client-side against /admin/broker/probe (not proxied through this handler): a
+  // server-side sub-fetch would need to forward the Access JWT request-to-request, mixing
+  // concerns, whereas the browser's own Access cookie flows naturally client-side.
   const universeLinks = renderUniverseLinks(args.universe)
-  // AAPL control chip は universe に AAPL が居る環境では重複するので出さない。
+  // Omitted when the universe already contains AAPL, to avoid offering it as a control chip twice.
   const hasAapl = [
     ...(args.universe?.allowedSymbols ?? []),
     ...(args.universe?.inactiveSymbols ?? []),
@@ -216,16 +186,16 @@ export function brokerProbeBody(args: {
     el.textContent = text;
   }
 
-  // XSS 防御 (CodeRabbit #462): innerHTML へ流す動的値 (URL 由来 symbol /
-  // broker 応答のフィールド / error 文字列) は必ずこれを通す。
+  // Every dynamic value headed for innerHTML (URL-derived symbol, broker response fields,
+  // error strings) must go through this first — an XSS guard, not just formatting.
   function escHtml(v) {
     return String(v == null ? '' : v).replace(/[&<>"']/g, function (ch) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
     });
   }
 
-  // probe 開始時 / fetch 失敗時に全表示領域をニュートラルへ戻す (stale 防止、
-  // CodeRabbit #462: pill だけ戻すと失敗時に前回銘柄の結果が残る)。
+  // Resets every display region, not just the pills: resetting pills alone would leave the
+  // previous symbol's stale body/raw text visible after a probe start or a failed fetch.
   function resetProbeView(label) {
     setPill('bp-instrument-pill', 'wait', label);
     setPill('bp-quote-pill', 'wait', label);
@@ -247,10 +217,8 @@ export function brokerProbeBody(args: {
     if (copyAiBtn) copyAiBtn.hidden = true;
   }
 
-  // probe 結果の AI 用コピー (#alerts-trades-ui と同運用): UI で省略・整形した
-  // 情報ではなく admin endpoint のレスポンス全体 (全 raw セクション + meta) を
-  // 文脈ヘッダ付きで積む。スクリーンショット往復だとセクションが切れて
-  // どの probe の結果か特定できない問題への対策。
+  // Copies the full admin endpoint response (all raw sections + meta), not the UI's trimmed
+  // summary — a screenshot round-trip crops sections and loses which probe it came from.
   var lastProbeResult = null;
   var copyAiBtn = document.getElementById('probe-copy-ai');
   if (copyAiBtn) copyAiBtn.addEventListener('click', function () {
@@ -281,8 +249,6 @@ export function brokerProbeBody(args: {
     }
   });
 
-  // fetch abort (10s timeout) は raw の英語のまま出すと分かりにくいので日本語化。
-  // data-api.webull.co.jp (JP market-data host) の無応答は既知 (#21、Yahoo 移行済み)。
   function humanizeError(section) {
     if (!section) return 'no data';
     if (section.error && /aborted/i.test(section.error)) return '応答なし (10秒 timeout)';
@@ -313,15 +279,12 @@ export function brokerProbeBody(args: {
     return n.toLocaleString('ja-JP', { maximumFractionDigits: 2 });
   }
 
-  // #461: instrument 照会の判定カード。quotes / trade 両 host 候補のうち最初に
-  // 200 + JSON parse 可能なものを採用する (#415 の balance 候補方式と同じ)。
   function renderInstrumentCard(body, symbol) {
     var bodyEl = document.getElementById('bp-instrument-body');
     var rawTarget = document.getElementById('bp-instrument-raw');
-    // JP の正しい path は /openapi/instrument/stock/list (JP docs Trading API >
-    // Get Stock Instrument、#461)。host 未確定のため trade / quotes 両方、かつ
-    // category 推定の取り違え対策 (CodeRabbit #462) で ETF/STOCK 両 category を
-    // 並べる。末尾 2 つは汎用 SDK path の drift 検証用 (#251 方式)。
+    // Which host actually serves this endpoint is unconfirmed, so both trade and quotes hosts
+    // are tried; both ETF/STOCK categories are tried too as a guard against a category
+    // mis-inference. The last two candidates are the generic SDK path, kept for drift checking.
     var candidates = [
       { label: 'stock/list (trade host, v2)', section: body.instrumentStockTradeV2 },
       { label: 'stock/list (trade host)', section: body.instrumentStockTrade },
@@ -344,8 +307,8 @@ export function brokerProbeBody(args: {
     }
     if (!bodyEl) return;
 
-    // instrument 照会 (#475): 候補の先頭 (trade host, v2 = 実測で稼働) を優先して
-    // symbol 一致行を探し、status (OC/CO/NT) とフラグを全分岐で添える。
+    // Candidates are tried in order (trade host v2 first — confirmed working); the first
+    // candidate with a matching symbol row wins.
     var instMatch = null;
     for (var ci = 0; ci < candidates.length && !instMatch; ci++) {
       var csec = candidates[ci].section;
@@ -373,17 +336,17 @@ export function brokerProbeBody(args: {
       return '<div class="muted" style="font-size:12px;margin-top:3px">' + chips.join(' ・ ') + '</div>';
     }
 
-    // instrument status が CO/NT なら preview の結果に関わらず NG (#475 server 側
-    // checkTradability と同じ判定)。
+    // CO/NT status is NG regardless of the preview outcome — mirrors the server-side
+    // checkTradability judgment so this UI never contradicts what actual order placement decides.
     if (instMatch && (instMatch.status === 'CO' || instMatch.status === 'NT')) {
       setPill('bp-instrument-pill', 'ng', STATUS_JA[instMatch.status]);
       bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> の instrument status は <code>' + escHtml(instMatch.status) + '</code> (' + STATUS_JA[instMatch.status] + ') — 新規エントリー不可。' + instSummaryHtml(instMatch);
       return;
     }
 
-    // 発注前検証 (Preview Order) の結果が最優先 — 発注パイプラインそのものの
-    // 検証なので instrument 照会より確度が高い (#461)。body shape を複数試して
-    // どれか 1 つでも通れば取引可能、どれかが TICKER_IS_DENY なら取扱なし確定。
+    // Preview Order takes priority over the instrument query: it exercises the actual order
+    // pipeline, so it's more authoritative. Several body shapes are tried since any one
+    // succeeding means tradable, and any one returning TICKER_IS_DENY is a confirmed deny.
     if (Array.isArray(body.previewVariants) && body.previewVariants.length > 0) {
       var okVariant = null;
       var denyVariant = null;
@@ -393,7 +356,8 @@ export function brokerProbeBody(args: {
         if (v.result && v.result.phase === 'response' && typeof v.result.bodyTruncated === 'string' &&
             v.result.bodyTruncated.indexOf('TICKER_IS_DENY') !== -1) { denyVariant = v; }
       }
-      // 全 variant が「銘柄不正」PARAM_ERR → マスタに不存在 (ZZZZ 実測パターン)。
+      // Every responding variant returning "invalid symbol" PARAM_ERR means the symbol isn't
+      // in Webull's master list at all, not merely undeliverable.
       var respondingAll = body.previewVariants.filter(function (v) { return v.result && v.result.status !== null; });
       var allInvalidSymbol = respondingAll.length > 0 && respondingAll.every(function (v) {
         var b = parseBody(v.result);
@@ -406,9 +370,9 @@ export function brokerProbeBody(args: {
         return;
       }
       if (okVariant) {
-        // preview 200 = 見積もり成功。発注 allowlist は検証されない (USMV は
-        // status=OC のまま本番 place が deny された前例) ため「取引可能」とは
-        // 表示しない。
+        // A 200 preview only means the quote succeeded, not that a real order will go
+        // through — a symbol has stayed status=OC yet still been denied at actual order
+        // placement, so this never claims "取引可能" from a preview success alone.
         setPill('bp-instrument-pill', 'unknown', instMatch && instMatch.status === 'OC' ? 'OC + 見積もり可' : '見積もり可');
         var okParsed = parseBody(okVariant.result);
         var cost = okParsed && (okParsed.estimated_cost || (okParsed.data && okParsed.data.estimated_cost));
@@ -452,7 +416,7 @@ export function brokerProbeBody(args: {
         '<span class="muted">判定不可のときの発注可否は実発注の結果 (#460 の自動停止ガード) で確定します。</span>';
       return;
     }
-    // どれか 1 候補にでも symbol が出てくれば「銘柄情報あり」(category 非依存)。
+    // A match in any responding candidate counts, regardless of which category it queried.
     var match = null;
     var matchLabel = '';
     for (var k = 0; k < responded.length; k++) {
@@ -486,8 +450,6 @@ export function brokerProbeBody(args: {
     }
   }
 
-  // 価格抽出: parse → (Yahoo chart は meta へ) → 失敗時は truncate 済み body から
-  // regex fallback。quote カードと preview の limit cap の両方で使う。
   function extractPrice(section, priceKeys) {
     if (!section) return null;
     var parsed = parseBody(section);
@@ -508,12 +470,10 @@ export function brokerProbeBody(args: {
     return null;
   }
 
-  // 直近 probe の Yahoo 価格 (preview の limit cap 用)。銘柄が変わったら使わない
-  // — 前銘柄の価格で preview すると価格系エラーが deny 判定を潰す (CodeRabbit #466)。
+  // Discarded once the symbol changes: previewing with a stale symbol's price would surface a
+  // price-related error that masks the actual deny/allow result.
   var lastYahoo = { symbol: null, price: null };
 
-  // quote カード: status pill + 価格らしきフィールドの要約。shape が読めなくても
-  // pill と raw は必ず更新する (stale 表示を残さない、CodeRabbit #262 の方針)。
   function renderQuoteCard(pillId, bodyId, section, priceKeys) {
     var ok = section && section.phase === 'response' && section.status === 200;
     setPill(pillId, ok ? 'ok' : (section ? 'ng' : 'unknown'), ok ? '200 OK' : (section ? (section.status != null ? 'status ' + section.status : 'timeout') : 'no data'));
@@ -544,7 +504,7 @@ export function brokerProbeBody(args: {
       return;
     }
     var html = items.map(function (item) {
-      // broker 応答由来の値は attribute / innerHTML どちらも必ず escape (#462)。
+      // Broker-response values are escaped for both the data-* attribute and the innerHTML text.
       var sym = escHtml(item.symbol || '');
       var name = escHtml(item.symbol_name || '');
       var qty = escHtml(formatNumber(item.quantity));
@@ -644,7 +604,6 @@ export function brokerProbeBody(args: {
         var body = res.body;
         statusEl.textContent = res.status === 200 ? '完了' : ('admin endpoint status=' + res.status);
         quoteEl.textContent = '--- snapshot (trade host, v2) ---\\n' + prettify(body.snapshotTradeV2) + '\\n\\n--- snapshot (quotes host) ---\\n' + (body.quote ? prettify(body.quote) : '(no data)');
-        // trade host + v2 の snapshot (JP docs の production host) が 200 なら優先表示。
         var webullQuote = (body.snapshotTradeV2 && body.snapshotTradeV2.status === 200) ? body.snapshotTradeV2 : (body.quote || null);
         renderQuoteCard('bp-quote-pill', 'bp-quote-body', webullQuote, ['last_price', 'price', 'close', 'last']);
         var quoteYahooEl = document.getElementById('probe-quote-yahoo');
@@ -691,13 +650,12 @@ export function brokerProbeBody(args: {
       })
       .catch(function (e) {
         statusEl.textContent = 'fetch error: ' + (e && e.message ? e.message : String(e));
-        // 失敗時も前回 probe の結果を残さない (stale 防止 #462)。
         resetProbeView('失敗');
       })
   }
 
-  // 選択 → 実行の 2 段階フロー (操作要望): chip クリックは**選択のみ** (通信
-  // しない)。「診断を実行」で初めて probe + (checkbox ON なら) 発注前検証を走らせる。
+  // Chip click only selects — it doesn't fetch. A probe (and, if checked, the preview-order
+  // check) only starts when 診断を実行 is clicked, so browsing symbols never triggers network calls.
   var selected = { symbol: null, category: null };
 
   function setSelection(sym, cat) {
@@ -748,7 +706,7 @@ export function brokerProbeBody(args: {
     });
   }
 
-  // URL params は**プリ選択のみ** (自動実行しない — 選択 → 実行の流れを徹底)。
+  // URL params only pre-select, same select-then-run rule as chip clicks — they never auto-run a probe.
   var qs = new URLSearchParams(window.location.search);
   if (qs.has('symbol') && qs.has('category')) {
     setSelection(qs.get('symbol'), qs.get('category'));

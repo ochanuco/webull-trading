@@ -19,23 +19,12 @@ export async function insertJournalRecord(
 }
 
 /**
- * Returns true when at least one trade_journal row for `symbol` within the
- * last `withinMs` ms has a `state_apply_error` indicating a sanity failure
- * (broker stub fill detected by `resolveFilledPrice`'s ratio guard) or the
- * `repair_skipped_invalid_row` variant emitted by `reconcileFills`'s repair
- * mode for the same root cause.
- *
- * Designed for the cron BUY-side cooldown (issue: 9697 04/28 06 fills
- * incident) — when a sanity failure was just observed, the broker side may
- * have already accumulated phantom shares, while the DO position remains
- * null. Letting cron continue to BUY in that window stacks positions
- * silently. This helper is the predicate for `runPullbackScheduler`'s
- * `sanityFailedCooldown` gate.
- *
- * Both markers are checked because PR #225 changed the repair path so that
- * an earlier `sanity_failed` row may be overwritten by `repair_skipped_invalid_row`
- * on the next reconcile attempt — either marker is evidence of the same
- * underlying broker-stub condition.
+ * True when `symbol` has a `trade_journal` row within `withinMs` whose
+ * `state_apply_error` shows a broker-stub sanity failure (`sanity_failed`,
+ * from `resolveFilledPrice`'s ratio guard) or its `repair_skipped_invalid_row`
+ * retry variant — a later reconcile attempt can overwrite one marker with
+ * the other, so both must be matched. Feeds `runPullbackScheduler`'s
+ * BUY-side `sanityFailedCooldown` gate.
  */
 export async function hasRecentSanityFailure(
   d1: D1Database,

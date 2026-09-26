@@ -18,8 +18,7 @@ const baseConfig: TradingConfig = {
 }
 
 function quote(price: number, ageMs = 1_000): QuoteSnapshot {
-  // bid/ask seeded inside the default spread-guard envelope so the halt /
-  // gap / band tests exercise their own gate and not the spread fail-closed.
+  // bid/ask inside the default spread-guard envelope so halt/gap/band tests exercise their own gate
   return {
     price,
     asOf: new Date(now.getTime() - ageMs).toISOString(),
@@ -63,8 +62,7 @@ function makeService(
   store: PositionStore,
   overrides: { staleQuoteMs?: number; gapRejectPct?: number } = {},
 ) {
-  // FixedRuleStrategy: price<=buyBelow → BUY. The wide thresholds make every
-  // test input a BUY regardless of symbol.
+  // FixedRuleStrategy price<=buyBelow → BUY; wide thresholds make every test input a BUY
   return new TradingService(
     new FixedRuleStrategy(10_000, 20_000_000),
     new DefaultRiskPolicy(),

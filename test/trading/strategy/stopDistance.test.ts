@@ -63,8 +63,6 @@ describe('resolveStopDistance', () => {
     expect(r.effectiveStopPct).toBe(-0.04)
   })
 
-  // 本番実測 (SOXL): atr20/price = 22% → kAtr 2.0 で stop -44%、TP は +7%。
-  // R:R 0.16 という壊れた比率が cap で 0.5 に矯正されることを固定する。
   it('SOXL 実測パラメタで R:R が 0.5 以上になる', () => {
     const r = resolveStopDistance({
       price: 136.81,

@@ -43,11 +43,8 @@ describe('loadUsdJpyRate', () => {
   it('includes requestId in every structured failure log (CodeRabbit #407)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      // non-ok
       await loadUsdJpyRate({ requestId: 'req-1', fetchFn: fakeFetch(chart(150), false, 429) })
-      // invalid rate
       await loadUsdJpyRate({ requestId: 'req-2', fetchFn: fakeFetch(chart(0)) })
-      // fetch reject
       const rejectFetch = vi.fn(async () => {
         throw new Error('boom')
       }) as unknown as typeof fetch

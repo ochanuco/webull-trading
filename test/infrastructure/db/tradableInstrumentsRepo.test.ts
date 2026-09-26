@@ -1,3 +1,5 @@
+import type { SQL } from 'drizzle-orm'
+import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core'
 import { describe, expect, it, vi } from 'vitest'
 import {
   finalizeTradableDisappearance,
@@ -28,11 +30,9 @@ interface Row {
   [k: string]: unknown
 }
 
-/**
- * 動作する in-memory fake。upsert (batch 経由) は store を実際に更新し、
- * select は store を読む。これで watermark の mark-and-sweep を実検証できる。
- * update().set().where() は記録のみ (消失判定の戻り値で検証する)。
- */
+// Working in-memory fake: upsert (via batch) really mutates `store`, select
+// reads it back, so the watermark mark-and-sweep can be exercised end to end.
+// update().set().where() only records its call (asserted via the disappearance return value).
 function memDb(initial: Row[]) {
   const store = new Map<string, Row>(initial.map((r) => [r.symbol.toUpperCase(), { ...r }]))
   const updateCalls: unknown[] = []
@@ -92,10 +92,8 @@ describe('upsertTradablePage', () => {
     const entries = Array.from({ length: 12 }, (_, i) => entry(`S${i}`)).concat(entry('SOXL'))
     const n = await upsertTradablePage(db, entries, 'wm')
     expect(n).toBe(13)
-    // 既存 SOXL は firstSeenAt 保持、lastSeenAt は watermark に更新。
     expect(store.get('SOXL')?.firstSeenAt).toBe('old')
     expect(store.get('SOXL')?.lastSeenAt).toBe('wm')
-    // 新規は firstSeenAt=watermark。
     expect(store.get('S0')?.firstSeenAt).toBe('wm')
   })
 
@@ -123,7 +121,7 @@ describe('finalizeTradableDisappearance (watermark mark-and-sweep)', () => {
     const disappeared = await finalizeTradableDisappearance(db, 'wm2', 'now')
     expect(disappeared).toEqual(['USMV'])
     expect(updateCalls).toHaveLength(1)
-    // set 内容まで検証 (誤った set 値の回帰を拾う)。
+    // Checks the actual set() values, not just the call count (regression guard).
     expect((updateCalls[0] as { set: Record<string, unknown> }).set).toMatchObject({
       currentlyTradable: false,
       updatedAt: 'now',
@@ -135,10 +133,20 @@ describe('finalizeTradableDisappearance (watermark mark-and-sweep)', () => {
     expect(await finalizeTradableDisappearance(db, 'wm2', 'now')).toEqual([])
     expect(updateCalls).toHaveLength(0)
   })
+
+  it('re-evaluates currentlyTradable/lastSeenAt in the UPDATE WHERE, not just symbol IN(...), so a concurrent newer sweep is not overwritten', async () => {
+    const { db, updateCalls } = memDb([{ symbol: 'SOXL', currentlyTradable: true, lastSeenAt: 'wm1' }])
+    await finalizeTradableDisappearance(db, 'wm2', 'now')
+    const dialect = new SQLiteSyncDialect()
+    const { sql } = dialect.sqlToQuery((updateCalls[0] as { where: SQL }).where)
+    expect(sql).toContain('"symbol" in')
+    expect(sql).toContain('"currently_tradable" = ?')
+    expect(sql).toContain('"last_seen_at" < ?')
+  })
 })
 
 describe('refreshTradableInstruments (一括 helper)', () => {
-  // watermark は単調増加の ISO 文字列で比較される (lex 順)。前回 < 今回 になる値を使う。
+  // Watermarks compare lexicographically as ISO strings, so PREV must sort before NOW.
   const PREV = '2026-01-01T00:00:00Z'
   const NOW = '2026-06-12T00:00:00Z'
 
@@ -152,7 +160,6 @@ describe('refreshTradableInstruments (一括 helper)', () => {
       nowIso: NOW,
     })
     expect(result.upserted).toBe(2)
-    // SOXL は今回 seen (lastSeenAt=NOW)、USMV は未 seen (PREV < NOW) → 消失。
     expect(result.disappearedSymbols).toEqual(['USMV'])
     expect(result.appliedDisappearance).toBe(true)
   })

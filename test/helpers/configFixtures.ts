@@ -1,11 +1,7 @@
 import type { LoadedGlobalConfig } from '../../src/infrastructure/db/globalConfigLoader'
 import type { SymbolUniverse } from '../../src/infrastructure/db/symbolUniverse'
 
-/**
- * Default snapshot matching the legacy test env (DRY_RUN=true, TRADING_ENABLED=true,
- * MAX_ORDER_NOTIONAL=100 相当)。route / integration テストで D1 loader を vi.mock
- * する際のベースラインとして使う。
- */
+// Baseline for tests that mock the D1 config loader; matches the legacy test env.
 export function makeGlobalConfigSnapshot(
   overrides: Partial<LoadedGlobalConfig> = {},
 ): LoadedGlobalConfig {

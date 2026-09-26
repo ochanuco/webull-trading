@@ -13,9 +13,7 @@ import { FixedRuleStrategy } from '../../../src/trading/strategy/strategies/Fixe
 
 const fixedNow = new Date('2026-04-21T14:00:00.000Z')
 
-// Stretched maxOrderNotional so the per-symbol risk gate never trips before
-// the portfolio exposure gate. The point of these tests is the exposure
-// ceiling specifically (#77).
+// maxOrderNotional stretched so the per-symbol risk gate never trips before the exposure gate under test
 const baseConfig: TradingConfig = {
   dryRun: true,
   tradingEnabled: true,
@@ -28,7 +26,7 @@ const baseConfig: TradingConfig = {
 const buyUsd = {
   symbol: 'SOXL',
   price: 10,
-  quantity: 50, // notional = 500
+  quantity: 50,
   buyBelow: 11,
   sellAbove: 999,
 }
@@ -36,7 +34,7 @@ const buyUsd = {
 const buyJpy = {
   symbol: '7203',
   price: 1_000,
-  quantity: 100, // notional = 100_000
+  quantity: 100,
   buyBelow: 1_100,
   sellAbove: 999_999,
 }
@@ -150,8 +148,7 @@ function makeService(
 
 describe('TradingService portfolio exposure gate (#77)', () => {
   it('rejects BUY when projected USD exposure exceeds the ceiling', async () => {
-    // total_capital_usd = 1333, max_pct = 0.6 → ceiling = 799.8.
-    // openExposure = 500, order = 500 → projected 1000 > 799.8 → reject.
+    // ceiling = 1333 * 0.6 = 799.8; projected 500 + 500 = 1000 exceeds it
     const portfolio: PortfolioState = {
       ...emptyPortfolioState(() => fixedNow),
       openExposureUsd: 500,
@@ -172,7 +169,7 @@ describe('TradingService portfolio exposure gate (#77)', () => {
   })
 
   it('allows BUY when projected exposure stays at or below the ceiling', async () => {
-    // ceiling = 800 (= 1333 * 0.6). open 0 + order 500 = 500 ≤ 800.
+    // ceiling = 1333 * 0.6 = 800; projected 0 + 500 = 500 stays under it
     const portfolio: PortfolioState = emptyPortfolioState(() => fixedNow)
     const service = makeService(
       makePositionStore(emptySymbolState('SOXL', () => fixedNow)),
@@ -186,9 +183,7 @@ describe('TradingService portfolio exposure gate (#77)', () => {
   })
 
   it('skips the gate when total_capital_usd is null (POC default)', async () => {
-    // With null capital baseline, openExposure can be arbitrarily large but
-    // the gate must not trigger — POC requirement is "fail-open until the
-    // operator seeds a number".
+    // fail-open until the operator seeds a capital number, regardless of openExposure size
     const portfolio: PortfolioState = {
       ...emptyPortfolioState(() => fixedNow),
       openExposureUsd: 9_999_999,
@@ -205,8 +200,6 @@ describe('TradingService portfolio exposure gate (#77)', () => {
   })
 
   it('treats USD and JPY budgets independently (USD exposure does not consume JPY ceiling)', async () => {
-    // USD heavily exposed but a JPY BUY still passes because the JPY budget
-    // is untouched.
     const portfolio: PortfolioState = {
       ...emptyPortfolioState(() => fixedNow),
       openExposureUsd: 1_000_000,
@@ -229,10 +222,9 @@ describe('TradingService portfolio exposure gate (#77)', () => {
   })
 
   it('SELL is never rejected by the exposure gate even when exposure is over-ceiling', async () => {
-    // SELLs reduce exposure; the gate only applies to BUYs.
     const sellInput = {
       symbol: 'SOXL',
-      price: 20, // strategy → SELL when > 15
+      price: 20,
       quantity: 5,
       buyBelow: 5,
       sellAbove: 15,

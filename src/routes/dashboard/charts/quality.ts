@@ -2,16 +2,11 @@ import { kpiCard } from '../overview'
 import { esc, safeJsonScript } from '../shared'
 import { type ChartsBodyQuality, type QualityPeriod, ECHARTS_CDN, QUALITY_PERIOD_LABELS } from './shared'
 
-/**
- * Per-trade realized PnL 行 (#quality-redesign)。symbol / timestamp を持つのは
- * 銘柄別集計 (`computeSymbolStats`) と期間フィルタ (`filterTradePnlsByPeriod`) の
- * 両方がこの単位で動くため。trade_journal.realized_pnl は SELL fill に確定
- * 損益が記録される (BUY は null)。
- */
+/** Per-trade realized PnL — one row per SELL fill (`realized_pnl` is null on BUY rows). */
 export interface TradePnlRow {
   realizedPnl: number
   symbol: string
-  /** ISO timestamp (trade_journal.timestamp、UTC 前提)。 */
+  /** ISO timestamp (trade_journal.timestamp, assumed UTC). */
   timestamp: string
 }
 
@@ -37,10 +32,9 @@ export async function loadTradePnls(db: D1Database): Promise<TradePnlRow[]> {
 const PERIOD_DAYS: Record<'30d' | '90d', number> = { '30d': 30, '90d': 90 }
 
 /**
- * `?period=` フィルタを行配列に適用 (#quality-redesign)。カレンダー日境界
- * (JST 日次) ではなく、`now` から遡ったローリングウィンドウ (30日 / 90日) —
- * 期間切替は「直近どれだけ遡るか」の直感に合わせる。`now` は省略可能 (test
- * から固定時刻を注入できるように)。
+ * Rolling window from `now` (not a JST calendar-day boundary) — period
+ * switching reads as "how far back", which a calendar cutoff wouldn't match
+ * near a day boundary. `now` defaults so tests can inject a fixed time.
  */
 export function filterTradePnlsByPeriod(
   rows: TradePnlRow[],
@@ -70,10 +64,8 @@ export interface TradeStats {
   total: number
 }
 
-/**
- * 「エッジが本物か」を 1 表で見るためのサマリ統計。break-even (pnl=0) は wins / losses
- * どちらにも入れない (エクスペクタンシ計算で 0 として中立に効く)。
- */
+// break-even (pnl=0) counts toward neither wins nor losses, but still
+// contributes 0 to `expectancy`'s denominator below.
 export function computeTradeStats(pnls: number[]): TradeStats {
   if (pnls.length === 0) {
     return { count: 0, wins: 0, losses: 0, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, expectancy: 0, total: 0 }
@@ -98,9 +90,9 @@ export function computeTradeStats(pnls: number[]): TradeStats {
   const avgWin = wins > 0 ? sumWin / wins : 0
   const avgLoss = losses > 0 ? sumLoss / losses : 0
   const profitFactor = sumLoss < 0 ? sumWin / Math.abs(sumLoss) : sumWin > 0 ? Infinity : 0
-  // break-even (pnl=0) も分母に含めた「全トレード平均」。旧式
-  // (winRate*avgWin + (1-winRate)*avgLoss) は分母が decisive のみで、
-  // break-even 込みの「トレード毎」表示と不整合だった (CodeRabbit PR #684)。
+  // Divides by all trades, not just decisive ones — winRate*avgWin +
+  // (1-winRate)*avgLoss divides by decisive trades only, which undercounts
+  // break-even trades against a "per-trade" label.
   const expectancy = total / pnls.length
   return { count: pnls.length, wins, losses, winRate, avgWin, avgLoss, profitFactor, expectancy, total }
 }
@@ -113,10 +105,6 @@ export interface SymbolStat {
   profitFactor: number
 }
 
-/**
- * 銘柄別成績 (#quality-redesign)。`computeTradeStats` を銘柄ごとに再利用し、
- * 合計 PnL 降順で返す (表・横バー両方がこの順序をそのまま使う)。
- */
 export function computeSymbolStats(rows: TradePnlRow[]): SymbolStat[] {
   const bySymbol = new Map<string, number[]>()
   for (const r of rows) {
@@ -135,20 +123,9 @@ export function computeSymbolStats(rows: TradePnlRow[]): SymbolStat[] {
   return out.sort((a, b) => b.totalPnl - a.totalPnl)
 }
 
-/**
- * SKIP reason カテゴリ (#quality-redesign)。`pullbackScheduler.ts` の実際の
- * emitDecision(SKIP) reason は prefix でおおむね分類できる:
- *   - `portfolio_halted:` / `drawdown_kill:` — ポートフォリオ全体の entry 停止
- *   - `role:`             — cash_parking 等、銘柄ロールによる entry 抑止
- *   - `sizing rejected:`  — lot_size 未設定などサイジング不可
- *   - `risk:`             — earnings/macro/per-symbol risk/sanity cooldown/pair_regime
- *                            (`risk: insufficient buying power` / `risk: buying-power
- *                            unavailable` は資金不足として別カテゴリに分ける)
- *   - それ以外の internal invariant guard (bar 不足 / 価格・数量・ロック不正 /
- *     二重発注ガード) — 「システムガード」としてまとめる
- * 色は dataviz skill の検証済みデフォルト categorical palette (light/dark 両対応、
- * adjacent CVD/normal-vision gate 通過) の slot 1-7 を順に割り当てる。
- */
+// Colors are slots 1-7 of the dataviz skill's validated categorical
+// palette, in order — not picked ad hoc, so don't reorder without checking
+// its light/dark and CVD-adjacency validation still holds.
 const SKIP_REASON_CATEGORIES = [
   { key: 'halt', label: '取引停止中', color: '#2a78d6' },
   { key: 'risk_gate', label: 'リスクゲート', color: '#eb6834' },
@@ -161,11 +138,8 @@ const SKIP_REASON_CATEGORIES = [
 
 export type SkipReasonCategoryKey = (typeof SKIP_REASON_CATEGORIES)[number]['key']
 
-/**
- * raw SKIP reason 文字列 → カテゴリ key。未知の形式 (将来追加 / 旧形式) は
- * 'other' に落として合計が欠けないようにする (`aggregateDecisionRows` の
- * ERROR フォールバックと同じ考え方)。
- */
+// Unrecognized reason strings (future prefixes, old formats) fall to
+// 'other' rather than being dropped, so aggregate counts never go missing.
 export function categorizeSkipReason(reason: string | null | undefined): SkipReasonCategoryKey {
   if (!reason) return 'other'
   if (/^(?:portfolio_halted|drawdown_kill):/.test(reason)) return 'halt'
@@ -212,11 +186,8 @@ export function aggregateSkipReasonRows(
     .map(([date, counts]) => ({ date, counts }))
 }
 
-/**
- * 日次 SKIP 理由カテゴリ breakdown (#quality-redesign、旧 `loadDecisionBreakdown`
- * の置き換え)。直近 90 日固定 (`?period=` の対象外 — この chart は「最近の
- * ゲート傾向」を見る用途なので、成績カード/表/バーの期間切替とは独立)。
- */
+// Fixed 90-day window, independent of `?period=` — this chart tracks recent
+// gate trends, not the trade-stats period the rest of the tab switches on.
 export async function loadSkipReasonBreakdown(db: D1Database): Promise<SkipReasonBreakdownPoint[]> {
   const result = await db
     .prepare(
@@ -250,12 +221,9 @@ function renderPeriodPills(period: QualityPeriod): string {
   return `<div style="margin-bottom:10px">${links}</div>`
 }
 
-/**
- * X スクショ用の成績サマリカード (#quality-redesign)。固定幅 ~640px、3×3 の
- * stat タイル。既存 `.kpi-card` (`kpiCard()`、overview タブと同じ部品) を
- * 敷き詰めて再利用し、値だけ 18px に上書きする (overview の KPI 帯より密な
- * 3 列グリッドなので既定 22px だと詰まりすぎる)。
- */
+// Fixed ~640px width fits an X screenshot. Value font shrunk to 18px
+// (from kpiCard's default 22px) since this 3-column grid is denser than
+// overview's KPI strip.
 function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
   const tile = (label: string, text: string, cls?: string) =>
     kpiCard(label, `<span style="font-size:18px" class="${cls ?? ''}">${esc(text)}</span>`)

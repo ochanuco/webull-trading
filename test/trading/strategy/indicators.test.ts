@@ -17,7 +17,7 @@ describe('computePullbackIndicators', () => {
     expect(computePullbackIndicators(makeBars([1, 2, 3]))).toBeNull()
   })
 
-  it('computes sma50 / return50d (20d) / high20d (10d) / low20d from the tail window', () => {
+  it('computes sma50 / return20d (20d) / high10d (10d) / low20d from the tail window', () => {
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const result = computePullbackIndicators(makeBars(closes))
     expect(result).not.toBeNull()
@@ -25,32 +25,25 @@ describe('computePullbackIndicators', () => {
     expect(r.price).toBe(159)
     // sma50 = average of closes 110..159 = (110+159)/2 = 134.5
     expect(r.sma50).toBeCloseTo(134.5, 4)
-    // #318: return lookback は 20 営業日。last vs closes[-20] = closes[40] = 140
-    // → (159 - 140)/140
-    expect(r.return50d).toBeCloseTo((159 - 140) / 140, 4)
-    // #318: high lookback は 10 営業日。max of highs for last 10 bars。
-    // highs are close*1.01、最新 10 closes = 150..159 → max = 159 * 1.01。
-    expect(r.high20d).toBeCloseTo(159 * 1.01, 4)
-    // low20d は変更なし (20 日窓のまま、dashboard 表示用)。
-    // lows are close*0.99, last 20 closes are 140..159 → min = 140 * 0.99
+    // last vs closes[-20]=140 → (159-140)/140
+    expect(r.return20d).toBeCloseTo((159 - 140) / 140, 4)
+    // latest 10 closes 150..159 → max = 159*1.01
+    expect(r.high10d).toBeCloseTo(159 * 1.01, 4)
+    // latest 20 closes 140..159 → min = 140*0.99
     expect(r.low20d).toBeCloseTo(140 * 0.99, 4)
-    // #momentum: breakoutHigh20 = 当日を除く直近20日の終値高値。
-    // closes[-21..-1] = closes 139..158 → max = 158 (当日 159 は除外)。
+    // #momentum: 当日を除く直近20日の終値高値。closes[-21..-1]=139..158 → max=158 (当日159は除外)
     expect(r.breakoutHigh20).toBe(158)
   })
 
   it('breakoutHigh20 は当日終値を含めない (自己参照防止)', () => {
-    // 単調増加なら当日が常に最高値。breakoutHigh20 は前日(=当日除く最高)になる。
+    // 単調増加系列を使うのは、当日が常に最高値になるケースで確実に検証するため
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const r = computePullbackIndicators(makeBars(closes))!
-    // 当日 close = 159。breakoutHigh20 は 158 (当日を除外) で、159 にはならない。
     expect(r.breakoutHigh20).toBe(158)
     expect(r.breakoutHigh20).toBeLessThan(r.price)
   })
 
   it('low20d picks the smallest low even when not the most recent bar', () => {
-    // 60 closes mostly increasing, but last 20 includes a dip to enforce the
-    // 20-bar window semantics. Set bar[55].low artificially low.
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const bars = makeBars(closes)
     bars[55]!.low = 50 // dip in last 20
@@ -61,17 +54,14 @@ describe('computePullbackIndicators', () => {
   describe('intradayPrice override', () => {
     const closes = Array.from({ length: 60 }, (_, i) => 100 + i)
     const bars = makeBars(closes)
-    // #318: daily close ベースの fixture 値: last = 159, sma50 = 134.5、
-    // return50d (実体は 20d) = (159-140)/140、high20d (実体は 10d) = 159*1.01。
     const dailyOnly = computePullbackIndicators(bars)!
 
-    it('uses intradayPrice as price when provided and positive', () => {
+    it('uses intradayPrice for price only — daily-derived indicators stay unaffected', () => {
       const r = computePullbackIndicators(bars, 200)!
       expect(r.price).toBe(200)
-      // daily 系 indicator は intraday の影響を受けない
       expect(r.sma50).toBeCloseTo(dailyOnly.sma50, 4)
-      expect(r.return50d).toBeCloseTo(dailyOnly.return50d, 4)
-      expect(r.high20d).toBeCloseTo(dailyOnly.high20d, 4)
+      expect(r.return20d).toBeCloseTo(dailyOnly.return20d, 4)
+      expect(r.high10d).toBeCloseTo(dailyOnly.high10d, 4)
       expect(r.low20d).toBeCloseTo(dailyOnly.low20d, 4)
       expect(r.atr20).toBeCloseTo(dailyOnly.atr20, 4)
       expect(r.baselineAtr20).toBeCloseTo(dailyOnly.baselineAtr20, 4)
@@ -98,7 +88,6 @@ describe('computePullbackIndicators', () => {
 
 describe('computeHoldBusinessDays', () => {
   it('counts weekday-only days between open and now (US)', () => {
-    // Mon 2026-04-13 open, Fri 2026-04-17 now → 4 business days
     expect(
       computeHoldBusinessDays(
         '2026-04-13T10:00:00.000Z',
@@ -109,7 +98,6 @@ describe('computeHoldBusinessDays', () => {
   })
 
   it('skips weekends (US)', () => {
-    // Fri open, next Mon now → 1 business day (weekend does not count)
     expect(
       computeHoldBusinessDays(
         '2026-04-17T10:00:00.000Z',
@@ -124,8 +112,7 @@ describe('computeHoldBusinessDays', () => {
   })
 })
 
-// #atr-baseline-window: baseline は既定で直近 20 本 (atr20 の窓) を内包する。
-// opt-in で除外でき、その場合だけ「直近 vs それ以前」の素直な比率になる。
+// #atr-baseline-window: baseline は既定で直近 20 本を内包する。opt-in で除外でき、その場合だけ「直近 vs それ以前」の素直な比率になる
 describe('computePullbackIndicators baseline ATR window', () => {
   /** 前半 40 本は静穏 (幅 1%)、直近 20 本だけボラを 5 倍にした系列。 */
   function volSpikeBars(): DailyBar[] {
@@ -146,7 +133,6 @@ describe('computePullbackIndicators baseline ATR window', () => {
   it('overlap では baseline に直近の急騰分が混ざり、比率が鈍る', () => {
     const r = computePullbackIndicators(volSpikeBars(), null, { baselineMode: 'overlap' })!
     const ratio = r.atr20 / r.baselineAtr20
-    // 実際のボラ差は 5 倍だが、baseline が直近を含むので比率は大幅に縮む。
     expect(ratio).toBeLessThan(3)
   })
 
@@ -169,8 +155,7 @@ describe('computePullbackIndicators baseline ATR window', () => {
   })
 })
 
-// #atr-baseline-window: 既定の percentile は「その銘柄自身の atr20 分布の p80」。
-// 銘柄ごとのボラ水準 (SOXL 22% vs VUG 1.7%) に依存せず高ボラ局面を検出する。
+// #atr-baseline-window: 既定の percentile は「その銘柄自身の atr20 分布の p80」。銘柄ごとのボラ水準 (SOXL 22% vs VUG 1.7%) に依存せず高ボラ局面を検出する
 describe('percentile baseline (既定)', () => {
   /** 前半 40 本は静穏、直近 20 本だけボラ 5 倍。 */
   function volSpikeBars(): DailyBar[] {

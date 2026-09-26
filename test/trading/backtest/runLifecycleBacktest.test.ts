@@ -34,13 +34,9 @@ function uptrendWarmup(start: number): DailyBar[] {
   return buildBars(start, Array(60).fill(1.01))
 }
 
-/**
- * A gentle multi-day decline (-0.5%/day) off the warmup peak. Empirically
- * (verified against `computeEntryDistance` directly): 2025-04-01..04-05 are
- * probe-eligible (setup intact, pullback not yet in the [-6%,-3%] band),
- * 04-06/04-07 cross into the band (full-eligible), 04-08+ the trend gate
- * itself fails (20d return decays below the 8% floor).
- */
+// -0.5%/day decline off the warmup peak: 04-01..04-05 probe-eligible (pullback not yet in
+// [-6%,-3%]), 04-06/04-07 cross into the band (full-eligible), 04-08+ trend gate fails (20d
+// return decays below 8% floor). Verified directly against `computeEntryDistance`.
 function gentleDecline(fromClose: number): DailyBar[] {
   return buildBars(fromClose, Array(10).fill(0.995), '2025-04-01')
 }
@@ -77,11 +73,10 @@ describe('runLifecycleBacktest — staged entry state machine', () => {
     expect(legs.map((l) => l.label)).toEqual(['probe', 'confirm', 'full'])
     expect(legs[0]!.date).toBe('2025-04-01')
     expect(legs[1]!.date).toBe('2025-04-03') // streak: 04-01=1, 04-02=2, 04-03=3 >= confirmDays
-    expect(legs[2]!.date).toBe('2025-04-06') // first fullEligible bar
+    expect(legs[2]!.date).toBe('2025-04-06')
     expect(legs[0]!.fraction).toBeCloseTo(0.25, 9)
     expect(legs[1]!.fraction).toBeCloseTo(0.25, 9)
     expect(legs[2]!.fraction).toBeCloseTo(0.5, 9)
-    // avgPrice is the qty-weighted mean of the three legs.
     const totalQty = legs.reduce((s, l) => s + l.qty, 0)
     const weighted = legs.reduce((s, l) => s + l.qty * l.price, 0) / totalQty
     expect(result.trades[0]!.entryPrice).toBeCloseTo(weighted, 6)
@@ -171,7 +166,6 @@ describe('runLifecycleBacktest — staged entry state machine', () => {
     const withFee = await runLifecycleBacktest(bars, baseParams(STAGED_POLICY, feeConfig))
 
     expect(withFee.totalCost).toBeGreaterThan(0)
-    // One entry leg (BUY) + one exit (END_OF_DATA close) = 2 fee-bearing fills.
     const entryNotional = withFee.trades[0]!.entryLegs[0]!.qty * withFee.trades[0]!.entryLegs[0]!.price
     const exitNotional = withFee.trades[0]!.qty * withFee.trades[0]!.exitPrice
     const expectedCost =
@@ -181,7 +175,6 @@ describe('runLifecycleBacktest — staged entry state machine', () => {
     expect(withFee.totalCost).toBeCloseTo(expectedCost, 6)
     expect(withFee.trades[0]!.cost).toBeCloseTo(expectedCost, 6)
     expect(withFee.totalPnl).toBeCloseTo(free.totalPnl - expectedCost, 6)
-    // Net cash accounting: final equity should still reconcile to initialCash + totalPnl.
     expect(withFee.equityCurve.at(-1)?.equity).toBeCloseTo(
       withFee.params.initialCash + withFee.totalPnl,
       4,
@@ -220,11 +213,9 @@ describe('runLifecycleBacktest — staged entry state machine', () => {
   })
 })
 
-/**
- * `partial-trailing` ExitPolicy (issue #709 Phase 4). All cases use `entryPolicy: {kind:'full'}`
- * so `entryPrice` is a single fill and pnl% math is easy to hand-check; the `preset` exit engine
- * is unaffected by any of this (proven separately by the untouched Phase 3 regression suite).
- */
+// `partial-trailing` ExitPolicy (#709 Phase 4): all cases use entryPolicy: {kind:'full'} so
+// entryPrice is a single fill and pnl% math is easy to hand-check; the `preset` exit engine is
+// unaffected (proven separately by the untouched Phase 3 regression suite).
 describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)', () => {
   const PARTIAL_TRAILING: ExitPolicy = {
     kind: 'partial-trailing',
@@ -279,7 +270,6 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
     expect(partialLeg.qty).toBe(Math.floor(fullQty * 0.5))
     expect(finalLeg.qty).toBe(fullQty - partialLeg.qty)
     expect(trade.qty).toBe(fullQty)
-    // exitPrice is the qty-weighted average across both exit legs, not either leg's own price.
     const weightedExit =
       (partialLeg.qty * partialLeg.price + finalLeg.qty * finalLeg.price) / trade.qty
     expect(trade.exitPrice).toBeCloseTo(weightedExit, 9)
@@ -295,15 +285,12 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
     expect(partialLeg.cost).toBeCloseTo(expectedPartialCost, 9)
     expect(finalLeg.cost).toBeCloseTo(expectedFinalCost, 9)
     expect(result.totalCost).toBeCloseTo(expectedEntryCost + expectedPartialCost + expectedFinalCost, 6)
-    // Cash conservation: ending equity always reconciles to initialCash + totalPnl regardless of
-    // how many legs the round trip took to close.
     expect(result.equityCurve.at(-1)?.equity).toBeCloseTo(result.params.initialCash + result.totalPnl, 4)
   })
 
   it('falls back to a full TP exit (single "final" leg) when the tpFraction floor leaves no residual', async () => {
     const { bars } = fullEntryPullbackBars([1.04, 1.04, 1.04])
-    // initialCash sized so the entry fills exactly 1 share — floor(1 * 0.5) = 0, so the partial
-    // sale would be a 0-share leg; the engine must fall back to a full TP close instead.
+    // initialCash sized to fill exactly 1 share, so floor(1 * 0.5) = 0 forces the fallback
     const result = await runLifecycleBacktest(bars, {
       symbol: 'TEST',
       from: '2025-01-01',
@@ -342,8 +329,7 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
     const trade = result.trades[0]!
     expect(trade.exitReason).toBe('TRAIL')
     expect(trade.exitLegs.map((l) => l.label)).toEqual(['partial_tp', 'final'])
-    // The trail exit still nets a profit — the residual rode a big chunk of the rally before
-    // giving it back, it wasn't stopped out at a loss.
+    // residual rode a big chunk of the rally before giving it back — not stopped out at a loss
     expect(trade.realizedPnl).toBeGreaterThan(0)
   })
 
@@ -365,8 +351,7 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
     const trade = result.trades[0]!
     expect(trade.exitReason).toBe('STOP')
     expect(trade.exitLegs.map((l) => l.label)).toEqual(['partial_tp', 'final'])
-    // A crash steep enough to blow through the hard stop wipes out the gain the partial TP
-    // locked in — net pnl goes negative even though the first leg sold at a profit.
+    // the crash wipes out the partial-TP gain even though that first leg sold at a profit
     expect(trade.realizedPnl).toBeLessThan(0)
   })
 
@@ -380,12 +365,10 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
       low: last * 0.94,
       close: last * 0.95,
     }
-    // A mild +0.3%/day continuation (not a sharp rally, not a decline): keeps pnl well under TP
-    // and the hard-stop distance the whole window, so time-stop is the only thing that can fire.
-    // Empirically (verified directly against `computeEntryDistance`): the trend gate chain holds
-    // through business-day 5 (2025-04-08) and has failed (trend gate) by business-day 6
-    // (2025-04-09) — chosen so one scenario's extended deadline lands inside the "still holds"
-    // window and the other's original deadline lands after the gate has already failed.
+    // +0.3%/day: stays well under TP/hard-stop distance so only time-stop can fire. Verified
+    // against `computeEntryDistance`: trend gate holds through business-day 5 (2025-04-08) and
+    // has failed by business-day 6 (2025-04-09) — split needed so one scenario's extended
+    // deadline lands inside the "still holds" window and the other's lands after it fails.
     const cont = buildBars(pullbackDay.close, Array(contDays).fill(1.003), '2025-04-02')
     return [...warmup, pullbackDay, ...cont]
   }
@@ -404,11 +387,9 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
       feeFixedPerOrder: 0,
     })
 
-    // Without the extension this would have closed on 2025-04-03 (business-day 2). Closing on
-    // 2025-04-08 instead (business-day 5 = 2 + 3) proves the one-shot extension fired — and since
-    // the trend gate chain is still intact on 2025-04-08 (see `timeStopExtensionBars`), the exit
-    // there also proves the extension is a hard cap, not something that re-extends indefinitely
-    // while the trend keeps holding.
+    // without the extension this closes on 2025-04-03 (day 2); closing on 04-08 (day 5 = 2+3)
+    // proves the one-shot extension fired, and since the trend gate is still intact there, it
+    // also proves the extension is a hard cap rather than something that re-extends indefinitely
     expect(result.trades).toHaveLength(1)
     const trade = result.trades[0]!
     expect(trade.exitReason).toBe('TIME_STOP')
@@ -429,9 +410,8 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
       feeFixedPerOrder: 0,
     })
 
-    // The trend gate has already failed by business-day 6 (2025-04-09, see
-    // `timeStopExtensionBars`), so the extension condition never fires — the exit lands on the
-    // *original* deadline (2025-04-09), not the would-be-extended 2025-04-14.
+    // trend gate has already failed by day 6, so the extension never fires — exit lands on the
+    // original deadline (2025-04-09), not the would-be-extended 2025-04-14
     expect(result.trades).toHaveLength(1)
     const trade = result.trades[0]!
     expect(trade.exitReason).toBe('TIME_STOP')
@@ -460,7 +440,6 @@ describe('runLifecycleBacktest — partial-trailing exit policy (#709 Phase 4)',
     ])
 
     expect(implicit.trades).toHaveLength(1)
-    // preset always closes in one leg — no partial_tp, whole qty at once.
     expect(implicit.trades[0]!.exitLegs.map((l) => l.label)).toEqual(['final'])
     expect(implicit.trades[0]!.exitReason).toBe('TP')
     expect(implicit.totalPnl).toBeCloseTo(explicit.totalPnl, 9)
@@ -515,7 +494,6 @@ describe('fee-inclusive cash clamp (#713 review)', () => {
       [...warmup, pullbackDay],
       baseParams({ kind: 'full' }, { feeFixedPerOrder: 50, feePctOfNotional: 0.01 }),
     )
-    // fill が起きたかに関わらず equity 曲線に負の cash が現れないこと
     for (const p of result.equityCurve) {
       expect(p.equity).toBeGreaterThanOrEqual(0)
     }
@@ -525,9 +503,7 @@ describe('fee-inclusive cash clamp (#713 review)', () => {
 
 describe('staged entry × partial-trailing interaction', () => {
   it('freezes entry-leg additions once a partial TP has fired on the round trip', async () => {
-    // probe/confirm (0.5 投入) → rally で partial TP → 再度押し目圏に入っても
-    // 残り fraction の追加建てをしないこと。trail/hard-stop/time-stop を遠ざけて
-    // 「open のまま押し目再来」を作る。
+    // trail/hard-stop/time-stop を遠ざけて、position を open のまま押し目が再来する状況を作る
     const warmup = uptrendWarmup(100)
     const decline = gentleDecline(warmup[warmup.length - 1]!.close)
     const probePhase = decline.slice(0, 4) // 04-01..04-04: probe→confirm (streak 3)
@@ -544,7 +520,6 @@ describe('staged entry × partial-trailing interaction', () => {
     const trade = result.trades[0]!
     const partial = trade.exitLegs.find((l) => l.label === 'partial_tp')
     expect(partial).toBeDefined()
-    // entry leg は partial TP の日以降に 1 本も増えていない
     for (const leg of trade.entryLegs) {
       expect(leg.date <= partial!.date).toBe(true)
     }
@@ -552,12 +527,8 @@ describe('staged entry × partial-trailing interaction', () => {
   })
 })
 
-/**
- * `evaluateReentry` (issue #709 Phase 5). `TEST_DEFAULT_RULE` sets
- * `reentryMinAtrBelowLastExit: 1.0` / `reentryGuardBusinessDays: 3`, matched against
- * `businessDaysBetween` directly-verified date pairs (2025-04-08 is a Tuesday: 1 business day to
- * 04-09, 3 to 04-11, 4 to 04-14, 5 to 04-15).
- */
+// evaluateReentry (#709 Phase 5): TEST_DEFAULT_RULE sets reentryMinAtrBelowLastExit=1.0 /
+// reentryGuardBusinessDays=3. 2025-04-08 (Tue) business days: 1→04-09, 3→04-11, 4→04-14, 5→04-15.
 describe('evaluateReentry (#709 Phase 5)', () => {
   const rule = TEST_DEFAULT_RULE
 
@@ -731,19 +702,11 @@ describe('evaluateReentry (#709 Phase 5)', () => {
   })
 })
 
-/**
- * Harness integration (#709 Phase 5): `reentryPolicy: 'reason-aware'` blocks a would-be re-entry
- * after a STOP that `reentryPolicy: 'none'` (Phase 3/4 behavior) takes, on the identical bars.
- *
- * A single sharp crash (-20% one day) after the initial entry both triggers the STOP and wrecks
- * the 50d-return trend gate — `distance.buyable`/`trendContinues` stay false for weeks while the
- * gate recovers. The +2%/day rebound restores `trendContinues` (all non-pullback gates pass) on
- * 2025-04-20, at which point the position is still flat and (staged) `probeEligible` — the first
- * bar either policy could actually re-enter on. `businessDaysBetween('2025-04-02', '2025-04-20')`
- * (the STOP date to that bar) is 12; `slWaitDays: 15` keeps the STOP-wait block active there, so
- * `'reason-aware'` still blocks while `'none'` fires the probe fill — proving the gate, not
- * happenstance, is what's different between the two runs.
- */
+// Harness integration (#709 Phase 5): a single -20% crash both triggers the STOP and wrecks the
+// 50d-return trend gate; the +2%/day rebound restores trendContinues on 2025-04-20, the first bar
+// either policy could re-enter on. businessDaysBetween(STOP, 04-20) = 12, and slWaitDays=15 keeps
+// the STOP-wait block active there — so 'reason-aware' still blocks while 'none' fires the probe
+// fill, proving the gate (not happenstance) is what differs between the two runs.
 describe('runLifecycleBacktest — reason-aware reentryPolicy blocks a re-entry `none` takes (#709 Phase 5)', () => {
   it('does not re-enter after a STOP within slWaitDays, while `none` does on the identical bars', async () => {
     const warmup = uptrendWarmup(100)
@@ -786,15 +749,11 @@ describe('runLifecycleBacktest — reason-aware reentryPolicy blocks a re-entry 
       reentryPolicy: { kind: 'reason-aware', slWaitDays: 15 },
     })
 
-    // `none`: STOP exit, then a second round trip re-entering once the trend gate recovers
-    // (forced closed at end-of-data — the window doesn't run long enough for a real exit signal).
     expect(withoutGate.trades).toHaveLength(2)
     expect(withoutGate.trades[0]!.exitReason).toBe('STOP')
     expect(withoutGate.trades[1]!.entryLegs[0]!.label).toBe('probe')
     expect(withoutGate.trades[1]!.entryLegs[0]!.date).toBe('2025-04-20')
 
-    // `reason-aware` (slWaitDays: 15 > the 12 business days from the STOP to 2025-04-20): the
-    // exact same re-entry opportunity is blocked outright — only the original STOP round trip.
     expect(withGate.trades).toHaveLength(1)
     expect(withGate.trades[0]!.exitReason).toBe('STOP')
   })

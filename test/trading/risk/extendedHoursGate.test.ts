@@ -38,8 +38,7 @@ describe('extendedHoursStatusToDecision', () => {
 })
 
 describe('isWithinExtendedHoursGateWindow', () => {
-  // 2026-04-20 (Mon) は US 休場日ではない (Good Friday は 2026-04-03)。EDT (UTC-4)
-  // 期間なので ET = UTC - 4h。開場 09:30 ET = 13:30 UTC。
+  // 2026-04-20 (Mon, EDT UTC-4): 通常取引日、開場 09:30 ET = 13:30 UTC
   it('is valid 30 minutes after US open (10:00 ET)', () => {
     const now = new Date('2026-04-20T14:00:00.000Z')
     expect(isWithinExtendedHoursGateWindow(now)).toBe(true)

@@ -119,8 +119,7 @@ describe('evaluateEarningsGate — within window', () => {
   })
 
   it('rejects across a weekend (Friday earnings, Monday eval = 1 BD)', async () => {
-    // Friday earnings 2026-04-17, Monday eval 2026-04-20 — 3 calendar days but
-    // 1 business day with weekend skip, must reject under freezeBusinessDays=1.
+    // 3 calendar days but 1 business day with weekend skip
     const repo = fakeRepo([row('AAPL', '2026-04-17')])
     const decision = await evaluateEarningsGate(
       { symbol: 'AAPL', evalDate: '2026-04-20', side: 'BUY' },
@@ -134,8 +133,7 @@ describe('evaluateEarningsGate — within window', () => {
 
 describe('evaluateEarningsGate — outside window', () => {
   it('approves 2 business days before earnings (range exclusive)', async () => {
-    // Friday earnings 2026-04-24, eval Tuesday 2026-04-21 — 2 business days
-    // gap (Wed and Thu) under freezeBusinessDays=1.
+    // gap is Wed and Thu (2 business days) under freezeBusinessDays=1
     const repo = fakeRepo([row('AAPL', '2026-04-24')])
     const decision = await evaluateEarningsGate(
       { symbol: 'AAPL', evalDate: '2026-04-21', side: 'BUY' },
@@ -239,8 +237,7 @@ describe('evaluateEarningsGate — config sanitisation', () => {
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     const call = fetchSpy.mock.calls[0]!
-    // window expanded to ±30 BD around 2026-04-20 — `from` should be well
-    // before, `to` well after.
+    // window expanded to ±30 BD around 2026-04-20
     expect(call[1] < '2026-04-01').toBe(true)
     expect(call[2] > '2026-05-01').toBe(true)
   })

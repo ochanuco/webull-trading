@@ -72,7 +72,6 @@ describe('reconcileFills internals', () => {
   // ratio sanity guardrail (issue: 6971 ping-pong from filled_price=10 stub)
   describe('resolveFilledPrice ratio sanity', () => {
     beforeEach(() => {
-      // Quiet the JSON warn log so test output stays readable.
       vi.spyOn(console, 'warn').mockImplementation(() => {})
     })
     afterEach(() => {
@@ -127,14 +126,9 @@ describe('reconcileFills internals', () => {
     })
   })
 
-  // ---------------------------------------------------------------------------
-  // referenceLimitPrice (issue: 9697 ping-pong loop where broker echoes the
-  // same stub for both filled_price and limit_price → ratio=1 silently
-  // passes the PR #223 sanity guard and a $10 stub fills DO state.
-  //
-  // Fix: prefer the pre_submit row's limit_price (= our signed intent) over
-  // detail.limit_price as the ratio reference.
-  // ---------------------------------------------------------------------------
+  // fix: prefer the pre_submit row's limit_price (our signed intent) over detail.limit_price as
+  // the ratio reference, since a broker-echoed stub matching both fields let ratio=1 slip past
+  // the PR #223 sanity guard
   describe('resolveFilledPrice with referenceLimitPrice (pre_submit intent)', () => {
     beforeEach(() => {
       vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -144,10 +138,7 @@ describe('reconcileFills internals', () => {
     })
 
     it('rejects 9697-style stub (filled=10, broker.limit=10, pre_submit=3516)', () => {
-      // The exact bug: broker echoes a stub limit_price that matches its
-      // stub filled_price, so ratio = 10/10 = 1 and the prior implementation
-      // accepted the bogus fill. With the pre_submit reference, ratio
-      // = 10/3516 = 0.00284 → reject.
+      // broker ratio 10/10=1 would pass; pre_submit ratio 10/3516≈0.00284 correctly rejects
       const detail = {
         items: [{ filled_price: '10' }],
         limit_price: '10',
@@ -168,10 +159,8 @@ describe('reconcileFills internals', () => {
     })
 
     it('falls back to broker limit when referenceLimitPrice is null', () => {
-      // No pre_submit reference (= legacy caller). Existing behaviour:
-      // ratio uses broker limit. Stub-vs-stub still passes (ratio=1) — this
-      // is the bug we are fixing for the new caller, but the fallback is
-      // preserved to avoid regression for any non-reconcile call site.
+      // preserved for legacy (non-reconcile) callers, even though it still lets a
+      // stub-vs-stub ratio=1 through — the bug this describe block fixes only for the new caller
       const detail = {
         items: [{ filled_price: '10' }],
         limit_price: '10',
@@ -191,8 +180,6 @@ describe('reconcileFills internals', () => {
     })
 
     it('treats non-positive referenceLimitPrice as missing (falls back to broker limit)', () => {
-      // Defensive against malformed pre_submit rows. 0 / negative → ignore
-      // and fall back to broker echo.
       const detail = {
         items: [{ filled_price: '10' }],
         limit_price: '2683',
@@ -216,6 +203,29 @@ describe('reconcileFills internals', () => {
       expect(
         _internal.resolveFilledPrice(1, detail, { referenceLimitPrice: 3516 }),
       ).toBe(3500)
+    })
+  })
+
+  describe('findPairPartner', () => {
+    const pairRegimes = [
+      { bullSymbol: 'SOXL', bearSymbol: 'SOXS', proxySymbol: 'SOXX', invalidConfig: null },
+      { bullSymbol: 'TQQQ', bearSymbol: 'SQQQ', proxySymbol: 'QQQ', invalidConfig: null },
+    ]
+
+    it('returns the bear symbol when the bull leg exits', () => {
+      expect(_internal.findPairPartner('SOXL', pairRegimes)).toBe('SOXS')
+    })
+
+    it('returns the bull symbol when the bear leg exits', () => {
+      expect(_internal.findPairPartner('SQQQ', pairRegimes)).toBe('TQQQ')
+    })
+
+    it('is case-insensitive on the input symbol', () => {
+      expect(_internal.findPairPartner('soxl', pairRegimes)).toBe('SOXS')
+    })
+
+    it('returns null for a symbol not in any regime-enabled pair', () => {
+      expect(_internal.findPairPartner('AAPL', pairRegimes)).toBeNull()
     })
   })
 })
@@ -297,11 +307,6 @@ function makeFakeDb(rows: CandidateRow[], options: { failStateAppliedAtOnce?: bo
         pendingSet = values
         return {
           where: (predicate: { queryChunks?: unknown[] }) => {
-            // Pull the row id out of the eq() predicate. drizzle-orm's
-            // `eq(col, value)` creates an SQL chunk where the bound value
-            // is in `queryChunks`. We don't care about the schema; just
-            // grep the chunks for a finite number — there's only one row
-            // id in any UPDATE we issue.
             const rowId = extractRowId(predicate)
             updates.push({ rowId, set: pendingSet ?? {} })
             const shouldFail = failStateAppliedAtOnce && pendingSet?.stateAppliedAt !== undefined
@@ -406,7 +411,6 @@ const FAKE_DB_BINDING = { __isFakeD1: true } as unknown as D1Database
 
 describe('reconcileFills state-apply marker (issue #142)', () => {
   beforeEach(() => {
-    // Quiet the JSON event log so test output stays readable.
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'log').mockImplementation(() => {})
   })
@@ -550,8 +554,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       retryStateApply: true,
     })
 
-    // Repair-mode rows must NOT trigger a fresh Webull poll — the canonical
-    // status/qty/price are already on the row.
+    // canonical status/qty/price are already on the row, so no fresh poll is needed
     expect(webullStub.findOrderByClientId).not.toHaveBeenCalled()
     expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-repair-1', {
       side: 'BUY',
@@ -772,13 +775,11 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(portfolioStub.applyRealizedPnlOnce).toHaveBeenCalledWith('coid-sell-1', 40)
     expect(summary.stateApplied).toBe(1)
     expect(updates.at(-1)!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
-    // #reentry (Change A): 損益符号を問わず全 SELL で cooldown を張る。+40 の
-    // 利確でも翌営業日まで park し、同日/次tick の買い戻し whipsaw を止める。
+    // cooldown even on a profit prevents same-day/next-tick buyback whipsaw
     expect(symbolStub.setCooldown).toHaveBeenCalledTimes(1)
-    // #661: 解除は翌営業日の**寄り** (nextSessionOpen) であって旧
-    // nextTradingDay (24h 刻み・時刻保持) の 2026-04-27T12:00:00.000Z ではない。
-    // now = 2026-04-25T12:00:00.000Z (土) → 翌営業日は 2026-04-27 (月)、
-    // US 開場 09:30 ET = EDT で 13:30Z。
+    // #661: release is the next session's open (nextSessionOpen), not the old nextTradingDay's
+    // 24h-later same-clock-time 2026-04-27T12:00:00.000Z. Sat 04-25 → next trading day Mon 04-27,
+    // US open 09:30 ET = 13:30Z (EDT).
     expect(symbolStub.setCooldown).toHaveBeenCalledWith('SOXL', '2026-04-27T13:30:00.000Z')
   })
 
@@ -797,12 +798,9 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     }
     const first = makeFakeDb([row], { failStateAppliedAtOnce: true })
     const second = makeFakeDb([row])
-    // #77: reconcileFills now also calls `createDb` once at startup for the
-    // symbol_universe lookup (= 2 createDb invocations per reconcileFills
-    // call). Queue an extra "universe" fake before each pass — the universe
-    // load is wrapped in try/catch so its result doesn't have to be a real
-    // symbol_config row set; an empty fake DB whose SELECT throws is fine
-    // (handler falls back to the JP-numeric currency heuristic).
+    // #77: reconcileFills also calls createDb once at startup for the symbol_universe lookup
+    // (2 createDb invocations per call). That load is wrapped in try/catch, so an empty fake
+    // whose SELECT throws is fine here (handler falls back to the JP-numeric currency heuristic).
     const universeFake = makeFakeDb([])
     vi.mocked(createDb)
       .mockReturnValueOnce(universeFake.db)
@@ -854,18 +852,11 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     await expect(reconcileFills({ env: {} as never })).rejects.toThrow(/env\.DB/)
   })
 
-  // ---------------------------------------------------------------------------
-  // sanity failure → repair cohort retention (PR #223 CodeRabbit Major)
-  //
-  // When `resolveFilledPrice()` rejects a fill price as a stub (ratio guard),
-  // the row must be left WITHOUT `state_applied_at` so the next reconcile
-  // tick re-selects it from the repair cohort and tries again with whatever
-  // the broker now reports.
-  // ---------------------------------------------------------------------------
-
+  // sanity failure → repair cohort retention (PR #223 CodeRabbit Major): when
+  // resolveFilledPrice() rejects a fill price as a stub (ratio guard), the row must be left
+  // WITHOUT state_applied_at so the next reconcile tick re-selects it and retries
   it('sanity failure: keeps state_applied_at NULL so next tick retries', async () => {
-    // JP UAT 6971-style stub: filled_quantity > 0 but filled_price=10 vs
-    // limit_price=2683 — sanity ratio guard rejects.
+    // JP UAT 6971-style stub: filled_price=10 vs limit_price=2683 — sanity ratio guard rejects
     const row: CandidateRow = {
       id: 31,
       clientOrderId: 'coid-jp-stub-1',
@@ -892,7 +883,6 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         },
       }) as unknown as ReturnType<typeof createWebullHttpClient>,
     )
-    // Quiet sanity warn log.
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const symbolStub = emptySymbolStateStub()
 
@@ -907,18 +897,12 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     // DO state apply must NOT happen — the stub price would poison avgPrice.
     expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
 
-    // Two UPDATEs:
-    //   (1) journal fill columns (broker_status=FILLED, filled_qty=1,
-    //       filled_price=null because sanity rejected)
-    //   (2) failure marker (state_apply_error set, attempts++) — but
-    //       crucially state_applied_at must NOT be stamped.
+    // (1) journal fill columns (filled_price=null because sanity rejected), (2) failure marker
     expect(updates).toHaveLength(2)
     expect(updates[0]!.set.brokerStatus).toBe('FILLED')
     expect(updates[0]!.set.filledQty).toBe(1)
     expect(updates[0]!.set.filledPrice).toBeNull()
     expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
-    // Failure marker UPDATE: error recorded, marker NOT stamped → row
-    // remains in repair cohort for next tick.
     expect(updates[1]!.set.stateAppliedAt).toBeUndefined()
     expect(updates[1]!.set.stateApplyError).toMatch(/sanity_failed/)
     expect(updates[1]!.set.stateApplyAttempts).toBeDefined()
@@ -932,18 +916,9 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
   })
 
   it('next reconcile tick: realistic broker price → DO apply succeeds, marker stamped', async () => {
-    // Same row from the sanity failure — broker_status='FILLED' already
-    // recorded but state_applied_at still NULL. retryStateApply=true sweeps
-    // it back. This time the broker returns a realistic 2680 vs 2683 (within
-    // the 0.5–2x band) — but note the repair branch uses the canonical
-    // filled_price already on the row, NOT the broker's response. So we
-    // simulate the row having been updated (e.g. by a prior cron tick that
-    // saw a realistic broker price between #1 and #2 — equivalent to the row
-    // gaining a usable price by some path).
-    //
-    // Practical model: imagine the prior cron tick observed the new healthy
-    // price and the journal UPDATE wrote `filled_price=2680`, but the DO
-    // apply still failed transiently. retryStateApply now picks it up.
+    // simulates a prior cron tick already having written a healthy filled_price=2680 to the
+    // row (the repair branch uses the row's own filled_price, not a fresh broker response),
+    // with the DO apply having failed transiently; retryStateApply now picks it back up
     const row: CandidateRow = {
       id: 31,
       clientOrderId: 'coid-jp-stub-1',
@@ -973,9 +948,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       retryStateApply: true,
     })
 
-    // Repair path doesn't re-poll Webull.
     expect(webullStub.findOrderByClientId).not.toHaveBeenCalled()
-    // DO apply now runs with the healthy price.
     expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('6971', 'coid-jp-stub-1', {
       side: 'BUY',
       qty: 1,
@@ -989,10 +962,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
   })
 
   it('FILLED with filledQty=0 (genuine no-op): stamps marker — no retry forever', async () => {
-    // Distinguishes (b) sanity failure from (a) genuine "FILLED but nothing
-    // to apply". CANCELLED-then-FILLED shaped rows (filledQty=0) have no
-    // recoverable state — stamp the marker so the row exits the repair
-    // cohort.
+    // distinguishes this from the sanity-failure case above: a genuine no-op has no recoverable
+    // state to retry for, unlike a sanity-rejected price which might resolve on a later poll
     const row: CandidateRow = {
       id: 33,
       clientOrderId: 'coid-zero-qty',
@@ -1029,20 +1000,15 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
 
     expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
-    // Two UPDATEs: journal fill columns + state_applied_at marker (no-op
-    // path — nothing to apply, stamp so we don't retry forever).
     expect(updates).toHaveLength(2)
     expect(updates[1]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
     expect(summary.stateApplied).toBe(0)
     expect(summary.stateApplyFailed).toBe(0)
   })
 
-  // ---------------------------------------------------------------------------
-  // Partial-fill-then-cancel (this PR): a limit order that partially fills
-  // before the remainder is CANCELLED/EXPIRED still owes the DO the shares
-  // that actually filled — the prior code only applied on `status === 'FILLED'`
-  // and silently dropped these.
-  // ---------------------------------------------------------------------------
+  // Partial-fill-then-cancel: a limit order that partially fills before the remainder is
+  // CANCELLED/EXPIRED still owes the DO the shares that actually filled — applying only on
+  // status === 'FILLED' would silently drop these.
   it('CANCELLED with filled_quantity > 0 applies the filled portion to symbol state', async () => {
     const row: CandidateRow = {
       id: 40,
@@ -1130,19 +1096,10 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(summary.errors).toEqual([])
   })
 
-  // Regression: a historical no-fill CANCELLED row is never stamped
-  // state_applied_at (there was nothing to apply), so `broker_status`
-  // already equals 'CANCELLED' with `state_applied_at IS NULL` on the
-  // journal. Without the `filledQty > 0` guard on the repair cohort, this
-  // shape would be treated as "repair" and re-hit
-  // `repair_skipped_invalid_row` (recordApplyFailure + summary.errors) on
-  // every single reconcile tick forever, even though the cancel was
-  // perfectly normal.
-  //
-  // `makeFakeDb`'s select chain does not evaluate the drizzle `where(...)`
-  // predicate (it just returns the fixture rows unconditionally), so this
-  // exercises the in-loop `isRepair` guard rather than the SQL
-  // `repairFilter` — the two are written to mirror each other.
+  // without the filledQty > 0 guard on the repair cohort, a no-fill CANCELLED row (normal;
+  // nothing to apply) would be mistaken for "repair" and re-hit repair_skipped_invalid_row on
+  // every tick forever. makeFakeDb's select chain ignores the drizzle where(...) predicate, so
+  // this exercises the in-loop isRepair guard rather than the SQL repairFilter (written to mirror it).
   it('a no-fill CANCELLED row already on the journal is not treated as repair (no recordApplyFailure, no errors, no DO call)', async () => {
     const row: CandidateRow = {
       id: 45,
@@ -1335,8 +1292,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       now: () => new Date('2026-04-25T12:00:00.000Z'),
     })
 
-    // (60 - 50) * 4 = 40 realized, on the 4 filled shares — not the original
-    // order quantity.
+    // (60 - 50) * 4 = 40 realized, on the 4 filled shares, not the original order quantity
     expect(symbolStub.recordFillOnce).toHaveBeenCalledWith('SOXL', 'coid-sell-partial-cancel', {
       side: 'SELL',
       qty: 4,
@@ -1347,12 +1303,6 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(summary.stateApplied).toBe(1)
   })
 
-  // ---------------------------------------------------------------------------
-  // 9697 ping-pong scenario (this PR): broker echoes detail.limit_price=10 to
-  // match its stub filled_price=10 → ratio=1 silently passes the PR #223
-  // sanity check. Pre_submit limit_price (3516, our signed intent) is the
-  // fix: ratio collapses to 10/3516 = 0.00284, sanity rejects, DO is spared.
-  // ---------------------------------------------------------------------------
   it('JP 9697 stub: broker echoes limit=10 matching filled=10 — pre_submit limit catches it', async () => {
     const row: CandidateRow = {
       id: 92, // matches the post_submit row id from the bug report
@@ -1360,7 +1310,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       symbol: '9697',
       side: 'BUY',
       preSubmitSide: 'BUY',
-      // Pre_submit row id 91 with limit_price=3516. JOIN attaches it here.
+      // pre_submit row id 91, limit_price=3516; JOIN attaches it here
       preSubmitLimitPrice: 3516,
       brokerStatus: null,
       filledQty: null,
@@ -1376,9 +1326,6 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         'coid-9697-stub': {
           status: 'FILLED',
           filled_quantity: '1',
-          // BUG: broker echoes the same stub for both fields. Without the
-          // pre_submit reference, ratio = 10/10 = 1 and PR #223 sanity
-          // wrongly accepts the fill.
           limit_price: '10',
           items: [{ filled_price: '10' }],
           side: 'BUY',
@@ -1397,16 +1344,11 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       now: () => new Date('2026-04-25T12:00:00.000Z'),
     })
 
-    // DO state must NOT be touched — that's the whole point. avgPrice=10
-    // would have triggered a TP→SELL→re-fill ping-pong against a real
-    // entry near 3516.
+    // an accepted avgPrice=10 would have triggered a TP→SELL→re-fill ping-pong against a real
+    // entry near 3516
     expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
 
-    // Two UPDATEs:
-    //   (1) journal fill columns: broker_status=FILLED, filled_qty=1,
-    //       filled_price=null (sanity rejected via pre_submit reference)
-    //   (2) failure marker — state_applied_at must NOT be stamped so the
-    //       row stays in the repair cohort for next tick.
+    // (1) journal fill columns (filled_price=null, rejected via pre_submit reference), (2) failure marker
     expect(updates).toHaveLength(2)
     expect(updates[0]!.set.brokerStatus).toBe('FILLED')
     expect(updates[0]!.set.filledQty).toBe(1)
@@ -1457,17 +1399,9 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     expect(fn(null, null, 'CANCELLED')).toBe(false)
   })
 
-  // ---------------------------------------------------------------------------
-  // auto-abandon (this PR): rows that have tripped a permanent sanity-class
-  // error MAX_REPAIR_ATTEMPTS times should be force-stamped state_applied_at
-  // so they fall out of the repair cohort and stop driving the
-  // reconcile_fills_partial alarm forever. Transient errors (broker_5xx,
-  // network) must keep retrying past 5 attempts.
-  //
-  // Real-world trigger: 9697 — 6 rows accumulated to attempts 12-24 with
-  // `state_apply_error='sanity_failed: filled_price rejected by ratio guard'`,
-  // and the operator received the same alert every 5-minute cron tick.
-  // ---------------------------------------------------------------------------
+  // rows that trip a permanent sanity-class error MAX_REPAIR_ATTEMPTS times get force-stamped
+  // state_applied_at so they fall out of the repair cohort and stop driving the
+  // reconcile_fills_partial alarm forever; transient errors (broker_5xx, network) keep retrying
   describe('auto-abandon for sanity-stuck repair rows', () => {
     it('attempts >= 5 + sanity_failed → force-stamps state_applied_at and bumps abandoned count', async () => {
       const row: CandidateRow = {
@@ -1476,12 +1410,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         symbol: '9697',
         side: 'BUY',
         brokerStatus: 'FILLED',
-        // filled_price=null is the actual on-disk shape for sanity-rejected
-        // rows (resolveFilledPrice returned null and the journal UPDATE
-        // wrote NULL). Repair branch's invalid-row guard would normally
-        // catch this, but we want the auto-abandon path to fire FIRST so
-        // the row drops out of the cohort before consuming another
-        // `repair_skipped_invalid_row` slot.
+        // filled_price=null is the on-disk shape for sanity-rejected rows; the auto-abandon path
+        // must fire before the repair branch's invalid-row guard would otherwise catch it
         filledQty: 1,
         filledPrice: null,
         realizedPnl: null,
@@ -1494,7 +1424,6 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
       vi.mocked(createWebullHttpClient).mockReturnValue(
         makeWebullStub({}) as unknown as ReturnType<typeof createWebullHttpClient>,
       )
-      // Quiet the audit-log warn so the test output stays readable.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const symbolStub = emptySymbolStateStub()
 
@@ -1507,20 +1436,18 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // No DO call — abandoned rows are not re-applied.
       expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
-      // Single UPDATE: the auto-abandon stamp.
+      // single UPDATE: the auto-abandon stamp
       expect(updates).toHaveLength(1)
       expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
       expect(updates[0]!.set.stateApplyError).toMatch(/^auto_abandoned_after_5_attempts:/)
       expect(updates[0]!.set.stateApplyError).toMatch(/sanity_failed/)
       expect(updates[0]!.set.stateApplyAttempts).toBeDefined()
-      // Counts: abandoned bumps, errors stays empty (so notifier stays quiet).
+      // errors stays empty so the error-based notifier doesn't fire for abandoned rows
       expect(summary.abandoned).toBe(1)
       expect(summary.stateApplied).toBe(0)
       expect(summary.stateApplyFailed).toBe(0)
       expect(summary.errors).toEqual([])
-      // Audit log emitted so operator can see the abandon event.
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('"event":"reconcile_auto_abandon"'),
       )
@@ -1578,10 +1505,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
 
     it('attempts < 5 + sanity_failed (filledPrice null) → re-polls Webull instead of the cache-only repair path', async () => {
-      // A row with a cached `filled_price=null` (prior sanity rejection) must
-      // NOT be treated as repair (the cache is unusable) — it goes through
-      // the fresh-poll path instead. Below MAX_REPAIR_ATTEMPTS, auto-abandon
-      // must not fire prematurely even though this poll's price is still bad.
+      // cached filled_price=null is unusable, so it re-polls rather than repairing from cache
       const row: CandidateRow = {
         id: 200,
         clientOrderId: 'coid-stuck-early',
@@ -1622,31 +1546,24 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // Re-polled Webull (not the cache-only repair path).
       expect(webullStub.findOrderByClientId).toHaveBeenCalled()
       expect(symbolStub.recordFillOnce).not.toHaveBeenCalled()
-      // Two UPDATEs: (1) journal fill columns from the fresh poll,
-      // (2) failure marker (sanity_failed again) — state_applied_at NOT
-      // stamped, so the row stays eligible for the next tick's poll.
+      // (1) fresh-poll fill columns, (2) failure marker; state_applied_at stays unset either way
       expect(updates).toHaveLength(2)
       expect(updates[0]!.set.filledPrice).toBeNull()
       expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
       expect(updates[1]!.set.stateAppliedAt).toBeUndefined()
       expect(updates[1]!.set.stateApplyError).toMatch(/sanity_failed/)
-      // Crucially: NOT abandoned, error counted (so the operator alert can
-      // still surface a fresh issue while it is recoverable).
+      // not abandoned; error is counted so the operator alert can surface a fresh, recoverable issue
       expect(summary.abandoned).toBe(0)
       expect(summary.stateApplyFailed).toBe(1)
       expect(summary.errors).toHaveLength(1)
     })
 
     it('CANCELLED partial fill: invalid first price re-polls and applies once the broker returns a valid price', async () => {
-      // #6 regression: a CANCELLED/CANCELED/EXPIRED row that carries a
-      // partial fill must get the same re-poll treatment as FILLED when the
-      // first price fails the sanity ratio guard — not the cache-only repair
-      // path (which would immediately hit `repair_skipped_invalid_row` and,
-      // after enough ticks, auto-abandon a row a later poll could still
-      // resolve).
+      // #6: CANCELLED/CANCELED/EXPIRED with a partial fill gets the same re-poll treatment as
+      // FILLED on a sanity-rejected first price, not the cache-only repair path (which would
+      // eventually auto-abandon a row a later poll could still resolve)
       const row: CandidateRow = {
         id: 201,
         clientOrderId: 'coid-cancel-stub',
@@ -1700,14 +1617,9 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
 
     it('attempts >= 5 + transient error (DO unavailable) → keeps retrying (NOT abandoned)', async () => {
-      // Transient errors should never auto-abandon — the next tick may
-      // succeed even after dozens of failures. Here `state_apply_error`
-      // does NOT contain `sanity_failed` / `repair_skipped_invalid_row`,
-      // so `isPermanentSanityFailure` returns false.
-      //
-      // We give the row a usable filled_price so the standard repair
-      // path runs; the DO stub then throws to simulate a still-broken
-      // underlying.
+      // state_apply_error doesn't match sanity_failed/repair_skipped_invalid_row, so
+      // isPermanentSanityFailure returns false and the standard repair path runs (DO stub
+      // throws again here to simulate the underlying still being broken)
       const row: CandidateRow = {
         id: 300,
         clientOrderId: 'coid-stuck-transient',
@@ -1718,7 +1630,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         filledPrice: 40,
         realizedPnl: null,
         stateAppliedAt: null,
-        stateApplyAttempts: 10, // way past the threshold
+        stateApplyAttempts: 10,
         stateApplyError: 'DO unavailable',
       }
       const { db, updates } = makeFakeDb([row])
@@ -1738,10 +1650,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // Repair path actually ran (= we did not auto-abandon).
       expect(symbolStub.recordFillOnce).toHaveBeenCalled()
-      // Single UPDATE — the recordApplyFailure error stamp. state_applied_at
-      // MUST NOT be set (= row remains in cohort for next tick).
+      // single UPDATE (recordApplyFailure's error stamp); state_applied_at stays unset
       expect(updates).toHaveLength(1)
       expect(updates[0]!.set.stateAppliedAt).toBeUndefined()
       expect(updates[0]!.set.stateApplyError).toBe('DO still unavailable')
@@ -1750,10 +1660,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
 
     it('attempts >= 5 + null state_apply_error → keeps retrying (NOT abandoned)', async () => {
-      // Defensive: a row could conceivably have high attempts with a null
-      // error column (e.g. attempts bump after marker UPDATE failure
-      // clears the prior error). isPermanentSanityFailure(null) is false →
-      // do not abandon, let the standard path run.
+      // e.g. attempts bumped after a marker UPDATE failure cleared the prior error;
+      // isPermanentSanityFailure(null) is false, so the standard path still runs
       const row: CandidateRow = {
         id: 400,
         clientOrderId: 'coid-null-error',
@@ -1783,7 +1691,6 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // Standard repair path runs (DO apply succeeded).
       expect(symbolStub.recordFillOnce).toHaveBeenCalled()
       expect(summary.abandoned).toBe(0)
       expect(summary.stateApplied).toBe(1)
@@ -1791,12 +1698,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
 
     it('markAsAbandoned UPDATE throws → loop continues, row goes to errors, abandoned not bumped', async () => {
-      // CodeRabbit #228: the auto-abandon UPDATE must be wrapped in
-      // try/catch so a single transient D1 failure does not abort the
-      // whole reconcile batch. Two rows both qualify for auto-abandon;
-      // the first row's UPDATE throws (simulated via
-      // `failStateAppliedAtOnce`) — the loop must continue to process
-      // the second row, which abandons normally.
+      // #228: the auto-abandon UPDATE is wrapped in try/catch so a single transient D1 failure
+      // does not abort the whole reconcile batch
       const stuckRows: CandidateRow[] = [
         {
           id: 9697,
@@ -1825,8 +1728,7 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
           stateApplyError: 'sanity_failed: filled_price rejected by ratio guard',
         },
       ]
-      // Fail the first stateAppliedAt-bearing UPDATE (= first row's
-      // markAsAbandoned). Second row's UPDATE then succeeds.
+      // fails the first row's markAsAbandoned UPDATE; the second row's UPDATE then succeeds
       const { db, updates } = makeFakeDb(stuckRows, { failStateAppliedAtOnce: true })
       vi.mocked(createDb).mockReturnValue(db)
       vi.mocked(createWebullHttpClient).mockReturnValue(
@@ -1845,20 +1747,14 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         retryStateApply: true,
       })
 
-      // Both rows attempted the auto-abandon UPDATE (= loop continued
-      // past the first row's failure). Both UPDATEs carry the abandon
-      // marker shape (`stateAppliedAt` + `auto_abandoned_after_*`).
+      // both rows attempted the UPDATE (loop continued past the first row's failure)
       expect(updates).toHaveLength(2)
       expect(updates[0]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
       expect(updates[0]!.set.stateApplyError).toMatch(/^auto_abandoned_after_5_attempts:/)
       expect(updates[1]!.set.stateAppliedAt).toBe('2026-04-25T12:00:00.000Z')
       expect(updates[1]!.set.stateApplyError).toMatch(/^auto_abandoned_after_6_attempts:/)
-      // First row failed: surfaced as an error, NOT counted as abandoned.
-      // Second row succeeded: counted as abandoned.
       expect(summary.abandoned).toBe(1)
-      // CodeRabbit #228 minor: stateApplyFailed counts DO state apply
-      // failures, not auto-abandon DB UPDATE failures. The latter is
-      // tracked via summary.errors.
+      // stateApplyFailed counts DO state-apply failures, not auto-abandon DB UPDATE failures
       expect(summary.stateApplyFailed).toBe(0)
       expect(summary.errors).toEqual([
         {
@@ -1866,24 +1762,18 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
           message: expect.stringContaining('auto_abandon_failed:'),
         },
       ])
-      // Error log emitted for the failed row.
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining('"event":"reconcile_auto_abandon_error"'),
       )
-      // Second row's success audit log emitted.
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('"event":"reconcile_auto_abandon"'),
       )
     })
   })
 
-  // ---------------------------------------------------------------------------
-  // notFound bucket split (#139). The broker-side history call may miss for
-  // two reasons: (a) the order rotated off the recent first-page window, or
-  // (b) the order doesn't exist on the broker at all. We separate the two so
-  // dashboards / alerting can treat "deep lookup also missed" as a stronger
-  // signal than "first page didn't have it".
-  // ---------------------------------------------------------------------------
+  // #139: split so dashboards/alerting can treat "deep lookup also missed" as a stronger
+  // signal than "first page didn't have it" (order rotated off the recent window vs. it
+  // genuinely doesn't exist on the broker)
   describe('notFound split: recent-window vs after-deep-lookup', () => {
     it('classifies as notFoundRecentWindow when historyMaxPages=1 and broker returns nothing', async () => {
       const row: CandidateRow = {
@@ -1912,14 +1802,13 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
           SYMBOL_STATE: makeSymbolStateNamespace(symbolStub) as never,
         } as never,
         now: () => new Date('2026-04-25T12:00:00.000Z'),
-        // historyMaxPages omitted → default 1 → no deep sweep.
+        // historyMaxPages omitted → default 1 → no deep sweep
       })
 
-      // Single lookup, no deep sweep.
       expect(webullStub.findOrderByClientId).toHaveBeenCalledTimes(1)
       expect(summary.notFoundRecentWindow).toEqual(['coid-missing-1'])
       expect(summary.notFoundAfterDeepLookup).toEqual([])
-      // Legacy bucket still populated so existing dashboards keep working.
+      // legacy bucket stays populated so existing dashboards keep working
       expect(summary.notFound).toEqual(['coid-missing-1'])
     })
 
@@ -1953,9 +1842,8 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
         historyMaxPages: 5,
       })
 
-      // Two lookups: initial single-page, then deep sweep with maxPages.
+      // two lookups: initial single-page, then deep sweep with maxPages
       expect(webullStub.findOrderByClientId).toHaveBeenCalledTimes(2)
-      // The deep-sweep call carried the bounded maxPages.
       const deepCall = webullStub.findOrderByClientId.mock.calls[1]!
       expect(deepCall[1]).toMatchObject({ maxPages: 5 })
       expect(summary.notFoundRecentWindow).toEqual([])
@@ -1964,10 +1852,9 @@ describe('reconcileFills state-apply marker (issue #142)', () => {
     })
   })
 
-  // #drift: ack ロストした SELL (submit が例外で記録漏れ) を broker 履歴から拾って
-  // 保有を close し、実現損益も記録する heal 経路。errored cohort の WHERE は fake db
-  // が無視するので、ここでは「候補に入った errored 由来 SELL 行が正しく apply される」
-  // ことを検証する (cohort 選択自体は SQL レベルの変更)。
+  // #drift: heals a SELL whose ack was lost (submit threw, so it was never recorded) by picking
+  // it up from broker history. makeFakeDb ignores the WHERE clause, so this only verifies that
+  // an errored-cohort SELL row applies correctly, not the SQL-level cohort selection itself.
   it('heals a drifted position: applies a found SELL fill (close + realized PnL)', async () => {
     const row: CandidateRow = {
       id: 42,

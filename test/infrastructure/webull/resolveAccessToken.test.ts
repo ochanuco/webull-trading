@@ -17,9 +17,7 @@ function makeNamespace(state: WebullTokenState | null, throws?: Error) {
 }
 
 describe('resolveAccessToken', () => {
-  // #21 Phase B: DO 由来の NORMAL token が runtime の正源。Phase A の env は
-  // bootstrap 用 fallback。両方 set されてれば DO 側を優先するのが本 helper の
-  // 中核挙動。
+  // #21 Phase B: a NORMAL DO token is the runtime source of truth; env (Phase A) is bootstrap-only fallback.
   it('returns DO token when DO state is NORMAL (env fallback is ignored)', async () => {
     const env = {
       WEBULL_TOKEN_STATE: makeNamespace({
@@ -36,8 +34,7 @@ describe('resolveAccessToken', () => {
     expect(await resolveAccessToken(env)).toBe('do-token')
   })
 
-  // DO に何も入ってないとき (= Phase A 初回起動 / 投入前) は env fallback で動く。
-  // production cutover を「先に env で動かす → 後で DO 投入」の流れにできる。
+  // Lets a production cutover run on env first and backfill the DO state later.
   it('falls back to env when DO state is null', async () => {
     const env = {
       WEBULL_TOKEN_STATE: makeNamespace(null),
@@ -47,9 +44,8 @@ describe('resolveAccessToken', () => {
     expect(await resolveAccessToken(env)).toBe('env-bootstrap')
   })
 
-  // INVALID / EXPIRED な state は「使うべきでない」シグナルなので env にも fallback
-  // しない (現在の token を強制的に "無し" 扱いにする)。INVALID_TOKEN を broker が
-  // 返してから operator が気付けるよう、わざと auth header を欠落させる。
+  // PENDING/INVALID/EXPIRED are "don't use this" signals, not just "unset" —
+  // env fallback still applies (it's a separate credential, not a stand-in for the DO token).
   it.each(['PENDING', 'INVALID', 'EXPIRED'] as const)(
     'returns env fallback when DO state is %s (does not silently emit stale token)',
     async (status) => {
@@ -87,9 +83,8 @@ describe('resolveAccessToken', () => {
     expect(await resolveAccessToken(env)).toBeUndefined()
   })
 
-  // DO call が throw した場合は env にフォールバックして broker call を試行させる。
-  // DO bind が壊れてるからといって全 broker call を止めると過剰反応 → fail-safe
-  // のレイヤーが多重化されてる事を尊重 (token なら broker 側で 401)。
+  // A broken DO binding shouldn't halt every broker call — fall back to env and
+  // let the broker itself reject with 401 if the token turns out bad.
   it('falls back to env when DO stub throws (with warn log)', async () => {
     const env = {
       WEBULL_TOKEN_STATE: makeNamespace(null, new Error('do offline')),

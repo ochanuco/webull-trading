@@ -7,15 +7,10 @@ import {
   type AttentionObservationRecord,
 } from '../../../src/infrastructure/db/attentionObservationRepo'
 
-/**
- * `bulkInsertIgnore` の chunk insert 動作テスト。
- * `macroEventCalendarRepo.test.ts` と同じ fake drizzle builder パターンで
- * chunk 14 / multi-row VALUES / `.onConflictDoNothing()` の挙動 + inserted/skipped
- * カウントを担保する。
- */
-
 /** `attention_observation` の列数 (source, probeKey, metric, bucketAt, value, fetchedAt, requestId)。 */
 const COLUMNS = 7
+const CHUNK_SIZE = 14
+const REMAINDER = 6
 
 /** SQL fragment (`whereArgs`/`orderByArgs` に積まれる drizzle `SQL` オブジェクト) を検証用に文字列化する。 */
 const dialect = new SQLiteSyncDialect()
@@ -78,25 +73,23 @@ describe('createAttentionObservationRepo.bulkInsertIgnore', () => {
     expect(db.insert).not.toHaveBeenCalled()
   })
 
-  it('chunks 14 rows per multi-row INSERT (single subrequest per chunk)', async () => {
-    // 20 = CHUNK(14) + 端数(6) — チャンク境界をまたぐ件数を維持する。
-    const records: AttentionObservationRecord[] = Array.from({ length: 20 }, (_, i) =>
+  it('chunks 14 rows per multi-row INSERT (single subrequest per chunk), crossing the chunk boundary at a 6-row remainder', async () => {
+    const records: AttentionObservationRecord[] = Array.from({ length: CHUNK_SIZE + REMAINDER }, (_, i) =>
       record({ bucketAt: `2026-07-24T${String(i % 24).padStart(2, '0')}:00:00.000Z` }),
     )
     const insertedPerChunk = [
-      Array.from({ length: 14 }, (_, i) => ({ id: i + 1 })),
-      Array.from({ length: 6 }, (_, i) => ({ id: 14 + i + 1 })),
+      Array.from({ length: CHUNK_SIZE }, (_, i) => ({ id: i + 1 })),
+      Array.from({ length: REMAINDER }, (_, i) => ({ id: CHUNK_SIZE + i + 1 })),
     ]
     const { db, insertCalls } = makeFakeInsertDb({ insertedPerChunk })
     const repo = createAttentionObservationRepo(db)
     const result = await repo.bulkInsertIgnore(records)
     expect(insertCalls).toHaveLength(2)
-    expect(insertCalls[0]!.values).toHaveLength(14)
-    expect(insertCalls[1]!.values).toHaveLength(6)
-    expect(result).toEqual({ inserted: 20, skipped: 0 })
-    // D1 の bound parameter 上限は 1 クエリあたり 100 個。multi-row INSERT の bind
-    // 数は `列数 × チャンクの行数` なので、これを超えないことを再発防止ガードとして
-    // 各チャンクで検証する (CHUNK=50 のままだと 7 列 × 50 行 = 350 bind で超過していた)。
+    expect(insertCalls[0]!.values).toHaveLength(CHUNK_SIZE)
+    expect(insertCalls[1]!.values).toHaveLength(REMAINDER)
+    expect(result).toEqual({ inserted: CHUNK_SIZE + REMAINDER, skipped: 0 })
+    // Bind count = columns × chunk rows must stay <= D1's 100-param limit
+    // (CHUNK=50 previously exceeded it: 7 cols x 50 rows = 350).
     for (const call of insertCalls) {
       expect(call.values.length * COLUMNS).toBeLessThanOrEqual(100)
     }
@@ -117,7 +110,7 @@ describe('createAttentionObservationRepo.bulkInsertIgnore', () => {
   it('attributes UNIQUE-violation skips correctly within a single chunk (idempotent backfill)', async () => {
     const records: AttentionObservationRecord[] = [
       record({ bucketAt: '2026-07-24T14:30:00.000Z' }),
-      record({ bucketAt: '2026-07-24T14:30:00.000Z' }), // duplicate bucket, same tick
+      record({ bucketAt: '2026-07-24T14:30:00.000Z' }),
       record({ bucketAt: '2026-07-24T14:45:00.000Z' }),
     ]
     const { db } = makeFakeInsertDb({ insertedPerChunk: [[{ id: 1 }, { id: 2 }]] })
@@ -166,7 +159,7 @@ describe('createAttentionObservationRepo.fetchRecent / purgeOlderThan', () => {
     return { db, whereArgs }
   }
 
-  it('fetchRecent selects and orders by bucketAt asc', async () => {
+  it('fetchRecent selects and orders by bucketAt asc, with the actual where/orderBy SQL fragments (not just call counts) checked', async () => {
     const rows = [{ id: 1, bucketAt: '2026-07-24T14:30:00.000Z' }]
     const { db, whereArgs, orderByArgs } = makeFakeSelectDb(rows)
     const repo = createAttentionObservationRepo(db)
@@ -178,8 +171,6 @@ describe('createAttentionObservationRepo.fetchRecent / purgeOlderThan', () => {
     })
     expect(result).toBe(rows)
     expect(db.select).toHaveBeenCalledTimes(1)
-    // CodeRabbit: 呼び出し回数だけでなく、実際に where/orderBy へ渡された
-    // drizzle SQL fragment の中身 (filter / ordering) を軽く検証する。
     expect(whereArgs).toHaveLength(1)
     const where = dialect.sqlToQuery(whereArgs[0] as SQL)
     expect(where.sql).toContain('"bucket_at" >= ?')
