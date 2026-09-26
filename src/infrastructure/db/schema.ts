@@ -948,15 +948,19 @@ export type ExtendedHoursObservationRow = typeof extendedHoursObservation.$infer
 export type ExtendedHoursObservationInsert = typeof extendedHoursObservation.$inferInsert
 
 /**
- * Observe-only Google News headline + `typesafe/jev` classification log.
- * Written by `headlineEvalScheduler` on the 15-minute slot boundary of the
+ * Observe-only market-headline + `typesafe/jev` classification log. Written
+ * by `headlineEvalScheduler` on the 15-minute slot boundary of the
  * quote-reconcile cron; read by nothing in strategy/risk/execution — this
  * table exists to build a labeled dataset before any gate ever consumes it.
  * One row per attempt (including empty/fetch/AI failures) so gaps in
  * coverage are visible in the data itself, not just in logs.
  *
- * `UNIQUE (source, evaluated_at)` caps writes at one row per 15-minute slot
- * per source, mirroring `attentionObservation`'s idempotent-backfill target.
+ * `source` records which feed actually produced the row: `yahoo_finance_rss`
+ * (primary) or `google_news_rss` (fallback, used only when the Yahoo fetch
+ * itself fails). `UNIQUE (source, evaluated_at)` caps writes at one row per
+ * 15-minute slot per source — since the scheduler only ever picks one source
+ * per slot, this is one row per slot in practice, mirroring
+ * `attentionObservation`'s idempotent-backfill target.
  */
 export const newsHeadlineEval = sqliteTable(
   'news_headline_eval',
@@ -964,7 +968,7 @@ export const newsHeadlineEval = sqliteTable(
     id: integer('id').primaryKey({ autoIncrement: true }),
     /** 評価対象スロットの ISO UTC (15分境界)。 */
     evaluatedAt: text('evaluated_at').notNull(),
-    /** データソース識別子。今のところ 'google_news_rss' のみ。 */
+    /** 'yahoo_finance_rss' (primary) / 'google_news_rss' (fallback)。 */
     source: text('source').notNull(),
     query: text('query').notNull(),
     headlineCount: integer('headline_count').notNull(),
