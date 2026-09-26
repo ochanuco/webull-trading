@@ -53,7 +53,7 @@ export class GoogleNewsRssClient {
   constructor(options: GoogleNewsRssClientOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     // Workers' global `fetch` must be bound to globalThis or it throws
-    // "Illegal invocation" — mirrors GdeltDocClient / YahooBarClient.
+    // "Illegal invocation" — mirrors YahooBarClient.
     this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
   }
 

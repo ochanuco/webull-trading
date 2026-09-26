@@ -230,31 +230,19 @@ export interface Env {
 }
 
 
-// NEWS_ATTENTION_ENABLED: opt-in for `newsScheduler`. 'true'
-// (case-insensitive, trimmed) enables the GDELT fetch; unset/anything else
-// disables it — same "unset is the safe default, opt-in is explicit"
-// pattern as QUOTE_SOURCE / BAR_SOURCE.
-// GDELT_API_BASE: GDELT DOC 2.0 API base URL override, for tests. Unset
-// uses the production URL (`https://api.gdeltproject.org`).
-export interface Env {
-  NEWS_ATTENTION_ENABLED?: string
-  GDELT_API_BASE?: string
-}
-
-
 // EXTENDED_HOURS_OBSERVATION_ENABLED: opt-in for `extendedHoursScheduler`.
 // 'true' (case-insensitive, trimmed) enables fetching Yahoo pre-market 1m
 // bars in the US pre-market window ([open-90min, open)); unset/anything
-// else disables it, same default-safe pattern as NEWS_ATTENTION_ENABLED.
-// Read by `extendedHoursGate` (gated off by default via
-// `global_config.extended_hours_gate_mode`).
+// else disables it — same "unset is the safe default, opt-in is explicit"
+// pattern as QUOTE_SOURCE / BAR_SOURCE. Read by `extendedHoursGate` (gated
+// off by default via `global_config.extended_hours_gate_mode`).
 export interface Env {
   EXTENDED_HOURS_OBSERVATION_ENABLED?: string
 }
 
 
 // JEV_HEADLINE_EVAL_ENABLED: opt-in for `headlineEvalScheduler`, same
-// default-safe pattern as NEWS_ATTENTION_ENABLED / EXTENDED_HOURS_OBSERVATION_ENABLED.
+// default-safe pattern as EXTENDED_HOURS_OBSERVATION_ENABLED.
 // AI: Workers AI binding. Typed as a minimal local shape rather than
 // @cloudflare/workers-types' `Ai` — that type's `run()` overloads are keyed
 // to a fixed model catalog and reject the `typesafe/jev` model id at

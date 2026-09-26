@@ -869,48 +869,6 @@ export type TradableInstrumentRow = typeof tradableInstrument.$inferSelect
 export type TradableInstrumentInsert = typeof tradableInstrument.$inferInsert
 
 /**
- * Append-only news/crowd attention observation time series, shared across
- * sources via the `source` column (GDELT report-volume/tone today; room for
- * e.g. a YouTube upload-count producer without a schema fork). Written by
- * `newsScheduler` on the 5-minute cron, read by `newsShockGate`.
- *
- * `UNIQUE (source, probe_key, metric, bucket_at)` is the idempotent-backfill
- * mechanism: GDELT's `timespan=1d` request returns ~96 buckets every tick,
- * so each tick bulk-insert-ignores all of them. A missed tick self-heals on
- * the next one — already-seen buckets collide on the unique index and are
- * skipped, never duplicated.
- */
-export const attentionObservation = sqliteTable(
-  'attention_observation',
-  {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    /** Data source: 'gdelt' (report volume/tone) or 'youtube' (upload count, not yet implemented). */
-    source: text('source').notNull(),
-    /** probe 定義のキー (`newsProbes.ts` のコード定数と一致)。 */
-    probeKey: text('probe_key').notNull(),
-    /** 'volume' (report-volume %) / 'tone' (mean tone) / 'upload_count' (not yet implemented). */
-    metric: text('metric').notNull(),
-    /** 観測 bucket の ISO UTC (GDELT timeline の `date` を正規化した値)。 */
-    bucketAt: text('bucket_at').notNull(),
-    value: real('value').notNull(),
-    /** producer が実際に fetch/insert した時刻 (ISO UTC)。 */
-    fetchedAt: text('fetched_at').notNull(),
-    requestId: text('request_id'),
-  },
-  (t) => ({
-    // Idempotent-backfill key (see table doc). Also covers newsShockGate's
-    // trailing-window range read, like macroEventCalendar, so no separate
-    // plain index is added.
-    sourceProbeMetricBucketUnique: uniqueIndex(
-      'attention_observation_source_probe_metric_bucket_unique',
-    ).on(t.source, t.probeKey, t.metric, t.bucketAt),
-  }),
-)
-
-export type AttentionObservationRow = typeof attentionObservation.$inferSelect
-export type AttentionObservationInsert = typeof attentionObservation.$inferInsert
-
-/**
  * Extended-hours (pre-market) reference observation table. Written by
  * `extendedHoursScheduler` on the US pre-market cron window
  * ([open-90min, open)) from Yahoo's `/v8/finance/chart` bars, and read by
@@ -948,19 +906,20 @@ export type ExtendedHoursObservationRow = typeof extendedHoursObservation.$infer
 export type ExtendedHoursObservationInsert = typeof extendedHoursObservation.$inferInsert
 
 /**
- * Observe-only market-headline + `typesafe/jev` classification log. Written
- * by `headlineEvalScheduler` on the 15-minute slot boundary of the
- * quote-reconcile cron; read by nothing in strategy/risk/execution — this
- * table exists to build a labeled dataset before any gate ever consumes it.
- * One row per attempt (including empty/fetch/AI failures) so gaps in
- * coverage are visible in the data itself, not just in logs.
+ * Market-headline + `typesafe/jev` classification log. Written by
+ * `headlineEvalScheduler` on the 15-minute slot boundary of the
+ * quote-reconcile cron. One row per attempt (including empty/fetch/AI
+ * failures) so gaps in coverage are visible in the data itself, not just in
+ * logs. Read by `newsShockGate` (via `newsShockDecision.loadNewsShockDecision`)
+ * for BUY-size scaling — the only D1 table this producer's original design
+ * didn't expect a risk/strategy reader for, until newsShockGate's GDELT
+ * source was swapped for this one.
  *
  * `source` records which feed actually produced the row: `yahoo_finance_rss`
  * (primary) or `google_news_rss` (fallback, used only when the Yahoo fetch
  * itself fails). `UNIQUE (source, evaluated_at)` caps writes at one row per
  * 15-minute slot per source — since the scheduler only ever picks one source
- * per slot, this is one row per slot in practice, mirroring
- * `attentionObservation`'s idempotent-backfill target.
+ * per slot, this is one row per slot in practice.
  */
 export const newsHeadlineEval = sqliteTable(
   'news_headline_eval',
