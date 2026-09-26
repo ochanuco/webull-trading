@@ -218,7 +218,6 @@ describe('per-symbol risk gate parity (TradingService vs runPullbackScheduler) â
   })
 
   it('SELL passes the stale-quote gate (exit priority â€” TradingService)', async () => {
-    // no cron leg here: runPullbackScheduler only drives BUY, so this is TradingService-only
     const state: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 1, avgPrice: 124.95, openedAt: now.toISOString() },
