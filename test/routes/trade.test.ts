@@ -165,8 +165,7 @@ describe('trade routes', () => {
       },
       {
         ...env,
-        // #21: WebullTradeClient は ENVIRONMENT='production' 以外を fail-safe
-        // で拒否する。LIVE 経路の test ではこのラベルが必須。
+        // WebullTradeClient は ENVIRONMENT='production' 以外を fail-safe で拒否する (#21)。
         ENVIRONMENT: 'production',
         WEBULL_APP_KEY: 'app-key',
         WEBULL_APP_SECRET: 'app-secret',
@@ -263,9 +262,6 @@ describe('trade routes', () => {
     expect(body.riskDecision.reasons.some((r) => r.toLowerCase().includes('trading'))).toBe(true)
   })
 
-  // #276: env TRADING_ENABLED=false が DB=true を上書きする (より制限的が勝つ)。
-  // `/trade/decide` を通して RiskPolicy が tradingEnabled=false 扱いで reject
-  // することを確認する (= deploy-gate override が実際に発注 path で効く保証)。
   it('env TRADING_ENABLED=false overrides DB tradingEnabled=true (#276 kill-switch)', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ tradingEnabled: true }),
@@ -296,9 +292,6 @@ describe('trade routes', () => {
     expect(body.riskDecision.reasons.some((r) => r.toLowerCase().includes('trading'))).toBe(true)
   })
 
-  // #276 DoD invariant: DRY_RUN=true 時は kill-switch ON (tradingEnabled=true) でも
-  // **絶対に実発注しない**。execution mode が DRY_RUN になり Webull endpoint への
-  // fetch も 0 回であることを確認する。kill-switch ON / DRY_RUN ON の両立シナリオ。
   it('DRY_RUN=true must NOT place real orders even when kill-switch is ON (#276 DoD)', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ dryRun: true, tradingEnabled: true }),
@@ -327,9 +320,7 @@ describe('trade routes', () => {
     const body = (await response.json()) as {
       executionResult?: { mode: string; submitted: boolean }
     }
-    // kill-switch ON だが DRY_RUN は独立して効く: mode='DRY_RUN' で broker 発注なし。
     expect(body.executionResult?.mode).toBe('DRY_RUN')
-    // Webull endpoint への HTTP は一切走らない。
     expect(fetchMock).not.toHaveBeenCalled()
   })
 

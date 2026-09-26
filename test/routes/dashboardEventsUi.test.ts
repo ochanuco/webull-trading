@@ -6,16 +6,6 @@ import { createDb } from '../../src/infrastructure/db/tradeJournalRepo'
 import { recordChange } from '../../src/infrastructure/db/configAuditLog'
 import { makeGlobalConfigSnapshot, makeSymbolUniverse } from '../helpers/configFixtures'
 
-/**
- * #293 — dashboard イベント管理 UI のテスト。
- *
- * `GET /dashboard/events` で earnings + macro 一覧 + 追加 form を描画、
- * `POST /dashboard/events/earnings/seed` 等の form 受け handler が repo を
- * 呼んで 303 redirect、バリデーション失敗は 400 で再描画 + 入力 echo を保持
- * することを確認する。XSS regression として notes に <script> を入れて escape
- * されることも見る (#284 と同じ姿勢)。
- */
-
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: vi.fn(),
 }))
@@ -56,12 +46,9 @@ type MacroRow = {
   createdAt: string
 }
 
-/**
- * `createDb(env.DB).select().from().where().orderBy()` chain を満たす最小限の
- * thenable mock。await でき、`Promise<rows[]>` を返す。Dashboard 側の earnings
- * list query (`loadEarningsInRange`) と delete handler の `.then((rows) => rows[0] ?? null)`
- * 両方をカバーする。
- */
+// select().from().where().orderBy() chain + thenable の両方を満たす最小 mock。
+// earnings list query (loadEarningsInRange) と delete handler の
+// .then((rows) => rows[0] ?? null) の両方をカバーする。
 function fakeListDb(earningsRows: EarningsRow[]) {
   const query = {
     from: vi.fn(() => query),
@@ -75,7 +62,6 @@ function fakeListDb(earningsRows: EarningsRow[]) {
   }
 }
 
-/** 共通の repo mock (earnings + macro)。 */
 function fakeEarningsRepo() {
   return {
     bulkUpsert: vi.fn<(records: unknown) => Promise<{ inserted: number; skipped: number }>>(
@@ -166,17 +152,13 @@ describe('dashboard events UI (#293)', () => {
     const body = await res.text()
     expect(body).toContain('決算 (earnings)')
     expect(body).toContain('マクロイベント (macro)')
-    // earnings row 列
     expect(body).toContain('AAPL')
     expect(body).toContain(inTen)
     expect(body).toContain('Q2 2026')
-    // macro row 列
     expect(body).toContain('<code>FOMC</code>')
     expect(body).toContain('US — June meeting')
-    // 削除 form action は /dashboard/events/<kind>/<id>/delete
     expect(body).toContain('action="/dashboard/events/earnings/1/delete"')
     expect(body).toContain('action="/dashboard/events/macro/7/delete"')
-    // 「+ 追加」 details が両セクションに存在
     expect(body).toContain('action="/dashboard/events/earnings/seed"')
     expect(body).toContain('action="/dashboard/events/macro/seed"')
   })
@@ -209,7 +191,7 @@ describe('dashboard events UI (#293)', () => {
     expect(earningsRepo.bulkUpsert).toHaveBeenCalledWith([
       { symbol: 'AAPL', earningsDate: tomorrow, notes: 'Q2 2026' },
     ])
-    // 監査ログ: 1 件 inserted なので recordChange が呼ばれる (endpoint 一致まで確認)。
+    // 1 件 inserted なので recordChange が呼ばれる (endpoint 一致まで確認)。
     expect(vi.mocked(recordChange)).toHaveBeenCalled()
     expect(vi.mocked(recordChange).mock.calls[0]?.[1]?.endpoint).toBe(
       '/dashboard/events/earnings/seed',
@@ -260,7 +242,7 @@ describe('dashboard events UI (#293)', () => {
     const earningsRepo = fakeEarningsRepo()
     earningsRepo.deleteById.mockResolvedValueOnce(true)
     const macroRepo = fakeMacroRepo()
-    // createDb は delete handler 内の "before snapshot" 取得で呼ばれる ("rows" を返せれば中身は問わない)。
+    // createDb は delete handler の "before snapshot" 取得で呼ばれる (中身は問わない)。
     vi.mocked(createDb).mockReturnValue(
       fakeListDb([]) as unknown as ReturnType<typeof createDb>,
     )
@@ -317,9 +299,8 @@ describe('dashboard events UI (#293)', () => {
     vi.mocked(createDb).mockReturnValue(
       fakeListDb([]) as unknown as ReturnType<typeof createDb>,
     )
-    // empty symbol → re-render w/ error, repo NOT called。
-    // 日付は SUT ではないので、`now ± clamp` から確実に外れない "today" を使う
-    // (`'2026-05-15'` のような固定日付だと数か月後に out-of-range で fail する)。
+    // 日付は SUT ではないので `now ± clamp` から外れない "today" を使う
+    // (固定日付だと数か月後に out-of-range で fail する)。
     const today = new Date().toISOString().slice(0, 10)
     const res1 = await withFakeRepos(earningsRepo, macroRepo, async () => {
       const app = createApp()
@@ -366,12 +347,10 @@ describe('dashboard events UI (#293)', () => {
   })
 
   it('clamp upper bound is inclusive at +365d but rejects +366d', async () => {
-    // withinClampRange は date-only inclusive。`now + 365d` は通り、`now + 366d` は 400。
     const macroRepo = fakeMacroRepo()
     vi.mocked(createDb).mockReturnValue(
       fakeListDb([]) as unknown as ReturnType<typeof createDb>,
     )
-    // +365d (inclusive boundary): 受理されて 303 redirect になること
     const earningsRepo365 = fakeEarningsRepo()
     const day365 = new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10)
     const okRes = await withFakeRepos(earningsRepo365, macroRepo, async () => {
@@ -392,7 +371,6 @@ describe('dashboard events UI (#293)', () => {
     expect(okRes.status).toBe(303)
     expect(earningsRepo365.bulkUpsert).toHaveBeenCalled()
 
-    // +366d (out of range): 400 + 入力 form 再描画
     const earningsRepo366 = fakeEarningsRepo()
     const day366 = new Date(Date.now() + 366 * 86_400_000).toISOString().slice(0, 10)
     const badRes = await withFakeRepos(earningsRepo366, macroRepo, async () => {
@@ -417,7 +395,6 @@ describe('dashboard events UI (#293)', () => {
   })
 
   it('seed earnings with symbol outside universe → save succeeds + warning rendered', async () => {
-    // universe.allowedSymbols に無い "MSFT" を入れる。 spec: "保存は許す + UI で warning"。
     const earningsRepo = fakeEarningsRepo()
     const macroRepo = fakeMacroRepo()
     vi.mocked(createDb).mockReturnValue(
@@ -439,11 +416,9 @@ describe('dashboard events UI (#293)', () => {
         { ...baseEnv, DB: {} as D1Database },
       )
     })
-    // 保存 (bulkUpsert) は行われる (non-blocking warning)
     expect(earningsRepo.bulkUpsert).toHaveBeenCalledWith([
       { symbol: 'MSFT', earningsDate: tomorrow, notes: null },
     ])
-    // PRG redirect ではなく 200 で再描画 + warning notice
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('class="warn"')
@@ -452,8 +427,6 @@ describe('dashboard events UI (#293)', () => {
   })
 
   it('XSS regression: notes / event_kind with <script> payload is escaped on render', async () => {
-    // operator が誤って (or 攻撃者が DB 直接書込みで) 入れた <script> が
-    // 一覧テーブルで生で出ないこと。escapeHtml 経由で中和されているはず。
     const scriptPayload = '<script>alert(1)</script>'
     const today = new Date().toISOString().slice(0, 10)
     const earningsRow: EarningsRow = {
@@ -465,8 +438,8 @@ describe('dashboard events UI (#293)', () => {
     }
     const macroRow: MacroRow = {
       id: 22,
-      eventType: 'FOMC', // event_type は schema regex で `[A-Z0-9_]` のみだが、
-      // 万一壊れた row が入っても escape されるかを notes 側で見る。
+      // event_type は schema regex で [A-Z0-9_] のみなので、XSS は notes 側で見る。
+      eventType: 'FOMC',
       eventDate: today,
       eventTime: null,
       notes: scriptPayload,
@@ -487,9 +460,7 @@ describe('dashboard events UI (#293)', () => {
     })
     expect(res.status).toBe(200)
     const body = await res.text()
-    // 生の <script>alert(1)</script> が body に出てはいけない
     expect(body).not.toContain(scriptPayload)
-    // 代わりに escape 済みの形が両 row 由来で 2 回以上含まれる
     expect(body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
   })
 })

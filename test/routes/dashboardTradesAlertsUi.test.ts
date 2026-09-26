@@ -88,31 +88,25 @@ describe('/dashboard/trades 新 UI (#alerts-trades-ui)', () => {
     const res = await app.request('/dashboard/trades', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
     expect(res.status).toBe(200)
     const body = await res.text()
-    // view filter pills
     expect(body).toContain('view=fills')
     expect(body).toContain('約定・手仕舞い')
-    // イベント日本語 + raw は title に保持
     expect(body).toContain('● 約定')
     expect(body).toContain('● 手仕舞い')
     expect(body).toContain('title="post_submit"')
-    // 売買バッジ
     expect(body).toContain('>買</span>')
     expect(body).toContain('>売</span>')
-    // 実現損益 + exit reason
     expect(body).toContain('+12.34')
     expect(body).toContain('take_profit')
-    // エラーは短い日本語 + 全文 details
     expect(body).toContain('エラー: 銘柄取扱なし')
     expect(body).toContain('OAUTH_OPENAPI_TICKER_IS_DENY')
-    // mode pill
     expect(body).toContain('実発注')
     expect(body).toContain('>DRY<')
-    // AI 用コピー: 全件ボタン + 行ボタン + raw payload (表示で省略した field も含む)
+    // AI 用コピーの raw payload は表示で省略した field も含む
     expect(body).toContain('id="log-copy-all"')
     expect(body).toContain('class="log-copy-btn" data-id="3"')
     expect(body).toContain('window.__tradesCopy')
     expect(body).toContain('trade_journal (約定履歴)')
-    // inline script の構文回帰 (#465 ガードをこのページにも)
+    // #465 inline script 構文回帰ガード
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
       expect(() => new Function(m[1]!)).not.toThrow()
     }
@@ -141,7 +135,6 @@ describe('/dashboard/trades ⇄ /dashboard/cron 相互リンク (#nav-links)', (
     )
     expect(res.status).toBe(200)
     const body = await res.text()
-    // フィルタ中バナー: 注文単位の絞り込み + 判定への逆リンク + 全件へ戻る
     expect(body).toContain('の履歴のみ表示')
     expect(body).toContain('href="/dashboard/cron?clientOrderId=co-abc123"')
     expect(body).toContain('href="/dashboard/trades"')
@@ -219,10 +212,8 @@ describe('/dashboard/trades ⇄ /dashboard/cron 相互リンク (#nav-links)', (
     )
     expect(res.status).toBe(200)
     const body = await res.text()
-    // 注文単位バナー + 約定への逆リンク
     expect(body).toContain('の判定のみ表示')
     expect(body).toContain('href="/dashboard/trades?clientOrderId=co-fill1"')
-    // 実 fill セルも同じ注文の trades へ飛べる
     expect(body).toContain('この注文の約定履歴を見る')
   })
 })
@@ -266,9 +257,7 @@ describe('/dashboard/alerts 新 UI (#alerts-trades-ui)', () => {
     // 長文は先頭 + 全文 details (原文は grep 用に保持)
     expect(body).toContain('<summary class="muted" style="font-size:11px;cursor:pointer">全文</summary>')
     expect(body).toContain(longMessage.slice(0, 100))
-    // 短文はそのまま
     expect(body).toContain('dryRun true → false')
-    // AI 用コピー
     expect(body).toContain('id="log-copy-all"')
     expect(body).toContain('window.__alertsCopy')
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
@@ -319,9 +308,8 @@ describe('/dashboard/cron AI 用コピー (#alerts-trades-ui)', () => {
     expect(body).toContain('id="log-copy-all"')
     expect(body).toContain('class="log-copy-btn" data-id="2963"')
     expect(body).toContain('window.__cronCopy')
-    // full 側には trace が入る
     expect(body).toContain('risk.role_entry_suppressed')
-    // #decisions-chart-unify: 銘柄リンクはチャート銘柄タブへ、cron 内絞り込みは ▼
+    // 銘柄リンクはチャート銘柄タブへ、cron 内絞り込みは ▼ (#decisions-chart-unify)
     expect(body).toContain('href="/dashboard/charts?tab=symbol&symbol=USMV"')
     expect(body).toContain('この銘柄の判定だけに絞り込み')
     // 銘柄レール: universe 不在 (このテストの mock) では出ない — レール無しでも本文は描画される
@@ -360,7 +348,6 @@ describe('/dashboard/cron 銘柄レール (#decisions-chart-unify)', () => {
     const res = await app.request('/dashboard/cron?symbol=SOXL', { headers: {} }, { ...baseEnv, DB: {} as D1Database })
     const body = await res.text()
     expect(body).toContain('<aside class="symbol-rail"')
-    // ALL は非選択、SOXL が active
     expect(body).toContain('>ALL</span>')
     expect(body).toMatch(/rail-item active" href="\/dashboard\/cron\?symbol=SOXL/)
     expect(body).toContain('href="/dashboard/cron?symbol=SOXS')
@@ -458,11 +445,9 @@ describe('loadDecisionRowsInSession のページ整合 (#cron-session-filter pag
     realizedPnl: null,
     brokerStatus: null,
   })
-  /**
-   * limit() 呼び出しごとに次のバッチを返す stateful fake (カーソル前進を模擬)。
-   * 判定クエリは leftJoin を通るので、それ以外のクエリ (kill switch の
-   * global_config 読みなど) には空を返して queue を消費させない。
-   */
+  // limit() 呼び出しごとに次のバッチを返す stateful fake (カーソル前進を模擬)。判定クエリは
+  // leftJoin を通るので、それ以外のクエリ (kill switch の global_config 読みなど) には空を
+  // 返して queue を消費させない。
   function batchedDb(batches: unknown[][]) {
     const queue = [...batches]
     return {
@@ -530,14 +515,13 @@ describe('loadDecisionRowsInSession のページ整合 (#cron-session-filter pag
     expect(body).toContain('data-id="5"')
     expect(body).toContain('data-id="3"')
     expect(body).not.toContain('data-id="4"')
-    expect(body).not.toContain('data-id="1"') // limit=2 で切れる
-    expect(body).toContain('before=3') // 表示末尾がカーソル
+    expect(body).not.toContain('data-id="1"')
+    expect(body).toContain('before=3')
   })
 
   it('route: 走査打ち切りでページが埋まらなかったら、カーソルは走査末尾へ進む', async () => {
-    // batch1 の先頭 2 行だけ開場、以降 5 バッチ分 (走査上限) すべて休場行。
-    // 走査済み窓内の開場行は表示済みなので、表示末尾 (1199) でなく走査末尾
-    // (201) から次ページを始める — 同じ休場行の舐め直しと空ページを防ぐ。
+    // 走査済み窓内の開場行は表示済みなので、表示末尾でなく走査末尾から次ページを
+    // 始める (同じ休場行の舐め直しと空ページを防ぐ)。
     const batches = Array.from({ length: 5 }, (_, b) =>
       Array.from({ length: 200 }, (_, i) => mkRow(1200 - b * 200 - i, b === 0 && i < 2)),
     )

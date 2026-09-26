@@ -1,50 +1,34 @@
 /**
- * 銘柄チャートタブ (`renderSymbolTab`) の client 側初期化スクリプト実体。
+ * Client-side init script for the symbol chart tab (`renderSymbolTab`),
+ * served statically at `GET /dashboard/static/symbol-chart.js` (cacheable,
+ * unlike an inline `<script>` re-sent on every symbol switch).
  *
- * 元は `symbol.ts` の `renderSymbolTab` 内にインライン `<script>` として
- * 約1200行 (≈70KB) 埋め込まれていた。銘柄切替のたびに同一内容の巨大
- * インラインスクリプトを HTML に再送していたため、静的ファイル化して
- * `GET /dashboard/static/symbol-chart.js` として配信し、ブラウザキャッシュ
- * (`Cache-Control: public, max-age=86400` + ETag) を効かせる (#charts-symbol-redesign)。
+ * Reads chart data only from `#__chartData`'s `textContent` (never
+ * `window.__chartData`), because after a client-side symbol switch replaces
+ * `#symbol-main`'s innerHTML, a `<script>` inserted that way would not
+ * execute — reading the inert JSON script via DOM keeps both the initial
+ * page load and a post-swap re-init working the same way.
  *
- * データは `#__chartData` (別 `<script type="application/json">` で per-request
- * に埋め込む JSON) からのみ読む — `JSON.parse(el.textContent)` で毎回 DOM から
- * 読み直す (`window.__chartData` 代入には依存しない)。クライアント側銘柄切替
- * (#charts-symbol-redesign Phase C、`#symbol-main` の innerHTML を partial
- * fetch で丸ごと差し替える) の後も同じ読み方で動くようにするため:
- * innerHTML 経由で挿入した通常の `<script>` は実行系であっても実行されない
- * ブラウザ仕様があるが、`type="application/json"` の inert script は元々
- * 実行されない前提なので innerHTML 差し替えでも挙動が変わらない。
- * このファイル自体に `${...}` テンプレート補間は無い (build 前に grep 済み)。
- * ビルドステップを増やさない POC 方針を維持するため、実体は TypeScript の
- * export された定数文字列のままにしている。内容を変更する場合は `symbol.ts`
- * 側の DOM 構造 (`#symbol-chart` / `#decision-trace-panel` / `.zoom-preset` /
- * `#symbol-main` / `.symbol-rail` / `.symbol-subnav` 等) との整合を確認すること。
- *
- * 銘柄切替 (#charts-symbol-redesign Phase C): チャート初期化本体を
- * `initSymbolChart()` として再実行可能にし、`.symbol-rail` / `.symbol-subnav`
- * のクリックを intercept して `?partial=1` で `#symbol-main` の innerHTML だけ
- * fetch → 差し替え → `initSymbolChart()` 再実行、という SPA 風遷移にする。
- * fetch 失敗 / non-200 / timeout は fail-open で通常のフルページ遷移に
- * フォールバックする。
+ * Kept as a plain exported string (no separate build step) to match the POC
+ * policy of not adding a bundler. This file has no `${...}` interpolation.
+ * Changing the DOM ids/classes it queries (`#symbol-chart`,
+ * `#decision-trace-panel`, `.zoom-preset`, `#symbol-main`, `.symbol-rail`,
+ * `.symbol-subnav`) requires updating `symbol.ts` in lockstep.
  */
 export const SYMBOL_CHART_CLIENT_SCRIPT = `
 (function () {
-  // ECharts インスタンスは module scope で共有する。銘柄切替のたびに
-  // initSymbolChart() を再実行するので、window resize listener を都度
-  // 追加すると disposed instance を握った古い closure が積み上がってしまう
-  // (呼ぶたびに console error 兼無駄な処理が増える)。1 回だけ登録し、
-  // この変数越しに常に「今の」インスタンスへ resize を届ける。
+  // Shared across initSymbolChart() re-runs (symbol switch) rather than
+  // adding a resize listener per call, which would pile up closures over
+  // disposed chart instances.
   var symChart = null;
   window.addEventListener('resize', function () { if (symChart) symChart.resize(); });
 
   function initSymbolChart() {
       if (typeof echarts === 'undefined') return;
       var chartEl = document.getElementById('symbol-chart');
-      // 再実行時 (銘柄切替 swap 後) は前回のインスタンスを破棄してから作り直す。
-      // getInstanceByDom も併用し、symChart 変数と DOM の紐付けがずれた場合
-      // (例外で init 未完了のまま次の swap が来た等) でも dispose し損ねない
-      // ようにする。
+      // getInstanceByDom (not just the symChart variable) so a stale
+      // instance is still disposed if a prior init threw before symChart
+      // was assigned.
       if (chartEl) {
         var prevInstance = echarts.getInstanceByDom(chartEl);
         if (prevInstance) prevInstance.dispose();
@@ -55,27 +39,20 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       var sc = data && data.symbolChart;
       if (!chartEl || !sc || sc.points.length === 0) return;
 
-      // xAxis 戦略:
-      //   intradayBars が揃っているとき → category axis (categories = 各 bar の
-      //     ISO timestamp)。overnight / 週末 / 米国祝日の空白を「詰めて」表示する
-      //     (TradingView 等と同様の挙動)。ECharts の time axis では非取引時間を
-      //     skip する native 機能が無いため、category 化が standard 解。
-      //   intradayBars が空 (Yahoo intraday fetch 失敗) → time axis fallback。
-      //     candle が無いので gap も発生せず、line / markPoint だけ実時刻で描画。
-      // category mode では「category index」を全 series の x として揃える。
-      // markPoint も coord に [categoryIndex, price] を渡す。
+      // Category axis (index-based x, categories = each bar's ISO timestamp)
+      // when intradayBars exist: ECharts' time axis has no native way to
+      // skip non-trading hours, so category axis is used to collapse
+      // overnight/weekend/holiday gaps (TradingView-style). Falls back to a
+      // time axis when intradayBars is empty (Yahoo intraday fetch failed).
       var ohlcBars = sc.intradayBars || [];
       var useCategoryAxis = ohlcBars.length > 0;
       var ohlcMs = ohlcBars.map(function (b) { return new Date(b.timestamp).getTime(); });
       var categories = ohlcBars.map(function (b) { return b.timestamp; });
 
-      // セッション境界 (休場 → 開場) 検出:
-      // category axis 化で休場 gap が詰まった結果 (#193)、視覚的に
-      // 「どこから新セッションか」が分かりにくくなった。15m interval なので
-      // 隣接 bar は通常 15 分差。週末 / 夜間 closed 後の最初の bar は数時間〜
-      // 数十時間ぶんの差が空く。閾値 90 分で safe に検出し、後ろ側
-      // category index を「新セッションの開場点」として markLine 描画する。
-      // useCategoryAxis === false (intradayBars 空) の場合は描画 skip。
+      // Session-open detection: collapsing gaps onto a category axis makes
+      // session boundaries visually ambiguous, so a >=90min jump between
+      // adjacent 15m bars (normally ~15min apart) is flagged as a new
+      // session open and drawn as a markLine. Skipped in time-axis fallback.
       var sessionOpenIndices = [];
       if (useCategoryAxis) {
         var SESSION_GAP_MS = 90 * 60 * 1000;
@@ -84,9 +61,8 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         }
       }
 
-      // Map a millisecond timestamp to the nearest category index.
-      // ohlcMs は intradayBars の順序 (= Yahoo の昇順) を保つ前提。binary search
-      // で近接 index を返す。ohlcMs 空 (= time axis fallback) なら -1。
+      // Binary search over ohlcMs (assumed ascending, Yahoo's native order)
+      // for the nearest category index; -1 when ohlcMs is empty (time-axis fallback).
       function nearestIndex(ms) {
         if (!Number.isFinite(ms) || ohlcMs.length === 0) return -1;
         var lo = 0, hi = ohlcMs.length - 1;
@@ -96,13 +72,13 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           var mid = (lo + hi) >> 1;
           if (ohlcMs[mid] < ms) lo = mid + 1; else hi = mid;
         }
-        // lo は ms 以上の最初の index。一つ前と比べて近い方を採用。
+        // lo is the first index >= ms; pick whichever neighbor is closer.
         if (lo > 0 && (ms - ohlcMs[lo - 1]) <= (ohlcMs[lo] - ms)) return lo - 1;
         return lo;
       }
 
-      // category mode では x = category index、time mode では x = ISO timestamp
-      // (= category 値そのもの)。両 mode を同じ shape (x, y) で扱えるよう抽象化。
+      // Abstracts the two axis modes to the same (x, y) shape: category
+      // index in category mode, ISO timestamp (the category value itself) in time mode.
       function xForTimestamp(ts) {
         if (useCategoryAxis) {
           var idx = nearestIndex(new Date(ts).getTime());
@@ -121,22 +97,19 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       function jstLabel(value) {
         return jstFmt.format(new Date(value)).replace(/\\//g, '/');
       }
-      // fill 時刻は秒精度で表示 (同分内 fills を区別するため)。axisLabel は
-      // 分単位で密度を保つ (秒まで出すと x 軸ラベルが詰まる)。
+      // Second precision reserved for fill timestamps (distinguishing
+      // same-minute fills); axisLabel stays minute precision to avoid crowding.
       var jstFmtSec = new Intl.DateTimeFormat('ja-JP', {
         timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
       });
       function jstLabelSec(value) {
         return jstFmtSec.format(new Date(value)).replace(/\\//g, '/');
       }
-      // category index → 表示 label。category 値は ISO timestamp なのでそのまま JST 化。
       function jstLabelForX(value) {
         if (useCategoryAxis) {
-          // value は category 値 (ISO string) または index。axisLabel formatter に
-          // 来るのは index/value (params.value=ISO)、dataZoom labelFormatter は
-          // value=ISO string が来る (slider 端点の category 値)。
+          // ECharts callers pass either an index (number) or the category's
+          // ISO string, depending on call site.
           if (typeof value === 'number') {
-            // index として渡される場合 (recomputeYAxis 由来等)
             var i = Math.round(value);
             if (i < 0 || i >= categories.length) return '';
             return jstLabel(categories[i]);
@@ -146,37 +119,25 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         return jstLabel(value);
       }
 
-      // candlestick の data shape: [open, close, low, high]。category mode では
-      // index ベースなので 4 値だけ並べれば ECharts が categories 配列と対応付ける。
-      // time mode では [timestamp, open, close, low, high] の 5 値タプル。
+      // Category mode: candle data is index-based, [open, close, low, high]
+      // (ECharts pairs it with the categories array). Time mode adds the
+      // timestamp: [timestamp, open, close, low, high].
       var ohlcXY = useCategoryAxis
         ? ohlcBars.map(function (b) { return [b.open, b.close, b.low, b.high]; })
         : ohlcBars.map(function (b) { return [b.timestamp, b.open, b.close, b.low, b.high]; });
-      // SMA50 line: cron-eval points から取得 (daily で計算された値の推移)。
-      // category mode では point の timestamp を最近接 ohlc index に snap して
-      // [index, value] で渡す。時間軸の連続性は category 上で保たれる。
       var smasXY = sc.points.map(function (p) {
         if (p.sma50 == null) return [xForTimestamp(p.timestamp), null];
         return [xForTimestamp(p.timestamp), p.sma50];
       });
-      // (close line は削除: candle が close を含むので冗長、overnight gap で
-      //  斜めに横断する視覚ノイズが発生していたため #176 → #177 で除去)
 
-      // 押し目買いゾーン:
-      // - 上端 = high20d × (1 + pullbackMax)  ≒ 教科書の「上値抵抗線 (resistance)」
-      // - 下端 = high20d × (1 + pullbackMin)  = 押し目買いの下限 (-15% 以下は深すぎ)
+      // Pullback zone: upper = high20d * (1 + pullbackMax) (resistance-ish),
+      // lower = high20d * (1 + pullbackMin) (too-deep cutoff).
       var pullbackMaxMul = 1 + sc.rules.pullbackMax;
       var pullbackMinMul = 1 + sc.rules.pullbackMin;
-      // 帯の描画は 3 層で構成 (#237 follow-up):
-      //   1. markArea fill (薄オレンジ): 「現在の押し目ゾーン (latest high20d 基準)」
-      //      を flat に塗って即座にレンジを把握させる。
-      //   2. per-timestamp dashed line × 2 (上端 / 下端): 各日の high20d × mul を
-      //      たどる斜めライン。SOXL のように high20d が右肩上がりで動く銘柄では
-      //      flat な markArea とのズレが大きく、傾きで「押し目ゾーンが日々どう動
-      //      いてるか」を可視化する。
-      // 元々 (#232 follow-up) は 1 だけにしていたが、価格 momentum が大きい銘柄で
-      // 「平行な帯が実態とズレて見える」issue → 1+2 のハイブリッドに戻す。
-      // markArea の opacity は重ね描きで濃くなりすぎないよう 0.12 → 0.08 に下げる。
+      // Drawn as both a flat markArea fill (latest high20d) and two sloped
+      // per-timestamp dashed lines: a flat band alone reads wrong for
+      // symbols where high20d trends strongly (e.g. SOXL), since the band's
+      // actual daily movement diverges from the flat fill.
       var latestHigh20d = null;
       for (var lhi = sc.points.length - 1; lhi >= 0; lhi -= 1) {
         var lhp = sc.points[lhi];
@@ -207,9 +168,8 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         ]],
       } : null;
 
-      // per-timestamp の押し目ゾーン上下端 (sloped 2 lines)。各 point.high20d ×
-      // pullbackMaxMul / pullbackMinMul を辿る。high20d が null の point は
-      // null を入れて echarts に segment break させる (connectNulls=false)。
+      // null (not omitted) for a missing high20d, so echarts breaks the
+      // segment there (paired with connectNulls: false below).
       var pullbackUpperXY = sc.points.map(function (p) {
         var x = xForTimestamp(p.timestamp);
         if (typeof p.high20d !== 'number' || !isFinite(p.high20d)) return [x, null];
@@ -220,15 +180,10 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         if (typeof p.high20d !== 'number' || !isFinite(p.high20d)) return [x, null];
         return [x, p.high20d * pullbackMinMul];
       });
-      // 全点 null の場合は line series を出さない (legend を汚さない)。
       var pullbackBandHasData =
         pullbackUpperXY.some(function (xy) { return xy[1] != null; }) &&
         pullbackLowerXY.some(function (xy) { return xy[1] != null; });
 
-      // 押し目ゾーン端までの距離ラベル (#entry-distance): 「入場ライン」独立線は
-      // 廃止し、既存の上端/下端点線に「あと −X.X% ($Y)」を付与する。現価格は
-      // latestCronPrice (直近 strategy 評価値) 基準。過熱/トレンド等で実際に入場
-      // できない件は下の「入場まで」パネルが説明する (ここは純粋な価格距離)。
       function bandEdgeLabel(name, edgeY) {
         if (!Number.isFinite(edgeY) || sc.latestCronPrice == null || !(sc.latestCronPrice > 0)) return name;
         var mv = (edgeY - sc.latestCronPrice) / sc.latestCronPrice;
@@ -237,35 +192,17 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       var pullbackUpperLabel = bandEdgeLabel('押し目上端', bandUpperY);
       var pullbackLowerLabel = bandEdgeLabel('押し目下端', bandLowerY);
 
-      // 価格トレンド線 (server-side で daily close の linear regression fit)。
-      // 旧仕様の「上値抵抗線 / 下値支持線」上下 2 本は、ローソク足の上下を
-      // flat に走り「価格の中心を辿る trend」という user 期待と乖離していた
-      // ため、close の重心を通る best-fit 1 本に統一した。
-      //
-      // 検出失敗 (sample < 2 / 同時刻のみ) なら null → 描画スキップ。
-      //
-      // 過去 #185 / #187 / #188 / #189 で「描画されない」回帰があったが、
-      // 根因は ECharts の dataZoom + 2 点 line series が「片方の点が zoom
-      // 範囲外になると線が引かれない」既知挙動 (issue #3637 系)。#189 で
-      // dataZoom の filterMode を 'weakFilter' に変えて改善したが、それでも
-      // ユーザ環境で残ケースがあった。本質的に robust にするため、line の
-      // data 自体を「常に zoom 範囲内に複数点が入る粒度」に展開する。
-      //
-      // 具体的には intradayBars (15m candle、60 日で ~1500 点) の各 timestamp
-      // で trend line の y 値を線形補間し、[[t, y], ...] の dense path にす
-      // る。これで 5D (~120 点) や 1D zoom でも複数点が必ず visible になり
-      // filterMode 不問で線分が描画される。intradayBars が空 (Yahoo fetch
-      // 失敗) のときは 2 点 endpoint fallback (旧挙動)。
-      //
-      // 線形外挿: trend line は概念上両側に伸びる線なので、p1 より過去側 /
-      // end より未来側の sample も同じ slope で外挿する。
-      //
-      // ※ Server-side densifyTrendLine (export) と同じアルゴリズム。
-      //    unit test はそちらで担保する。client 側に inline するのは sc.*
-      //    オブジェクトを HTML script に埋めて echarts.init で消費するため。
-      // category mode では sample を「各 ohlc bar の ms」として展開した後、
-      // 結果の [t, y] 配列を index ベース [i, y] に変換する (ohlcMs[i] === t を
-      // 満たすので 1:1 対応)。time mode では従来通り [t, y] のまま渡す。
+      // densifyTrendLine expands the trend line's 2 endpoints into a dense
+      // path (one point per intradayBars timestamp, linearly interpolated,
+      // extrapolated past both endpoints) instead of passing a 2-point line
+      // series. ECharts drops a 2-point line entirely once either endpoint
+      // scrolls outside the dataZoom range (a known upstream issue); a dense
+      // path keeps multiple points visible at any zoom level regardless of
+      // filterMode. Falls back to the raw 2-point line when intradayBars is
+      // empty (Yahoo fetch failed).
+      // Mirrors the server-side densifyTrendLine export algorithm exactly
+      // — that copy is what's unit-tested; this one only exists inline
+      // because it consumes sc.* already embedded in the page.
       var ohlcTimestamps = ohlcMs.slice();
       function densifyTrendLine(line, sampleTimestamps) {
         if (!line) return null;
@@ -323,30 +260,16 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       }
       var trendLineXY = toCategoryXY(densifyTrendLine(sc.trendLine, ohlcTimestamps));
 
-      // markPoint は xAxis: ISO timestamp (time axis 上の実時刻位置)。category 不一致問題なし。
-      // pin label を短縮: BUY/SELL は色 (緑/赤) で識別、price だけ表示。
-      // close-time fill (15 分以内) で label 重なりが起きにくい。pnl は SELL のみ
-      // 末尾に小数 1 桁で付与 (例: "120.19 +0.4")。詳細 (full-precision PnL /
-      // qty / timestamp) は markPoint hover tooltip で表示。
-      // realizedPnl と filledQty を data に保持し tooltip.formatter から
-      // full-precision で読む (label の toFixed(1) で丸めた値とは独立)。
-      // pin label は「全 fill 中で最新」の 1 個だけ表示。それより古いのは
-      // 全部 marker のみで label.show: false。BUY と SELL を別々に最新採用
-      // していた旧仕様だと近接する BUY→SELL pair で label が重なる回帰が
-      // あったため、現保有 status を表す「最後のアクション」だけ強調。
-      // 過去の fill 詳細は hover tooltip (full-precision PnL / qty / 時刻) で。
       var buys = sc.markers.filter(function (m) { return m.side === 'BUY'; });
       var sells = sc.markers.filter(function (m) { return m.side === 'SELL'; });
       var latestFillTs = sc.markers.length > 0
         ? sc.markers[sc.markers.length - 1].timestamp
         : null;
-      // category mode では markPoint coord に [categoryIndex, price] を渡す。
-      // fill 時刻を最近接 ohlc bar (= 15m 粒度) の index に snap するため、同 bar
-      // 内の複数 fill は同じ index に重なる。pin label は側 (top/bottom) と色で
-      // 区別するため重なっても 1 件は読める。fillTimestamp は秒精度を保持して
-      // hover tooltip で full-precision 時刻として表示される (情報損失なし)。
-      // clientOrderId を data に保持し、pin クリックで side パネルに fill 詳細 +
-      // 取引ジャーナル (/dashboard/trades?clientOrderId=...) への逆リンクを出す。
+      // Only the single most recent fill's pin gets a visible price label;
+      // older fills render marker-only. Labeling BUY and SELL independently
+      // (each showing their own latest) made an adjacent BUY/SELL pair
+      // overlap, so only the overall-latest "last action" is labeled — full
+      // detail for older fills is still available via hover tooltip.
       var entries = buys.map(function (m) {
         var showLabel = m.timestamp === latestFillTs;
         return {
@@ -369,12 +292,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         };
       });
 
-      // 判定点 (#decision-trace のグラフ同期): cron の判定イベント (HOLD を除く
-      // BUY/SELL/SKIP/REJECT/ERROR) を eval 時刻 × eval 価格に色分けでプロットする。
-      // 点クリックで脇パネルに判定トレース・ラダー (server 事前レンダリング HTML)
-      // を出し、文字ログとグラフを 1 画面で同期させる。category mode では eval
-      // 時刻を最近接 ohlc index に snap (markPoint と同じ手法、xForTimestamp 流用)。
-      // 色は取引品質タブの DECISION_COLORS と揃える。
+      // Colors mirror the trade-quality tab's DECISION_COLORS.
       var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', SKIP: '#b25000', REJECT: '#7c3aed', ERROR: '#c22' };
       var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', SKIP: '見送り (bot判定)', REJECT: '拒否 (証券会社)', ERROR: 'エラー (原因不明・一時的)' };
       function escHtml(s) {
@@ -390,13 +308,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         };
       });
 
-      // 保有区間 markArea (#chart-markers): BUY→SELL の closed pair を薄背景で
-      // 塗る (server 側 pairClosedTrades の結果 = sc.holdingSpans)。SELL の
-      // realizedPnl の符号で緑 (勝ち) / 赤 (負け) 系、欠損 (null) は中立グレー。
-      // オープン中の保有は server が span に含めない (右端まで塗ると「そこで
-      // 決済した」と誤読される) — 現保有は avg/stop/TP 線が担う。
-      // category mode では xAxis に最近接 ohlc index、time mode では ISO を渡す
-      // (markPoint coord と同じ xForTimestamp 流用)。
+      // An open (not yet closed) position is never included in
+      // holdingSpans by the server — shading it through to the right edge
+      // would misread as "closed here", so avg/stop/TP lines cover that case instead.
       var holdingSpans = sc.holdingSpans || [];
       var holdingAreaData = holdingSpans.map(function (s) {
         var color = s.realizedPnl == null
@@ -408,16 +322,11 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         ];
       });
 
-      // 保有中なら avg / stop / take-profit を「dense path の独立 line series」
-      // として描画。openedAt から最新までのみ描画 (chart 全幅に伸ばすと
-      // 「ずっと前から avg だった」と誤読される) のは旧仕様 (markLine 方式) と
-      // 同じだが、ECharts dataZoom + 2 点 markLine は trend line と同様
-      // 「片端が zoom 範囲外になると線が消える」回帰があるため (#190 / #191
-      // と同根、issue #3637 系)、densifyHorizontalLine で intradayBars
-      // 各 timestamp に y を割り当てた dense path に展開する。これで 1D zoom
-      // でも複数点が必ず visible になり filterMode 不問で線が描画される。
-      // ※ Server-side densifyHorizontalLine (export) と同じアルゴリズム。
-      //    unit test はそちらで担保する。
+      // Same dense-path workaround as densifyTrendLine, applied to a
+      // horizontal avg/stop/TP line drawn only from openedAt to the latest
+      // point (not the full chart width, which would misread as "avg since
+      // forever"). Mirrors the server-side densifyHorizontalLine export,
+      // which is what's unit-tested.
       function densifyHorizontalLine(yValue, fromTs, toTs, samples) {
         if (!Number.isFinite(yValue)) return null;
         var a = typeof fromTs === 'number' ? fromTs : new Date(fromTs).getTime();
@@ -452,14 +361,10 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       var avgLabel = '';
       var stopLabel = '';
       var tpLabel = '';
-      // 保有ナシ時に「もし今 BUY したら」の損切り / 利食い水準を仮置きで描く
-      // preview lines。virtualAvg = sc.latestCronPrice (= 直近 cron eval で
-      // strategy 評価に使った価格) を仮の avg と見立てる。
-      // sc.points[末尾] を使うと Yahoo daily filler が末尾に来ているケース
-      // (cron 停止中 / 銘柄古い) で「過去 Yahoo close」を avg にしてしまい、
-      // user に「最新評価値」と誤解させる。latestCronPrice が null = 評価履歴
-      // 自体が無い → preview line そのものを描画スキップする。
-      // dotted + opacity 0.5 で「actual position ではない」と区別する。
+      // Preview stop/TP (no position held) use latestCronPrice, not the last
+      // chart point — the last point can be a Yahoo daily filler (cron
+      // paused / stale symbol), which would show a stale close as if it
+      // were the current strategy-evaluated price.
       var previewStopLineXY = null;
       var previewTpLineXY = null;
       var previewStopLabel = '';
@@ -471,9 +376,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         var tpPrice = avg * (1 + sc.rules.takeProfitPct);
         extraYValues.push(avg, stopPrice, tpPrice);
         var openedAt = sc.position.openedAt;
-        // openedAt > 最新 point (chart データが古い / position 直後でまだ
-        // strategy_decision_log に記録されていない) のとき、endTs が openedAt
-        // より過去に出ると線が逆向き (左側) に伸びる。max で clamp。
+        // Clamped to openedAt (not left to go negative): a fresh position
+        // opened after the latest recorded point would otherwise draw the
+        // line backwards.
         var latestTs = sc.points.length > 0 ? sc.points[sc.points.length - 1].timestamp : openedAt;
         var endTs = new Date(latestTs).getTime() >= new Date(openedAt).getTime()
           ? latestTs
@@ -496,26 +401,23 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         var pStopPrice = virtualAvg * (1 + sc.rules.stopPct);
         var pTpPrice = virtualAvg * (1 + sc.rules.takeProfitPct);
         extraYValues.push(pStopPrice, pTpPrice);
-        // preview line の x 範囲: chart 開始 → 最新 cron eval timestamp。
-        // 末尾を Yahoo filler 末尾まで伸ばすと「最新 cron 以降の Yahoo 区間」
-        // にも線が出てしまい virtualAvg と整合しないので latestCron まで。
+        // Ends at latestCronTimestamp, not the chart's last point: extending
+        // into the Yahoo-filler tail past the last cron eval would draw a
+        // line inconsistent with virtualAvg.
         var pFromMs = new Date(sc.points[0].timestamp).getTime();
         var pToMs = new Date(sc.latestCronTimestamp).getTime();
         if (Number.isFinite(pFromMs) && Number.isFinite(pToMs)) {
           previewStopLineXY = toCategoryXY(densifyHorizontalLine(pStopPrice, pFromMs, pToMs, ohlcTimestamps));
           previewTpLineXY = toCategoryXY(densifyHorizontalLine(pTpPrice, pFromMs, pToMs, ohlcTimestamps));
-          // label は actual stop/TP と長さを揃える (右端で見切れないよう
-          // "preview" prefix ではなく "(preview)" suffix にして、actual の
-          // "stop X (-Y%)" と同等の幅に収める)。
           previewStopLabel = 'stop ' + pStopPrice.toFixed(2) + ' (preview)';
           previewTpLabel = 'TP ' + pTpPrice.toFixed(2) + ' (preview)';
         }
       }
 
-      // 参考 価格外挿線 (#entry-distance のグラフ表現): 直近ペースを未来へ延ばした
-      // 点線。category 軸に未来スロットを足して描く。**予測ではなく外挿** なので
-      // 点線 + "参考" 明記。entryPrice が無い (価格非依存ブロック) 局面は server 側で
-      // projection=null になり描かれない。time 軸 fallback は POC では描画しない。
+      // Extrapolation of recent pace into future category slots — not a
+      // prediction, hence dotted + labeled "参考" (reference only). Only
+      // drawn in category-axis mode; server sends projection=null when
+      // entryPrice can't be determined (price-independent gate blocking).
       var projLineXY = null;
       var projCrossPoint = null;
       var projZoomEndIndex = null;
@@ -532,13 +434,11 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           if (lastBarMs - ohlcMs[bi] <= dayMs) barsPerDay += 1; else break;
         }
         barsPerDay = Math.max(1, barsPerDay);
-        // 未来スロットの timestamp 間隔 (直近 bar の平均間隔)。
         var span = barsPerDay > 1 ? (lastBarMs - ohlcMs[ohlcMs.length - barsPerDay]) / (barsPerDay - 1) : 3600000;
         if (!Number.isFinite(span) || span <= 0) span = 3600000;
-        // 描く未来 bar 数: 交差あり (= 入場時期の目安が見える) はその近辺まで
-        // 1〜5 営業日に clamp。交差なしは向き (傾き) が読めれば十分なので
-        // 半営業日分の bar だけ — 未来スロットは axis を占有して履歴側の candle
-        // を左に圧縮するため、最小限に保つ (operator 指摘 ×2)。
+        // Future bars kept minimal (crossing: clamped to 1-5 business days;
+        // no crossing: just enough to read the slope) — each future slot
+        // occupies axis space and compresses the historical candles.
         var drawBars;
         if (proj.crossingSteps != null) {
           var drawDays = Math.min(Math.max(Math.ceil(proj.crossingSteps), 1), 5);
@@ -555,7 +455,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         projLineXY = [[startIdx, proj.lastPrice], [endIdx, projEndPrice]];
         extraYValues.push(proj.lastPrice, projEndPrice);
         if (proj.entryPrice != null) extraYValues.push(proj.entryPrice);
-        // 交差点 marker (描画範囲内のときだけ pin を出す)。
+        // Crossing-point pin only within the drawn range.
         if (proj.crossingSteps != null && proj.entryPrice != null) {
           var crossBars = Math.round(proj.crossingSteps * barsPerDay);
           if (crossBars >= 0 && crossBars <= drawBars) {
@@ -565,28 +465,25 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         projZoomEndIndex = endIdx;
       })();
 
-      // ECharts の scale:true は markLine を yAxis range に含めないため、
-      // TP / stop が data 範囲外だと枠の外で見えなくなる。data 全体 +
-      // position lines + markers を考慮した explicit min/max + padding。
-      // NaN / Infinity が混入すると Math.min/max が NaN を返し、
-      // 結果 yAxis が壊れる (axis label に巨大数が出る回帰例あり) ので
-      // pushIfFinite で防御。
+      // Explicit yAxis min/max: ECharts' scale:true excludes markLine from
+      // the axis range, so a TP/stop outside the data range would render
+      // off-canvas otherwise. pushIfFinite guards against NaN/Infinity
+      // reaching Math.min/max, which breaks the whole axis.
       var allY = [];
       function pushIfFinite(v) {
         if (v != null && typeof v === 'number' && Number.isFinite(v)) allY.push(v);
       }
-      // y軸は candle の高低 + markers + position 線だけで decide。
-      // SMA50 (long-term、現在価格と乖離大) / band / low20d / trend line を
-      // 入れると軸 range が必要以上に広がり candle が縦圧縮される
-      // (trader-strategist 助言)。これらは line として描画はする
-      // (auto-clip で軸外は切れる) が、軸 range には影響させない。
+      // Range decided from candle high/low + markers + position lines only.
+      // SMA50 / band / low20d / trend line are still drawn (and auto-clipped
+      // at the axis edge) but excluded here — including them stretches the
+      // range and compresses the candles.
       (sc.intradayBars || []).forEach(function (b) {
         pushIfFinite(b.high);
         pushIfFinite(b.low);
       });
       sc.markers.forEach(function (m) { pushIfFinite(m.price); });
       extraYValues.forEach(function (v) { pushIfFinite(v); });
-      pushIfFinite(data.prevClose); // 前日終値 markLine が枠外に出ないように
+      pushIfFinite(data.prevClose);
       var yMin, yMax;
       if (allY.length > 0) {
         var rawMin = Math.min.apply(null, allY);
@@ -598,12 +495,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         }
       }
 
-      // dataZoom: 下部 slider + inside (wheel/pinch zoom)。初期 zoom 範囲は
-      // ?from / ?to URL params (data.zoomFromMs / zoomToMs)。zoom 操作時に
-      // history.replaceState で URL を更新 → 銘柄切替を跨いでも range を維持。
-      // category mode では startValue/endValue が「category index」を指す。
-      // URL 由来の ms 範囲は最近接 index に snap して dataZoom に渡す。
-      // time mode (intradayBars 空) では従来通り ms をそのまま startValue に。
+      // Initial zoom range from ?from/?to (data.zoomFromMs/zoomToMs), snapped
+      // to the nearest category index in category mode. dataZoom listener
+      // below writes it back to the URL via replaceState, so it survives a symbol switch.
       var dzInitial = (function () {
         if (data.zoomFromMs == null || data.zoomToMs == null) return {};
         if (useCategoryAxis) {
@@ -615,30 +509,17 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         }
         return { startValue: data.zoomFromMs, endValue: data.zoomToMs };
       })();
-      // 外挿線を初期表示に収める: category mode で右端 (endValue) を外挿末尾まで
-      // 広げる (未来スロットを足したぶん)。startValue は据え置きなので履歴 + 外挿が
-      // 同時に見える。
+      // Widens the initial right edge to include the projection's future
+      // slots (history + extrapolation both visible without an extra zoom-out).
       if (projZoomEndIndex != null && useCategoryAxis && dzInitial.endValue != null) {
         dzInitial.endValue = Math.min(projZoomEndIndex, categories.length - 1);
       }
-      // dataZoom slider 両端ラベルも JST で表示 (default だと UTC date string)。
-      // category mode では labelFormatter に category 値 (= ISO timestamp 文字列)
-      // が渡されるので jstLabel に直接通せばよい (内部で Date(value) parse)。
-      // filterMode: 'weakFilter' は line / markLine など複数点で 1 figure を
-      // 構成する series 用。default の 'filter' は data item 単位で評価し、
-      // 1 dimension でも zoom 外なら点ごと除外する → 直近 2 pivot を chart 末
-      // まで延長する trend line ([oldPivot(~30d 前), chartEnd] の 2 点) は 5D
-      // zoom で oldPivot が範囲外 → 1 点だけ残り「線が引けない」回帰になる。
-      // 'weakFilter' は同 group 内の全点が同じ側に外れた時のみ filter する
-      // ため、片端が範囲内なら線分は描画される (公式 issue #3637 / official
-      // PR で line chart が zoom 中に消える問題の対策として実装された挙動)。
-      // candle / line / scatter / markLine / markPoint / markArea すべてで
-      // 「1 点が範囲外でも視覚的に切れて表示される」のが期待動作なので
-      // wide chart (1 銘柄 / 数千点) でも問題ない。
-      // 下部 slider と wheel/pinch zoom は廃止 (Google Finance 風 — range 操作は
-      // 1日/5日/1か月/最大 のピルのみ。operator 要望)。inside dataZoom は
-      // ピルの dispatchAction / URL 同期の受け皿として残すが、マウス・タッチ
-      // 操作は全て無効化する (sticky チャート上で page scroll を奪わない効果も)。
+      // filterMode: 'weakFilter' (not the default 'filter') only drops a
+      // multi-point series (line/markLine) when every point in it falls
+      // outside the zoom range — 'filter' drops per-point, which breaks a
+      // 2-endpoint line the moment either endpoint scrolls off-range.
+      // Slider and wheel/pinch zoom are disabled: range control is the 1D/5D/1M/All
+      // preset pills only. The inside dataZoom stays as the pills' dispatch target.
       var dataZoomCfg = [
         Object.assign({
           type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter',
@@ -648,33 +529,24 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       ];
 
       symChart = echarts.init(chartEl);
-      // chart title は出さない: 銘柄は左レールの強調で、表示要素は凡例で分かる。
       symChart.setOption({
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
-          // 既定の trigger:'axis' tooltip は header に axis value (時刻) を
-          // UTC 文字列で出すため、JST formatter を当てた custom formatter で上書き。
-          // candlestick 値は [open, close, low, high]、line は scalar として処理。
-          // category mode では axisValue は category 値 (= ISO timestamp string)。
+          // Overrides the default UTC axis-value header with a JST formatter.
           formatter: function (params) {
             if (!Array.isArray(params) || params.length === 0) return '';
             var ts = params[0].axisValue;
             var lines = ['<div style="font-weight:600;font-size:11px">' + jstLabelForX(ts) + '</div>'];
-            // densified path (intradayBars timestamp ごとに line series を埋める
-            // PR #190 / #192) により、同じ seriesName + 同じ y 値の data point が
-            // 同一 axis index 周辺に多数並ぶ。ECharts の trigger axis は該当
-            // params を全件渡してくるため、tooltip 上で SMA50 65.82 が 16 行
-            // 続くような重複表示が発生する。seriesName + 整形後 value を key に
-            // した Set で連続行を 1 行に dedup する (系列ごと 1 行)。candle は
-            // OHLC 4 値の array なので special-case のまま既存挙動を維持。
+            // The densified line series (one point per intradayBars
+            // timestamp) puts many same-seriesName-same-value points near
+            // one axis index, which trigger:'axis' would otherwise repeat
+            // as duplicate tooltip rows — dedup by seriesName + formatted value.
             var seenLine = Object.create(null);
             for (var i = 0; i < params.length; i += 1) {
               var p = params[i];
               if (p.seriesType === 'candlestick' && Array.isArray(p.value)) {
-                // ECharts は candlestick の p.value 先頭に系列の x (timestamp/index)
-                // を入れて返すことがあるため、長さで分岐。length===4 の場合は
-                // [O, C, L, H]、5 以上は [x, O, C, L, H]。
+                // p.value is [O, C, L, H] at length 4, or [x, O, C, L, H] at length >= 5.
                 var off = p.value.length >= 5 ? 1 : 0;
                 lines.push('<div style="font-size:11px">' + p.marker + ' ' + p.seriesName +
                   '  O ' + Number(p.value[off]).toFixed(2) +
@@ -696,26 +568,15 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           },
         },
         legend: { top: 22, type: 'scroll' },
-        // plot 面積最大化: grid 余白を絞り、splitLine 淡く、axisLine 非表示で
-        // candle が映える背景に (trader-strategist 助言)。下部 slider 廃止に伴い
-        // bottom は x軸ラベル分 (28px) のみ。
-        // right は stop/TP の endLabel ("stop X (preview)" 等) が見切れないよう
-        // 80px 確保 (短い "stop X (-Y%)" でも余白として違和感ない範囲)。
         grid: { left: 50, right: 20, top: 56, bottom: 28, containLabel: true },
         dataZoom: dataZoomCfg,
-        // category mode: categories = intradayBars 各 bar の ISO timestamp。
-        // overnight / 週末 / 米国祝日の空白を「詰めて」表示するため (TradingView
-        // 同等)、time axis ではなく category axis を採用。category 間隔は等間隔
-        // なので「金曜 16:00 ET 引け」と「月曜 09:30 ET 寄り」が隣接する。これは
-        // 「同じ 1 hour 進んだように見える」が、休場で値が動いていない gap を
-        // 詰める方が視認性で勝る (user 要望)。
-        // time mode (intradayBars 空) では従来の time axis にフォールバック。
+        // Category axis (equal spacing per bar) collapses non-trading gaps
+        // so e.g. Friday close sits adjacent to Monday open — reads as an
+        // even step, trading that off against the alternative of a
+        // time-proportional axis with large dead gaps.
         xAxis: useCategoryAxis ? {
           type: 'category',
           data: categories,
-          // 連続する category を密に並べた候補の中から ECharts が省略間引きする
-          // ので、明示的な intervals 不要。formatter で個々の category 値 (ISO
-          // timestamp) を JST に整形。
           axisLabel: { formatter: function (value) { return jstLabel(value); }, hideOverlap: true },
           axisLine: { show: false },
           splitLine: { show: true, lineStyle: { opacity: 0.15 } },
@@ -732,22 +593,15 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           splitLine: { show: true, lineStyle: { opacity: 0.15 } },
         },
         series: [
-          // 保有区間の薄背景 (markArea、#chart-markers)。host series 自体は
-          // 空 data の line (markArea を legend 名付きでぶら下げるための器)。
-          // z:0 で candle / 線群のさらに背面に置く。色は span ごとに
-          // holdingAreaData 側の itemStyle で指定済み (勝ち緑 / 負け赤)。
+          // Empty-data line series exists only as a named host for the
+          // markArea (ECharts markArea has no series type of its own).
           ...(holdingAreaData.length > 0 ? [{
             name: '保有区間 (確定)', type: 'line', data: [],
             symbol: 'none', silent: true, z: 0,
             itemStyle: { color: 'rgba(120, 120, 128, 0.4)' },
             markArea: { silent: true, data: holdingAreaData },
           }] : []),
-          // 保有時は押し目バンド非表示 (avg/stop/TP に集中)、非保有時は表示。
-          //
-          // 帯は markArea fill のみで表現 (#232 follow-up): 以前は per-timestamp
-          // の dashed line 2 本も併用していたが、20 日 high はあまり動かず
-          // markArea の上下境界とほぼ重なって冗長だった。markArea のみに統一して
-          // 凡例もコンパクトにし、chart の視認性を上げる。
+          // Hidden while holding a position (avg/stop/TP take visual priority instead).
           ...((sc.position || !pullbackBandMarkArea) ? [] : [
             {
               name: '押し目ゾーン',
@@ -756,11 +610,6 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               markArea: pullbackBandMarkArea,
             },
           ]),
-          // per-timestamp 上下端 (sloped lines)。markArea の上に重ねて、
-          // high20d が動く銘柄での「帯の傾き」を可視化する。保有時 + 押し目
-          // markArea 描画なしのケースは line も出さない (chart 過密回避)。
-          // 凡例は markArea host series '押し目ゾーン' に集約させたいので、
-          // この 2 本は legendHoverLink で同期する独立 series (name のみ別)。
           ...((sc.position || !pullbackBandMarkArea || !pullbackBandHasData) ? [] : [
             {
               name: '押し目上端',
@@ -769,7 +618,6 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
               itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
               symbol: 'none', z: 2,
-              // 入場まで距離を右端ラベルに (旧「入場ライン」線の代替)。
               endLabel: { show: true, formatter: pullbackUpperLabel, color: '#b25000', fontSize: 10 },
             },
             {
@@ -782,52 +630,33 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               endLabel: { show: true, formatter: pullbackLowerLabel, color: '#b25000', fontSize: 10 },
             },
           ]),
-          // 価格トレンド (linear regression, 直近 30 日 daily close fit)。
-          // 1 本だけ。中間色 (紫 #9333ea) で「上値 / 下値どちらでもない、価格
-          // の重心」を表す。dense path (intradayBars 各 timestamp で y 補間)
-          // で zoom にかかわらず確実に描画される (2 点 line series で zoom
-          // 縮めると seg-droppable な ECharts 既知挙動 #3637 系への根本対処)。
-          // z:7 で candle (z:5) / SMA50 (z:6) より上に置き、線本体を最前面に。
-          // symbol:'none' で点 marker は出さない。itemStyle.color は legend
-          // dot 色を lineStyle.color と揃えるため明示。
           ...(trendLineXY ? [{
             name: '価格トレンド (linear regression, 30日)', type: 'line', data: trendLineXY,
             lineStyle: { width: 1.8, color: '#9333ea', type: 'solid' }, symbol: 'none',
             itemStyle: { color: '#9333ea' }, z: 7,
           }] : []),
-          // candle: 主役。日本式配色 (Google Finance JA と同じ):
-          // 赤 = 陽線 (close >= open) / 緑 = 陰線 (close < open)。
-          // markPoint / markLine もここに anchor。barWidth 明示で overnight
-          // gap 後の細い candle を視認可能に。borderWidth 強めて
-          // body と wick の対比を確保。
+          // Japan-style coloring: red = up (close >= open), green = down —
+          // opposite of the US convention.
           ...(ohlcXY.length > 0 ? [{
             name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
-            // barWidth は auto (slot 幅比例)。15m 化で本数が 4 倍になったため、
-            // 固定 px だと zoom out 時に candle が重なる。
             itemStyle: {
-              color: '#d23f31',     // 陽線 (close >= open) — 日本式は赤
-              color0: '#1e8e3e',    // 陰線 (close < open) — 日本式は緑
+              color: '#d23f31',
+              color0: '#1e8e3e',
               borderColor: '#d23f31',
               borderColor0: '#1e8e3e',
               borderWidth: 1.5,
             },
             z: 5,
-            // position lines (avg/stop/TP) は dense path の独立 line series
-            // として描画する (下方参照、densifyHorizontalLine 適用)。
-            // candlestick の markLine は trend line / position line いずれも
-            // dataZoom + 2 点だと「片端外で線が消える」回帰があるため使わない。
-            //
-            // ただしセッション境界の縦点線は xAxis: <category index> 指定で
-            // y 軸全幅にまたがる「真の vertical markLine」となり、ECharts の
-            // 描画 path が trend line (slanted 2-point markLine) とは別系統。
-            // 縦線方向は zoom 範囲外でも描画ロバスト (#193 follow-up)。
-            // category 軸モード時のみ data を積む (time axis fallback では空)。
+            // Session-open boundaries use markLine (not the densified line
+            // series avg/stop/TP use below) because a vertical markLine
+            // spans the full y-range natively and stays visible outside the
+            // zoom range, unlike a 2-point sloped markLine.
             markLine: (function () {
               var mlData = sessionOpenIndices.map(function (idx) {
                 return { xAxis: idx };
               });
-              // 前日終値の水平点線 + 右端ラベル (Google Finance 風)。candle series
-              // の markLine に同居させる (独立 series にすると legend を汚すため)。
+              // Attached to the candle series' markLine rather than its own
+              // series, to avoid adding a legend entry.
               if (data.prevClose != null && Number.isFinite(data.prevClose)) {
                 mlData.push({
                   yAxis: data.prevClose,
@@ -868,23 +697,11 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               },
             } : undefined,
           }] : []),
-          // SMA50 line: Yahoo daily bars から server-side で連続計算 (cron eval
-          // 行間も Yahoo 日次で線が繋がる)。candle (z:5) より上に置いて細い
-          // candle 帯に重なっても見えるようにする。色は TradingView 系で
-          // SMA に多用される orange (#f59e0b)、solid 1.4px。
-          // trend line は独立 series で描画する (上方参照)。markLine 方式は
-          // legend に出ないため legend と series の対応が崩れる。
           {
             name: 'SMA50', type: 'line', data: smasXY,
             lineStyle: { width: 1.4, color: '#f59e0b', type: 'solid' },
             symbol: 'none', connectNulls: true, z: 6,
           },
-          // 保有時の avg / stop / TP 水平線。densifyHorizontalLine で
-          // openedAt〜最新の dense path に展開済み (上方参照)。endLabel で
-          // 右端に「avg 124.95」等のラベルを出す (zoom in しても右端は常に
-          // 描画範囲内なので consistently 見える)。z:8 で candle / SMA50 /
-          // trend line のすべてより上に置き、保有 status を最優先で可視化。
-          // tooltip / hover には介入させたくないので silent + emphasis disabled。
           ...(avgLineXY ? [{
             name: avgLabel, type: 'line', data: avgLineXY,
             lineStyle: { width: 1, color: '#444', type: 'solid' }, symbol: 'none',
@@ -906,10 +723,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             endLabel: { show: true, formatter: tpLabel, color: '#057a55', fontSize: 11 },
             silent: true, emphasis: { disabled: true }, z: 8,
           }] : []),
-          // 保有ナシ時の preview stop / TP (current price ベース)。dotted +
-          // opacity 0.5 で「actual position の線ではない、仮置き」と視覚区別。
-          // z:7 にして actual の z:8 より下に置く (混在することは無いが、
-          // 凡例での視覚上の優先度として明示)。
+          // dotted + opacity 0.5 distinguishes these from an actual position's lines.
           ...(previewStopLineXY ? [{
             name: previewStopLabel, type: 'line', data: previewStopLineXY,
             lineStyle: { width: 1, color: '#c22', type: 'dotted', opacity: 0.5 }, symbol: 'none',
@@ -928,11 +742,6 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             },
             silent: true, emphasis: { disabled: true }, z: 7,
           }] : []),
-          // 入場ライン (#entry-distance): 今 BUY が成立する最寄り価格。cyan 実線 +
-          // endLabel で「入場ライン $Y (−X.X%)」。現価格との差がチャート上の縦の
-          // 隙間として直感的に読める。z:9 で価格線群より前面、判定点 (z:11) より背面。
-          // 参考 価格外挿線: 直近ペースの未来延長 (点線)。予測ではない (legend / 注記)。
-          // 交差点 (= 入場ライン到達) には pin を立てる。
           ...(projLineXY ? [{
             name: '参考 価格外挿 (予測ではない)', type: 'line', data: projLineXY,
             lineStyle: { width: 1.4, color: '#0891b2', type: 'dotted', opacity: 0.85 }, symbol: 'none',
@@ -947,11 +756,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               }],
             } : undefined,
           }] : []),
-          // 判定点 scatter: cron 判定イベントを価格チャートに重ねる。z を最前面に
-          // 寄せて (candle z:5 / 線 z:6-8 より上) クリック可能にする。REJECT/ERROR
-          // (= broker 拒否 / 失敗) は少し大きくして目立たせる。SKIP (bot 内部
-          // ゲート見送り) は定常運転に近いので通常サイズ。
-          // tooltip は item trigger で decision + reason 要約 (詳細は click→ラダー)。
+          // Larger symbol for REJECT/ERROR (broker rejection / failure) to make them stand out.
           ...(decisionPoints.length > 0 ? [{
             name: '判定', type: 'scatter', data: decisionPoints,
             symbol: 'circle',
@@ -977,23 +782,17 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         ],
       });
 
-      // 判定点クリック → 脇パネルにその判定の判定トレース・ラダーを表示する
-      // (文字ログ↔グラフ同期の肝)。ladderHtml は server 側で renderDecisionLadder
-      // により事前レンダリング済み (全値 esc 済みの自前 markup) なので innerHTML
-      // へ挿すだけ。JS 側にラダー描画ロジックを複製しない。
-      // #charts-symbol-redesign: パネルは既定 display:none (プレースホルダで
-      // 空間を取らない、fold 圧縮の一環)。クリックで内容を差し込むと同時に表示する。
+      // ladderHtml is pre-rendered, pre-escaped markup from the server
+      // (renderDecisionLadder) — inserted directly, not re-rendered here.
       var tracePanel = document.getElementById('decision-trace-panel');
       function showDecisionTrace(d) {
         if (!tracePanel || !d) return;
         tracePanel.innerHTML = d.ladderHtml || '';
         tracePanel.style.display = 'block';
       }
-      // fill ピンクリック → 同じ脇パネルに fill 詳細 + 取引ジャーナルへの
-      // 逆リンクを表示する (#chart-markers)。判定 pin (showDecisionTrace) と
-      // 同じ流儀で innerHTML 差し替えのみ。値は DB 由来なので escHtml を通し、
-      // clientOrderId は URL 側 encodeURIComponent (quote も % escape される
-      // ため href 属性への注入も安全)。
+      // Values are DB-sourced, so escHtml everywhere; clientOrderId also
+      // goes through encodeURIComponent (which escapes quotes too, so it's
+      // safe in an href attribute).
       function showFillDetail(d) {
         if (!tracePanel || !d) return;
         var side = d.name === 'SELL' ? '売り (SELL)' : '買い (BUY)';
@@ -1020,22 +819,16 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           showDecisionTrace(p.data);
           if (tracePanel) tracePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } else if (p && p.componentType === 'markPoint' && p.data && p.data.fillTimestamp != null) {
-          // fill ピンは candle series の markPoint (componentType で識別)。
-          // 外挿線の「参考 到達」pin は fillTimestamp を持たないので反応しない。
+          // fillTimestamp distinguishes a fill pin from the projection's
+          // "reference reached" pin, which has no fillTimestamp.
           showFillDetail(p.data);
           if (tracePanel) tracePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
       });
-      // #charts-symbol-redesign: 初期表示では開かない (fold 内サマリカードの
-      // 「直近判定」で同じ情報を既に見せている)。パネルは display:none のまま
-      // 空間を取らず、判定点 / fill ピンをクリックしたときだけ開く。
 
-      // visible 範囲 (zoom 後の x 軸) 内の candle high/low / markers / position
-      // 線を集めて y 軸 range を再計算。zoom out / preset 切替で「縦に空白が
-      // 広がる」現象を防ぎプロ chart 風のタイト fit に。
-      // category mode では dataZoom.startValue/endValue は category index、
-      // time mode では ms。各 bar / marker / point について
-      // 「visible 範囲内か」を判定する関数を mode で切り替える。
+      // Recomputes the y-axis to fit only what's visible after a zoom
+      // change, instead of the full data range — otherwise zooming in
+      // leaves large empty vertical margins.
       function recomputeYAxis() {
         var opt = symChart.getOption();
         var dz = opt.dataZoom && opt.dataZoom[0];
@@ -1043,9 +836,6 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         var startVal = dz.startValue;
         var endVal = dz.endValue;
         if (startVal == null || endVal == null) return;
-        // mode 共通: 「ts (ISO string) または ms が visible か」を返す。
-        // category mode では nearestIndex で snap した index を range と比較。
-        // time mode では ms を range と比較。
         function inRangeMs(ms) {
           if (!Number.isFinite(ms)) return false;
           if (useCategoryAxis) {
@@ -1054,10 +844,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           }
           return ms >= startVal && ms <= endVal;
         }
-        // category index ベースの直接判定 (intradayBars iterate 用)
         function inRangeIdx(idx) {
           if (useCategoryAxis) return idx >= startVal && idx <= endVal;
-          return true; // time mode では使わない (intradayBars iterate 側で ms 判定)
+          return true; // unused in time mode — the intradayBars loop below uses inRangeMs instead
         }
         var visibleY = [];
         function pushIfFinite(v) {
@@ -1072,12 +861,11 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         sc.markers.forEach(function (m) {
           if (inRangeMs(new Date(m.timestamp).getTime())) pushIfFinite(m.price);
         });
-        // visible 範囲内の SMA50 は「candle range の近傍にある時だけ」含める。
-        // #181 では SMA50 常時可視を優先したが、乖離が大きい銘柄 (3x ETF rally
-        // 等: SMA50=125 / 価格=260) では軸が倍近く引き伸ばされ、candle の
-        // 高値-安値が読めなくなる (operator 指摘で方針転換)。近傍 = candle
-        // range を上下 25% 拡張した帯。帯の外の SMA50 線は clip されるが、値は
-        // 価格ヘッダーのサブ行 (SMA50: X) で常に確認できる。
+        // SMA50 is included in the y-range only when it's near the visible
+        // candle range (within 25%) — a symbol with a wide SMA50/price
+        // divergence (e.g. a 3x ETF mid-rally) would otherwise stretch the
+        // axis and compress the candles unreadably. Out-of-band SMA50 still
+        // draws (clipped), and its value is always visible in the price header.
         var candleMin = visibleY.length ? Math.min.apply(null, visibleY) : null;
         var candleMax = visibleY.length ? Math.max.apply(null, visibleY) : null;
         sc.points.forEach(function (p) {
@@ -1088,13 +876,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           var nearBand = Math.max((candleMax - candleMin) * 0.25, 0.5);
           if (v >= candleMin - nearBand && v <= candleMax + nearBand) visibleY.push(v);
         });
-        // trend line: regression で fit した 1 本。pivots[0]→end の 2 点で
-        // 直線が定義される。visible 範囲内に endpoint または時間軸の交点が
-        // 乗るときに y 値を取り込んで axis 外にはみ出さないようにする。両
-        // endpoint が範囲外でも線分が visible 帯を横断するなら sample して
-        // その y を採用 (= 単純な 2 点線形補間)。
-        // category mode では index 基準の visible range を ms に変換して
-        // 既存の ms 補間ロジックをそのまま再利用する。
+        // Samples the trend line's y at the visible range's clipped
+        // endpoints (interpolating from its two pivots), so the line stays
+        // in the y-range even when both its own endpoints are off-screen.
         function sampleTrendY(line) {
           if (!line) return;
           var p1 = line.pivots[0];
@@ -1121,8 +905,6 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           pushIfFinite(p1.price + slope * (b - t1));
         }
         sampleTrendY(sc.trendLine);
-        // 保有期間が visible 範囲と重なっていれば position 線を含める。
-        // category mode では openedAt の最近接 index と endVal を比較。
         if (sc.position) {
           var openedAtMs = new Date(sc.position.openedAt).getTime();
           var openedVisible = false;
@@ -1141,19 +923,16 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             pushIfFinite(avg * (1 + sc.rules.takeProfitPct));
           }
         } else if (sc.latestCronPrice != null && sc.latestCronPrice > 0) {
-          // preview lines は描画範囲が chart 開始 → 最新 cron eval まで。
-          // visible 範囲とは常に交差する想定。virtualAvg = latestCronPrice
-          // (Yahoo filler ではなく実 strategy 評価値) から stop/TP を算出。
-          // latestCronPrice == null のときは preview 線そのものを描いていない
-          // ので y range にも含めない (= 軸が無駄に広がるのを防ぐ)。
+          // Not included when latestCronPrice is null: the preview lines
+          // themselves aren't drawn in that case, so including them here
+          // would stretch the axis for nothing.
           var pVirtualAvg = sc.latestCronPrice;
           pushIfFinite(pVirtualAvg * (1 + sc.rules.stopPct));
           pushIfFinite(pVirtualAvg * (1 + sc.rules.takeProfitPct));
         }
-        // 押し目ゾーン上端 (= 入場まで距離ラベルを載せた線) を y 範囲に含めて
-        // ラベルが枠外に切れないようにする。下端は広がりすぎ防止のため含めない。
+        // Only the upper band edge (carries the distance-to-entry label) is
+        // included — the lower edge is left out to avoid over-widening the axis.
         if (Number.isFinite(bandUpperY)) pushIfFinite(bandUpperY);
-        // 参考 価格外挿線の末尾価格も含める (未来スロットに描くので zoom 右端で visible)。
         if (projEndPrice != null) pushIfFinite(projEndPrice);
         if (visibleY.length === 0) return;
         var rawMin = Math.min.apply(null, visibleY);
@@ -1162,14 +941,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         var pad = Math.max((rawMax - rawMin) * 0.05, 0.5);
         symChart.setOption({ yAxis: { min: rawMin - pad, max: rawMax + pad } });
       }
-      // 初回 render 後に一度実行 (default zoom 範囲に y を tight fit)
       recomputeYAxis();
 
-      // dataZoom 変更で URL の ?from / ?to を更新 (replaceState なので history
-      // 汚染なし)。debounce 200ms で連続操作中の URL flicker を抑制。
-      // 同時に symbol picker / tab strip の '?tab=symbol' リンクの href も
-      // 上書き → 銘柄切替で zoom が古い range に reset されない。
-      // y 軸も visible 範囲に再 fit (recomputeYAxis、debounce 内で)。
+      // Debounced 200ms to avoid URL churn while dragging/zooming continuously.
       var dzTimer = null;
       symChart.on('dataZoom', function () {
         if (dzTimer) clearTimeout(dzTimer);
@@ -1182,8 +956,6 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           var ev = dz.endValue;
           if (sv == null || ev == null) return;
           try {
-            // category mode: sv/ev は category index → categories[i] (ISO string)
-            // を取り出して ms に変換。time mode: sv/ev は ms (number)。
             var fromMsLocal, toMsLocal;
             if (useCategoryAxis) {
               var sIdx = Math.max(0, Math.min(categories.length - 1, Math.round(sv)));
@@ -1200,8 +972,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             url.searchParams.set('from', fromIso);
             url.searchParams.set('to', toIso);
             window.history.replaceState({}, '', url.toString());
-            // server-render 時の picker / tab strip リンクは古い from/to を
-            // 持っているので、ここで href を新値に書き換える。
+            // Server-rendered rail/subnav links still carry the stale
+            // from/to they were rendered with — rewrite them so a symbol
+            // switch doesn't reset the zoom.
             var symbolLinks = document.querySelectorAll('a[href*="tab=symbol"]');
             for (var i = 0; i < symbolLinks.length; i += 1) {
               try {
@@ -1215,10 +988,8 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         }, 200);
       });
 
-      // preset zoom buttons (1D / 5D / 1M / All) の click handler。
-      // dispatchAction で dataZoom を更新 → 既存の dataZoom listener が
-      // URL ?from / ?to も連動更新する。
-      // category mode では ms 範囲を最近接 index に snap してから dispatch。
+      // dispatchAction below re-triggers the dataZoom listener above, which
+      // also updates the URL — no separate URL-sync call needed here.
       var presetButtons = document.querySelectorAll('.zoom-preset');
       for (var pi = 0; pi < presetButtons.length; pi += 1) {
         presetButtons[pi].addEventListener('click', function (ev) {
@@ -1235,10 +1006,8 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             sv = fromMs;
             eV = toMs;
           }
-          // Google 風ピルの active 付替 (押した range を強調)
           for (var pj = 0; pj < presetButtons.length; pj += 1) presetButtons[pj].classList.remove('active');
           ev.currentTarget.classList.add('active');
-          // dataZoom は inside 1 つだけ (slider 廃止)
           symChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: sv, endValue: eV });
         });
       }
@@ -1246,17 +1015,14 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
 
   document.addEventListener('DOMContentLoaded', initSymbolChart);
 
-  // ---------------------------------------------------------------------
-  // 銘柄切替 (client-side partial swap, #charts-symbol-redesign Phase C)
-  // ---------------------------------------------------------------------
-  // 対象は左レール (.symbol-rail) と symbol サブナビ (.symbol-subnav、
-  // チャート/履歴・設定) のリンクのみ。同一 origin かつ ?tab=symbol の
-  // リンクだけ intercept し、それ以外 (別ページへのリンク・modifier キー
-  // 付きクリック・別 origin) は通常のブラウザ挙動に任せる。
+  // Client-side partial swap for symbol switching: intercepts same-origin
+  // ?tab=symbol clicks on .symbol-rail / .symbol-subnav only, leaving
+  // everything else (other pages, modifier-key clicks, other origins) to
+  // normal browser navigation.
 
-  // 左レールの active 銘柄ハイライトを、swap 後の focus symbol に追従させる。
-  // rail 自体は swap 対象 (#symbol-main) の外にあるため HTML は差し替わらず、
-  // クラス付替えだけで見た目を同期する。
+  // The rail itself lives outside #symbol-main (the swap target), so its
+  // HTML never gets replaced — only the active class is toggled to follow
+  // the swapped-in symbol.
   function updateRailActiveSymbol(symbol) {
     var items = document.querySelectorAll('.symbol-rail .rail-item');
     for (var i = 0; i < items.length; i += 1) {
@@ -1267,9 +1033,8 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
     }
   }
 
-  // #symbol-main の innerHTML を \`url\` (+ &partial=1) の fetch 結果で差し替え、
-  // チャートを再初期化する。fetch 失敗 / non-200 / timeout は fail-open で
-  // 通常のフルページ遷移 (window.location.href) にフォールバックする。
+  // Fetch failure, non-200, or timeout falls back to a normal full-page
+  // navigation rather than leaving the page half-swapped.
   function navigateSymbolPartial(url, pushHistory) {
     var main = document.getElementById('symbol-main');
     if (!main) { window.location.href = url.toString(); return; }
@@ -1301,7 +1066,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
 
   document.addEventListener('click', function (ev) {
     if (ev.defaultPrevented || ev.button !== 0) return;
-    // modifier キー付きクリック (新規タブ/ウィンドウで開く操作) は intercept しない。
+    // Leaves modifier-key clicks (open in new tab/window) to the browser.
     if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     var target = ev.target;
     var a = target && target.closest ? target.closest('a') : null;
@@ -1318,10 +1083,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
     navigateSymbolPartial(url, true);
   });
 
-  // 戻る/進む: このリスナーが生きている = 現在 symbol タブ表示中、なので
-  // 遷移先 URL が tab=symbol でなければ (overview/quality タブへ戻る等)
-  // SPA では対応せずフルリロードに任せる (location は既に新 URL に
-  // 変わっているので reload で正しいページが取れる)。
+  // This listener only runs while the symbol tab is active, so a back/forward
+  // navigation to a non-symbol tab (window.location is already the new URL)
+  // is handled by a full reload rather than the SPA swap.
   window.addEventListener('popstate', function () {
     var url = new URL(window.location.href);
     if (url.searchParams.get('tab') !== 'symbol') {
@@ -1333,11 +1097,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
 })();
 `
 
-/**
- * FNV-1a 32bit ハッシュ。改ざん耐性は不要 (静的アセットの ETag 用途のみ)。
- * `crypto.subtle.digest` は非同期なのでモジュール読み込み時に同期計算したく、
- * この軽量ハッシュで十分 (内容が変われば別 ETag になれば良い)。
- */
+/** Not tamper-resistant, only used as an ETag — chosen over `crypto.subtle.digest` because it can run synchronously at module load. */
 function computeFnv1aHex(content: string): string {
   let hash = 0x811c9dc5
   for (let i = 0; i < content.length; i += 1) {
@@ -1347,9 +1107,5 @@ function computeFnv1aHex(content: string): string {
   return (hash >>> 0).toString(16)
 }
 
-/**
- * `GET /dashboard/static/symbol-chart.js` の ETag。内容 (このファイル) が
- * 変わらない限り同じ値を返す静的ハッシュ + 文字数の組。ブラウザの
- * `If-None-Match` 突合と 304 応答に使う (#charts-symbol-redesign)。
- */
+/** ETag for `GET /dashboard/static/symbol-chart.js`, used for `If-None-Match` / 304. */
 export const SYMBOL_CHART_CLIENT_SCRIPT_ETAG = `"${computeFnv1aHex(SYMBOL_CHART_CLIENT_SCRIPT)}-${SYMBOL_CHART_CLIENT_SCRIPT.length}"`

@@ -5,7 +5,6 @@ import { and, desc, eq, inArray, isNotNull, lt, or, type SQL } from 'drizzle-orm
 import { formatRealizedPnl } from './cron'
 import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
-/** trade_journal の lifecycle イベント → 日本語ラベル + 色 (#alerts-trades-ui)。 */
 const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
   decision: { ja: '判定', color: '#86868b' },
   intent: { ja: '注文作成', color: '#46608a' },
@@ -15,7 +14,6 @@ const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
   exit: { ja: '手仕舞い', color: '#b25000' },
 }
 
-/** broker error_code → 短い日本語。未知コードは code をそのまま出す。 */
 export const BROKER_ERROR_LABELS: Record<string, string> = {
   OAUTH_OPENAPI_TICKER_IS_DENY: '銘柄取扱なし',
   OAUTH_OPENAPI_SELL_QTY_EXCEED_AVAILABLE_QTY: '売却数量超過',
@@ -23,7 +21,6 @@ export const BROKER_ERROR_LABELS: Record<string, string> = {
   INVALID_TOKEN: 'トークン無効',
 }
 
-/** errorMessage から error_code らしき token を抜く (JSON / 平文の両対応)。 */
 export function extractBrokerErrorCode(message: string): string | null {
   const fromJson = message.match(/"error_code"\s*:\s*"([A-Z0-9_]+)"/)
   if (fromJson) return fromJson[1]!
@@ -31,7 +28,7 @@ export function extractBrokerErrorCode(message: string): string | null {
   return bare ? bare[1]! : null
 }
 
-/** trades ページのクエリ解釈結果 (SSR / JSON export 共用)。 */
+/** Shared query-parsing result for the SSR page and its JSON export. */
 export interface TradesQuery {
   view: 'all' | 'fills' | 'errors'
   symbol?: string
@@ -40,17 +37,8 @@ export interface TradesQuery {
   before?: number
 }
 
-/**
- * `?view/symbol/clientOrderId/limit/before` の解釈を 1 か所に寄せる
- * (#dashboard-json-api)。SSR と `/json` が別々に解釈すると「画面で見た絞り込み
- * と JSON の絞り込みが微妙に違う」drift 事故になるため。
- *
- * - view: 全イベント (default) / 約定・手仕舞いのみ / エラーのみ。ジャーナルは
- *   1 注文で複数 lifecycle 行を持つため、operator の主目的 (「何が約定した?」
- *   「何が失敗した?」) を 1 クリックで絞れるようにする。
- * - symbol / clientOrderId: 銘柄 / 注文単位の絞り込み (#nav-links)。
- *   clientOrderId は 1 注文の lifecycle 行を縦に並べる「注文詳細ビュー」。
- */
+// Single parse point for SSR and /json: parsing the query separately in each would let the
+// screen's filter and the JSON's filter drift apart.
 export function parseTradesQuery(query: (key: string) => string | undefined): TradesQuery {
   const view = ((v) => (v === 'fills' || v === 'errors' ? v : 'all'))(query('view'))
   const out: TradesQuery = { view, limit: clampLimit(query('limit')) }
@@ -63,10 +51,7 @@ export function parseTradesQuery(query: (key: string) => string | undefined): Tr
   return out
 }
 
-/**
- * trade_journal から絞り込み済みの行を新しい順に取る (SSR / JSON export 共用)。
- * SSR 側は `limit + 1` を渡して hasMore 判定に使う (呼び出し側で pop)。
- */
+/** Shared by SSR and JSON export; SSR passes `limit + 1` and pops the extra row to detect `hasMore`. */
 export async function loadTradeJournalRows(
   db: ReturnType<typeof createDb>,
   q: TradesQuery,
@@ -93,14 +78,8 @@ export async function loadTradeJournalRows(
   return filtered.orderBy(desc(tradeJournal.id)).limit(q.limit)
 }
 
-/**
- * trades packet builder (schema: `dashboard_trades_export.v1`)。
- *
- * rows は trade_journal の row そのまま (`__tradesCopy` の rows と同等) —
- * 表示で省略した field も含めて AI に渡す。filter を envelope に明記するのは
- * 「この JSON は trade_journal 全体か、どの絞り込みの部分集合か」を受け手が
- * 誤解しないため (SSR の filter バナー相当)。
- */
+// rows are raw trade_journal rows, including fields the SSR table omits — the `filter` envelope
+// (mirroring the SSR filter banner) tells the reader whether this is the whole table or a subset.
 export function buildTradesPacket(rows: TradeJournalRow[], q: TradesQuery) {
   return {
     ...exportMeta('dashboard_trades_export.v1'),
@@ -125,8 +104,6 @@ export function tradesBody(
   hasMore = false,
   filters: { symbol?: string; clientOrderId?: string } = {},
 ): string {
-  // symbol / clientOrderId フィルタを view pill・ページネーションの URL に
-  // 伝搬させる (#nav-links)。pill を切り替えても絞り込みが外れないように。
   const filterQs =
     (filters.symbol ? `&symbol=${encodeURIComponent(filters.symbol)}` : '') +
     (filters.clientOrderId ? `&clientOrderId=${encodeURIComponent(filters.clientOrderId)}` : '')
@@ -137,8 +114,7 @@ export function tradesBody(
     : filters.symbol
       ? `<p class="filter-banner">銘柄 <strong>${esc(displaySymbol(filters.symbol, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(filters.symbol)}">チャートで見る</a> / <a href="/dashboard/cron?symbol=${encodeURIComponent(filters.symbol)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
       : ''
-  // JSON export へのリンクは現在の絞り込み (view / limit / symbol / clientOrderId /
-  // before) をそのまま引き継ぐ — 「画面で見ている部分集合と同じもの」を開くため。
+  // Carries the current filter into the JSON link so it opens the same subset as the screen.
   const jsonHref = `/dashboard/trades/json?view=${view}&limit=${limit}${filterQs}${before !== undefined ? `&before=${before}` : ''}`
   const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip" style="margin-left:4px">JSON を開く</a>`
   const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}</nav>`
@@ -151,11 +127,9 @@ export function tradesBody(
       const eventCell = `<span title="${esc(r.tradeEventType)}" style="color:${ev.color};font-weight:600">● ${esc(ev.ja)}</span>`
       const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : null
       const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
-      // ▼ は同一銘柄の約定だけに絞り込み、「判定」は clientOrderId でこの注文の
-      // 判定行 (cron) へ飛ぶ逆リンク (#nav-links)。
-      // 銘柄は ticker のみ。正式名称 (VUG-Vanguard Growth Index Fund ETF Shares 等)
-      // をそのまま出すと、折り返し禁止の列が横に伸びて表全体が破綻するので
-      // title (ホバー) に逃がす。inactive の注記も同じ title に載せる。
+      // Ticker only in the cell; the full display name (e.g. "VUG-Vanguard Growth Index Fund
+      // ETF Shares") would blow out this no-wrap column and break the table layout, so it (and
+      // the inactive note) go in the hover title instead.
       const symbolTitle = r.symbol
         ? inactive
           ? `${symbolText} — ${inactiveTooltip(r.symbol, universe)}`
@@ -173,7 +147,6 @@ export function tradesBody(
           : r.side === 'SELL'
             ? `<span class="err" style="font-weight:700">売</span> <span class="muted" style="font-size:11px">SELL</span>`
             : '<span class="muted">—</span>'
-      // 数量: 発注数量 → 約定数量。一致なら 1 つだけ、部分約定が見えるように。
       const qtyCell =
         r.filledQty !== null && r.quantity !== null && r.filledQty !== r.quantity
           ? `${esc(r.quantity)} → <strong>${esc(r.filledQty)}</strong>`
@@ -192,8 +165,8 @@ export function tradesBody(
         r.realizedPnl !== null
           ? `${formatRealizedPnl(r.realizedPnl)}${r.exitReason ? ` <span class="muted" style="font-size:11px">${esc(r.exitReason)}</span>` : ''}`
           : '<span class="muted">—</span>'
-      // 状態: エラーは短い日本語 + code、全文は <details>。enum はそのまま残す
-      // (broker API と grep で突き合わせる運用のため title / details に保持)。
+      // Raw enum values are kept in title/details (not fully translated) so they stay
+      // grep-able against the broker API's own error/status strings.
       let statusCell: string
       const errorText = r.errorMessage ?? r.errorClass
       if (errorText) {

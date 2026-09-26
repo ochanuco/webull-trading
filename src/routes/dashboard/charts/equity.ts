@@ -7,19 +7,12 @@ export interface EquityPoint {
   date: string // YYYY-MM-DD (JST)
   dailyPnl: number
   cumulativePnl: number
-  drawdownPct: number // 0 or 負 (peak からの低下率)
+  drawdownPct: number // 0 or negative, % drop from peak
 }
 
-/**
- * trade_journal の post_submit で realized_pnl が記録されている SELL fill を
- * 日次集計し、累積 PnL とドローダウン率を計算する。
- *
- * - peak は cumulativePnl の rolling max
- * - drawdownPct は peak が 0 以下のとき null 相当 (= 0%) として扱う
- *   (peak が小さい初期は割り算が暴れるため)
- */
+/** Daily-aggregates realized_pnl from SELL fills, then feeds computeEquitySeries. */
 export async function loadEquityCurve(db: D1Database): Promise<EquityPoint[]> {
-  // SQLite の date(timestamp) はデフォルト UTC。JST 表示にするため +9h shift。
+  // SQLite's date() defaults to UTC; +9h shifts the group-by key to JST.
   const result = await db
     .prepare(
       `SELECT date(timestamp, '+9 hours') AS day,
@@ -44,38 +37,36 @@ export function computeEquitySeries(
   for (const d of daily) {
     cumulative += d.dailyPnl
     if (cumulative > peak) peak = cumulative
-    // peak が +側になるまでは drawdown を 0 表示 (シード資金規模が不明なので
-    // % 計算は意味をなさない。peak を絶対額として比較するのも手だが、トレーダー
-    // 視点では「最高益からの下落率」が読みたいので peak>0 で初めて非ゼロに)
+    // drawdownPct stays 0 until peak turns positive — there's no seed
+    // capital to divide by, so a % against a near-zero/negative peak would
+    // swing wildly early in the series.
     const dd = peak > 0 ? (cumulative - peak) / peak : 0
     points.push({ date: d.date, dailyPnl: d.dailyPnl, cumulativePnl: cumulative, drawdownPct: dd })
   }
   return points
 }
 
-/** equity line に重ねる取引マーカー 1 件 (全銘柄の post_submit fill)。 */
+/** One trade marker overlaid on the equity line — post_submit fills across all symbols. */
 export interface EquityTradeMarker {
-  timestamp: string // ISO UTC (fill 時刻)
-  /** YYYY-MM-DD (JST)。equity curve の category 軸に載せるための日次キー。 */
+  timestamp: string // ISO UTC (fill time)
+  /** YYYY-MM-DD (JST) — category-axis key for the equity chart. */
   date: string
   symbol: string
   side: 'BUY' | 'SELL'
   filledPrice: number
   filledQty: number | null
   realizedPnl: number | null
-  /** クリック遷移先 `/dashboard/trades?clientOrderId=` 用。無い古い行は遷移なし。 */
+  /** Links to `/dashboard/trades?clientOrderId=`; null on older rows that predate the column. */
   clientOrderId: string | null
 }
 
 /**
- * 全銘柄の post_submit fill を equity curve 用マーカーとして取得する。
- *
- * `loadSymbolChart` (loaders.ts) の fills SQL と同型だが symbol 条件なし。
- * side は post_submit 行に無い (writer は pre_submit にしか入れない) ため
- * client_order_id で pre_submit と self-JOIN、それも無い古い行は
- * realized_pnl の有無から推測する (`resolveFillSide` 共用)。
- * 期間フィルタは付けない: equity curve 自体が全期間 (trade_journal 全量の
- * 日次集計) なので、マーカーも同範囲 = 全件で揃える。
+ * Mirrors loadSymbolChart's fills query (loaders.ts) minus the symbol
+ * filter. `side` isn't written on post_submit rows, so it's resolved via a
+ * self-join to the matching pre_submit row, falling back to
+ * `resolveFillSide`'s realized_pnl inference for older rows with none. No
+ * period filter: the equity curve itself is all-time, so markers stay
+ * aligned with it.
  */
 export async function loadEquityTradeMarkers(db: D1Database): Promise<EquityTradeMarker[]> {
   const result = await db
@@ -109,7 +100,7 @@ export async function loadEquityTradeMarkers(db: D1Database): Promise<EquityTrad
   for (const r of result.results ?? []) {
     if (r.filled_price === null || !Number.isFinite(Number(r.filled_price))) continue
     const date = jstDayKey(r.timestamp)
-    if (!date) continue // timestamp 不正な行は category 軸に載せられないので捨てる
+    if (!date) continue // can't place a marker on the category axis without a valid date
     markers.push({
       timestamp: r.timestamp,
       date,
@@ -124,12 +115,11 @@ export async function loadEquityTradeMarkers(db: D1Database): Promise<EquityTrad
   return markers
 }
 
-/** 期間別リターン 1 行 (PnL 変化額)。 */
 export interface PeriodReturn {
   key: '1W' | '1M' | '3M' | 'YTD' | 'ALL'
-  /** 日本語ラベル (UI 表示用)。 */
+  /** Japanese label for display. */
   label: string
-  /** 期間内の累積 realized PnL 変化額。シード資金を保持していないため % は出さない。 */
+  /** $ change in cumulative realized PnL over the period — no % (no seed-capital denominator). */
   change: number
 }
 
@@ -141,13 +131,8 @@ const JST_DAY_ONLY_FMT = new Intl.DateTimeFormat('en-CA', {
 })
 
 /**
- * 期間別リターン (1W / 1M / 3M / YTD / ALL) を計算する (pure)。
- *
- * - 基準は「期間開始日 (JST) 前の最後の累積 PnL」。期間より古い point が
- *   無ければ 0 (= curve の開始値) を基準にする。ALL は常に 0 基準。
- * - `now` は引数で受ける (テスト容易性のため関数内で `Date.now()` は呼ばない)。
- * - % は返さない: equity は累積 realized PnL でシード資金額 (分母) が無く、
- *   変化率を計算すると初期の小さい累積値で数字が暴れて誤解を招く。
+ * Per-period PnL change vs. the last cumulative value before the period's
+ * JST start date (0 when no earlier point exists; ALL is always vs. 0).
  */
 export function computePeriodReturns(points: EquityPoint[], now: Date): PeriodReturn[] {
   if (points.length === 0) return []
@@ -165,7 +150,7 @@ export function computePeriodReturns(points: EquityPoint[], now: Date): PeriodRe
   return defs.map((d) => {
     let baseline = 0
     if (d.start !== null) {
-      // points は日付昇順。開始日より前の最後の累積値が基準。
+      // points is date-ascending, so the last point before d.start wins.
       for (const p of points) {
         if (p.date < d.start) baseline = p.cumulativePnl
         else break
@@ -175,18 +160,14 @@ export function computePeriodReturns(points: EquityPoint[], now: Date): PeriodRe
   })
 }
 
-/** 月次 PnL 1 本 (bar チャート用)。 */
+/** One monthly PnL bar. */
 export interface MonthlyReturn {
-  /** YYYY-MM (JST)。 */
+  /** YYYY-MM (JST). */
   month: string
-  /** その月の realized PnL 増分 (= dailyPnl の月内合計)。 */
+  /** Sum of dailyPnl within the month. */
   pnl: number
 }
 
-/**
- * 月次 (JST) の PnL 増分を集計する (pure)。EquityPoint.date は既に JST の
- * 日次キーなので、先頭 7 文字 (YYYY-MM) でグルーピングするだけでよい。
- */
 export function computeMonthlyReturns(points: EquityPoint[]): MonthlyReturn[] {
   const byMonth = new Map<string, number>()
   for (const p of points) {
@@ -199,13 +180,9 @@ export function computeMonthlyReturns(points: EquityPoint[]): MonthlyReturn[] {
 }
 
 /**
- * equity packet builder (schema: `dashboard_equity_export.v1`, #553)。
- *
- * MCP `get_equity` 用。チャート overview タブと同じ loader (`loadEquityCurve`)
- * の結果と同じ pure 集計 (期間別 / 月次リターン) を envelope に包むだけ —
- * 「画面で見る内容 = AI に渡す JSON」の規約 (shared.ts `exportMeta`) に従い、
- * 集計ロジックをここへ寄せて SSR との drift を作らない。
- * `now` は引数で受ける (computePeriodReturns と同じテスト容易性の理由)。
+ * MCP `get_equity` packet. Reuses the same pure aggregations
+ * (computePeriodReturns / computeMonthlyReturns) the SSR overview tab
+ * renders, so the JSON payload can't drift from what the dashboard shows.
  */
 export function buildEquityPacket(points: EquityPoint[], now: Date) {
   return {
@@ -216,30 +193,31 @@ export function buildEquityPacket(points: EquityPoint[], now: Date) {
   }
 }
 
-/** overview チャート描画用に整列済みの view model (client inline JS に渡す形)。 */
+/** View model for the overview chart, shaped for the client inline script. */
 export interface OverviewChartData {
-  /** category 軸 (equity 日付 ∪ マーカー日付、昇順)。 */
+  /** Category axis: union of equity dates and marker dates, ascending. */
   dates: string[]
-  /** `dates` と同 index の累積 PnL (equity point の無い日は直前値で forward-fill)。 */
+  /** Cumulative PnL per `dates` index; forward-filled on days with no equity point. */
   equity: number[]
-  /** `dates` と同 index のドローダウン (%、0 or 負)。 */
+  /** Drawdown % per `dates` index (0 or negative). */
   drawdownPct: number[]
-  /** 各マーカー + その日の equity y 値 (scatter の座標)。 */
+  /** Each marker plus its day's equity y-value, for scatter placement. */
   markers: Array<EquityTradeMarker & { y: number }>
-  /** `dates` と同 index の QQQ 騰落率 (%)。データ開始前は null。系列自体が無ければ null。 */
+  /** QQQ return % per `dates` index; null before the series starts or if benchmark is unavailable. */
   benchmark: Array<number | null> | null
 }
 
 /**
- * equity curve / マーカー / ベンチマークを 1 本の category 軸に整列する (pure)。
+ * Aligns equity, markers, and benchmark onto one category axis (pure).
  *
- * - 軸は equity 日付とマーカー日付の和集合: BUY fill は realized_pnl を生まない
- *   ため equity curve に同日 point が無いことが多く、equity 日付だけを軸にすると
- *   BUY マーカーの置き場が無くなる。マーカー日は直前の累積値で forward-fill。
- * - 最初の equity point より前 (エントリーだけあって未確定の期間) は累積 0 扱い。
- * - benchmark (QQQ) は日付キーで forward-fill して同軸に載せる。QQQ の date は
- *   Yahoo の UTC 日付で JST キーと最大 1 日ずれるが、% 騰落率の傾き比較用途では
- *   許容する (厳密な同日照合はしない)。
+ * The axis is the union of equity and marker dates, not equity dates alone:
+ * a BUY fill carries no realized_pnl, so it often has no same-day equity
+ * point to sit on. Marker days forward-fill the prior cumulative value;
+ * before the first equity point, cumulative is 0.
+ *
+ * Benchmark (QQQ) forward-fills by date key onto the same axis. Its Yahoo
+ * UTC date can drift up to a day from the JST key, which is fine since only
+ * the return curve's slope is compared, not day-for-day values.
  */
 export function buildOverviewChartData(
   equityPoints: EquityPoint[],
@@ -283,15 +261,11 @@ export function buildOverviewChartData(
   return { dates, equity, drawdownPct, markers: outMarkers, benchmark: benchAligned }
 }
 
-/** 符号付き金額表示 ("+12.34" / "-3.00")。色分けは class 側でやる。 */
 function fmtSignedAmount(v: number): string {
   return `${v > 0 ? '+' : ''}${fmtNumber(v)}`
 }
 
-/**
- * 期間別リターンの小テーブル (13px 基準、日本語ラベル)。
- * % は出さない (シード資金を保持していない — computePeriodReturns 参照)。
- */
+/** No %, same reason as computePeriodReturns (no seed-capital denominator). */
 function renderPeriodReturnsTable(rows: PeriodReturn[]): string {
   if (rows.length === 0) return ''
   const cells = rows
@@ -314,8 +288,6 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
   }
   const vm = buildOverviewChartData(args.equity, args.tradeMarkers ?? [], args.benchmark ?? null)
   const hasBenchmark = vm.benchmark !== null
-  // ベンチマーク注記: 左軸 ($) と右軸 (%) は意味の異なる系列の重ね描きである
-  // ことを明示する。取得失敗時は series を省略して注記だけ残す (fail-graceful)。
   const benchmarkNote = hasBenchmark
     ? 'ベンチマーク: 実現 PnL ($ 左軸) vs QQQ 騰落率 (% 右軸) — 意味の異なる系列の重ね描きなので傾き / 方向の比較のみに使う (絶対値は比較不能)。'
     : 'ベンチマーク (QQQ 騰落率) は取得失敗のため非表示 (チャート本体には影響なし)。'
@@ -338,8 +310,8 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
         }
         return { name: name, type: 'scatter', symbolSize: 9, z: 5, itemStyle: { color: color }, data: items };
       }
-      // ベンチマーク系列名は legend / title / tooltip の単位判定の 3 箇所で
-      // 使うため一本化する (名前変更時の判定ズレ防止、CodeRabbit PR #698)。
+      // Single source for legend/title/tooltip unit-detection, all three of
+      // which match against this name.
       var BENCH_SERIES = '市場に乗るだけ (QQQ)';
       var series = [
         { name: '確定損益 (累積)', type: 'line', data: vm.equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } },

@@ -101,17 +101,14 @@ describe('dashboard', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('<title>ダッシュボード')
-    // #dashboard-ia: nav は 4 項目に削減 (positions/portfolio はホーム統合で
-    // nav から外れたため、代わりに再編後のグローバル nav を検証)
+    // positions/portfolio はホーム統合で nav から外れたため、再編後のグローバル nav を検証 (#dashboard-ia)
     expect(body).toContain('href="/dashboard/charts?tab=symbol"')
     expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('管理 ▾')
     expect(body).toContain('診断 ▾')
   })
 
-  // #276: kill-switch は全 page 共通でサイドバー下部に表示される (banner → sidebar
-  // へ配置変更)。DB binding がある時のみ表示、effective=true なら「停止」、
-  // false なら「再開」(confirm 付き) ボタンが出る。
+  // kill-switch は DB binding がある時のみ表示 (#276)
   it('renders kill-switch banner with 取引停止 button when tradingEnabled=true', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ tradingEnabled: true }),
@@ -138,7 +135,7 @@ describe('dashboard', () => {
     const body = await res.text()
     expect(body).toContain('取引 OFF (停止中)')
     expect(body).toContain('取引再開')
-    // 再開 は誤操作防止に HTML confirm()
+    // 誤操作防止に HTML confirm()
     expect(body).toContain('onsubmit="return confirm(')
     expect(body).toContain('name="enabled" value="true"')
   })
@@ -152,16 +149,11 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    // env override 適用後の effective は OFF
     expect(body).toContain('取引 OFF (停止中)')
-    // env override note が出る
     expect(body).toContain('env TRADING_ENABLED で deploy-gate ON')
-    // button は disabled
     expect(body).toMatch(/<button[^>]*disabled[^>]*>取引再開<\/button>/)
   })
 
-  // グローバルメニュー上部化: 全 page 共通 shell は上部バー (topnav)。
-  // kill switch は上部バー右端の badge + ドロップダウン (details) に入る。
   it('renders global menu as top bar with kill-switch dropdown (no left sidebar)', async () => {
     vi.mocked(loadGlobalConfigFrom).mockResolvedValue(
       makeGlobalConfigSnapshot({ tradingEnabled: true }),
@@ -173,16 +165,12 @@ describe('dashboard', () => {
     expect(body).toContain('<header class="header">')
     expect(body).toContain('class="topnav"')
     expect(body).toContain('class="topnav-killswitch"')
-    // 旧左サイドバーは無い
     expect(body).not.toContain('class="sidebar"')
-    // nav link は維持 (ホーム / 銘柄管理 など)
     expect(body).toContain('href="/dashboard/symbols"')
     // ページタイトル h1 は出さない (nav の active 強調で現在地が分かるため冗長)
     expect(body).not.toContain('page-title')
   })
 
-  // チャートの view 切替 (概要/成績/個別銘柄) は本文 tab strip
-  // ではなく header 2段目の subnav に出す (サブメニュー化)。
   it('charts overview/quality pages share the レビュー subnav (#remove-grid)', async () => {
     const app = createApp()
     // DB 未バインドでも subnav は出る (本文は unavailable)
@@ -193,22 +181,17 @@ describe('dashboard', () => {
     )
     const body = await res.text()
     expect(body).toContain('<nav class="subnav">')
-    // 約定履歴と同じ「レビュー」subnav に統一 (現在地 = 成績)
     expect(body).toContain('>成績</span>')
     expect(body).toContain('class="subnav-link active"')
     expect(body).toContain('href="/dashboard/trades"')
-    // 旧チャート専用 subnav (個別銘柄 / 銘柄グリッド) は出さない
-    // (グローバル nav の「銘柄」リンクは tab=symbol を持つので subnav 内のみ検査)
+    // グローバル nav の「銘柄」リンクは tab=symbol を持つので subnav 内のみ検査する
     expect(body).not.toContain('銘柄グリッド')
     const subnavHtml = body.match(/<nav class="subnav">([\s\S]*?)<\/nav>/)?.[1] ?? ''
     expect(subnavHtml).not.toContain('tab=symbol')
   })
 
-  /**
-   * `loadTradePnls` / `loadSkipReasonBreakdown` は生 SQL (`db.prepare(sql).all()`)
-   * を直接叩く。SQL 文字列の一部 (`trade_journal` / `strategy_decision_log`) で
-   * どちらのクエリかを判別して別々の fixture 行を返す fake。
-   */
+  // loadTradePnls / loadSkipReasonBreakdown は生 SQL を直接叩く。SQL 文字列の一部
+  // (trade_journal / strategy_decision_log) でクエリを判別して別々の fixture 行を返す。
   function fakeQualityDb(
     tradeRows: Array<{ pnl: number; symbol: string | null; timestamp: string }>,
     skipRows: Array<{ day: string; reason: string | null; n: number }>,
@@ -227,8 +210,8 @@ describe('dashboard', () => {
   describe('GET /dashboard/charts?tab=quality (#quality-redesign)', () => {
     it('成績カード + 銘柄別表 + SKIP breakdown を描画し、period pill が active を持つ', async () => {
       const app = createApp()
-      // period フィルタは実行時刻基準なので、固定日時だと将来 90 日窓の外に
-      // 出てテストが時限で壊れる (CodeRabbit PR #684)。相対日時で生成する。
+      // period フィルタは実行時刻基準なので、固定日時だと将来 90 日窓の外に出て
+      // テストが時限で壊れる (CodeRabbit PR #684)。相対日時で生成する。
       const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString()
       const env = {
         ...baseEnv,
@@ -244,19 +227,15 @@ describe('dashboard', () => {
       const res = await app.request('/dashboard/charts?tab=quality&period=90d', { headers: authHeader }, env)
       expect(res.status).toBe(200)
       const body = await res.text()
-      // stat タイル (件数 / 勝率 / profit factor / 勝 / 負 / 合計PnL / 平均利益 / 平均損失 / 期待値)
       expect(body).toContain('運用成績 (直近90日)')
       expect(body).toContain('件数')
       expect(body).toContain('profit factor')
       expect(body).toContain('期待値 (トレード毎)')
-      // 銘柄別表
       expect(body).toContain('SOXL')
       expect(body).toContain('TQQQ')
-      // period pill: 90d が active
       expect(body).toMatch(/<a class="zoom-preset active"[^>]*href="\/dashboard\/charts\?tab=quality&period=90d"/)
       expect(body).toContain('href="/dashboard/charts?tab=quality&period=30d"')
       expect(body).toContain('href="/dashboard/charts?tab=quality&period=all"')
-      // SKIP breakdown chart のコンテナ + legend 用カテゴリラベル
       expect(body).toContain('id="skip-reason-chart"')
       expect(body).toContain('銘柄ロール抑止')
     })
@@ -311,9 +290,8 @@ describe('dashboard', () => {
     expect(body).toContain('SOXL')
   })
 
-  // #dashboard-mf-layout: overview パネル ON/OFF フォーム。createDb mock 未設定 →
-  // loadOverviewPanelsCsv が default fallback → 全パネル checked で描画
-  // (#dashboard-ia で status / positions が additive に増え 6 パネル)。
+  // createDb mock 未設定 → loadOverviewPanelsCsv が default fallback → 全パネル
+  // checked で描画される (#dashboard-mf-layout)。
   it('renders overview panel toggle form on config page (all checked by default)', async () => {
     const env = { ...baseEnv, DB: {} as D1Database }
     const app = createApp()
@@ -329,9 +307,8 @@ describe('dashboard', () => {
   it('saves overview panel selection (303 redirect, CSV deduped + invalid dropped)', async () => {
     let storedCsv: string | undefined
     let insertedValues: Record<string, unknown> | undefined
-    // setOverviewPanels は db.batch([select(before), insert().values().onConflictDoUpdate()])。
-    // select/insert は batch に渡す statement を組むだけ (mock では空 obj)、実 read は batch が返す。
-    // batch 呼び出し自体を spy して原子更新 (read→write 退行) の回帰ガードにする。
+    // setOverviewPanels は db.batch([select(before), insert().values().onConflictDoUpdate()])
+    // で原子更新する。batch 呼び出し自体を spy して read→write の退行を検出する。
     const batchSpy = vi.fn(async (_stmts: unknown[]) => [[{ value: 'risk,activity' }], {}])
     vi.mocked(createDb).mockReturnValue({
       select: () => ({ from: () => ({ where: () => ({ limit: () => ({}) }) }) }),
@@ -367,10 +344,9 @@ describe('dashboard', () => {
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/dashboard/config')
     expect(storedCsv).toBe('risk,activity')
-    // upsert の insert 部の payload も検証 (初回作成時に正しい行が入る)。
     expect(insertedValues).toMatchObject({ id: 'default', overviewPanels: 'risk,activity' })
     expect(typeof insertedValues?.updatedAt).toBe('string')
-    // 原子更新の回帰ガード: 1 回の batch に before-read + upsert の 2 statement。
+    // 1 回の batch に before-read + upsert の 2 statement (原子更新の回帰ガード)
     expect(batchSpy).toHaveBeenCalledTimes(1)
     expect((batchSpy.mock.calls[0]![0] as unknown[]).length).toBe(2)
   })
@@ -390,10 +366,9 @@ describe('dashboard', () => {
     expect(body).toContain('&lt;script&gt;')
   })
 
-  // inactive (active=0) 銘柄も config / picker / table に表示する (operator visibility)。
-  // cron / risk gate の評価対象は変えない (= allowedSymbols のみ)。
-  // "INACTIVE" naming: `inactiveSymbols` は disable / pause 双方を含むため
-  // 中立的な "INACTIVE" を採用 (CodeRabbit #229)。
+  // inactive (active=0) 銘柄も config/picker/table に表示する (operator visibility) が、
+  // cron/risk gate の評価対象 (allowedSymbols) は変えない。`inactiveSymbols` は
+  // disable/pause 双方を含むため中立的な "INACTIVE" を採用する (CodeRabbit #229)。
   it('renders inactive symbols on config page with grayed-out style and notes tooltip', async () => {
     vi.mocked(loadSymbolUniverse).mockResolvedValue(
       makeSymbolUniverse({
@@ -604,7 +579,6 @@ describe('dashboard', () => {
     expect(res.status).toBe(401)
   })
 
-  // #141: dashboard alerts view
   it('renders /dashboard/alerts unavailable when DB is not bound', async () => {
     const app = createApp()
     const res = await app.request('/dashboard/alerts', { headers: authHeader }, baseEnv)
@@ -677,7 +651,7 @@ describe('parseOverviewPanels', () => {
   it('ignores invalid tokens and whitespace', () => {
     expect([...parseOverviewPanels(' risk , bogus ')].sort()).toEqual(['risk'])
   })
-  // #dashboard-ia Phase 3: 旧 6 パネルの CSV が保存済みでも設定を作り直させない。
+  // 旧 6 パネルの CSV が保存済みでも設定を作り直させない (#dashboard-ia Phase 3)。
   it('maps legacy panel keys onto the new areas', () => {
     expect([...parseOverviewPanels('risk,activity')].sort()).toEqual(['activity', 'risk'])
     expect([...parseOverviewPanels('positions,composition')].sort()).toEqual(['risk'])
@@ -830,7 +804,6 @@ describe('safeJsonScript', () => {
   it('単独の "<" も escape (HTML タグ解釈を抑止)', () => {
     const html = safeJsonScript('__d', { html: '<a>' })
     expect(html).toContain('\\u003ca>')
-    // <a> という HTML タグとして混入しない
     expect(html.match(/<a>/g)).toBeNull()
   })
 })
@@ -1016,8 +989,7 @@ describe('computeTradeStats', () => {
     expect(s.expectancy).toBe(0)
   })
 
-  // 期待値は break-even も分母に含めた「全トレード平均」(CodeRabbit PR #684)。
-  // 旧式 (decisive のみ分母) だと [10, 0] が 10 になっていた。
+  // 旧式 (decisive のみ分母) だと [10, 0] が 10 になっていた (CodeRabbit PR #684)。
   it('break-even を含む期待値は全トレード数を分母にする', () => {
     const s = computeTradeStats([10, 0])
     expect(s.expectancy).toBe(5)
@@ -1064,6 +1036,10 @@ describe('parseChartsTab', () => {
     expect(parseChartsTab('')).toBe('overview')
     expect(parseChartsTab('xss')).toBe('overview')
     expect(parseChartsTab('OVERVIEW')).toBe('overview') // 大文字も既知扱いせず default に
+  })
+
+  it('旧 grid タブ (廃止済み URL) は symbol にマップする', () => {
+    expect(parseChartsTab('grid')).toBe('symbol')
   })
 })
 
@@ -1159,7 +1135,7 @@ const DEFAULT_PARAMS: StrategyParamsSnapshot = {
   reentryGuardBusinessDays: 3,
 }
 
-/** Count cells flagged as 変更済 (title attr ベースで識別、凡例 ⚠ と分離)。 */
+// title attr ベースで変更済 cell を識別する (凡例の ⚠ とは別カウント)
 function countCellWarnings(html: string): number {
   return (html.match(/title="default 値から変更"/g) ?? []).length
 }
@@ -1206,9 +1182,8 @@ describe('renderStrategyParamsPanel', () => {
     expect(html).toContain('default から変更されている')
   })
 
-  // 銘柄管理の override / role preset が効いている項目は global と異なる値に
-  // なる。以前は global 値しか表示されず「銘柄管理で設定した値が出ない」見た目
-  // バグがあった (operator 指摘) — effective 値 + 「銘柄別」タグの regression 防止。
+  // 銘柄管理の override/role preset が効く項目は global と異なる値になる。
+  // global 値のみ表示する退行を防ぐため effective 値 + 「銘柄別」タグを検証する。
   it('global を渡すと effective 値が表示され、global と異なる項目に「銘柄別」タグが付く', () => {
     const effective = { ...DEFAULT_PARAMS, stopPct: -0.05, takeProfitPct: 0.06 }
     const html = renderStrategyParamsPanel(effective, { ...DEFAULT_PARAMS })
@@ -1391,9 +1366,8 @@ describe('computeLinearRegressionLine', () => {
 })
 
 describe('densifyTrendLine', () => {
-  // p1 = (t=0, y=100), end = (t=10, y=110) → slope 1/ms
-  // 実際の dashboard では epoch ms (~1.7e12) だが、線形補間の数学は
-  // origin 不変なので小さい数で test しても等価。
+  // p1 = (t=0, y=100), end = (t=10, y=110) → slope 1/ms。線形補間は origin 不変なので、
+  // 実際の epoch ms (~1.7e12) の代わりに小さい数で test しても等価。
   const baseLine: TrendLineSegment = {
     pivots: [
       { timestamp: new Date(0).toISOString(), price: 100, type: 'high' },
@@ -1420,7 +1394,6 @@ describe('densifyTrendLine', () => {
   })
 
   it('p1 / end の外側でも extrapolate (両側に伸びる)', () => {
-    // sample に -5 と 15 を含めると外挿される
     const samples = [-5, 0, 10, 15]
     const out = densifyTrendLine(baseLine, samples)
     expect(out).toEqual([
@@ -1527,9 +1500,8 @@ describe('densifyHorizontalLine', () => {
   })
 
   it('fromTs == toTs (degenerate、openedAt と最新が同 ms) → 2 点 fallback', () => {
-    // a >= b ブランチ。実用上は呼び元で endTs = max(latestTs, openedAt) clamp
-    // しているので fromTs == toTs は openedAt 直後 (latestTs == openedAt) の
-    // ケース。
+    // 呼び元は endTs = max(latestTs, openedAt) で clamp するので、これは
+    // openedAt 直後 (latestTs == openedAt) の a >= b ケース。
     const out = densifyHorizontalLine(120, 50, 50, [10, 50, 80])
     expect(out).toEqual([
       [50, 120],
@@ -1659,7 +1631,6 @@ describe('mergeYahooAndCronPoints', () => {
       { timestamp: '2026-04-24T05:00:00.000Z', price: 104, sma50: 90, high20d: 110, low20d: 80 }, // JST 04/24
     ]
     const merged = mergeYahooAndCronPoints(yahoo, cron)
-    // 04/23: Yahoo, 04/24: cron (preferred)
     expect(merged.length).toBe(2)
     expect(merged[0]!.price).toBe(100) // Yahoo
     expect(merged[0]!.sma50).toBe(null)
@@ -1700,7 +1671,7 @@ describe('mergeYahooAndCronPoints', () => {
       { timestamp: '2026-04-25T05:00:00.000Z', price: 120, sma50: null, high20d: null, low20d: null },
     ]
     const merged = mergeYahooAndCronPoints(yahoo, cron)
-    // Yahoo は残る + 有効な cron (04/25) は残る + 不正 cron は完全に除外
+    // Yahoo は残り、有効な cron (04/25) も残り、不正 cron のみ完全に除外される
     expect(merged.length).toBe(2)
     expect(merged.some((p) => p.timestamp === 'not-an-iso')).toBe(false)
     expect(merged.map((p) => p.timestamp)).toEqual([
@@ -1766,9 +1737,8 @@ describe('computeRollingSma', () => {
 import { fetchYahooBarsForChart } from '../../src/routes/dashboard'
 
 describe('fetchYahooBarsForChart', () => {
-  // warmup を足してから getDailyBars に渡す実装で contract leak していたケース
-  // (lookback=0 / 負値 / 非整数) を caller contract のままで弾けることを確認。
-  // 実 fetch には行かないので mock 不要 (validation で先に throw)。
+  // warmup 加算後に getDailyBars へ渡す実装で lookback=0/負値/非整数 が漏れていたケースを、
+  // caller contract のまま弾けることを確認する (validation が先に throw するので mock 不要)。
   it('lookback=0 で RangeError', async () => {
     await expect(fetchYahooBarsForChart('AAPL', 0)).rejects.toBeInstanceOf(RangeError)
   })
@@ -1818,9 +1788,8 @@ describe('parseIsoTimestamp', () => {
   })
 
   it('数字のみ文字列は invalid (Date は ISO format string のみ accept)', () => {
-    // new Date('1777705200000') は Invalid Date。URL から数字の timestamp ms を
-    // 渡されても reject される (ISO format でないので意図的)。client 側は
-    // 必ず ISO で URL を更新するので運用上問題なし。
+    // client 側は必ず ISO で URL を更新するので、数字だけの timestamp ms が reject
+    // されても運用上問題ない。
     expect(parseIsoTimestamp('1777705200000')).toBeNull()
   })
 })
@@ -2016,10 +1985,8 @@ import {
   type DecisionRow,
   type SymbolChartDecision,
 } from '../../src/routes/dashboard'
-// 銘柄チャートタブの client 側初期化スクリプトは静的ファイル化されている
-// (#charts-symbol-redesign)。`renderSymbolTab` の戻り値 (html) には
-// `<script src=...>` の参照だけが乗るので、JS 内の文字列 (series 名 /
-// click handler 名等) を検証するテストはこの定数を直接見る。
+// renderSymbolTab の戻り値には <script src=...> 参照のみが乗るため、JS 内の文字列
+// (series 名/click handler 名等) を検証するテストはこの定数を直接見る (#charts-symbol-redesign)。
 import { SYMBOL_CHART_CLIENT_SCRIPT } from '../../src/routes/dashboard/charts/symbolChartScript'
 import { buildBuyabilityView, type EvalIndicatorPoint } from '../../src/trading/strategy/entryDistance'
 import {
@@ -2148,16 +2115,13 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
         ladderHtml: '<div>LADDER_EMBED_MARKER</div>',
       },
     ]))
-    // scatter series / click handler は静的ファイル化された client script 側
-    // (#charts-symbol-redesign)。html はその参照 (<script src>) だけを持つ。
+    // scatter series / click handler は静的ファイル化された client script 側にある (#charts-symbol-redesign)
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("type: 'scatter'")
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("name: '判定'")
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('showDecisionTrace')
     expect(html).toContain('decision-trace-panel')
-    // 各点の ladderHtml が payload に埋め込まれている (safeJsonScript で < は
-    // < に escape されるが marker テキストは残る)
+    // ladderHtml は safeJsonScript で < が < に escape されるが marker テキストは残る
     expect(html).toContain('LADDER_EMBED_MARKER')
-    // 凡例キャプションも出る
     expect(html).toContain('見送り・bot判定 (SKIP)')
     expect(html).toContain('拒否・証券会社 (REJECT)')
   })
@@ -2166,9 +2130,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     const html = renderSymbolTab(symbolArgs([]))
     // 凡例キャプションは decisions があるときだけ出す
     expect(html).not.toContain('見送り・bot判定 (SKIP)')
-    // payload の decisions は空配列 (= runtime で scatter 0 点)
     expect(html).toContain('"decisions":[]')
-    // placeholder パネルは常に描画
     expect(html).toContain('decision-trace-panel')
   })
 
@@ -2179,11 +2141,11 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     )
     const html = renderSymbolTab(symbolArgs([], view))
     expect(html).toContain('入場まで') // パネル headline
-    // 入場ライン独立線は廃止 → 押し目ゾーン端に距離ラベルを載せる
-    // (bandEdgeLabel の呼び出しは静的ファイル化された client script 側)
+    // 入場ライン独立線は廃止 → 押し目ゾーン端に距離ラベルを載せる (bandEdgeLabel は
+    // 静的ファイル化された client script 側にある)
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("bandEdgeLabel('押し目上端'")
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("bandEdgeLabel('押し目下端'")
-    expect(html).not.toContain('"entryLine"') // 独立 entryLine payload は無い
+    expect(html).not.toContain('"entryLine"')
   })
 
   it('buyability が null なら projection も null', () => {
@@ -2191,7 +2153,6 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('"projection":null')
   })
 
-  // 銘柄レール (左固定): 旧 inline picker (「切替: <full name の列挙>」) を置換。
   it('銘柄レールを左に出し、focus は active / inactive は注記付きで識別する', () => {
     const universe = makeSymbolUniverse({
       allowedSymbols: ['TQQQ', 'SOXL'],
@@ -2206,11 +2167,9 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
       universe,
     })
     expect(html).toContain('class="symbol-rail"')
-    // focus (TQQQ) は active、ticker + 小さい銘柄名の縦リスト
     expect(html).toContain('class="rail-item active"')
     expect(html).toContain('<span class="rail-sym">TQQQ</span>')
     expect(html).toContain('<span class="rail-name">ProShares UltraPro QQQ</span>')
-    // inactive (1570) は inactive class + tooltip 注記
     expect(html).toContain('class="rail-item inactive"')
     expect(html).toContain('INACTIVE: liquidity dropped')
     // 旧 inline picker の「| 切替:」は出ない
@@ -2236,8 +2195,6 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('inactive — paused for review')
   })
 
-  // Google Finance 風: 前日終値を payload に載せ (チャートの点線基準)、
-  // 価格ヘッダー (大きい現在値 + 前日比) を chart 上に出す。
   it('前日終値を payload に載せ、価格ヘッダーと range ピルを描画する', () => {
     const base = symbolArgs([])
     const html = renderSymbolTab({
@@ -2252,7 +2209,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     })
     expect(html).toContain('"prevClose":78')
     expect(html).toContain('前日終値 $78.00')
-    // 現在値 (latestCronPrice=80) を大きく + 前日比 (上昇=赤)
+    // latestCronPrice=80 を現在値として大きく表示
     expect(html).toContain('$80.00')
     expect(html).toContain('前日比')
     // range ピルは chart container の直後 (chart-pin 内、チャート直下に出す)
@@ -2263,7 +2220,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     if (panelIdx >= 0) expect(pillIdx).toBeLessThan(panelIdx)
   })
 
-  // チャートは sticky 固定 (入場ゲート説明 / 判定トレースとグラフを同時に見るため)
+  // 入場ゲート説明/判定トレースとグラフを同時に見せるため、チャートは sticky 固定にする
   it('チャートと指標バッジを sticky な symbol-chart-pin で包む', () => {
     const html = renderSymbolTab(symbolArgs([]))
     const pinIdx = html.indexOf('class="symbol-chart-pin"')
@@ -2272,10 +2229,8 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html.indexOf('id="symbol-chart"')).toBeGreaterThan(pinIdx)
   })
 
-  // client 側初期化スクリプトの静的ファイル化 (#charts-symbol-redesign)。
-  // 巨大インライン <script> (旧: 約1200行/70KB) を外部 route に外出しした
-  // ので、html には <script src> 参照のみが ECharts CDN の後に defer で乗る
-  // ことを確認する (window.__chartData を読む実行順序を壊さない)。
+  // <script src> はECharts CDN の後に defer で置く必要がある (window.__chartData を
+  // 読む実行順序を壊さないため、#charts-symbol-redesign で外部ファイル化)。
   it('client script は外部ファイル参照 (<script src> + defer) で、ECharts CDN の後に置く', () => {
     const html = renderSymbolTab(symbolArgs([]))
     const echartsIdx = html.indexOf('cdn.jsdelivr.net/npm/echarts')
@@ -2283,7 +2238,6 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(echartsIdx).toBeGreaterThanOrEqual(0)
     expect(scriptTagIdx).toBeGreaterThan(echartsIdx)
     expect(html.slice(scriptTagIdx, scriptTagIdx + 80)).toContain('defer')
-    // 旧インライン初期化コードそのものはもう SSR html に埋め込まれない
     expect(html).not.toContain("document.addEventListener('DOMContentLoaded'")
   })
 
@@ -2309,8 +2263,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     const html = renderSymbolTab(symbolArgs([], view))
     expect(html).toContain('"projection"')
     expect(html).toContain('"slopePerStep"')
-    // 外挿線 series 名 (配線確認)。series 定義は静的ファイル化された client
-    // script 側にある (#charts-symbol-redesign)。
+    // 外挿線 series 定義は静的ファイル化された client script 側にある (#charts-symbol-redesign)
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('参考 価格外挿')
   })
 })
@@ -2586,7 +2539,6 @@ describe('renderSymbolTab — fold 内サマリ / サブタブ分離 (#charts-sy
     // 判断サマリ grid は details より前 (fold 上部)
     expect(gridIdx).toBeGreaterThanOrEqual(0)
     expect(gridIdx).toBeLessThan(detailsIdx)
-    // details に open は付かない (既定で閉じる)
     expect(html).not.toContain('<details open style="margin-top:10px">')
   })
 })
@@ -2700,8 +2652,7 @@ describe('renderZoomPresetButtons', () => {
 import { renderLastRolledCell } from '../../src/routes/dashboard'
 
 describe('renderLastRolledCell (issue #140)', () => {
-  // 2026-04-25T00:00:00Z = 09:00 JST。3 ケースの elapsed を相対計算するための
-  // anchor。
+  // 2026-04-25T00:00:00Z = 09:00 JST。各ケースの elapsed を相対計算する anchor。
   const fixedNowMs = Date.parse('2026-04-25T00:00:00.000Z')
   const now = () => fixedNowMs
 

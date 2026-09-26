@@ -7,13 +7,10 @@ import { ValidationError } from '../shared/errors'
 import type { OrderIntent, OrderSide } from '../trading/domain/OrderIntent'
 
 /**
- * Low-level Webull connectivity endpoint. Intentionally limited to dry-run
- * mode so it cannot bypass the TradingService risk gate (allowed_symbols /
- * max_order_notional / pending lock / spread / drawdown kill, etc).
- *
- * Live execution must go through `/trade/execute` or `/admin/strategy/run`,
- * which run the full risk pipeline before talking to the broker. See
- * issue #137 for the rationale.
+ * Low-level Webull connectivity endpoint, intentionally dry-run only so it
+ * cannot bypass TradingService's risk gate (allowed_symbols /
+ * max_order_notional / pending lock / spread / drawdown kill, etc). Live
+ * execution must go through `/trade/execute` or `/admin/strategy/run`.
  */
 export const webull = new Hono<AppBindings>().post('/order/place', async (c) => {
   const intent = await parseOrderIntent(c.req.json())

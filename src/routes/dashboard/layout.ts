@@ -4,11 +4,8 @@ import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader
 import { resolveTradingEnabled } from '../../trading/runtime/killSwitch'
 import { esc, fmtJst } from './shared'
 
-/**
- * Dashboard-local Hono context shape。`AppBindings.Variables` の `requestId` に
- * 加え、kill-switch banner state を `use('*')` middleware で初頭 load して
- * 全 route から参照可能にする (#276)。
- */
+// `killSwitchState` is loaded once by a `use('*')` middleware so every route
+// can read it without its own D1 round trip.
 export type DashboardBindings = AppBindings & {
   Variables: AppBindings['Variables'] & {
     killSwitchState: KillSwitchBannerState | null
@@ -268,33 +265,20 @@ export function renderLayout(
   subnav = '',
 ): string {
   const killSwitch = killSwitchTopnav(c.var.killSwitchState)
-  // active 判定はグループ単位の前方一致 (#dashboard-ia)。/charts は ?tab= で
-  // 「銘柄」(symbol) と「レビュー」(overview/quality) に分かれるため
-  // query も見る。
+  // /charts splits into '銘柄' vs 'レビュー' by ?tab=, so path alone isn't enough.
   let tab: string | null = null
   try {
     tab = new URL(c.req.url).searchParams.get('tab')
   } catch {
-    // 相対 URL 等で parse できない場合は tab 無し (= overview) 扱い
+    // Unparseable (e.g. a relative URL) falls back to no tab.
   }
   return layout(title, body, resolveActiveNavGroup(c.req.path, tab), killSwitch, subnav)
 }
 
-/**
- * グローバル nav (#dashboard-ia Phase 1): 日常の 3 画面 + 管理 + 診断。
- *
- * 実利用は「銘柄」「ホームの約定」「取引品質の一部」に偏っており、判定ログ・
- * アラート・監査・broker 診断・token は平常時に開かれない。**消さずに前面から
- * 下げる**のがこの再編の主旨で、Phase 1 では URL も機能も変えず、どこから
- * 辿れるかだけを変える。
- *
- * - 管理 (`ops`): 書き込みを伴う画面だけ
- * - 診断 (`diag`): 障害時にだけ開く画面。MCP は同じ D1 に依存するので AI では
- *   代替できず、削除はしない
- *
- * 資産系 (/positions /portfolio) はホームに統合済みのため nav には出さない
- * (URL は直アクセス可のまま維持)。
- */
+// `ops` = write-capable pages only. `diag` = rarely opened but not removable:
+// it's the only path to incident evidence (alert → requestId → judgment log),
+// and MCP depends on the same D1 data so it can't substitute. /positions and
+// /portfolio stay URL-reachable but out of the nav (folded into home).
 export type NavGroupKey = 'home' | 'symbol' | 'review' | 'ops' | 'diag'
 
 const NAV_GROUPS: ReadonlyArray<{
@@ -308,17 +292,12 @@ const NAV_GROUPS: ReadonlyArray<{
   { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 成績 / 実現損益の推移' },
 ]
 
-/** 管理ドロップダウン内リンク (書き込みを伴う低頻度ページ)。 */
 const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/config', text: '設定' },
   { href: '/dashboard/symbols', text: '銘柄管理' },
   { href: '/dashboard/events', text: 'イベント' },
 ]
 
-/**
- * 診断ドロップダウン内リンク。平常時は開かないが、障害時の一次情報と証跡は
- * ここにしか無い (通知 → アラート → requestId → 判定ログ の導線)。
- */
 const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
   { href: '/dashboard/alerts', text: 'アラート', title: '通知の履歴 (severity / cause で絞り込み)' },
   { href: '/dashboard/cron', text: '判定ログ', title: 'なぜ買った / 買わなかったかを requestId で追う' },
@@ -340,16 +319,12 @@ const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string
   },
 ]
 
-/**
- * 現在ページ → active nav グループの解決 (グループ単位の前方一致)。
- * /positions /portfolio は nav 外の直アクセスページなので active 無し (null)。
- */
+// Prefix match per nav group. /positions and /portfolio are reachable by
+// URL but not in the nav, so they resolve to null rather than a group.
 export function resolveActiveNavGroup(activePath?: string, tab?: string | null): NavGroupKey | null {
   if (!activePath) return null
   if (activePath === '/dashboard' || activePath === '/dashboard/') return 'home'
   if (activePath === '/dashboard/charts') {
-    // symbol タブは「銘柄」、overview (default) / quality は「レビュー」。
-    // 'grid' は廃止済みタブの legacy alias (parseChartsTab が symbol に畳む)。
     return tab === 'symbol' || tab === 'grid' ? 'symbol' : 'review'
   }
   if (activePath === '/dashboard/trades' || activePath.startsWith('/dashboard/trades/')) {
@@ -380,8 +355,6 @@ function renderTopNav(active?: NavGroupKey | null): string {
         return `<a class="nav-link" href="${l.href}"${t}>${esc(l.text)}</a>`
       })
       .join('')
-  // 管理 / 診断は kill switch と同じ details ドロップダウン。summary 自体が
-  // 現在地表示を兼ねる (配下ページでは active 装飾)。
   return `${links}<span class="nav-sep"></span><details class="topnav-ops">
     <summary class="nav-link${active === 'ops' ? ' active' : ''}">管理 ▾</summary>
     <div class="ops-pop">${popLinks(OPS_NAV_LINKS)}</div>
@@ -391,16 +364,8 @@ function renderTopNav(active?: NavGroupKey | null): string {
   </details>`
 }
 
-/**
- * 「レビュー」グループ共通の subnav (#dashboard-ia)。charts の
- * `renderChartsSubnav` と同型で trades / cron / alerts の 3 ページに出す
- * (charts ページ自体は既存の charts subnav のまま — subnav 2 本は出さない)。
- */
-/**
- * レビュー内 subnav。判定ログ / アラートは診断へ移したので
- * ここには出さないが、**個別ページ側は同じ subnav を出して迷子を防ぐ**ため
- * key 自体は残す (active にならないだけ)。
- */
+// 'cron' / 'alerts' keys stay even though the diag nav owns those pages now —
+// pages that still render this subnav need the key to not render as active.
 export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts' | 'lifecycle'
 
 const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
@@ -409,21 +374,16 @@ const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   label: string
 }> = [
   { key: 'trades', href: '/dashboard/trades', label: '約定履歴' },
-  // #dashboard-ia Phase 4: 中身は勝率 / PF / 期待値 / PnL 分布であって、
-  // スリッページや約定率は含まない。「取引品質」は実態と合わないので「成績」。
+  // Labelled "成績" not "取引品質": the content is win rate / PF / expected
+  // value / PnL distribution, not slippage or fill rate.
   { key: 'quality', href: '/dashboard/charts?tab=quality', label: '成績' },
-  // 口座資産 (portfolio) と累積 realized PnL は別物なので、どちらの推移かを
-  // ラベルで明示する。
+  // Labelled to distinguish from account-level portfolio equity.
   { key: 'equity', href: '/dashboard/charts', label: '実現損益の推移' },
-  // #709 Phase 2: exit reason 別成績 / フォワードリターン / SKIP 後の
-  // MFE-MAE 等、単発の成績表 (quality) より粒度の細かいライフサイクル分析。
   { key: 'lifecycle', href: '/dashboard/lifecycle', label: 'ライフサイクル' },
 ]
 
-/**
- * 診断ページ間の subnav。アラート → 判定ログ → 監査の横移動は障害対応で
- * 実際に使うので、診断側にも subnav を出す (レビュー subnav には出さない)。
- */
+// Diag pages get their own subnav (unlike review) because alert → judgment
+// log → audit cross-navigation happens during incident response.
 export type DiagSubnavKey = 'alerts' | 'cron' | 'audit' | 'probe' | 'token' | 'extendedHours'
 
 const DIAG_SUBNAV_KEY_BY_HREF: Record<string, DiagSubnavKey> = {
@@ -454,11 +414,9 @@ export function renderAnalysisSubnav(active: AnalysisSubnavKey): string {
   }).join('')
 }
 
-/**
- * 取引 ON/OFF (kill switch) を上部バー右端の badge + ドロップダウンで出す
- * (#276 banner → sidebar → topnav と配置変更)。status ラベル / env override 注記 /
- * 停止・再開フォームは従来と同じ文言・action を維持 (テスト・運用の互換)。
- */
+// Status label / env-override note / stop-resume form text and action must
+// stay byte-for-byte what they were before this moved to the topnav —
+// existing tests and operator muscle memory depend on the exact wording.
 function killSwitchTopnav(state: KillSwitchBannerState | null): string {
   if (state === null) {
     return `<details class="topnav-killswitch">
@@ -494,8 +452,8 @@ function killSwitchTopnav(state: KillSwitchBannerState | null): string {
   </details>`
 }
 
-// ページタイトル h1 は出さない (上部 nav の active 強調で現在地が分かるため
-// 冗長 — operator 要望)。title は <title> にのみ残す。
+// No h1: active-nav highlighting already shows current location, so a page
+// title would be redundant (per operator request). Kept in <title> only.
 function layout(
   title: string,
   body: string,
@@ -522,12 +480,11 @@ function layout(
   ${subnav ? `<nav class="subnav">${subnav}</nav>` : ''}
 </header>
 <script id="header-h-script">
-  // sticky 要素 (.symbol-rail / .symbol-chart-pin) の top に使う header 実高。
-  // nav の折り返しで高さが変わるため実測でセットする (CSS 固定値だと自然位置と
-  // ズレてスクロール開始時に jump する)。
-  // 注: XSS 回帰テストが「未エスケープ payload の生 script 開始タグ」を検出する
-  // ため、layout 由来の script tag には属性 (id) を付けて区別する。タグ文字列を
-  // この comment 内にもそのまま書かないこと。
+  // Measured (not fixed CSS) header height, since nav wrapping changes it —
+  // a fixed value would drift from the sticky rail/pin's natural position.
+  // The id attribute lets the XSS-regression test tell this script tag
+  // apart from an unescaped payload's own raw script tag — do not write a
+  // literal script tag string in this comment, or that check breaks.
   (function () {
     var h = document.querySelector('.header');
     if (!h) return;

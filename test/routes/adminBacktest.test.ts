@@ -10,12 +10,8 @@ const unauthEnv = {}
 
 const authHeader = {}
 
-/**
- * Build a synthetic Yahoo-shaped chart payload from a list of DailyBar.
- * Mirrors the columnar response that `normalizeYahooChart` consumes so the
- * admin endpoint sees identical bars to what live YahooBarClient would
- * deliver.
- */
+// Mirrors the columnar response `normalizeYahooChart` consumes, so the admin endpoint
+// sees identical bars to what live YahooBarClient would deliver.
 function buildYahooChart(bars: DailyBar[]): unknown {
   return {
     chart: {
@@ -58,10 +54,6 @@ function buildBars(start: number, factors: number[], startDate = '2024-01-01'): 
   return bars
 }
 
-/**
- * Stub `loadGlobalConfigFrom` so the route doesn't try to talk to a real D1
- * binding. Returns the canonical defaults verbatim.
- */
 vi.mock('../../src/infrastructure/db/globalConfigLoader', () => ({
   loadGlobalConfigFrom: async () => ({
     source: 'd1',
@@ -129,11 +121,6 @@ describe('GET /admin/backtest', () => {
   })
 
   it('400s when no Yahoo bars fall within the requested range', async () => {
-    // Regression for the silent fallback bug: previously, when
-    // `bars.findIndex(b => b.date >= from)` returned -1 (i.e. Yahoo had
-    // nothing inside [from, to] — e.g. `from` is in the future / symbol
-    // delisted) the route ran the backtest against the *entire* prior
-    // history and returned 200. The endpoint must now reject with 400.
     const pastBars = buildBars(100, Array(80).fill(1.005), '2024-01-01')
 
     globalThis.fetch = vi.fn(async () =>
@@ -166,7 +153,6 @@ describe('GET /admin/backtest', () => {
     const tail = buildBars(pullback.close, [1.05, 1.05, 1.02, 1.02], '2024-04-02')
     const bars = [...warmup, pullback, ...tail]
 
-    // Stub the global fetch so YahooBarClient returns our synthetic series.
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify(buildYahooChart(bars)), {
         status: 200,
@@ -202,9 +188,9 @@ describe('GET /admin/backtest/compare', () => {
     globalThis.fetch = originalFetch
   })
 
+  // Same shape as the '200s' /backtest test: warmup uptrend, a deep single-day pullback
+  // (in-band for a one-shot BUY), then a rally.
   function mockUptrendPullbackBars(): DailyBar[] {
-    // Same synthetic shape as the '200s' /backtest test: warmup uptrend, a
-    // deep single-day pullback (in-band for a one-shot BUY), then a rally.
     const warmup = buildBars(100, Array(80).fill(1.005), '2024-01-01')
     const last = warmup[warmup.length - 1]!.close
     const pullback: DailyBar = {
@@ -300,8 +286,6 @@ describe('GET /admin/backtest/compare', () => {
     }
     expect(body.params).toBeDefined()
     expect(typeof body.barCount).toBe('number')
-    // Default variants: full, staged:25/25/50, full+trail:50/2/0, full+trail:50/2/5 (#709 Phase
-    // 4), full+preset+reentry:guard, full+preset+reentry:aware:5 (#709 Phase 5).
     expect(body.variants).toHaveLength(6)
     const names = body.variants.map((v) => v.name)
     expect(names).toEqual([
@@ -322,8 +306,7 @@ describe('GET /admin/backtest/compare', () => {
       expect(typeof variant.tradeCount).toBe('number')
       expect(Array.isArray(variant.trades)).toBe(true)
     }
-    // Bare entry specs (no `+<exit>`) stay backward compatible with Phase 3: they parse to
-    // exitPolicy {kind:'preset'}.
+    // Bare entry specs (no `+<exit>`) stay backward compatible with Phase 3.
     expect(body.variants[0]!.exitPolicy).toEqual({ kind: 'preset' })
     expect(body.variants[1]!.exitPolicy).toEqual({ kind: 'preset' })
     expect(body.variants[2]!.exitPolicy).toEqual({
@@ -368,9 +351,8 @@ describe('GET /admin/backtest/compare', () => {
     ) as unknown as typeof fetch
 
     const app = createApp()
-    // `+` is form-decoded to a space in a URL query string (same as an HTML form submit), so a
-    // literal `+` in `variants` must be percent-encoded (`%2B`) here — exactly as an operator
-    // typing this into a browser/curl would need to.
+    // `+` is form-decoded to a space in a query string, so a literal `+` in `variants`
+    // must be percent-encoded (`%2B`).
     const res = await app.request(
       '/admin/backtest/compare?symbol=AAPL&from=2024-04-01&to=2024-04-10&variants=full%2Bpreset,full%2Btrail:30/1.5/3',
       { headers: { ...authHeader } },
@@ -422,8 +404,7 @@ describe('GET /admin/backtest/compare', () => {
     expect(res.status).toBe(400)
   })
 
-  /** `+reentry:<spec>` variant format (#709 Phase 5). */
-  it('parses `<entry>+reentry:<spec>` (exit omitted) into exitPolicy preset + the reentryPolicy', async () => {
+  it('parses `<entry>+reentry:<spec>` (exit omitted) into exitPolicy preset + the reentryPolicy (#709 Phase 5)', async () => {
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify(buildYahooChart(mockUptrendPullbackBars())), {
         status: 200,

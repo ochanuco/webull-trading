@@ -99,28 +99,24 @@ import type { SymbolRule } from '../trading/strategy/strategies/PullbackUptrendS
  */
 export const admin = new Hono<AppBindings>()
   /**
-   * Production readiness preflight (#375-#380)。Read-only: D1 / DO / env の
-   * 現在状態を集約し、live enablement 前に fail-closed で確認できるようにする。
-   * Broker 実通信は `/admin/broker/probe` に分離し、ここでは発注経路に触れない。
+   * Read-only preflight: aggregates D1/DO/env state for fail-closed
+   * verification before live enablement. Broker communication lives in
+   * `/admin/broker/probe`, not here, to keep this endpoint side-effect free.
    */
   .get('/production-readiness', async (c) => {
     c.header('Cache-Control', 'no-store')
     return c.json(await collectProductionReadiness(c.env, c.get('requestId')))
   })
   /**
-   * Operator override for a corrupted `position`. Used when a past reconcile
-   * race left DO state with a qty above broker truth (#215) — the regular
-   * recordFill path can't undo it because there is no fill to apply, so the
-   * operator must reset directly. POC blast radius: requires Basic Auth and
-   * an explicit `reason` string for the audit log.
+   * Operator override for a corrupted `position`, e.g. after a reconcile
+   * race leaves DO state ahead of broker truth — recordFill can't undo that
+   * (there's no fill to apply), so this resets the position directly.
    *
    * Body: `{ qty: number, avgPrice: number, openedAt?: string | null, reason: string }`
-   *   - `qty=0` → close the position (avgPrice / openedAt ignored)
-   *   - `qty>0` → write `{ qty, avgPrice, openedAt: openedAt ?? now() }`
+   *   - `qty=0` closes the position (avgPrice / openedAt ignored)
+   *   - `qty>0` writes `{ qty, avgPrice, openedAt: openedAt ?? now() }`
    *
-   * Side effects: emits one structured `symbol_state_position_override`
-   * audit log with before/after/reason/requestId. Does NOT touch
-   * `pendingOrder` / `cooldownUntil` / `settledCash`.
+   * Leaves `pendingOrder` / `cooldownUntil` / `settledCash` untouched.
    */
   .post('/symbol-state/:symbol/override-position', rateLimit('ADMIN_WRITE'), async (c) => {
     const symbol = c.req.param('symbol').trim().toUpperCase()
@@ -180,12 +176,8 @@ export const admin = new Hono<AppBindings>()
     )
     return c.json({ symbol, settledCash: state.settledCash, updatedAt: state.updatedAt })
   })
-  /**
-   * 強制的に cooldownUntil を過去時刻 (UNIX epoch 0) にして取引停止状態を解除する。
-   * 直前損切後の cooldown (reconcileFills が設定) を staging で即解除したい時に
-   * 使う。PositionStore.setCooldown は string 必須なので `new Date(0).toISOString()`
-   * を渡すことで「過去」扱いにして実質クリア。
-   */
+  // Sets cooldownUntil to epoch (not null) since PositionStore.setCooldown requires a string;
+  // strategy's `> now` check then treats it as already expired.
   .post('/symbols/:symbol/clear-cooldown', rateLimit('ADMIN_WRITE'), async (c) => {
     const symbol = c.req.param('symbol').trim().toUpperCase()
     if (symbol.length === 0) {
@@ -212,30 +204,22 @@ export const admin = new Hono<AppBindings>()
       updatedAt: state.updatedAt,
     })
   })
-  /**
-   * Manual trigger for `runStrategyCron`. Returns the same `StrategyCronResult`
-   * the hourly scheduled handler would console.log. Useful for debugging bar
-   * fetch failures / skip reasons without waiting for :15 of the hour.
-   *
-   * Honours `global_config.dry_run` via runStrategyCron itself — does NOT
-   * bypass. Protected by the same basic-auth as the rest of /admin/*.
-   */
+  // Manual trigger for `runStrategyCron`, for debugging skip reasons without
+  // waiting for the hourly schedule. Does not bypass `global_config.dry_run`.
   .post('/strategy/run', rateLimit('ADMIN_WRITE'), async (c) => {
     const result = await runStrategyCron(c.env)
     return c.json(result)
   })
   /**
-   * Runtime kill-switch toggle (issue #276)。`global_config.trading_enabled` を
-   * 切替えて `trading_toggle_history` に append。dashboard 経由は
-   * `application/x-www-form-urlencoded`、CLI 経由は JSON で受ける (Content-Type
-   * で分岐)。dashboard form 後の挙動を素直にするため、form post には HTML 302
-   * で `/dashboard` に戻す。
+   * Flips `global_config.trading_enabled` and appends to
+   * `trading_toggle_history`. Branches on Content-Type: form body from the
+   * dashboard (redirects back to `/dashboard`), JSON from CLI callers.
    *
-   * Body (JSON or form): `{ enabled: boolean, reason: string }`
+   * Body: `{ enabled: boolean, reason: string }`
    *
-   * `effective` フィールドで env override 適用後の値を返す: env=false なら DB
-   * を true に書いても `effective=false` で運用者に「env override 効いてる」
-   * を視認させる (saw-tooth な切替えで混乱する事故防止)。
+   * Response `effective` is the value after env override is applied, so an
+   * operator writing DB `true` under `TRADING_ENABLED=false` still sees
+   * `effective=false` instead of believing the toggle took effect.
    */
   .post('/trading/toggle', rateLimit('STATE_CHANGE'), async (c) => {
     if (!c.env.DB) {
@@ -269,7 +253,6 @@ export const admin = new Hono<AppBindings>()
       }),
     )
     if (isForm) {
-      // Form 経由は dashboard に戻して銀行のような one-click 操作にする。
       return c.redirect('/dashboard', 303)
     }
     const effective = resolveTradingEnabled(result.after, c.env.TRADING_ENABLED)
@@ -282,22 +265,18 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * Offline backtest harness for PullbackUptrendStrategy (issue #198)。
-   *
-   * Yahoo Finance daily bars を取って `runBacktest` に流し込み、結果 JSON を
-   * 返す。POC で `pullback_default_*` の妥当性を data-driven に評価するための
-   * tool — 実発注は **しない** (純粋計算)。
+   * Offline backtest harness for PullbackUptrendStrategy. Feeds Yahoo
+   * Finance daily bars through `runBacktest`; pure calculation, never
+   * places an order.
    *
    * Query:
    *   - `symbol`         (required)  e.g. AAPL / 7203
    *   - `from`, `to`     (required)  ISO date "YYYY-MM-DD"
    *   - `initialCash`    (optional)  default 10000
    *   - `stopPct`, `takeProfitPct`, `timeStopDays`, `pullbackMax`,
-   *     `pullbackMin`, `minReturn50d`, `kAtr` (optional)  global_config 既定
-   *     を override
+   *     `pullbackMin`, `minReturn50d`, `kAtr` (optional)  override global_config
    *
-   * 返り値は `BacktestResult` をそのまま JSON 化したもの。in-memory only、
-   * D1 永続化は別 PR (issue #198 の `backtest_run` / `backtest_trade`)。
+   * Returns `BacktestResult` as-is, in-memory only (no D1 persistence).
    */
   .get('/backtest', async (c) => {
     const setup = await buildBacktestSetup(c)
@@ -313,40 +292,32 @@ export const admin = new Hono<AppBindings>()
     return c.json(result)
   })
   /**
-   * 現行一括投入 vs 段階エントリー (Probe→確認→押し目) の比較 backtest
-   * (issue #709 Phase 3)、全量利確 (preset) vs 部分利確+ATRトレーリング
-   * (issue #709 Phase 4)、および exit reason 別の再エントリー条件比較
-   * (issue #709 Phase 5) の比較。`/backtest` と同一 bars・rule・コスト条件で
-   * 複数 `EntryPolicy` × `ExitPolicy` × `ReentryPolicy` variant を走らせ、
-   * `runLifecycleBacktest` の結果を並べて返す。実発注は **しない**。
+   * Runs multiple `EntryPolicy` x `ExitPolicy` x `ReentryPolicy` variants
+   * through `runLifecycleBacktest` on the same bars/rule/cost basis as
+   * `/backtest`, and returns them side by side. Never places an order.
    *
    * Query:
-   *   - `symbol`, `from`, `to`, `initialCash`, rule override 群は `/backtest` と共通
-   *   - `variants` (optional) カンマ区切り。既定
-   *     `full,staged:25/25/50,full+trail:50/2/0,full+trail:50/2/5,full+preset+reentry:guard,full+preset+reentry:aware:5`。
-   *     書式は `<entry>[+<exit>][+reentry:<spec>]` (`+<exit>` 省略時は `preset`、
-   *     `+reentry:<spec>` 省略時は `none` 扱い — Phase 3/4 時点の書式はそのまま
-   *     引き続き有効):
-   *       - `<entry>` = `full` | `staged:<probe>/<confirm>/<full>` (% 整数、合計 100)
+   *   - `symbol`, `from`, `to`, `initialCash`, rule overrides: same as `/backtest`
+   *   - `variants` (optional) comma-separated, format `<entry>[+<exit>][+reentry:<spec>]`
+   *     (`+<exit>` defaults to `preset`, `+reentry:<spec>` defaults to `none`):
+   *       - `<entry>` = `full` | `staged:<probe>/<confirm>/<full>` (integer %, sums to 100)
    *       - `<exit>`  = `preset` | `trail:<tpFraction%>/<trailKAtr>/<extDays>`
-   *         (例 `full+trail:50/2/5` = TP到達で半分利確・残りをATR2σトレーリング・
-   *         トレンド継続時 time-stop を5営業日延長)
-   *       - `reentry:<spec>` = `reentry:none` | `reentry:guard` | `reentry:aware:<slWaitDays>`
-   *         (順序は exit の後。`guard` = 現行ライブ再エントリー価格ガードの複製、
-   *         `aware:<slWaitDays>` = exit reason 別の再エントリー条件 — 詳細は
-   *         `runLifecycleBacktest.ts` の `evaluateReentry`)
-   *     URL クエリ内の `+` は form-decode で空白になる (HTML form 送信と同じ) ので、
-   *     ブラウザ / curl から直接叩く場合は `%2B` に percent-encode すること。
-   *   - `confirmDays` (optional, default 3) staged variant 共通の confirm streak 日数
-   *   - `feePctOfNotional`, `feeFixedPerOrder` (optional) 既定は global_config
+   *         (e.g. `trail:50/2/5` = take half profit at TP, trail the rest at 2 ATR sigma,
+   *         extend the time-stop 5 sessions while the trend holds)
+   *       - `<reentry spec>` = `reentry:none` | `reentry:guard` | `reentry:aware:<slWaitDays>`
+   *         (`guard` mirrors the live re-entry price guard; `aware:<slWaitDays>` varies by exit
+   *         reason — see `evaluateReentry` in `runLifecycleBacktest.ts`)
+   *     A literal `+` in the query string form-decodes to a space, so callers outside an HTML
+   *     form must percent-encode it as `%2B`.
+   *   - `confirmDays` (optional, default 3) confirm-streak days shared by staged variants
+   *   - `feePctOfNotional`, `feeFixedPerOrder` (optional) default to global_config
    */
   .get('/backtest/compare', async (c) => {
     const setup = await buildBacktestSetup(c)
     const confirmDays = readOptionalNumber(c.req.query('confirmDays'), 'confirmDays', 3, {
       mustBePositive: true,
     })
-    // 小数の confirmDays は「probeStreak >= 0.5」が初日で成立して確認 leg の
-    // 意味が消えるので整数のみ受ける。
+    // Integer only: a fractional confirmDays satisfies `probeStreak >= 0.5` on day one, erasing the confirm leg.
     if (!Number.isInteger(confirmDays)) {
       throw new ValidationError("'confirmDays' must be a positive integer", { field: 'confirmDays' })
     }
@@ -362,7 +333,7 @@ export const admin = new Hono<AppBindings>()
       setup.global.feeFixedPerOrder,
       {},
     )
-    // 負の手数料は estimateOrderCost が負になりコストが利益として計上される。
+    // A negative fee would make estimateOrderCost negative, booking cost as profit.
     for (const [field, v] of [
       ['feePctOfNotional', feePctOfNotional],
       ['feeFixedPerOrder', feeFixedPerOrder],
@@ -423,24 +394,14 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * Lookup the Webull-side status of an order by client_order_id.
+   * Polls Webull for every locally-submitted order without a terminal
+   * `broker_status` in trade_journal, and patches the row with
+   * `filled_qty / filled_price / broker_status`. Idempotent — safe to call
+   * on demand.
    *
-   * The JP UAT tenant does not expose `/openapi/account/orders/detail` (404
-   * on both v1 and v2), so we fetch the first page of
-   * `/openapi/account/orders/history` (50 entries) and filter client-side.
-   * If the order is older than that window, returns 404
-   * `order_not_found_in_recent_history`.
-   */
-  /**
-   * Poll Webull for every locally-submitted order that doesn't yet have a
-   * terminal `broker_status` in trade_journal, and patch the row with
-   * `filled_qty / filled_price / broker_status`. Safe to call on demand —
-   * idempotent (terminal rows are already excluded by the WHERE clause).
-   *
-   * Optional `?retryStateApply=1` mode (issue #142): also sweep
-   * `broker_status='FILLED' AND state_applied_at IS NULL` rows that have
-   * aged out of the cron lookback window. Use to manually unstick legacy
-   * split-brain rows after deploying the marker columns.
+   * `?retryStateApply=1` also sweeps `broker_status='FILLED' AND
+   * state_applied_at IS NULL` rows that aged out of the cron lookback
+   * window, to unstick legacy split-brain rows manually.
    */
   .post('/orders/reconcile', rateLimit('ADMIN_WRITE'), async (c) => {
     const retryStateApply = parseTruthyQuery(c.req.query('retryStateApply'))
@@ -453,12 +414,9 @@ export const admin = new Hono<AppBindings>()
   })
   /**
    * Read-only count of `broker_status='FILLED' AND state_applied_at IS NULL`
-   * rows — i.e. the split-brain backlog that issue #142 tracks. A non-zero
-   * `pendingApply` is the operator's signal to invoke
-   * `POST /admin/orders/reconcile?retryStateApply=1`.
-   *
-   * Cheap (single COUNT(*) query) so safe to scrape from a dashboard. Does
-   * not mutate state.
+   * rows (the split-brain backlog). A non-zero `pendingApply` is the signal
+   * to invoke `POST /admin/orders/reconcile?retryStateApply=1`. Single
+   * COUNT(*), safe to poll from a dashboard.
    */
   .get('/orders/repair-status', async (c) => {
     if (!c.env.DB) {
@@ -479,31 +437,23 @@ export const admin = new Hono<AppBindings>()
     return c.json({ pendingApply })
   })
   /**
-   * Reconcile broker-side holdings into the per-symbol DO `position`.
-   *
-   * Pulls Webull `/openapi/account/positions` once and walks the symbol
-   * universe (or `?symbol=SOXL` for a single ticker), comparing the DO
-   * `position.qty` against broker `available_quantity`. When they disagree
-   * the DO row is overwritten via the same `overridePosition` path used by
-   * `/admin/symbol-state/:symbol/override-position` — one structured
-   * `symbol_state_position_override` log per write plus an outer
-   * `holdings_sync_applied` log keyed by `requestId`.
-   *
-   * Use this as the manual recovery tool for DO state that drifted before
-   * PR #215 (idempotency) / PR #221 (SELL fallback) landed. Both fixes
-   * prevent **future** corruption but neither rewrites existing rows.
+   * Manual recovery tool: reconciles broker-side holdings into the
+   * per-symbol DO `position`. Pulls Webull `/openapi/account/positions`
+   * once and walks the symbol universe (or `?symbol=SOXL`), overwriting a
+   * disagreeing DO row via the same `overridePosition` path as
+   * `/admin/symbol-state/:symbol/override-position`. Does not rewrite rows
+   * that already match.
    *
    * Query:
    *   - `symbol`  (optional)  restrict to one ticker (case-insensitive)
    *   - `dryRun`  (optional)  `1`/`true`/`yes` → diff-only, no DO writes
    *   - `force`   (optional)  `1`/`true`/`yes` → bypass the "broker empty +
-   *                            DO has positions" safe-fail guard. Use only
-   *                            when the operator has *confirmed* the broker
-   *                            is genuinely empty (e.g. liquidation) and
-   *                            the DO rows are stale ghosts to be cleared.
+   *                            DO has positions" safe-fail guard; only for a
+   *                            confirmed-empty broker (e.g. liquidation)
+   *                            with stale DO ghost rows to clear
    *
-   * Body: ignored (POST kept for "this mutates state" intent — `dryRun`
-   *   path obviously doesn't, but the verb stays consistent).
+   * Body is ignored — POST rather than GET keeps the verb consistent with
+   * the route's non-dryRun mutating behavior.
    */
   .post('/orders/sync-holdings', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.SYMBOL_STATE) {
@@ -514,11 +464,8 @@ export const admin = new Hono<AppBindings>()
     const force = parseTruthyQuery(c.req.query('force'))
     const symbol = symbolRaw && symbolRaw.length > 0 ? symbolRaw.toUpperCase() : undefined
 
-    // Single-symbol mode skips the universe load: lets the operator sync a
-    // ticker even if it's been removed from `symbol_config` (e.g. retired
-    // strategy that still has a stale DO row). All-symbols mode needs D1;
-    // reject early so the operator gets 400-with-field instead of a 500
-    // from deeper in `loadSymbolUniverse`.
+    // Single-symbol mode skips the universe/D1 load, so an operator can sync
+    // a ticker even after it's been removed from `symbol_config`.
     let allowedSymbols: string[]
     if (symbol !== undefined) {
       allowedSymbols = [symbol]
@@ -553,50 +500,41 @@ export const admin = new Hono<AppBindings>()
    * Read-only diagnostic: directly hit Webull broker endpoints with bare fetch
    * and return the raw HTTP status / body / timing. Bypasses
    * `WebullHttpClient` / `WebullQuoteClient` so the response is **not normalized
-   * by our parsers** — used to verify whether sandbox failures (#240 alert:
-   * status 403 across US_STOCK / US_ETF) come from the broker side or our
-   * client-side handling.
+   * by our parsers** — used to tell whether a broker-side failure is really
+   * on the broker side or is our client-side handling.
    *
-   * Probes (in parallel, #251 / #254 で旧/新 path 比較):
+   * Probes (in parallel), each old-path/new-path pair kept to compare them:
    *   1. `GET /openapi/market-data/stock/snapshot` (`x-version: v2`)
    *      for `?symbol=` (default SOXL) + `?category=` (default US_ETF).
-   *   2. positions (旧): `GET /openapi/account/positions` (`x-version: v1`)
-   *   3. positions (新): `GET /openapi/assets/positions` (`x-version: v2`)
-   *   4. order history (旧): `GET /openapi/account/orders/history` (`v1`)
-   *   5. order history (新): `GET /openapi/trade/order/history` (`v2`)
+   *   2. positions (v1): `GET /openapi/account/positions`
+   *   3. positions (v2): `GET /openapi/assets/positions`
+   *   4. order history (v1): `GET /openapi/account/orders/history`
+   *   5. order history (v2): `GET /openapi/trade/order/history`
    *
    * Each probe returns the same uniform shape regardless of phase:
    * `{ phase: 'response' | 'auth' | 'fetch', status, ok, bodyTruncated,
-   *   bodyLength, msTaken, error }` with `null` for unavailable values
-   * (auth phase: status / ok / body fields / msTaken all null; fetch phase:
-   * status / ok / body fields null but msTaken set; response phase: error
-   * null). Body is truncated to 4 kB to avoid log blowup on HTML error pages.
+   *   bodyLength, msTaken, error }`, with `null` for whatever a given phase
+   * didn't reach. Body truncated to 4 kB to avoid log blowup on HTML error
+   * pages.
    *
-   * Pre-condition: `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` / `WEBULL_ACCOUNT_ID_JP_CASH`
-   * must be set (non-whitespace). Missing returns `400 ValidationError` —
-   * "I forgot to set X" should never silently look like "broker rejected".
-   * `WEBULL_TRADE_API_BASE` / `WEBULL_QUOTES_API_BASE` は env 未設定なら JP
-   * prod default (`api.webull.co.jp` / `data-api.webull.co.jp`) を使う (#21)。
-   * UAT で叩く場合は env を explicit に投入する (ALB hostname を override)。
+   * Pre-condition: `WEBULL_APP_KEY` / `WEBULL_APP_SECRET` /
+   * `WEBULL_ACCOUNT_ID_JP_CASH` must be set (non-whitespace), else `400
+   * ValidationError` — a missing var should never look like a broker
+   * rejection. `WEBULL_TRADE_API_BASE` / `WEBULL_QUOTES_API_BASE` default to
+   * the JP prod hosts when unset; set them explicitly to probe UAT instead.
    *
-   * Read-only: no DO writes, no D1 writes. Safe to call from operator browser.
+   * Read-only: no DO writes, no D1 writes.
    */
   .get('/broker/probe', async (c) => {
     const symbol = (c.req.query('symbol') ?? 'SOXL').trim().toUpperCase()
     const category = (c.req.query('category') ?? 'US_ETF').trim().toUpperCase()
-    // instrument 照会用の反対側 category (CodeRabbit #462)。UI のティッカー推定が
-    // ETF/STOCK を取り違えても判定が壊れないよう、両方を probe する。
+    // Also probes the opposite category, so a UI ticker misclassified as ETF/STOCK still gets a usable result.
     const altCategory = category.endsWith('_ETF')
       ? category.replace(/_ETF$/, '_STOCK')
       : category.replace(/_STOCK$/, '_ETF')
-    // 全 env var を trim、whitespace-only も "未設定" 扱い。silent な phase:'auth'
-    // 返却 (CodeRabbit #243 初版の auto-fix) は ambiguous (ユーザが「設定したつ
-    // もり」になる) なので、設定漏れ / 半角空白だけのケースは ValidationError で
-    // 400 を返す ("正規の設定" のときだけ probe を走らせる)。
-    //
-    // host 系 (WEBULL_TRADE_API_BASE / WEBULL_QUOTES_API_BASE) は env 未設定なら
-    // JP prod default (#21) を使うので missing チェック対象外。env が explicit に
-    // セットされてる時のみ URL format を validate する。
+    // Whitespace-only counts as unset. A silent phase:'auth' result on a missing
+    // var would look like "configured but broker rejected"; reject with 400 instead.
+    // Host vars fall back to the JP prod default when unset, so they're exempt from this check.
     const tradeBaseExplicit = (c.env.WEBULL_TRADE_API_BASE ?? '').trim()
     const quotesBaseExplicit = (c.env.WEBULL_QUOTES_API_BASE ?? '').trim()
     const baseUrl = tradeBaseExplicit || 'https://api.webull.co.jp'
@@ -608,10 +546,8 @@ export const admin = new Hono<AppBindings>()
     if (appKey.length === 0) missingEnv.push('WEBULL_APP_KEY')
     if (appSecret.length === 0) missingEnv.push('WEBULL_APP_SECRET')
     if (accountId.length === 0) missingEnv.push('WEBULL_ACCOUNT_ID_JP_CASH')
-    // base URL は length > 0 でも http(s):// で parse できないと probeOnce 内の
-    // `new URL(args.path, ${baseUrl}/)` が同期的に TypeError を吐いて 500 で
-    // 落ちる。明示的に validate して 400 で返す方が運用視点で扱いやすい。
-    // env が explicit にセットされてる値だけチェック (default 値は format 保証済)。
+    // An unparseable base URL would throw synchronously inside probeOnce's `new URL(...)` (500);
+    // validate explicit-only values up front and return 400 instead (defaults are format-guaranteed).
     const validateAbsoluteHttpUrl = (value: string, varName: string): void => {
       if (value.length === 0) return
       let parsed: URL | null = null
@@ -633,18 +569,14 @@ export const admin = new Hono<AppBindings>()
       )
     }
 
-    // #21 Phase B: DO or env 由来の `x-access-token` を resolve。NORMAL token が
-    // あれば全 probe call に乗せる (none なら省略、broker が 401 で発覚する)。
-    // この probe は client factory を経由せず buildSignedHeaders を直接呼んでた
-    // ため Phase B 直後は seed しても 401 が消えないバグだった (PR #329)。
-    // 診断ラベル (source / length) を probe response に乗せて「token が乗ったが
-    // broker が reject」と「そもそも token が未配信」を切り分け可能にする。
+    // Resolves the DO/env-sourced token directly (rather than via a client factory) and
+    // surfaces its source/length in the response, to distinguish "token sent but broker
+    // rejected it" from "no token was ever attached".
     const tokenResolved = await resolveAccessTokenWithSource(c.env)
     const accessToken = tokenResolved.token
 
-    // 全 phase で同じキーを返す uniform shape (CodeRabbit #243)。jq / curl から
-    // 結果を比較・集計するときに「auth phase だけキーが少ない」状況を避ける。
-    // 値が無い場合は null を入れ、`error` は response phase では null にする。
+    // Every phase returns the same key set (null where unreached), so jq/curl consumers
+    // don't have to special-case a shorter shape for the auth phase.
     interface ProbeResult {
       phase: 'response' | 'auth' | 'fetch'
       status: number | null
@@ -660,13 +592,9 @@ export const admin = new Hono<AppBindings>()
       path: string
       query: Record<string, string>
       version?: string
-      /** POST body (JSON 文字列)。署名対象に含める (place/preview 系)。 */
+      /** JSON string, included in the signed request (place/preview probes). */
       body?: string
-      /**
-       * 既定は trade host (`WEBULL_TRADE_API_BASE`)。snapshot probe は quotes host
-       * (`WEBULL_QUOTES_API_BASE`) を明示的に渡す — JP 本番では data-api 系に
-       * 分離されてるため。
-       */
+      /** Defaults to the trade host; snapshot probes pass the quotes host explicitly. */
       host?: string
     }): Promise<ProbeResult> {
       const url = new URL(args.path, `${args.host ?? baseUrl}/`)
@@ -737,14 +665,9 @@ export const admin = new Hono<AppBindings>()
       }
     }
 
-    /**
-     * Yahoo Finance 経由の同 symbol snapshot probe (#21 follow-up)。`probeOnce`
-     * と同じ uniform shape を返すが auth/signing 不要なので fetch を直接叩く。
-     * Yahoo は JP 銘柄に `.T` suffix を付ける convention (YahooBarClient/QuoteClient と同じ)。
-     */
+    // Returns the same uniform shape as probeOnce, but calls fetch directly since Yahoo needs no auth/signing.
     async function probeYahooSnapshot(symbolForProbe: string): Promise<ProbeResult> {
-      // JP 判定は `toYahooSymbol` に一本化 (CodeRabbit #334)。re-implement すると
-      // YahooBarClient / YahooQuoteClient の convention 変更時にズレる。
+      // Delegates JP-suffix detection to toYahooSymbol so this can't drift from YahooBarClient/YahooQuoteClient.
       const yahooSymbol = toYahooSymbol(symbolForProbe)
       const url = new URL(
         `/v8/finance/chart/${encodeURIComponent(yahooSymbol)}`,
@@ -761,7 +684,7 @@ export const admin = new Hono<AppBindings>()
           method: 'GET',
           headers: {
             Accept: 'application/json',
-            // Yahoo は anonymous request を 429 で返すので browser-like UA を付ける。
+            // Yahoo 429s anonymous requests without a browser-like UA.
             'User-Agent': 'Mozilla/5.0',
           },
           signal: controller.signal,
@@ -791,13 +714,9 @@ export const admin = new Hono<AppBindings>()
       }
     }
 
-    // #251 / #254: drift 検証のため旧 path (v1) と 新 path (v2) を **並列** で
-    // 叩いて比較する。各セクションを result 配列の object として返却:
-    //   - quote (path 共通、v2 ヘッダ): 既存
-    //   - positions: old=/openapi/account/positions+v1 vs new=/openapi/assets/positions+v2
-    //   - orderHistory: old=/openapi/account/orders/history+v1 vs new=/openapi/trade/order/history+v2
-    // dashboard UI は 旧 (= positions) を保有銘柄リスト描画に使うので shape は
-    // 後方互換維持 (`positions` field 名据え置き)、新 path 結果は追加 field。
+    // Old (v1) and new (v2) paths run in parallel for drift comparison. The dashboard UI
+    // still renders from the old `positions` result, so that field name stays put; the
+    // new-path results are additive.
     const [
       quoteResult,
       quoteYahooResult,
@@ -817,9 +736,7 @@ export const admin = new Hono<AppBindings>()
       snapshotTradeV2,
       instrumentStockTradeV2,
     ] = await Promise.all([
-      // path は WebullQuoteClient.DEFAULT_QUOTE_PATH と一致:
-      // /openapi/market-data/stock/snapshot (× /openapi/quotes/v2/...)。
-      // v2 は path ではなく x-version ヘッダ。
+      // Path matches WebullQuoteClient.DEFAULT_QUOTE_PATH; v2 is an x-version header, not a path change.
       probeOnce({
         method: 'GET',
         path: '/openapi/market-data/stock/snapshot',
@@ -830,50 +747,39 @@ export const admin = new Hono<AppBindings>()
           overnight_required: 'false',
         },
         version: 'v2',
-        // JP 本番は trade と quotes が別ホスト (`data-api.webull.co.jp`)。
-        // JP UAT (ALB) では同じ URL が入るので no-op。
+        // JP production splits trade/quotes across hosts; UAT (ALB) points both at the same URL, so this is a no-op there.
         host: quotesBaseUrl,
       }),
-      // Yahoo Finance を quote 用 backup source として probe (#21 follow-up)。
-      // 現状 strategy cron の default 経路でもあり、Webull JP の market-data API
-      // が稼働開始する前まで主軸を担う。auth/signing は不要なので probeOnce ではなく
-      // 直接 fetch する小 helper を呼ぶ。
+      // Yahoo as the quote backup source: it's also the strategy cron's current default path
+      // until Webull JP market-data is live. No auth/signing needed, so this skips probeOnce.
       probeYahooSnapshot(symbol),
-      // OLD: WebullHttpClient.getPositions (現行 cron が叩く path + v1)
       probeOnce({
         method: 'GET',
         path: '/openapi/account/positions',
         query: { account_id: accountId },
         version: 'v1',
       }),
-      // NEW: 新 OpenAPI docs の path + v2 (x-access-token 必須化の可能性は
-      // 別 issue #258 で評価、本 probe は signing 周りは現行と同じ buildSignedHeaders)
       probeOnce({
         method: 'GET',
         path: '/openapi/assets/positions',
         query: { account_id: accountId },
         version: 'v2',
       }),
-      // OLD: 現行 findOrderByClientId が叩く path + v1。
-      // page_size は broker 側の制約で 10-100 のみ受理 (`5` だと 417
-      // OAUTH_OPENAPI_PARAM_ERR、see #251 follow-up)。
+      // page_size accepts only 10-100 broker-side; 5 returns 417 OAUTH_OPENAPI_PARAM_ERR.
       probeOnce({
         method: 'GET',
         path: '/openapi/account/orders/history',
         query: { account_id: accountId, page_size: '10' },
         version: 'v1',
       }),
-      // NEW: 新 OpenAPI docs の trade/order/history + v2
       probeOnce({
         method: 'GET',
         path: '/openapi/trade/order/history',
         query: { account_id: accountId, page_size: '10' },
         version: 'v2',
       }),
-      // #415 buying-power: Account Balance endpoint の path/version/レスポンス項目を
-      // 確定するための probe (doc: /api-doc/trade/account/account-balance)。positions が
-      // account/*(v1)→assets/*(v2) で drift した実績を踏まえ候補を並列で叩く。どれが
-      // 200 + buying-power フィールドを返すかで本実装の path/version/DTO を決める。
+      // Account Balance endpoint candidates: positions already drifted from account/*(v1) to
+      // assets/*(v2), so these run in parallel to find which one returns 200 with a buying-power field.
       probeOnce({
         method: 'GET',
         path: '/openapi/account/balance',
@@ -892,13 +798,10 @@ export const admin = new Hono<AppBindings>()
         query: { account_id: accountId },
         version: 'v2',
       }),
-      // #461: instrument 照会 (銘柄が Webull に登録されているか)。
-      // **JP の正しい path は `/openapi/instrument/stock/list`** (JP docs
-      // Trading API > Get Stock Instrument)。汎用 SDK の `/instrument/list` とは
-      // drift しており (#251 と同パターン)、HK 専用の `/trade/security` は JP に
-      // 存在しない。host (trade / quotes) は docs に明記が無いので両方 probe。
-      // category は UI のティッカー推定が ETF/STOCK を取り違え得るため
-      // (CodeRabbit #462) 反対側 category も probe する。
+      // Instrument lookup (is this symbol registered with Webull). JP's correct path is
+      // `/openapi/instrument/stock/list` (JP docs, not the generic SDK's `/instrument/list`,
+      // and HK-only `/trade/security` doesn't exist in JP). Host isn't documented, so both are
+      // probed, each with both categories in case the caller misclassified ETF/STOCK.
       probeOnce({
         method: 'GET',
         path: '/openapi/instrument/stock/list',
@@ -925,8 +828,7 @@ export const admin = new Hono<AppBindings>()
         version: 'v1',
         host: quotesBaseUrl,
       }),
-      // 汎用 SDK path (`/instrument/list`) も比較用に残す — data-api が将来
-      // 稼働したときに JP がどちらの path を採るかの drift 検証 (#251 方式)。
+      // Generic SDK path kept for comparison, in case JP eventually adopts it once data-api is live.
       probeOnce({
         method: 'GET',
         path: '/openapi/instrument/list',
@@ -940,11 +842,8 @@ export const admin = new Hono<AppBindings>()
         query: { symbols: symbol, category },
         version: 'v1',
       }),
-      // JP docs (market-data-api/data-api) の再読で判明: **Market Data API の
-      // production host は api.webull.co.jp (trade host) + x-version v2
-      // (HMAC-SHA256)**。従来の probe は「market-data = data-api (別 host)」前提
-      // で trade host には v1 しか投げていなかった — trade host + v2 の組合せを
-      // ここで初めて検証する。
+      // Market Data API's production host is the trade host (api.webull.co.jp) at x-version v2,
+      // not the separate data-api host assumed by the other probes above — validated here.
       probeOnce({
         method: 'GET',
         path: '/openapi/market-data/stock/snapshot',
@@ -964,26 +863,19 @@ export const admin = new Hono<AppBindings>()
       }),
     ])
 
-    // #461 follow-up: **Preview Order = 発注しない注文検証** (JP docs 正式記載:
-    // POST /openapi/account/orders/preview)。発注パイプラインの検証 (取扱外
-    // 銘柄の TICKER_IS_DENY を含む) を、注文を作らずに引ける唯一の documented
-    // API。POST なので通常 probe では叩かず、UI の明示ボタン (query preview=1)
-    // でのみ実行する。body は production の place order と同じ mapper を使い
-    // (qty=1 の BUY、limit cap は Yahoo 価格 or 100)、**path は place ではなく
-    // preview に固定** — 注文は作成されない。
+    // POST /openapi/account/orders/preview is the only documented API that exercises the
+    // order pipeline (including a TICKER_IS_DENY check) without creating an order, so it's
+    // gated behind an explicit `?preview=1` rather than run on every probe call.
     let previewVariants: Array<{ label: string; result: ProbeResult }> | null = null
     if (c.req.query('preview') === '1') {
       const priceRaw = Number(c.req.query('price'))
       const previewPrice = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 100
-      // category の typo を US に黙って丸めない (CodeRabbit #466) — preview は
-      // 表示と保存可否に直結するので許容値以外は 400。
       if (!/^(US|JP)_(STOCK|ETF)$/.test(category)) {
         throw new ValidationError(`unsupported category for preview: ${category}`, {
           field: 'category',
         })
       }
       const market = (category.startsWith('JP_') ? 'JP' : 'US') as 'US' | 'JP'
-      // body shape 候補は form チェック (#461 tradabilityCheck) と共有。
       const variants = buildPreviewOrderVariants(symbol, market, previewPrice, accountId)
       const results = await Promise.all(
         variants.map((v) =>
@@ -999,12 +891,9 @@ export const admin = new Hono<AppBindings>()
       previewVariants = variants.map((v, i) => ({ label: v.label, result: results[i]! }))
     }
 
-    // #460: per-symbol 取扱判定 probe (tradecheck=1)。tradable/list の全件 sweep を
-    // せずに 1 銘柄の発注可否を引けるか — SDK の per-symbol 取引照会
-    // (/trade/instrument・/trade/security) が tradePolicy (ALL/CLOSE_ONLY/DENIED)
-    // を返すかを本番 access token + account_id で検証する。instrument_id は上の
-    // v2 instrument 照会から取る。すべて GET = read-only。これが効けば
-    // 「登録前に 1 発叩く」on-demand 判定が成立し list-cache が不要になる。
+    // Per-symbol tradability probe (`?tradecheck=1`): checks whether a per-symbol lookup
+    // (/trade/instrument, /trade/security) returns tradePolicy directly, as a read-only
+    // alternative to sweeping the whole tradable/list.
     let tradeInstrumentProbe:
       | { instrumentId: string | null; variants: Array<{ label: string; result: ProbeResult }> }
       | null = null
@@ -1023,7 +912,7 @@ export const admin = new Hono<AppBindings>()
           const idRaw = (row as { instrument_id?: unknown } | null)?.instrument_id
           if (idRaw != null) instrumentId = String(idRaw).replace(/\..*$/, '')
         } catch {
-          // instrument_id 取得失敗時は instrument_id 系 variant をスキップ
+          // Leaves instrumentId null; the instrumentId-dependent variants below are skipped, not failed.
         }
       }
       const market = category.startsWith('JP_') ? 'JP' : 'US'
@@ -1071,49 +960,34 @@ export const admin = new Hono<AppBindings>()
       tradeInstrumentProbe = { instrumentId, variants }
     }
 
-    // 診断 payload は raw broker レスポンスを含むので browser / 中間 cache に
-    // 残させない (CodeRabbit #243)。ヘッダは json() 前に c.header() で付ける。
+    // Diagnostic payload includes raw broker responses, so it must not linger in browser/intermediary caches.
     c.header('Cache-Control', 'no-store')
     return c.json({
       timestamp: new Date().toISOString(),
       sandbox: { trade: baseUrl, quotes: quotesBaseUrl },
       input: { symbol, category, accountIdConfigured: accountId.length > 0 },
-      // #21 token diagnostic: source ('do_normal' なら DO 由来 NORMAL token を
-      // 使った正常 path / 'env' は Phase A fallback / 'none' は token なし
-      // = broker は INVALID_TOKEN を返す)。length は値の長さだけで plaintext は
-      // 出さない (browser cache / log 経由の漏洩防止)。
+      // `source: 'do_normal'` is the healthy path; `'env'` is the Phase A fallback; `'none'`
+      // means the broker will return INVALID_TOKEN. Only length is exposed, never the token itself.
       accessToken: {
         source: tokenResolved.source,
         length: accessToken?.length ?? 0,
         doStatus: tokenResolved.doStatus ?? null,
       },
-      // #21 app_key diagnostic: staging / production の WEBULL_APP_KEY が
-      // 手元 1Password 値と一致してるかを確認するための head 6 文字 (32 文字 hex
-      // の先頭 6 文字は十分公開しても安全)。token と app_key が違う app に紐付く
-      // と broker が INVALID_TOKEN を返すため、operator が手元値と並べて確認できる
-      // ようにする。
+      // First 6 hex chars, safe to expose, let an operator confirm staging/production's
+      // WEBULL_APP_KEY matches their local value without seeing the full secret.
       appKey: {
         length: appKey.length,
         head: appKey.slice(0, 6),
       },
       quote: quoteResult,
-      // 後方互換: dashboard UI が `positions` を保有銘柄リスト描画に使うので
-      // 旧 path 結果を従来通り返す。
       positions: positionsOld,
-      // 新 OpenAPI docs ベースの結果。drift 比較に使う。
       positionsNew,
       orderHistoryOld,
       orderHistoryNew,
-      // #415 buying-power: Account Balance endpoint 候補の probe 結果。どれが 200 +
-      // buying-power フィールドを返すかで本実装の path/version/DTO を確定する。
       balanceAccountV1,
       balanceAssetsV2,
       balanceAssetsAccountV2,
-      // Yahoo Finance 経由の同 symbol snapshot (#21 follow-up)。Webull の data-api
-      // が応答しない状況での代替経路の生死を可視化する。
       quoteYahoo: quoteYahooResult,
-      // #461: instrument 照会 (Webull 取扱の事前チェック近似)。quotes / trade の
-      // 両 host 候補。UI は 200 が返った側を採用して判定カードを出す。
       instrumentStockTrade,
       instrumentStockTradeAlt,
       instrumentStockQuotes,
@@ -1123,7 +997,6 @@ export const admin = new Hono<AppBindings>()
       snapshotTradeV2,
       instrumentStockTradeV2,
       previewVariants,
-      // #460: per-symbol 取扱判定 probe (tradecheck=1 のときのみ非 null)。
       tradeInstrumentProbe,
       readiness: {
         tokenOk: tokenResolved.source === 'do_normal',
@@ -1141,13 +1014,9 @@ export const admin = new Hono<AppBindings>()
       },
     })
   })
-  /**
-   * #415: 口座買付余力の軽量 JSON。dashboard (ホーム / 銘柄設定) が client-side
-   * fetch して表示する用 (broker/probe と同じく credentials: 'same-origin' で
-   * CF Access cookie を流用)。live token が無い / broker エラーは fail-safe で
-   * `status:'unavailable'` を返し、ページ描画は壊さない。通貨別 buying_power を
-   * そのまま返す (FX 換算はせず、表示側で通貨別に出す)。
-   */
+  // Lightweight buying-power JSON for client-side dashboard fetches. A missing token or
+  // broker error fails safe to `status:'unavailable'` rather than breaking page render;
+  // per-currency buying_power is returned as-is, with no FX conversion.
   .get('/buying-power', async (c) => {
     c.header('Cache-Control', 'no-store')
     try {
@@ -1174,11 +1043,10 @@ export const admin = new Hono<AppBindings>()
     }
   })
   /**
-   * #21 Phase B: `WebullTokenStateDO` operator endpoints。
-   *
-   * - GET /webull-token        : 現在の状態 metadata を返す (token plaintext は返却しない)
-   * - POST /webull-token/seed  : operator が `pnpm run issue-token` で取得した NORMAL token を投入
-   * - POST /webull-token/refresh: 手動 refresh トリガー (cron 待たずに更新)
+   * `WebullTokenStateDO` operator endpoints:
+   * - GET /webull-token         current state metadata (never the token plaintext)
+   * - POST /webull-token/seed   install a NORMAL token from `pnpm run issue-token`
+   * - POST /webull-token/refresh manual refresh, without waiting for cron
    */
   .get('/webull-token', async (c) => {
     if (!c.env.WEBULL_TOKEN_STATE) {
@@ -1186,10 +1054,8 @@ export const admin = new Hono<AppBindings>()
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
     const state = await store.getState()
-    // token plaintext は返さない (audit log / browser cache / screenshot に
-    // 漏れないため)。head/tail だけ表示して operator が「どの token か」を
-    // 識別できれば十分。さらに browser / intermediary cache にも残らない
-    // よう Cache-Control: no-store (CodeRabbit #326)。
+    // Never returns the token plaintext (audit log / cache / screenshot exposure); a
+    // head/tail hint is enough for an operator to identify which token is active.
     c.header('Cache-Control', 'no-store')
     if (!state) {
       return c.json({ seeded: false, state: null })
@@ -1224,9 +1090,8 @@ export const admin = new Hono<AppBindings>()
         { field: 'env' },
       )
     }
-    // operator が貼り付けた token が本当に NORMAL かを broker 側で再確認してから DO に保存。
-    // (Phase A の issue-token script では verify 済だが、time-of-check vs time-of-use の
-    // ズレを締めるため。期限切れ間近の token を seed されても弾ける)
+    // Re-verifies NORMAL status with the broker before storing, closing the
+    // time-of-check/time-of-use gap since the token was issued.
     const tokenClient = new WebullTokenClient({
       auth: new WebullAuth({
         appKey: c.env.WEBULL_APP_KEY,
@@ -1248,8 +1113,6 @@ export const admin = new Hono<AppBindings>()
       expires: dto.expires,
       status: dto.status,
     })
-    // 監査ログには token plaintext は含めず metadata のみ (CodeRabbit #326)。
-    // 「誰がいつ seed したか」が requestId / actor 付きで D1 に残る。
     await writeAuditLog(
       c,
       '/admin/webull-token/seed',
@@ -1280,10 +1143,8 @@ export const admin = new Hono<AppBindings>()
     if (!c.env.WEBULL_TOKEN_STATE) {
       throw new ValidationError('WEBULL_TOKEN_STATE binding is not configured', { field: 'env' })
     }
-    // force=true で「期限まで余裕あるからスキップ」のロジックを bypass。
+    // force=true bypasses the "still has time before expiry" skip.
     const summary = await refreshWebullToken(c.env, { force: true })
-    // 監査ログ: 手動 refresh が走った事実 (とその結果) を残す (CodeRabbit #326)。
-    // token plaintext は出さず、status と時刻だけ before/after に積む。
     await writeAuditLog(
       c,
       '/admin/webull-token/refresh',
@@ -1310,8 +1171,6 @@ export const admin = new Hono<AppBindings>()
       refreshed: summary.refreshed,
       skippedReason: summary.skippedReason ?? null,
       failureReason: summary.failureReason ?? null,
-      // before/after の token plaintext は返さない (上記 GET と同じ理由)。
-      // status / 時刻のみ。
       after: summary.after
         ? {
             expires: summary.after.expires,
@@ -1324,13 +1183,12 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * #460: OpenAPI 取扱可能銘柄 allowlist の手動リフレッシュ (チャンク式)。
-   *
-   * 全件 sweep (~50 ページ・約1分) は 1 リクエストの実行予算で完走できないため、
-   * **1 回 = 最大 ~15 ページ (~20秒) を同期処理**して進捗を返す。done=false なら
-   * `nextCursor` と `watermark` を返すので、UI が同じ watermark + cursor で続けて
-   * POST し、done になるまで再開する。watermark は最初の呼び出し (cursor 無し) で
-   * サーバが採番し、以降クライアントが echo する (sweep 全体の mark-and-sweep 基準)。
+   * Manual, chunked refresh of the tradable-symbol allowlist: a full sweep
+   * (~50 pages) doesn't fit one request's execution budget, so each call
+   * processes at most ~15 pages and returns progress. While `done=false`,
+   * the UI resumes by POSTing the returned `nextCursor` and `watermark`
+   * until done. The server mints `watermark` on the first call (no cursor)
+   * as the mark-and-sweep basis for the whole run; the client echoes it back.
    */
   .post('/tradable-allowlist/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -1338,7 +1196,6 @@ export const admin = new Hono<AppBindings>()
     }
     const cursorRaw = (c.req.query('cursor') ?? '').trim()
     const watermarkRaw = (c.req.query('watermark') ?? '').trim()
-    // 初回 (cursor 無し) は watermark を採番。再開時はクライアントの値を信頼。
     const watermark = watermarkRaw.length > 0 ? watermarkRaw : new Date().toISOString()
     const summary = await refreshTradableAllowlist(c.env, watermark, {
       ...(cursorRaw.length > 0 ? { startCursor: cursorRaw } : {}),
@@ -1357,10 +1214,7 @@ export const admin = new Hono<AppBindings>()
     const status = await getTradableAllowlistStatus(createDb(c.env.DB)).catch(() => null)
     return c.json({ ...summary, watermark, total: status?.total ?? null })
   })
-  /**
-   * #460: allowlist の現在のサマリ (UI のポーリング用)。リフレッシュ進捗
-   * (件数の増加) と最終取得時刻を返す。
-   */
+  // Current allowlist summary for UI polling: row count and last-fetched time.
   .get('/tradable-allowlist/status', async (c) => {
     c.header('Cache-Control', 'no-store')
     if (!c.env.DB) {
@@ -1369,15 +1223,19 @@ export const admin = new Hono<AppBindings>()
     const status = await getTradableAllowlistStatus(createDb(c.env.DB))
     return c.json(status)
   })
+  /**
+   * Looks up the Webull-side status of an order by client_order_id. The JP
+   * UAT tenant 404s on `/openapi/account/orders/detail`, so this instead
+   * fetches the first page of `/openapi/account/orders/history` and filters
+   * client-side; an order outside that page returns
+   * `order_not_found_in_recent_history`.
+   */
   .get('/orders/:clientOrderId', async (c) => {
     const clientOrderId = c.req.param('clientOrderId').trim()
     if (clientOrderId.length === 0) {
       throw new ValidationError('clientOrderId must be non-empty', { field: 'clientOrderId' })
     }
-    // #139: operator can opt into a bounded deep-lookup sweep via query
-    // params. Default behaviour (no params) is the prior single-page lookup.
-    // `maxPages` is hard-capped at 20 so a typo / abuse can't fan out into a
-    // huge broker batch — 20 * 50 = 1000 rows is plenty for ops use.
+    // `maxPages` is capped at 20 (20 * 50 = 1000 rows) so a typo or abuse can't fan out into a huge broker batch.
     const maxPages = parsePositiveIntQuery(c.req.query('maxPages'), { max: 20 })
     // Webull /openapi/account/orders/history accepts page_size 10–100 only.
     const pageSize = parsePositiveIntQuery(c.req.query('pageSize'), { max: 100 })
@@ -1428,10 +1286,9 @@ export const admin = new Hono<AppBindings>()
         dailyRealizedPnl: after.dailyRealizedPnl,
       },
     )
-    // 総資産チャート (`/dashboard/portfolio`) 用の時系列スナップショット。
-    // PortfolioStateDO は通貨を区別しない単一値 (慣例的 USD) なので USD カラムに
-    // 書き込み、JPY は per-currency split が入るまで NULL。書込失敗で handler
-    // 本体は止めない (audit と同じ姿勢 — DO 状態変更は既に成立済)。
+    // PortfolioStateDO holds one currency-agnostic value (USD by convention), so this writes
+    // the USD column only and leaves JPY null until per-currency split exists. A write failure
+    // here doesn't fail the handler — the DO state change above already succeeded.
     if (c.env.DB) {
       const drawdownPct =
         before.dailyStartEquity > 0
@@ -1498,9 +1355,9 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * Bulk seed `earnings_calendar` rows (issue #196 1/3)。POC では外部 API 連携を
-   * 持たず、operator が手動で curl 経由で seed する。重複 (symbol × earnings_date)
-   * は `INSERT OR IGNORE` で skip し、件数を返す。
+   * Bulk seed `earnings_calendar` rows; there's no external API integration,
+   * so an operator seeds manually via curl. Duplicates (symbol x
+   * earnings_date) are skipped via `INSERT OR IGNORE`.
    *
    * Body: `[{ symbol: "AAPL", earnings_date: "2026-04-30", notes?: "Q2" }, ...]`
    */
@@ -1516,8 +1373,6 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError('body must contain at least one entry', { field: 'body' })
     }
     if (body.length > 1000) {
-      // 桁違いの誤入力を弾く。1 cron 環境で扱う universe は十数銘柄 × 4 半期分
-      // (せいぜい 100 行) を想定。
       throw new ValidationError('body cannot exceed 1000 entries per request', { field: 'body' })
     }
     const records: EarningsCalendarSeedInput[] = []
@@ -1537,10 +1392,7 @@ export const admin = new Hono<AppBindings>()
     }
     return c.json({ inserted: result.inserted, skipped: result.skipped, total: records.length })
   })
-  /**
-   * Read `earnings_calendar` rows for a symbol (operator inspect)。`?symbol=AAPL`
-   * 必須。NULL / 0 件でも 200 を返す (空配列)。
-   */
+  // `?symbol=AAPL` required; returns 200 with an empty array when there are no rows.
   .get('/earnings', async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
@@ -1550,9 +1402,6 @@ export const admin = new Hono<AppBindings>()
     const rows = await repo.fetchBySymbol(symbol)
     return c.json({ symbol, rows })
   })
-  /**
-   * Delete a single earnings row by `id`。誤 seed の取り消し用。404 if not found。
-   */
   .delete('/earnings/:id', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
@@ -1577,9 +1426,9 @@ export const admin = new Hono<AppBindings>()
     return c.json({ deleted: true, id })
   })
   /**
-   * Bulk seed `macro_event_calendar` rows (issue #196 2/3)。POC では外部 API
-   * 連携を持たず、operator が手動で curl 経由で seed する。重複 (event_type ×
-   * event_date) は `INSERT OR IGNORE` で skip し、件数を返す。
+   * Bulk seed `macro_event_calendar` rows; operator-seeded via curl, no
+   * external API integration. Duplicates (event_type x event_date) are
+   * skipped via `INSERT OR IGNORE`.
    *
    * Body: `[{ event_type: "FOMC", event_date: "2026-06-17",
    *           event_time?: "14:00", notes?: "June FOMC" }, ...]`
@@ -1599,8 +1448,6 @@ export const admin = new Hono<AppBindings>()
       throw new ValidationError('body must contain at least one entry', { field: 'body' })
     }
     if (body.length > 1000) {
-      // POC では年 50 件 (FOMC + CPI + NFP + ...) × 数年で十分上限。桁違いの
-      // 誤入力を弾く目的。
       throw new ValidationError('body cannot exceed 1000 entries per request', { field: 'body' })
     }
     const records: MacroEventCalendarSeedInput[] = []
@@ -1620,10 +1467,7 @@ export const admin = new Hono<AppBindings>()
     }
     return c.json({ inserted: result.inserted, skipped: result.skipped, total: records.length })
   })
-  /**
-   * Read `macro_event_calendar` rows (operator inspect)。`?from`/`?to` は
-   * いずれも YYYY-MM-DD で optional。`?type` で event_type filter (大文字化)。
-   */
+  // `?from`/`?to` (both optional, YYYY-MM-DD) and `?type` (event_type, upper-cased) filter the rows.
   .get('/macro-events', async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
@@ -1644,8 +1488,8 @@ export const admin = new Hono<AppBindings>()
       toRaw !== '' &&
       fromRaw > toRaw
     ) {
-      // `?from=2026-07-10&to=2026-07-01` のような operator 入力ミスを 400 で
-      // 弾く (空配列 200 だと「データなし」と区別がつかないため)。
+      // Rejected explicitly rather than returning an empty-array 200, which would be
+      // indistinguishable from "no data in range".
       throw new ValidationError("'from' must be <= 'to'", { field: 'from' })
     }
     if (typeRaw !== undefined && typeRaw !== '' && !isMacroEventType(typeRaw)) {
@@ -1666,9 +1510,6 @@ export const admin = new Hono<AppBindings>()
       rows,
     })
   })
-  /**
-   * Delete a single macro event row by `id`。誤 seed の取り消し用。
-   */
   .delete('/macro-events/:id', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
       throw new ValidationError('DB binding is not configured', { field: 'env' })
@@ -1693,17 +1534,18 @@ export const admin = new Hono<AppBindings>()
     return c.json({ deleted: true, id })
   })
   /**
-   * symbol_config CRUD (#292) — UI からの form POST 用 endpoint 群。
+   * `symbol_config` CRUD, driven by dashboard form POSTs
+   * (application/x-www-form-urlencoded, redirecting 303 back to
+   * `/dashboard/symbols` on success — PRG) or an equivalent JSON body
+   * (returns 200 JSON instead). All routes go through
+   * `rateLimit('ADMIN_WRITE')` + `writeAuditLog`.
    *
-   * `/admin/symbol-config`               INSERT (重複 symbol は 409)
-   * `/admin/symbol-config/:symbol/update` 全列 UPDATE
-   * `/admin/symbol-config/:symbol/toggle-active` active 1↔0
-   * `/admin/symbol-config/:symbol/delete` soft delete (active=false; hard delete はしない)
-   *
-   * いずれも `rateLimit('ADMIN_WRITE')` + `writeAuditLog` を経由する。
-   * dashboard form (application/x-www-form-urlencoded) からの POST を想定し、
-   * 成功時は 303 redirect で `/dashboard/symbols` に戻す (PRG)。JSON body も
-   * 同じ shape で受理し、JSON Accept (= ヘッダ無し) の場合は 200 JSON を返す。
+   * `/admin/symbol-config`                       INSERT (409 on duplicate symbol)
+   * `/admin/symbol-config/:symbol/update`         full-row UPDATE
+   * `/admin/symbol-config/:symbol/toggle-active`  flips `active`
+   * `/admin/symbol-config/:symbol/delete`         hard DELETE; requires the
+   *                                                row already inactive
+   *                                                (toggle-active first)
    */
   .post('/symbol-config', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -1715,7 +1557,7 @@ export const admin = new Hono<AppBindings>()
     const db = createDb(c.env.DB)
     const now = new Date().toISOString()
 
-    // #315: inverse_symbol が指定されたら bull/bear を対で登録する (連動登録)。
+    // A supplied inverse_symbol registers the bull/bear pair together.
     const inverseSymbol = parseInverseSymbolField(body)
     if (inverseSymbol !== null) {
       if (inverseSymbol === input.symbol) {
@@ -1781,7 +1623,7 @@ export const admin = new Hono<AppBindings>()
     const symbolPath = normalizeSymbolPathParam(c.req.param('symbol'))
     const isForm = isFormContentType(c.req.header('content-type'))
     const body = await readFormOrJsonBody(c)
-    // path の :symbol を強制し、body symbol は無視 (path が source of truth)。
+    // The path param wins over any `symbol` in the body — the path is the source of truth.
     const bodyObj = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
     const input: SymbolConfigWriteInput = {
       ...parseSymbolConfigBody({ ...bodyObj, symbol: symbolPath }),
@@ -1871,8 +1713,7 @@ export const admin = new Hono<AppBindings>()
       }
       return c.json({ error: 'still_active', symbol: symbolPath }, 400)
     }
-    // #315: half-pair を残さないよう inverse_pairs のリンクも cascade 削除
-    // (相手の symbol_config 行は残す)。symbol_config 削除成功後に実行。
+    // Cascades the inverse_pairs link too, so no half-pair is left behind (the counterpart's symbol_config row stays).
     await deleteInversePairsForSymbol(db, symbolPath)
     await writeAuditLog(
       c,
@@ -1885,16 +1726,14 @@ export const admin = new Hono<AppBindings>()
     return c.json({ symbol: symbolPath, deleted: true })
   })
   /**
-   * 配分シミュレーション (#symbol-relation-map dry-run)。**cron と同一の pure
-   * 関数** (computeConditionalAllocation / buildCashRebalancePlan) に、現在の
-   * 設定 (+ 任意の draft 上書き) と最新の判定材料・DO 保有を食わせて、
-   * 「いま cron が走ったら配分はどう流れるか」を返す。読み取り専用 —
-   * 発注経路には構造的に到達しない (execution を一切組み立てない)。
-   * staging の trading_enabled OFF でも動かせる配分ロジック検証手段。
+   * Feeds the current config (plus any draft override) and the latest
+   * indicators/DO holdings through the same pure functions the cron uses
+   * (`computeConditionalAllocation` / `buildCashRebalancePlan`), to preview
+   * how allocation would flow on the next cron run. Read-only: it never
+   * builds an execution, so it works even with `trading_enabled` off.
    *
-   * body (任意): { pcts?: Record<sym, number|null (%)>, fallbacks?: Record<sym, string|null> }
-   * — ワークフロー編集の draft を適用前に試す用。fallback 設定は canvas と同じく
-   * entry_required ON を含意する。
+   * body (optional): { pcts?: Record<sym, number|null (%)>, fallbacks?: Record<sym, string|null> }
+   * to try a draft edit before applying it. Setting a fallback implies `entry_required` ON.
    */
   .post('/allocation/simulate', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -1909,7 +1748,6 @@ export const admin = new Hono<AppBindings>()
     const global = await loadGlobalConfigFrom(c.env, c.get('requestId'))
     const notes: string[] = []
 
-    // draft 上書き: pcts (% → fraction、null = 解除)、fallbacks (null = 解除)。
     const targetWeights: Record<string, number> = { ...universe.symbolBudgetAllocPct }
     for (const [symRaw, v] of Object.entries(body.pcts ?? {})) {
       const sym = normalizeSymbol(symRaw)
@@ -1946,11 +1784,11 @@ export const admin = new Hono<AppBindings>()
         continue
       }
       cashFallback[sym] = out
-      // canvas 同様、退避先の設定は条件連動 ON を含意する。
+      // Setting a fallback implies entry_required ON, same as the canvas editor.
       entryRequired.add(sym)
     }
 
-    // 判定材料: cron と同じ bars → indicators → entry status (lookback 60)。
+    // Same bars -> indicators -> entry status pipeline as the cron (lookback 60).
     const defaultRule: SymbolRule = {
       stopPct: global.pullbackDefaultStopPct,
       takeProfitPct: global.pullbackDefaultTakeProfitPct,
@@ -1963,7 +1801,7 @@ export const admin = new Hono<AppBindings>()
       maxSma50DeviationPct: global.pullbackDefaultMaxSma50DeviationPct,
       maxAtrRatio: global.pullbackDefaultMaxAtrRatio,
       maxStopToTpRatio: global.pullbackDefaultMaxStopToTpRatio,
-      // #reentry: cron の runStrategyCron 既定と一致 (global_config 列化はまだ)。
+      // Matches runStrategyCron's hardcoded default (not yet a global_config column).
       reentryMinAtrBelowLastExit: 1.0,
       reentryGuardBusinessDays: 3,
     }
@@ -2012,8 +1850,7 @@ export const admin = new Hono<AppBindings>()
       inversePairs: universe.inversePairs,
     })
 
-    // 退避の実発注プラン。total_capital_jpy 未設定なら金額換算不可 (fail-closed
-    // と同じ理由で undefined のまま) — その旨を notes で返す。
+    // No total_capital_jpy means notional can't be computed; stays null (fail-closed), noted in the response.
     let plan: ReturnType<typeof buildCashRebalancePlan> | null = null
     if (global.totalCapitalJpy != null && Number.isFinite(global.totalCapitalJpy) && global.totalCapitalJpy > 0) {
       const usdJpy = await loadUsdJpyRate({ requestId: c.get('requestId') })
@@ -2043,10 +1880,11 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * 退避先の set / clear (#symbol-relation-map 編集キャンバス、#496 多分岐)。
-   * body: { targets: ['SGOV','USMV'] } で設定 (entry_required も同時に ON、
-   * 複数は配分計算で等分割)、{ targets: null } で解除。旧 { target } も受ける。
-   * 検証: 全銘柄が登録済み・同一通貨・self 禁止・上限 MAX_CASH_FALLBACKS。
+   * Sets or clears cash-fallback targets. `{ targets: ['SGOV','USMV'] }` sets
+   * them (also turning `entry_required` ON; multiple targets split evenly in
+   * allocation), `{ targets: null }` clears. Legacy `{ target }` also
+   * accepted. Validates: all symbols registered, same currency, no self
+   * reference, at most `MAX_CASH_FALLBACKS`.
    */
   .post('/symbol-config/:symbol/cash-fallback', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -2086,7 +1924,7 @@ export const admin = new Hono<AppBindings>()
       if (targetRow === null) {
         throw new ValidationError(`target ${target} is not a registered symbol`, { field: 'targets' })
       }
-      // 通貨跨ぎの退避は配分計算側で skip される (fail-closed) ため、入力時点で拒否する。
+      // Rejected at input time rather than left to silently skip in the allocation calc.
       if (targetRow.currency !== source.currency) {
         throw new ValidationError(
           `target ${target} currency ${targetRow.currency} must match ${source.currency}`,
@@ -2110,11 +1948,10 @@ export const admin = new Hono<AppBindings>()
     })
   })
   /**
-   * 予算配分% の一括更新 (#budget-alloc ラダー)。一覧の各 slider が
-   * `pct_<SYMBOL>` field を送り、「確定」押下で全銘柄まとめて更新する
-   * (確定するまでは client 側で仮調整)。値は % (0-100)、空 / 0 → NULL
-   * (= risk-% sizing)。インバース対は片側でも UI が同期するので両側送られる
-   * 想定だが、server 側でも相手を同値に揃える防御を入れる (JS off 耐性)。
+   * Bulk-updates budget allocation %. Each `pct_<SYMBOL>` form field is a
+   * percentage (0-100); empty or 0 clears it to NULL (risk-% sizing takes
+   * over). The server re-syncs an inverse pair to the same value even if
+   * only one side was submitted, so it isn't dependent on client JS.
    */
   .post('/symbol-config/budget-alloc', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.DB) {
@@ -2125,7 +1962,6 @@ export const admin = new Hono<AppBindings>()
     const now = new Date().toISOString()
     const form = await c.req.formData()
     const inverse = await loadInversePairs(db)
-    // pct_<SYMBOL> を集約 (大文字正規化、% → fraction、空/0 → null)。
     const desired = new Map<string, number | null>()
     for (const [key, raw] of form.entries()) {
       if (!key.startsWith('pct_')) continue
@@ -2141,7 +1977,7 @@ export const admin = new Hono<AppBindings>()
       }
       desired.set(sym, pctNum <= 0 ? null : pctNum / 100)
     }
-    // インバース対の同値同期 (両側 desired にある場合は UI 値を尊重、片側のみなら相手も揃える)。
+    // If only one side of an inverse pair was submitted, mirror its value onto the other side.
     for (const [sym, pct] of [...desired.entries()]) {
       const inv = inverse[sym]
       if (inv && !desired.has(inv)) desired.set(inv, pct)
@@ -2166,20 +2002,13 @@ export const admin = new Hono<AppBindings>()
     return c.json({ updated })
   })
   /**
-   * symbol search (live autocomplete + form auto-fill 用)。
-   *
-   * Yahoo Finance の public search endpoint を proxy する。query (`?q=AA` 等) の
-   * 部分マッチで複数候補を返す。JP 判定 (4 桁数字 → `.T` 付け足し) は
-   * server 側で行い、quotes は market / currency 推測込みで返す。
-   *
-   * Yahoo 障害時は `matches: []` を返して client は手動入力に fallback。
-   * Access auth + ADMIN_WRITE rate-limit を通る。
-   */
-  /**
-   * 銘柄の Webull JP 取扱チェック (#461)。登録フォームが symbol 選択時に呼ぶ。
-   * Preview Order (発注しない注文検証) で TICKER_IS_DENY を発注前に引く。
-   * 'denied' のみ登録ブロック対象 — 'error' / 'unavailable' は通す (check 不能で
-   * 全登録が止まるのは過剰 fail-closed。発注側には #460 の事後ガードがある)。
+   * Webull JP tradability check, called by the registration form when a
+   * symbol is chosen. Uses Preview Order (order validation without placing
+   * one) to surface TICKER_IS_DENY before registration. Only `'denied'`
+   * blocks registration — `'error'` / `'unavailable'` let it through, since
+   * failing the whole registration whenever the check itself is unavailable
+   * would be over-aggressive fail-closed; a post-registration guard still
+   * catches a bad symbol before it can trade.
    */
   .get('/symbol-config/tradability-check', rateLimit('ADMIN_WRITE'), async (c) => {
     c.header('Cache-Control', 'no-store')
@@ -2192,9 +2021,9 @@ export const admin = new Hono<AppBindings>()
       return c.json({ error: 'market must be US or JP' }, 400)
     }
     const market = marketRaw
-    // 確定 NG (registry): #460 ガード/手動対応が symbol_config.notes に残した
-    // deny マーカー。過去に実発注で拒否された銘柄は broker に聞くまでもなく ❌
-    // (preview は allowlist を検証しないため、これが唯一の事前 ❌ 根拠)。
+    // A `TICKER_IS_DENY` note recorded by a prior guard/manual fix is a known-bad symbol;
+    // no need to ask the broker again. Preview doesn't check the allowlist, so this is the
+    // only pre-registration signal for that case.
     if (c.env.DB) {
       const row = await findSymbolConfig(createDb(c.env.DB), symbolRaw).catch(() => null)
       if (row?.notes?.includes('TICKER_IS_DENY')) {
@@ -2208,15 +2037,13 @@ export const admin = new Hono<AppBindings>()
       }
     }
     const priceRaw = Number(c.req.query('price'))
-    // instrument 照会 (#475) は US 銘柄のみ (API が US_STOCK / US_ETF 限定)。
-    // ETF を US_STOCK category で引いても返る実測 (USMV) があるので category は
-    // US_STOCK 固定でよい。Promise のまま渡して preview と並列に解決させる。
+    // Instrument lookup only applies to US (the API is US_STOCK/US_ETF only); US_STOCK also
+    // returns ETF rows in practice (verified with USMV), so category can stay fixed.
     const instrumentPromise =
       market === 'US'
         ? lookupInstrument(c.env, { symbol: symbolRaw, category: 'US_STOCK' })
         : undefined
-    // #460: OpenAPI allowlist (tradable/list 由来) の status も併せて返す。
-    // instrument status (OC) では区別できない deny を区別できる唯一の事前シグナル。
+    // The OpenAPI allowlist status distinguishes a deny that instrument status (OC) alone can't.
     const allowlistStatus = c.env.DB
       ? await getTradableStatusForSymbol(createDb(c.env.DB), symbolRaw).catch(() => 'unknown' as const)
       : ('unknown' as const)
@@ -2228,6 +2055,12 @@ export const admin = new Hono<AppBindings>()
     })
     return c.json({ ...result, allowlist: allowlistStatus })
   })
+  /**
+   * Proxies Yahoo Finance's public search endpoint for the registration
+   * form's autocomplete. JP detection (4-digit numeric -> `.T` suffix) is
+   * resolved server-side. Falls back to `matches: []` (client switches to
+   * manual entry) on a Yahoo failure rather than erroring.
+   */
   .get('/symbol-config/lookup', rateLimit('ADMIN_WRITE'), async (c) => {
     const queryRaw = c.req.query('q') ?? c.req.query('symbol') ?? ''
     const query = queryRaw.trim().toUpperCase()
@@ -2262,7 +2095,7 @@ export const admin = new Hono<AppBindings>()
         .slice(0, 10)
         .map((q) => {
           const ySym = q.symbol!
-          // `.T` suffix の銘柄は JP 扱い、それ以外は US (Yahoo の他取引所は将来拡張)
+          // `.T` suffix means JP, everything else US (other Yahoo exchanges are unhandled for now)
           const isJp = ySym.endsWith('.T')
           const cleanSym = isJp ? ySym.replace(/\.T$/, '') : ySym
           return {
@@ -2283,7 +2116,7 @@ export const admin = new Hono<AppBindings>()
     }
   })
   /**
-   * #77 portfolio exposure gate: operator-supplied baseline for
+   * Operator-supplied baseline for the portfolio exposure gate's
    * `openExposure{Usd,Jpy}`. Use after a holdings rebuild (e.g.
    * `/admin/orders/sync-holdings`) when the on-DO counter has drifted from
    * broker truth, or to zero things out on a fresh tenant.
@@ -2350,15 +2183,6 @@ function readSeedExposureBody(body: unknown): { usd?: number; jpy?: number } {
   return out
 }
 
-/**
- * Validate a single `/admin/macro-events/seed` body entry。
- *
- *   - `event_type`: 1〜32 chars, `[A-Z0-9_]` のみ (大文字化前提) — operator が
- *     'FOMC' / 'CPI' / 'NFP_REV' のような短い記号で seed する想定
- *   - `event_date`: ISO 'YYYY-MM-DD' で round-trip validation (`isYmd`)
- *   - `event_time` (optional): `HH:MM` (00:00〜23:59 のみ受理)。null / 省略 OK
- *   - `notes` (optional): 256 chars 上限
- */
 function parseMacroEventSeedRow(raw: unknown, idx: number): MacroEventCalendarSeedInput {
   if (raw === null || typeof raw !== 'object') {
     throw new ValidationError(`entry [${idx}]: must be an object`, { field: `body[${idx}]` })
@@ -2425,17 +2249,10 @@ function parseMacroEventSeedRow(raw: unknown, idx: number): MacroEventCalendarSe
   }
 }
 
-/**
- * 'FOMC' / 'CPI' / 'NFP' 等の短い event_type 記号として受理可能か。
- * 1〜32 chars、`[A-Za-z0-9_]` のみ (大文字化は呼び出し側で行う)。
- */
 function isMacroEventType(value: string): boolean {
   return /^[A-Za-z0-9_]{1,32}$/.test(value)
 }
 
-/**
- * 'HH:MM' (00:00〜23:59) として受理可能か。秒は持たない (POC では分単位で十分)。
- */
 function isHourMinute(value: string): boolean {
   if (!/^\d{2}:\d{2}$/.test(value)) return false
   const [hh, mm] = value.split(':') as [string, string]
@@ -2482,17 +2299,7 @@ function parseEarningsSeedRow(raw: unknown, idx: number): EarningsCalendarSeedIn
   return { symbol: symbol.toUpperCase(), earningsDate, notes }
 }
 
-/**
- * Parse the `/admin/symbol-state/:symbol/override-position` body. Strict so
- * an operator typo in qty / avgPrice / reason gets a 400 instead of silently
- * writing a malformed position into the DO.
- *
- *   - `qty`: finite >= 0 (0 = close)
- *   - `avgPrice`: finite > 0 when `qty > 0`; ignored when `qty=0` but we
- *     still type-check to surface stray fields
- *   - `openedAt`: ISO 8601 timestamp string OR null OR omitted (→ null)
- *   - `reason`: required, 1..256 chars (mandatory audit context)
- */
+// Strict validation so an operator typo gets a 400 instead of silently writing a malformed position into the DO.
 function readOverridePositionBody(body: unknown): {
   qty: number
   avgPrice: number
@@ -2522,8 +2329,7 @@ function readOverridePositionBody(body: unknown): {
     }
     avgPrice = avgPriceRaw
   } else if (avgPriceRaw !== undefined && avgPriceRaw !== null) {
-    // qty=0 close: avgPrice irrelevant. Tolerate but still validate type so
-    // a stray string doesn't get silently accepted.
+    // avgPrice is unused when closing (qty=0), but still type-checked so a stray value isn't silently accepted.
     if (typeof avgPriceRaw !== 'number' || !Number.isFinite(avgPriceRaw) || avgPriceRaw < 0) {
       throw new ValidationError('avgPrice must be a finite number >= 0 when present', {
         field: 'avgPrice',
@@ -2555,11 +2361,6 @@ function readOverridePositionBody(body: unknown): {
   return { qty, avgPrice, openedAt, reason }
 }
 
-/**
- * `/admin/trading/toggle` の body parser (issue #276)。JSON / form 双方を受け、
- * `enabled` (boolean) と `reason` (1..256 chars) を strict に validate する。
- * form value は string で渡るため "true"/"false"/"1"/"0"/"on" を許容。
- */
 function readToggleBody(body: unknown): { enabled: boolean; reason: string } {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new ValidationError('body must be a JSON object or form-encoded', { field: 'body' })
@@ -2570,8 +2371,7 @@ function readToggleBody(body: unknown): { enabled: boolean; reason: string } {
   if (typeof enabledRaw === 'boolean') {
     enabled = enabledRaw
   } else if (typeof enabledRaw === 'string') {
-    // form post は string で来る。dashboard form は 'true' / 'false' を送るので
-    // それを正規ケースに、CLI ミス防止に 'on' (HTML checkbox 流儀) も許容。
+    // Also accepts HTML checkbox-style 'on'/'off' alongside the dashboard form's 'true'/'false'.
     const norm = enabledRaw.trim().toLowerCase()
     if (norm === 'true' || norm === '1' || norm === 'on') enabled = true
     else if (norm === 'false' || norm === '0' || norm === 'off') enabled = false
@@ -2640,7 +2440,6 @@ function parseTruthyQuery(value: string | undefined): boolean {
  * Parse a positive integer query param with an upper bound. Returns
  * `undefined` for absent / unparseable / out-of-range values so the caller
  * falls back to its built-in default (= zero broker pressure from a typo).
- * (#139)
  */
 function parsePositiveIntQuery(
   value: string | undefined,
@@ -2655,13 +2454,8 @@ function parsePositiveIntQuery(
   return n
 }
 
-/**
- * 状態変更系 admin POST 用の audit log writer (#274)。基本認証 user を header
- * から抽出し `recordChange` で diff 1 行を書く。`env.DB` が無い / D1 が落ちて
- * いるケースは log を skip (handler 本体の状態変更は既に成立しているため、
- * audit の欠落で 500 を返したくない)。before == after は recordChange 側で
- * no-op skip される。
- */
+// A missing/unreachable D1 skips the log rather than failing the request — the handler's state
+// change already succeeded, and a missing audit entry shouldn't turn that into a 500.
 async function writeAuditLog(
   c: Context<AppBindings>,
   endpoint: string,
@@ -2692,11 +2486,8 @@ async function writeAuditLog(
   }
 }
 
-/**
- * `client.getState(symbol)` を safe wrap。stub に getState が無い (legacy fake)
- * / DO 呼び出しが throw した場合は `null` を返す — audit ログの before snapshot
- * が取れないだけで、handler 本体の状態変更は止めない。
- */
+// Swallows a throw (e.g. a legacy fake stub without getState) so a missing before-snapshot
+// for the audit log doesn't block the handler's actual state change.
 async function safeGetSymbolState(
   client: SymbolStateClient,
   symbol: string,
@@ -2718,12 +2509,8 @@ async function safeGetPortfolioState(
   }
 }
 
-/**
- * `YYYY-MM-DD` の文法チェック + **実在しない日付の弾き**。`Date` の自動
- * normalize ('2026-02-30' → '2026-03-02') を逆手に取り、parse 後の Date を
- * 同じ形式で書き戻して入力と一致するか比較する。これで `2026-02-30` や
- * `2026-13-01` が DB に保存される事故を防ぐ (CodeRabbit #196 review)。
- */
+// Rejects calendar-invalid dates like '2026-02-30' by re-formatting the parsed Date and
+// comparing it back to the input — `Date` would otherwise silently normalize it to '2026-03-02'.
 function isYmd(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const ms = Date.parse(`${value}T00:00:00.000Z`)
@@ -2732,20 +2519,9 @@ function isYmd(value: string): boolean {
   return roundTrip === value
 }
 
-/**
- * symbol_config CRUD UI (#292) で受け付ける form/JSON body を共通化して
- * 解析する。dashboard form は application/x-www-form-urlencoded、CLI は JSON
- * を送る想定。
- *
- *   - symbol: 1〜10 chars、英数字 (`[A-Za-z0-9]`)。JP の 4 桁数字 (e.g. `1570`)
- *     も合法。upper-case で正規化する。
- *   - market: 'US' | 'JP'
- *   - currency: 'USD' | 'JPY' (DB CHECK 制約と一致)
- *   - active: boolean (form では 'true'/'false'/'on' を許容、checkbox の 'on'
- *     → true、未送信 → false で扱う)
- *   - maxNotional: 正の数 or null (空文字 → null)
- *   - name / notes: optional string、256 chars 上限
- */
+// Shared parser for the symbol_config CRUD UI: dashboard sends
+// application/x-www-form-urlencoded, CLI sends JSON. `currency` is
+// constrained to 'USD' | 'JPY' to match the DB CHECK constraint.
 function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new ValidationError('body must be an object or form-encoded', { field: 'body' })
@@ -2796,16 +2572,12 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   const symbol = normalizeSymbol(raw.symbol)
   const market = parseMarket(raw.market)
   const currency = parseCurrency(raw.currency)
-  // form の checkbox は未送信時に key 自体が来ない (= undefined)。dashboard
-  // form は hidden input で `active=false` を必ず送る運用にするが、未送信は
-  // 安全側に false (= disabled) で受ける。
+  // An unsent checkbox key (undefined) is treated as false (disabled), the safer default.
   const active = parseFormBool(raw.active, false)
   const maxNotionalRaw = raw.max_notional ?? raw.maxNotional
   const maxNotional = parseOptionalPositiveNumber(maxNotionalRaw, 'maxNotional')
   const name = parseOptionalString(raw.name, 'name')
   const notes = parseOptionalString(raw.notes, 'notes')
-  // Per-symbol pullback override (#316)。空文字 / undefined → NULL (= global
-  // default fall-through)。範囲外は ValidationError、DB CHECK と二重防御。
   const timeStopDaysOverride = parseOptionalIntegerInRange(
     raw.time_stop_days_override ?? raw.timeStopDaysOverride,
     'timeStopDaysOverride',
@@ -2818,10 +2590,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     0.5,
     5.0,
   )
-  // 予算配分: form は **% (0.1<=pct<=100)** で送る。fraction (0.001<=pct<=1) に変換して
-  // 保存 (#budget-alloc)。空 / undefined → NULL (= 従来の risk-% sizing)。下限は UI の
-  // 表示丸め (0.1% 刻み) / slider (5% 刻み) と揃え、sub-0.1% の保持崩れを防ぐ
-  // (CodeRabbit #405)。範囲外は 400。
+  // Form sends a percent (0.1-100), stored as a fraction. The 0.1 floor matches the UI's
+  // display rounding, so a sub-0.1% value can't get silently truncated to zero on save.
   const budgetAllocPctRaw = parseOptionalNumberInRange(
     raw.budget_alloc_pct ?? raw.budgetAllocPct,
     'budgetAllocPct',
@@ -2829,11 +2599,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     100,
   )
   const budgetAllocPct = budgetAllocPctRaw === null ? null : budgetAllocPctRaw / 100
-  // 売買単位は **入力必須** (空欄/未指定はエラー)。fallback しない (#symbol-lot-size)。
-  // 整数 1-100000 (JP 個別株=100 / ETF=1 / US=1 を想定、上限は防御的に広め)。
+  // Lot size has no fallback: a missing/blank value is rejected rather than defaulted.
   const lotSize = parseRequiredIntegerInRange(raw.lot_size ?? raw.lotSize, 'lotSize', 1, 100_000)
-  // stop/TP override (#exit-atr): form は **% (符号付き)** で送る。fraction に変換して保存。
-  // 空 / undefined → NULL (= global default)。stop は負 (-99..-0.1%)、TP は正 (0.1..100%)。
   const stopPctRaw = parseOptionalNumberInRange(
     raw.stop_pct_override ?? raw.stopPctOverride,
     'stopPctOverride',
@@ -2848,14 +2615,9 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     100,
   )
   const takeProfitPctOverride = takeProfitPctRaw === null ? null : takeProfitPctRaw / 100
-  // intraday-only (#intraday-only): checkbox 未送信は false。active と同じ form bool 解釈。
   const intradayOnly = parseFormBool(raw.intraday_only ?? raw.intradayOnly, false)
-  // role (#452 Layer 1): 空 / undefined → NULL (= 従来挙動)。enum 外は 400 —
-  // typo した role を黙って従来挙動に倒さない (fail-closed の入口防御)。
+  // Rejects an unrecognized role with 400 rather than silently falling back to legacy behavior.
   const role = parseSymbolRole(raw.role)
-  // entry gate override (#452 Layer 2a): form は押し目/トレンド/過伸長を **%**、
-  // ATR 比を ratio 生値で送る。fraction に変換して保存。空 / undefined → NULL
-  // (= role preset → global default の fall-through)。
   const pullbackMaxRaw = parseOptionalNumberInRange(
     raw.pullback_max_override ?? raw.pullbackMaxOverride,
     'pullbackMaxOverride',
@@ -2870,9 +2632,8 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     0,
   )
   const pullbackMinOverride = pullbackMinRaw === null ? null : pullbackMinRaw / 100
-  // 押し目バンドの cross-check: max (0 側) が min (深い側) より深いと entry が
-  // 永久に成立しない。fail-closed 方向だが入力時点の typo はここで弾く。片側
-  // だけの指定は global / preset と組むので判定しない (repo 側コメント参照)。
+  // A max shallower than min would make entry permanently unreachable; caught here as a typo guard.
+  // A single-sided override isn't checked, since it combines with the global/preset value for the other side.
   if (
     pullbackMaxOverride !== null &&
     pullbackMinOverride !== null &&
@@ -2908,8 +2669,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
     raw.require_above_sma50_override ?? raw.requireAboveSma50Override,
     'requireAboveSma50Override',
   )
-  // 条件連動配分 (#452 Layer 3): checkbox 未送信は false (= 従来挙動)。退避先は
-  // ticker 文法 + self 参照禁止。空 → NULL (= 退避しない)。
   const entryRequired = parseFormBool(raw.entry_required ?? raw.entryRequired, false)
   const alwaysActive = parseFormBool(raw.always_active ?? raw.alwaysActive, false)
   const cashFallbackSymbols = parseCashFallbackSymbols(
@@ -2944,11 +2703,6 @@ function parseSymbolConfigBody(body: unknown): SymbolConfigWriteInput {
   }
 }
 
-/**
- * cash_fallback_symbol(s) (#452 / #496 多分岐): form はカンマ/空白区切り text。
- * 空 / undefined → NULL。ticker 文法外・self 参照・上限超過は 400
- * (誤った退避先へ積み増す事故の入口防御)。
- */
 function parseCashFallbackSymbols(value: unknown, selfSymbol: string): string[] | null {
   if (value === undefined || value === null) return null
   let tokens: string[]
@@ -2990,9 +2744,6 @@ function parseCashFallbackSymbols(value: unknown, selfSymbol: string): string[] 
   return out.length > 0 ? out : null
 }
 
-/**
- * role (#452): 空文字 / undefined / null → null (= 従来挙動)。enum 外は 400。
- */
 function parseSymbolRole(value: unknown): SymbolRole | null {
   if (value === undefined || value === null) return null
   if (typeof value !== 'string') {
@@ -3006,10 +2757,6 @@ function parseSymbolRole(value: unknown): SymbolRole | null {
   return trimmed
 }
 
-/**
- * 3 値 boolean (#452 require_above_sma50_override)。form select は '' (= global
- * default) / 'true' / 'false' を送る。それ以外は 400。
- */
 function parseOptionalTriStateBool(value: unknown, field: string): boolean | null {
   if (value === undefined || value === null) return null
   if (typeof value === 'boolean') return value
@@ -3022,10 +2769,6 @@ function parseOptionalTriStateBool(value: unknown, field: string): boolean | nul
   throw new ValidationError(`${field} must be '', 'true' or 'false'`, { field })
 }
 
-/**
- * 必須 integer in [min,max]。空文字 / undefined / null は **エラー** (fallback
- * しない、#symbol-lot-size)。売買単位 lot_size の受け口。
- */
 function parseRequiredIntegerInRange(
   value: unknown,
   field: string,
@@ -3073,10 +2816,6 @@ function normalizeSymbolPathParam(value: string): string {
   return normalizeSymbol(value)
 }
 
-/**
- * `inverse_symbol` (連動登録用、任意) を抽出。未指定 / 空文字 → null (= 単一登録)。
- * 指定時は symbol と同じ正規化 (1-10 英数大文字) を通す。#315。
- */
 function parseInverseSymbolField(body: unknown): string | null {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return null
   const raw = (body as { inverse_symbol?: unknown; inverseSymbol?: unknown })
@@ -3086,12 +2825,8 @@ function parseInverseSymbolField(body: unknown): string | null {
   return normalizeSymbol(value)
 }
 
-/**
- * 連動登録時の counterpart メタ (Yahoo lookup 由来、任意)。form の hidden field
- * `inverse_name` / `inverse_market` / `inverse_currency` を拾い、counterpart の
- * symbol_config に焼く (インバース銘柄名を一覧に出すため #315)。market/currency が
- * 不正値なら undefined を返し createSymbolPair 側で primary 継承に倒す。
- */
+// An invalid market/currency resolves to undefined here rather than throwing,
+// so createSymbolPair falls back to inheriting the primary symbol's values.
 function parseCounterpartMeta(body: unknown): CounterpartMeta {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return {}
   const raw = body as { inverse_name?: unknown; inverse_market?: unknown; inverse_currency?: unknown }
@@ -3152,11 +2887,6 @@ function parseOptionalPositiveNumber(value: unknown, field: string): number | nu
   throw new ValidationError(`${field} must be a positive number or empty`, { field })
 }
 
-/**
- * Optional integer in [min,max]。空文字 / undefined / null → null (fall-through)。
- * 整数 (Number.isInteger) でない値は ValidationError。範囲外も ValidationError。
- * Per-symbol override (#316) で time_stop_days_override の受け口に使う。
- */
 function parseOptionalIntegerInRange(
   value: unknown,
   field: string,
@@ -3191,11 +2921,6 @@ function parseOptionalIntegerInRange(
   )
 }
 
-/**
- * Optional finite float in [min,max]。空文字 / undefined / null → null
- * (fall-through)。範囲外 / 非数値は ValidationError。Per-symbol override
- * (#316) で k_atr_override の受け口に使う。
- */
 function parseOptionalNumberInRange(
   value: unknown,
   field: string,
@@ -3255,8 +2980,7 @@ function symbolConfigSnapshot(row: SymbolConfigRow): Record<string, unknown> {
     timeStopDaysOverride: row.timeStopDaysOverride,
     kAtrOverride: row.kAtrOverride,
     budgetAllocPct: row.budgetAllocPct,
-    // audit before/after に全設定列を含める (CodeRabbit #453)。ここに列が
-    // 落ちていると admin API の row echo と監査差分から変更が見えなくなる。
+    // Every settings column is included so an audit diff can't silently miss a change.
     lotSize: row.lotSize,
     stopPctOverride: row.stopPctOverride,
     takeProfitPctOverride: row.takeProfitPctOverride,
@@ -3317,13 +3041,8 @@ interface BacktestSetup {
   global: Awaited<ReturnType<typeof loadGlobalConfigFrom>>
 }
 
-/**
- * Shared query parsing + rule construction + Yahoo bar fetch/slice for
- * `/backtest` and `/backtest/compare` (#709 Phase 3) — both must see
- * identical bars/rule so their results are comparable. Extracted verbatim
- * from the original `/backtest` handler; behavior covered by the existing
- * `test/routes/adminBacktest.test.ts` suite.
- */
+// Shared by `/backtest` and `/backtest/compare` so both see identical bars/rule and their
+// results stay comparable.
 async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetup> {
   const symbol = readRequiredParam(c.req.query('symbol'), 'symbol').toUpperCase()
   const from = readRequiredParam(c.req.query('from'), 'from')
@@ -3392,11 +3111,9 @@ async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetu
       global.pullbackDefaultMaxStopToTpRatio,
       {},
     ),
-    // #reentry: 再エントリー価格ガードの係数。`/backtest` (runBacktest, entry 軸なし) では
-    // 未使用のまま既定値保持のみ。`/backtest/compare` の `reentry:guard` / `reentry:aware:<n>`
-    // variant (issue #709 Phase 5) はこの係数を `runLifecycleBacktest` の `lastExit` 追跡と
-    // 併せて実際に使う — 係数自体は `?reentryMinAtrBelowLastExit=` 等の query override を
-    // まだ持たない (対応 issue が来たら追加、今は out of scope)。
+    // Unused by `/backtest` (runBacktest has no entry-policy axis); `/backtest/compare`'s
+    // `reentry:guard`/`reentry:aware:<n>` variants use it via runLifecycleBacktest's `lastExit`
+    // tracking. No query override yet — always the hardcoded default below.
     reentryMinAtrBelowLastExit: 1.0,
     reentryGuardBusinessDays: 3,
   }
@@ -3423,9 +3140,8 @@ async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetu
   const warmupKeep = 60
   const sliced = bars.slice(Math.max(0, liveStartIdx - warmupKeep))
 
-  // #atr-baseline-window: `?atrBaselineMode=overlap|exclude-recent|percentile`
-  // で baseline の作り方を差し替えて成績を比較できる。既定は global_config の
-  // 値 (= 本番と同じ条件)。閾値の再校正はこれと `?maxAtrRatio=` を振って行う。
+  // `?atrBaselineMode=overlap|exclude-recent|percentile` overrides how the baseline is built,
+  // for comparing against the global_config default (= production behavior).
   const atrBaselineModeQuery = c.req.query('atrBaselineMode')
   const atrBaselineMode: BacktestSetup['atrBaselineMode'] =
     atrBaselineModeQuery === 'overlap' ||
@@ -3437,12 +3153,8 @@ async function buildBacktestSetup(c: Context<AppBindings>): Promise<BacktestSetu
   return { symbol, from, to, initialCash, rule, atrBaselineMode, sliced, global }
 }
 
-/** `/backtest/compare` default variant set: current one-shot entry, a staged-entry split
- * (#709 Phase 3), two partial-exit + ATR trailing variants — with and without the
- * trend-continuation time-stop extension (#709 Phase 4) — and two re-entry-gated one-shot-entry
- * variants — the live price-guard replica and the exit-reason-aware policy (#709 Phase 5) — all
- * against the one-shot entry / preset exit baseline so each axis's comparison isn't confounded by
- * the others. */
+// Each variant beyond `full` isolates one axis (entry, exit, or re-entry) against the
+// one-shot-entry/preset-exit baseline, so comparisons across axes aren't confounded.
 const DEFAULT_COMPARE_VARIANTS = [
   'full',
   'staged:25/25/50',
@@ -3531,8 +3243,8 @@ function parseEntrySpec(entrySpec: string, fullSpec: string, confirmDays: number
   }
 }
 
-/** `preset` = current all-quantity TP/stop/time-stop (Phase 3 behavior, unchanged).
- * `trail:<tpFraction%>/<trailKAtr>/<extDays>` = partial-exit + ATR trailing (#709 Phase 4). */
+/** `preset` = all-quantity TP/stop/time-stop.
+ * `trail:<tpFraction%>/<trailKAtr>/<extDays>` = partial-exit + ATR trailing. */
 function parseExitSpec(exitSpec: string, fullSpec: string): ExitPolicy {
   if (exitSpec === 'preset') return { kind: 'preset' }
   const match = /^trail:(\d{1,3})\/(\d+(?:\.\d+)?)\/(\d+)$/.exec(exitSpec)
@@ -3565,10 +3277,9 @@ function parseExitSpec(exitSpec: string, fullSpec: string): ExitPolicy {
   }
 }
 
-/** `none` = no re-entry gate (Phase 3/4 behavior, unchanged). `guard` = replica of the live
- * `PullbackUptrendStrategy` re-entry price ceiling. `aware:<slWaitDays>` = exit-reason-aware
- * re-entry (#709 Phase 5) — see `evaluateReentry` in `runLifecycleBacktest.ts` for the exact
- * per-reason rules. */
+/** `none` = no re-entry gate. `guard` = replica of the live `PullbackUptrendStrategy` re-entry
+ * price ceiling. `aware:<slWaitDays>` = exit-reason-aware re-entry — see `evaluateReentry` in
+ * `runLifecycleBacktest.ts` for the exact per-reason rules. */
 function parseReentrySpec(reentrySpec: string, fullSpec: string): ReentryPolicy {
   if (reentrySpec === 'none') return { kind: 'none' }
   if (reentrySpec === 'guard') return { kind: 'price-guard' }

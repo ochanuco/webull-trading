@@ -19,8 +19,7 @@ vi.mock('../../src/infrastructure/db/tradeJournalRepo', async () => {
   )
   return { ...actual, createDb: vi.fn() }
 })
-// loadSymbolChart は内部で env.DB raw SQL / Yahoo / DO を触るため、/json route の
-// 契約 (schema / ladderHtml 除去 / rules 伝搬) 検証には stub で十分。
+// loadSymbolChart は D1/Yahoo/DO を触るため、/json route 契約の検証には stub で十分
 vi.mock('../../src/routes/dashboard/charts/loaders', async () => {
   const actual = await vi.importActual<typeof import('../../src/routes/dashboard/charts/loaders')>(
     '../../src/routes/dashboard/charts/loaders',
@@ -54,7 +53,7 @@ function fakeSymbolStateNamespace() {
   } as unknown
 }
 
-/** trades loader (select→from→where→orderBy→limit) 用の fake chain。 */
+// trades loader (select→from→where→orderBy→limit) 用の fake chain
 function fakeJournalDb(rows: Array<Record<string, unknown>>) {
   const chain = {
     where: vi.fn(() => chain),
@@ -67,7 +66,7 @@ function fakeJournalDb(rows: Array<Record<string, unknown>>) {
   return { db, chain }
 }
 
-/** loadDecisionRows (select→from→leftJoin→where→orderBy→limit) 用の fake chain。 */
+// loadDecisionRows (select→from→leftJoin→where→orderBy→limit) 用の fake chain
 function fakeCronDb(rows: unknown[]) {
   const query = {
     from: vi.fn(() => query),
@@ -135,13 +134,12 @@ describe('dashboard JSON export API (#dashboard-json-api)', () => {
       expect(soxl.displayName).toBe('Direxion Semiconductor Bull 3X')
       expect(soxl.qty).toBe(10)
       expect(soxl.avgPrice).toBe(100)
-      // SSR の「現在値」列と同じ pickFreshQuote の結果 (Webull snapshot 側採用)
+      // SSR の「現在値」列と同じ pickFreshQuote の結果
       expect(soxl.quote).toEqual({ price: 105, source: 'yahoo', asOf: '2026-07-01T00:00:00Z' })
       expect(soxl.unrealizedPnlPct).toBe(5)
       expect(soxl.pendingOrderSide).toBeNull()
       expect(soxl.inactive).toBe(false)
       expect(soxl.error).toBeNull()
-      // inactive 銘柄も SSR 同様に含まれ、flag が立つ
       const soxs = json.positions[1]
       expect(soxs.symbol).toBe('SOXS')
       expect(soxs.inactive).toBe(true)
@@ -173,7 +171,7 @@ describe('dashboard JSON export API (#dashboard-json-api)', () => {
       expect(res.status).toBe(200)
       const json = (await res.json()) as Record<string, any>
       expect(json.schema).toBe('dashboard_trades_export.v1')
-      // filter の明記 (この JSON が何の部分集合かを AI が誤解しないため)
+      // 部分集合かどうかを consumer が誤解しないよう filter を明記する
       expect(json.filter).toEqual({
         view: 'fills',
         symbol: 'SOXL',
@@ -185,7 +183,7 @@ describe('dashboard JSON export API (#dashboard-json-api)', () => {
       // rows は trade_journal row そのまま (__tradesCopy と同等)
       expect(json.rows[0].id).toBe(1)
       expect(json.rows[0].tradeEventType).toBe('fill')
-      // フィルタが実際に SQL where に乗っている + limit は SSR と違い +1 しない
+      // limit は SSR と違い +1 しない
       expect(chain.where).toHaveBeenCalledTimes(1)
       expect(chain.limit).toHaveBeenCalledWith(10)
     })
@@ -251,7 +249,7 @@ describe('dashboard JSON export API (#dashboard-json-api)', () => {
         { ...baseEnv, DB: {} as D1Database },
       )
       expect(res.status).toBe(200)
-      // /charts SSR route に食われず JSON が返る (route 定義順の担保)
+      // /charts SSR route に食われない (route 定義順の担保)
       expect(res.headers.get('content-type')).toContain('application/json')
       const body = await res.text()
       const json = JSON.parse(body) as Record<string, any>
@@ -260,7 +258,6 @@ describe('dashboard JSON export API (#dashboard-json-api)', () => {
       expect(json.rules).toEqual(fakeChart.rules)
       expect(json.points).toHaveLength(1)
       expect(json.position).toEqual({ avgPrice: 29, openedAt: '2026-06-20T00:00:00Z' })
-      // 判定 pin は構造化 field のみ — HTML 断片 (ladderHtml) は落ちる
       expect(json.chartDecisions[0]).toEqual({
         id: 11,
         timestamp: '2026-07-01T00:00:00Z',
@@ -270,11 +267,9 @@ describe('dashboard JSON export API (#dashboard-json-api)', () => {
       })
       expect(body).not.toContain('ladderHtml')
       expect(body).not.toContain('ladder-html-fragment')
-      // 判定履歴は traceJson / indicatorsJson が parse 済み object で入る
       expect(json.decisionHistory[0].trace).toEqual([{ label: 'entry.above_sma50', passed: true }])
       expect(json.decisionHistory[0].indicators).toEqual({ price: 30, sma50: 28 })
       expect(json.decisionHistory[0].requestId).toBe('req-1')
-      // loader は SSR と同じ symbol / effective rules で呼ばれる
       const [, calledSymbol, calledRules] = vi.mocked(loadSymbolChart).mock.calls[0]!
       expect(calledSymbol).toBe('SOXL')
       expect(calledRules).toEqual({
