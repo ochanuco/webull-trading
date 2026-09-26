@@ -5,16 +5,7 @@ import {
   type VixRegimeFilterConfig,
 } from '../../../src/trading/risk/vixRegimeFilter'
 
-/**
- * Tests for the VIX regime filter (#196 3/3)。
- *
- * 観点:
- *   - 4 ケースの境界 (normal / warning / critical / unavailable)
- *   - 閾値ぴったりは normal 側に倒す (`>` で warning 判定なので等値は normal)
- *   - 取得失敗 (vix=null / NaN / 0 / 負値) は fail-open で normal fallback
- *   - 壊れた config (NaN / 順序逆 / scale 範囲外) は default に倒す (defensive)
- *   - reason 文字列は localizeReason / dashboard の grep で識別可能な canonical 形式
- */
+// VIX regime filter (#196 3/3): reason 文字列は localizeReason / dashboard の grep で識別可能な canonical 形式
 
 const baseConfig: VixRegimeFilterConfig = { ...DEFAULT_VIX_REGIME_CONFIG }
 
@@ -28,7 +19,6 @@ describe('evaluateVixRegime — happy paths', () => {
   })
 
   it('returns normal exactly at the warning threshold (boundary uses strict >)', () => {
-    // VIX === warningThreshold は normal 側に残す (`vix > warning` で判定)。
     const decision = evaluateVixRegime(25.0, baseConfig)
     expect(decision.regime).toBe('normal')
     expect(decision.sizeScale).toBe(1.0)
@@ -43,7 +33,6 @@ describe('evaluateVixRegime — happy paths', () => {
   })
 
   it('returns warning at the critical boundary (=== critical → still warning)', () => {
-    // VIX === criticalThreshold は warning 側 (`vix > critical` が false)。
     const decision = evaluateVixRegime(30.0, baseConfig)
     expect(decision.regime).toBe('warning')
     expect(decision.sizeScale).toBe(0.5)
@@ -94,12 +83,11 @@ describe('evaluateVixRegime — defensive config sanitize', () => {
       criticalThreshold: 30,
       warningSizeScale: 2.5, // out of [0, 1]
     })
-    expect(decision.sizeScale).toBe(0.5) // clamped to default
+    expect(decision.sizeScale).toBe(0.5)
   })
 
   it('falls back to defaults when thresholds are inverted (warning > critical)', () => {
-    // warning=30, critical=25 のような逆転は normal/warning/critical 領域が
-    // 矛盾するので default (25 / 30) に倒す。
+    // 逆転すると normal/warning/critical の領域が矛盾するため default に倒す
     const decision = evaluateVixRegime(27.3, {
       warningThreshold: 30,
       criticalThreshold: 25,

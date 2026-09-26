@@ -64,20 +64,14 @@ describe('fresh quote decisions and BUY cooldown scope', () => {
   })
 })
 
+// #318: trend filter は 20d return ベース。40 bars 緩い上昇 (SMA50 warmup) → 15 bars 急伸 (高値122) →
+// 5 bars 高値到達後 mild -4% pullback (BUY ゾーン)。結果: closes[-20]≈108、last=117.5、20d return≈+8.8%。
 function uptrendBars(): DailyBar[] {
-  // #318: short-term swing 整合化で trend filter は 20d return ベースになった。
-  // closes[-20] vs last の return が +8% を超えるよう、最後の 20 営業日に
-  // しっかりした上昇を入れる:
-  //   - 40 bars: slow uptrend (warmup for SMA50)
-  //   - 15 bars: steeper leg → 高値 122 まで
-  //   - 5 bars: 高値到達 → mild -4% pullback (BUY ゾーン)
-  // 結果: closes[-20] ≈ 108 (bar 40)、last = 117.5、20d return ≈ +8.8%。
   const bars: DailyBar[] = []
   for (let i = 0; i < 40; i += 1) {
     const close = 100 + i * 0.2 // gentle warmup, bar 39 close = 107.8
     bars.push(synth(i, close))
   }
-  // bar 40 close = 108、20d return baseline がここに据わる。
   for (let i = 40; i < 55; i += 1) {
     const close = 108 + (i - 40) * 1.0 // steeper, bar 54 close = 122
     bars.push(synth(i, close))
@@ -159,7 +153,6 @@ describe('momentum routing (#momentum)', () => {
     const { BreakoutMomentumStrategy, TEST_DEFAULT_MOMENTUM_RULE } = await import(
       '../../../src/trading/strategy/strategies/BreakoutMomentumStrategy'
     )
-    // 押し目 (momentum 未指定): 新高値なので HOLD = 発注なし。
     const exPull = mockExecution()
     const sumPull = await runPullbackScheduler({
       symbols: ['ICLN'],
@@ -172,7 +165,6 @@ describe('momentum routing (#momentum)', () => {
     expect(sumPull.buys).toBe(0)
     expect(exPull.calls).toHaveLength(0)
 
-    // momentum 指定: 同 bars でブレイク BUY。signal は通常経路で execution まで到達。
     const exMom = mockExecution()
     const sumMom = await runPullbackScheduler({
       symbols: ['ICLN'],
@@ -219,14 +211,10 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions[0]?.trace?.find((step) => step.label === 'broker.submit')?.label_ja).toBe('証券会社への発注送信')
   })
 
-  // #reentry: flat な state に前回手仕舞い (lastExitPrice + lastExitAt) が
-  // 残っていると、scheduler がそれを strategy に plumb し、窓内 & 値幅不足なら
-  // BUY を price 軸ガードで止める (uptrendBars は本来 BUY する fixture)。
-  it('blocks a would-be BUY when re-entry price guard is active (recent exit near price)', async () => {
+  it('blocks a would-be BUY when re-entry price guard is active (recent exit near price, #reentry)', async () => {
     const recentlyExited: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
-      // 直近 BUY fixture の last close = 117.5。前回売値をそこに置くと
-      // ceiling = 117.5 - 1*ATR < 117.5 なので必ずガードに掛かる。
+      // last close 117.5 に前回売値を置くと ceiling = 117.5 - 1*ATR < 117.5 で必ずガードに掛かる
       lastExitPrice: 117.5,
       // now (2026-04-20 Mon) の 1 営業日前 (Fri) → businessDaysSinceExit = 1 < 3。
       lastExitAt: '2026-04-17T14:30:00.000Z',
@@ -272,15 +260,10 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
   })
 
-  // #660: overridePosition (sync-holdings 経由) は position を null にするだけで
-  // lastExecutedPrice は古い BUY 価格のまま残りうる。lastExitAt も無い
-  // (= 一度も exit していない、または旧 state のまま) 銘柄は未取引扱いなので、
-  // その stale lastExecutedPrice をガード基準に「推論」してはいけない —
-  // 従来どおり無条件で BUY を通す。
-  it('treats a symbol with no lastExitAt as never-exited and does not infer a guard from stale lastExecutedPrice', async () => {
+  it('treats a symbol with no lastExitAt as never-exited and does not infer a guard from stale lastExecutedPrice (#660)', async () => {
     const neverExitedState: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
-      // sync-holdings 由来の残骸: 古い BUY 価格が居座っている想定。
+      // sync-holdings 由来の残骸: 古い BUY 価格が居座っている想定
       lastExecutedPrice: 50,
       lastExitPrice: null,
       lastExitAt: null,
@@ -300,13 +283,8 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
   })
 
-  // #660 (CodeRabbit follow-up): lastExitAt は #582 で先行導入済みだが
-  // lastExitPrice は本フィールドの新規追加。そのため deploy 直前にガード窓内
-  // (reentryGuardBusinessDays 未満) で exit した銘柄は、lastExitAt はあるのに
-  // lastExitPrice が無い移行期の state になりうる。ここを fail-open (無条件
-  // BUY 許可) にすると、まさにガードで守るべき窓内で無防備に買い直せてしまう
-  // (SQQQ 事故と同型のリスク窓)。窓内なら価格不明でも entry を保留する
-  // (fail-closed) べき。
+  // #660: lastExitAt (#582) はあるが lastExitPrice が無い移行期 state がありうる。
+  // 窓内で fail-open にすると守るべきガードが無防備になるため fail-closed で保留する。
   it('fail-closes the re-entry guard when lastExitAt exists but lastExitPrice is legacy-null within the guard window', async () => {
     const migrationWindowState: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
@@ -333,7 +311,6 @@ describe('runPullbackScheduler', () => {
     expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
   })
 
-  // 窓経過後は lastExitPrice が無くても自然に fail-open へ戻る (恒久 block ではない)。
   it('allows the BUY once the guard window elapses even when lastExitPrice is legacy-null', async () => {
     const pastWindowState: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
@@ -356,12 +333,10 @@ describe('runPullbackScheduler', () => {
     expect(summary.decisions.find((d) => d.symbol === 'SOXL')?.decision).toBe('BUY')
   })
 
-  // #660: lastExitPrice が明示的に設定されていれば、それを基準にガードが発火
-  // する — lastExecutedPrice の値は無視される (両者を意図的に食い違わせて確認)。
-  it('drives the re-entry guard from lastExitPrice, ignoring a differing lastExecutedPrice', async () => {
+  it('drives the re-entry guard from lastExitPrice, ignoring a differing lastExecutedPrice (#660)', async () => {
     const explicitExitState: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
-      // lastExecutedPrice はガードに使われないダミー値 (無関係に高い値)。
+      // lastExecutedPrice はガードに使われないダミー値 (無関係に高い値)
       lastExecutedPrice: 200,
       lastExitPrice: 45.83,
       lastExitAt: '2026-04-17T14:30:00.000Z',
@@ -431,9 +406,7 @@ describe('runPullbackScheduler', () => {
     expect(summary.buys).toBe(1)
   })
 
-  // daily bar 取得が失敗しても held position の exit 判定を
-  // 無防備なまま放置しない。flat は今まで通り (1 回で確定)、held は 1 回だけ
-  // retry してから ERROR にする。
+  // flat は今まで通り 1 回で確定、held は 1 回だけ retry してから ERROR にする
   describe('held position survives bar-fetch failure', () => {
     const heldState = (): SymbolState => ({
       ...emptySymbolState('BROKEN', () => now),
@@ -513,10 +486,7 @@ describe('runPullbackScheduler', () => {
   })
 
   it('uses intraday 1h close as fill price when getIntradayBars resolves', async () => {
-    // 既存 BUY fixture (uptrendBars) は daily last close = 117.5。chart UI と
-    // 整合させるため cron は intraday の最新 close を採用するのが今回の挙動。
-    // 117.5 とは別の値 (118.25) を返して fill 価格 (= intent.price) がそちらに
-    // なることを確認する。
+    // chart UI と整合させるため、daily last close (117.5) とは別の intraday close (118.25) を返す
     const intradayBars: IntradayBar[] = [
       { timestamp: '2026-04-20T13:00:00.000Z', open: 117.6, high: 118.4, low: 117.4, close: 118.0 },
       { timestamp: '2026-04-20T14:00:00.000Z', open: 118.0, high: 118.5, low: 117.9, close: 118.25 },
@@ -541,17 +511,12 @@ describe('runPullbackScheduler', () => {
     const intent = execution.calls[0] as { side: string; price: number }
     expect(intent.side).toBe('BUY')
     expect(intent.price).toBe(118.25)
-    // decision sink に渡る price も intraday 由来のものになっていること
     expect(summary.decisions[0]?.price).toBe(118.25)
-    // 判断価格の出所が trace 先頭に残る (fresh な intraday bar)。
     expect(summary.decisions[0]?.trace?.[0]?.label).toBe('data.price_as_of')
     expect(summary.decisions[0]?.trace?.[0]?.message).toBe('intraday_60m:2026-04-20T14:00:00.000Z')
   })
 
   it('falls back to daily close for the decision record, but skips the BUY as stale price', async () => {
-    // intraday 対応 client では daily close fallback は BUY の判断価格として
-    // 採用しない (intraday bar 0件 = 鮮度確認不能)。fallback
-    // 自体 (indicators.price = daily close 117.5) は decision record に残る。
     const store = makeStore({})
     const execution = mockExecution()
     const barClient: BarClient = {
@@ -583,8 +548,7 @@ describe('runPullbackScheduler', () => {
   })
 
   it('still SELLs a held position at the stop price when intraday bars are unavailable', async () => {
-    // 価格鮮度ゲートは BUY のみが対象 — 保有中の exit (stop hit) は intraday bar
-    // が無くても daily close の判断価格で通常どおり動く。
+    // 価格鮮度ゲートは BUY のみが対象 — exit は daily close で通常どおり動く
     const heldState: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 5, avgPrice: 200, openedAt: new Date('2026-01-01T00:00:00.000Z').toISOString() },
@@ -642,7 +606,6 @@ describe('runPullbackScheduler', () => {
   })
 
   it('proceeds with the BUY at the daily close when the client has no getIntradayBars', async () => {
-    // intraday 非対応 client (Webull 等) は従来どおり無 gate。
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
       equity: 100_000,
@@ -733,14 +696,12 @@ describe('runPullbackScheduler', () => {
       now: () => now,
     })
 
-    // notifier failure must not block the BUY path.
     expect(summary.buys).toBe(1)
     await Promise.resolve()
     warnSpy.mockRestore()
   })
 
   it('does not call notifier when one is not provided (back-compat) (#199)', async () => {
-    // Sanity: existing call sites without `notifier` keep working.
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
       equity: 100_000,
@@ -754,8 +715,7 @@ describe('runPullbackScheduler', () => {
 })
 
 describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
-  // Default risk config matches global_config defaults; production wires this
-  // through runStrategyCron so cron / `/trade/execute` evaluate the same gates.
+  // production wires this through runStrategyCron so cron / /trade/execute evaluate the same gates
   const baseRiskConfig = {
     inversePairs: {} as Record<string, string>,
     spreadLimits: { US: 0.0025, JP: 0.006 },
@@ -843,8 +803,6 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
   })
 
   it('places a BUY when bid/ask is missing but the source lacks it (Yahoo, #411 案A)', async () => {
-    // TQQQ 再現: Yahoo feed は price のみで bid/ask 無し → spread guard を適用外に
-    // して通す (fail-closed しない)。console.warn の skip ログは抑制。
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const state: SymbolState = {
@@ -897,8 +855,7 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
   })
 
   it('approves BUY when no per-symbol gate fires', async () => {
-    // settledCash 0 (unseeded) + lastQuote null (unseeded) → all gates skip;
-    // proves the gate is wired but does not block clean inputs.
+    // settledCash 0 + lastQuote null (unseeded) → all gates skip; proves the gate is wired but harmless
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -914,8 +871,6 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
   })
 
   it('skips the gate when perSymbolRisk option is omitted (back-compat)', async () => {
-    // No perSymbolRisk → existing behaviour, even when state would trip
-    // the gate (stale quote here) the BUY proceeds.
     const state: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       lastQuote: {
@@ -960,9 +915,7 @@ describe('runPullbackScheduler per-symbol risk gate (#138 parity)', () => {
   })
 
   it('SELL exit is still submitted when cooldownUntil is in the future (evaluateCooldown does not block exits)', async () => {
-    // #intraday-only force-close signal (SELL) を経路として使う: decide() 自体は
-    // cooldownUntil 未来だと HOLD を返すため、cooldown 中の SELL を作るには
-    // decide() 後に override する既存経路 (intraday close) を借りる。
+    // decide() は cooldown 中は HOLD を返すため、cooldown 中の SELL は intraday-only force-close の override 経路を借りて作る
     const heldState: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 3, avgPrice: 117, openedAt: '2026-04-19T00:00:00.000Z' },
@@ -999,7 +952,6 @@ describe('runPullbackScheduler earnings calendar gate (#196)', () => {
       earningsGate: {
         repo: {
           async fetchByRange() {
-            // Always returns one row whose date matches the eval day.
             return [
               {
                 id: 1,
@@ -1078,9 +1030,6 @@ describe('runPullbackScheduler earnings calendar gate (#196)', () => {
 
 describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
   it('rejects BUY when a macro event is within the freeze window of eval timestamp', async () => {
-    // FOMC 14:00 ET (= 18:30 UTC EDT) を `now` (= 14:30 UTC EDT に近い) と
-    // 同瞬間に置く simple repo。`now` 経由で 14:30 UTC が渡るので CPI 08:30 ET
-    // (= 12:30 UTC) を window 内に置く。
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -1091,9 +1040,7 @@ describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
       macroEventGate: {
         repo: {
           async fetchByDateRange() {
-            // 2026-04-20 12:30 UTC = 08:30 EDT — `now` 14:30 UTC = 10:30 EDT。
-            // 2h 差で window 外。代わりに 14:30 UTC = 10:30 EDT を CPI 時刻に
-            // することで window 内に入れる。
+            // now は 14:30 UTC = 10:30 EDT なので CPI 時刻を 10:30 に置いて window 内に入れる
             return [
               {
                 id: 1,
@@ -1168,7 +1115,6 @@ describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
   })
 
   it('earnings reason wins when both gates would reject (priority order)', async () => {
-    // 両 gate 入れたら earnings の reject が先 (task 指定の優先順位 earnings → macro)。
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -1236,8 +1182,7 @@ describe('runPullbackScheduler macro event gate (#196 2/3)', () => {
 })
 
 describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
-  // Probe で「VIX 無し時の qty / notional」を確定させ、warning 時の half qty
-  // を厳密に比較できるようにする。uptrendBars + equity 100k は決定的。
+  // VIX 無し時の qty/notional を確定させ、warning 時の half qty と厳密に比較できるようにする
   async function probeBaseQty(): Promise<number> {
     const probe = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -1296,16 +1241,12 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
     expect(execution.calls).toHaveLength(1)
     const intent = execution.calls[0] as { side: string; quantity: number }
     expect(intent.side).toBe('BUY')
-    // floor(baseQty * 0.5)
     expect(intent.quantity).toBe(Math.floor(baseQty * 0.5))
     expect(summary.vix?.regime).toBe('warning')
   })
 
   it('rejects BUY with VIX reason when warning sizeScale rounds qty below 1 share', async () => {
-    // sizeScale が極端に小さい (0.001) 場合、qty * 0.001 → floor で 0 になる。
-    // 「sizing は通ったが VIX 縮小で 0 になった」経路を確実に取りたいので、
-    // 通常 sizing が通る入力で sizeScale だけ極端にする (実運用では現れない値だが
-    // 境界条件として実装の正しさを担保する)。
+    // sizeScale=0.001 は実運用では現れない極端値だが、sizing 通過後に VIX 縮小で 0 になる経路を境界条件として確実に取る
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -1389,10 +1330,7 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
   })
 
   it('does not block SELL even when VIX is critical', async () => {
-    // existing position から SELL 経路を作る。SELL は VIX 関係なく通る前提。
-    // (uptrendBars の最後 4% pullback は BUY ではなく実際には HOLD/BUY 判定なので、
-    // SELL を出すには time stop / take profit / stop loss のいずれかが要る。
-    // 簡略のため take-profit を踏ませる: avgPrice を低く置いて pnl を +10% にする)
+    // uptrendBars は BUY 判定になるので、SELL を出すため avgPrice を低く置いて take-profit を踏ませる
     const sellingState: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 5, avgPrice: 100, openedAt: now.toISOString() },
@@ -1412,21 +1350,14 @@ describe('runPullbackScheduler VIX regime filter (#196 3/3)', () => {
       },
       now: () => now,
     })
-    // BUY は確実に来ない。
     expect(summary.buys).toBe(0)
-    // SELL が確かに通っていることを証明 (CodeRabbit #216 4th):
-    //   - summary.sells === 1
-    //   - execution に SELL intent が渡っている
-    //   - decision log にも SELL が残っている
-    // これで「critical でも SELL は本当に通る」passthrough を実証する
-    // (HOLD で素通りしても通る test だと、回帰検知ができない)。
+    // CodeRabbit #216 4th: summary.sells / execution intent / decision log の 3 点で SELL passthrough を実証する
     expect(summary.sells).toBe(1)
     expect(execution.calls).toHaveLength(1)
     expect(execution.calls[0]).toMatchObject({ side: 'SELL' })
     const sellDecision = summary.decisions.find((d) => d.decision === 'SELL')
     expect(sellDecision).toBeDefined()
     expect(sellDecision?.order?.side).toBe('SELL')
-    // vix_critical 起因の HOLD が混ざっていないこと (SELL 銘柄は VIX 無関係で通る)。
     const vixHold = summary.decisions.find(
       (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('vix_critical'),
     )
@@ -1537,8 +1468,7 @@ describe('runPullbackScheduler news shock gate (news-shock-gate PR 2)', () => {
     })
     expect(summary.buys).toBe(1)
     const intent = execution.calls[0] as { quantity: number }
-    // VIX (0.5x) を先に floor し、その結果へさらに news (0.5x) を floor する
-    // 逐次適用 (既存 half-entry × VIX と同じ流儀)。0.5 × 0.5 = 0.25 相当。
+    // VIX と news は逐次 floor 適用 (既存 half-entry × VIX と同じ流儀) — 一括 0.25 倍ではない
     expect(intent.quantity).toBe(Math.floor(Math.floor(baseQty * 0.5) * 0.5))
   })
 
@@ -1574,7 +1504,6 @@ describe('runPullbackScheduler news shock gate (news-shock-gate PR 2)', () => {
     const held = summary.decisions.find(
       (d) => d.decision === 'HOLD' && (d.reason ?? '').includes('news_shock_critical'),
     )
-    // binding gate (news) の reason が出て、vix の reason は出ない。
     expect(held?.reason).toContain('news_shock_critical')
     expect(held?.reason).not.toContain('vix_')
   })
@@ -1849,12 +1778,7 @@ describe('runPullbackScheduler extended hours gate (issue #709 Phase 6)', () => 
 })
 
 describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () => {
-  /**
-   * Down-trend bars that fire a SELL on a held position. PullbackUptrend
-   * triggers SELL when price breaks below the trailing stop / takeProfit.
-   * Cheap shortcut: take uptrendBars() and crash the last close so the
-   * stop fires.
-   */
+  // uptrendBars() の last close を crash させ、held position の trailing stop を発火させる安価な近道
   function downtrendBars(): DailyBar[] {
     const bars = uptrendBars()
     const last = bars[bars.length - 1]!
@@ -1866,17 +1790,11 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
     return {
       ...emptySymbolState('AAPL', () => now),
       position: { qty, avgPrice, openedAt: '2026-04-19T15:00:00.000Z' },
-      // Add settledCash so the per-symbol gate (when used) wouldn't trip;
-      // here we don't pass perSymbolRisk so it's a no-op anyway.
-      settledCash: 100_000,
+      settledCash: 100_000, // per-symbol gate wouldn't trip if it were passed; currently unused (no-op)
     }
   }
 
-  /**
-   * Build a Webull-style 417 SELL_QTY_EXCEED error mirroring what
-   * `WebullHttpClient` actually throws — the body snippet is embedded in
-   * the message so `isSellQtyExceedError` can read it.
-   */
+  // WebullHttpClient が実際に投げる形を mirror — body snippet は isSellQtyExceedError が読めるよう message に埋め込む
   function makeSellQtyExceedError(): BrokerClientError {
     return new BrokerClientError(
       `Webull request failed permanently with status 417 body=${JSON.stringify({
@@ -1907,9 +1825,6 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
   }
 
   it('retries SELL with broker available qty when 417 SELL_QTY_EXCEED fires', async () => {
-    // Setup: DO state qty=8, broker available=4. PullbackUptrend triggers
-    // SELL via the downtrend close. First execute() throws 417 SELL_QTY_EXCEED
-    // → fallback resolver returns 4 → second execute() succeeds with qty=4.
     const overrideCalls: Array<{ symbol: string; args: { qty: number; reason: string } }> = []
     const baseStore = makeStore({ AAPL: heldState(8, 124.95) })
     const positionStore: PositionStore = {
@@ -1930,7 +1845,6 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
       now: () => now,
     })
 
-    // Two execute() calls: original SELL 8 + fallback SELL 4.
     expect(execution.calls).toHaveLength(2)
     const firstIntent = execution.calls[0] as { side: string; quantity: number }
     const secondIntent = execution.calls[1] as { side: string; quantity: number }
@@ -1942,7 +1856,6 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
     expect(summary.sells).toBe(1)
     expect(summary.errors).toHaveLength(0)
 
-    // DO position must be force-reset to null after the fallback succeeds.
     expect(overrideCalls).toHaveLength(1)
     expect(overrideCalls[0]).toMatchObject({
       symbol: 'AAPL',
@@ -1950,7 +1863,6 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
     })
     expect(overrideCalls[0]?.args.reason).toContain('sell_qty_fallback')
 
-    // Decision trace should include the new fallback step.
     const decision = summary.decisions.find((d) => d.symbol === 'AAPL')
     expect(decision?.decision).toBe('SELL')
     expect(decision?.order?.quantity).toBe(4)
@@ -2017,7 +1929,6 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
       sellFallback: { getAvailableQty: async () => 0 },
       now: () => now,
     })
-    // No retry submit, no DO reset, original 417 error reported.
     expect(execution.calls).toHaveLength(1)
     expect(overrideCalls).toHaveLength(0)
     expect(summary.sells).toBe(0)
@@ -2105,8 +2016,6 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
       sellFallback: { getAvailableQty: async () => 4 },
       now: () => now,
     })
-    // Retry was attempted but failed → DO state stays untouched, summary
-    // reports the *original* 417 error (not the retry 503).
     expect(execution.calls).toHaveLength(2)
     expect(overrideCalls).toHaveLength(0)
     expect(summary.sells).toBe(0)
@@ -2149,8 +2058,7 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
     }
     const execution = mockSellExecution({ firstThrow: makeSellQtyExceedError() })
     const fallbackSpy = vi.fn(async () => 4)
-    // uptrendBars + no held position → BUY signal. The "417 SELL_QTY_EXCEED"
-    // is artificial here but lets us prove the fallback is gated on side='SELL'.
+    // the 417 is artificial on a BUY signal, but proves the fallback is gated on side='SELL'
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
       equity: 100_000,
@@ -2168,10 +2076,8 @@ describe('runPullbackScheduler SELL_QTY_EXCEED fallback (#215 follow-up)', () =>
 })
 
 describe('runPullbackScheduler sanity_failed cooldown gate', () => {
-  // 9697 04/28 incident: broker stub fill (filled_price=10 vs limit ~2683) が
-  // ratio guard で reject されると DO state は更新されず、cron は毎 tick
-  // 「未保有 → BUY」を送って broker 側 600 株疑い。cooldown gate は直近 N 分で
-  // sanity_failed が観測されていれば BUY を block する。
+  // broker stub fill が ratio guard で reject されると DO state は更新されず、cron は毎 tick BUY を送ってしまう。
+  // cooldown gate は直近 N 分で sanity_failed が観測されていれば BUY を block する。
 
   it('rejects BUY when sanity_failed cooldown reports a recent failure', async () => {
     const execution = mockExecution()
@@ -2227,9 +2133,7 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
   })
 
   it('treats a thrown check as cooldown active (fail-closed)', async () => {
-    // DB read failure should not silently let BUY through — the incident we
-    // are guarding against is exactly the case where the broker side may have
-    // accumulated phantom shares.
+    // DB read failure should not silently let BUY through — the broker side may have accumulated phantom shares
     const execution = mockExecution()
     const checkSpy = vi.fn(async () => {
       throw new Error('D1 unavailable')
@@ -2252,10 +2156,7 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
   })
 
   it('does not invoke check on the SELL path (existing position exit not gated)', async () => {
-    // SELL は対象外: broker stub fill では起きない (= sanity_failed の根本原因
-    // ではない) し、entry を凍結したいだけで exit を妨げる必要はない。Strategy
-    // が SELL を出す setup に切り替えるため、time-stop / take-profit を引き寄せた
-    // position を fixture で持たせる。
+    // SELL は sanity_failed の根本原因ではなく、entry を凍結したいだけで exit を妨げる必要はない
     const execution = mockExecution()
     const checkSpy = vi.fn(async () => true)
     const heldState: SymbolState = {
@@ -2277,8 +2178,6 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
       now: () => now,
     })
 
-    // SELL であれば cooldown は呼ばれず、execute も走る。HOLD で抜けた場合は
-    // execute は走らないが check も呼ばれない (= BUY 経路でしか引かない実装)。
     expect(checkSpy).not.toHaveBeenCalled()
     if (summary.sells > 0) {
       expect((execution.calls[0] as { side: string }).side).toBe('SELL')
@@ -2286,7 +2185,6 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
   })
 
   it('does not affect other symbols when one symbol is in cooldown', async () => {
-    // Cooldown は symbol 単位 — 1 銘柄が止まっても他銘柄の評価は通常通り。
     const execution = mockExecution()
     const checkSpy = vi.fn(async (symbol: string) => symbol === '9697')
     const summary = await runPullbackScheduler({
@@ -2309,9 +2207,7 @@ describe('runPullbackScheduler sanity_failed cooldown gate', () => {
 })
 
 describe('runPullbackScheduler per-symbol rule override (#316)', () => {
-  // 3x leveraged ETF を念頭に「銘柄ごとに timeStopDays / kAtr を上書きできる」
-  // ことを検証。default rule timeStopDays=10、override で 5 にすると holdBD≥5
-  // の銘柄が time-stop SELL に乗る。同じ holdBD で override 無しの銘柄は HOLD。
+  // 3x leveraged ETF を念頭に、銘柄ごとに timeStopDays / kAtr を上書きできることを検証する
   const defaultRule = {
     stopPct: -0.04,
     takeProfitPct: 0.07,
@@ -2332,17 +2228,13 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
   }
 
   it('applies timeStopDays override to the matching symbol and falls through for others', async () => {
-    // 7 BD 前に open した position を 2 銘柄に同条件で持たせ、SOXL 側だけ
-    // timeStopDays=5 override する。SOXL は time-stop SELL、AAPL は default
-    // (10d) 未到達で HOLD。avgPrice=117 は last close=117.5 とほぼ同値で
-    // take-profit / stop-loss を発火させない (時間切れだけが起きる)。
+    // avgPrice=117 ≈ last close 117.5 なので take-profit/stop-loss は発火せず、time-stop だけが起きる
     const heldState = (symbol: string): SymbolState => ({
       ...emptySymbolState(symbol, () => now),
       position: {
         qty: 5,
         avgPrice: 117,
-        // 7 business days 前。default rule timeStopDays=10 では未到達、
-        // override timeStopDays=5 では到達する境界。
+        // 7 BD 前: default (10d) は未到達、override (5d) では到達する境界
         openedAt: new Date('2026-04-09T00:00:00.000Z').toISOString(),
       },
     })
@@ -2363,24 +2255,19 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
 
     const soxlDecision = summary.decisions.find((d) => d.symbol === 'SOXL')
     const aaplDecision = summary.decisions.find((d) => d.symbol === 'AAPL')
-    // SOXL は override timeStopDays=5 で time-stop に乗る。
     expect(soxlDecision?.decision).toBe('SELL')
     expect(soxlDecision?.reason).toMatch(/time-stop hit.*>=\s*5d/)
-    // AAPL は default の 10d 未到達 — time-stop は発火しない (HOLD 経路)。
     expect(aaplDecision?.decision).toBe('HOLD')
     expect(aaplDecision?.reason ?? '').not.toMatch(/time-stop hit/)
   })
 
   it('uses defaultRule when rulesMap is empty (NULL override fall-through)', async () => {
-    // Override が無い場合は default 通り。7 BD 前は default (10d) 未到達 →
-    // time-stop は発火せず HOLD で抜ける。
     const heldState: SymbolState = {
       ...emptySymbolState('SOXL', () => now),
       position: {
         qty: 5,
         avgPrice: 117,
-        // 7 BD 前 → default (10d) 未到達。
-        openedAt: new Date('2026-04-09T00:00:00.000Z').toISOString(),
+        openedAt: new Date('2026-04-09T00:00:00.000Z').toISOString(), // 7 BD 前 → default (10d) 未到達
       },
     }
     const execution = mockExecution()
@@ -2391,7 +2278,6 @@ describe('runPullbackScheduler per-symbol rule override (#316)', () => {
       positionStore: makeStore({ SOXL: heldState }),
       execution,
       defaultRule,
-      // rulesMap 未指定 → 全 symbol が defaultRule を使う。
       now: () => now,
     })
 
@@ -2410,7 +2296,6 @@ describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
       barClient: mockBarClient(uptrendBars()),
       positionStore: makeStore({}),
       execution,
-      // map は渡すが AAPL を含めない → lot_size 未設定扱い → 発注見送り。
       symbolLotSizeMap: { SOXL: 1 },
       now: () => now,
     })
@@ -2442,7 +2327,6 @@ describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
   })
 
   it('rounds a JP-style lot=100 symbol down to a whole unit (single-unit-or-zero)', async () => {
-    // lot=100 で equity が 1 単元に届かない → lot-size-round で 0 株 reject。
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -2463,8 +2347,7 @@ describe('runPullbackScheduler per-symbol lot_size (#symbol-lot-size)', () => {
 
 describe('runPullbackScheduler budget-alloc basis fail-closed (#417 buying-power)', () => {
   it('fail-closed (no BUY) for a budget symbol when budgetBasisJpy is undefined (total_capital_jpy 未設定)', async () => {
-    // total_capital_jpy=null → runStrategyCron は budgetBasisJpy=undefined を渡す。
-    // 幻の資本で sizing せず発注見送り (過大発注 → Webull 417 を防ぐ)。
+    // 幻の資本で sizing すると過大発注になり Webull 417 を招くため発注見送りにする
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
       symbols: ['AAPL'],
@@ -2563,8 +2446,7 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
   })
 
   it('shared pool covers only the first of two BUYs (sequential decrement)', async () => {
-    // budget mode + symbolCap で notional を 1 銘柄 ≈ ¥49,937 に固定 (fx=1)。
-    // pool ¥60,000 → 1 件目は通り、2 件目は残余力不足で reject。
+    // symbolCap で notional を 1 銘柄 ≈ ¥49,937 に固定、pool ¥60,000 → 2 件目は残余力不足
     const execution = mockExecution()
     const ledger = createBuyingPowerLedger({ availableJpy: 60_000, asOf: null, bufferPct: 0 })
     const summary = await runPullbackScheduler({
@@ -2589,9 +2471,7 @@ describe('runPullbackScheduler buying-power pool gate (#415)', () => {
 })
 
 describe('runPullbackScheduler global max order notional cap', () => {
-  // budget-alloc mode で target を固定し、cap 適用後の qty を厳密に検証する
-  // (risk-% sizing は ATR/stop 由来で notional が動くため predictability が低い)。
-  // entryPrice はいずれも uptrendBars() の last close 117.5。
+  // budget-alloc mode で target を固定し cap 後の qty を検証する (risk-% sizing は notional が動き predictability が低い)
   it('caps notional to the global cap when no symbol cap is set (10 shares → 5)', async () => {
     const execution = mockExecution()
     const summary = await runPullbackScheduler({
@@ -2922,9 +2802,7 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
     expect(summary.decisions.find((d) => d.symbol === 'AAPL')?.decision).toBe('HOLD')
   })
 
-  // force-close window (引け前15分) に飲み込まれる直前の新規
-  // BUY を止める。15分 cron は force-close と新規 entry を同じ window で両立
-  // できない (const 定義のコメント参照)。
+  // 15分 cron は force-close (引け前15分) と新規 entry を同じ window で両立できないため、直前の新規 BUY を止める
   describe('no new entry within 30min of US close', () => {
     // 2026-04-20 月曜、EDT → 引け 20:00 UTC。
     const noEntryWindow = new Date('2026-04-20T19:45:00.000Z') // 15:45 ET (引け15分前、force-close 境界と重複)
@@ -2979,10 +2857,8 @@ describe('runPullbackScheduler intraday-only force-close (#intraday-only)', () =
       expect(summary.buys).toBe(1)
     })
 
-    it('vetoes a HALF-eligible entry_gate HOLD at 15:45 ET even when the symbol also qualifies for HALF promotion', async () => {
-      // #452 HALF 昇格ブロックより前で veto しないと、intraday-only かつ
-      // half-entry 両方に属する銘柄で veto 後の HALF 昇格が BUY を復活させる
-      // (regression fixture: HALF_RULE と同条件の near-miss pullback setup)。
+    it('vetoes a HALF-eligible entry_gate HOLD at 15:45 ET even when the symbol also qualifies for HALF promotion (#452)', async () => {
+      // veto を HALF 昇格判定より前に行わないと、昇格判定が BUY を復活させてしまう
       const HALF_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.035 }
       const execution = mockExecution()
       const summary = await runPullbackScheduler({
@@ -3041,8 +2917,7 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
   })
 
   it('does not gate the SELL path (exit of a held position still runs)', async () => {
-    // role を後から cash_parking 等に変えた銘柄に保有が残っていても
-    // stop / time-stop / TP の exit は従来どおり動く (fail-closed は entry 側のみ)。
+    // role を後から変えた銘柄に保有が残っていても exit は従来どおり動く (fail-closed は entry 側のみ)
     const execution = mockExecution()
     const heldState: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
@@ -3079,18 +2954,11 @@ describe('runPullbackScheduler role entry suppression (#452)', () => {
   })
 })
 
-// #658 実害回帰フィクスチャ: 2026-07-29 SQQQ 実害の再現用 bars。TEST_DEFAULT_RULE
-// で評価すると price=47.1187 / atr20=2.35 (実測値と一致するよう bars を逆算)、
-// pullback=-6.5% (pullbackMin=-0.06 の許容バンド [-0.072, -0.06) 内) のみが
-// 未通過で、他の 6 gate は全通過 → deriveEntryStatusFromIndicators は
-// status='HALF' / halfGate.key='pullback_deep' を返す (値は
-// `pnpm exec vitest run` で実行確認済み、下記コメントに実測値を記載)。
-//
-// 旧実装 (scheduler が signal.action==='HOLD' のたびに指標から entry status を
-// 再導出していた) は、この HALF 判定**だけ**を見て BUY 0.5x に昇格させていた。
-// 実際には reentry guard (前回売値 45.8302 に対し price 47.1187 が高すぎる) が
-// entryDecision の最初の早期 return で HOLD を確定させており、7 gate 集合に
-// 存在しない再エントリーガードは再導出では検知できなかった。
+// #658: TEST_DEFAULT_RULE で評価すると price=47.1187/atr20=2.35 (bars を逆算)、pullback=-6.5% (許容バンド
+// [-0.072,-0.06) 内) のみ未通過、他 6 gate は全通過 → HALF/pullback_deep。
+// 旧実装は entry status の再導出だけを見て BUY 0.5x に昇格させていたが、実際は reentry guard
+// (前回売値 45.8302 に対し price 47.1187 が高すぎる) が早期 return で HOLD を確定させており、
+// 7 gate 集合に無い再エントリーガードは再導出では検知できなかった。
 function reentryHalfMissBars(): DailyBar[] {
   const SPREAD_ABS = 1.175 // high-low per bar -> atr20 = 2.35
   const start = 43
@@ -3112,9 +2980,8 @@ function reentryHalfMissBars(): DailyBar[] {
 }
 
 describe('runPullbackScheduler half entry (#452 段階判定)', () => {
-  // uptrendBars() の pullback は (117.5-122)/122 ≈ -3.69%。pullbackMin を
-  // -0.035 に絞ると pullback_deep だけが僅差で落ち (許容バンド -0.042 以内)、
-  // HALF 候補になる。-0.025 ならバンド外 → WATCH (発注なし)。
+  // uptrendBars() の pullback ≈ -3.69%。pullbackMin -0.035 だと僅差で落ち (許容バンド -0.042 以内) HALF 候補、
+  // -0.025 だとバンド外で WATCH (発注なし)
   const HALF_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.035 }
   const WATCH_RULE = { ...TEST_DEFAULT_RULE, pullbackMin: -0.025, pullbackMax: -0.03 }
 
@@ -3186,9 +3053,7 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     expect(execution.calls).toHaveLength(0)
   })
 
-  it('half entry still passes through downstream risk gates (inverse-pair exposure rejects)', async () => {
-    // HALF でも逆ポジ保有中は発注しない (#452 safety)。perSymbolRisk の
-    // inverse-pair gate が BUY intent を reject することを確認する。
+  it('half entry still passes through downstream risk gates (inverse-pair exposure rejects) (#452)', async () => {
     const execution = mockExecution()
     const inverseHeld: SymbolState = {
       ...emptySymbolState('SQQQ', () => now),
@@ -3216,13 +3081,8 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     expect(reject?.reason).toContain('inverse')
   })
 
-  // #658 実害回帰 (2026-07-29 SQQQ): reentryHalfMissBars() は entry gate 視点で
-  // 見れば HALF (pullback_deep 僅差) だが、reentry guard 由来の HOLD
-  // (holdCause='guard') なので昇格しないこと。#660 で再エントリーガードの基準が
-  // lastExitPrice (明示フィールド) に変わったので、それを設定して価格比較ガード
-  // (47.1187 > 43.4802 = 45.8302 - 1*2.35) 本来の経路を通す (lastExecutedPrice
-  // のままだと lastExitPrice===null の #660 移行期 fail-closed 経路に落ちてしまい、
-  // 価格ガードそのものは検証できない)。
+  // #660: lastExitPrice を明示設定して価格比較ガード本来の経路を通す
+  // (lastExecutedPrice のままだと #660 移行期 fail-closed 経路に落ちてしまう)。
   it('does not promote a re-entry-guard HOLD even when the underlying gates would derive HALF (#658)', async () => {
     const execution = mockExecution()
     const guardedState: SymbolState = {
@@ -3246,18 +3106,12 @@ describe('runPullbackScheduler half entry (#452 段階判定)', () => {
     const decision = summary.decisions.find((d) => d.symbol === 'SQQQ')
     expect(decision?.decision).toBe('HOLD')
     expect(decision?.reason).toMatch(/re-entry guard/)
-    // 前回売値 45.8302 由来の ceiling (= 45.8302 - 1*2.35 = 43.48, reason は
-    // toFixed(2) 表示) が出ること = legacy fail-closed 経路 (#660) ではなく
-    // 価格比較ガード本来の経路であること。
     expect(decision?.reason).toContain('45.8302')
     expect(decision?.reason).toContain('43.48')
     expect(decision?.trace?.map((s) => s.label)).toContain('entry.reentry_below_last_exit')
     expect(decision?.trace?.map((s) => s.label)).not.toContain('entry.half_status')
   })
 
-  // #658: 再エントリーガードの窓 (既定 3 営業日) を過ぎれば guard は無効化され、
-  // 同じ HALF 相当の gate 状況は通常どおり 0.5x に昇格する (= 昇格ロジック自体は
-  // holdCause='entry_gate' の場合に生きていることの確認)。
   it('promotes the same HALF-eligible symbol once the re-entry guard window has elapsed (#658)', async () => {
     const execution = mockExecution()
     const staleExitState: SymbolState = {
@@ -3305,7 +3159,6 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
 
   it('cashRebalanceQuantityMap forces a fixed-quantity BUY bypassing pullback gates', async () => {
     const execution = mockExecution()
-    // downtrend 相当でも (= 通常なら HOLD でも) cash 銘柄は指定数量で BUY する。
     const summary = await runPullbackScheduler({
       symbols: ['SGOV'],
       equity: 100_000,
@@ -3367,8 +3220,7 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
   })
 
   it('cash rebalance never overrides a strategy SELL (stop-loss exit wins)', async () => {
-    // avgPrice 200 vs uptrendBars last close 117.5 → deep loss, well past the
-    // -4% stop → decide() returns SELL regardless of the rebalance map.
+    // avgPrice 200 vs last close 117.5 は -4% stop を大きく超えるため decide() は SELL を返す
     const heldState: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 5, avgPrice: 200, openedAt: now.toISOString() },
@@ -3418,8 +3270,7 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
   })
 
   it('cash rebalance respects the re-entry guard window', async () => {
-    // TEST_DEFAULT_RULE.reentryGuardBusinessDays = 3。lastExitAt 1 business day
-    // 前 (2026-04-17 金, now = 2026-04-20 月) → bd=1 < 3 → guard 有効、BUY なし。
+    // reentryGuardBusinessDays=3。lastExitAt 1 business day 前 → bd=1 < 3 → guard 有効
     const withinGuard: SymbolState = {
       ...emptySymbolState('SGOV', () => now),
       lastExitAt: '2026-04-17T14:30:00.000Z',
@@ -3463,15 +3314,12 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
   })
 
   it('cashRebalanceSellQuantityMap emits a partial SELL toward active weight (#452 follow-up)', async () => {
-    // avgPrice 112 vs uptrendBars last close 117.5 → pnl ≈ +4.9%、stop/TP の
-    // どちらにも掛からず HOLD になる held position。
+    // avgPrice 112 vs last close 117.5 → pnl ≈ +4.9%、stop/TP どちらにも掛からず HOLD になる held position
     const heldState: SymbolState = {
       ...emptySymbolState('SGOV', () => now),
       position: { qty: 100, avgPrice: 112, openedAt: now.toISOString() },
     }
     const execution = mockExecution()
-    // mockExecution は常に mode='DRY_RUN' を返す (このスイートの他ケースと同じ
-    // DRY_RUN 経路) — 部分 SELL でも同じ経路が通ることを確認する。
     const summary = await runPullbackScheduler({
       symbols: ['SGOV'],
       equity: 100_000,
@@ -3510,8 +3358,7 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
   })
 
   it('cash rebalance SELL は strategy exit (stop-loss) を上書きしない (全量売却が優先、二重発注なし)', async () => {
-    // avgPrice 200 vs uptrendBars last close 117.5 → 深い含み損で stop-loss
-    // 経由の SELL (全量 5 株)。cashRebalanceSellQuantityMap の 2 株は無視される。
+    // avgPrice 200 vs last close 117.5 → 深い含み損で stop-loss 経由の SELL (全量 5 株) になる
     const heldState: SymbolState = {
       ...emptySymbolState('AAPL', () => now),
       position: { qty: 5, avgPrice: 200, openedAt: now.toISOString() },
@@ -3585,8 +3432,6 @@ describe('runPullbackScheduler cash rebalance / entry snapshots (#452 Layer 3)',
 
 describe('inverse_hedge role enabled but inverse-pair gate still wins (#457)', () => {
   it('role 有効化後も相手保有中の BUY は inverse-pair gate で reject', async () => {
-    // #457 で inverse_hedge の entry 抑止は外れた (= buildEntrySuppressedSymbols
-    // が空を返す) が、両建て防止 (inverse_pairs) は下流で引き続き効くこと。
     const { buildEntrySuppressedSymbols } = await import(
       '../../../src/trading/strategy/symbolRuleResolution'
     )
@@ -3671,8 +3516,7 @@ describe('runPullbackScheduler TICKER_IS_DENY hook (#460)', () => {
   })
 
   it('does not call the hook on the SELL path (保有 orphan 化を避ける)', async () => {
-    // time stop で SELL が出る保有を持たせ、SELL submit が deny で落ちても
-    // hook は呼ばれない (= 銘柄は評価対象に残り、exit は次 tick で再試行)。
+    // SELL submit が deny で落ちても、銘柄は評価対象に残り exit は次 tick で再試行される
     const hook = vi.fn(async () => undefined)
     const heldState: SymbolState = {
       ...emptySymbolState('USMV', () => now),
@@ -3796,9 +3640,7 @@ describe('runPullbackScheduler pair regime layer (#472)', () => {
       pairRegime: { mode: 'enforce', thresholds: THRESHOLDS, pairs: [REGIME_PAIR] },
       now: () => now,
     })
-    // SOXL は保有中 → strategy の SELL (TP) がそのまま通る (unknown でも exit は妨げない)
     expect(summary.sells).toBe(1)
-    // SOXS の BUY は unknown で block
     const reject = summary.decisions.find((d) => d.decision === 'SKIP' && d.symbol === 'SOXS')
     expect(reject?.reason).toContain('zone=unknown')
   })

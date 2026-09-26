@@ -6,10 +6,8 @@ import {
   type SymbolRule,
 } from '../../../src/trading/strategy/strategies/PullbackUptrendStrategy'
 
-// 全 gate 通過するベース指標 (TEST_DEFAULT_RULE 比):
-//   trend: 0.20 > 0.08 / above_sma50: 100 > 90 / overextension: 0.111 <= 0.6
-//   volatility: 1.0 <= 1.5 / high20d_valid: 104 > 0
-//   pullback: (100-104)/104 = -0.0385 ∈ [-0.06, -0.03]
+// 全 gate 通過するベース指標 (TEST_DEFAULT_RULE 比): trend 0.20>0.08 / above_sma50 100>90 /
+// overextension 0.111<=0.6 / volatility 1.0<=1.5 / pullback -0.0385 ∈ [-0.06,-0.03]
 const baseIndicators = (): PullbackIndicators => ({
   price: 100,
   sma50: 90,
@@ -33,8 +31,6 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   })
 
   it('WATCH when the only failing gate is volatility, even within the ×1.2 tolerance band (regime gate, #659)', () => {
-    // atrRatio 1.65 > max 1.5、閾値の 1.2 倍 (1.8) 以内でも volatility はレジーム
-    // gate なので HALF にせず WATCH のまま (#659)。
     const result = deriveEntryStatusFromIndicators(
       { ...baseIndicators(), atr20: 1.65 },
       rule(),
@@ -55,8 +51,7 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   })
 
   it('WATCH when a single degree gate fails beyond the tolerance band', () => {
-    // pullback = (100-110)/110 = -0.0909、min -0.06 の許容バンド -0.072 を
-    // 超えて外れる → HALF にせず WATCH (監視のみ、発注なし)。
+    // pullback = (100-110)/110 = -0.0909、許容バンド -0.072 を超えて外れる
     const result = deriveEntryStatusFromIndicators(
       { ...baseIndicators(), high20d: 110 },
       rule(),
@@ -96,7 +91,6 @@ describe('deriveEntryStatus (#452 段階判定)', () => {
   })
 
   it('does not grant HALF when the degree-gate threshold is 0 (degenerate band, fail-closed)', () => {
-    // pullbackMax=0 だと許容バンド幅も 0。押し目ゼロでの部分 entry は認めない。
     const result = deriveEntryStatusFromIndicators(
       { ...baseIndicators(), price: 104.5, high20d: 104, sma50: 95 },
       rule({ pullbackMax: 0 }),

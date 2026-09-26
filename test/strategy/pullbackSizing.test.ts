@@ -1,12 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { computePullbackSizing, type PullbackSizingInput } from '../../src/trading/strategy/pullbackSizing'
 
-/**
- * kAtr is required (#23 Lane 1, no-backward-compat). This helper injects
- * kAtr=2 by default; individual tests override to exercise ATR-dominant
- * paths. Chosen so `kAtr * atr20 <= |entry * stopPct|` in the baseline case,
- * preserving the pct-bound expectations of legacy tests.
- */
+// kAtr is required (#23 Lane 1, no-backward-compat); default 2 keeps the pct
+// stop dominant in the baseline case, preserving legacy pct-only expectations.
 const baseInput = (
   overrides: Partial<PullbackSizingInput> = {},
 ): PullbackSizingInput => ({
@@ -108,8 +104,7 @@ describe('computePullbackSizing', () => {
   })
 
   it('populates diagnostic fields (rawQuantity / stopDistance / riskBudget)', () => {
-    // equity 100k, risk 0.4% → budget 400。entry 100 × stopPct -4% → pctStop 4。
-    // atr20 × kAtr = 2×2 = 4。max = 4。raw qty = floor(400 / 4) = 100。
+    // budget 400 (equity 100k × 0.4%), stopDistance 4 (pct==atr) → rawQuantity floor(400/4)=100
     const result = computePullbackSizing(baseInput())
     expect(result.rawQuantity).toBe(100)
     expect(result.stopDistance).toBe(4)
@@ -117,9 +112,7 @@ describe('computePullbackSizing', () => {
   })
 
   it('rawQuantity reflects pre-lot-round value so operators can see the gap', () => {
-    // entry 1297 atr20 24 kAtr 2 → atrStop 48、pctStop 1297*0.04=51.88。stop≒52。
-    // equity 2M risk 0.4% → budget 8000。raw qty = floor(8000/51.88) = 154。
-    // lot 100 → rounded 100 (allowed) → diagnostic rawQuantity still 154.
+    // pctStop 51.88 dominates atrStop 48; rawQuantity floor(8000/51.88)=154, lot-rounds to 100
     const result = computePullbackSizing(
       baseInput({
         equity: 2_000_000,
@@ -142,8 +135,7 @@ describe('computePullbackSizing', () => {
   })
 
   it('falls back to pct stop when atr20 is 0 (post-halt ATR collapse guard)', () => {
-    // atr20=0 → atrStop=0, pctStop=4 wins. floor(400/4)=100, then atr-floor
-    // halving (atr20 < baseline*0.5) → 50.
+    // pctStop 4 wins with atr20=0; floor(400/4)=100, then atr-floor halving → 50
     const result = computePullbackSizing(
       baseInput({ atr20: 0, baselineAtr20: 3 }),
     )

@@ -17,7 +17,6 @@ import {
 /** `ymd` の ET 日中 (17:00Z = 12:00 EST / 13:00 EDT) — ET 暦日 == UTC 暦日 == ymd。 */
 const etMidday = (ymd: string) => new Date(`${ymd}T17:00:00.000Z`)
 
-/** `year` の全日を ET 日中 instant で走査し、predicate が true の ymd を集める。 */
 function scanYear(year: number, predicate: (d: Date) => boolean): string[] {
   const hits: string[] = []
   for (
@@ -43,7 +42,6 @@ describe('isWithinUsCloseWindow (#intraday-only)', () => {
     expect(isWithinUsCloseWindow(new Date('2026-04-20T14:30:00.000Z'), 15)).toBe(false) // 10:30 ET (日中)
   })
   it('DST-safe: EST (winter) uses 21:00 UTC close', () => {
-    // 2026-01-05 は月曜、EST (UTC-5) → 引け 16:00 ET = 21:00 UTC。
     expect(isWithinUsCloseWindow(new Date('2026-01-05T20:50:00.000Z'), 15)).toBe(true) // 15:50 ET
     expect(isWithinUsCloseWindow(new Date('2026-01-05T19:50:00.000Z'), 15)).toBe(false) // 14:50 ET (夏時間の窓は冬は外れる)
   })
@@ -55,22 +53,21 @@ describe('isWithinUsCloseWindow (#intraday-only)', () => {
 })
 
 describe('isWithinStrategyWindow — US (#session-window-gate)', () => {
-  // 2026-04-20 は月曜、EDT (UTC-4) → 開場 09:30 ET = 13:30 UTC、引け 16:00 ET = 20:00 UTC。
-  // 窓 = [09:00 ET, 16:00 ET) (minutesBeforeOpen=30)。
+  // 2026-04-20 (月, EDT UTC-4): 開場 09:30 ET=13:30 UTC、引け 16:00 ET=20:00 UTC。窓 = [09:00 ET, 16:00 ET) (minutesBeforeOpen=30)。
   it('開場30分前 (09:00 ET) は inclusive で true', () => {
-    expect(isWithinStrategyWindow(new Date('2026-04-20T13:00:00.000Z'), 'US', 30)).toBe(true) // 09:00 ET
+    expect(isWithinStrategyWindow(new Date('2026-04-20T13:00:00.000Z'), 'US', 30)).toBe(true)
   })
   it('窓の前 (08:59 ET) は false', () => {
-    expect(isWithinStrategyWindow(new Date('2026-04-20T12:59:00.000Z'), 'US', 30)).toBe(false) // 08:59 ET
+    expect(isWithinStrategyWindow(new Date('2026-04-20T12:59:00.000Z'), 'US', 30)).toBe(false)
   })
   it('日中 (12:00 ET) は true、引け (16:00 ET) は exclusive で false', () => {
-    expect(isWithinStrategyWindow(new Date('2026-04-20T16:00:00.000Z'), 'US', 30)).toBe(true) // 12:00 ET
+    expect(isWithinStrategyWindow(new Date('2026-04-20T16:00:00.000Z'), 'US', 30)).toBe(true)
     expect(isWithinStrategyWindow(new Date('2026-04-20T19:59:00.000Z'), 'US', 30)).toBe(true) // 15:59 ET
-    expect(isWithinStrategyWindow(new Date('2026-04-20T20:00:00.000Z'), 'US', 30)).toBe(false) // 16:00 ET
+    expect(isWithinStrategyWindow(new Date('2026-04-20T20:00:00.000Z'), 'US', 30)).toBe(false)
   })
   it('DST-safe: 13:00 UTC は夏 (EDT) で 09:00 ET=true、冬 (EST) は 08:00 ET=false', () => {
-    expect(isWithinStrategyWindow(new Date('2026-04-20T13:00:00.000Z'), 'US', 30)).toBe(true) // EDT 09:00
-    expect(isWithinStrategyWindow(new Date('2026-01-05T13:00:00.000Z'), 'US', 30)).toBe(false) // EST 08:00
+    expect(isWithinStrategyWindow(new Date('2026-04-20T13:00:00.000Z'), 'US', 30)).toBe(true)
+    expect(isWithinStrategyWindow(new Date('2026-01-05T13:00:00.000Z'), 'US', 30)).toBe(false)
     expect(isWithinStrategyWindow(new Date('2026-01-05T14:00:00.000Z'), 'US', 30)).toBe(true) // EST 09:00
   })
   it('週末 / 祝日 / 負の offset は false', () => {
@@ -80,22 +77,21 @@ describe('isWithinStrategyWindow — US (#session-window-gate)', () => {
   })
   it('minutesBeforeOpen=0 は開場 (09:30 ET) ちょうどから', () => {
     expect(isWithinStrategyWindow(new Date('2026-04-20T13:00:00.000Z'), 'US', 0)).toBe(false) // 09:00 ET
-    expect(isWithinStrategyWindow(new Date('2026-04-20T13:30:00.000Z'), 'US', 0)).toBe(true) // 09:30 ET
+    expect(isWithinStrategyWindow(new Date('2026-04-20T13:30:00.000Z'), 'US', 0)).toBe(true)
   })
 })
 
 describe('isWithinStrategyWindow — JP (#session-window-gate)', () => {
   // JST = UTC+9 (DST なし)。開場 09:00 JST、引け 15:30 JST。窓 = [08:30 JST, 15:30 JST)。
   it('回帰: 月曜 08:30 JST (=前日 23:30 UTC) で true (UTC 日付ズレを跨ぐ)', () => {
-    // 2026-04-20(月) 08:30 JST = 2026-04-19T23:30Z (UTC は日曜) でも JP 取引日として true。
     expect(isWithinStrategyWindow(new Date('2026-04-19T23:30:00.000Z'), 'JP', 30)).toBe(true)
   })
   it('窓の前 (08:29 JST) は false', () => {
     expect(isWithinStrategyWindow(new Date('2026-04-19T23:29:00.000Z'), 'JP', 30)).toBe(false)
   })
   it('引け前 (15:29 JST) true / 引け (15:30 JST) は exclusive で false', () => {
-    expect(isWithinStrategyWindow(new Date('2026-04-20T06:29:00.000Z'), 'JP', 30)).toBe(true) // 15:29 JST
-    expect(isWithinStrategyWindow(new Date('2026-04-20T06:30:00.000Z'), 'JP', 30)).toBe(false) // 15:30 JST
+    expect(isWithinStrategyWindow(new Date('2026-04-20T06:29:00.000Z'), 'JP', 30)).toBe(true)
+    expect(isWithinStrategyWindow(new Date('2026-04-20T06:30:00.000Z'), 'JP', 30)).toBe(false)
   })
   it('週末は false', () => {
     expect(isWithinStrategyWindow(new Date('2026-04-18T03:00:00.000Z'), 'JP', 30)).toBe(false) // 土曜 12:00 JST
@@ -123,7 +119,7 @@ describe('isWithinRegularSession', () => {
     expect(isWithinRegularSession(new Date('2026-04-20T20:00:00.000Z'), 'US')).toBe(false)
   })
   it('半日取引日 (2026-11-27) は 13:00 ET 引けで false になる', () => {
-    expect(isWithinRegularSession(new Date('2026-11-27T18:00:00.000Z'), 'US')).toBe(false) // 13:00 ET
+    expect(isWithinRegularSession(new Date('2026-11-27T18:00:00.000Z'), 'US')).toBe(false)
   })
   it('祝日は false', () => {
     expect(isWithinRegularSession(new Date('2026-01-01T15:00:00.000Z'), 'US')).toBe(false) // 元日
@@ -164,8 +160,6 @@ describe('isTradingDay', () => {
 
 describe('nextTradingDay — year-end / new year roll', () => {
   it('JP: 2026-12-30 (Wed) → 2027-01-04 (Mon) skipping 12/31 + 年始', () => {
-    // 2026-12-31 (Thu) TSE closed, 2027-01-01 (Fri) 元日,
-    // 2027-01-02 (Sat), 2027-01-03 (Sun) → next trading day is 2027-01-04 (Mon).
     const tue = new Date('2026-12-30T10:00:00.000Z')
     expect(nextTradingDay(tue, 'JP').toISOString().slice(0, 10)).toBe('2027-01-04')
   })
@@ -178,8 +172,7 @@ describe('nextTradingDay — year-end / new year roll', () => {
 
 describe('nextTradingDay — Golden Week', () => {
   it('JP: 2026-05-01 (Fri) → 2026-05-07 (Thu) skipping GW', () => {
-    // 5/2 Sat, 5/3 Sun, 5/4 Mon みどりの日, 5/5 Tue こどもの日,
-    // 5/6 Wed 振替休日 (5/3 が Sun) → next trading day is 5/7 Thu.
+    // 5/4-5 祝日, 5/6 振替休日 (5/3 が Sun のため)
     const fri = new Date('2026-05-01T10:00:00.000Z')
     expect(nextTradingDay(fri, 'JP').toISOString().slice(0, 10)).toBe('2026-05-07')
   })
@@ -187,9 +180,7 @@ describe('nextTradingDay — Golden Week', () => {
 
 describe('countTradingDaysBetween — excludes holidays', () => {
   it('JP: 2026-04-28 (Tue) → 2026-05-07 (Thu) counts 3 trading days', () => {
-    // Cursor から翌日以降をカウント:
-    // 4/29 Wed 昭和の日 ✗ / 4/30 Thu ○ / 5/1 Fri ○ / 5/2 Sat ✗ /
-    // 5/3 Sun ✗ / 5/4 Mon ✗ / 5/5 Tue ✗ / 5/6 Wed ✗ / 5/7 Thu ○ → 3
+    // counts 4/30, 5/1, 5/7 (4/29 昭和の日、5/2-5/6 は土日+GW祝日+振替休日で除外)
     expect(
       countTradingDaysBetween(
         '2026-04-28T10:00:00.000Z',
@@ -225,10 +216,7 @@ describe('inferTradingMarket', () => {
   })
 })
 
-// NYSE 公式カレンダーの既知休場日 (2026–2030)。assert 値は自前計算ではなく
-// 公式カレンダー / 祝日規則の既知日 (#547 タスク指定の Good Friday 含む)。
-// 2028 に New Year 休場が無いのは NYSE Rule 7.2 (1/1 が土曜 → 前年 12/31 に
-// 振替しない) のため。
+// 2026–2030 の休場日は NYSE 公式カレンダーの実測値 (#547, Good Friday 含む)
 const NYSE_EXPECTED_CLOSURES: Record<number, string[]> = {
   2026: [
     '2026-01-01', // New Year's Day
@@ -306,20 +294,20 @@ describe('isUsMarketHoliday — NYSE 休場ルール計算 (#547)', () => {
   })
 
   it('振替境界: 7/4=土→7/3休場、7/4=日→7/5休場、7/4=平日→7/4のみ', () => {
-    // 2026: 7/4 土 → 7/3 (金) が休場。7/4 当日 (土) は observed でないので false。
+    // 7/4 (土) 当日は observed 対象でないため false
     expect(isUsMarketHoliday(etMidday('2026-07-03'))).toBe(true)
     expect(isUsMarketHoliday(etMidday('2026-07-04'))).toBe(false)
-    // 2027: 7/4 日 → 7/5 (月) が休場。前週金曜 7/2 は通常営業。
+    // 前週金曜 7/2 は通常営業
     expect(isUsMarketHoliday(etMidday('2027-07-05'))).toBe(true)
     expect(isUsMarketHoliday(etMidday('2027-07-02'))).toBe(false)
-    // 2028: 7/4 火 (平日) → 休場は 7/4 のみ。7/3 (月) は半日取引であって休場ではない。
+    // 7/3 (月) は半日取引 (休場ではない)
     expect(isUsMarketHoliday(etMidday('2028-07-04'))).toBe(true)
     expect(isUsMarketHoliday(etMidday('2028-07-03'))).toBe(false)
     expect(isUsMarketHoliday(etMidday('2028-07-05'))).toBe(false)
   })
 
   it('NYSE Rule 7.2: 1/1 が土曜でも前年 12/31 (金) は休場にしない', () => {
-    // 2028-01-01 は土曜。実例: 2022-01-01 (土) に対し 2021-12-31 は通常立会。
+    // 実例: 2022-01-01 (土) に対し 2021-12-31 は通常立会
     expect(isUsMarketHoliday(etMidday('2027-12-31'))).toBe(false)
     expect(isUsMarketHoliday(etMidday('2021-12-31'))).toBe(false)
   })
@@ -483,16 +471,13 @@ describe('nextSessionOpen (#661)', () => {
   })
 
   it('JP 夜間 (UTC 日付ズレ): 2026-04-19T23:30Z (=月曜 08:30 JST) exit → 当日ではなく翌営業日 (火) の寄り', () => {
-    // JST 暦日は月曜 (2026-04-20) だが UTC 暦日は日曜 (2026-04-19)。UTC 日付基準で
-    // 判定すると誤って月曜を「翌日」扱いしてしまう回帰ケース — JST 暦日で
-    // 月曜を当日とみなし、翌営業日である火曜 (2026-04-21) 09:00 JST を返すべき。
+    // JST 暦日 (月) を当日とみなす — UTC 暦日 (日) 基準だと誤って翌日扱いする回帰ケース
     expect(nextSessionOpen(new Date('2026-04-19T23:30:00.000Z'), 'JP').toISOString()).toBe(
       '2026-04-21T00:00:00.000Z',
     )
   })
 
   it('JP 年末年始: 2026-12-30 (水) exit → 2027-01-04 (月) 09:00 JST = 00:00Z', () => {
-    // 12/31 TSE closed, 1/1 元日, 1/2 (土), 1/3 (日) → 翌営業日は 1/4 (月)。
     expect(nextSessionOpen(new Date('2026-12-30T10:00:00.000Z'), 'JP').toISOString()).toBe(
       '2027-01-04T00:00:00.000Z',
     )

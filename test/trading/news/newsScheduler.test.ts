@@ -74,7 +74,6 @@ describe('runNewsScheduler — probe round-robin', () => {
   it('連続する 5 分スロットは異なる probe/metric の組に進む (round-robin)', async () => {
     const env = makeEnv()
     const seen: Array<{ probeKey?: string; metric?: GdeltMetric }> = []
-    // 4 組 (2 probe × 2 metric) を 5 分刻みで叩き、全て異なる組み合わせであること。
     for (let i = 0; i < 4; i += 1) {
       const { client } = fakeClient(() => [])
       const now = new Date(new Date('2026-07-24T14:30:00.000Z').getTime() + i * 5 * 60 * 1000)

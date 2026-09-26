@@ -175,12 +175,12 @@ describe('classifyRoundTrips', () => {
 })
 
 describe('computeExitReasonStats', () => {
-  it('カテゴリ別の勝率/平均利益/平均損失/期待値を集計する', () => {
+  it('カテゴリ別の勝率/平均利益/平均損失/期待値を集計する (realizedPnl 欠損は除外)', () => {
     const trips: ClassifiedRoundTrip[] = [
       trip({ realizedPnl: 10, exitReasonCategory: 'TP' }),
       trip({ realizedPnl: 6, exitReasonCategory: 'TP' }),
       trip({ realizedPnl: -4, exitReasonCategory: 'SL' }),
-      trip({ realizedPnl: null, exitReasonCategory: 'SL' }), // 欠損は除外
+      trip({ realizedPnl: null, exitReasonCategory: 'SL' }),
     ]
     const stats = computeExitReasonStats(trips)
     expect(stats).toEqual([
@@ -220,7 +220,7 @@ describe('computeForwardReturns', () => {
     expect(result.r1).toBeCloseTo((102 - 100) / 100)
     expect(result.r3).toBeCloseTo((104 - 100) / 100)
     expect(result.r5).toBeCloseTo((108 - 100) / 100)
-    expect(result.r10).toBeNull() // bars に 10 本先が無い
+    expect(result.r10).toBeNull()
   })
 
   it('post-exit MFE は取得できた bar 範囲で best-effort に計算する', () => {
@@ -393,7 +393,6 @@ describe('crossTabSlExitsWithExtendedHours', () => {
 
 describe('pairRoundTrips input-order robustness (#712 review)', () => {
   it('sorts fills by at per symbol so out-of-order input pairs correctly', () => {
-    // SELL 行が入力配列で BUY より先に来ても、at 順に並べ直してペアになる
     const fills: LifecycleFill[] = [
       fill({ side: 'SELL', price: 110, at: '2026-06-05T14:00:00.000Z', realizedPnl: 10 }),
       fill({ side: 'BUY', price: 100, at: '2026-06-01T14:00:00.000Z' }),

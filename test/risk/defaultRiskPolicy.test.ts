@@ -225,7 +225,6 @@ describe('DefaultRiskPolicy', () => {
     }
 
     it('opens at 09:30 EST in winter (UTC-5)', () => {
-      // 2026-01-15 14:30 UTC = 09:30 EST (Thursday)
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-01-15T14:30:00.000Z'),
@@ -244,7 +243,6 @@ describe('DefaultRiskPolicy', () => {
     })
 
     it('opens at 09:30 EDT in summer (UTC-4)', () => {
-      // 2026-07-15 13:30 UTC = 09:30 EDT (Wednesday)
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-07-15T13:30:00.000Z'),
@@ -262,7 +260,6 @@ describe('DefaultRiskPolicy', () => {
     })
 
     it('is closed at the 16:00 EDT boundary (close exclusive)', () => {
-      // 2026-07-15 20:00 UTC = 16:00 EDT
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-07-15T20:00:00.000Z'),
@@ -298,7 +295,7 @@ describe('DefaultRiskPolicy', () => {
     })
 
     it('uses NY weekday: Friday UTC night that maps to NY Friday is still NY Friday (outside hours)', () => {
-      // 2026-04-24 23:30 UTC = 19:30 EDT Friday (after close, but Friday in NY)
+      // 2026-04-24 23:30 UTC = 19:30 EDT Friday
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-04-24T23:30:00.000Z'),
@@ -307,16 +304,14 @@ describe('DefaultRiskPolicy', () => {
     })
 
     it('handles the DST spring-forward day (2026-03-08)', () => {
-      // After 02:00 local on 2026-03-08, NY shifts EST→EDT.
-      // 13:30 UTC on 2026-03-08 = 09:30 EDT (already on DST).
+      // NY shifts EST→EDT after 02:00 local on 2026-03-08, so 13:30 UTC is already 09:30 EDT
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-03-08T13:30:00.000Z'),
       })
-      // Sunday in NY → still rejected by weekend rule, which is the correct conservative answer.
+      // still Sunday in NY, so the weekend rule rejects it regardless of the DST shift
       expect(decision.allowed).toBe(false)
 
-      // 13:30 UTC on Monday 2026-03-09 = 09:30 EDT → open.
       const nextDay = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-03-09T13:30:00.000Z'),
@@ -324,9 +319,7 @@ describe('DefaultRiskPolicy', () => {
       expect(nextDay.allowed).toBe(true)
     })
 
-    it('handles the DST fall-back day (2026-11-01)', () => {
-      // 2026-11-01 is Sunday — closed.
-      // Monday 2026-11-02 after fall-back: 14:30 UTC = 09:30 EST → open.
+    it('handles the DST fall-back day: Monday 2026-11-02 opens at 09:30 EST (14:30 UTC)', () => {
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-11-02T14:30:00.000Z'),
@@ -351,8 +344,7 @@ describe('DefaultRiskPolicy', () => {
     }
 
     it('rejects on a US market holiday (2026-07-03, Independence Day observed)', () => {
-      // 2026-07-03 14:00 UTC = 10:00 EDT — would be within the regular session
-      // by clock time alone, but the whole day is a US market holiday.
+      // 10:00 EDT would be within the regular session by clock time alone
       const decision = policy.evaluate({
         ...marketHoursInput,
         now: () => new Date('2026-07-03T14:00:00.000Z'),

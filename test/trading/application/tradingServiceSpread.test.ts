@@ -83,7 +83,6 @@ function service(store: PositionStore, overrides: { US?: number; JP?: number } =
 
 describe('TradingService spread guard (#38-D)', () => {
   it('rejects BUY for US liquid name when spread is 0.3% (above 0.25% limit)', async () => {
-    // 99.85 / 100.15 -> mid 100, spread 0.3 / 100 = 0.003
     const store = makeStore({
       SPY: { ...emptySymbolState('SPY', () => now), lastQuote: quote(99.85, 100.15) },
     })
@@ -94,7 +93,6 @@ describe('TradingService spread guard (#38-D)', () => {
   })
 
   it('allows BUY for US liquid name when spread is 0.2% (within 0.25% limit)', async () => {
-    // 99.9 / 100.1 -> pct 0.002
     const store = makeStore({
       SPY: { ...emptySymbolState('SPY', () => now), lastQuote: quote(99.9, 100.1) },
     })
@@ -103,7 +101,6 @@ describe('TradingService spread guard (#38-D)', () => {
   })
 
   it('rejects BUY for JP name when spread is 0.7% (above 0.6% limit)', async () => {
-    // 99.65 / 100.35 -> mid 100, spread 0.7 / 100 = 0.007
     const store = makeStore({
       '7203': { ...emptySymbolState('7203', () => now), lastQuote: quote(99.65, 100.35) },
     })
@@ -113,7 +110,6 @@ describe('TradingService spread guard (#38-D)', () => {
   })
 
   it('allows BUY for JP name when spread is 0.5% (within 0.6% limit)', async () => {
-    // 99.75 / 100.25 -> pct 0.005
     const store = makeStore({
       '7203': { ...emptySymbolState('7203', () => now), lastQuote: quote(99.75, 100.25) },
     })
