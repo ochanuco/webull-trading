@@ -76,7 +76,7 @@ src/
     state/                    SymbolStateDO / PortfolioStateDO / WebullTokenStateDO + clients / transitions
     portfolio/                runPortfolioRoll (EOD rollover)
     news/                     newsScheduler (attention observation の収集)
-                              + headlineEvalScheduler (Google News 見出し + jev 分類の observe-only 収集、`JEV_HEADLINE_EVAL_ENABLED`)
+                              + headlineEvalScheduler (Yahoo Finance 見出し + jev 分類の observe-only 収集 (Google News はフォールバック)、`JEV_HEADLINE_EVAL_ENABLED`)
     runtime/                  killSwitch + productionReadiness
     quotes/                   quoteScheduler + extendedHoursScheduler (時間外参考観測、#709)
     backtest/                 runBacktest
@@ -84,7 +84,8 @@ src/
     webull/                   WebullReadClient / WebullTradeClient (facade) + WebullHttpClient / WebullAuth
                               + mapper + token flow + tradability / instrument lookup / allowlist refresh
     quotes/                   BarClient / YahooBarClient / YahooQuoteClient / YahooExtendedHoursClient / WebullQuoteClient / fxRate
-    news/                     GdeltDocClient + newsProbes + GoogleNewsRssClient + jevHeadlineClassifier
+    news/                     GdeltDocClient + newsProbes + YahooFinanceRssClient + GoogleNewsRssClient (fallback)
+                              + rssHeadlineParser (両クライアント共有パース) + jevHeadlineClassifier
     calendar/                 us・jp market calendar + earnings / macro event repo
     notification/             Notifier 実装 + Slack/Discord webhook + 状態変化検知
     logger/                   AuditLogger + tradeJournal + strategyDecisionLog (console + D1 sink)
