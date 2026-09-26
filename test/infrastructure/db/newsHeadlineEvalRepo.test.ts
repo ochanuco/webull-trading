@@ -92,14 +92,11 @@ function makeFakeSelectDb(rows: unknown[]) {
 }
 
 describe('createNewsHeadlineEvalRepo.fetchLatest', () => {
-  it('returns the single row when one matches', async () => {
-    const row = { id: 1, source: 'google_news_rss', evaluatedAt: '2026-09-26T12:00:00.000Z' }
+  it('returns the single row when one matches, regardless of which source it is', async () => {
+    const row = { id: 1, source: 'yahoo_finance_rss', evaluatedAt: '2026-09-26T12:00:00.000Z' }
     const { db, limitArgs } = makeFakeSelectDb([row])
     const repo = createNewsHeadlineEvalRepo(db)
-    const result = await repo.fetchLatest({
-      source: 'google_news_rss',
-      atOrBeforeIso: '2026-09-26T12:15:00.000Z',
-    })
+    const result = await repo.fetchLatest({ atOrBeforeIso: '2026-09-26T12:15:00.000Z' })
     expect(result).toBe(row)
     expect(limitArgs).toEqual([1])
   })
@@ -107,10 +104,7 @@ describe('createNewsHeadlineEvalRepo.fetchLatest', () => {
   it('returns null when nothing matches', async () => {
     const { db } = makeFakeSelectDb([])
     const repo = createNewsHeadlineEvalRepo(db)
-    const result = await repo.fetchLatest({
-      source: 'google_news_rss',
-      atOrBeforeIso: '2026-09-26T12:15:00.000Z',
-    })
+    const result = await repo.fetchLatest({ atOrBeforeIso: '2026-09-26T12:15:00.000Z' })
     expect(result).toBeNull()
   })
 })

@@ -18,7 +18,7 @@ function row(overrides: Partial<NewsHeadlineEvalRow> = {}): NewsHeadlineEvalRow 
   return {
     id: 1,
     evaluatedAt: '2026-09-26T12:00:00.000Z',
-    source: 'google_news_rss',
+    source: 'yahoo_finance_rss',
     query: '("stock market") when:1h',
     headlineCount: 5,
     headlinesJson: '[]',
@@ -53,6 +53,7 @@ describe('buildHeadlineEvalSnapshot', () => {
     const snapshot = buildHeadlineEvalSnapshot(row(), new Date('2026-09-26T12:15:00.000Z'))
     expect(snapshot).toEqual({
       available: true,
+      source: 'yahoo_finance_rss',
       evaluatedAt: '2026-09-26T12:00:00.000Z',
       ageMin: 15,
       status: 'ok',
@@ -79,7 +80,7 @@ describe('buildHeadlineEvalSnapshot', () => {
 })
 
 describe('loadHeadlineEvalSnapshot', () => {
-  it('queries fetchLatest with the google_news_rss source and the given now, returning the built snapshot', async () => {
+  it('queries fetchLatest across all sources with the given now, returning the built snapshot', async () => {
     const fetchLatest = vi.fn(async () => row())
     vi.mocked(createNewsHeadlineEvalRepo).mockReturnValue({
       insertIgnore: vi.fn(),
@@ -87,11 +88,8 @@ describe('loadHeadlineEvalSnapshot', () => {
     })
     const now = new Date('2026-09-26T12:15:00.000Z')
     const snapshot = await loadHeadlineEvalSnapshot({} as D1Database, now, 'req-1')
-    expect(fetchLatest).toHaveBeenCalledWith({
-      source: 'google_news_rss',
-      atOrBeforeIso: now.toISOString(),
-    })
-    expect(snapshot).toEqual(expect.objectContaining({ available: true, ageMin: 15 }))
+    expect(fetchLatest).toHaveBeenCalledWith({ atOrBeforeIso: now.toISOString() })
+    expect(snapshot).toEqual(expect.objectContaining({ available: true, source: 'yahoo_finance_rss', ageMin: 15 }))
     expect(vi.mocked(createNewsHeadlineEvalDb)).toHaveBeenCalled()
   })
 
