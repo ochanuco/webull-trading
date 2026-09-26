@@ -126,12 +126,23 @@ describe('GoogleNewsRssClient.fetchHeadlines', () => {
     expect(rssError.bodySnippet.length).toBeLessThanOrEqual(200)
   })
 
-  it('throws GoogleNewsResponseError on a non-XML content-type', async () => {
+  it('throws GoogleNewsResponseError when a 200 body is not RSS (consent/captcha page)', async () => {
     const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
       new Response('<html>oops</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
     )
     const client = new GoogleNewsRssClient({ fetchFn })
     await expect(client.fetchHeadlines()).rejects.toBeInstanceOf(GoogleNewsResponseError)
+  })
+
+  it('accepts an RSS body even when Content-Type is not XML', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
+      new Response(rssFeed(item({ title: 'Stocks slide', source: 'Wire' })), {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' },
+      }),
+    )
+    const client = new GoogleNewsRssClient({ fetchFn })
+    await expect(client.fetchHeadlines()).resolves.toHaveLength(1)
   })
 
   it('throws GoogleNewsFetchError when the underlying fetch aborts (timeout)', async () => {

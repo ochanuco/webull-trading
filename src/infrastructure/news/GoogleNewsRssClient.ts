@@ -93,17 +93,17 @@ export class GoogleNewsRssClient {
       )
     }
 
-    const contentType = response.headers.get('content-type') ?? ''
-    if (!contentType.toLowerCase().includes('xml')) {
-      const snippet = await bodySnippet(response)
+    const body = await response.text()
+    // Checked on the body, not Content-Type: a consent/captcha page is a 200 with zero items, and
+    // parsing it would be stored as `no_headlines` instead of surfacing that the feed is blocked.
+    if (!/<rss[\s>]/i.test(body)) {
+      const snippet = body.slice(0, BODY_SNIPPET_MAX_CHARS)
       throw new GoogleNewsResponseError(
-        `Google News RSS returned non-XML content-type '${contentType}': ${snippet}`,
+        `Google News RSS returned a non-RSS body (content-type '${response.headers.get('content-type') ?? ''}'): ${snippet}`,
         response.status,
         snippet,
       )
     }
-
-    const body = await response.text()
     return parseGoogleNewsRss(body)
   }
 }
