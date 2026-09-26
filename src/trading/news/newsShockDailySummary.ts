@@ -137,7 +137,7 @@ function describeRegime(regime: NewsShockRegime): string {
     case 'warning':
       return '警戒'
     case 'critical':
-      return '過熱'
+      return '急落'
     case 'unknown':
     default:
       return '判定不能'
@@ -181,7 +181,7 @@ export function buildDailySummaryMessage(
   now: Date,
 ): string {
   const lines: string[] = [
-    `${regimeIcon(decision.regime)} **ニュース過熱ゲート (Jev)：${describeRegime(decision.regime)}**`,
+    `${regimeIcon(decision.regime)} **ニュース急落ゲート (Jev)：${describeRegime(decision.regime)}**`,
     mode === 'enforce' ? '発注に反映されています' : '観測モード / 発注には影響しません',
     '',
   ]

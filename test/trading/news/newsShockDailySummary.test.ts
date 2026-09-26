@@ -136,7 +136,7 @@ describe('runNewsShockDailySummary', () => {
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
     expect(event.kind).toBe('news_shock_daily_summary')
-    expect(event.message).toContain('⚠️ **ニュース過熱ゲート (Jev)：警戒**')
+    expect(event.message).toContain('⚠️ **ニュース急落ゲート (Jev)：警戒**')
     expect(event.message).toContain('観測モード / 発注には影響しません')
     expect(event.message).toContain('OK 2件 / エラー 1件')
     expect(event.message).toContain('fetch_error 1')
@@ -154,7 +154,7 @@ describe('runNewsShockDailySummary', () => {
     const event = notifyMock.mock.calls[0]![0] as NotificationEvent
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
-    expect(event.message).toContain('❔ **ニュース過熱ゲート (Jev)：判定不能**')
+    expect(event.message).toContain('❔ **ニュース急落ゲート (Jev)：判定不能**')
     expect(event.message).toContain('現在値: 判定不能')
     expect(event.message).toContain('OK 0件 / エラー 0件')
     expect(event.severity).toBe('info')
@@ -214,7 +214,7 @@ describe('buildDailySummaryMessage', () => {
       'enforce',
       now,
     )
-    expect(message).toContain('🔴 **ニュース過熱ゲート (Jev)：過熱**')
+    expect(message).toContain('🔴 **ニュース急落ゲート (Jev)：急落**')
     expect(message).toContain('発注に反映されています')
   })
 })
