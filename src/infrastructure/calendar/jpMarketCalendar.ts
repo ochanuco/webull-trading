@@ -7,7 +7,7 @@ import { TSE_CLOSURES } from '../../trading/domain/tradingCalendar'
 
 // Fail-closed on years not yet added here, rather than trusting TSE_CLOSURES
 // alone — an un-added future year must not silently be treated as tradable.
-const TSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026])
+const TSE_SUPPORTED_YEARS: ReadonlySet<number> = new Set([2026, 2027])
 
 // See usMarketCalendar.ts for why formatToParts is used over `.format()`.
 const JP_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
