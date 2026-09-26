@@ -251,3 +251,15 @@ export interface Env {
 export interface Env {
   EXTENDED_HOURS_OBSERVATION_ENABLED?: string
 }
+
+
+// JEV_HEADLINE_EVAL_ENABLED: opt-in for `headlineEvalScheduler`, same
+// default-safe pattern as NEWS_ATTENTION_ENABLED / EXTENDED_HOURS_OBSERVATION_ENABLED.
+// AI: Workers AI binding. Typed as a minimal local shape rather than
+// @cloudflare/workers-types' `Ai` — that type's `run()` overloads are keyed
+// to a fixed model catalog and reject the `typesafe/jev` model id at
+// compile time since it isn't in that catalog.
+export interface Env {
+  JEV_HEADLINE_EVAL_ENABLED?: string
+  AI?: { run(model: string, input: unknown): Promise<unknown> }
+}

@@ -15,6 +15,8 @@ export interface StrategyDecisionRecord {
   clientOrderId?: string | null
   /** 判定トレース JSON (`DecisionTraceStep[]`)。ラダー可視化用。 */
   traceJson?: string | null
+  /** `HeadlineEvalSnapshot` JSON。observe-only、sizing/gates からは参照されない。 */
+  headlineEvalJson?: string | null
 }
 
 // Failures are logged and swallowed: a logging error must never crash the
@@ -35,6 +37,7 @@ export async function logStrategyDecision(
       indicatorsJson: record.indicatorsJson ?? null,
       clientOrderId: record.clientOrderId ?? null,
       traceJson: record.traceJson ?? null,
+      headlineEvalJson: record.headlineEvalJson ?? null,
     })
   } catch (error) {
     console.error(

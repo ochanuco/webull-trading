@@ -13,6 +13,7 @@
       { "name": "WEBULL_TOKEN_STATE", "class_name": "WebullTokenStateDO" }
     ]
   },
+  "ai": { "binding": "AI" },
   // #285: Cloudflare Workers RateLimit bindings. State-changing POST endpoints
   // get a tight cap, other admin writes a looser cap, dashboard GETs a soft
   // cap. `/events/trade` (bridge ingest) is intentionally NOT rate-limited —
@@ -80,6 +81,7 @@
           "migrations_dir": "drizzle"
         }
       ],
+      "ai": { "binding": "AI" },
       // #285: per-env RateLimit binding duplicate (wrangler 4 does NOT inherit
       // top-level `unsafe.bindings` into env.* blocks). See top-level comment.
       "unsafe": {
@@ -130,7 +132,9 @@
         // 取引経路からは参照されない観測専用 — gate 本体は
         // `global_config.extended_hours_gate_mode` (既定 off) が別途握る。
         // staging は cron 無し (#277) なので自動蓄積はされない — 手動 trigger 用。
-        "EXTENDED_HOURS_OBSERVATION_ENABLED": "true"
+        "EXTENDED_HOURS_OBSERVATION_ENABLED": "true",
+        // news_headline_eval の収集 flag。取引経路からは参照されない。
+        "JEV_HEADLINE_EVAL_ENABLED": "true"
       },
       "routes": [
         { "pattern": "trading-staging.chanu.co", "custom_domain": true }
@@ -150,6 +154,7 @@
           "migrations_dir": "drizzle"
         }
       ],
+      "ai": { "binding": "AI" },
       // #285: per-env RateLimit binding duplicate.
       "unsafe": {
         "bindings": [
@@ -196,7 +201,9 @@
         // opt-in flag。これ自体は取引判断に影響しない — gate は
         // `global_config.extended_hours_gate_mode` (既定 off) で別に握っており、
         // observe (shadow) で妥当性を見てから enforce に上げる。
-        "EXTENDED_HOURS_OBSERVATION_ENABLED": "true"
+        "EXTENDED_HOURS_OBSERVATION_ENABLED": "true",
+        // news_headline_eval の収集 flag。取引経路からは参照されない。
+        "JEV_HEADLINE_EVAL_ENABLED": "true"
       },
       "routes": [
         { "pattern": "trading.chanu.co", "custom_domain": true }
@@ -216,6 +223,7 @@
           "migrations_dir": "drizzle"
         }
       ],
+      "ai": { "binding": "AI" },
       // #285: per-env RateLimit binding duplicate.
       "unsafe": {
         "bindings": [
