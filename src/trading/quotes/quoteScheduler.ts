@@ -17,11 +17,18 @@ export interface SnapshotClient {
   getSnapshots(symbols: string[], category: WebullQuoteCategory): Promise<QuoteResult[]>
 }
 
+export interface QuoteFeedError {
+  category: WebullQuoteCategory
+  message: string
+  /** Set only for a per-symbol failure (DO stub lookup / setQuote); a category-level fetch throw leaves this unset. */
+  symbol?: string
+}
+
 export interface QuoteRunSummary {
   fetched: number
   persisted: number
   skipped: string[]
-  errors: Array<{ category: WebullQuoteCategory; message: string }>
+  errors: QuoteFeedError[]
   /** Primary snapshot source (`'yahoo-snapshot'` / `'webull-snapshot'`). */
   source: string
   /**
@@ -167,7 +174,7 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
       try {
         const stub = env.SYMBOL_STATE.get(env.SYMBOL_STATE.idFromName(symbol))
         if (!stub) {
-          summary.errors.push({ category: job.category, message: `Failed to get DO stub for ${symbol}` })
+          summary.errors.push({ category: job.category, symbol, message: `Failed to get DO stub for ${symbol}` })
           continue
         }
         await stub.setQuote(symbol, quote)
@@ -175,6 +182,7 @@ export async function runQuoteFeed(options: RunQuoteFeedOptions): Promise<QuoteR
       } catch (error) {
         summary.errors.push({
           category: job.category,
+          symbol,
           message: `Failed to persist ${symbol}: ${error instanceof Error ? error.message : String(error)}`,
         })
       }

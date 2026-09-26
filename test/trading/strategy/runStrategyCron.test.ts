@@ -768,7 +768,8 @@ describe('runStrategyCron', () => {
       expect(fetchSpy).toHaveBeenCalled()
       const calls = fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>
       const body = JSON.parse(String(calls[0]?.[1]?.body))
-      expect(body.text).toContain('CRITICAL')
+      expect(body.text).toContain('🚨')
+      expect(body.text).toContain('売買停止中 (ポートフォリオ停止)')
       expect(body.text).toContain('portfolio_halted')
     } finally {
       globalThis.fetch = originalFetch
