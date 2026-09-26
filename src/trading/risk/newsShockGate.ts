@@ -1,9 +1,10 @@
 /**
- * Scales down or blocks BUY size when recent GDELT report volume spikes vs.
- * baseline. SELL always passes through unscaled — never blocks an exit.
+ * Scales down or blocks BUY size on a Jev-classified market-headline shock
+ * (`news_headline_eval`). SELL always passes through unscaled — never
+ * blocks an exit.
  *
  * Never calls fetch: the caller does the D1 read (`newsShockDecision.ts`)
- * and passes observations in, so this stays a pure function and adds no
+ * and passes the latest row in, so this stays a pure function and adds no
  * external call to the strategy tick.
  */
 
@@ -13,50 +14,36 @@ export type NewsShockRegime = 'normal' | 'warning' | 'critical' | 'unknown'
 type AttentionStalePolicy = 'fail_open' | 'block_buy'
 
 export interface NewsShockGateConfig {
-  warnRatio: number
-  blockRatio: number
   warnSizeScale: number
-  toneDropThreshold: number
-  requireTone: boolean
-  baselineDays: number
-  minSamples: number
-  windowMin: number
-  maxAgeMin: number
   attentionStalePolicy: AttentionStalePolicy
 }
 
 export const DEFAULT_NEWS_SHOCK_CONFIG: NewsShockGateConfig = {
-  // warnRatio/blockRatio calibrated from trailing 12mo GDELT p90/p99.
-  warnRatio: 2.3,
-  blockRatio: 4.4,
   warnSizeScale: 0.5,
-  toneDropThreshold: 1.5,
-  requireTone: true,
-  baselineDays: 7,
-  minSamples: 200,
-  windowMin: 120,
-  maxAgeMin: 90,
   attentionStalePolicy: 'fail_open',
 }
 
-/** Maps to `attention_observation` rows with metric='volume'. */
-export interface NewsShockVolumeObservation {
-  bucketAt: string
-  value: number
-}
+// Provisional thresholds, not yet exposed via global_config: there is no
+// calibration data for the Jev shock-score distribution the way GDELT's
+// ratio thresholds had 12mo of history behind them. Revisit once
+// news_headline_eval has enough history to calibrate against.
+const CRITICAL_SHOCK_THRESHOLD = 0.8
+const WARNING_SHOCK_THRESHOLD = 0.5
+/** Collector and strategy cron both run on 15-minute slots, so a fresh row should never be far behind. */
+const STALE_MAX_AGE_MIN = 45
 
-/** Maps to `attention_observation` rows with metric='tone'. */
-export interface NewsShockToneObservation {
-  bucketAt: string
-  value: number
+/** The subset of a `news_headline_eval` row this gate needs; kept separate from the D1 row type so this module has no infrastructure dependency. */
+export interface NewsShockHeadlineRow {
+  evaluatedAt: string
+  status: string
+  shock: number | null
+  direction: string | null
 }
 
 export interface NewsShockGateInput {
-  /** Should cover the trailing `baselineDays`; order doesn't matter. */
-  volumeObservations: NewsShockVolumeObservation[]
-  /** May be empty when `requireTone=false`. */
-  toneObservations: NewsShockToneObservation[]
-  asOf: string
+  /** Latest news_headline_eval row at/before `now`, or null if none exists yet. */
+  row: NewsShockHeadlineRow | null
+  now: Date
 }
 
 export interface NewsShockGateDecision {
@@ -65,258 +52,112 @@ export interface NewsShockGateDecision {
   sizeScale: number
   /** Canonical English reason string for logs/notifications; see tests for the exact per-regime formats. */
   reason: string
-  /** windowMax / baselineMedian. null when not computed (unknown regime). */
-  ratio: number | null
-  /** baselineTone - latestTone. null when tone wasn't computed. */
-  toneDrop: number | null
+  /** Jev shock score (0-1) behind this decision; null for an unknown regime. */
+  shock: number | null
+  /** Jev direction classification ('risk_off' / 'risk_on' / 'mixed' / 'not_market_relevant'); null for an unknown regime. */
+  direction: string | null
+  /** `evaluated_at` of the row this decision was computed from; null when no row was found at all. */
+  rowEvaluatedAt: string | null
   asOf: string
 }
 
 /**
- * A config with NaN / inverted thresholds / out-of-range values (e.g. a D1
- * UPDATE typo) is sanitized field-by-field back to `DEFAULT_NEWS_SHOCK_CONFIG`
- * rather than rejected outright.
+ * A config with NaN / out-of-range values (e.g. a D1 UPDATE typo) is
+ * sanitized field-by-field back to `DEFAULT_NEWS_SHOCK_CONFIG` rather than
+ * rejected outright.
  */
 export function evaluateNewsShockGate(
   input: NewsShockGateInput,
   config: NewsShockGateConfig = DEFAULT_NEWS_SHOCK_CONFIG,
 ): NewsShockGateDecision {
   const sane = sanitizeNewsShockConfig(config)
-  const asOf = input.asOf
-  const asOfMs = Date.parse(asOf)
-  if (!Number.isFinite(asOfMs)) {
-    // Malformed asOf from the caller — fail open rather than throwing mid-tick.
-    return unavailableDecision(sane, asOf)
+  const asOf = input.now.toISOString()
+  const row = input.row
+
+  if (!row) {
+    return unknownDecision(sane, asOf, null, 'news_shock_unavailable_no_row')
   }
 
-  const volumes = filterFinite(input.volumeObservations)
-  const tones = filterFinite(input.toneObservations)
-
-  const latestBucketMs = maxBucketMs(volumes, asOfMs)
-  if (latestBucketMs === null || asOfMs - latestBucketMs > sane.maxAgeMin * 60_000) {
-    return unavailableDecision(sane, asOf)
+  const rowMs = Date.parse(row.evaluatedAt)
+  const ageMin = Number.isFinite(rowMs) ? (input.now.getTime() - rowMs) / 60_000 : Number.POSITIVE_INFINITY
+  if (ageMin > STALE_MAX_AGE_MIN) {
+    return unknownDecision(sane, asOf, row.evaluatedAt, `news_shock_unavailable_stale: ${formatAgeMin(ageMin)}min`)
+  }
+  if (row.status !== 'ok') {
+    return unknownDecision(sane, asOf, row.evaluatedAt, `news_shock_unavailable_status: ${row.status}`)
+  }
+  if (row.shock === null) {
+    return unknownDecision(sane, asOf, row.evaluatedAt, 'news_shock_unavailable_no_shock')
   }
 
-  const baselineSinceMs = asOfMs - sane.baselineDays * 24 * 60 * 60_000
-  const baselineValues = volumes
-    .filter((o) => {
-      const t = Date.parse(o.bucketAt)
-      return Number.isFinite(t) && t >= baselineSinceMs && t <= asOfMs
-    })
-    .map((o) => o.value)
-  if (baselineValues.length < sane.minSamples) {
-    return insufficientBaselineDecision(sane, asOf, baselineValues.length)
-  }
-  // Median over non-zero values only: a sparse probe is quiet (volume=0)
-  // more than 80% of the time, so a median over all points is always 0 and
-  // the ratio diverges. Zero windows still count on the window-max side —
-  // a quiet recent window correctly ratios to 0 / 'normal'.
-  const positiveBaselineValues = baselineValues.filter((v) => v > 0)
-  const baselineMedian = median(positiveBaselineValues)
-  if (!Number.isFinite(baselineMedian)) {
-    // Only reachable when every baseline value is zero (median([]) === NaN);
-    // kept as a guard rather than assumed unreachable.
-    return degenerateBaselineDecision(sane, asOf)
-  }
+  const ageText = formatAgeMin(ageMin)
+  const directionText = row.direction ?? 'unknown'
 
-  const windowSinceMs = asOfMs - sane.windowMin * 60_000
-  const windowValues = volumes
-    .filter((o) => {
-      const t = Date.parse(o.bucketAt)
-      return Number.isFinite(t) && t >= windowSinceMs && t <= asOfMs
-    })
-    .map((o) => o.value)
-  if (windowValues.length === 0) {
-    // Only reachable with a misconfigured maxAgeMin > windowMin; defensive fail-open.
-    return unavailableDecision(sane, asOf)
-  }
-  const windowMax = Math.max(...windowValues)
-  const ratio = windowMax / baselineMedian
-
-  const toneDrop = computeToneDrop(tones, baselineSinceMs, asOfMs)
-
-  if (ratio > sane.blockRatio) {
-    const toneOk = !sane.requireTone || (toneDrop !== null && toneDrop >= sane.toneDropThreshold)
-    if (toneOk) {
-      return {
-        regime: 'critical',
-        sizeScale: 0,
-        reason: `news_shock_critical: ${ratio.toFixed(1)}x${toneDrop !== null ? ` tone-${toneDrop.toFixed(1)}` : ''} (block)`,
-        ratio,
-        toneDrop,
-        asOf,
-      }
-    }
-    // Ratio alone doesn't escalate to critical — a volume spike without a
-    // tone drop reads as heavy positive coverage, not a shock; warning only.
+  if (row.shock >= CRITICAL_SHOCK_THRESHOLD && row.direction === 'risk_off') {
     return {
-      regime: 'warning',
-      sizeScale: sane.warnSizeScale,
-      reason: `news_shock_warning: ${ratio.toFixed(1)}x (size x${sane.warnSizeScale})`,
-      ratio,
-      toneDrop,
+      regime: 'critical',
+      sizeScale: 0,
+      reason: `news_shock_critical: shock=${row.shock.toFixed(2)} direction=${directionText} age=${ageText}m (block)`,
+      shock: row.shock,
+      direction: row.direction,
+      rowEvaluatedAt: row.evaluatedAt,
       asOf,
     }
   }
-  if (ratio > sane.warnRatio) {
+  if (row.shock >= WARNING_SHOCK_THRESHOLD) {
     return {
       regime: 'warning',
       sizeScale: sane.warnSizeScale,
-      reason: `news_shock_warning: ${ratio.toFixed(1)}x (size x${sane.warnSizeScale})`,
-      ratio,
-      toneDrop,
+      reason: `news_shock_warning: shock=${row.shock.toFixed(2)} direction=${directionText} age=${ageText}m (size x${sane.warnSizeScale})`,
+      shock: row.shock,
+      direction: row.direction,
+      rowEvaluatedAt: row.evaluatedAt,
       asOf,
     }
   }
   return {
     regime: 'normal',
     sizeScale: 1.0,
-    reason: `news_shock_normal: ${ratio.toFixed(1)}x`,
-    ratio,
-    toneDrop,
+    reason: `news_shock_normal: shock=${row.shock.toFixed(2)} direction=${directionText} age=${ageText}m`,
+    shock: row.shock,
+    direction: row.direction,
+    rowEvaluatedAt: row.evaluatedAt,
     asOf,
   }
 }
 
-function unavailableDecision(sane: NewsShockGateConfig, asOf: string): NewsShockGateDecision {
-  return {
-    regime: 'unknown',
-    sizeScale: sane.attentionStalePolicy === 'block_buy' ? 0 : 1.0,
-    reason: 'news_shock_unavailable_fallback_normal',
-    ratio: null,
-    toneDrop: null,
-    asOf,
-  }
-}
-
-function insufficientBaselineDecision(
+function unknownDecision(
   sane: NewsShockGateConfig,
   asOf: string,
-  sampleCount: number,
+  rowEvaluatedAt: string | null,
+  reason: string,
 ): NewsShockGateDecision {
   return {
     regime: 'unknown',
     sizeScale: sane.attentionStalePolicy === 'block_buy' ? 0 : 1.0,
-    reason: `news_shock_insufficient_baseline: ${sampleCount}/${sane.minSamples}`,
-    ratio: null,
-    toneDrop: null,
+    reason,
+    shock: null,
+    direction: null,
+    rowEvaluatedAt,
     asOf,
   }
 }
 
-function degenerateBaselineDecision(sane: NewsShockGateConfig, asOf: string): NewsShockGateDecision {
-  return {
-    regime: 'unknown',
-    sizeScale: sane.attentionStalePolicy === 'block_buy' ? 0 : 1.0,
-    reason: 'news_shock_degenerate_baseline: all-zero',
-    ratio: null,
-    toneDrop: null,
-    asOf,
-  }
-}
-
-function maxBucketMs(
-  observations: Array<{ bucketAt: string }>,
-  asOfMs: number,
-): number | null {
-  let max: number | null = null
-  for (const o of observations) {
-    const t = Date.parse(o.bucketAt)
-    if (!Number.isFinite(t) || t > asOfMs) continue
-    if (max === null || t > max) max = t
-  }
-  return max
-}
-
-function computeToneDrop(
-  tones: NewsShockToneObservation[],
-  baselineSinceMs: number,
-  asOfMs: number,
-): number | null {
-  const inRange = tones
-    .map((o) => ({ t: Date.parse(o.bucketAt), value: o.value }))
-    .filter((o) => Number.isFinite(o.t) && o.t >= baselineSinceMs && o.t <= asOfMs)
-  if (inRange.length === 0) return null
-  const baselineTone = median(inRange.map((o) => o.value))
-  let latest = inRange[0]!
-  for (const o of inRange) {
-    if (o.t > latest.t) latest = o
-  }
-  if (!Number.isFinite(baselineTone)) return null
-  return baselineTone - latest.value
-}
-
-function filterFinite<T extends { value: number }>(observations: T[]): T[] {
-  return observations.filter((o) => Number.isFinite(o.value))
-}
-
-function median(values: number[]): number {
-  if (values.length === 0) return Number.NaN
-  const sorted = [...values].sort((a, b) => a - b)
-  const mid = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!
-}
-
-/**
- * Exported (not just called internally) because `loadNewsShockDecision`
- * needs the sanitized `baselineDays` before it computes `sinceIso`, ahead
- * of calling `evaluateNewsShockGate` — which sanitizes again internally.
- * Calling it twice is safe: it's idempotent.
- */
-export function sanitizeNewsShockConfig(config: NewsShockGateConfig): NewsShockGateConfig {
-  const warnRatioRaw = isPositiveFinite(config.warnRatio)
-    ? config.warnRatio
-    : DEFAULT_NEWS_SHOCK_CONFIG.warnRatio
-  const blockRatioRaw = isPositiveFinite(config.blockRatio)
-    ? config.blockRatio
-    : DEFAULT_NEWS_SHOCK_CONFIG.blockRatio
-  // Inverted (warn > block) resets both to defaults rather than one — a
-  // half-applied fix is harder to reason about operationally than a clean default.
-  const ordered = warnRatioRaw <= blockRatioRaw
-  const warnRatio = ordered ? warnRatioRaw : DEFAULT_NEWS_SHOCK_CONFIG.warnRatio
-  const blockRatio = ordered ? blockRatioRaw : DEFAULT_NEWS_SHOCK_CONFIG.blockRatio
-  const warnSizeScale = isUnitInterval(config.warnSizeScale)
-    ? config.warnSizeScale
-    : DEFAULT_NEWS_SHOCK_CONFIG.warnSizeScale
-  const toneDropThreshold =
-    typeof config.toneDropThreshold === 'number' && Number.isFinite(config.toneDropThreshold) && config.toneDropThreshold >= 0
-      ? config.toneDropThreshold
-      : DEFAULT_NEWS_SHOCK_CONFIG.toneDropThreshold
-  const requireTone = typeof config.requireTone === 'boolean' ? config.requireTone : DEFAULT_NEWS_SHOCK_CONFIG.requireTone
-  const baselineDays = isPositiveInt(config.baselineDays)
-    ? config.baselineDays
-    : DEFAULT_NEWS_SHOCK_CONFIG.baselineDays
-  const minSamples = isPositiveInt(config.minSamples)
-    ? config.minSamples
-    : DEFAULT_NEWS_SHOCK_CONFIG.minSamples
-  const windowMin = isPositiveInt(config.windowMin) ? config.windowMin : DEFAULT_NEWS_SHOCK_CONFIG.windowMin
-  const maxAgeMin = isPositiveInt(config.maxAgeMin) ? config.maxAgeMin : DEFAULT_NEWS_SHOCK_CONFIG.maxAgeMin
-  const attentionStalePolicy: AttentionStalePolicy =
-    config.attentionStalePolicy === 'block_buy' || config.attentionStalePolicy === 'fail_open'
-      ? config.attentionStalePolicy
-      : DEFAULT_NEWS_SHOCK_CONFIG.attentionStalePolicy
-  return {
-    warnRatio,
-    blockRatio,
-    warnSizeScale,
-    toneDropThreshold,
-    requireTone,
-    baselineDays,
-    minSamples,
-    windowMin,
-    maxAgeMin,
-    attentionStalePolicy,
-  }
-}
-
-function isPositiveFinite(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-}
-
-function isPositiveInt(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value > 0
+function formatAgeMin(ageMin: number): string {
+  return Number.isFinite(ageMin) ? Math.round(ageMin).toString() : 'inf'
 }
 
 function isUnitInterval(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
+export function sanitizeNewsShockConfig(config: NewsShockGateConfig): NewsShockGateConfig {
+  const warnSizeScale = isUnitInterval(config.warnSizeScale)
+    ? config.warnSizeScale
+    : DEFAULT_NEWS_SHOCK_CONFIG.warnSizeScale
+  const attentionStalePolicy: AttentionStalePolicy =
+    config.attentionStalePolicy === 'block_buy' || config.attentionStalePolicy === 'fail_open'
+      ? config.attentionStalePolicy
+      : DEFAULT_NEWS_SHOCK_CONFIG.attentionStalePolicy
+  return { warnSizeScale, attentionStalePolicy }
 }

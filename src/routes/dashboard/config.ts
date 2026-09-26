@@ -214,48 +214,16 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     detail: 'VIX 警戒時 (warning ≤ VIX < critical) の発注数量倍率。0.5 = 半分に縮小。1.0 で縮小なし、0 で停止と同義。',
   },
   news_shock_mode: {
-    label: 'ニュース過熱ゲート モード',
-    detail: 'off (無効、既定) / observe (判定を記録するだけで数量は変えない) / enforce (実際に数量を縮小/停止)。',
-  },
-  news_shock_warn_ratio: {
-    label: 'ニュース過熱 警戒倍率',
-    detail: '直近報道量の最大値が baseline (直近の中央値) のこの倍率を超えたら警戒 (数量縮小)。2.3 が標準 (GDELT 実測 上位10%相当)。',
-  },
-  news_shock_block_ratio: {
-    label: 'ニュース過熱 緊急倍率',
-    detail: '警戒倍率に加え、この倍率を超え、かつ論調悪化条件も満たすと新規買いを全停止。4.4 が標準 (GDELT 実測 上位1%相当)。',
+    label: 'ニュース急落ゲート モード',
+    detail: 'Google/Yahoo 見出しの Jev 判定 (news_headline_eval) で動く。off (無効、既定) / observe (判定と Discord 通知のみで数量は変えない) / enforce (shock ≥ 0.5 で縮小、shock ≥ 0.8 かつ risk_off で新規買い停止)。',
   },
   news_shock_warn_size_scale: {
-    label: 'ニュース過熱 警戒時の発注数量縮小率 (比率)',
+    label: 'ニュース急落 警戒時の発注数量縮小率 (比率)',
     detail: '警戒時の発注数量倍率。0.5 = 半分に縮小。VIX の縮小率と乗算で合成される。',
   },
-  news_shock_tone_drop_threshold: {
-    label: 'ニュース過熱 論調悪化しきい値',
-    detail: '緊急停止に追加で要求する論調の悪化幅 (baseline 論調 − 直近論調)。報道量が増えただけ (好材料) では止めないための条件。',
-  },
-  news_shock_require_tone: {
-    label: 'ニュース過熱 論調条件を要求 (bool)',
-    detail: 'true (既定) で緊急停止に論調悪化を必須にする。false なら報道量急増だけで緊急停止しうる。',
-  },
-  news_shock_baseline_days: {
-    label: 'ニュース過熱 baseline 日数',
-    detail: '報道量の「通常水準」を測る trailing 日数。7 が標準。',
-  },
-  news_shock_min_samples: {
-    label: 'ニュース過熱 baseline 最小サンプル数',
-    detail: 'baseline 算出に必要な観測点の下限。未満なら判定不能扱い (縮小/停止しない)。200 が標準。',
-  },
-  news_shock_window_min: {
-    label: 'ニュース過熱 直近窓 (分)',
-    detail: '報道量の急増を見る直近窓の長さ。120分 (2時間) が標準。',
-  },
-  news_shock_max_age_min: {
-    label: 'ニュース過熱 観測の鮮度上限 (分)',
-    detail: '最新観測がこれより古いと判定不能 (stale) 扱い。90分が標準。',
-  },
   attention_stale_policy: {
-    label: 'ニュース観測 stale 時の挙動',
-    detail: 'fail_open (既定、判定不能なら通常通り BUY を許可) / block_buy (判定不能なら新規買いを止める、operator の明示的な安全側切替)。',
+    label: 'ニュース判定不能時の挙動',
+    detail: '最新の Jev 判定が無い・45分より古い・取得失敗のとき。fail_open (既定、通常通り BUY を許可) / block_buy (新規買いを止める、operator の明示的な安全側切替)。',
   },
 }
 

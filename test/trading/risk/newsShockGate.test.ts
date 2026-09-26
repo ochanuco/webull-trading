@@ -5,338 +5,143 @@ import {
   sanitizeNewsShockConfig,
   type NewsShockGateConfig,
   type NewsShockGateInput,
-  type NewsShockToneObservation,
-  type NewsShockVolumeObservation,
+  type NewsShockHeadlineRow,
 } from '../../../src/trading/risk/newsShockGate'
 
-// News shock gate (#196 follow-up, PR 2): pure function, no fetch — call-site wiring is
+// News shock gate (jev source swap): pure function, no fetch — call-site wiring is
 // covered separately by runStrategyCron.test.ts's regression guard.
 
-const ASOF = '2026-04-25T12:00:00.000Z'
-const ASOF_MS = Date.parse(ASOF)
+const NOW = new Date('2026-09-27T12:00:00.000Z')
 
-/** baseline (7日) 全域に均等分布する 200 点の volume 観測を作る。全点 value=1。 */
-function makeBaselineVolumes(count = 200, value = 1): NewsShockVolumeObservation[] {
-  const spanMs = 7 * 24 * 60 * 60_000
-  const stepMs = spanMs / count
-  const out: NewsShockVolumeObservation[] = []
-  for (let i = 0; i < count; i++) {
-    // 最後の点も asOf より手前に置く — window (2h) 用の spike は呼び出し側で別途 asOf に追加する
-    out.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
+function headlineRow(overrides: Partial<NewsShockHeadlineRow> = {}): NewsShockHeadlineRow {
+  return {
+    evaluatedAt: NOW.toISOString(),
+    status: 'ok',
+    shock: 0.1,
+    direction: 'risk_on',
+    ...overrides,
   }
-  return out
 }
 
-function withSpike(base: NewsShockVolumeObservation[], spike: number): NewsShockVolumeObservation[] {
-  return [...base, { bucketAt: ASOF, value: spike }]
-}
-
-describe('evaluateNewsShockGate — happy paths', () => {
-  it('returns normal when ratio is at 1.0x (no spike)', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 1),
-      toneObservations: [],
-      asOf: ASOF,
-    }
+describe('evaluateNewsShockGate — regime thresholds', () => {
+  it('returns normal below the warning threshold (0.5)', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.49 }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('normal')
     expect(decision.sizeScale).toBe(1.0)
-    expect(decision.reason).toBe('news_shock_normal: 1.0x')
-    expect(decision.ratio).toBe(1)
-    expect(decision.asOf).toBe(ASOF)
+    expect(decision.shock).toBe(0.49)
   })
 
-  it('returns normal exactly at the warn threshold (boundary uses strict >)', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 2.3),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('normal')
-    expect(decision.sizeScale).toBe(1.0)
-  })
-
-  it('returns warning between warn (excl.) and block (incl.) thresholds', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 2.8),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('warning')
-    expect(decision.sizeScale).toBe(0.5)
-    expect(decision.reason).toBe('news_shock_warning: 2.8x (size x0.5)')
-    expect(decision.ratio).toBe(2.8)
-  })
-
-  it('returns warning at the block boundary (=== block → still warning)', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 4.4),
-      toneObservations: [],
-      asOf: ASOF,
-    }
+  it('returns warning exactly at the 0.5 boundary (inclusive)', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.5, direction: 'mixed' }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('warning')
     expect(decision.sizeScale).toBe(0.5)
   })
 
-  it('returns critical when ratio exceeds block AND tone dropped enough', () => {
-    const tones: NewsShockToneObservation[] = [
-      { bucketAt: new Date(ASOF_MS - 24 * 60 * 60_000).toISOString(), value: 0 },
-      { bucketAt: new Date(ASOF_MS - 12 * 60 * 60_000).toISOString(), value: 0 },
-      { bucketAt: ASOF, value: -2.3 },
-    ]
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 5.1),
-      toneObservations: tones,
-      asOf: ASOF,
-    }
+  it('returns warning (not critical) at shock>=0.8 when direction is not risk_off', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.85, direction: 'mixed' }), now: NOW }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.regime).toBe('warning')
+    expect(decision.sizeScale).toBe(0.5)
+  })
+
+  it('returns warning (not critical) at shock>=0.8 with risk_on direction', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.99, direction: 'risk_on' }), now: NOW }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.regime).toBe('warning')
+  })
+
+  it('returns critical exactly at the 0.8 boundary (inclusive) with risk_off', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.8, direction: 'risk_off' }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('critical')
     expect(decision.sizeScale).toBe(0)
-    expect(decision.reason).toBe('news_shock_critical: 5.1x tone-2.3 (block)')
-    expect(decision.ratio).toBe(5.1)
-    expect(decision.toneDrop).toBeCloseTo(2.3, 5)
+    expect(decision.reason).toContain('shock=0.80')
+    expect(decision.reason).toContain('direction=risk_off')
+    expect(decision.reason).toContain('(block)')
+  })
+
+  it('returns critical above 0.8 with risk_off', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.94, direction: 'risk_off' }), now: NOW }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.regime).toBe('critical')
+    expect(decision.shock).toBe(0.94)
+    expect(decision.direction).toBe('risk_off')
+  })
+
+  it('uses warnSizeScale from config for the warning regime', () => {
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnSizeScale: 0.25 }
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6 }), now: NOW }
+    const decision = evaluateNewsShockGate(input, config)
+    expect(decision.sizeScale).toBe(0.25)
+    expect(decision.reason).toContain('size x0.25')
   })
 })
 
-describe('evaluateNewsShockGate — tone AND condition', () => {
-  it('does not escalate to critical when tone data is unavailable (requireTone=true default)', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 5.1),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('warning')
-    expect(decision.sizeScale).toBe(0.5)
-    expect(decision.reason).toBe('news_shock_warning: 5.1x (size x0.5)')
-    expect(decision.toneDrop).toBeNull()
-  })
-
-  it('does not escalate to critical when tone dropped less than toneDropThreshold', () => {
-    const tones: NewsShockToneObservation[] = [
-      { bucketAt: new Date(ASOF_MS - 24 * 60 * 60_000).toISOString(), value: 0 },
-      { bucketAt: ASOF, value: -0.5 }, // drop = 0.5 < default threshold 1.5
-    ]
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 5.1),
-      toneObservations: tones,
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('warning')
-    expect(decision.sizeScale).toBe(0.5)
-  })
-
-  it('escalates to critical without tone data when requireTone=false', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, requireTone: false }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 5.1),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    expect(decision.regime).toBe('critical')
-    expect(decision.sizeScale).toBe(0)
-    expect(decision.reason).toBe('news_shock_critical: 5.1x (block)')
-    expect(decision.toneDrop).toBeNull()
-  })
-})
-
-describe('evaluateNewsShockGate — fail-open (stale / insufficient baseline)', () => {
-  it('falls back to unknown/normal when there are no observations at all', () => {
-    const input: NewsShockGateInput = { volumeObservations: [], toneObservations: [], asOf: ASOF }
+describe('evaluateNewsShockGate — unknown (missing/stale/non-ok data)', () => {
+  it('returns unknown when there is no row at all', () => {
+    const input: NewsShockGateInput = { row: null, now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('unknown')
     expect(decision.sizeScale).toBe(1.0)
-    expect(decision.reason).toBe('news_shock_unavailable_fallback_normal')
-    expect(decision.ratio).toBeNull()
+    expect(decision.shock).toBeNull()
+    expect(decision.direction).toBeNull()
+    expect(decision.rowEvaluatedAt).toBeNull()
+    expect(decision.reason).toBe('news_shock_unavailable_no_row')
   })
 
-  it('falls back to unknown/normal when the latest observation is older than maxAgeMin', () => {
-    const staleBucket = new Date(ASOF_MS - 200 * 60_000).toISOString() // 200min > default 90min
-    const input: NewsShockGateInput = {
-      volumeObservations: [{ bucketAt: staleBucket, value: 1 }],
-      toneObservations: [],
-      asOf: ASOF,
-    }
+  it('returns unknown when the row is older than 45 minutes (stale, exclusive boundary)', () => {
+    const staleAt = new Date(NOW.getTime() - 46 * 60_000).toISOString()
+    const input: NewsShockGateInput = { row: headlineRow({ evaluatedAt: staleAt, shock: 0.9 }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('unknown')
-    expect(decision.sizeScale).toBe(1.0)
-    expect(decision.reason).toBe('news_shock_unavailable_fallback_normal')
+    expect(decision.reason).toContain('news_shock_unavailable_stale')
+    expect(decision.rowEvaluatedAt).toBe(staleAt)
   })
 
-  it('reports insufficient_baseline with the actual/expected sample count when below minSamples', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(83), 1),
-      toneObservations: [],
-      asOf: ASOF,
-    }
+  it('treats exactly 45 minutes old as still fresh (boundary is exclusive: only strictly older is stale)', () => {
+    const at45 = new Date(NOW.getTime() - 45 * 60_000).toISOString()
+    const input: NewsShockGateInput = { row: headlineRow({ evaluatedAt: at45, shock: 0.1 }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('unknown')
-    expect(decision.sizeScale).toBe(1.0)
-    expect(decision.reason).toBe('news_shock_insufficient_baseline: 84/200')
-  })
-
-  it('treats an all-zero baseline (enough samples, but every value is zero) as a distinct degenerate/unknown decision, not a divide-by-zero', () => {
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199, 0), 0),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('unknown')
-    expect(decision.sizeScale).toBe(1.0)
-    expect(decision.reason).toBe('news_shock_degenerate_baseline: all-zero')
-    expect(Number.isFinite(decision.ratio)).toBe(false)
-  })
-
-  it('blocks BUY on degenerate (all-zero) baseline too when attentionStalePolicy=block_buy', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, attentionStalePolicy: 'block_buy' }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199, 0), 0),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    expect(decision.regime).toBe('unknown')
-    expect(decision.sizeScale).toBe(0)
-    expect(decision.reason).toBe('news_shock_degenerate_baseline: all-zero')
-  })
-
-  it('computes ratio from the non-zero baseline median when the baseline is sparse (mostly zero with some real observations)', () => {
-    // market_selloff の典型分布を模す: 非ゼロ median = 0.1、window max = 0.5 → ratio = 5.0
-    const spanMs = 7 * 24 * 60 * 60_000
-    const stepMs = spanMs / 300
-    const baseline: NewsShockVolumeObservation[] = []
-    for (let i = 0; i < 300; i++) {
-      // 古い50点だけ非ゼロ、直近250点はゼロ (window はspike側の観測専用にしたいため)
-      const value = i < 50 ? 0.1 : 0
-      baseline.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
-    }
-    const tones: NewsShockToneObservation[] = [
-      { bucketAt: new Date(ASOF_MS - 24 * 60 * 60_000).toISOString(), value: 0 },
-      { bucketAt: new Date(ASOF_MS - 12 * 60 * 60_000).toISOString(), value: 0 },
-      { bucketAt: ASOF, value: -2.3 },
-    ]
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(baseline, 0.5),
-      toneObservations: tones,
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.ratio).toBeCloseTo(5.0, 5)
-    // 5.0 > blockRatio(4.4) かつ tone drop 条件も満たす
-    expect(decision.regime).toBe('critical')
-    expect(decision.sizeScale).toBe(0)
-  })
-
-  it('returns ratio=0 / normal when the baseline is sparse but the recent window is also quiet (all zero)', () => {
-    const spanMs = 7 * 24 * 60 * 60_000
-    const stepMs = spanMs / 300
-    const baseline: NewsShockVolumeObservation[] = []
-    for (let i = 0; i < 300; i++) {
-      // 古い50点だけ非ゼロ、直近250点はゼロ (window はspike側の観測専用にしたいため)
-      const value = i < 50 ? 0.1 : 0
-      baseline.push({ bucketAt: new Date(ASOF_MS - spanMs + i * stepMs).toISOString(), value })
-    }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(baseline, 0),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.ratio).toBe(0)
     expect(decision.regime).toBe('normal')
-    expect(decision.sizeScale).toBe(1.0)
   })
 
-  it('falls back to unknown when the latest observation passes maxAgeMin but misses the narrower window', () => {
-    // windowMin=30 < maxAgeMin(default 90); observation is 60min old
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, windowMin: 30 }
-    const input: NewsShockGateInput = {
-      volumeObservations: [
-        ...makeBaselineVolumes(200),
-        { bucketAt: new Date(ASOF_MS - 60 * 60_000).toISOString(), value: 1 },
-      ],
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
+  it('returns unknown when the row status is not ok (e.g. fetch_error)', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ status: 'fetch_error', shock: null }), now: NOW }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('unknown')
-    expect(decision.sizeScale).toBe(1.0)
+    expect(decision.reason).toBe('news_shock_unavailable_status: fetch_error')
+  })
+
+  it('returns unknown when status is ok but shock is null (defensive: malformed row)', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ status: 'ok', shock: null }), now: NOW }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.regime).toBe('unknown')
+    expect(decision.reason).toBe('news_shock_unavailable_no_shock')
   })
 
   it('blocks BUY (sizeScale=0) on unknown when attentionStalePolicy=block_buy', () => {
     const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, attentionStalePolicy: 'block_buy' }
-    const input: NewsShockGateInput = { volumeObservations: [], toneObservations: [], asOf: ASOF }
+    const input: NewsShockGateInput = { row: null, now: NOW }
     const decision = evaluateNewsShockGate(input, config)
     expect(decision.regime).toBe('unknown')
     expect(decision.sizeScale).toBe(0)
-    expect(decision.reason).toBe('news_shock_unavailable_fallback_normal')
   })
 
-  it('blocks BUY on insufficient_baseline too when attentionStalePolicy=block_buy', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, attentionStalePolicy: 'block_buy' }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(83), 1),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    expect(decision.regime).toBe('unknown')
-    expect(decision.sizeScale).toBe(0)
+  it('keeps sizeScale=1.0 on unknown with the default fail_open policy', () => {
+    const input: NewsShockGateInput = { row: null, now: NOW }
+    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+    expect(decision.sizeScale).toBe(1.0)
   })
 })
 
 describe('evaluateNewsShockGate — defensive config sanitize', () => {
-  it('falls back to defaults when warnRatio is NaN', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnRatio: Number.NaN }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 2.8),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    expect(decision.regime).toBe('warning') // default warnRatio=2.3 kicks in
-  })
-
-  it('falls back to defaults when thresholds are inverted (warn > block)', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnRatio: 10, blockRatio: 2 }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 2.8),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    // defaults (2.3 / 4.4) restored → 2.8x falls in warning band.
-    expect(decision.regime).toBe('warning')
-    expect(decision.sizeScale).toBe(0.5)
-  })
-
-  it('clamps invalid warnSizeScale to default (0.5)', () => {
+  it('clamps invalid warnSizeScale to the default (0.5)', () => {
     const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnSizeScale: 3 }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(199), 2.8),
-      toneObservations: [],
-      asOf: ASOF,
-    }
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6 }), now: NOW }
     const decision = evaluateNewsShockGate(input, config)
     expect(decision.sizeScale).toBe(0.5)
-  })
-
-  it('falls back to default minSamples when given a non-positive value', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, minSamples: -5 }
-    const input: NewsShockGateInput = {
-      volumeObservations: withSpike(makeBaselineVolumes(83), 1),
-      toneObservations: [],
-      asOf: ASOF,
-    }
-    const decision = evaluateNewsShockGate(input, config)
-    // default minSamples=200 restored → 84 samples still insufficient.
-    expect(decision.reason).toBe('news_shock_insufficient_baseline: 84/200')
   })
 
   it('falls back to default attentionStalePolicy when given an unrecognized value', () => {
@@ -344,60 +149,17 @@ describe('evaluateNewsShockGate — defensive config sanitize', () => {
       ...DEFAULT_NEWS_SHOCK_CONFIG,
       attentionStalePolicy: 'bogus',
     } as unknown as NewsShockGateConfig
-    const input: NewsShockGateInput = { volumeObservations: [], toneObservations: [], asOf: ASOF }
+    const input: NewsShockGateInput = { row: null, now: NOW }
     const decision = evaluateNewsShockGate(input, config)
     // default 'fail_open' restored → sizeScale stays 1.0, not blocked.
     expect(decision.sizeScale).toBe(1.0)
   })
 })
 
-// sanitizeNewsShockConfig の直接単体テスト (#619): runStrategyCron が sinceIso 計算前に呼ぶため
-// 返り値の各 field が有限/範囲内/順序正しいという契約を独立に固定する
-
 describe('sanitizeNewsShockConfig', () => {
   it('returns the input unchanged when everything is already valid', () => {
     const sane = sanitizeNewsShockConfig(DEFAULT_NEWS_SHOCK_CONFIG)
     expect(sane).toEqual(DEFAULT_NEWS_SHOCK_CONFIG)
-  })
-
-  it('replaces NaN baselineDays with the default (the exact regression this test guards)', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, baselineDays: Number.NaN }
-    const sane = sanitizeNewsShockConfig(config)
-    expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
-    expect(Number.isFinite(sane.baselineDays)).toBe(true)
-    expect(() => new Date(Date.now() - sane.baselineDays * 24 * 60 * 60_000).toISOString()).not.toThrow()
-  })
-
-  it('replaces non-finite / non-integer baselineDays variants (Infinity, 0, negative, float) with the default', () => {
-    for (const bad of [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -3, 2.5]) {
-      const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, baselineDays: bad }
-      const sane = sanitizeNewsShockConfig(config)
-      expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
-    }
-  })
-
-  it('replaces a non-number (string from a bad DB write) baselineDays with the default', () => {
-    const config = {
-      ...DEFAULT_NEWS_SHOCK_CONFIG,
-      baselineDays: 'not-a-number' as unknown as number,
-    } as NewsShockGateConfig
-    const sane = sanitizeNewsShockConfig(config)
-    expect(sane.baselineDays).toBe(DEFAULT_NEWS_SHOCK_CONFIG.baselineDays)
-  })
-
-  it('resets both warnRatio and blockRatio to defaults when out of range', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnRatio: Number.NaN, blockRatio: -1 }
-    const sane = sanitizeNewsShockConfig(config)
-    expect(sane.warnRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.warnRatio)
-    expect(sane.blockRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.blockRatio)
-  })
-
-  it('resets both warnRatio and blockRatio to defaults when their order is reversed', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnRatio: 10, blockRatio: 2 }
-    const sane = sanitizeNewsShockConfig(config)
-    expect(sane.warnRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.warnRatio)
-    expect(sane.blockRatio).toBe(DEFAULT_NEWS_SHOCK_CONFIG.blockRatio)
-    expect(sane.warnRatio).toBeLessThanOrEqual(sane.blockRatio)
   })
 
   it('clamps warnSizeScale outside [0,1] to the default', () => {
@@ -406,19 +168,6 @@ describe('sanitizeNewsShockConfig', () => {
       const sane = sanitizeNewsShockConfig(config)
       expect(sane.warnSizeScale).toBe(DEFAULT_NEWS_SHOCK_CONFIG.warnSizeScale)
     }
-  })
-
-  it('replaces non-positive-integer minSamples/windowMin/maxAgeMin with defaults', () => {
-    const config: NewsShockGateConfig = {
-      ...DEFAULT_NEWS_SHOCK_CONFIG,
-      minSamples: Number.NaN,
-      windowMin: -10,
-      maxAgeMin: 0,
-    }
-    const sane = sanitizeNewsShockConfig(config)
-    expect(sane.minSamples).toBe(DEFAULT_NEWS_SHOCK_CONFIG.minSamples)
-    expect(sane.windowMin).toBe(DEFAULT_NEWS_SHOCK_CONFIG.windowMin)
-    expect(sane.maxAgeMin).toBe(DEFAULT_NEWS_SHOCK_CONFIG.maxAgeMin)
   })
 
   it('replaces an unrecognized attentionStalePolicy with the default', () => {
@@ -431,7 +180,7 @@ describe('sanitizeNewsShockConfig', () => {
   })
 
   it('is idempotent (sanitizing an already-sanitized config is a no-op)', () => {
-    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, baselineDays: Number.NaN, warnRatio: -5 }
+    const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnSizeScale: -5 }
     const once = sanitizeNewsShockConfig(config)
     const twice = sanitizeNewsShockConfig(once)
     expect(twice).toEqual(once)

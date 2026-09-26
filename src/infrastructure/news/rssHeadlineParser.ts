@@ -18,7 +18,7 @@ const PUBDATE_RE = /<pubDate\b[^>]*>([\s\S]*?)<\/pubDate>/i
 const SOURCE_RE = /<source\b[^>]*>([\s\S]*?)<\/source>/i
 const CDATA_RE = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/
 
-export function decodeXmlText(raw: string): string {
+function decodeXmlText(raw: string): string {
   const cdataMatch = CDATA_RE.exec(raw)
   const text = cdataMatch ? cdataMatch[1]! : raw
   return text

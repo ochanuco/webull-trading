@@ -14,7 +14,6 @@ import { resolveAccessToken } from './infrastructure/webull/resolveAccessToken'
 import { createWebullReadClient } from './infrastructure/webull/WebullReadClient'
 import { runExtendedHoursObservation } from './trading/quotes/extendedHoursScheduler'
 import { runHeadlineEvalScheduler } from './trading/news/headlineEvalScheduler'
-import { runNewsScheduler } from './trading/news/newsScheduler'
 import { runNewsShockDailySummary } from './trading/news/newsShockDailySummary'
 import { runPortfolioRoll } from './trading/portfolio/runPortfolioRoll'
 import {
@@ -393,29 +392,7 @@ export default {
         },
       ),
     )
-    // Wired fully independent of quote/reconcile so a GDELT outage or rate limit can't
-    // propagate into the trading path. runNewsScheduler already swallows its own fetch/DB
-    // failures internally; the `.catch` here is defense in depth, not the primary guard.
-    ctx.waitUntil(
-      runNewsScheduler({ env, requestId })
-        .then((summary) => {
-          if (!summary.ran) return
-          console.log(
-            JSON.stringify({
-              event: 'news_scheduler_run',
-              requestId,
-              probeKey: summary.probeKey,
-              metric: summary.metric,
-              fetched: summary.fetched,
-              inserted: summary.inserted,
-              skipped: summary.skipped,
-            }),
-          )
-        })
-        .catch(() => undefined),
-    )
-    // Same isolation pattern as the news scheduler above: wired independent of
-    // quote/reconcile/strategy so a Yahoo outage can't propagate into the trading path.
+    // Wired independent of quote/reconcile/strategy so a Yahoo outage can't propagate into the trading path.
     ctx.waitUntil(
       runExtendedHoursObservation({ env, requestId })
         .then((summary) => {

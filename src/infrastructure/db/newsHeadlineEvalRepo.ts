@@ -1,9 +1,10 @@
 /**
- * Thin repo over `news_headline_eval`. Producer-only, like
- * `attentionObservationRepo` / `extendedHoursObservationRepo`: nothing in
- * strategy/risk/execution reads this table.
+ * Thin repo over `news_headline_eval`. Written by `headlineEvalScheduler`
+ * (producer) and read by `newsShockDecision.loadNewsShockDecision` (the only
+ * risk-side reader) plus `newsShockDailySummary` — everything else in
+ * strategy/risk/execution leaves this table alone.
  */
-import { desc, lte } from 'drizzle-orm'
+import { desc, gte, lte } from 'drizzle-orm'
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'
 import { newsHeadlineEval, type NewsHeadlineEvalRow } from './schema'
 
@@ -37,6 +38,8 @@ export interface NewsHeadlineEvalRepo {
   insertIgnore(record: NewsHeadlineEvalRecord): Promise<{ inserted: boolean }>
   /** Newest row at/before `atOrBeforeIso` across all sources, or null if none — the point-in-time read for strategy_decision_log. */
   fetchLatest(filter: { atOrBeforeIso: string }): Promise<NewsHeadlineEvalRow | null>
+  /** All rows with `evaluated_at >= sinceIso`, newest first — the coverage/shock window for the daily summary. */
+  fetchSince(sinceIso: string): Promise<NewsHeadlineEvalRow[]>
 }
 
 export function createNewsHeadlineEvalDb(d1: D1Database): NewsHeadlineEvalDb {
@@ -85,6 +88,14 @@ export function createNewsHeadlineEvalRepo(db: NewsHeadlineEvalDb): NewsHeadline
         .orderBy(desc(newsHeadlineEval.evaluatedAt))
         .limit(1)
       return rows[0] ?? null
+    },
+
+    async fetchSince(sinceIso) {
+      return db
+        .select()
+        .from(newsHeadlineEval)
+        .where(gte(newsHeadlineEval.evaluatedAt, sinceIso))
+        .orderBy(desc(newsHeadlineEval.evaluatedAt))
     },
   }
 }

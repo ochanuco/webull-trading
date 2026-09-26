@@ -84,6 +84,7 @@ describe('loadHeadlineEvalSnapshot', () => {
     const fetchLatest = vi.fn(async () => row())
     vi.mocked(createNewsHeadlineEvalRepo).mockReturnValue({
       insertIgnore: vi.fn(),
+      fetchSince: vi.fn(),
       fetchLatest,
     })
     const now = new Date('2026-09-26T12:15:00.000Z')
@@ -96,6 +97,7 @@ describe('loadHeadlineEvalSnapshot', () => {
   it('returns available:false reason:no_row when no row exists', async () => {
     vi.mocked(createNewsHeadlineEvalRepo).mockReturnValue({
       insertIgnore: vi.fn(),
+      fetchSince: vi.fn(),
       fetchLatest: vi.fn(async () => null),
     })
     const snapshot = await loadHeadlineEvalSnapshot({} as D1Database, new Date())
@@ -106,6 +108,7 @@ describe('loadHeadlineEvalSnapshot', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     vi.mocked(createNewsHeadlineEvalRepo).mockReturnValue({
       insertIgnore: vi.fn(),
+      fetchSince: vi.fn(),
       fetchLatest: vi.fn(async () => {
         throw new Error('D1 unavailable')
       }),
