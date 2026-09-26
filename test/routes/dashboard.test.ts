@@ -1954,11 +1954,12 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
     expect(html).not.toContain('前日比')
   })
 
-  it('サブ行に SMA50/high20d/low20d (最新の indicator 付き point から)', () => {
+  it('サブ行に SMA50/high10d/low20d (最新の indicator 付き point から)', () => {
     const html = renderPriceHeader(fakeChartWith([pt(100, true), pt(110)]))
     expect(html).toContain('SMA50')
     expect(html).toContain('60.00')
-    expect(html).toContain('high20d')
+    expect(html).toContain('high10d:')
+    expect(html).not.toContain('high20d:')
     expect(html).toContain('105.00')
   })
 
