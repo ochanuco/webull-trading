@@ -26,13 +26,16 @@ export function classifyRegimeSeverity<R extends string>(
   return 'info'
 }
 
-/** Any load failure (missing table, connection error, invalid stored value) falls back to null, i.e. treated as first observation. */
+/**
+ * null = no usable snapshot (treated as first observation); undefined = the read itself failed.
+ * An invalid stored value stays null rather than undefined so the next write can repair it.
+ */
 export async function loadRegimeSnapshot<R extends string>(
   db: D1Database,
   key: string,
   isValidRegime: (value: unknown) => value is R,
   requestId?: string,
-): Promise<R | null> {
+): Promise<R | null | undefined> {
   try {
     const drizzle = createDb(db)
     const rows = await drizzle
@@ -53,7 +56,7 @@ export async function loadRegimeSnapshot<R extends string>(
         message: error instanceof Error ? error.message : String(error),
       }),
     )
-    return null
+    return undefined
   }
 }
 

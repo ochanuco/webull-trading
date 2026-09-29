@@ -659,29 +659,33 @@ export async function runStrategyCron(
     const previousAlertLevel = env.DB
       ? await loadRegimeSnapshot(env.DB, NEWS_SHOCK_ALERT_LEVEL_KEY, isNewsShockRegime, options.requestId)
       : null
-    const nextAlertLevel = computeNextNewsShockAlertLevel(newsShockDecision.regime, previousAlertLevel)
-    // Notifying on the latched level (not the raw regime) collapses a
-    // critical->warning->critical flap into a single warning->critical
-    // notification, since the latch only moves down on a return to normal.
-    await detectAndNotifyRegimeChange({
-      db: env.DB,
-      notifier,
-      key: NEWS_SHOCK_ALERT_LEVEL_KEY,
-      current: { regime: nextAlertLevel, reason: newsShockDecision.reason },
-      rank: NEWS_SHOCK_REGIME_RANK,
-      criticalRegime: 'critical',
-      isValidRegime: isNewsShockRegime,
-      requestId: options.requestId,
-      headline: (from, to) => buildNewsShockRegimeHeadline(from, to, newsShockDecision, mode),
-    }).catch((err) => {
-      console.warn(
-        JSON.stringify({
-          event: 'news_shock_regime_change_detect_failed',
-          requestId: options.requestId,
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      )
-    })
+    // A failed read must not look like a first observation: that would overwrite a latched
+    // critical with the current warning and emit the very critical->warning flap the latch exists to hide.
+    if (previousAlertLevel !== undefined) {
+      const nextAlertLevel = computeNextNewsShockAlertLevel(newsShockDecision.regime, previousAlertLevel)
+      // Notifying on the latched level (not the raw regime) collapses a
+      // critical->warning->critical flap into a single warning->critical
+      // notification, since the latch only moves down on a return to normal.
+      await detectAndNotifyRegimeChange({
+        db: env.DB,
+        notifier,
+        key: NEWS_SHOCK_ALERT_LEVEL_KEY,
+        current: { regime: nextAlertLevel, reason: newsShockDecision.reason },
+        rank: NEWS_SHOCK_REGIME_RANK,
+        criticalRegime: 'critical',
+        isValidRegime: isNewsShockRegime,
+        requestId: options.requestId,
+        headline: (from, to) => buildNewsShockRegimeHeadline(from, to, newsShockDecision, mode),
+      }).catch((err) => {
+        console.warn(
+          JSON.stringify({
+            event: 'news_shock_regime_change_detect_failed',
+            requestId: options.requestId,
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        )
+      })
+    }
   }
   const newsShockGateOption =
     newsShockDecision && global.newsShockMode !== 'off'

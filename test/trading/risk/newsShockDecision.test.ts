@@ -268,6 +268,7 @@ describe('news_shock_alert_level notification episodes (computeNextNewsShockAler
   // on the latched value. The caller skips this entirely on 'unknown'.
   async function tick(db: D1Database, notifier: Notifier, currentRegime: NewsShockRegime) {
     const previous = await loadRegimeSnapshot(db, NEWS_SHOCK_ALERT_LEVEL_KEY, isNewsShockRegime)
+    if (previous === undefined) return { emitted: false }
     const next = computeNextNewsShockAlertLevel(currentRegime, previous)
     return detectAndNotifyRegimeChange<NewsShockRegime>({
       db,
