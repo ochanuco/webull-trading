@@ -136,11 +136,11 @@ describe('runNewsShockDailySummary', () => {
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
     expect(event.kind).toBe('news_shock_daily_summary')
-    expect(event.message).toContain('⚠️ **ニュース急落ゲート (Jev)：警戒**')
-    expect(event.message).toContain('観測モード / 発注には影響しません')
-    expect(event.message).toContain('OK 2件 / エラー 1件')
-    expect(event.message).toContain('fetch_error 1')
-    expect(event.message).toContain('最大 shock: **0.60**')
+    const lines = event.message.split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toBe('⚠️ ニュース急落ゲート：警戒 (観測のみ)')
+    expect(lines[1]).toBe('現在 shock 0.60 リスクオフ・09/27 21:00')
+    expect(lines[2]).toBe('24h 最大 0.60 (09/27 21:00)・取得 2/3・エラー 1件 (fetch_error 1など)')
     expect(event.severity).toBe('warning')
   })
 
@@ -154,9 +154,11 @@ describe('runNewsShockDailySummary', () => {
     const event = notifyMock.mock.calls[0]![0] as NotificationEvent
     expect(event.type).toBe('SUMMARY')
     if (event.type !== 'SUMMARY') throw new Error('unreachable')
-    expect(event.message).toContain('❔ **ニュース急落ゲート (Jev)：判定不能**')
-    expect(event.message).toContain('現在値: 判定不能')
-    expect(event.message).toContain('OK 0件 / エラー 0件')
+    const lines = event.message.split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toBe('❔ ニュース急落ゲート：判定不能 (観測のみ)')
+    expect(lines[1]).toBe('現在 判定不能 (news_shock_unavailable_no_row)')
+    expect(lines[2]).toBe('24h 最大 ―・取得 0/0')
     expect(event.severity).toBe('info')
   })
 
@@ -212,9 +214,11 @@ describe('buildDailySummaryMessage', () => {
       },
       { total: 10, okCount: 10, errorCounts: {}, maxShock: { value: 0.94, evaluatedAt: '2026-09-27T11:55:00.000Z', direction: 'risk_off' } },
       'enforce',
-      now,
     )
-    expect(message).toContain('🔴 **ニュース急落ゲート (Jev)：急落**')
-    expect(message).toContain('発注に反映されています')
+    const lines = message.split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toBe('🔴 ニュース急落ゲート：急落 (発注に反映)')
+    expect(lines[1]).toBe('現在 shock 0.94 リスクオフ・09/27 20:55')
+    expect(lines[2]).toBe('24h 最大 0.94 (09/27 20:55)・取得 10/10')
   })
 })
