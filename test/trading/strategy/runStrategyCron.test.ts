@@ -1363,6 +1363,7 @@ describe('runStrategyCron', () => {
         status: 'ok',
         error: null,
         model: 'jev-1.13.0',
+        questionVersion: 'v2',
         shock: 0.99,
         direction: 'risk_off',
         directionConfidence: 1,

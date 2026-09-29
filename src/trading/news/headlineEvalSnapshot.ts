@@ -20,6 +20,7 @@ export type HeadlineEvalSnapshot =
       evaluatedAt: string
       ageMin: number
       status: string
+      questionVersion: string | null
       shock: number | null
       direction: string | null
       directionConfidence: number | null
@@ -42,6 +43,7 @@ export function buildHeadlineEvalSnapshot(
     evaluatedAt: row.evaluatedAt,
     ageMin: Math.round((now.getTime() - Date.parse(row.evaluatedAt)) / 60_000),
     status: row.status,
+    questionVersion: row.questionVersion,
     shock: row.shock,
     direction: row.direction,
     directionConfidence: row.directionConfidence,
