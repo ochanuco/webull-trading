@@ -109,16 +109,16 @@ export function buildNewsShockRegimeHeadline(
   decision: NewsShockGateDecision,
   mode: 'observe' | 'enforce',
 ): string | undefined {
-  const shockText = decision.shock !== null ? `shock ${decision.shock.toFixed(2)}` : 'shock 算出不能'
+  const shockText = decision.shock !== null ? `${Math.round(decision.shock * 100)}%` : '算出不能'
   if (to === 'critical') {
     return mode === 'enforce'
-      ? `ニュース急落 (${shockText}) — 新規買い停止`
-      : `ニュース急落 (${shockText}) — 観測のみ`
+      ? `${shockText}：ニュース急落 — 新規買い停止`
+      : `${shockText}：ニュース急落 — 観測のみ`
   }
   if (to === 'warning') {
     return mode === 'enforce'
-      ? `ニュース悪化 (${shockText}) — 買い数量 x${decision.sizeScale}`
-      : `ニュース悪化 (${shockText}) — 観測のみ`
+      ? `${shockText}：ニュース悪化 — 買い数量 x${decision.sizeScale}`
+      : `${shockText}：ニュース悪化 — 観測のみ`
   }
   if (to === 'normal' && (from === 'warning' || from === 'critical')) {
     return 'ニュース平常に戻りました'

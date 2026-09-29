@@ -184,7 +184,7 @@ export function buildDailySummaryMessage(
 
   const line2 =
     decision.shock !== null && decision.rowEvaluatedAt
-      ? `現在 shock ${decision.shock.toFixed(2)} ${describeDirection(decision.direction)}・${formatJstStamp(decision.rowEvaluatedAt)}`
+      ? `現在 ${Math.round(decision.shock * 100)}% ${describeDirection(decision.direction)}・${formatJstStamp(decision.rowEvaluatedAt)}`
       : `現在 判定不能 (${describeUnavailable(decision.reason)})`
 
   const errorTotal = Object.values(stats.errorCounts).reduce((a, b) => a + b, 0)
@@ -195,7 +195,7 @@ export function buildDailySummaryMessage(
           .join(', ')})`
       : ''
   const line3 = stats.maxShock
-    ? `24h 最大 ${stats.maxShock.value.toFixed(2)} (${formatJstStamp(stats.maxShock.evaluatedAt)})・取得 ${stats.okCount}/${stats.total}${errorSuffix}`
+    ? `24h 最大 ${Math.round(stats.maxShock.value * 100)}% (${formatJstStamp(stats.maxShock.evaluatedAt)})・取得 ${stats.okCount}/${stats.total}${errorSuffix}`
     : `24h 最大 ―・取得 ${stats.okCount}/${stats.total}${errorSuffix}`
 
   return [line1, line2, line3].join('\n')
