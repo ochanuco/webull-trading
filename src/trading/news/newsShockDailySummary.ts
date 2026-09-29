@@ -185,14 +185,14 @@ export function buildDailySummaryMessage(
   const line2 =
     decision.shock !== null && decision.rowEvaluatedAt
       ? `現在 shock ${decision.shock.toFixed(2)} ${describeDirection(decision.direction)}・${formatJstStamp(decision.rowEvaluatedAt)}`
-      : `現在 判定不能 (${decision.reason})`
+      : `現在 判定不能 (${describeUnavailable(decision.reason)})`
 
   const errorTotal = Object.values(stats.errorCounts).reduce((a, b) => a + b, 0)
   const errorSuffix =
     errorTotal > 0
       ? `・エラー ${errorTotal}件 (${Object.entries(stats.errorCounts)
           .map(([status, count]) => `${status} ${count}`)
-          .join(', ')}など)`
+          .join(', ')})`
       : ''
   const line3 = stats.maxShock
     ? `24h 最大 ${stats.maxShock.value.toFixed(2)} (${formatJstStamp(stats.maxShock.evaluatedAt)})・取得 ${stats.okCount}/${stats.total}${errorSuffix}`
@@ -210,4 +210,10 @@ function formatJstStamp(evaluatedAtIso: string): string {
   const hh = String(jst.getUTCHours()).padStart(2, '0')
   const mi = String(jst.getUTCMinutes()).padStart(2, '0')
   return `${mm}/${dd} ${hh}:${mi}`
+}
+
+function describeUnavailable(reason: string): string {
+  if (reason.includes('_stale')) return '判定が古い'
+  if (reason.includes('_status')) return '取得/判定失敗'
+  return 'データなし'
 }

@@ -140,7 +140,7 @@ describe('runNewsShockDailySummary', () => {
     expect(lines).toHaveLength(3)
     expect(lines[0]).toBe('⚠️ ニュース急落ゲート：警戒 (観測のみ)')
     expect(lines[1]).toBe('現在 shock 0.60 リスクオフ・09/27 21:00')
-    expect(lines[2]).toBe('24h 最大 0.60 (09/27 21:00)・取得 2/3・エラー 1件 (fetch_error 1など)')
+    expect(lines[2]).toBe('24h 最大 0.60 (09/27 21:00)・取得 2/3・エラー 1件 (fetch_error 1)')
     expect(event.severity).toBe('warning')
   })
 
@@ -157,7 +157,7 @@ describe('runNewsShockDailySummary', () => {
     const lines = event.message.split('\n')
     expect(lines).toHaveLength(3)
     expect(lines[0]).toBe('❔ ニュース急落ゲート：判定不能 (観測のみ)')
-    expect(lines[1]).toBe('現在 判定不能 (news_shock_unavailable_no_row)')
+    expect(lines[1]).toBe('現在 判定不能 (データなし)')
     expect(lines[2]).toBe('24h 最大 ―・取得 0/0')
     expect(event.severity).toBe('info')
   })
