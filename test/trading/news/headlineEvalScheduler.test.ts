@@ -164,6 +164,7 @@ describe('runHeadlineEvalScheduler — no headlines', () => {
     expect(inserts).toHaveLength(1)
     expect(inserts[0]).toContain('no_headlines')
     expect(inserts[0]).toContain('yahoo_finance_rss')
+    expect(inserts[0]).toContain('v2')
   })
 })
 
@@ -197,6 +198,7 @@ describe('runHeadlineEvalScheduler — both sources fail', () => {
     expect(inserts).toHaveLength(1)
     expect(inserts[0]).toContain('fetch_error')
     expect(inserts[0]).toContain('yahoo_finance_rss')
+    expect(inserts[0]).toContain('v2')
     const combinedError = inserts[0]!.find(
       (v) => typeof v === 'string' && v.includes('Yahoo unreachable'),
     ) as string | undefined
@@ -217,6 +219,7 @@ describe('runHeadlineEvalScheduler — jev failure', () => {
     expect(summary.source).toBe('yahoo_finance_rss')
     expect(inserts[0]).toContain('jev_error')
     expect(inserts[0]).toContain('AI Gateway down')
+    expect(inserts[0]).toContain('v2')
   })
 
   it('AI の応答が壊れていても (state !== Completed) jev_error 行を書く', async () => {
@@ -249,6 +252,7 @@ describe('runHeadlineEvalScheduler — happy path', () => {
     expect(params).toContain('ok')
     expect(params).toContain('yahoo_finance_rss')
     expect(params).toContain('jev-1.13.0')
+    expect(params).toContain('v2')
     expect(params).toContain(0.94)
     expect(params).toContain('risk_off')
     expect(params).toContain(3.08)

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { classifyHeadlines, type JevAi } from '../../../src/infrastructure/news/jevHeadlineClassifier'
+import {
+  classifyHeadlines,
+  JEV_QUESTION_VERSION,
+  type JevAi,
+} from '../../../src/infrastructure/news/jevHeadlineClassifier'
 
 function fakeAi(run: (model: string, input: unknown) => Promise<unknown>): JevAi {
   return { run: vi.fn(run) }
@@ -52,6 +56,17 @@ describe('classifyHeadlines', () => {
     expect(model).toBe('typesafe/jev')
     expect((input as { state: unknown }).state).toEqual(['A', 'B'])
     expect((input as { questions: unknown }).questions).toBeDefined()
+  })
+
+  it('asks the v2 shock question (outsized selloff, not an ordinary down day)', async () => {
+    expect(JEV_QUESTION_VERSION).toBe('v2')
+    const run = vi.fn(async (_model: string, _input: unknown) => COMPLETED_SAMPLE)
+    const ai: JevAi = { run }
+    await classifyHeadlines(ai, ['A'])
+    const [, input] = run.mock.calls[0]!
+    const questions = (input as { questions: { shock: { instructions: string } } }).questions
+    expect(questions.shock.instructions).toContain('abnormal, outsized selloff or panic')
+    expect(questions.shock.instructions).not.toContain('sudden negative shock')
   })
 
   it('returns ok=false when ai.run rejects', async () => {
