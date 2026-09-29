@@ -50,13 +50,15 @@ import {
   type VixRegimeFilterDecision,
 } from '../risk/vixRegimeFilter'
 import { detectAndNotifyVixRegimeChange } from '../../infrastructure/notification/vixRegimeChange'
-import { detectAndNotifyRegimeChange } from '../../infrastructure/notification/regimeChange'
+import { detectAndNotifyRegimeChange, loadRegimeSnapshot } from '../../infrastructure/notification/regimeChange'
 import type { NewsShockGateDecision } from '../risk/newsShockGate'
 import {
   buildNewsShockRegimeHeadline,
+  computeNextNewsShockAlertLevel,
   isNewsShockGateReady,
   isNewsShockRegime,
   loadNewsShockDecision,
+  NEWS_SHOCK_ALERT_LEVEL_KEY,
   NEWS_SHOCK_REGIME_RANK,
 } from '../risk/newsShockDecision'
 import { isExtendedHoursGateReady, loadExtendedHoursGateDecisions } from '../risk/extendedHoursGate'
@@ -651,29 +653,39 @@ export async function runStrategyCron(
   }
   if (newsShockDecision && newsShockDecision.regime !== 'unknown') {
     // 'unknown' means missing data (collector outage / stale row), not a
-    // market state, so the unknown->normal recovery transition alone is
-    // suppressed — recovering from a data gap isn't itself actionable news.
+    // market state — skip the latch entirely so it neither escalates nor
+    // resets on a data gap.
     const mode = global.newsShockMode === 'enforce' ? 'enforce' : 'observe'
-    await detectAndNotifyRegimeChange({
-      db: env.DB,
-      notifier,
-      key: 'news_shock_regime',
-      current: { regime: newsShockDecision.regime, reason: newsShockDecision.reason },
-      rank: NEWS_SHOCK_REGIME_RANK,
-      criticalRegime: 'critical',
-      isValidRegime: isNewsShockRegime,
-      requestId: options.requestId,
-      shouldNotify: (from, to) => !(from === 'unknown' && to === 'normal'),
-      headline: (from, to) => buildNewsShockRegimeHeadline(from, to, newsShockDecision, mode),
-    }).catch((err) => {
-      console.warn(
-        JSON.stringify({
-          event: 'news_shock_regime_change_detect_failed',
-          requestId: options.requestId,
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      )
-    })
+    const previousAlertLevel = env.DB
+      ? await loadRegimeSnapshot(env.DB, NEWS_SHOCK_ALERT_LEVEL_KEY, isNewsShockRegime, options.requestId)
+      : null
+    // A failed read must not look like a first observation: that would overwrite a latched
+    // critical with the current warning and emit the very critical->warning flap the latch exists to hide.
+    if (previousAlertLevel !== undefined) {
+      const nextAlertLevel = computeNextNewsShockAlertLevel(newsShockDecision.regime, previousAlertLevel)
+      // Notifying on the latched level (not the raw regime) collapses a
+      // critical->warning->critical flap into a single warning->critical
+      // notification, since the latch only moves down on a return to normal.
+      await detectAndNotifyRegimeChange({
+        db: env.DB,
+        notifier,
+        key: NEWS_SHOCK_ALERT_LEVEL_KEY,
+        current: { regime: nextAlertLevel, reason: newsShockDecision.reason },
+        rank: NEWS_SHOCK_REGIME_RANK,
+        criticalRegime: 'critical',
+        isValidRegime: isNewsShockRegime,
+        requestId: options.requestId,
+        headline: (from, to) => buildNewsShockRegimeHeadline(from, to, newsShockDecision, mode),
+      }).catch((err) => {
+        console.warn(
+          JSON.stringify({
+            event: 'news_shock_regime_change_detect_failed',
+            requestId: options.requestId,
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        )
+      })
+    }
   }
   const newsShockGateOption =
     newsShockDecision && global.newsShockMode !== 'off'

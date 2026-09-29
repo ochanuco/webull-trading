@@ -161,7 +161,7 @@ describe('loadRegimeSnapshot / persistRegimeSnapshot — failure logging uses th
   it('logs `${key}_snapshot_load_failed` on load failure', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const result = await loadRegimeSnapshot(brokenDb(), KEY, isRegime, 'req-1')
-    expect(result).toBeNull()
+    expect(result).toBeUndefined()
     const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string)
     expect(logged.event).toBe('news_shock_regime_snapshot_load_failed')
     expect(logged.requestId).toBe('req-1')
