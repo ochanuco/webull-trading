@@ -41,6 +41,28 @@ export function isNewsShockRegime(value: unknown): value is NewsShockRegime {
   return value === 'unknown' || value === 'normal' || value === 'warning' || value === 'critical'
 }
 
+/** `config_state_snapshot` key for the latched alert level (see `computeNextNewsShockAlertLevel`), distinct from the raw per-tick regime. */
+export const NEWS_SHOCK_ALERT_LEVEL_KEY = 'news_shock_alert_level'
+
+/**
+ * Latches the notified alert level so shock hovering across the
+ * warning/critical boundary fires a notification only once per episode:
+ * an escalation sticks at its highest level until the regime fully recovers
+ * to normal, which is the only thing that resets the latch. `unknown` is a
+ * data gap rather than a market read, so it neither escalates nor resets —
+ * callers are expected to skip this entirely on an unknown tick rather than
+ * pass it in, but the fallback here keeps the function total.
+ */
+export function computeNextNewsShockAlertLevel(
+  current: NewsShockRegime,
+  previousLatched: NewsShockRegime | null,
+): NewsShockRegime {
+  if (current === 'unknown') return previousLatched ?? 'unknown'
+  if (current === 'normal') return 'normal'
+  if (previousLatched === null) return current
+  return NEWS_SHOCK_REGIME_RANK[previousLatched] >= NEWS_SHOCK_REGIME_RANK[current] ? previousLatched : current
+}
+
 /**
  * D1-reads the newest `news_headline_eval` row at/before `now` and evaluates
  * it with `evaluateNewsShockGate`. Never calls fetch itself — collecting
@@ -80,32 +102,28 @@ export async function loadNewsShockDecision(
   return evaluateNewsShockGate({ row, now }, config)
 }
 
-/** Human-readable headline for a `news_shock_regime` STATE_CHANGE notification; undefined falls back to the default "state change: ..." display. */
+/** Human-readable headline for a `news_shock_alert_level` STATE_CHANGE notification; undefined falls back to the default "state change: ..." display. */
 export function buildNewsShockRegimeHeadline(
   from: NewsShockRegime,
   to: NewsShockRegime,
   decision: NewsShockGateDecision,
   mode: 'observe' | 'enforce',
 ): string | undefined {
-  const shockText = decision.shock !== null ? `shock ${decision.shock.toFixed(2)}` : 'shock 算出不能'
-  const directionSuffix = decision.direction ? ` (${decision.direction})` : ''
+  const shockText = decision.shock !== null ? `${Math.round(decision.shock * 100)}%` : '算出不能'
   if (to === 'critical') {
-    const action =
-      mode === 'enforce' ? '新規買いを停止します' : '本来は新規買い停止 (observe中: 発注は変更しません)'
-    return `ニュース急落シグナル: ${shockText}${directionSuffix} で市場悪化を検知 — ${action}`
+    return mode === 'enforce'
+      ? `${shockText}：ニュース急落 (新規買い停止)`
+      : `${shockText}：ニュース急落 (観測のみ)`
   }
   if (to === 'warning') {
-    // No separate severity label (e.g. 警戒) — the ⚠️ icon already conveys it.
-    const action =
-      mode === 'enforce'
-        ? `新規買い数量を縮小します (x${decision.sizeScale})`
-        : 'observe中のため発注は変更しません'
-    return `ニュース悪化シグナル (${shockText}${directionSuffix}) — ${action}`
+    return mode === 'enforce'
+      ? `${shockText}：ニュース悪化 (買い数量 x${decision.sizeScale})`
+      : `${shockText}：ニュース悪化 (観測のみ)`
   }
   if (to === 'normal' && (from === 'warning' || from === 'critical')) {
-    return `ニュース悪化シグナル解除 — 平常に戻りました (現在${shockText})`
+    return 'ニュース平常に戻りました'
   }
-  // unknown→normal is data recovery, not a market signal — shouldNotify
-  // suppresses that transition entirely, so no headline is needed here.
+  // unknown→normal is data recovery, not a market signal — the caller skips
+  // notifying on an unknown tick entirely, so no headline is needed here.
   return undefined
 }

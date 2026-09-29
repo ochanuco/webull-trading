@@ -37,7 +37,7 @@ export async function loadVixRegimeSnapshot(
   db: D1Database,
   requestId?: string,
 ): Promise<VixRegime | null> {
-  return loadRegimeSnapshot(db, VIX_REGIME_SNAPSHOT_KEY, isVixRegime, requestId)
+  return (await loadRegimeSnapshot(db, VIX_REGIME_SNAPSHOT_KEY, isVixRegime, requestId)) ?? null
 }
 
 export async function persistVixRegimeSnapshot(

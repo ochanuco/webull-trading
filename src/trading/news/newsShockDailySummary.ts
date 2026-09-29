@@ -96,7 +96,7 @@ export async function runNewsShockDailySummary(env: Env, requestId: string): Pro
     const stats = summarizeRows(rows)
 
     const mode = global.newsShockMode === 'enforce' ? 'enforce' : 'observe'
-    const message = buildDailySummaryMessage(decision, stats, mode, now)
+    const message = buildDailySummaryMessage(decision, stats, mode)
     const severity = decision.regime === 'critical' ? 'critical' : decision.regime === 'warning' ? 'warning' : 'info'
 
     // Awaited, not fire-and-forget: this function IS the ctx.waitUntil task
@@ -173,53 +173,47 @@ function describeDirection(direction: string | null): string {
   }
 }
 
-/** Pure message builder, kept separate from the notify call so it's directly testable. */
+/** Pure message builder, kept separate from the notify call so it's directly testable. Always exactly 3 lines, no blank lines — a per-tick regime STATE_CHANGE already carries the alert-worthy detail. */
 export function buildDailySummaryMessage(
   decision: NewsShockGateDecision,
   stats: DailyRowStats,
   mode: 'observe' | 'enforce',
-  now: Date,
 ): string {
-  const lines: string[] = [
-    `${regimeIcon(decision.regime)} **ニュース急落ゲート (Jev)：${describeRegime(decision.regime)}**`,
-    mode === 'enforce' ? '発注に反映されています' : '観測モード / 発注には影響しません',
-    '',
-  ]
+  const modeLabel = mode === 'enforce' ? '発注に反映' : '観測のみ'
+  const line1 = `${regimeIcon(decision.regime)} ニュース急落ゲート：${describeRegime(decision.regime)} (${modeLabel})`
 
-  if (decision.shock !== null) {
-    const timePart = decision.rowEvaluatedAt ? ` ｜ ${formatDataTime(decision.rowEvaluatedAt, now)}` : ''
-    lines.push(`現在値: shock **${decision.shock.toFixed(2)}** ｜ ${describeDirection(decision.direction)}${timePart}`)
-  } else {
-    lines.push(`現在値: 判定不能 (${decision.reason})`)
-  }
+  const line2 =
+    decision.shock !== null && decision.rowEvaluatedAt
+      ? `現在 ${Math.round(decision.shock * 100)}% ${describeDirection(decision.direction)}・${formatJstStamp(decision.rowEvaluatedAt)}`
+      : `現在 判定不能 (${describeUnavailable(decision.reason)})`
 
-  lines.push('')
   const errorTotal = Object.values(stats.errorCounts).reduce((a, b) => a + b, 0)
-  const errorBreakdown =
+  const errorSuffix =
     errorTotal > 0
-      ? ` (${Object.entries(stats.errorCounts)
+      ? `・エラー ${errorTotal}件 (${Object.entries(stats.errorCounts)
           .map(([status, count]) => `${status} ${count}`)
           .join(', ')})`
       : ''
-  lines.push(`直近24時間: OK ${stats.okCount}件 / エラー ${errorTotal}件${errorBreakdown}`)
+  const line3 = stats.maxShock
+    ? `24h 最大 ${Math.round(stats.maxShock.value * 100)}% (${formatJstStamp(stats.maxShock.evaluatedAt)})・取得 ${stats.okCount}/${stats.total}${errorSuffix}`
+    : `24h 最大 ―・取得 ${stats.okCount}/${stats.total}${errorSuffix}`
 
-  if (stats.maxShock) {
-    lines.push(
-      `最大 shock: **${stats.maxShock.value.toFixed(2)}** (${describeDirection(stats.maxShock.direction)}) — ${formatDataTime(stats.maxShock.evaluatedAt, now)}`,
-    )
-  }
-
-  return lines.join('\n')
+  return [line1, line2, line3].join('\n')
 }
 
-function formatDataTime(evaluatedAtIso: string, now: Date): string {
+function formatJstStamp(evaluatedAtIso: string): string {
   const t = Date.parse(evaluatedAtIso)
   if (!Number.isFinite(t)) return '時刻不明'
   const jst = new Date(t + 9 * 60 * 60_000)
+  const mm = String(jst.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(jst.getUTCDate()).padStart(2, '0')
   const hh = String(jst.getUTCHours()).padStart(2, '0')
-  const mm = String(jst.getUTCMinutes()).padStart(2, '0')
-  const stamp = `${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${hh}:${mm} JST`
-  const lagHours = (now.getTime() - t) / (60 * 60_000)
-  const lagPart = lagHours >= 1 ? `（${lagHours.toFixed(1)}時間前）` : ''
-  return `${stamp}${lagPart}`
+  const mi = String(jst.getUTCMinutes()).padStart(2, '0')
+  return `${mm}/${dd} ${hh}:${mi}`
+}
+
+function describeUnavailable(reason: string): string {
+  if (reason.includes('_stale')) return '判定が古い'
+  if (reason.includes('_status')) return '取得/判定失敗'
+  return 'データなし'
 }
