@@ -112,13 +112,13 @@ export function buildNewsShockRegimeHeadline(
   const shockText = decision.shock !== null ? `${Math.round(decision.shock * 100)}%` : '算出不能'
   if (to === 'critical') {
     return mode === 'enforce'
-      ? `${shockText}：ニュース急落 — 新規買い停止`
-      : `${shockText}：ニュース急落 — 観測のみ`
+      ? `${shockText}：ニュース急落 (新規買い停止)`
+      : `${shockText}：ニュース急落 (観測のみ)`
   }
   if (to === 'warning') {
     return mode === 'enforce'
-      ? `${shockText}：ニュース悪化 — 買い数量 x${decision.sizeScale}`
-      : `${shockText}：ニュース悪化 — 観測のみ`
+      ? `${shockText}：ニュース悪化 (買い数量 x${decision.sizeScale})`
+      : `${shockText}：ニュース悪化 (観測のみ)`
   }
   if (to === 'normal' && (from === 'warning' || from === 'critical')) {
     return 'ニュース平常に戻りました'

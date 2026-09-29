@@ -149,28 +149,28 @@ describe('buildNewsShockRegimeHeadline', () => {
   it('describes a warning entry in observe mode as observation-only', () => {
     const d = decision({ regime: 'warning', sizeScale: 0.5, shock: 0.73, direction: 'mixed' })
     expect(buildNewsShockRegimeHeadline('normal', 'warning', d, 'observe')).toBe(
-      '73%：ニュース悪化 — 観測のみ',
+      '73%：ニュース悪化 (観測のみ)',
     )
   })
 
   it('describes a warning entry in enforce mode with the size-scale action', () => {
     const d = decision({ regime: 'warning', sizeScale: 0.5, shock: 0.73, direction: 'mixed' })
     expect(buildNewsShockRegimeHeadline('normal', 'warning', d, 'enforce')).toBe(
-      '73%：ニュース悪化 — 買い数量 x0.5',
+      '73%：ニュース悪化 (買い数量 x0.5)',
     )
   })
 
   it('describes a critical entry in observe mode as observation-only', () => {
     const d = decision({ regime: 'critical', sizeScale: 0, shock: 0.8, direction: 'risk_off' })
     expect(buildNewsShockRegimeHeadline('warning', 'critical', d, 'observe')).toBe(
-      '80%：ニュース急落 — 観測のみ',
+      '80%：ニュース急落 (観測のみ)',
     )
   })
 
   it('describes a critical entry in enforce mode as a buy stop', () => {
     const d = decision({ regime: 'critical', sizeScale: 0, shock: 0.8, direction: 'risk_off' })
     expect(buildNewsShockRegimeHeadline('warning', 'critical', d, 'enforce')).toBe(
-      '80%：ニュース急落 — 新規買い停止',
+      '80%：ニュース急落 (新規買い停止)',
     )
   })
 
