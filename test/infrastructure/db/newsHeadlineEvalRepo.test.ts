@@ -64,6 +64,7 @@ describe('createNewsHeadlineEvalRepo.insertIgnore', () => {
     const inserted = values[0] as Record<string, unknown>
     expect(inserted.error).toBeNull()
     expect(inserted.model).toBeNull()
+    expect(inserted.questionVersion).toBeNull()
     expect(inserted.shock).toBeNull()
     expect(inserted.requestId).toBeNull()
   })

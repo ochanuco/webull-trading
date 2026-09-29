@@ -19,6 +19,7 @@ import { YAHOO_FINANCE_SYMBOLS, YahooFinanceRssClient } from '../../infrastructu
 import type { RssHeadline } from '../../infrastructure/news/rssHeadlineParser'
 import {
   classifyHeadlines,
+  JEV_QUESTION_VERSION,
   type JevClassification,
   type JevClassifyResult,
 } from '../../infrastructure/news/jevHeadlineClassifier'
@@ -110,6 +111,7 @@ export async function runHeadlineEvalScheduler(
         status,
         error: extra.error ?? null,
         model: extra.classification?.model ?? null,
+        questionVersion: JEV_QUESTION_VERSION,
         shock: extra.classification?.answers.shock ?? null,
         direction: extra.classification?.answers.direction ?? null,
         directionConfidence: extra.classification?.answers.directionConfidence ?? null,

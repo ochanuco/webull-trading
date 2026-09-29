@@ -36,6 +36,7 @@ function row(overrides: Partial<NewsHeadlineEvalRow> = {}): NewsHeadlineEvalRow 
     status: 'ok',
     error: null,
     model: 'jev-1.13.0',
+    questionVersion: 'v2',
     shock: 0.1,
     direction: 'risk_on',
     directionConfidence: 1,

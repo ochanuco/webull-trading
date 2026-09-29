@@ -937,6 +937,8 @@ export const newsHeadlineEval = sqliteTable(
     status: text('status').notNull(),
     error: text('error'),
     model: text('model'),
+    /** Jev の質問文バージョン (`jevHeadlineClassifier.JEV_QUESTION_VERSION`)。既存行は 'v0' で backfill。 */
+    questionVersion: text('question_version'),
     shock: real('shock'),
     direction: text('direction'),
     directionConfidence: real('direction_confidence'),

@@ -6,25 +6,34 @@
  */
 const MODEL_ID = 'typesafe/jev'
 
+/**
+ * Bump this whenever the question text below changes — rows scored under
+ * different wordings are not comparable, so evaluation needs to tell them
+ * apart. v0's shock question ("a sudden negative shock... moving markets")
+ * scored an ordinary -0.7% day as high as real crashes, and asking for the
+ * "implied direction" leaned risk_off even on quiet days.
+ */
+export const JEV_QUESTION_VERSION = 'v2'
+
 const QUESTIONS = {
   shock: {
     type: 'noul',
     instructions:
-      'Do these headlines, taken together, report a sudden negative shock that is moving broad US equity markets right now?',
+      'Do these headlines report an abnormal, outsized selloff or panic in broad US equity markets right now, beyond an ordinary down day?',
     criteria: {
-      true: 'Multiple headlines describe an ongoing or just-occurred broad US market selloff, crash, panic, or a policy/geopolitical event that is actively driving one.',
+      true: 'Headlines describe an unusually large broad US market drop (on the order of 2% or more for major indexes, "worst day since", plunge, crash, rout, circuit breaker, VIX spike) or a policy/geopolitical shock actively driving one.',
       false:
-        'Headlines are routine commentary, forecasts, opinion, single-company news, non-US markets only, or old events being recapped.',
+        'Ordinary daily declines or gains (under about 1%), stocks "slip", "edge lower" or "fall" modestly, routine commentary, forecasts, futures chatter, single-company news, non-US markets only, or recaps of older events.',
     },
   },
   direction: {
     type: 'choice',
-    instructions: 'What is the dominant near-term direction implied for broad US equities?',
+    instructions: 'Which way are broad US equity indexes moving according to the most recent market headlines?',
     criteria: {
-      risk_off: 'Selling pressure, fear, falling indexes, flight to safety.',
-      risk_on: 'Relief rally, easing of a threat, rising indexes.',
-      mixed: 'Conflicting signals with no dominant direction.',
-      not_market_relevant: 'Headlines are not about financial markets or market-moving policy.',
+      risk_off: 'Indexes are falling or selling off.',
+      risk_on: 'Indexes are rising or rallying, including relief rallies after a selloff.',
+      mixed: 'Flat, or headlines disagree on the direction.',
+      not_market_relevant: 'No headline reports how broad US indexes are moving.',
     },
   },
   severity: {

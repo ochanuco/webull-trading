@@ -19,6 +19,7 @@ export interface NewsHeadlineEvalRecord {
   status: string
   error?: string | null
   model?: string | null
+  questionVersion?: string | null
   shock?: number | null
   direction?: string | null
   directionConfidence?: number | null
@@ -60,6 +61,7 @@ export function createNewsHeadlineEvalRepo(db: NewsHeadlineEvalDb): NewsHeadline
           status: record.status,
           error: record.error ?? null,
           model: record.model ?? null,
+          questionVersion: record.questionVersion ?? null,
           shock: record.shock ?? null,
           direction: record.direction ?? null,
           directionConfidence: record.directionConfidence ?? null,
