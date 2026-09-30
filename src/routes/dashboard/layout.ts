@@ -499,6 +499,7 @@ function layout(
   ${body}
   <div class="footer">画面生成時刻: ${esc(fmtJst(new Date()))}</div>
 </main>
+<script src="/dashboard/assets/telemetry.js" defer></script>
 </body>
 </html>`
 }

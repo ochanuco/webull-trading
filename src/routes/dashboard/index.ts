@@ -92,6 +92,7 @@ import {
 } from '../../infrastructure/db/extendedHoursObservationRepo'
 import { lifecycleBody } from './lifecycle'
 import { loadLifecycleReport } from '../../trading/analysis/lifecycleReport'
+import { telemetryDisabledJs, telemetryHost, telemetryJs } from './telemetry'
 export { safeJsonScript } from './shared'
 export { extractTokenFromPaste } from './webullToken'
 export { ALL_OVERVIEW_PANELS, parseOverviewPanels } from './overview'
@@ -240,6 +241,20 @@ export const dashboard = new Hono<DashboardBindings>()
     const state = await loadKillSwitchState(c.env)
     c.set('killSwitchState', state)
     await next()
+  })
+  .get('/assets/telemetry.js', (c) => {
+    const key = c.env.POSTHOG_KEY
+    // identify にユーザのメールを埋めるので、同一ブラウザでのユーザ切替を跨いで
+    // 再利用させない。
+    c.header('Cache-Control', 'no-store')
+    const js = key
+      ? telemetryJs({
+          key,
+          host: telemetryHost(c.env.POSTHOG_HOST),
+          distinctId: c.req.header('Cf-Access-Authenticated-User-Email') ?? null,
+        })
+      : telemetryDisabledJs
+    return c.body(js, 200, { 'Content-Type': 'text/javascript; charset=utf-8' })
   })
   .get('/', async (c) => {
     if (!c.env.DB) {
