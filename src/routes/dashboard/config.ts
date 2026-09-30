@@ -2,20 +2,23 @@ import { loadGlobalConfigFrom } from '../../infrastructure/db/globalConfigLoader
 import { loadSymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { ALL_OVERVIEW_PANELS, OVERVIEW_PANEL_LABELS, type OverviewPanel } from './overview'
 import { displaySymbol, esc, inactiveTooltip, isSymbolInactive } from './shared'
+import { FIELD_STYLE } from './webullToken'
 
 export function configBody(
   global: Awaited<ReturnType<typeof loadGlobalConfigFrom>>,
   universe: Awaited<ReturnType<typeof loadSymbolUniverse>>,
   overviewPanels: Set<OverviewPanel>,
 ): string {
-  const panelForm = `<details open>
-    <summary>ダッシュボード overview パネル表示</summary>
-    <form method="post" action="/dashboard/config/overview-panels" style="margin:8px 0;display:flex;flex-direction:column;gap:6px;max-width:560px">
-      ${ALL_OVERVIEW_PANELS.map((k) => `<label style="font-size:13px"><input type="checkbox" name="panels" value="${k}"${overviewPanels.has(k) ? ' checked' : ''}/> ${esc(OVERVIEW_PANEL_LABELS[k])}</label>`).join('')}
-      <div><button type="submit" style="padding:4px 12px;font-size:13px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer">保存</button></div>
-    </form>
-    <p class="muted" style="font-size:12px"><code>/dashboard</code> の overview に表示するパネル。全て OFF にすると全表示に戻ります。</p>
-  </details>`
+  const panelForm = `<div class="card">
+    <div class="card-head"><h2 class="card-title">ダッシュボード overview パネル表示</h2></div>
+    <div class="card-body">
+      <form method="post" action="/dashboard/config/overview-panels" style="display:flex;flex-direction:column;gap:2px;max-width:560px">
+        ${ALL_OVERVIEW_PANELS.map((k) => `<label class="field-check"><input type="checkbox" name="panels" value="${k}"${overviewPanels.has(k) ? ' checked' : ''}/> ${esc(OVERVIEW_PANEL_LABELS[k])}</label>`).join('')}
+        <div style="margin-top:6px"><button type="submit" class="btn primary">保存</button></div>
+      </form>
+      <p class="muted" style="font-size:12px;margin:8px 0 0"><code>/dashboard</code> の overview に表示するパネル。全て OFF にすると全表示に戻ります。</p>
+    </div>
+  </div>`
   // Keys stay in snake_case (not translated) so a row can be pasted straight into
   // `UPDATE global_config SET xxx = ...`; the Japanese explanation lives in its own column.
   const globalRows = Object.entries(global as unknown as Record<string, unknown>)
@@ -56,28 +59,34 @@ export function configBody(
         </tr>`
     })
     .join('')
-  return `${panelForm}
-  <p class="muted" style="font-size:12px;margin:0 0 10px">
-    設定変更は before/after が記録されます — <a href="/dashboard/audit">監査ログを見る →</a>
-  </p>
-  <details open>
-    <summary>グローバル設定 (global_config)</summary>
-    <table>
-      <thead><tr><th>Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
-      <tbody>${globalRows}</tbody>
-    </table>
-  </details>
-  <details open>
-    <summary>銘柄別設定 (symbol_config) — active ${universe.allowedSymbols.length} / inactive ${universe.inactiveSymbols.length} 銘柄</summary>
-    <p class="muted" style="font-size:12px">
-      inactive (active=0) 銘柄も表示しています。cron / risk gate の評価対象は active=1 のみで、
-      inactive 銘柄は灰色斜体・取消線で区別しています。再有効化は <code>UPDATE symbol_config SET active = 1 WHERE symbol = '...'</code>。
-    </p>
-    <table>
-      <thead><tr><th>銘柄</th><th>状態</th><th>通貨</th><th>1注文あたり上限 (max_notional)</th><th>インバース対 (inverse)</th><th>メモ (notes)</th></tr></thead>
-      <tbody>${symRows}</tbody>
-    </table>
-  </details>`
+  return `<style>${FIELD_STYLE}</style>
+  ${panelForm}
+
+  <div class="card">
+    <div class="card-head">
+      <h2 class="card-title">グローバル設定 (global_config)</h2>
+      <span class="card-actions"><a href="/dashboard/audit">監査ログ (before/after) →</a></span>
+    </div>
+    <div class="card-body tablewrap">
+      <table>
+        <thead><tr><th>Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
+        <tbody>${globalRows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2 class="card-title">銘柄別設定 (symbol_config) — active ${universe.allowedSymbols.length} / inactive ${universe.inactiveSymbols.length} 銘柄</h2>
+      <span class="info-tip" tabindex="0" aria-label="inactive 銘柄の扱い" data-tip="inactive (active=0) 銘柄も表示しています。cron / risk gate の評価対象は active=1 のみで、inactive 銘柄は灰色斜体・取消線で区別しています。再有効化は UPDATE symbol_config SET active = 1 WHERE symbol = '...'。">?</span>
+    </div>
+    <div class="card-body tablewrap">
+      <table>
+        <thead><tr><th>銘柄</th><th>状態</th><th>通貨</th><th>1注文あたり上限 (max_notional)</th><th>インバース対 (inverse)</th><th>メモ (notes)</th></tr></thead>
+        <tbody>${symRows}</tbody>
+      </table>
+    </div>
+  </div>`
 }
 
 interface ConfigKeyMeta {
