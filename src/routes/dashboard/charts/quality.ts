@@ -1,5 +1,4 @@
-import { kpiCard } from '../overview'
-import { esc, safeJsonScript } from '../shared'
+import { esc, fmtNumber, safeJsonScript } from '../shared'
 import { type ChartsBodyQuality, type QualityPeriod, ECHARTS_CDN, QUALITY_PERIOD_LABELS } from './shared'
 
 /** Per-trade realized PnL — one row per SELL fill (`realized_pnl` is null on BUY rows). */
@@ -204,64 +203,93 @@ export async function loadSkipReasonBreakdown(db: D1Database): Promise<SkipReaso
   return aggregateSkipReasonRows(result.results ?? [])
 }
 
-const NUM_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '—')
 const PCT_FMT = (n: number) => (Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—')
 const PF_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '∞')
-/** 正/負の色分けは既存サイト慣習 (`.ok` = 緑 #057a55 / `.err` = 赤 #c22) に揃える。 */
+/** Sign before the $ mark, comma-grouped via `fmtNumber` (`+$170.02`, `-$12,345.67`) — these are all $ PnL figures, never a bare number. */
+const MONEY_FMT = (n: number) => (Number.isFinite(n) ? `${n >= 0 ? '+' : '-'}$${fmtNumber(Math.abs(n))}` : '—')
 const signClass = (n: number) => (n > 0 ? 'ok' : n < 0 ? 'err' : 'muted')
 
 function renderPeriodPills(period: QualityPeriod): string {
   const periods: QualityPeriod[] = ['30d', '90d', 'all']
   const links = periods
     .map((p) => {
-      const active = p === period ? ' active' : ''
-      return `<a class="zoom-preset${active}" style="text-decoration:none" href="/dashboard/charts?tab=quality&period=${p}">${esc(QUALITY_PERIOD_LABELS[p])}</a>`
+      const cls = p === period ? ' class="active"' : ''
+      return `<a${cls} href="/dashboard/charts?tab=quality&period=${p}">${esc(QUALITY_PERIOD_LABELS[p])}</a>`
     })
     .join('')
-  return `<div style="margin-bottom:10px">${links}</div>`
+  return `<div class="seg" style="margin-bottom:12px">${links}</div>`
 }
 
-// Fixed ~640px width fits an X screenshot. Value font shrunk to 18px
-// (from kpiCard's default 22px) since this 3-column grid is denser than
-// overview's KPI strip.
+/**
+ * 640px-wide tile (spec: this exact card gets screenshotted for X posts).
+ * Custom markup rather than `overview.ts`'s `kpiCard()`: that helper's
+ * label-then-value stack has no room for a hero row (bigger value, two
+ * secondary stats beside it) or for the row2/row3 divider grid below, both
+ * asked for explicitly — reusing it would mean fighting its layout with
+ * overrides rather than just writing the shape once.
+ *
+ * Row 1 (hero) sits on `--surface-2` with no inner border; rows 2-3 are
+ * flat cells divided by 1px rules (no per-cell card chrome). `min-width:0`
+ * on every value plus `font-variant-numeric:tabular-nums` (`.perf-*` rules,
+ * `CHARTS_PAGE_STYLE`) keeps a long value (`+$12,345.67`) from overflowing
+ * its cell instead of shrinking the grid track to fit it.
+ */
 function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
-  const tile = (label: string, text: string, cls?: string) =>
-    kpiCard(label, `<span style="font-size:18px" class="${cls ?? ''}">${esc(text)}</span>`)
-  const tiles = [
-    tile('件数', String(stats.count)),
-    tile('勝率', PCT_FMT(stats.winRate)),
-    tile('profit factor', PF_FMT(stats.profitFactor)),
-    tile('勝', String(stats.wins), 'ok'),
-    tile('負', String(stats.losses), 'err'),
-    tile('合計 PnL', NUM_FMT(stats.total), signClass(stats.total)),
-    tile('平均利益', NUM_FMT(stats.avgWin), 'ok'),
-    tile('平均損失', NUM_FMT(stats.avgLoss), 'err'),
-    tile('期待値 (トレード毎)', NUM_FMT(stats.expectancy), signClass(stats.expectancy)),
+  const cell = (label: string, text: string, cls?: string) =>
+    `<div class="perf-cell"><div class="perf-cell-label">${esc(label)}</div><div class="perf-cell-value ${cls ?? ''}">${esc(text)}</div></div>`
+  const wideCell = (label: string, text: string, cls?: string) =>
+    `<div class="perf-cell perf-cell-wide"><div class="perf-cell-label">${esc(label)}</div><div class="perf-cell-value ${cls ?? ''}">${esc(text)}</div></div>`
+  // TradeStats has no per-trade max-win/max-loss, so row 3 is 勝/負 spanning
+  // 2 columns each rather than 4 single cells matching row 2's width.
+  const cells = [
+    cell('profit factor', PF_FMT(stats.profitFactor)),
+    cell('期待値 (トレード毎)', MONEY_FMT(stats.expectancy), signClass(stats.expectancy)),
+    cell('平均利益', MONEY_FMT(stats.avgWin), 'ok'),
+    cell('平均損失', MONEY_FMT(stats.avgLoss), 'err'),
+    wideCell('勝', String(stats.wins), 'ok'),
+    wideCell('負', String(stats.losses), 'err'),
   ].join('')
-  return `<div class="panel" style="max-width:640px">
-    <div class="panel-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</div>
-    <p class="muted" style="font-size:11px;margin:-8px 0 12px">as of ${esc(asOfJst)}</p>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">${tiles}</div>
+  return `<div class="card" style="width:640px;box-sizing:border-box">
+    <div class="card-head">
+      <span class="card-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</span>
+      <span class="card-actions muted" style="font-size:11px">as of ${esc(asOfJst)}</span>
+    </div>
+    <div class="perf-hero-row">
+      <div class="perf-hero">
+        <div class="perf-hero-label">合計 PnL</div>
+        <div class="perf-hero-value ${signClass(stats.total)}">${esc(MONEY_FMT(stats.total))}</div>
+      </div>
+      <div class="perf-hero-secondary">
+        <div class="perf-stat"><div class="perf-cell-label">件数</div><div class="perf-stat-value">${stats.count}</div></div>
+        <div class="perf-stat"><div class="perf-cell-label">勝率</div><div class="perf-stat-value">${esc(PCT_FMT(stats.winRate))}</div></div>
+      </div>
+    </div>
+    <div class="perf-cell-grid">${cells}</div>
   </div>`
 }
 
 function renderSymbolTable(symbolStats: SymbolStat[]): string {
-  if (symbolStats.length === 0) return ''
+  if (symbolStats.length === 0) return `<div class="empty">まだ銘柄別の確定損益がありません。</div>`
   const rows = symbolStats
     .map(
       (s) => `<tr>
         <td>${esc(s.symbol)}</td>
         <td class="num">${s.count}</td>
         <td class="num">${PCT_FMT(s.winRate)}</td>
-        <td class="num ${signClass(s.totalPnl)}">${NUM_FMT(s.totalPnl)}</td>
+        <td class="num ${signClass(s.totalPnl)}">${MONEY_FMT(s.totalPnl)}</td>
         <td class="num">${PF_FMT(s.profitFactor)}</td>
       </tr>`,
     )
     .join('')
-  return `<table style="margin-top:16px;max-width:640px">
-    <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計PnL</th><th class="num">PF</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>`
+  return `<div class="card">
+    <div class="card-head"><span class="card-title">銘柄別 成績</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計PnL</th><th class="num">PF</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`
 }
 
 export function renderQualityTab(args: ChartsBodyQuality): string {
@@ -270,31 +298,41 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
   }
   const symbolBarChart =
     args.symbolStats.length > 0
-      ? `<div id="symbol-pnl-chart" style="width:100%;max-width:640px;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:16px"></div>`
+      ? `<div class="card">
+        <div class="card-head"><span class="card-title">銘柄別 合計PnL</span></div>
+        <div id="symbol-pnl-chart" style="width:100%;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px"></div>
+      </div>`
       : ''
+  // The bar chart stacks under the table in the same right-hand column
+  // (rather than full-width below the row) so the two columns read as a
+  // matched pair against the fixed 640px hero card, instead of the right
+  // column ending noticeably shorter than the left.
   const tradeSection = args.hasTradeData
     ? `${renderPeriodPills(args.period)}
-      ${renderStatsCard(args.stats, args.period, args.asOfJst)}
-      ${renderSymbolTable(args.symbolStats)}
-      ${symbolBarChart}`
+      <div class="quality-perf-row">
+        ${renderStatsCard(args.stats, args.period, args.asOfJst)}
+        <div>${renderSymbolTable(args.symbolStats)}${symbolBarChart}</div>
+      </div>`
     : ''
   const skipSection =
     args.skipBreakdown.length > 0
-      ? `<div id="skip-reason-chart" style="width:100%;height:340px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:20px"></div>`
+      ? `<div class="card">
+        <div class="card-head"><span class="card-title">日次 SKIP 理由内訳</span></div>
+        <div id="skip-reason-chart" style="width:100%;height:340px"></div>
+      </div>`
       : ''
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') return;
+      if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
+      var t = window.wtTokens ? window.wtTokens() : {};
       var data = window.__chartData;
       var barEl = document.getElementById('symbol-pnl-chart');
       if (barEl && data.symbolStats && data.symbolStats.length > 0) {
-        var barChart = echarts.init(barEl);
         var symbols = data.symbolStats.map(function (s) { return s.symbol; });
-        barChart.setOption({
-          title: { text: '銘柄別 合計PnL', left: 'center', textStyle: { fontSize: 14 } },
+        window.wtChart(barEl, {
           tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-          grid: { left: 70, right: 60, top: 40, bottom: 20 },
-          xAxis: { type: 'value', splitLine: { lineStyle: { color: '#eee' } } },
+          grid: { left: 70, right: 60, top: 20, bottom: 20 },
+          xAxis: { type: 'value', splitLine: { lineStyle: { color: t.border } } },
           yAxis: { type: 'category', data: symbols, inverse: true },
           series: [{
             type: 'bar',
@@ -303,7 +341,7 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
               var positive = s.totalPnl >= 0;
               return {
                 value: s.totalPnl,
-                itemStyle: { color: positive ? '#057a55' : '#c22', borderRadius: 3 },
+                itemStyle: { color: positive ? t.up : t.down, borderRadius: 3 },
                 label: {
                   show: true,
                   position: positive ? 'right' : 'left',
@@ -314,18 +352,15 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
             }),
           }],
         });
-        window.addEventListener('resize', function () { barChart.resize(); });
       }
       var skipEl = document.getElementById('skip-reason-chart');
       if (skipEl && data.skipBreakdown && data.skipBreakdown.length > 0) {
-        var skipChart = echarts.init(skipEl);
         var dates = data.skipBreakdown.map(function (p) { return p.date; });
         var categories = data.skipCategories;
-        skipChart.setOption({
-          title: { text: '日次 SKIP 理由内訳', left: 'center', textStyle: { fontSize: 14 } },
+        window.wtChart(skipEl, {
           tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-          legend: { top: 22, data: categories.map(function (c) { return c.label; }) },
-          grid: { left: 50, right: 20, top: 60, bottom: 40 },
+          legend: { top: 4, data: categories.map(function (c) { return c.label; }) },
+          grid: { left: 50, right: 20, top: 40, bottom: 40 },
           xAxis: { type: 'category', data: dates },
           yAxis: { type: 'value', name: '件数' },
           series: categories.map(function (c) {
@@ -333,12 +368,11 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
               name: c.label,
               type: 'bar',
               stack: 'skip',
-              itemStyle: { color: c.color, borderWidth: 2, borderColor: '#fff' },
+              itemStyle: { color: c.color, borderWidth: 2, borderColor: t.surface },
               data: data.skipBreakdown.map(function (p) { return p.counts[c.key] || 0; }),
             };
           }),
         });
-        window.addEventListener('resize', function () { skipChart.resize(); });
       }
     });
   `

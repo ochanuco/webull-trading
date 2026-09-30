@@ -223,9 +223,10 @@ describe('GET /dashboard/charts?tab=overview (equity enhance SSR)', () => {
     const res = await app.request('/dashboard/charts?tab=overview', {}, env as never)
     expect(res.status).toBe(200)
     const body = await res.text()
+    // PnL + drawdown share one echarts instance (two grids, linked
+    // axisPointer) since #ui-redesign — no separate dd-chart container.
     expect(body).toContain('id="equity-chart"')
-    expect(body).toContain('id="dd-chart"')
-    expect(body).toContain('期間別リターン')
+    expect(body).toContain('期間別の確定損益')
     expect(body).toContain('id="monthly-chart"')
     expect(body).toContain('1週間')
     expect(body).toContain('年初来')

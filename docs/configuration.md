@@ -124,3 +124,22 @@ warning / critical への突入と、そこからの解除のみ (日本語見�
 
 - Cloudflare Access JWT で `/trade/*` / `/webull/*` / `/admin/*` / `/dashboard/*` / `/mcp` を保護 (#29)
 - state 変更 / admin write / dashboard GET は Workers Rate Limit binding で cap (#285)
+
+## dashboard telemetry (PostHog)
+
+ダッシュボードの UI/UX 改善のため、ブラウザ上での操作ログを PostHog に送る。MCP /
+API を直接叩く操作はブラウザを通らないため対象外。
+
+`POSTHOG_KEY` secret（`wrangler secret put POSTHOG_KEY --env=<env>`）を設定すると
+有効になる。未設定なら `GET /dashboard/assets/telemetry.js` は何も初期化しない空の
+JS を返し、telemetry は完全に無効。`POSTHOG_HOST` は省略時 `https://us.i.posthog.com`
+（https 以外を指定した場合もこの既定に fallback）。
+
+Cloudflare Access で認証されたメールアドレス（`Cf-Access-Authenticated-User-Email`
+ヘッダ）があれば `posthog.identify` でそのユーザーとして識別する。ヘッダが無い
+リクエストは匿名のままキャプチャされる。
+
+autocapture・pageview（charts ページの symbol 切替は pushState なので
+`history_change` モード）・pageleave に加えセッションリプレイの入力欄マスクも
+有効化しているが、リプレイの記録自体は PostHog 側のプロジェクト設定でも有効化が
+必要。

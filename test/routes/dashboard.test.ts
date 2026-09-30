@@ -233,11 +233,27 @@ describe('dashboard', () => {
       expect(body).toContain('期待値 (トレード毎)')
       expect(body).toContain('SOXL')
       expect(body).toContain('TQQQ')
-      expect(body).toMatch(/<a class="zoom-preset active"[^>]*href="\/dashboard\/charts\?tab=quality&period=90d"/)
+      expect(body).toMatch(/<a class="active"[^>]*href="\/dashboard\/charts\?tab=quality&period=90d"/)
       expect(body).toContain('href="/dashboard/charts?tab=quality&period=30d"')
       expect(body).toContain('href="/dashboard/charts?tab=quality&period=all"')
       expect(body).toContain('id="skip-reason-chart"')
       expect(body).toContain('銘柄ロール抑止')
+    })
+
+    it('大きな合計PnLでもカンマ区切り + $ 符号付きで hero セルに描画される (#quality-hero-overflow)', async () => {
+      const app = createApp()
+      const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString()
+      const env = {
+        ...baseEnv,
+        DB: fakeQualityDb(
+          [{ pnl: 12345.67, symbol: 'SOXL', timestamp: daysAgo(1) }],
+          [],
+        ),
+      }
+      const res = await app.request('/dashboard/charts?tab=quality', { headers: authHeader }, env)
+      const body = await res.text()
+      // カンマ区切り (fmtNumber 経由) — toFixed(2) の桁溢れ検証も兼ねる
+      expect(body).toContain('class="perf-hero-value ok">+$12,345.67</div>')
     })
 
     it('trade データが無ければ成績カードは省略し、SKIP breakdown のみ出す', async () => {
@@ -1922,7 +1938,7 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
     expect(html).toContain('▲')
     expect(html).toContain('+2.00%')
     expect(html).toContain('(+2.00)')
-    expect(html).toContain('#d23f31') // 上昇 = 赤
+    expect(html).toContain('var(--down)') // 上昇 = 赤 (--down トークンを流用)
     expect(html).toContain('前日比')
   })
 
@@ -1930,7 +1946,7 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
     const html = renderPriceHeader(fakeChartWith([pt(100), pt(97)]))
     expect(html).toContain('▼')
     expect(html).toContain('-3.00%')
-    expect(html).toContain('#188038') // 下落 = 緑
+    expect(html).toContain('var(--up)') // 下落 = 緑 (--up トークンを流用)
   })
 
   it('JPY 銘柄は ¥ + 整数表示', () => {
@@ -2175,8 +2191,10 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     expect(html).toContain('INACTIVE: liquidity dropped')
     // 旧 inline picker の「| 切替:」は出ない
     expect(html).not.toContain('切替:')
-    // active な focus も本文側に見出しを出す (注記なし)
-    expect(html).toContain('銘柄: <strong>')
+    // active な focus はチャートヘッダー行がティッカー/名称を示す (注記なし) —
+    // 旧「銘柄: X」見出しはチャート表示では冗長なため削除済み (#ui-redesign)
+    expect(html).toContain('<span class="symbol-ticker">TQQQ</span>')
+    expect(html).toContain('<span class="symbol-name">ProShares UltraPro QQQ</span>')
     expect(html).not.toContain('inactive —')
   })
 
@@ -2192,7 +2210,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
       availableSymbols: ['SOXL', 'TQQQ'],
       universe,
     })
-    expect(html).toContain('銘柄: <strong>')
+    expect(html).toContain('<span class="symbol-ticker">TQQQ</span>')
     expect(html).toContain('inactive — paused for review')
   })
 
@@ -2213,12 +2231,11 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     // latestCronPrice=80 を現在値として大きく表示
     expect(html).toContain('$80.00')
     expect(html).toContain('前日比')
-    // range ピルは chart container の直後 (chart-pin 内、チャート直下に出す)
+    // range seg はヘッダー行 (チャートより前) に出す — チャート直下には置かない (#ui-redesign)
     const chartIdx = html.indexOf('id="symbol-chart"')
-    const pillIdx = html.indexOf('class="zoom-preset"')
-    const panelIdx = html.indexOf('入場まで')
-    expect(pillIdx).toBeGreaterThan(chartIdx)
-    if (panelIdx >= 0) expect(pillIdx).toBeLessThan(panelIdx)
+    const pillIdx = html.indexOf('id="chart-range-seg"')
+    expect(pillIdx).toBeGreaterThanOrEqual(0)
+    expect(pillIdx).toBeLessThan(chartIdx)
   })
 
   // 入場ゲート説明/判定トレースとグラフを同時に見せるため、チャートは sticky 固定にする
@@ -2316,7 +2333,7 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
       // stop=96 → (96-104)/104=-7.69%、TP=107 → (107-104)/104=+2.88%
       expect(value).toContain('stop まで -7.7%')
       expect(value).toContain('TP まで +2.9%')
-      expect(color).toBe('#3a3a3c')
+      expect(color).toBe('var(--text)')
     })
 
     it('未保有 + buyable: 入場条件充足の結論', () => {
@@ -2328,7 +2345,7 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
       )
       const { value, color } = renderConclusionValue(view, null, baseParams, 95)
       expect(value).toContain('入場条件 充足')
-      expect(color).toBe('#057a55')
+      expect(color).toBe('var(--up)')
     })
 
     it('未保有 + 価格まであと X%: ボトルネックゲート名を併記', () => {
@@ -2338,13 +2355,13 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
       )
       const { value, color } = renderConclusionValue(view, null, baseParams, 200)
       expect(value).toContain('入場まで あと 価格')
-      expect(color).toBe('#b25000')
+      expect(color).toBe('var(--warn)')
     })
 
     it('buyability null: 判定データなし', () => {
       const { value, color } = renderConclusionValue(null, null, baseParams, null)
       expect(value).toBe('判定データなし')
-      expect(color).toBe('#86868b')
+      expect(color).toBe('var(--text-3)')
     })
   })
 
@@ -2453,9 +2470,9 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
   describe('renderEffectiveRuleChips', () => {
     it('stop / TP / time-stop を effective 値の chip で出す', () => {
       const html = renderEffectiveRuleChips(baseParams)
-      expect(html).toContain('class="chip">stop -4.0%</span>')
-      expect(html).toContain('class="chip">TP +7.0%</span>')
-      expect(html).toContain('class="chip">time-stop 10営業日</span>')
+      expect(html).toContain('stop -4.0%</span>')
+      expect(html).toContain('TP +7.0%</span>')
+      expect(html).toContain('time-stop 10営業日</span>')
     })
   })
 })
@@ -2503,7 +2520,7 @@ describe('renderSymbolTab — fold 内サマリ / サブタブ分離 (#charts-sy
     const html = renderSymbolTab(baseArgs())
     expect(html).toContain('<span class="subnav-link active">チャート</span>')
     expect(html).toContain('href="/dashboard/charts?tab=symbol&symbol=TQQQ&view=detail">履歴・設定</a>')
-    expect(html).toContain('class="judgment-grid"')
+    expect(html).toContain('class="judgment-row"')
     expect(html).toContain('未保有') // 保有状態カード (position=null)
     expect(html).toContain('SKIP (見送り)') // 直近判定カード
     expect(html).not.toContain('判定履歴') // renderSymbolDecisionHistory の見出し
@@ -2521,7 +2538,7 @@ describe('renderSymbolTab — fold 内サマリ / サブタブ分離 (#charts-sy
     expect(html).toContain('href="/dashboard/charts?tab=symbol&symbol=TQQQ">チャート</a>')
     expect(html).toContain('判定履歴') // renderSymbolDecisionHistory
     expect(html).toContain('戦略パラメータ (PullbackUptrendStrategy')
-    expect(html).not.toContain('class="judgment-grid"')
+    expect(html).not.toContain('class="judgment-row"')
     expect(html).not.toContain('id="symbol-chart"')
     expect(html).not.toContain('id="decision-trace-panel"')
   })
@@ -2534,7 +2551,7 @@ describe('renderSymbolTab — fold 内サマリ / サブタブ分離 (#charts-sy
     const html = renderSymbolTab(baseArgs({ buyability: view }))
     const detailsIdx = html.indexOf('<details style="margin-top:10px">')
     const summaryIdx = html.indexOf('入場まで — ゲートチェックリスト・距離推移')
-    const gridIdx = html.indexOf('class="judgment-grid"')
+    const gridIdx = html.indexOf('class="judgment-row"')
     expect(detailsIdx).toBeGreaterThanOrEqual(0)
     expect(summaryIdx).toBeGreaterThan(detailsIdx)
     // 判断サマリ grid は details より前 (fold 上部)
@@ -2616,7 +2633,8 @@ describe('renderZoomPresetButtons', () => {
     expect(html).toContain('>5日<')
     expect(html).toContain('>1か月<')
     expect(html).toContain('>最大<')
-    expect(html.match(/class="zoom-preset"/g)?.length).toBe(4)
+    expect(html).toContain('class="seg" id="chart-range-seg"')
+    expect(html.match(/<button/g)?.length).toBe(4)
   })
 
   it('1D ボタンの from は lastTimestamp - 1day、to は lastTimestamp', () => {

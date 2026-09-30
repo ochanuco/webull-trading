@@ -8,6 +8,7 @@ import type { EarningsCalendarRow, MacroEventCalendarRow } from '../../infrastru
 import { extractActor, recordChange } from '../../infrastructure/db/configAuditLog'
 import { type DashboardBindings, renderLayout } from './layout'
 import { displaySymbol, esc, inactiveTooltip, isSymbolInactive, unavailable } from './shared'
+import { FIELD_STYLE } from './webullToken'
 
 /** Form input echoed back on a validation failure so the operator doesn't retype it. */
 export interface EventsEarningsFormEcho {
@@ -290,8 +291,8 @@ export function eventsBody(args: EventsBodyArgs): string {
 
   const earningsTable =
     earnings.length === 0
-      ? '<p class="muted">この範囲には登録された決算がありません。</p>'
-      : `<table>
+      ? '<p class="empty">この範囲には登録された決算がありません。</p>'
+      : `<div class="tablewrap"><table>
     <thead><tr>
       <th>銘柄<br><span class="muted" style="font-size:10px">symbol</span></th>
       <th>決算日<br><span class="muted" style="font-size:10px">event_date</span></th>
@@ -314,12 +315,12 @@ export function eventsBody(args: EventsBodyArgs): string {
         </tr>`
       })
       .join('')}</tbody>
-  </table>`
+  </table></div>`
 
   const macroTable =
     macros.length === 0
-      ? '<p class="muted">この範囲には登録されたマクロイベントがありません。</p>'
-      : `<table>
+      ? '<p class="empty">この範囲には登録されたマクロイベントがありません。</p>'
+      : `<div class="tablewrap"><table>
     <thead><tr>
       <th>イベント種別<br><span class="muted" style="font-size:10px">event_type</span></th>
       <th>備考<br><span class="muted" style="font-size:10px">国 / notes</span></th>
@@ -336,39 +337,48 @@ export function eventsBody(args: EventsBodyArgs): string {
         </tr>`
       })
       .join('')}</tbody>
-  </table>`
+  </table></div>`
 
-  return `<p class="muted">期間: ${esc(from)} 〜 ${esc(to)} (now-30d 〜 now+30d)。<code>earnings_calendar</code> / <code>macro_event_calendar</code> は risk gate の avoid ソースです。
+  return `<style>${FIELD_STYLE}</style>
+  <p class="muted" style="margin:0 0 12px">期間: ${esc(from)} 〜 ${esc(to)} (now-30d 〜 now+30d)。<code>earnings_calendar</code> / <code>macro_event_calendar</code> は risk gate の avoid ソースです。
   add は <code>now-90d 〜 now+365d</code> の範囲に clamp します。delete は audit に記録されます。</p>
 
-<h2 class="sub-head">決算 (earnings)</h2>
-${earningsErr}
-${earningsNotice}
-<details${earningsFormOpen} style="margin-bottom:12px">
-  <summary style="cursor:pointer">+ 追加</summary>
-  <form method="post" action="/dashboard/events/earnings/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-    <label>銘柄<br><input name="symbol" value="${esc(eEcho.symbol)}" placeholder="AAPL / 7203" required maxlength="16" style="padding:4px 8px;width:140px"></label>
-    <label>決算日<br><input name="earnings_date" type="date" value="${esc(eEcho.earningsDate)}" required style="padding:4px 8px"></label>
-    <label>備考 (任意)<br><input name="notes" value="${esc(eEcho.notes)}" placeholder="Q2 2026 BMO" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
-    <button type="submit" style="padding:6px 14px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">追加</button>
-  </form>
-</details>
-${earningsTable}
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">決算 (earnings)</h2></div>
+    <div class="card-body">
+      ${earningsErr}
+      ${earningsNotice}
+      <details${earningsFormOpen} style="margin-bottom:12px">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px">+ 追加</summary>
+        <form method="post" action="/dashboard/events/earnings/seed" class="field-row" style="margin-top:10px">
+          <div class="field"><label>銘柄</label><input name="symbol" value="${esc(eEcho.symbol)}" placeholder="AAPL / 7203" required maxlength="16" style="width:140px"></div>
+          <div class="field"><label>決算日</label><input name="earnings_date" type="date" value="${esc(eEcho.earningsDate)}" required></div>
+          <div class="field"><label>備考 (任意)</label><input name="notes" value="${esc(eEcho.notes)}" placeholder="Q2 2026 BMO" maxlength="256" style="min-width:240px"></div>
+          <div class="field"><button type="submit" class="btn primary">追加</button></div>
+        </form>
+      </details>
+      ${earningsTable}
+    </div>
+  </div>
 
-<h2 class="sub-head">マクロイベント (macro)</h2>
-${macroErr}
-${macroNotice}
-<details${macroFormOpen} style="margin-bottom:12px">
-  <summary style="cursor:pointer">+ 追加</summary>
-  <form method="post" action="/dashboard/events/macro/seed" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-    <label>イベント種別<br><input name="event_type" value="${esc(mEcho.eventType)}" placeholder="FOMC / CPI / NFP" required maxlength="32" style="padding:4px 8px;width:160px"></label>
-    <label>国 (任意)<br><input name="country" value="${esc(mEcho.country)}" placeholder="US / JP" maxlength="16" style="padding:4px 8px;width:100px"></label>
-    <label>発生日<br><input name="event_date" type="date" value="${esc(mEcho.eventDate)}" required style="padding:4px 8px"></label>
-    <label>備考 (任意)<br><input name="notes" value="${esc(mEcho.notes)}" placeholder="June FOMC" maxlength="256" style="padding:4px 8px;min-width:240px"></label>
-    <button type="submit" style="padding:6px 14px;background:#057a55;color:#fff;border:none;border-radius:4px;cursor:pointer">追加</button>
-  </form>
-</details>
-${macroTable}`
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">マクロイベント (macro)</h2></div>
+    <div class="card-body">
+      ${macroErr}
+      ${macroNotice}
+      <details${macroFormOpen} style="margin-bottom:12px">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px">+ 追加</summary>
+        <form method="post" action="/dashboard/events/macro/seed" class="field-row" style="margin-top:10px">
+          <div class="field"><label>イベント種別</label><input name="event_type" value="${esc(mEcho.eventType)}" placeholder="FOMC / CPI / NFP" required maxlength="32" style="width:160px"></div>
+          <div class="field"><label>国 (任意)</label><input name="country" value="${esc(mEcho.country)}" placeholder="US / JP" maxlength="16" style="width:100px"></div>
+          <div class="field"><label>発生日</label><input name="event_date" type="date" value="${esc(mEcho.eventDate)}" required></div>
+          <div class="field"><label>備考 (任意)</label><input name="notes" value="${esc(mEcho.notes)}" placeholder="June FOMC" maxlength="256" style="min-width:240px"></div>
+          <div class="field"><button type="submit" class="btn primary">追加</button></div>
+        </form>
+      </details>
+      ${macroTable}
+    </div>
+  </div>`
 }
 
 // extractActor throws when Access middleware hasn't set `actor` yet — caught here so a missing
