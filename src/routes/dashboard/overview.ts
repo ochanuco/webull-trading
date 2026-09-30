@@ -386,7 +386,7 @@ function renderPerformanceCard(data: OverviewData, open: OpenPositionView[]): st
 function renderStopBar(stop: StopDistanceView | undefined): string {
   if (stop === undefined) return '<span class="muted">—</span>'
   if (stop.toStopPct <= 0) {
-    return `<div class="stop-bar-wrap"><div class="bar-track stop-bar-track"><div class="bar-fill down" style="width:100%"></div></div><span class="err">損切り水準</span></div>`
+    return `<div class="stop-bar-wrap"><div class="bar-track stop-bar-track"><div class="bar-fill down" style="width:100%"></div></div><span class="err stat-note">損切り水準</span></div>`
   }
   // Normalized against 2x the effective stop's own magnitude so breakeven
   // (toStopPct == |effectiveStopPct|) reads as the bar's halfway point,
