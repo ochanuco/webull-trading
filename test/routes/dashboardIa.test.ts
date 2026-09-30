@@ -321,18 +321,21 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('href="/dashboard/cron"')
     expect(body).toContain('href="/dashboard/alerts"')
-    // ホーム再編 (#ui-redesign Lane B): 総資産カード + 保有銘柄の 平均取得/stop バー + 成績 KPI
+    // ホーム再編 (#ui-redesign Lane B): 総資産カード + 保有銘柄 (右列、コンパクトリスト) + 成績 KPI
     expect(body).toContain('<span class="card-title">総資産</span>')
-    expect(body).toContain('$100.00') // 平均取得 (avgPrice=100)
-    expect(body).toContain('$105.00') // 現在値 (lastQuote.price=105)
+    // コンパクトリストは ticker + qty/avg のみ (現在値列は無し、損益率と stop バーが右側)
+    expect(body).toContain('10株 @ $100.00') // 数量・平均取得
+    expect(body).toContain('class="num ok">5.00%</div>') // 損益率
     // stopPct=-0.04, atr20=0 (fakeD1 は空) → effectiveStopPct=-4%、pnlPct=5% → toStopPct=9%
     expect(body).toContain('stop-bar-track')
     expect(body).toContain('あと 9.0%')
     expect(body).toContain('勝ち')
     expect(body).toContain('負け')
     expect(body).toContain('勝率')
-    expect(body).toContain('発注エラー')
+    expect(body).toContain('エラー')
     expect(body).toContain('実現損益')
+    // 保有銘柄は 直近30日 カードの下、右列 (span-4) にスタックされる
+    expect(body).toMatch(/直近30日[\s\S]*保有銘柄 1 件/)
   })
 
   it('home inline scripts parse without syntax errors', async () => {

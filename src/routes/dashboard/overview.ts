@@ -193,25 +193,30 @@ export const OVERVIEW_PAGE_STYLE = `
   .mini-note{font-size:12px;color:var(--text-3);margin:8px 0 0}
   .stop-bar-wrap{min-width:88px}
   .stop-bar-track{width:80px}
-  /* Right column of the hero row must read as tall as the equity card next
-     to it, not shrink-wrap its own shorter content. margin-bottom:0 avoids
-     the card's own bottom margin adding to its 100%-stretched height. */
-  .hero-equity-row .card{height:100%;margin-bottom:0;display:flex;flex-direction:column}
   .kpi-hero-line{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
   .kpi-hero-line .kpi-value{font-size:28px}
   /* 4 flat cells sharing one surface-2 strip with vertical dividers, instead
      of 4 individually-bordered .kpi-card boxes nested inside an already
-     bordered card. */
+     bordered card. "エラー" (not 発注エラー) keeps every label readable at
+     12px down to 390px without a narrow-viewport font shrink (12px is the
+     info-row floor — never go below it, not even at phone width). */
   .flat-stats{display:flex;background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 4px;margin-top:12px}
   .flat-stats .fstat{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:0 6px;border-left:1px solid var(--border)}
   .flat-stats .fstat:first-child{border-left:none}
   .flat-stats .fstat .stat-value{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums}
-  /* 発注エラー (5 chars) is the tightest label at 4-per-row; a narrow phone
-     width leaves too little space per cell for it to stay on one line. */
-  @media(max-width:480px){.flat-stats .fstat .stat-label{font-size:11px;white-space:nowrap}.flat-stats .fstat{padding:0 3px}}
   .empty-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-  .empty-row .empty{text-align:right}
-  .empty-row .empty{padding:0}
+  .empty-row .empty{text-align:right;padding:0}
+  /* 保有銘柄 compact list (right column, 4-col width): ticker+qty/avg on the
+     left, pnl% + stop bar stacked on the right — no table, since a 6-column
+     table header doesn't fit a ~320px column without wrapping. */
+  .holding-list{display:flex;flex-direction:column}
+  .holding-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .holding-row:last-child{border-bottom:none}
+  .holding-main{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .holding-sym{font-weight:600;font-size:13px}
+  .holding-sub{font-size:12px;color:var(--text-3)}
+  .holding-side{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex:0 0 auto}
+  .holding-side .num{font-size:13px;font-weight:650}
 `
 
 // Not configurable/hideable like the panels below: mode, trading on/off, and quote freshness
@@ -365,7 +370,7 @@ function renderPerformanceCard(data: OverviewData, open: OpenPositionView[]): st
     fstat('勝ち', st ? String(st.wins) : '—'),
     fstat('負け', st ? String(st.losses) : '—'),
     fstat('勝率', winRate !== null ? `${fmtNumber(winRate, 0)}%` : '—'),
-    fstat('発注エラー', st ? `<span class="${st.errors > 0 ? 'err' : ''}">${st.errors}</span>` : '—'),
+    fstat('エラー', st ? `<span class="${st.errors > 0 ? 'err' : ''}">${st.errors}</span>` : '—'),
   ]
   return `<div class="card">
     <div class="card-head"><span class="card-title">直近30日</span></div>
@@ -393,36 +398,38 @@ function renderStopBar(stop: StopDistanceView | undefined): string {
   return `<div class="stop-bar-wrap"><div class="bar-track stop-bar-track"><div class="bar-fill ${tone}" style="${style}"></div></div><span class="muted stat-note">あと ${fmtNumber(stop.toStopPct, 1)}%</span></div>`
 }
 
+// Renders as a compact list (ticker + qty/avg, pnl% + stop bar), not a
+// table — this card lives in the hero row's 4-col right column, where a
+// 6-column table header wraps before it fits.
 function renderHoldingsCard(data: OverviewData, open: OpenPositionView[]): string {
-  const stopTip = `<span class="info-tip" tabindex="0" aria-label="stop 距離の説明" data-tip="${esc(
-    '実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は 銘柄 タブへ。',
-  )}">?</span>`
   if (!data.symbolStateBound) {
     return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄</span><span class="empty">SYMBOL_STATE 未配線のため表示できません。</span></div></div>`
   }
   if (open.length === 0) {
     return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄 0 件</span><span class="empty">保有中の銘柄はありません。</span></div></div>`
   }
+  const stopTip = `<span class="info-tip" tabindex="0" aria-label="stop 距離の説明" data-tip="${esc(
+    '実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は 銘柄 タブへ。',
+  )}">?</span>`
   const rows = open
     .map((o) => {
       const pnlCls = o.pnlPct === null ? '' : o.pnlPct >= 0 ? 'ok' : 'err'
-      return `<tr>
-        <td class="grow"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}" title="${esc(displaySymbol(o.sym, data.universe))}">${esc(o.sym)}</a></td>
-        <td class="num">${fmtNumber(o.qty, 0)}</td>
-        <td class="num">${fmtPriceCcy(o.avgPrice, o.currency)}</td>
-        <td class="num">${o.price === null ? '<span class="muted">—</span>' : fmtPriceCcy(o.price, o.currency)}</td>
-        <td class="num ${pnlCls}">${o.pnlPct === null ? '—' : `${fmtNumber(o.pnlPct, 2)}%`}</td>
-        <td>${renderStopBar(data.stopDistances.get(o.sym))}</td>
-      </tr>`
+      return `<div class="holding-row">
+        <div class="holding-main">
+          <a class="holding-sym" href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}" title="${esc(displaySymbol(o.sym, data.universe))}">${esc(o.sym)}</a>
+          <div class="holding-sub">${fmtNumber(o.qty, 0)}株 @ ${fmtPriceCcy(o.avgPrice, o.currency)}</div>
+        </div>
+        <div class="holding-side">
+          <div class="num ${pnlCls}">${o.pnlPct === null ? '—' : `${fmtNumber(o.pnlPct, 2)}%`}</div>
+          ${renderStopBar(data.stopDistances.get(o.sym))}
+        </div>
+      </div>`
     })
     .join('')
   const exposurePill = renderExposurePill(data, open)
   return `<div class="card">
-    <div class="card-head"><span class="card-title">保有銘柄 ${open.length} 件</span>${exposurePill}</div>
-    <div class="tablewrap"><table class="fit">
-      <thead><tr><th class="grow">銘柄</th><th class="num">数量</th><th class="num">平均取得</th><th class="num">現在値</th><th class="num">損益率</th><th>stop 距離 ${stopTip}</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>
+    <div class="card-head"><span class="card-title">保有銘柄 ${open.length} 件</span><span class="card-actions">${exposurePill}${stopTip}</span></div>
+    <div class="holding-list">${rows}</div>
   </div>`
 }
 
@@ -435,7 +442,7 @@ function renderExposurePill(data: OverviewData, open: OpenPositionView[]): strin
   if (!(cap > 0) || usd <= 0) return ''
   const pct = (usd / cap) * 100
   const cls = pct >= 60 ? 'warn' : 'neutral'
-  return `<span class="card-actions"><span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span></span>`
+  return `<span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span>`
 }
 
 function fmtJstShort(iso: string): string {
@@ -490,23 +497,30 @@ function dedupeEchartsCdnTag(html: string): string {
 export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
+  const showActivity = data.panels.has('activity')
+  const showRisk = data.panels.has('risk')
 
   sections.push(renderRunStateStrip(data))
 
-  if (data.panels.has('activity')) {
+  // 保有銘柄 sits stacked under 直近30日 in the right column rather than as
+  // its own full-width section: at natural (unforced) height the two right-
+  // column cards together read about as tall as the equity chart on a quiet
+  // day, and simply run longer than it once there are many open positions —
+  // both are fine, so neither column is stretched to match the other.
+  if (showActivity || showRisk) {
+    const left = showActivity
+      ? `<div class="card">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div>`
+      : ''
+    const right = (showActivity ? renderPerformanceCard(data, open) : '') + (showRisk ? renderHoldingsCard(data, open) : '')
     sections.push(
-      `<div class="grid cols-12 hero-equity-row" style="margin:16px 0">
-        <div class="span-8"><div class="card">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div></div>
-        <div class="span-4">${renderPerformanceCard(data, open)}</div>
+      `<div class="grid cols-12" style="margin:16px 0">
+        <div class="span-8">${left}</div>
+        <div class="span-4">${right}</div>
       </div>`,
     )
   }
 
-  if (data.panels.has('risk')) {
-    sections.push(renderHoldingsCard(data, open))
-  }
-
-  if (data.panels.has('activity')) {
+  if (showActivity) {
     sections.push(renderRecentTradesCard(data))
   }
 
