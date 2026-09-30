@@ -12,8 +12,8 @@
  * Kept as a plain exported string (no separate build step) to match the POC
  * policy of not adding a bundler. This file has no `${...}` interpolation.
  * Changing the DOM ids/classes it queries (`#symbol-chart`,
- * `#decision-trace-panel`, `.zoom-preset`, `#symbol-main`, `.symbol-rail`,
- * `.symbol-subnav`) requires updating `symbol.ts` in lockstep.
+ * `#decision-trace-panel`, `#chart-range-seg`, `#symbol-main`,
+ * `.symbol-rail`, `.symbol-subnav`) requires updating `symbol.ts` in lockstep.
  */
 export const SYMBOL_CHART_CLIENT_SCRIPT = `
 (function () {
@@ -38,6 +38,12 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       var data = chartDataEl ? JSON.parse(chartDataEl.textContent || 'null') : null;
       var sc = data && data.symbolChart;
       if (!chartEl || !sc || sc.points.length === 0) return;
+
+      // Operator constraint: prices always carry a currency mark. JPY-listed
+      // symbols (4-digit tickers) still show 2-decimal labels here — full
+      // fmtPriceCcy parity would need duplicating its digit-count branch for
+      // every label below, not worth it for the small JP-symbol slice.
+      var ccyMark = data.currency === 'JPY' ? '¥' : '$';
 
       // Category axis (index-based x, categories = each bar's ISO timestamp)
       // when intradayBars exist: ECharts' time axis has no native way to
@@ -187,7 +193,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       function bandEdgeLabel(name, edgeY) {
         if (!Number.isFinite(edgeY) || sc.latestCronPrice == null || !(sc.latestCronPrice > 0)) return name;
         var mv = (edgeY - sc.latestCronPrice) / sc.latestCronPrice;
-        return name + ' あと ' + (mv >= 0 ? '+' : '') + (mv * 100).toFixed(1) + '% ($' + edgeY.toFixed(2) + ')';
+        return name + ' あと ' + (mv >= 0 ? '+' : '') + (mv * 100).toFixed(1) + '% (' + ccyMark + edgeY.toFixed(2) + ')';
       }
       var pullbackUpperLabel = bandEdgeLabel('押し目上端', bandUpperY);
       var pullbackLowerLabel = bandEdgeLabel('押し目下端', bandLowerY);
@@ -306,7 +312,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         return {
           value: [xForTimestamp(d.timestamp), d.price],
           decision: d.decision, reason: d.reason, evalTs: d.timestamp, ladderHtml: d.ladderHtml,
-          itemStyle: { color: color, borderColor: t.surface, borderWidth: 1 },
+          // opacity < 1 so a dense run of daily evals reads as individual
+          // dots, not a solid bead line, at normal zoom levels.
+          itemStyle: { color: color, borderColor: t.surface, borderWidth: 1, opacity: 0.72 },
         };
       });
 
@@ -390,9 +398,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         avgLineXY = toCategoryXY(densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps));
         stopLineXY = toCategoryXY(densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps));
         tpLineXY = toCategoryXY(densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps));
-        avgLabel = 'avg ' + avg.toFixed(2);
-        stopLabel = 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
-        tpLabel = 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
+        avgLabel = 'avg ' + ccyMark + avg.toFixed(2);
+        stopLabel = 'stop ' + ccyMark + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
+        tpLabel = 'TP ' + ccyMark + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
       } else if (
         sc.points.length > 0 &&
         sc.latestCronPrice != null &&
@@ -411,8 +419,11 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         if (Number.isFinite(pFromMs) && Number.isFinite(pToMs)) {
           previewStopLineXY = toCategoryXY(densifyHorizontalLine(pStopPrice, pFromMs, pToMs, ohlcTimestamps));
           previewTpLineXY = toCategoryXY(densifyHorizontalLine(pTpPrice, pFromMs, pToMs, ohlcTimestamps));
-          previewStopLabel = 'stop ' + pStopPrice.toFixed(2) + ' (preview)';
-          previewTpLabel = 'TP ' + pTpPrice.toFixed(2) + ' (preview)';
+          // "(preview)" dropped from the label text: the dotted line +
+          // 0.5 opacity already read as non-committal, and the literal
+          // suffix was the long half of what clipped at the right edge.
+          previewStopLabel = 'stop ' + ccyMark + pStopPrice.toFixed(2);
+          previewTpLabel = 'TP ' + ccyMark + pTpPrice.toFixed(2);
         }
       }
 
@@ -568,8 +579,22 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             return lines.join('');
           },
         },
-        legend: { top: 22, type: 'scroll' },
-        grid: { left: 50, right: 20, top: 56, bottom: 28, containLabel: true },
+        // Explicit allowlist (not every series name) so the legend stays a
+        // single compact top-left row: the candlestick series would
+        // otherwise show a solid-color swatch (it has no up/down duality in
+        // a legend icon) and the avg/stop/TP/projection lines already carry
+        // their own endLabel text on the chart, so listing them too just
+        // duplicates and overflows.
+        legend: {
+          top: 4, left: 4, itemWidth: 12, itemHeight: 8,
+          textStyle: { fontSize: 11 },
+          data: (trendLineXY ? ['価格トレンド(30日回帰)'] : []).concat(['SMA50']),
+        },
+        // right:96 (not 20) leaves room for the stop/TP/avg endLabels — an
+        // endLabel draws past the plot's right edge into this margin, and a
+        // margin narrower than the label text clips it hard at the canvas
+        // boundary (e.g. "stop $110.61" rendering as just "stop $").
+        grid: { left: 50, right: 96, top: 34, bottom: 28, containLabel: true },
         dataZoom: dataZoomCfg,
         // Category axis (equal spacing per bar) collapses non-trading gaps
         // so e.g. Friday close sits adjacent to Monday open — reads as an
@@ -635,7 +660,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           // other meanings already) — a fixed hue keeps this decorative
           // overlay distinguishable from every semantic series in both themes.
           ...(trendLineXY ? [{
-            name: '価格トレンド (linear regression, 30日)', type: 'line', data: trendLineXY,
+            name: '価格トレンド(30日回帰)', type: 'line', data: trendLineXY,
             lineStyle: { width: 1.8, color: '#8b5cf6', type: 'solid' }, symbol: 'none',
             itemStyle: { color: '#8b5cf6' }, z: 7,
           }] : []),
@@ -768,7 +793,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             symbol: 'circle',
             symbolSize: function (val, p) {
               var dec = p && p.data ? p.data.decision : '';
-              return (dec === 'REJECT' || dec === 'ERROR') ? 13 : 9;
+              return (dec === 'REJECT' || dec === 'ERROR') ? 10 : 7;
             },
             z: 11, emphasis: { scale: 1.6 }, cursor: 'pointer',
             tooltip: {
@@ -996,7 +1021,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
 
       // dispatchAction below re-triggers the dataZoom listener above, which
       // also updates the URL — no separate URL-sync call needed here.
-      var presetButtons = document.querySelectorAll('.zoom-preset');
+      var presetButtons = document.querySelectorAll('#chart-range-seg button');
       for (var pi = 0; pi < presetButtons.length; pi += 1) {
         presetButtons[pi].addEventListener('click', function (ev) {
           var fromMs = Number(ev.currentTarget.getAttribute('data-from-ms'));

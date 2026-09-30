@@ -208,10 +208,19 @@ export type ChartsBodyArgs =
   | ChartsBodySymbol
 
 /**
- * One-click dataZoom presets (1D/5D/1M/All). from/to are baked into each
- * button's data attrs at the last chart point; the client click handler
- * dispatches a `dataZoom` action from them, which the existing dataZoom
- * listener already syncs to the URL via replaceState.
+ * DOM id for the range-preset `.seg` group — scopes
+ * `symbolChartScript.ts`'s button query so it doesn't also match an
+ * unrelated `.seg` elsewhere on the page (e.g. the quality tab's period
+ * switch, when both render server-side in the same process).
+ */
+export const CHART_RANGE_SEG_ID = 'chart-range-seg'
+
+/**
+ * One-click dataZoom presets (1D/5D/1M/All), rendered as a `.seg` group
+ * (spec: `.seg` replaces the old bespoke `.zoom-preset` button styling).
+ * from/to are baked into each button's data attrs at the last chart point;
+ * the client click handler dispatches a `dataZoom` action from them, which
+ * the existing dataZoom listener already syncs to the URL via replaceState.
  */
 export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
   if (!chart || chart.points.length === 0) return ''
@@ -234,9 +243,78 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
   ]
   const buttons = presets
     .map(
-      (p) =>
-        `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}">${esc(p.label)}</button>`,
+      (p) => `<button data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}">${esc(p.label)}</button>`,
     )
     .join('')
-  return `<p class="seg" style="margin:8px 0 0">${buttons}</p>`
+  return `<div class="seg" id="${CHART_RANGE_SEG_ID}">${buttons}</div>`
 }
+
+/**
+ * Chart-page-only CSS, passed as `renderLayout`'s `pageStyle` arg — these
+ * classes are used exclusively by `symbol.ts`/`quality.ts`/`equity.ts`
+ * (unlike `.symbol-rail`/`.rail-*`/`.symbol-layout`/`.symbol-main`, which
+ * `cron.ts` also renders and so must stay in the shared layout STYLE).
+ */
+export const CHARTS_PAGE_STYLE = `
+  /* 判断カード群 (fold 上部の判断サマリ)。1360px 幅で 2×2、780px 以下は縦積み。 */
+  /* One card, 4 columns divided by a vertical rule (spec: not 4 separate
+     cards). Under 900px the columns wrap to 2x2; a vertical rule on every
+     non-first column would then land on top of row 2's first column too, so
+     the divider switches to per-row (nth-child) instead. */
+  .judgment-row{display:grid;grid-template-columns:repeat(4,1fr);font-size:13px}
+  .judgment-row .judgment-col{padding:0 16px}
+  .judgment-row .judgment-col:not(:first-child){border-left:1px solid var(--border)}
+  .judgment-row .jc-label{font-size:11px;color:var(--text-3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em}
+  .judgment-row .jc-value{font-size:13px;line-height:1.5}
+  @media(max-width:900px){
+    .judgment-row{grid-template-columns:1fr 1fr;row-gap:12px}
+    .judgment-row .judgment-col:nth-child(odd){border-left:none}
+    .judgment-row .judgment-col:nth-child(even){border-left:1px solid var(--border)}
+    .judgment-row .judgment-col:nth-child(n+3){border-top:1px solid var(--border);padding-top:12px}
+  }
+  /* symbol タブ内サブナビ「チャート / 履歴・設定」。header の .subnav-link と
+     同じトークンを再利用しつつ、本文内に埋め込むため padding/border は自前。 */
+  .symbol-subnav{display:flex;gap:2px;margin:0 0 10px;flex-wrap:wrap}
+  /* チャートを sticky 固定: 下の説明 panel 群 (入場ゲート / 判定 trace) を読む間も
+     グラフが見え続ける。.card と同じ見た目 (surface/border/shadow) を持たせつつ
+     class 名は変えない — テストがこの文字列で pin の位置を検証しているため。 */
+  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px 12px;margin-bottom:16px}
+  @media(max-width:780px){
+    /* 小画面では sticky 固定が viewport を食い潰すため解除。 */
+    .symbol-chart-pin{position:static}
+  }
+  /* 銘柄チャートのヘッダー行: 左 = ティッカー/名称/ロール pill、右 = 現在値
+     hero + 前日比 + range seg。range seg はチャート直下ではなくここに置く
+     (#ui-redesign lane-c)。 */
+  .symbol-header-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+  .symbol-id-block{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+  .symbol-ticker{font-size:24px;font-weight:700;letter-spacing:-0.01em}
+  .symbol-name{font-size:13px;color:var(--text-2)}
+  .symbol-header-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right}
+  .symbol-header-right .seg{margin-top:2px}
+  /* 判定マーカーの色キー行 (凡例の長文説明は info-tip 側へ、こちらは色だけの
+     コンパクト行として残す)。 */
+  .decision-legend-row{font-size:12px;margin:8px 0 0}
+  /* 成績タブ: 640px 固定の成績タイル (X 投稿用スクショ対象) + 残り幅の銘柄別表。 */
+  .quality-perf-row{display:grid;grid-template-columns:640px 1fr;gap:16px;align-items:start}
+  @media(max-width:1100px){.quality-perf-row{grid-template-columns:1fr}}
+  /* 成績タブの hero カード (X 投稿用スクショ対象): row1 は 合計PnL の hero +
+     件数/勝率 の副次 stat を surface-2 の帯に乗せる (内側に枠線を作らない)。
+     row2-3 は border 無しのフラットセルを 1px 罫線だけで区切る。値はすべて
+     min-width:0 + tabular-nums にして、長い値 (+$12,345.67 等) でもセルの
+     column track を突き破らず自然に収まるようにする。 */
+  .perf-hero-row{display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--surface-2);border-radius:var(--radius);padding:18px 20px;margin-bottom:2px}
+  .perf-hero{min-width:0}
+  .perf-hero-label{font-size:13px;color:var(--text-3)}
+  .perf-hero-value{font-size:48px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .perf-hero-secondary{display:flex;gap:28px;flex:0 0 auto}
+  .perf-stat{min-width:0}
+  .perf-stat-value{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .perf-cell-grid{display:grid;grid-template-columns:repeat(4,1fr)}
+  .perf-cell{padding:26px 12px;min-width:0;border-left:1px solid var(--border)}
+  .perf-cell:nth-child(4n+1){border-left:none}
+  .perf-cell:nth-child(n+5){border-top:1px solid var(--border)}
+  .perf-cell-wide{grid-column:span 2}
+  .perf-cell-label{font-size:12px;color:var(--text-3)}
+  .perf-cell-value{font-size:26px;font-weight:650;margin-top:4px;font-variant-numeric:tabular-nums;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+`
