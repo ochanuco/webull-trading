@@ -193,6 +193,25 @@ export const OVERVIEW_PAGE_STYLE = `
   .mini-note{font-size:12px;color:var(--text-3);margin:8px 0 0}
   .stop-bar-wrap{min-width:88px}
   .stop-bar-track{width:80px}
+  /* Right column of the hero row must read as tall as the equity card next
+     to it, not shrink-wrap its own shorter content. margin-bottom:0 avoids
+     the card's own bottom margin adding to its 100%-stretched height. */
+  .hero-equity-row .card{height:100%;margin-bottom:0;display:flex;flex-direction:column}
+  .kpi-hero-line{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+  .kpi-hero-line .kpi-value{font-size:28px}
+  /* 4 flat cells sharing one surface-2 strip with vertical dividers, instead
+     of 4 individually-bordered .kpi-card boxes nested inside an already
+     bordered card. */
+  .flat-stats{display:flex;background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 4px;margin-top:12px}
+  .flat-stats .fstat{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:0 6px;border-left:1px solid var(--border)}
+  .flat-stats .fstat:first-child{border-left:none}
+  .flat-stats .fstat .stat-value{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums}
+  /* 発注エラー (5 chars) is the tightest label at 4-per-row; a narrow phone
+     width leaves too little space per cell for it to stay on one line. */
+  @media(max-width:480px){.flat-stats .fstat .stat-label{font-size:11px;white-space:nowrap}.flat-stats .fstat{padding:0 3px}}
+  .empty-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .empty-row .empty{text-align:right}
+  .empty-row .empty{padding:0}
 `
 
 // Not configurable/hideable like the panels below: mode, trading on/off, and quote freshness
@@ -327,19 +346,34 @@ function renderExposureStopSummary(data: OverviewData, open: OpenPositionView[])
   return `<p class="mini-note">${parts.join(' ・ ')}</p>`
 }
 
+// Sign-before-currency (+$226.78 / -$10.41), unlike formatRealizedPnl's
+// $-then-sign (used in the trades table, where the column already reads
+// as a $ amount and doesn't need this card's headline emphasis).
+function fmtMoneySigned(value: number): string {
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  const cls = value > 0 ? 'ok' : value < 0 ? 'err' : 'muted'
+  const abs = Math.abs(value).toLocaleString('ja-JP', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return `<span class="${cls}">${sign}$${abs}</span>`
+}
+
 function renderPerformanceCard(data: OverviewData, open: OpenPositionView[]): string {
   const st = data.activityStats
   const winRate = st && st.wins + st.losses > 0 ? (st.wins / (st.wins + st.losses)) * 100 : null
-  const tiles = [
-    kpiCard('勝ち', st ? String(st.wins) : '—'),
-    kpiCard('負け', st ? String(st.losses) : '—'),
-    kpiCard('勝率', winRate !== null ? `${fmtNumber(winRate, 0)}%` : '—'),
-    kpiCard('発注エラー', st ? String(st.errors) : '—', st && st.errors > 0 ? '要確認' : undefined, 'err'),
-    kpiCard('実現損益', st ? `$${formatRealizedPnl(st.realizedPnlSum)}` : '—'),
+  const fstat = (label: string, valueHtml: string) =>
+    `<div class="fstat"><div class="stat-label">${esc(label)}</div><div class="stat-value">${valueHtml}</div></div>`
+  const cells = [
+    fstat('勝ち', st ? String(st.wins) : '—'),
+    fstat('負け', st ? String(st.losses) : '—'),
+    fstat('勝率', winRate !== null ? `${fmtNumber(winRate, 0)}%` : '—'),
+    fstat('発注エラー', st ? `<span class="${st.errors > 0 ? 'err' : ''}">${st.errors}</span>` : '—'),
   ]
   return `<div class="card">
     <div class="card-head"><span class="card-title">直近30日</span></div>
-    <div class="kpi-grid" style="margin-bottom:0">${tiles.join('')}</div>
+    <div class="kpi-hero-line">
+      <span class="stat-label">実現損益</span>
+      <span class="kpi-value">${st ? fmtMoneySigned(st.realizedPnlSum) : '—'}</span>
+    </div>
+    <div class="flat-stats">${cells.join('')}</div>
     ${renderExposureStopSummary(data, open)}
   </div>`
 }
@@ -364,16 +398,10 @@ function renderHoldingsCard(data: OverviewData, open: OpenPositionView[]): strin
     '実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は 銘柄 タブへ。',
   )}">?</span>`
   if (!data.symbolStateBound) {
-    return `<div class="card">
-      <div class="card-head"><span class="card-title">保有銘柄</span></div>
-      <div class="empty">SYMBOL_STATE 未配線のため表示できません。</div>
-    </div>`
+    return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄</span><span class="empty">SYMBOL_STATE 未配線のため表示できません。</span></div></div>`
   }
   if (open.length === 0) {
-    return `<div class="card">
-      <div class="card-head"><span class="card-title">保有銘柄 0 件</span></div>
-      <div class="empty">保有中の銘柄はありません。</div>
-    </div>`
+    return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄 0 件</span><span class="empty">保有中の銘柄はありません。</span></div></div>`
   }
   const rows = open
     .map((o) => {
@@ -418,11 +446,9 @@ function fmtJstShort(iso: string): string {
   return `${pick('month')}/${pick('day')} ${pick('hour')}:${pick('minute')}`
 }
 
+// Win/loss/error counts already live in the "直近30日" performance card right
+// above this one — repeating them in the card head here was pure duplication.
 function renderRecentTradesCard(data: OverviewData): string {
-  const st = data.activityStats
-  const meta = st
-    ? `<span class="muted stat-note">直近30日 勝ち${st.wins}/負け${st.losses}・発注エラー${st.errors}</span>`
-    : ''
   const trades = data.recentTrades
     .map((t) => {
       const sidePill = t.side === 'BUY' ? '<span class="pill buy">BUY</span>' : t.side === 'SELL' ? '<span class="pill sell">SELL</span>' : '<span class="muted">—</span>'
@@ -443,7 +469,6 @@ function renderRecentTradesCard(data: OverviewData): string {
   return `<div class="card">
     <div class="card-head">
       <span class="card-title">直近の約定</span>
-      ${meta}
       <span class="card-actions"><a href="/dashboard/cron">判定ログ →</a> <a href="/dashboard/trades">すべて見る →</a></span>
     </div>
     ${body}
@@ -459,10 +484,9 @@ function dedupeEchartsCdnTag(html: string): string {
   return parts[0] + tag + parts.slice(1).join('')
 }
 
-function areaLabel(text: string): string {
-  return `<div class="area-label">${esc(text)}</div>`
-}
-
+// No area-label section headers (リスクと保有銘柄 / 最近の活動): each card's
+// own title already says what it is, and a divider label above a single card
+// per section was pure repetition (#ui-redesign polish pass).
 export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
@@ -471,7 +495,7 @@ export function overviewBody(data: OverviewData): string {
 
   if (data.panels.has('activity')) {
     sections.push(
-      `<div class="grid cols-12" style="margin-top:16px">
+      `<div class="grid cols-12 hero-equity-row" style="margin:16px 0">
         <div class="span-8"><div class="card">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div></div>
         <div class="span-4">${renderPerformanceCard(data, open)}</div>
       </div>`,
@@ -479,12 +503,10 @@ export function overviewBody(data: OverviewData): string {
   }
 
   if (data.panels.has('risk')) {
-    sections.push(areaLabel('リスクと保有銘柄'))
     sections.push(renderHoldingsCard(data, open))
   }
 
   if (data.panels.has('activity')) {
-    sections.push(areaLabel('最近の活動'))
     sections.push(renderRecentTradesCard(data))
   }
 

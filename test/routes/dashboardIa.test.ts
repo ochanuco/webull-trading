@@ -297,7 +297,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
   })
   afterEach(() => vi.resetAllMocks())
 
-  it('renders 運転状態帯 + 3 領域 (リスクと保有銘柄 / 最近の活動) when DOs are bound', async () => {
+  it('renders 運転状態帯 + 保有銘柄 / 直近の約定カード (エリアラベルはカードタイトルに統合済み) when DOs are bound', async () => {
     const env = {
       ...baseEnv,
       DB: fakeD1(),
@@ -314,9 +314,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('取引 ON')
     expect(body).toContain('最終 cron')
     expect(body).toContain('未確認アラート')
-    expect(body).toContain('リスクと保有銘柄')
-    expect(body).toContain('最近の活動')
-    // リスクと保有銘柄は KPI / 資産構成を畳んだ 1 枚
+    // エリアラベル (リスクと保有銘柄 / 最近の活動見出し) は撤去し、カードタイトルのみで示す (#ui-redesign polish)
     expect(body).toContain('保有銘柄')
     expect(body).toContain('実効 stop は ATR と R:R 上限')
     expect(body).toContain('直近の約定')

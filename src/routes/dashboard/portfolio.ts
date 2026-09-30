@@ -95,7 +95,7 @@ export function renderPortfolioEquityChart(
 ): string {
   const rangeTabs = renderEquityRangeTabs(range, basePath)
   const infoTip = `<span class="info-tip" tabindex="0" aria-label="総資産チャートの説明" data-tip="${esc(
-    'PortfolioStateDO.dailyStartEquity の roll-daily 時点スナップショット。実現損益の推移 (レビュー) は trade_journal.realized_pnl の累積で、こちらは口座総資産そのもの (cash + 保有時価)。USD / JPY を別軸でプロットします。',
+    'PortfolioStateDO.dailyStartEquity の roll-daily 時点スナップショット。実現損益の推移 (レビュー) は trade_journal.realized_pnl の累積で、こちらは口座総資産そのもの (cash + 保有時価)。JPY 換算値はツールチップで確認できます。',
   )}">?</span>`
   const head = `<div class="card-head"><span class="card-title">総資産</span>${infoTip}<span class="card-actions">${rangeTabs}</span></div>`
   if (snapshots.length === 0) {
@@ -127,48 +127,62 @@ export function renderPortfolioEquityChart(
       var t = window.wtTokens ? window.wtTokens() : {};
       var data = window.__equityChartData;
       var dates = data.usd.map(function (p) { return p.date; });
-      var series = [];
-      if (data.hasUsd) {
-        series.push({
-          name: 'USD',
-          type: 'line',
-          data: data.usd.map(function (p) { return p.value; }),
-          connectNulls: false,
-          smooth: false,
-          lineStyle: { width: 2, color: t.accent },
-          itemStyle: { color: t.accent },
-        });
+      function toRgba(hex, alpha) {
+        var h = String(hex).replace('#', '');
+        if (h.length === 3) h = h.split('').map(function (c) { return c + c; }).join('');
+        var r = parseInt(h.substring(0, 2), 16) || 0;
+        var g = parseInt(h.substring(2, 4), 16) || 0;
+        var b = parseInt(h.substring(4, 6), 16) || 0;
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
       }
-      if (data.hasJpy) {
-        series.push({
-          name: 'JPY',
-          type: 'line',
-          yAxisIndex: data.hasUsd ? 1 : 0,
-          data: data.jpy.map(function (p) { return p.value; }),
-          connectNulls: false,
-          smooth: false,
-          lineStyle: { width: 2, color: t.warn },
-          itemStyle: { color: t.warn },
-        });
-      }
-      var yAxis = [{ type: 'value', name: 'USD', scale: true, axisLabel: { formatter: '{value}' } }];
-      if (data.hasUsd && data.hasJpy) {
-        yAxis.push({ type: 'value', name: 'JPY', scale: true, axisLabel: { formatter: '{value}' } });
-      } else if (!data.hasUsd && data.hasJpy) {
-        yAxis = [{ type: 'value', name: 'JPY', scale: true, axisLabel: { formatter: '{value}' } }];
-      }
-      // JPY defaults to hidden via the legend — the hero number above already
-      // shows it, and a second scale drawn by default competes with the USD
-      // line for attention on a chart whose point is "is USD going up".
-      var legend = { top: 4 };
-      if (data.hasJpy) legend.selected = { JPY: false };
-      // No in-canvas title: the card head above already reads "総資産".
+      // Single visible series (USD): a second axis for JPY competed with the
+      // headline "is USD going up" line for attention, and the hero number
+      // above already shows JPY — the tooltip formatter below still surfaces
+      // it per-point without drawing it.
+      var series = [{
+        name: 'USD',
+        type: 'line',
+        data: data.usd.map(function (p) { return p.value; }),
+        connectNulls: false,
+        showSymbol: false,
+        smooth: 0.25,
+        lineStyle: { width: 2, color: t.accent },
+        itemStyle: { color: t.accent },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: toRgba(t.accent, 0.22) },
+            { offset: 1, color: toRgba(t.accent, 0) },
+          ]),
+        },
+      }];
+      // No in-canvas title (card head reads "総資産") and no legend — a
+      // single-series chart has nothing to toggle.
       window.wtChart(document.getElementById('portfolio-equity-chart'), {
-        tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '—' : Number(v).toFixed(2); } },
-        legend: legend,
-        grid: { left: 50, right: 20, top: 40, bottom: 40, containLabel: true },
-        xAxis: { type: 'category', data: dates },
-        yAxis: yAxis,
+        tooltip: {
+          trigger: 'axis',
+          formatter: function (params) {
+            var p = params && params[0];
+            if (!p) return '';
+            var idx = p.dataIndex;
+            var usdVal = data.usd[idx] ? data.usd[idx].value : null;
+            var jpyVal = data.jpy[idx] ? data.jpy[idx].value : null;
+            var lines = [p.axisValueLabel || p.name];
+            lines.push((p.marker || '') + ' $' + (usdVal == null ? '—' : Number(usdVal).toFixed(2)));
+            if (jpyVal != null) lines.push('&nbsp;&nbsp;&nbsp;&nbsp;¥' + Number(jpyVal).toLocaleString('ja-JP'));
+            return lines.join('<br/>');
+          },
+        },
+        grid: { left: 46, right: 28, top: 16, bottom: 28, containLabel: true },
+        xAxis: {
+          type: 'category',
+          data: dates,
+          boundaryGap: false,
+          axisLabel: {
+            hideOverlap: true,
+            formatter: function (value) { return String(value).slice(5).replace('-', '/'); },
+          },
+        },
+        yAxis: { type: 'value', scale: true },
         series: series,
       });
     });
