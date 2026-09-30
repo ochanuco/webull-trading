@@ -250,17 +250,8 @@ export interface Env {
 export interface Env {
   JEV_HEADLINE_EVAL_ENABLED?: string
   AI?: { run(model: string, input: unknown): Promise<unknown> }
-}
-
-
-// PostHog browser telemetry for the dashboard (docs/configuration.md
-// "アクセス制御"). Unset POSTHOG_KEY serves a no-op telemetry.js — same
-// "unset is off" pattern as the other optional integrations above.
-// POSTHOG_HOST defaults to https://us.i.posthog.com when unset or non-https
-// (the host is echoed into a script served over the dashboard's Access
-// session, so it must not be coerced into carrying identified traffic
-// off-https).
-export interface Env {
+  // Unset POSTHOG_KEY serves a no-op telemetry.js. A non-https POSTHOG_HOST
+  // falls back to the default instead of sending identified events off-https.
   POSTHOG_KEY?: string
   POSTHOG_HOST?: string
 }
