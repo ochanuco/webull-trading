@@ -240,6 +240,22 @@ describe('dashboard', () => {
       expect(body).toContain('銘柄ロール抑止')
     })
 
+    it('大きな合計PnLでもカンマ区切り + $ 符号付きで hero セルに描画される (#quality-hero-overflow)', async () => {
+      const app = createApp()
+      const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString()
+      const env = {
+        ...baseEnv,
+        DB: fakeQualityDb(
+          [{ pnl: 12345.67, symbol: 'SOXL', timestamp: daysAgo(1) }],
+          [],
+        ),
+      }
+      const res = await app.request('/dashboard/charts?tab=quality', { headers: authHeader }, env)
+      const body = await res.text()
+      // カンマ区切り (fmtNumber 経由) — toFixed(2) の桁溢れ検証も兼ねる
+      expect(body).toContain('class="perf-hero-value ok">+$12,345.67</div>')
+    })
+
     it('trade データが無ければ成績カードは省略し、SKIP breakdown のみ出す', async () => {
       const app = createApp()
       const env = {

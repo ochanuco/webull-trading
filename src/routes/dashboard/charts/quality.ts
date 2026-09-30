@@ -1,5 +1,4 @@
-import { kpiCard } from '../overview'
-import { esc, safeJsonScript } from '../shared'
+import { esc, fmtNumber, safeJsonScript } from '../shared'
 import { type ChartsBodyQuality, type QualityPeriod, ECHARTS_CDN, QUALITY_PERIOD_LABELS } from './shared'
 
 /** Per-trade realized PnL — one row per SELL fill (`realized_pnl` is null on BUY rows). */
@@ -206,8 +205,8 @@ export async function loadSkipReasonBreakdown(db: D1Database): Promise<SkipReaso
 
 const PCT_FMT = (n: number) => (Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—')
 const PF_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '∞')
-/** Sign before the $ mark (`+$170.02`, `-$2.13`) — these are all $ PnL figures, never a bare number. */
-const MONEY_FMT = (n: number) => (Number.isFinite(n) ? `${n >= 0 ? '+' : '-'}$${Math.abs(n).toFixed(2)}` : '—')
+/** Sign before the $ mark, comma-grouped via `fmtNumber` (`+$170.02`, `-$12,345.67`) — these are all $ PnL figures, never a bare number. */
+const MONEY_FMT = (n: number) => (Number.isFinite(n) ? `${n >= 0 ? '+' : '-'}$${fmtNumber(Math.abs(n))}` : '—')
 const signClass = (n: number) => (n > 0 ? 'ok' : n < 0 ? 'err' : 'muted')
 
 function renderPeriodPills(period: QualityPeriod): string {
@@ -221,36 +220,51 @@ function renderPeriodPills(period: QualityPeriod): string {
   return `<div class="seg" style="margin-bottom:12px">${links}</div>`
 }
 
-// Fixed 640x640 tile (spec: this exact card gets screenshotted for X posts,
-// so it stays a near-square footprint). 合計PnL is the hero (2-col span,
-// larger value) since it's the one number an X reader actually wants —
-// the rest support it. `.perf-tile-grid` (CHARTS_PAGE_STYLE) bottom-aligns
-// each tile's value so a tall cell doesn't strand it up against the label.
+/**
+ * 640px-wide tile (spec: this exact card gets screenshotted for X posts).
+ * Custom markup rather than `overview.ts`'s `kpiCard()`: that helper's
+ * label-then-value stack has no room for a hero row (bigger value, two
+ * secondary stats beside it) or for the row2/row3 divider grid below, both
+ * asked for explicitly — reusing it would mean fighting its layout with
+ * overrides rather than just writing the shape once.
+ *
+ * Row 1 (hero) sits on `--surface-2` with no inner border; rows 2-3 are
+ * flat cells divided by 1px rules (no per-cell card chrome). `min-width:0`
+ * on every value plus `font-variant-numeric:tabular-nums` (`.perf-*` rules,
+ * `CHARTS_PAGE_STYLE`) keeps a long value (`+$12,345.67`) from overflowing
+ * its cell instead of shrinking the grid track to fit it.
+ */
 function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
-  const tile = (label: string, text: string, cls?: string) =>
-    kpiCard(label, `<span class="${cls ?? ''}">${esc(text)}</span>`)
-  const heroTile = kpiCard(
-    '合計 PnL',
-    `<span class="${signClass(stats.total)}">${esc(MONEY_FMT(stats.total))}</span>`,
-  )
-  // Row1 (with the hero, 5 column-tracks: hero=2 + 3 singles) reads as
-  // "the headline numbers"; row2 (5 singles) as the win/loss breakdown.
-  const tiles = [
-    tile('件数', String(stats.count)),
-    tile('勝率', PCT_FMT(stats.winRate)),
-    tile('profit factor', PF_FMT(stats.profitFactor)),
-    tile('勝', String(stats.wins), 'ok'),
-    tile('負', String(stats.losses), 'err'),
-    tile('平均利益', MONEY_FMT(stats.avgWin), 'ok'),
-    tile('平均損失', MONEY_FMT(stats.avgLoss), 'err'),
-    tile('期待値 (トレード毎)', MONEY_FMT(stats.expectancy), signClass(stats.expectancy)),
+  const cell = (label: string, text: string, cls?: string) =>
+    `<div class="perf-cell"><div class="perf-cell-label">${esc(label)}</div><div class="perf-cell-value ${cls ?? ''}">${esc(text)}</div></div>`
+  const wideCell = (label: string, text: string, cls?: string) =>
+    `<div class="perf-cell perf-cell-wide"><div class="perf-cell-label">${esc(label)}</div><div class="perf-cell-value ${cls ?? ''}">${esc(text)}</div></div>`
+  // TradeStats has no per-trade max-win/max-loss, so row 3 is 勝/負 spanning
+  // 2 columns each rather than 4 single cells matching row 2's width.
+  const cells = [
+    cell('profit factor', PF_FMT(stats.profitFactor)),
+    cell('期待値 (トレード毎)', MONEY_FMT(stats.expectancy), signClass(stats.expectancy)),
+    cell('平均利益', MONEY_FMT(stats.avgWin), 'ok'),
+    cell('平均損失', MONEY_FMT(stats.avgLoss), 'err'),
+    wideCell('勝', String(stats.wins), 'ok'),
+    wideCell('負', String(stats.losses), 'err'),
   ].join('')
-  return `<div class="card" style="width:640px;height:640px;box-sizing:border-box;display:flex;flex-direction:column">
+  return `<div class="card" style="width:640px;box-sizing:border-box">
     <div class="card-head">
       <span class="card-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</span>
       <span class="card-actions muted" style="font-size:11px">as of ${esc(asOfJst)}</span>
     </div>
-    <div class="perf-tile-grid">${heroTile}${tiles}</div>
+    <div class="perf-hero-row">
+      <div class="perf-hero">
+        <div class="perf-hero-label">合計 PnL</div>
+        <div class="perf-hero-value ${signClass(stats.total)}">${esc(MONEY_FMT(stats.total))}</div>
+      </div>
+      <div class="perf-hero-secondary">
+        <div class="perf-stat"><div class="perf-cell-label">件数</div><div class="perf-stat-value">${stats.count}</div></div>
+        <div class="perf-stat"><div class="perf-cell-label">勝率</div><div class="perf-stat-value">${esc(PCT_FMT(stats.winRate))}</div></div>
+      </div>
+    </div>
+    <div class="perf-cell-grid">${cells}</div>
   </div>`
 }
 

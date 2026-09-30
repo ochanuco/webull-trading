@@ -298,18 +298,23 @@ export const CHARTS_PAGE_STYLE = `
   /* 成績タブ: 640px 固定の成績タイル (X 投稿用スクショ対象) + 残り幅の銘柄別表。 */
   .quality-perf-row{display:grid;grid-template-columns:640px 1fr;gap:16px;align-items:start}
   @media(max-width:1100px){.quality-perf-row{grid-template-columns:1fr}}
-  /* 640x640 hero card's tile grid: 5 columns x 2 rows so the 合計PnL tile
-     (first child) can span 2 columns as a hero without leaving a ragged
-     gap — 1 hero(2) + 3 singles fills row 1, 5 singles fills row 2 exactly.
-     kpiCard()'s own markup stacks label directly above value with no
-     vertical spacing, which read as "value stranded at the top, dead space
-     below" once the grid stretched each tile to fill a tall row — the flex
-     column + space-between here pins the value to the tile's bottom instead. */
-  .perf-tile-grid{display:grid;grid-template-columns:repeat(5,1fr);grid-template-rows:repeat(2,1fr);gap:14px;flex:1;min-height:0}
-  .perf-tile-grid .kpi-card{display:flex;flex-direction:column;justify-content:space-between;height:100%;box-sizing:border-box}
-  .perf-tile-grid .kpi-card:first-child{grid-column:span 2}
-  .perf-tile-grid .kpi-value{font-size:30px}
-  /* 36px (not larger): +$170.02 at 44px clipped past the 2-column hero
-     cell's own width once card/tile padding was subtracted. */
-  .perf-tile-grid .kpi-card:first-child .kpi-value{font-size:36px}
+  /* 成績タブの hero カード (X 投稿用スクショ対象): row1 は 合計PnL の hero +
+     件数/勝率 の副次 stat を surface-2 の帯に乗せる (内側に枠線を作らない)。
+     row2-3 は border 無しのフラットセルを 1px 罫線だけで区切る。値はすべて
+     min-width:0 + tabular-nums にして、長い値 (+$12,345.67 等) でもセルの
+     column track を突き破らず自然に収まるようにする。 */
+  .perf-hero-row{display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--surface-2);border-radius:var(--radius);padding:18px 20px;margin-bottom:2px}
+  .perf-hero{min-width:0}
+  .perf-hero-label{font-size:13px;color:var(--text-3)}
+  .perf-hero-value{font-size:48px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .perf-hero-secondary{display:flex;gap:28px;flex:0 0 auto}
+  .perf-stat{min-width:0}
+  .perf-stat-value{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .perf-cell-grid{display:grid;grid-template-columns:repeat(4,1fr)}
+  .perf-cell{padding:26px 12px;min-width:0;border-left:1px solid var(--border)}
+  .perf-cell:nth-child(4n+1){border-left:none}
+  .perf-cell:nth-child(n+5){border-top:1px solid var(--border)}
+  .perf-cell-wide{grid-column:span 2}
+  .perf-cell-label{font-size:12px;color:var(--text-3)}
+  .perf-cell-value{font-size:26px;font-weight:650;margin-top:4px;font-variant-numeric:tabular-nums;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 `
