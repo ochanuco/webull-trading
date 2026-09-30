@@ -38,11 +38,11 @@ function renderPairRegimeLine(
   if (!view) return ''
   const d = view.decision
   const color =
-    d.zone === 'bull' ? '#057a55' : d.zone === 'bear' ? '#b25000' : d.zone === 'neutral' ? '#46608a' : '#c22'
+    d.zone === 'bull' ? 'var(--up)' : d.zone === 'bear' ? 'var(--warn)' : d.zone === 'neutral' ? 'var(--info)' : 'var(--down)'
   const sideJa = view.side === 'bull' ? 'ブル側' : 'ベア側'
   const allowed = (view.side === 'bull' && d.zone === 'bull') || (view.side === 'bear' && d.zone === 'bear')
   const verdict = allowed ? 'entry 可' : 'entry 不可'
-  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+  return `<div style="margin-top:8px;font-size:13px;color:var(--text);display:flex;gap:12px;flex-wrap:wrap;align-items:center">
     ペアレジーム: <strong style="color:${color}">${esc(PAIR_REGIME_ZONE_LABELS[d.zone])}</strong>
     <span class="muted" style="font-size:12px">この銘柄は${sideJa} → ${verdict}${view.mode === 'observe' ? ' (observe: gate は未適用)' : ''}</span>
     <span class="muted" style="font-size:12px">${d.score !== null ? `score ${(d.score * 100).toFixed(2)}%` : ''} proxy ${esc(d.proxySymbol)}${d.asOfDate ? ` / ${esc(d.asOfDate)} 時点` : ''}</span>
@@ -94,30 +94,30 @@ export function renderConclusionValue(
 ): { value: string; color: string } {
   if (position !== null) {
     const current = latestCronPrice ?? position.avgPrice
-    if (!(current > 0)) return { value: '算出不可 (現在値なし)', color: '#86868b' }
+    if (!(current > 0)) return { value: '算出不可 (現在値なし)', color: 'var(--text-3)' }
     const stopPrice = position.avgPrice * (1 + strategyParams.stopPct)
     const tpPrice = position.avgPrice * (1 + strategyParams.takeProfitPct)
     const toStop = (stopPrice - current) / current
     const toTp = (tpPrice - current) / current
     return {
       value: `stop まで ${fmtPctSigned(toStop)} ／ TP まで ${fmtPctSigned(toTp)}`,
-      color: '#3a3a3c',
+      color: 'var(--text)',
     }
   }
   const cur = buyability?.current ?? null
-  if (!cur) return { value: '判定データなし', color: '#86868b' }
-  if (cur.buyable) return { value: '入場条件 充足（BUY 候補）', color: '#057a55' }
+  if (!cur) return { value: '判定データなし', color: 'var(--text-3)' }
+  if (cur.buyable) return { value: '入場条件 充足（BUY 候補）', color: 'var(--up)' }
   if (cur.entryPrice !== null && cur.priceMove !== null) {
     const bottleneck = cur.bindingGate ? `（${esc(cur.bindingGate.labelJa)}）` : ''
     return {
       value: `入場まで あと 価格 ${fmtPctSigned(cur.priceMove)}${bottleneck}`,
-      color: '#b25000',
+      color: 'var(--warn)',
     }
   }
   const g = cur.bindingGate
   return {
     value: g ? `価格でも入場不可 — ${esc(g.labelJa)}` : '評価不可',
-    color: '#c22',
+    color: 'var(--down)',
   }
 }
 
@@ -247,7 +247,7 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
 
   const chartViewContent = `<div class="symbol-chart-pin">
   ${renderPriceHeader(args.symbolChart, args.universe)}
-  <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
+  <div id="symbol-chart" style="width:100%;height:380px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>
   ${renderZoomPresetButtons(args.symbolChart)}
   </div>
   ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
@@ -288,16 +288,19 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <script src="${SYMBOL_CHART_STATIC_PATH}" defer></script>`
 }
 
-const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
-  ENTRY: { label: 'ENTRY', bg: '#e6f6ec', fg: '#057a55' },
-  HALF: { label: 'HALF 0.5x', bg: '#fff4e6', fg: '#b25000' },
-  WATCH: { label: 'WATCH', bg: '#eef2f8', fg: '#46608a' },
-  NG: { label: 'NG', bg: '#fdecec', fg: '#c22' },
+// pill classes reuse the same tokenized bg/fg the badge used inline before
+// (ok=e6f6ec/057a55, warn=fff4e6/b25000, info=eef2f8/46608a, err=fdecec/c22)
+// — no visual change in light mode, and dark mode now comes for free.
+const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; pillClass: string }> = {
+  ENTRY: { label: 'ENTRY', pillClass: 'ok' },
+  HALF: { label: 'HALF 0.5x', pillClass: 'warn' },
+  WATCH: { label: 'WATCH', pillClass: 'info' },
+  NG: { label: 'NG', pillClass: 'err' },
 }
 
 function entryStatusBadgeHtml(status: EntryStatus): string {
   const b = ENTRY_STATUS_BADGE[status]
-  return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${b.bg};color:${b.fg};font-weight:700;font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
+  return `<span class="pill ${b.pillClass}" style="font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
 }
 
 /** Renders nothing when `alloc` is undefined (symbol has no target weight and received no reroute). */
