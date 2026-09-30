@@ -78,6 +78,7 @@ import { type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, p
 import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
 import { cachedDashboardJson } from './charts/dashboardBarsCache'
 import { SYMBOL_CHART_CLIENT_SCRIPT, SYMBOL_CHART_CLIENT_SCRIPT_ETAG } from './charts/symbolChartScript'
+import { CHART_THEME_CLIENT_SCRIPT, CHART_THEME_CLIENT_SCRIPT_ETAG } from './charts/chartTheme'
 import { type EquityTradeMarker, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers } from './charts/equity'
 import { loadBenchmarkSeries } from './charts/benchmark'
 import { computeSymbolStats, computeTradeStats, filterTradePnlsByPeriod, loadSkipReasonBreakdown, loadTradePnls } from './charts/quality'
@@ -461,6 +462,22 @@ export const dashboard = new Hono<DashboardBindings>()
       return c.body(null, 304, headers)
     }
     return c.body(SYMBOL_CHART_CLIENT_SCRIPT, 200, {
+      ...headers,
+      'content-type': 'text/javascript; charset=utf-8',
+    })
+  })
+  // Same cache pattern as symbol-chart.js above. Loaded from layout.ts on
+  // every page (not just charts), so it must not touch DB/env either.
+  .get('/static/chart-theme.js', (c) => {
+    const ifNoneMatch = c.req.header('if-none-match')
+    const headers = {
+      'cache-control': 'public, max-age=86400',
+      etag: CHART_THEME_CLIENT_SCRIPT_ETAG,
+    }
+    if (ifNoneMatch === CHART_THEME_CLIENT_SCRIPT_ETAG) {
+      return c.body(null, 304, headers)
+    }
+    return c.body(CHART_THEME_CLIENT_SCRIPT, 200, {
       ...headers,
       'content-type': 'text/javascript; charset=utf-8',
     })

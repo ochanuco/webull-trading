@@ -68,7 +68,8 @@ export function renderPortfolioEquityChart(
   }
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') return;
+      if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
+      var t = window.wtTokens ? window.wtTokens() : {};
       var data = window.__equityChartData;
       var dates = data.usd.map(function (p) { return p.date; });
       var series = [];
@@ -79,8 +80,8 @@ export function renderPortfolioEquityChart(
           data: data.usd.map(function (p) { return p.value; }),
           connectNulls: false,
           smooth: false,
-          lineStyle: { width: 2, color: '#1471a8' },
-          itemStyle: { color: '#1471a8' },
+          lineStyle: { width: 2, color: t.accent },
+          itemStyle: { color: t.accent },
         });
       }
       if (data.hasJpy) {
@@ -91,8 +92,8 @@ export function renderPortfolioEquityChart(
           data: data.jpy.map(function (p) { return p.value; }),
           connectNulls: false,
           smooth: false,
-          lineStyle: { width: 2, color: '#b25000' },
-          itemStyle: { color: '#b25000' },
+          lineStyle: { width: 2, color: t.warn },
+          itemStyle: { color: t.warn },
         });
       }
       var yAxis = [{ type: 'value', name: 'USD', axisLabel: { formatter: '{value}' } }];
@@ -101,27 +102,24 @@ export function renderPortfolioEquityChart(
       } else if (!data.hasUsd && data.hasJpy) {
         yAxis = [{ type: 'value', name: 'JPY', axisLabel: { formatter: '{value}' } }];
       }
-      var chart = echarts.init(document.getElementById('portfolio-equity-chart'));
-      chart.setOption({
-        title: { text: '総資産 (dailyStartEquity) 時系列', left: 'center', textStyle: { fontSize: 14 } },
+      // No in-canvas title: the card head above already reads "総資産チャート".
+      window.wtChart(document.getElementById('portfolio-equity-chart'), {
         tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '—' : Number(v).toFixed(2); } },
-        legend: { top: 24 },
-        grid: { left: 50, right: 20, top: 60, bottom: 40, containLabel: true },
+        legend: { top: 4 },
+        grid: { left: 50, right: 20, top: 40, bottom: 40, containLabel: true },
         xAxis: { type: 'category', data: dates },
         yAxis: yAxis,
         series: series,
       });
-      window.addEventListener('resize', function () { chart.resize(); });
     });
   `
-  return `<h3 style="margin-top:24px">総資産チャート</h3>
-  ${rangeTabs}
+  return `<div class="card-head"><span class="card-title">総資産チャート</span><span class="card-actions">${rangeTabs}</span></div>
   <p class="muted" style="font-size:12px">
     <code>PortfolioStateDO.dailyStartEquity</code> の roll-daily 時点スナップショット。
     <code>/dashboard/charts?tab=overview</code> は <code>trade_journal.realized_pnl</code> の
     累積で、こちらは口座総資産そのもの (cash + 保有時価)。USD / JPY を別軸でプロット。
   </p>
-  <div id="portfolio-equity-chart" style="width:100%;height:320px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <div id="portfolio-equity-chart" style="width:100%;height:320px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:12px"></div>
   ${safeJsonScript('__equityChartData', { usd: usdPoints, jpy: jpyPoints, hasUsd, hasJpy })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`

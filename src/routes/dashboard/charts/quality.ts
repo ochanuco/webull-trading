@@ -218,7 +218,7 @@ function renderPeriodPills(period: QualityPeriod): string {
       return `<a class="zoom-preset${active}" style="text-decoration:none" href="/dashboard/charts?tab=quality&period=${p}">${esc(QUALITY_PERIOD_LABELS[p])}</a>`
     })
     .join('')
-  return `<div style="margin-bottom:10px">${links}</div>`
+  return `<div class="seg" style="margin-bottom:10px">${links}</div>`
 }
 
 // Fixed ~640px width fits an X screenshot. Value font shrunk to 18px
@@ -270,7 +270,8 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
   }
   const symbolBarChart =
     args.symbolStats.length > 0
-      ? `<div id="symbol-pnl-chart" style="width:100%;max-width:640px;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:16px"></div>`
+      ? `<h3 class="sub-head">銘柄別 合計PnL</h3>
+      <div id="symbol-pnl-chart" style="width:100%;max-width:640px;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>`
       : ''
   const tradeSection = args.hasTradeData
     ? `${renderPeriodPills(args.period)}
@@ -280,21 +281,21 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
     : ''
   const skipSection =
     args.skipBreakdown.length > 0
-      ? `<div id="skip-reason-chart" style="width:100%;height:340px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:20px"></div>`
+      ? `<h3 class="sub-head">日次 SKIP 理由内訳</h3>
+      <div id="skip-reason-chart" style="width:100%;height:340px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>`
       : ''
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') return;
+      if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
+      var t = window.wtTokens ? window.wtTokens() : {};
       var data = window.__chartData;
       var barEl = document.getElementById('symbol-pnl-chart');
       if (barEl && data.symbolStats && data.symbolStats.length > 0) {
-        var barChart = echarts.init(barEl);
         var symbols = data.symbolStats.map(function (s) { return s.symbol; });
-        barChart.setOption({
-          title: { text: '銘柄別 合計PnL', left: 'center', textStyle: { fontSize: 14 } },
+        window.wtChart(barEl, {
           tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-          grid: { left: 70, right: 60, top: 40, bottom: 20 },
-          xAxis: { type: 'value', splitLine: { lineStyle: { color: '#eee' } } },
+          grid: { left: 70, right: 60, top: 20, bottom: 20 },
+          xAxis: { type: 'value', splitLine: { lineStyle: { color: t.border } } },
           yAxis: { type: 'category', data: symbols, inverse: true },
           series: [{
             type: 'bar',
@@ -303,7 +304,7 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
               var positive = s.totalPnl >= 0;
               return {
                 value: s.totalPnl,
-                itemStyle: { color: positive ? '#057a55' : '#c22', borderRadius: 3 },
+                itemStyle: { color: positive ? t.up : t.down, borderRadius: 3 },
                 label: {
                   show: true,
                   position: positive ? 'right' : 'left',
@@ -314,18 +315,15 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
             }),
           }],
         });
-        window.addEventListener('resize', function () { barChart.resize(); });
       }
       var skipEl = document.getElementById('skip-reason-chart');
       if (skipEl && data.skipBreakdown && data.skipBreakdown.length > 0) {
-        var skipChart = echarts.init(skipEl);
         var dates = data.skipBreakdown.map(function (p) { return p.date; });
         var categories = data.skipCategories;
-        skipChart.setOption({
-          title: { text: '日次 SKIP 理由内訳', left: 'center', textStyle: { fontSize: 14 } },
+        window.wtChart(skipEl, {
           tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-          legend: { top: 22, data: categories.map(function (c) { return c.label; }) },
-          grid: { left: 50, right: 20, top: 60, bottom: 40 },
+          legend: { top: 4, data: categories.map(function (c) { return c.label; }) },
+          grid: { left: 50, right: 20, top: 40, bottom: 40 },
           xAxis: { type: 'category', data: dates },
           yAxis: { type: 'value', name: '件数' },
           series: categories.map(function (c) {
@@ -333,12 +331,11 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
               name: c.label,
               type: 'bar',
               stack: 'skip',
-              itemStyle: { color: c.color, borderWidth: 2, borderColor: '#fff' },
+              itemStyle: { color: c.color, borderWidth: 2, borderColor: t.surface },
               data: data.skipBreakdown.map(function (p) { return p.counts[c.key] || 0; }),
             };
           }),
         });
-        window.addEventListener('resize', function () { skipChart.resize(); });
       }
     });
   `

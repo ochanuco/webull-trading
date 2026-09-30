@@ -297,7 +297,8 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
       : ''
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') return;
+      if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
+      var t = window.wtTokens ? window.wtTokens() : {};
       var data = window.__chartData;
       var vm = data.vm;
       var escHtml = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
@@ -310,22 +311,20 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
         }
         return { name: name, type: 'scatter', symbolSize: 9, z: 5, itemStyle: { color: color }, data: items };
       }
-      // Single source for legend/title/tooltip unit-detection, all three of
-      // which match against this name.
+      // Single source for legend/tooltip unit-detection, both of which
+      // match against this name (the card head above carries the title).
       var BENCH_SERIES = '市場に乗るだけ (QQQ)';
       var series = [
         { name: '確定損益 (累積)', type: 'line', data: vm.equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } },
-        markerSeries('売り・益 (SELL)', '#057a55', function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) >= 0; }),
-        markerSeries('売り・損 (SELL)', '#c22', function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) < 0; }),
-        markerSeries('買い (BUY)', '#86868b', function (m) { return m.side !== 'SELL'; }),
+        markerSeries('売り・益 (SELL)', t.up, function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) >= 0; }),
+        markerSeries('売り・損 (SELL)', t.down, function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) < 0; }),
+        markerSeries('買い (BUY)', t.text3, function (m) { return m.side !== 'SELL'; }),
       ];
       if (vm.benchmark) {
-        series.push({ name: BENCH_SERIES, type: 'line', yAxisIndex: 1, data: vm.benchmark, showSymbol: false, connectNulls: true, lineStyle: { width: 1, type: 'dashed', color: '#1471a8' }, itemStyle: { color: '#1471a8' } });
+        series.push({ name: BENCH_SERIES, type: 'line', yAxisIndex: 1, data: vm.benchmark, showSymbol: false, connectNulls: true, lineStyle: { width: 1, type: 'dashed', color: t.info }, itemStyle: { color: t.info } });
       }
-      var equityChart = echarts.init(document.getElementById('equity-chart'));
-      equityChart.setOption({
-        title: { text: vm.benchmark ? 'bot の確定損益 vs ' + BENCH_SERIES : 'bot の確定損益の推移', left: 'center', textStyle: { fontSize: 14 } },
-        legend: { top: 24, textStyle: { fontSize: 11 } },
+      var equityChart = window.wtChart(document.getElementById('equity-chart'), {
+        legend: { top: 4, textStyle: { fontSize: 11 } },
         tooltip: {
           trigger: 'axis',
           formatter: function (params) {
@@ -346,7 +345,7 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
             return lines.join('<br/>');
           },
         },
-        grid: { left: 50, right: vm.benchmark ? 55 : 20, top: 52, bottom: 40 },
+        grid: { left: 50, right: vm.benchmark ? 55 : 20, top: 32, bottom: 40 },
         xAxis: { type: 'category', data: vm.dates },
         yAxis: [
           { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
@@ -359,36 +358,32 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
           window.location.href = '/dashboard/trades?clientOrderId=' + encodeURIComponent(p.data.marker.clientOrderId);
         }
       });
-      var ddChart = echarts.init(document.getElementById('dd-chart'));
-      ddChart.setOption({
-        title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
+      window.wtChart(document.getElementById('dd-chart'), {
         tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
-        grid: { left: 50, right: 20, top: 40, bottom: 40 },
+        grid: { left: 50, right: 20, top: 28, bottom: 40 },
         xAxis: { type: 'category', data: vm.dates },
         yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
-        series: [{ type: 'line', data: vm.drawdownPct, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } }],
+        series: [{ type: 'line', data: vm.drawdownPct, areaStyle: { color: t.down, opacity: 0.2 }, lineStyle: { color: t.down, width: 1 } }],
       });
       var monthlyEl = document.getElementById('monthly-chart');
-      var monthlyChart = null;
       if (monthlyEl && data.monthly && data.monthly.length > 0) {
-        monthlyChart = echarts.init(monthlyEl);
-        monthlyChart.setOption({
-          title: { text: '月次 realized PnL (JST 集計)', left: 'center', textStyle: { fontSize: 14 } },
+        window.wtChart(monthlyEl, {
           tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
-          grid: { left: 50, right: 20, top: 40, bottom: 40 },
+          grid: { left: 50, right: 20, top: 28, bottom: 40 },
           xAxis: { type: 'category', data: data.monthly.map(function (m) { return m.month; }) },
           yAxis: { type: 'value', name: 'PnL' },
-          series: [{ type: 'bar', barMaxWidth: 40, data: data.monthly.map(function (m) { return { value: m.pnl, itemStyle: { color: m.pnl >= 0 ? '#057a55' : '#c22' } }; }) }],
+          series: [{ type: 'bar', barMaxWidth: 40, data: data.monthly.map(function (m) { return { value: m.pnl, itemStyle: { color: m.pnl >= 0 ? t.up : t.down } }; }) }],
         });
       }
-      window.addEventListener('resize', function () { equityChart.resize(); ddChart.resize(); if (monthlyChart) monthlyChart.resize(); });
     });
   `
   const monthly = args.monthlyReturns ?? []
   const monthlyChartHtml =
     monthly.length > 0
-      ? `<div id="monthly-chart" style="width:100%;height:260px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>`
+      ? `<h3 class="sub-head">月次 realized PnL (JST 集計)</h3>
+      <div id="monthly-chart" style="width:100%;height:260px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>`
       : ''
+  const equityTitle = hasBenchmark ? `bot の確定損益 vs 市場に乗るだけ (QQQ)` : 'bot の確定損益の推移'
   return `<p class="muted" style="font-size:12px">
     累積 realized PnL と peak からの下落率 (MaxDD)。戦略の長期パフォーマンス指標。
     シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算
@@ -396,8 +391,10 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
     risk_dd_halt) は別概念のため重畳しない。
     ${esc(benchmarkNote)}${esc(markerNote)}
   </p>
-  <div id="equity-chart" style="width:100%;height:340px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  <div id="dd-chart" style="width:100%;height:280px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
+  <h3 class="sub-head">${esc(equityTitle)}</h3>
+  <div id="equity-chart" style="width:100%;height:340px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>
+  <h3 class="sub-head">ドローダウン (累積 PnL の peak からの低下率)</h3>
+  <div id="dd-chart" style="width:100%;height:280px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>
   ${renderPeriodReturnsTable(args.periodReturns ?? [])}
   ${monthlyChartHtml}
   ${safeJsonScript('__chartData', { vm, monthly })}

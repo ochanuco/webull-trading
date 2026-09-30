@@ -19,6 +19,12 @@ export const ECHARTS_CDN = 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echa
  */
 export const SYMBOL_CHART_STATIC_PATH = '/dashboard/static/symbol-chart.js'
 
+/**
+ * Shared by `layout.ts` (`<script src>`, loaded on every page) and
+ * `index.ts` (route registration) so the two can't drift onto different paths.
+ */
+export const CHART_THEME_STATIC_PATH = '/dashboard/static/chart-theme.js'
+
 export type ChartsTab = 'overview' | 'quality' | 'symbol'
 
 export function parseChartsTab(value: string | undefined): ChartsTab {
@@ -232,5 +238,5 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
         `<button class="zoom-preset" data-from-ms="${p.fromMs}" data-to-ms="${p.toMs}">${esc(p.label)}</button>`,
     )
     .join('')
-  return `<p style="margin:8px 0 0">${buttons}</p>`
+  return `<p class="seg" style="margin:8px 0 0">${buttons}</p>`
 }

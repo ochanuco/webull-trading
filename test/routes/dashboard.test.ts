@@ -2316,7 +2316,7 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
       // stop=96 → (96-104)/104=-7.69%、TP=107 → (107-104)/104=+2.88%
       expect(value).toContain('stop まで -7.7%')
       expect(value).toContain('TP まで +2.9%')
-      expect(color).toBe('#3a3a3c')
+      expect(color).toBe('var(--text)')
     })
 
     it('未保有 + buyable: 入場条件充足の結論', () => {
@@ -2328,7 +2328,7 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
       )
       const { value, color } = renderConclusionValue(view, null, baseParams, 95)
       expect(value).toContain('入場条件 充足')
-      expect(color).toBe('#057a55')
+      expect(color).toBe('var(--up)')
     })
 
     it('未保有 + 価格まであと X%: ボトルネックゲート名を併記', () => {
@@ -2338,13 +2338,13 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
       )
       const { value, color } = renderConclusionValue(view, null, baseParams, 200)
       expect(value).toContain('入場まで あと 価格')
-      expect(color).toBe('#b25000')
+      expect(color).toBe('var(--warn)')
     })
 
     it('buyability null: 判定データなし', () => {
       const { value, color } = renderConclusionValue(null, null, baseParams, null)
       expect(value).toBe('判定データなし')
-      expect(color).toBe('#86868b')
+      expect(color).toBe('var(--text-3)')
     })
   })
 
