@@ -308,7 +308,7 @@ export function renderAllocationLine(alloc: SymbolAllocation | undefined): strin
   if (!alloc) return ''
   const pct = (w: number) => `${Math.round(w * 1000) / 10}%`
   const changed = Math.abs(alloc.activeWeight - alloc.targetWeight) > 1e-9
-  const color = alloc.activeWeight === 0 ? '#b25000' : changed ? '#057a55' : '#86868b'
+  const color = alloc.activeWeight === 0 ? 'var(--warn)' : changed ? 'var(--up)' : 'var(--text-3)'
   const arrow = changed ? ` → <strong>${pct(alloc.activeWeight)}</strong>` : ''
   const reroute = alloc.rerouteTo ? `（${esc(alloc.rerouteTo)} へ退避中）` : ''
   const rerouted = alloc.reroutedInWeight > 0 ? `（+${pct(alloc.reroutedInWeight)} 退避受入）` : ''
@@ -347,8 +347,8 @@ export function renderSymbolPolicyLine(
       `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
     )
   }
-  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-    ${parts.join('<span style="color:#d0d0d5">｜</span>')}
+  return `<div style="margin-top:8px;font-size:13px;color:var(--text);display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    ${parts.join('<span style="color:var(--border-strong)">｜</span>')}
     <a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:12px">設定変更</a>
   </div>`
 }
@@ -382,7 +382,7 @@ export function renderStrategyParamsPanel(
   // read as an unmodified global value.
   const symbolTag = (key: keyof StrategyParamsSnapshot): string =>
     globalParams !== undefined && p[key] !== globalParams[key]
-      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:#e8f0fe;color:#1a56db" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
+      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:var(--info-soft);color:var(--info)" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
       : ''
   const pct = (n: number): string =>
     (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
@@ -514,12 +514,12 @@ export function renderBuyabilityPanel(
   if (cur.buyable) {
     headline =
       '現在 入場条件を充足（cron 評価では BUY 候補。実発注は資金 / 単元など発注側ゲート次第）'
-    headColor = '#057a55'
+    headColor = 'var(--up)'
   } else if (cur.entryPrice !== null && cur.priceMove !== null) {
     const dir = cur.priceMove < 0 ? '下落' : '上昇'
     const binding = cur.bindingGate ? ` ／ ボトルネック: ${esc(cur.bindingGate.labelJa)}` : ''
     headline = `入場まで: あと 価格 <strong>${fmtPctSigned(cur.priceMove)}</strong>（${fmtPriceCcy(cur.entryPrice, ccy)} 到達 = ${dir}）${binding}`
-    headColor = '#b25000'
+    headColor = 'var(--warn)'
   } else {
     const g = cur.bindingGate
     const why = g
@@ -530,7 +530,7 @@ export function renderBuyabilityPanel(
     headline = g
       ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))} 不成立）。${why}`
       : '入場条件 評価不可'
-    headColor = '#c22'
+    headColor = 'var(--down)'
   }
 
   // --- 距離の推移 (mini bars) ---
@@ -546,10 +546,10 @@ export function renderBuyabilityPanel(
         const gap = Math.abs(p.priceMove)
         const w = Math.max(2, Math.round((gap / maxGap) * 90))
         const last = i === recent.length - 1
-        const color = last ? headColor : '#c9c9cf'
+        const color = last ? headColor : 'var(--border-strong)'
         const md = JST_MD_FMT.format(new Date(p.timestamp))
         return `<div style="display:flex;align-items:center;gap:6px;font-size:11px;line-height:1.5">
-          <span style="width:34px;color:#86868b;text-align:right">${esc(md)}</span>
+          <span style="width:34px;color:var(--text-3);text-align:right">${esc(md)}</span>
           <span style="display:inline-block;height:8px;width:${w}px;background:${color};border-radius:2px"></span>
           <span style="font-variant-numeric:tabular-nums">${fmtPctSigned(p.priceMove)}</span>
         </div>`
@@ -557,9 +557,9 @@ export function renderBuyabilityPanel(
       .join('')
     const trendLabel =
       buyability.trend === 'closing'
-        ? '<span style="color:#057a55">縮小中（入場に近づいている）</span>'
+        ? '<span style="color:var(--up)">縮小中（入場に近づいている）</span>'
         : buyability.trend === 'widening'
-          ? '<span style="color:#b25000">拡大中（入場から遠ざかっている）</span>'
+          ? '<span style="color:var(--warn)">拡大中（入場から遠ざかっている）</span>'
           : buyability.trend === 'flat'
             ? '<span class="muted">横ばい</span>'
             : '<span class="muted">判定不能</span>'
@@ -583,12 +583,12 @@ export function renderBuyabilityPanel(
       const ok = g.passed
       const binding = cur.bindingGate?.key === g.key
       const mark = ok ? '✅' : '❌'
-      const bg = ok ? '#f1f8f4' : '#fdf0f0'
-      const border = binding ? 'border-left:3px solid #c22;' : 'border-left:3px solid transparent;'
-      const tag = binding ? ' <span style="color:#c22;font-weight:600">◀ ボトルネック</span>' : ''
+      const bg = ok ? 'var(--up-soft)' : 'var(--down-soft)'
+      const border = binding ? 'border-left:3px solid var(--down);' : 'border-left:3px solid transparent;'
+      const tag = binding ? ' <span style="color:var(--down);font-weight:600">◀ ボトルネック</span>' : ''
       return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 8px;background:${bg};${border}border-radius:4px;font-size:12px;flex-wrap:wrap">
         <span>${mark}</span><span>${esc(g.labelJa)}</span>
-        <span style="color:#555;font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
+        <span style="color:var(--text-2);font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
       </div>`
     })
     .join('')
@@ -597,7 +597,7 @@ export function renderBuyabilityPanel(
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
-    halfNote = `<div style="margin-top:6px;font-size:12px;color:#b25000">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
+    halfNote = `<div style="margin-top:6px;font-size:12px;color:var(--warn)">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
   }
 
   return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
@@ -617,7 +617,7 @@ export function renderDecisionPlotCaption(chart: SymbolChartData | null): string
   const decisions = chart?.decisions ?? []
   if (decisions.length === 0) return ''
   const dot = (color: string, label: string): string =>
-    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 1px #fff,0 0 0 2px ${color}"></span>${esc(label)}</span>`
+    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 1px var(--surface),0 0 0 2px ${color}"></span>${esc(label)}</span>`
   const capped =
     decisions.length >= MAX_CHART_DECISIONS
       ? ` <span class="muted">(直近 ${MAX_CHART_DECISIONS} 件まで表示)</span>`
@@ -626,7 +626,7 @@ export function renderDecisionPlotCaption(chart: SymbolChartData | null): string
     ● は cron の判定イベント。点をクリックすると下に判定トレースが出ます (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}
   </p>
   <div style="font-size:12px;margin:0 0 4px">
-    ${dot('#057a55', '買い (BUY)')}${dot('#1471a8', '売り (SELL)')}${dot('#b25000', '見送り・bot判定 (SKIP)')}${dot('#7c3aed', '拒否・証券会社 (REJECT)')}${dot('#c22', 'エラー (ERROR)')}
+    ${dot('var(--up)', '買い (BUY)')}${dot('var(--info)', '売り (SELL)')}${dot('var(--warn)', '見送り・bot判定 (SKIP)')}${dot('#8b5cf6', '拒否・証券会社 (REJECT)')}${dot('var(--down)', 'エラー (ERROR)')}
   </div>`
 }
 
