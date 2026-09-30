@@ -100,6 +100,34 @@ export function fmtJst(value: string | Date | null | undefined): string {
   return `${pick('year')}-${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}:${pick('second')} JST`
 }
 
+export const JST_COMPACT_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Tokyo',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+
+/** `MM/DD HH:mm` in JST — for dense log tables where a full timestamp column doesn't fit. */
+export function fmtJstCompact(value: string | Date | null | undefined): string {
+  if (value === null || value === undefined) return '-'
+  const d = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(d.getTime())) return typeof value === 'string' ? value : '-'
+  const parts = JST_COMPACT_FORMATTER.formatToParts(d)
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
+  return `${pick('month')}/${pick('day')} ${pick('hour')}:${pick('minute')}`
+}
+
+/**
+ * `fmtJstCompact` wrapped in a `title`-carrying span with the full `fmtJst`
+ * timestamp, ready to drop straight into a table cell.
+ */
+export function fmtJstCompactCell(value: string | Date | null | undefined): string {
+  if (value === null || value === undefined) return '<span class="muted">—</span>'
+  return `<span title="${esc(fmtJst(value))}">${esc(fmtJstCompact(value))}</span>`
+}
+
 export function unavailable(reason: string): string {
   return `<p class="warn">利用不可: ${esc(reason)}</p>`
 }

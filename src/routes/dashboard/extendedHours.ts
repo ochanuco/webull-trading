@@ -1,5 +1,5 @@
 import type { ExtendedHoursObservationRow } from '../../infrastructure/db/schema'
-import { esc, fmtJst } from './shared'
+import { esc, fmtJstCompactCell } from './shared'
 
 const STATUS_LABELS: Record<string, { ja: string; cls: string }> = {
   NORMAL: { ja: 'NORMAL (正常)', cls: 'ok' },
@@ -32,19 +32,19 @@ function fmtFreshness(sec: number | null): string {
 }
 
 function symbolLink(symbol: string): string {
-  return `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbol)}" style="text-decoration:none"><strong>${esc(symbol)}</strong></a>`
+  return `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbol)}"><strong>${esc(symbol)}</strong></a>`
 }
 
 function renderRow(r: ExtendedHoursObservationRow, showCapturedAt: boolean): string {
   return `<tr>
-    ${showCapturedAt ? `<td class="muted" style="white-space:nowrap">${esc(fmtJst(r.capturedAt))}</td>` : ''}
+    ${showCapturedAt ? `<td class="muted">${fmtJstCompactCell(r.capturedAt)}</td>` : ''}
     <td>${symbolLink(r.symbol)}</td>
     <td>${statusPill(r.status)}</td>
     <td class="num">${fmtPriceValue(r.preMarketLast)}</td>
     <td class="num">${fmtPctValue(r.gapPct)}</td>
     <td class="num">${fmtPctValue(r.direction15mPct)}</td>
     <td class="num">${fmtPctValue(r.toStopPct)}</td>
-    <td class="muted" style="white-space:nowrap">${r.lastBarAt ? esc(fmtJst(r.lastBarAt)) : '<span class="muted">—</span>'}</td>
+    <td class="muted">${r.lastBarAt ? fmtJstCompactCell(r.lastBarAt) : '<span class="muted">—</span>'}</td>
     <td class="muted">${fmtFreshness(r.freshnessSec)}</td>
   </tr>`
 }
@@ -59,7 +59,7 @@ export function extendedHoursBody(args: ExtendedHoursBodyArgs): string {
   const { sessionYmd, latest, recent } = args
   const latestTable =
     latest.length === 0
-      ? '<p class="muted">本日 (NY) のプレマーケット観測はまだありません。</p>'
+      ? '<p class="empty">本日 (NY) のプレマーケット観測はまだありません。</p>'
       : `<div class="tablewrap"><table class="fit">
           <thead><tr>
             <th>銘柄</th><th>状態</th><th class="num">プレマ終値</th><th class="num">gap</th><th class="num">直近15分</th><th class="num">stopまで</th><th>最終bar (JST)</th><th>新しさ</th>
@@ -68,18 +68,22 @@ export function extendedHoursBody(args: ExtendedHoursBodyArgs): string {
         </table></div>`
   const recentTable =
     recent.length === 0
-      ? '<p class="muted">履歴はまだありません。</p>'
+      ? '<p class="empty">履歴はまだありません。</p>'
       : `<div class="tablewrap"><table class="fit">
           <thead><tr>
             <th>観測時刻 (JST)</th><th>銘柄</th><th>状態</th><th class="num">プレマ終値</th><th class="num">gap</th><th class="num">直近15分</th><th class="num">stopまで</th><th>最終bar (JST)</th><th>新しさ</th>
           </tr></thead>
           <tbody>${recent.map((r) => renderRow(r, true)).join('')}</tbody>
         </table></div>`
-  return `
-    <p class="muted" style="font-size:13px">対象日 (NY): ${esc(sessionYmd)}。Yahoo 時間外参考値であり執行価格ではありません。売買判断には未接続 (観測専用) です。</p>
+  return `<div class="card">
+    <div class="card-head">
+      <h2 class="card-title">時間外参考</h2>
+      <span class="info-tip" tabindex="0" aria-label="観測データの注記" data-tip="Yahoo 時間外参考値であり執行価格ではありません。売買判断には未接続 (観測専用) です。">?</span>
+      <div class="card-actions"><span class="muted">対象日 (NY): ${esc(sessionYmd)}</span></div>
+    </div>
     <div class="section-head">当日の銘柄別最新観測</div>
     ${latestTable}
     <div class="section-head" style="margin-top:20px">直近履歴 (最大50件)</div>
     ${recentTable}
-  `
+  </div>`
 }

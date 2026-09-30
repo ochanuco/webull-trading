@@ -5,7 +5,7 @@ import {
   LOG_COPY_ALL_BTN,
   displaySymbol,
   esc,
-  fmtJst,
+  fmtJstCompactCell,
   inactiveTooltip,
   isSymbolInactive,
   logCopyRowBtn,
@@ -83,52 +83,59 @@ const ALERT_EVENT_LABELS: Record<string, string> = {
 
 const ALERT_MESSAGE_FOLD = 160
 
+// `.small` bumps this page's old 11px meta text (requestId / cause / full
+// message text) up to the 12px operator-mandated readability floor.
+const ALERTS_PAGE_STYLE = `<style>.small{font-size:12px}</style>`
+
 export function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore = false } = args
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
-  const countLine = `<span class="muted" style="font-size:12px;margin-right:8px">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
+  const countLine = `<span class="muted small">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
+  const cardHead = `<div class="card-head"><h2 class="card-title">アラート</h2><div class="card-actions">${filterPills}${countLine}</div></div>`
   if (rows.length === 0) {
-    return `${filterPills}${countLine}<p class="muted">該当するアラートはありません。</p>`
+    return `${ALERTS_PAGE_STYLE}<div class="card">${cardHead}<p class="empty">該当するアラートはありません。</p></div>`
   }
   const tbody = rows
     .map((r) => {
       const sev = ALERT_SEVERITY_PILLS[r.severity] ?? { ja: r.severity, cls: 'neutral' }
       const sevCell = `<span title="${esc(r.severity)}" class="pill ${sev.cls}">${esc(sev.ja)}</span>`
-      const eventCell = `<span title="${esc(r.eventType)}" style="font-size:12px">${esc(ALERT_EVENT_LABELS[r.eventType] ?? r.eventType)}</span>`
+      const eventCell = `<span title="${esc(r.eventType)}" class="small">${esc(ALERT_EVENT_LABELS[r.eventType] ?? r.eventType)}</span>`
       const symbolInactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''} style="text-decoration:none"><strong${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</strong></a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${symbolInactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''}><strong${symbolInactive ? ' class="symbol-disabled"' : ''}>${esc(displaySymbol(r.symbol, universe))}</strong></a>`
         : '<span class="muted">—</span>'
       const code = r.eventType === 'ERROR' ? extractBrokerErrorCode(r.message) : null
       const shortLabel = code ? (BROKER_ERROR_LABELS[code] ?? code) : null
       const messageBody =
         r.message.length > ALERT_MESSAGE_FOLD
-          ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
+          ? `${esc(r.message.slice(0, ALERT_MESSAGE_FOLD))}…<details style="margin-top:2px"><summary class="muted small">全文</summary><code class="small" style="white-space:pre-wrap;word-break:break-all">${esc(r.message)}</code></details>`
           : esc(r.message)
       // div, not span: the message body can contain a block-level <details>.
-      const messageCell = `${shortLabel ? `<span class="pill err">${esc(shortLabel)}</span>` : ''}<div style="font-size:12px">${messageBody}</div>`
+      const messageCell = `${shortLabel ? `<span class="pill err">${esc(shortLabel)}</span>` : ''}<div class="small">${messageBody}</div>`
       const causeCell = r.cause
-        ? `<code style="font-size:11px">${esc(r.cause)}</code>`
+        ? `<code class="small">${esc(r.cause)}</code>`
         : '<span class="muted">—</span>'
       return `<tr style="vertical-align:top">
         <td>${logCopyRowBtn(r.id)}</td>
-        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
+        <td class="muted">${fmtJstCompactCell(r.timestamp)}</td>
         <td>${sevCell}</td>
         <td>${eventCell}</td>
         <td>${symbolCell}</td>
         <td>${causeCell}</td>
         <td>${messageCell}</td>
-        <td class="muted"><code style="font-size:11px">${esc(r.requestId ?? '—')}</code></td>
+        <td class="muted"><code class="small">${esc(r.requestId ?? '—')}</code></td>
       </tr>`
     })
     .join('')
-  return `${filterPills}${countLine}
+  return `${ALERTS_PAGE_STYLE}<div class="card">${cardHead}
+  <div class="tablewrap">
   <table>
     <thead><tr>
       <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  </div>
   ${renderPaginationNav({
     baseHref: buildAlertBaseHref(limit, severityFilter, eventTypeFilter),
     before,
@@ -146,7 +153,7 @@ export function alertsBody(args: AlertsBodyArgs): string {
     },
     rows,
   })}
-  ${renderLogCopyScript('__alertsCopy')}`
+  ${renderLogCopyScript('__alertsCopy')}</div>`
 }
 
 function buildAlertBaseHref(
@@ -172,9 +179,8 @@ export function renderAlertFilterPills(
     const qs = next.toString()
     return qs.length === 0 ? '/dashboard/alerts' : `/dashboard/alerts?${qs}`
   }
-  // Reuses the .chip look from the trades/cron view toggles for visual consistency.
   const pill = (label: string, href: string, isActive: boolean): string =>
-    `<a href="${esc(href)}" class="chip${isActive ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
+    `<a href="${esc(href)}"${isActive ? ' class="active"' : ''}>${esc(label)}</a>`
   const sev = [
     pill('全 severity', buildHref('severity', null), active.length === 0),
     pill(
@@ -204,5 +210,5 @@ export function renderAlertFilterPills(
       activeEventType === 'STATE_CHANGE',
     ),
   ].join('')
-  return `<nav style="margin-bottom:12px">${sev}<span class="muted" style="margin:0 8px">|</span>${ev}</nav>`
+  return `<div class="seg">${sev}</div><div class="seg">${ev}</div>`
 }

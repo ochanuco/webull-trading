@@ -1,5 +1,5 @@
 import type { ConfigAuditRow } from '../../infrastructure/db/configAuditLog'
-import { esc, fmtJst, renderPaginationNav } from './shared'
+import { esc, fmtJstCompactCell, renderPaginationNav } from './shared'
 
 export interface AuditBodyArgs {
   rows: ConfigAuditRow[]
@@ -13,30 +13,42 @@ export interface AuditBodyArgs {
   hasMore?: boolean
 }
 
+// Local input/button sizing: this page's filter form predates the
+// foundation's `.btn`/`.seg` components and has no bare `<input>` styling to
+// fall back on, so the 13px/32px/border-strong baseline from the type-scale
+// spec is declared here instead of relying on browser defaults.
+const AUDIT_PAGE_STYLE = `<style>
+  .audit-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:4px}
+  .audit-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--text-2)}
+  .audit-form input{height:32px;padding:0 8px;font-size:13px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-family:inherit}
+  .audit-form input:focus{outline:2px solid var(--accent);outline-offset:1px}
+  .small{font-size:12px}
+</style>`
+
 export function auditBody(args: AuditBodyArgs): string {
   const { rows, limit, actorFilter, endpointFilter, fromFilter, toFilter, before, hasMore = false } = args
-  const form = `<form method="get" action="/dashboard/audit" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-  <label>actor<br><input name="actor" value="${esc(actorFilter ?? '')}" placeholder="ai-agent" style="padding:4px 8px"></label>
-  <label>endpoint<br><input name="endpoint" value="${esc(endpointFilter ?? '')}" placeholder="/admin/symbols/:symbol/seed-cash" style="padding:4px 8px;min-width:280px"></label>
-  <label>from<br><input name="from" type="date" value="${esc(fromFilter)}" style="padding:4px 8px"></label>
-  <label>to<br><input name="to" type="date" value="${esc(toFilter)}" style="padding:4px 8px"></label>
-  <label>limit<br><input name="limit" type="number" min="1" max="500" value="${limit}" style="padding:4px 8px;width:90px"></label>
-  <button type="submit" style="padding:6px 14px">絞り込み</button>
-  <a href="/dashboard/audit" style="padding:6px 14px;text-decoration:none">リセット</a>
+  const form = `<form method="get" action="/dashboard/audit" class="audit-form">
+  <label>actor<input name="actor" value="${esc(actorFilter ?? '')}" placeholder="ai-agent"></label>
+  <label>endpoint<input name="endpoint" value="${esc(endpointFilter ?? '')}" placeholder="/admin/symbols/:symbol/seed-cash" style="min-width:280px"></label>
+  <label>from<input name="from" type="date" value="${esc(fromFilter)}"></label>
+  <label>to<input name="to" type="date" value="${esc(toFilter)}"></label>
+  <label>limit<input name="limit" type="number" min="1" max="500" value="${limit}" style="width:90px"></label>
+  <button type="submit" class="btn primary">絞り込み</button>
+  <a href="/dashboard/audit" class="btn">リセット</a>
 </form>`
-  const header = `<p class="muted">直近 ${rows.length} 件 (limit=${limit}, max 500)。状態変更系 admin POST の before/after diff。before == after の no-op 呼び出しは記録されません。</p>`
+  const cardHead = `<div class="card-head"><h2 class="card-title">監査ログ</h2><span class="info-tip" tabindex="0" aria-label="監査ログの注記" data-tip="状態変更系 admin POST の before/after diff。before == after の no-op 呼び出しは記録されません。">?</span><div class="card-actions"><span class="muted small">直近 ${rows.length} 件 (limit=${limit}, max 500)</span></div></div>`
   if (rows.length === 0) {
-    return `${header}${form}<p class="muted">該当する監査ログは見つかりませんでした。</p>`
+    return `${AUDIT_PAGE_STYLE}<div class="card">${cardHead}${form}<p class="empty">該当する監査ログは見つかりませんでした。</p></div>`
   }
   const tbody = rows
     .map((r) => {
       return `<tr>
-        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
+        <td class="muted">${fmtJstCompactCell(r.timestamp)}</td>
         <td><strong>${esc(r.actor)}</strong></td>
         <td><code>${esc(r.endpoint)}</code></td>
         <td>${esc(r.targetKey ?? '-')}</td>
-        <td><details><summary class="muted">before</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;background:#fafafa;padding:6px;border-radius:4px">${esc(formatAuditJson(r.beforeJson))}</pre></details></td>
-        <td><details><summary class="muted">after</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;background:#fafafa;padding:6px;border-radius:4px">${esc(formatAuditJson(r.afterJson))}</pre></details></td>
+        <td><details><summary class="muted">before</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--surface-2);padding:6px;border-radius:4px">${esc(formatAuditJson(r.beforeJson))}</pre></details></td>
+        <td><details><summary class="muted">after</summary><pre style="margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--surface-2);padding:6px;border-radius:4px">${esc(formatAuditJson(r.afterJson))}</pre></details></td>
         <td class="muted"><code>${esc(r.requestId ?? '-')}</code></td>
       </tr>`
     })
@@ -46,19 +58,21 @@ export function auditBody(args: AuditBodyArgs): string {
   if (endpointFilter) auditBaseParams.push(`endpoint=${encodeURIComponent(endpointFilter)}`)
   if (fromFilter) auditBaseParams.push(`from=${encodeURIComponent(fromFilter)}`)
   if (toFilter) auditBaseParams.push(`to=${encodeURIComponent(toFilter)}`)
-  return `${header}${form}
+  return `${AUDIT_PAGE_STYLE}<div class="card">${cardHead}${form}
+  <div class="tablewrap">
   <table>
     <thead><tr>
       <th>timestamp (JST)</th><th>actor</th><th>endpoint</th><th>target</th><th>before</th><th>after</th><th>requestId</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
+  </div>
   ${renderPaginationNav({
     baseHref: `/dashboard/audit?${auditBaseParams.join('&')}`,
     before,
     lastId: rows.length > 0 ? rows[rows.length - 1]!.id : undefined,
     hasMore,
-  })}`
+  })}</div>`
 }
 
 export function clampAuditLimit(raw: string | undefined): number {
