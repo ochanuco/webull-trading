@@ -257,11 +257,21 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
  */
 export const CHARTS_PAGE_STYLE = `
   /* 判断カード群 (fold 上部の判断サマリ)。1360px 幅で 2×2、780px 以下は縦積み。 */
-  .judgment-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-  @media(max-width:780px){.judgment-grid{grid-template-columns:1fr}}
-  .judgment-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:13px}
-  .judgment-card .jc-label{font-size:11px;color:var(--text-3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em}
-  .judgment-card .jc-value{font-size:13px;line-height:1.5}
+  /* One card, 4 columns divided by a vertical rule (spec: not 4 separate
+     cards). Under 900px the columns wrap to 2x2; a vertical rule on every
+     non-first column would then land on top of row 2's first column too, so
+     the divider switches to per-row (nth-child) instead. */
+  .judgment-row{display:grid;grid-template-columns:repeat(4,1fr);font-size:13px}
+  .judgment-row .judgment-col{padding:0 16px}
+  .judgment-row .judgment-col:not(:first-child){border-left:1px solid var(--border)}
+  .judgment-row .jc-label{font-size:11px;color:var(--text-3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em}
+  .judgment-row .jc-value{font-size:13px;line-height:1.5}
+  @media(max-width:900px){
+    .judgment-row{grid-template-columns:1fr 1fr;row-gap:12px}
+    .judgment-row .judgment-col:nth-child(odd){border-left:none}
+    .judgment-row .judgment-col:nth-child(even){border-left:1px solid var(--border)}
+    .judgment-row .judgment-col:nth-child(n+3){border-top:1px solid var(--border);padding-top:12px}
+  }
   /* symbol タブ内サブナビ「チャート / 履歴・設定」。header の .subnav-link と
      同じトークンを再利用しつつ、本文内に埋め込むため padding/border は自前。 */
   .symbol-subnav{display:flex;gap:2px;margin:0 0 10px;flex-wrap:wrap}
@@ -288,4 +298,18 @@ export const CHARTS_PAGE_STYLE = `
   /* 成績タブ: 640px 固定の成績タイル (X 投稿用スクショ対象) + 残り幅の銘柄別表。 */
   .quality-perf-row{display:grid;grid-template-columns:640px 1fr;gap:16px;align-items:start}
   @media(max-width:1100px){.quality-perf-row{grid-template-columns:1fr}}
+  /* 640x640 hero card's tile grid: 5 columns x 2 rows so the 合計PnL tile
+     (first child) can span 2 columns as a hero without leaving a ragged
+     gap — 1 hero(2) + 3 singles fills row 1, 5 singles fills row 2 exactly.
+     kpiCard()'s own markup stacks label directly above value with no
+     vertical spacing, which read as "value stranded at the top, dead space
+     below" once the grid stretched each tile to fill a tall row — the flex
+     column + space-between here pins the value to the tile's bottom instead. */
+  .perf-tile-grid{display:grid;grid-template-columns:repeat(5,1fr);grid-template-rows:repeat(2,1fr);gap:14px;flex:1;min-height:0}
+  .perf-tile-grid .kpi-card{display:flex;flex-direction:column;justify-content:space-between;height:100%;box-sizing:border-box}
+  .perf-tile-grid .kpi-card:first-child{grid-column:span 2}
+  .perf-tile-grid .kpi-value{font-size:30px}
+  /* 36px (not larger): +$170.02 at 44px clipped past the 2-column hero
+     cell's own width once card/tile padding was subtracted. */
+  .perf-tile-grid .kpi-card:first-child .kpi-value{font-size:36px}
 `

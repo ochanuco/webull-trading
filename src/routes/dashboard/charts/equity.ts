@@ -261,11 +261,11 @@ export function buildOverviewChartData(
   return { dates, equity, drawdownPct, markers: outMarkers, benchmark: benchAligned }
 }
 
+/** Sign before the $ mark (`+$35.76`, `-$2.13`) — no %, same reason as computePeriodReturns (no seed-capital denominator). */
 function fmtSignedAmount(v: number): string {
-  return `${v > 0 ? '+' : ''}${fmtNumber(v)}`
+  return `${v >= 0 ? '+' : '-'}$${fmtNumber(Math.abs(v))}`
 }
 
-/** No %, same reason as computePeriodReturns (no seed-capital denominator). */
 function renderPeriodReturnsRow(rows: PeriodReturn[]): string {
   if (rows.length === 0) return ''
   const tiles = rows
@@ -274,7 +274,7 @@ function renderPeriodReturnsRow(rows: PeriodReturn[]): string {
       return `<div class="kpi"><div class="kpi-label">${esc(r.label)}</div><div class="kpi-value ${cls}" style="font-size:20px">${esc(fmtSignedAmount(r.change))}</div></div>`
     })
     .join('')
-  return `<h3 class="sub-head">期間別リターン (実現 PnL 変化額)</h3>
+  return `<h3 class="sub-head">期間別の確定損益</h3>
   <div class="kpi-grid">${tiles}</div>`
 }
 
@@ -328,7 +328,7 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
       // charts, which made comparing a PnL move to its drawdown context a
       // manual lookup between two separate tooltips.
       var equityChart = window.wtChart(document.getElementById('equity-chart'), {
-        legend: { top: 4, textStyle: { fontSize: 11 }, data: ['確定損益 (累積)'].concat(vm.benchmark ? [BENCH_SERIES] : []) },
+        legend: { top: 4, left: 4, textStyle: { fontSize: 11 }, data: ['確定損益 (累積)'].concat(vm.benchmark ? [BENCH_SERIES] : []) },
         axisPointer: { link: [{ xAxisIndex: 'all' }] },
         tooltip: {
           trigger: 'axis',
@@ -361,10 +361,17 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
           { type: 'category', data: vm.dates, gridIndex: 0, axisLabel: { show: false } },
           { type: 'category', data: vm.dates, gridIndex: 1 },
         ],
+        // No axis "name" labels (they ate grid space for little gain) — the
+        // $/% mark lives in each tick's own formatter instead.
         yAxis: [
-          { type: 'value', name: 'PnL', gridIndex: 0, axisLabel: { formatter: '{value}' } },
-          { type: 'value', name: 'QQQ %', gridIndex: 0, show: !!vm.benchmark, axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
-          { type: 'value', name: 'DD %', gridIndex: 1, max: 0, axisLabel: { formatter: '{value}%' } },
+          {
+            type: 'value', gridIndex: 0,
+            axisLabel: { formatter: function (v) { return (v < 0 ? '-$' : '$') + Math.abs(v); } },
+          },
+          { type: 'value', gridIndex: 0, show: !!vm.benchmark, axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
+          // splitNumber:2 keeps the short drawdown grid (~80px tall) to 2-3
+          // labels instead of the default 5, which overlapped.
+          { type: 'value', gridIndex: 1, max: 0, splitNumber: 2, axisLabel: { formatter: '{value}%' } },
         ],
         series: series,
       });

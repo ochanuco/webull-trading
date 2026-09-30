@@ -204,10 +204,10 @@ export async function loadSkipReasonBreakdown(db: D1Database): Promise<SkipReaso
   return aggregateSkipReasonRows(result.results ?? [])
 }
 
-const NUM_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '—')
 const PCT_FMT = (n: number) => (Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—')
 const PF_FMT = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '∞')
-/** 正/負の色分けは既存サイト慣習 (`.ok` = 緑 #057a55 / `.err` = 赤 #c22) に揃える。 */
+/** Sign before the $ mark (`+$170.02`, `-$2.13`) — these are all $ PnL figures, never a bare number. */
+const MONEY_FMT = (n: number) => (Number.isFinite(n) ? `${n >= 0 ? '+' : '-'}$${Math.abs(n).toFixed(2)}` : '—')
 const signClass = (n: number) => (n > 0 ? 'ok' : n < 0 ? 'err' : 'muted')
 
 function renderPeriodPills(period: QualityPeriod): string {
@@ -222,27 +222,35 @@ function renderPeriodPills(period: QualityPeriod): string {
 }
 
 // Fixed 640x640 tile (spec: this exact card gets screenshotted for X posts,
-// so it stays a near-square footprint, not just a compact 3-column strip).
+// so it stays a near-square footprint). 合計PnL is the hero (2-col span,
+// larger value) since it's the one number an X reader actually wants —
+// the rest support it. `.perf-tile-grid` (CHARTS_PAGE_STYLE) bottom-aligns
+// each tile's value so a tall cell doesn't strand it up against the label.
 function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
   const tile = (label: string, text: string, cls?: string) =>
     kpiCard(label, `<span class="${cls ?? ''}">${esc(text)}</span>`)
+  const heroTile = kpiCard(
+    '合計 PnL',
+    `<span class="${signClass(stats.total)}">${esc(MONEY_FMT(stats.total))}</span>`,
+  )
+  // Row1 (with the hero, 5 column-tracks: hero=2 + 3 singles) reads as
+  // "the headline numbers"; row2 (5 singles) as the win/loss breakdown.
   const tiles = [
     tile('件数', String(stats.count)),
     tile('勝率', PCT_FMT(stats.winRate)),
     tile('profit factor', PF_FMT(stats.profitFactor)),
     tile('勝', String(stats.wins), 'ok'),
     tile('負', String(stats.losses), 'err'),
-    tile('合計 PnL', NUM_FMT(stats.total), signClass(stats.total)),
-    tile('平均利益', NUM_FMT(stats.avgWin), 'ok'),
-    tile('平均損失', NUM_FMT(stats.avgLoss), 'err'),
-    tile('期待値 (トレード毎)', NUM_FMT(stats.expectancy), signClass(stats.expectancy)),
+    tile('平均利益', MONEY_FMT(stats.avgWin), 'ok'),
+    tile('平均損失', MONEY_FMT(stats.avgLoss), 'err'),
+    tile('期待値 (トレード毎)', MONEY_FMT(stats.expectancy), signClass(stats.expectancy)),
   ].join('')
   return `<div class="card" style="width:640px;height:640px;box-sizing:border-box;display:flex;flex-direction:column">
     <div class="card-head">
       <span class="card-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</span>
       <span class="card-actions muted" style="font-size:11px">as of ${esc(asOfJst)}</span>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);gap:16px;flex:1">${tiles}</div>
+    <div class="perf-tile-grid">${heroTile}${tiles}</div>
   </div>`
 }
 
@@ -254,7 +262,7 @@ function renderSymbolTable(symbolStats: SymbolStat[]): string {
         <td>${esc(s.symbol)}</td>
         <td class="num">${s.count}</td>
         <td class="num">${PCT_FMT(s.winRate)}</td>
-        <td class="num ${signClass(s.totalPnl)}">${NUM_FMT(s.totalPnl)}</td>
+        <td class="num ${signClass(s.totalPnl)}">${MONEY_FMT(s.totalPnl)}</td>
         <td class="num">${PF_FMT(s.profitFactor)}</td>
       </tr>`,
     )
@@ -281,13 +289,16 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
         <div id="symbol-pnl-chart" style="width:100%;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px"></div>
       </div>`
       : ''
+  // The bar chart stacks under the table in the same right-hand column
+  // (rather than full-width below the row) so the two columns read as a
+  // matched pair against the fixed 640px hero card, instead of the right
+  // column ending noticeably shorter than the left.
   const tradeSection = args.hasTradeData
     ? `${renderPeriodPills(args.period)}
       <div class="quality-perf-row">
         ${renderStatsCard(args.stats, args.period, args.asOfJst)}
-        ${renderSymbolTable(args.symbolStats)}
-      </div>
-      ${symbolBarChart}`
+        <div>${renderSymbolTable(args.symbolStats)}${symbolBarChart}</div>
+      </div>`
     : ''
   const skipSection =
     args.skipBreakdown.length > 0

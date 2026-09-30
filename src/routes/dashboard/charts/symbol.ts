@@ -164,7 +164,9 @@ export function renderLatestDecisionValue(rows: DecisionRow[] | undefined): stri
 /** `p` must be the resolved effective value (global → role preset → symbol override, via `buildSymbolRules`), not a raw symbol_config read — displaying raw config here previously drifted from what the strategy actually used. */
 export function renderEffectiveRuleChips(p: StrategyParamsSnapshot): string {
   const pct = (n: number): string => (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
-  return `<span class="chip">stop ${esc(pct(p.stopPct))}</span> <span class="chip">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip">time-stop ${p.timeStopDays}営業日</span>`
+  // white-space:nowrap: the 4-column judgment card's narrower columns
+  // otherwise let the browser break "time-stop" at its hyphen mid-word.
+  return `<span class="chip" style="white-space:nowrap">stop ${esc(pct(p.stopPct))}</span> <span class="chip" style="white-space:nowrap">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip" style="white-space:nowrap">time-stop ${p.timeStopDays}営業日</span>`
 }
 
 /** Returns '' when there's no chart data — the noData branch is handled by the caller instead. */
@@ -178,22 +180,28 @@ export function renderJudgmentSummaryGrid(args: ChartsBodySymbol): string {
     args.strategyParams,
     chart.latestCronPrice,
   )
-  return `<div class="judgment-grid">
-    <div class="judgment-card">
-      <div class="jc-label">結論</div>
-      <div class="jc-value" style="color:${conclusion.color}">${conclusion.value}</div>
-    </div>
-    <div class="judgment-card">
-      <div class="jc-label">保有状態</div>
-      <div class="jc-value">${renderPositionSummaryValue(chart.position, args.strategyParams, chart.latestCronPrice, ccy)}</div>
-    </div>
-    <div class="judgment-card">
-      <div class="jc-label">直近判定</div>
-      <div class="jc-value">${renderLatestDecisionValue(args.decisionRows)}</div>
-    </div>
-    <div class="judgment-card">
-      <div class="jc-label">有効ルール</div>
-      <div class="jc-value">${renderEffectiveRuleChips(args.strategyParams)}</div>
+  // One card, 4 columns divided by a border (spec: not 4 separate cards) —
+  // .judgment-row/.judgment-col switch to a bordered 2x2 under 900px instead
+  // of vertical dividers, since 4-across dividers don't read once wrapped.
+  return `<div class="card">
+    <div class="card-head"><span class="card-title">判断</span></div>
+    <div class="judgment-row">
+      <div class="judgment-col">
+        <div class="jc-label">結論</div>
+        <div class="jc-value" style="color:${conclusion.color}">${conclusion.value}</div>
+      </div>
+      <div class="judgment-col">
+        <div class="jc-label">保有状態</div>
+        <div class="jc-value">${renderPositionSummaryValue(chart.position, args.strategyParams, chart.latestCronPrice, ccy)}</div>
+      </div>
+      <div class="judgment-col">
+        <div class="jc-label">直近判定</div>
+        <div class="jc-value">${renderLatestDecisionValue(args.decisionRows)}</div>
+      </div>
+      <div class="judgment-col">
+        <div class="jc-label">有効ルール</div>
+        <div class="jc-value">${renderEffectiveRuleChips(args.strategyParams)}</div>
+      </div>
     </div>
   </div>`
 }
@@ -243,7 +251,6 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
       : null
   const view: SymbolTabView = args.view === 'detail' ? 'detail' : 'chart'
   const subnav = args.focusSymbol ? renderSymbolViewSubnav(args.focusSymbol, view) : ''
-  const focusHeader = renderFocusSymbolHeader(args)
 
   const chartViewContent = `<div class="symbol-chart-pin">
   ${renderSymbolChartHeaderRow(args)}
@@ -254,7 +261,6 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
   <div id="symbol-chart" style="width:100%;height:480px"></div>
   ${renderDecisionColorKey(args.symbolChart)}
   </div>
-  ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderJudgmentSummaryGrid(args)}
   <details style="margin-top:10px">
@@ -267,10 +273,15 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px;display:none"></div>`
 
   const detailViewContent = `
+  ${renderFocusSymbolHeader(args)}
   ${renderSymbolDecisionHistory(args)}
   ${renderStrategyParamsPanel(args.strategyParams, args.strategyParamsGlobal)}`
 
-  const content = `${subnav}${focusHeader}${view === 'detail' ? detailViewContent : chartViewContent}`
+  // The chart view's own header row (ticker/name/role/price) already answers
+  // "which symbol" — repeating `renderFocusSymbolHeader`'s "銘柄: X" line
+  // above it was pure duplication. The detail/history view has no such
+  // header, so it keeps using it.
+  const content = `${subnav}${view === 'detail' ? detailViewContent : chartViewContent}`
   return `${content}
   ${chartDataScript({
     symbolChart: symbolChartPayload,
@@ -716,12 +727,44 @@ function renderRolePill(role: string | null): string {
   return `<span class="pill info" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}: ${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
 }
 
+/** '' when the symbol is active — kept out of the header id-block layout when there's nothing to say. */
+function renderFocusInactiveNote(args: ChartsBodySymbol): string {
+  if (!args.focusSymbol || !isSymbolInactive(args.focusSymbol, args.universe)) return ''
+  const reason = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
+  return ` <span class="muted" style="font-size:11px">(inactive — ${esc(reason)})</span>`
+}
+
 /**
- * Header row above the chart: ticker/name/role on the left, price hero +
- * range `.seg` stacked on the right — replaces the old small "銘柄: X" line
- * + bare price header for the chart view specifically (the detail/history
- * view keeps `renderFocusSymbolHeader`'s compact identity line instead,
- * since it has no chart or range to anchor a hero header to).
+ * Compact policy meta for the header (配分 target / 常時配分 / 条件連動 / 退避先
+ * + 設定変更 link) — role itself is shown separately as `renderRolePill`, so
+ * this only covers the remaining fields `renderSymbolPolicyLine` used to
+ * print as its own line under the chart (now redundant with the header).
+ */
+function renderSymbolPolicyMeta(symbol: string, policy: SymbolPolicySummary | null): string {
+  const parts: string[] = []
+  if (policy?.targetWeight !== null && policy?.targetWeight !== undefined) {
+    parts.push(`配分 target ${Math.round(policy.targetWeight * 1000) / 10}%`)
+  }
+  if (policy?.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
+  if (policy?.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (policy?.cashFallbackSymbols) {
+    parts.push(
+      `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
+    )
+  }
+  const metaText =
+    parts.length > 0
+      ? `<span class="muted" style="font-size:12px">${parts.join('<span style="color:var(--border-strong)"> ｜ </span>')}</span> `
+      : ''
+  return `${metaText}<a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:11px">設定変更</a>`
+}
+
+/**
+ * Header row above the chart: ticker/name/role/policy-meta on the left,
+ * price hero + range `.seg` stacked on the right — replaces the old small
+ * "銘柄: X" line + bare price header for the chart view specifically (the
+ * detail/history view keeps `renderFocusSymbolHeader`'s compact identity
+ * line instead, since it has no chart or range to anchor a hero header to).
  */
 function renderSymbolChartHeaderRow(args: ChartsBodySymbol): string {
   if (!args.focusSymbol) return ''
@@ -732,6 +775,8 @@ function renderSymbolChartHeaderRow(args: ChartsBodySymbol): string {
       <span class="symbol-ticker">${esc(args.focusSymbol)}</span>
       ${name ? `<span class="symbol-name">${esc(name)}</span>` : ''}
       ${renderRolePill(role)}
+      ${renderSymbolPolicyMeta(args.focusSymbol, args.symbolPolicy ?? null)}
+      ${renderFocusInactiveNote(args)}
     </div>
     <div class="symbol-header-right">
       ${renderPriceHeader(args.symbolChart, args.universe)}
