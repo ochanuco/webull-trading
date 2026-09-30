@@ -34,7 +34,7 @@ export function configBody(
         CONFIG_KEY_META[k]
       const label = meta?.label ?? '—'
       const detail = meta?.detail ?? '—'
-      return `<tr><th>${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:11px">${esc(detail)}</td></tr>`
+      return `<tr><th style="white-space:nowrap">${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:12px">${mdBoldToStrong(esc(detail))}</td></tr>`
     })
     .join('')
   const allConfigSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
@@ -69,7 +69,7 @@ export function configBody(
     </div>
     <div class="card-body tablewrap">
       <table>
-        <thead><tr><th>Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
+        <thead><tr><th style="white-space:nowrap">Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
         <tbody>${globalRows}</tbody>
       </table>
     </div>
@@ -241,4 +241,13 @@ function formatConfigValue(v: unknown): string {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   return String(v)
+}
+
+// CONFIG_KEY_META.detail uses `**word**` (author convenience, some notes
+// rely on the emphasis to disambiguate e.g. which side of a lookback window
+// a number refers to). Input must already be HTML-escaped — this only adds
+// trusted `<strong>` tags, so escaping first keeps a literal `<`/`>` in a
+// detail string from becoming a tag instead of merely losing its emphasis.
+function mdBoldToStrong(escaped: string): string {
+  return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }

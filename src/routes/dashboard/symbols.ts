@@ -1234,8 +1234,11 @@ export function symbolsListBody(args: {
       const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
       const toggleAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/toggle-active`
       const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
+      // Active rows show no delete affordance at all (must deactivate
+      // first) rather than a disabled placeholder — a muted "—" next to
+      // live buttons read as a rendering glitch, not a state.
       const deleteForm = r.active
-        ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
+        ? ''
         : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去、インバース対のリンクも解除)。元に戻せません。よろしいですか？');">
             <button type="submit" class="btn-sm danger">削除</button>
           </form>`
@@ -1288,20 +1291,22 @@ export function symbolsListBody(args: {
         ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse!)}/edit" title="${treeTitle}" style="${connStyle}"></a>`
         : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
+      const dateParts = dateOnly.split('-')
+      const dateShort = dateParts.length === 3 ? `${dateParts[1]}/${dateParts[2]}` : dateOnly
       const tradBadge = tradableBadgeHtml(tradable.get(sym)?.status ?? 'unknown')
       const tradBadgeHtml = tradBadge ? `<div style="margin-top:2px">${tradBadge}</div>` : ''
       return `<tr${rowStyle}>
         <td style="position:relative;width:28px;padding:0">${treeCell}</td>
         <td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="チャート銘柄タブで見る" style="text-decoration:none"><strong><span${symStyle}>${esc(r.symbol)}</span></strong></a>${tradBadgeHtml}</td>
-        <td>${esc(r.name ?? '')}</td>
+        <td class="grow">${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${roleCell}</td>
         <td>${lotSizeCell}</td>
         <td>${maxNotionalCell}</td>
         ${budgetTd}
-        <td>${esc(r.notes ?? '')}</td>
-        <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
-        <td>
+        <td style="white-space:normal;max-width:220px">${esc(r.notes ?? '')}</td>
+        <td class="muted" style="font-size:11px" title="${esc(dateOnly)}">${esc(dateShort)}</td>
+        <td style="display:flex;gap:6px;align-items:center;white-space:nowrap">
           <a href="${esc(editHref)}" class="btn-sm">編集</a>
           <form method="post" action="${esc(toggleAction)}" style="display:inline">
             <button type="submit" class="btn-sm">${esc(toggleLabel)}</button>
@@ -1317,17 +1322,17 @@ export function symbolsListBody(args: {
       ${filterBar}
       ${headerBar}
       <div class="tablewrap">
-      <table>
+      <table class="fit">
         <thead><tr>
           <th style="width:28px" title="インバース対のツリー表記"></th>
           <th>銘柄</th>
-          <th>銘柄名</th>
+          <th class="grow">銘柄名</th>
           <th>市場/通貨</th>
           <th>ロール</th>
           <th>売買単位</th>
           <th>1注文上限</th>
           <th>予算配分</th>
-          <th>メモ</th>
+          <th style="white-space:normal">メモ</th>
           <th>更新日</th>
           <th>操作</th>
         </tr></thead>
@@ -1620,7 +1625,7 @@ function renderSymbolRoleCell(row: SymbolConfigRow): string {
     role === null
       ? '<span class="muted" title="role 未設定 = 従来挙動">—</span>'
       : known
-        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code><div class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</div>`
+        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code> <span class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
         : `<span class="err" title="不正な role 値です。entry は抑止されます (fail-closed)。編集から正しい値を選んでください。">⚠ ${esc(role)}</span>`
   const notes: string[] = []
   if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
