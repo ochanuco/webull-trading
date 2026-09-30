@@ -80,6 +80,8 @@ const STYLE = `
   ${TOKENS}
   *{box-sizing:border-box}
   body{font-family:var(--font);margin:0;padding:0;background:var(--bg);color:var(--text);font-variant-numeric:tabular-nums}
+  a{color:var(--accent-text);text-decoration:none}
+  a:hover{text-decoration:underline}
   h1{margin:0 0 16px;font-size:22px}
   /* shell: 上部グローバル nav + main (グローバルメニュー上部化 — 左はページ固有
      コンテンツ用に空ける。チャート個別銘柄タブの銘柄レール等)。
