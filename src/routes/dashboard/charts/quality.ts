@@ -214,19 +214,18 @@ function renderPeriodPills(period: QualityPeriod): string {
   const periods: QualityPeriod[] = ['30d', '90d', 'all']
   const links = periods
     .map((p) => {
-      const active = p === period ? ' active' : ''
-      return `<a class="zoom-preset${active}" style="text-decoration:none" href="/dashboard/charts?tab=quality&period=${p}">${esc(QUALITY_PERIOD_LABELS[p])}</a>`
+      const cls = p === period ? ' class="active"' : ''
+      return `<a${cls} href="/dashboard/charts?tab=quality&period=${p}">${esc(QUALITY_PERIOD_LABELS[p])}</a>`
     })
     .join('')
-  return `<div class="seg" style="margin-bottom:10px">${links}</div>`
+  return `<div class="seg" style="margin-bottom:12px">${links}</div>`
 }
 
-// Fixed ~640px width fits an X screenshot. Value font shrunk to 18px
-// (from kpiCard's default 22px) since this 3-column grid is denser than
-// overview's KPI strip.
+// Fixed 640x640 tile (spec: this exact card gets screenshotted for X posts,
+// so it stays a near-square footprint, not just a compact 3-column strip).
 function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: string): string {
   const tile = (label: string, text: string, cls?: string) =>
-    kpiCard(label, `<span style="font-size:18px" class="${cls ?? ''}">${esc(text)}</span>`)
+    kpiCard(label, `<span class="${cls ?? ''}">${esc(text)}</span>`)
   const tiles = [
     tile('件数', String(stats.count)),
     tile('勝率', PCT_FMT(stats.winRate)),
@@ -238,15 +237,17 @@ function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: stri
     tile('平均損失', NUM_FMT(stats.avgLoss), 'err'),
     tile('期待値 (トレード毎)', NUM_FMT(stats.expectancy), signClass(stats.expectancy)),
   ].join('')
-  return `<div class="panel" style="max-width:640px">
-    <div class="panel-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</div>
-    <p class="muted" style="font-size:11px;margin:-8px 0 12px">as of ${esc(asOfJst)}</p>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">${tiles}</div>
+  return `<div class="card" style="width:640px;height:640px;box-sizing:border-box;display:flex;flex-direction:column">
+    <div class="card-head">
+      <span class="card-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</span>
+      <span class="card-actions muted" style="font-size:11px">as of ${esc(asOfJst)}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);gap:16px;flex:1">${tiles}</div>
   </div>`
 }
 
 function renderSymbolTable(symbolStats: SymbolStat[]): string {
-  if (symbolStats.length === 0) return ''
+  if (symbolStats.length === 0) return `<div class="empty">まだ銘柄別の確定損益がありません。</div>`
   const rows = symbolStats
     .map(
       (s) => `<tr>
@@ -258,10 +259,15 @@ function renderSymbolTable(symbolStats: SymbolStat[]): string {
       </tr>`,
     )
     .join('')
-  return `<table style="margin-top:16px;max-width:640px">
-    <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計PnL</th><th class="num">PF</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>`
+  return `<div class="card">
+    <div class="card-head"><span class="card-title">銘柄別 成績</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計PnL</th><th class="num">PF</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`
 }
 
 export function renderQualityTab(args: ChartsBodyQuality): string {
@@ -270,19 +276,25 @@ export function renderQualityTab(args: ChartsBodyQuality): string {
   }
   const symbolBarChart =
     args.symbolStats.length > 0
-      ? `<h3 class="sub-head">銘柄別 合計PnL</h3>
-      <div id="symbol-pnl-chart" style="width:100%;max-width:640px;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>`
+      ? `<div class="card">
+        <div class="card-head"><span class="card-title">銘柄別 合計PnL</span></div>
+        <div id="symbol-pnl-chart" style="width:100%;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px"></div>
+      </div>`
       : ''
   const tradeSection = args.hasTradeData
     ? `${renderPeriodPills(args.period)}
-      ${renderStatsCard(args.stats, args.period, args.asOfJst)}
-      ${renderSymbolTable(args.symbolStats)}
+      <div class="quality-perf-row">
+        ${renderStatsCard(args.stats, args.period, args.asOfJst)}
+        ${renderSymbolTable(args.symbolStats)}
+      </div>
       ${symbolBarChart}`
     : ''
   const skipSection =
     args.skipBreakdown.length > 0
-      ? `<h3 class="sub-head">日次 SKIP 理由内訳</h3>
-      <div id="skip-reason-chart" style="width:100%;height:340px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:8px"></div>`
+      ? `<div class="card">
+        <div class="card-head"><span class="card-title">日次 SKIP 理由内訳</span></div>
+        <div id="skip-reason-chart" style="width:100%;height:340px"></div>
+      </div>`
       : ''
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {

@@ -220,16 +220,11 @@ const STYLE = `
   .chip{padding:3px 12px;border-radius:14px;border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font-size:12px;text-decoration:none}
   .chip.active{background:var(--text);border-color:var(--text);color:var(--bg)}
   button.chip{cursor:pointer}
-  /* セグメント (排他選択): range / period ピルなど。.zoom-preset は旧クラス名の
-     まま同じ見た目にする (JS が data 属性でこのクラスのボタンを拾うため
-     rename すると symbolChartScript.ts と食い違う)。 */
+  /* セグメント (排他選択): range / period ピルなど。 */
   .seg{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border-radius:999px;padding:2px;flex-wrap:wrap}
   .seg>a,.seg>button{padding:4px 12px;font-size:12.5px;border-radius:999px;border:none;background:transparent;color:var(--text-2);cursor:pointer;text-decoration:none;white-space:nowrap;font-family:inherit}
   .seg>a:hover,.seg>button:hover{color:var(--text)}
   .seg>a.active,.seg>button.active,.seg>a.tab-active,.seg>button.tab-active{background:var(--surface);color:var(--text);font-weight:600;box-shadow:var(--shadow)}
-  .zoom-preset{padding:4px 14px;font-size:12.5px;background:transparent;border:none;border-radius:999px;cursor:pointer;color:var(--text-2);font-family:inherit}
-  .zoom-preset:hover{color:var(--text)}
-  .zoom-preset.active{background:var(--surface);color:var(--accent-text);font-weight:600;box-shadow:var(--shadow)}
   .tab-strip{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border-radius:999px;padding:2px}
   .tab{padding:4px 12px;font-size:12.5px;border-radius:999px;color:var(--text-2);text-decoration:none;white-space:nowrap}
   .tab:hover{color:var(--text)}
@@ -340,33 +335,11 @@ const STYLE = `
      (#charts-symbol-redesign Phase C)。fetch 中だけ付与し、成功/フォールバック
      どちらでも解除される。 */
   .symbol-main.symbol-main-loading{opacity:0.45;transition:opacity 0.15s;pointer-events:none}
-  /* チャートを sticky 固定: 下の説明 panel 群 (入場ゲート / 判定 trace) を読む間も
-     グラフが見え続ける。下からスクロールしてくる panel は z-index と page 背景色で
-     チャートの裏に隠す。STYLE は全 page の <style> に埋まるため、コメントにも
-     page 本文の assertion に使われる日本語 label をそのまま書かないこと。 */
-  /* 旧実装は margin-top:-24px + padding-top:24px で main padding を吸収していたが、
-     pin の前にサブナビ / inactive 注記が入った現在は、負 margin が前段要素に
-     被さって文字を隠すため撤去 (#fix-chart-pin-overlap)。前段はスクロールで
-     pin の裏に潜るので、透け防止の背景と z-index だけ残す。 */
-  .symbol-chart-pin{position:sticky;top:var(--header-h,86px);z-index:50;background:var(--bg);padding-bottom:8px}
   @media(max-width:780px){
     .symbol-layout{flex-direction:column}
     .symbol-rail{position:static;flex-direction:row;flex-wrap:wrap;width:100%;max-height:none}
     .symbol-rail .rail-head{width:100%}
-    /* 小画面では 460px のチャート固定が viewport を食い潰すため解除 */
-    .symbol-chart-pin{position:static}
   }
-  /* symbol タブ内サブナビ「チャート / 履歴・設定」(#charts-symbol-redesign)。
-     header の .subnav (topnav 2段目) と同じ .subnav-link トークンを再利用しつつ、
-     本文 (.symbol-main) 内に埋め込むため padding/border は自前に持つ。 */
-  .symbol-subnav{display:flex;gap:2px;margin:0 0 10px;flex-wrap:wrap}
-  /* fold 内の判断サマリ grid (#charts-symbol-redesign)。1360px 幅で 2×2、
-     780px 以下は縦積み。カードは 13px 基準・.panel と同系統の見た目。 */
-  .judgment-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-  @media(max-width:780px){.judgment-grid{grid-template-columns:1fr}}
-  .judgment-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:13px}
-  .judgment-card .jc-label{font-size:11px;color:var(--text-3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em}
-  .judgment-card .jc-value{font-size:13px;line-height:1.5}
 `
 
 // Runs synchronously in <head>, before <style>/<body> — a deferred or

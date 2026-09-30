@@ -233,7 +233,7 @@ describe('dashboard', () => {
       expect(body).toContain('期待値 (トレード毎)')
       expect(body).toContain('SOXL')
       expect(body).toContain('TQQQ')
-      expect(body).toMatch(/<a class="zoom-preset active"[^>]*href="\/dashboard\/charts\?tab=quality&period=90d"/)
+      expect(body).toMatch(/<a class="active"[^>]*href="\/dashboard\/charts\?tab=quality&period=90d"/)
       expect(body).toContain('href="/dashboard/charts?tab=quality&period=30d"')
       expect(body).toContain('href="/dashboard/charts?tab=quality&period=all"')
       expect(body).toContain('id="skip-reason-chart"')
@@ -1922,7 +1922,7 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
     expect(html).toContain('▲')
     expect(html).toContain('+2.00%')
     expect(html).toContain('(+2.00)')
-    expect(html).toContain('#d23f31') // 上昇 = 赤
+    expect(html).toContain('var(--down)') // 上昇 = 赤 (--down トークンを流用)
     expect(html).toContain('前日比')
   })
 
@@ -1930,7 +1930,7 @@ describe('renderPriceHeader (Google Finance 風 価格ヘッダー)', () => {
     const html = renderPriceHeader(fakeChartWith([pt(100), pt(97)]))
     expect(html).toContain('▼')
     expect(html).toContain('-3.00%')
-    expect(html).toContain('#188038') // 下落 = 緑
+    expect(html).toContain('var(--up)') // 下落 = 緑 (--up トークンを流用)
   })
 
   it('JPY 銘柄は ¥ + 整数表示', () => {
@@ -2213,12 +2213,11 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     // latestCronPrice=80 を現在値として大きく表示
     expect(html).toContain('$80.00')
     expect(html).toContain('前日比')
-    // range ピルは chart container の直後 (chart-pin 内、チャート直下に出す)
+    // range seg はヘッダー行 (チャートより前) に出す — チャート直下には置かない (#ui-redesign)
     const chartIdx = html.indexOf('id="symbol-chart"')
-    const pillIdx = html.indexOf('class="zoom-preset"')
-    const panelIdx = html.indexOf('入場まで')
-    expect(pillIdx).toBeGreaterThan(chartIdx)
-    if (panelIdx >= 0) expect(pillIdx).toBeLessThan(panelIdx)
+    const pillIdx = html.indexOf('id="chart-range-seg"')
+    expect(pillIdx).toBeGreaterThanOrEqual(0)
+    expect(pillIdx).toBeLessThan(chartIdx)
   })
 
   // 入場ゲート説明/判定トレースとグラフを同時に見せるため、チャートは sticky 固定にする
@@ -2616,7 +2615,8 @@ describe('renderZoomPresetButtons', () => {
     expect(html).toContain('>5日<')
     expect(html).toContain('>1か月<')
     expect(html).toContain('>最大<')
-    expect(html.match(/class="zoom-preset"/g)?.length).toBe(4)
+    expect(html).toContain('class="seg" id="chart-range-seg"')
+    expect(html.match(/<button/g)?.length).toBe(4)
   })
 
   it('1D ボタンの from は lastTimestamp - 1day、to は lastTimestamp', () => {

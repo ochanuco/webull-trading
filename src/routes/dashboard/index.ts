@@ -74,7 +74,7 @@ import { configBody } from './config'
 import { cronBody, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
-import { type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseQualityPeriod, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
+import { CHARTS_PAGE_STYLE, type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseQualityPeriod, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
 import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
 import { cachedDashboardJson } from './charts/dashboardBarsCache'
 import { SYMBOL_CHART_CLIENT_SCRIPT, SYMBOL_CHART_CLIENT_SCRIPT_ETAG } from './charts/symbolChartScript'
@@ -514,6 +514,7 @@ export const dashboard = new Hono<DashboardBindings>()
           'チャート',
           unavailable('DB not bound'),
           chartsPageSubnav(parseChartsTab(c.req.query('tab'))),
+          CHARTS_PAGE_STYLE,
         ),
       )
     }
@@ -554,6 +555,7 @@ export const dashboard = new Hono<DashboardBindings>()
               monthlyReturns: computeMonthlyReturns(equity),
             }),
             chartsPageSubnav(tab),
+            CHARTS_PAGE_STYLE,
           ),
         )
       }
@@ -578,6 +580,7 @@ export const dashboard = new Hono<DashboardBindings>()
               skipBreakdown,
             }),
             chartsPageSubnav(tab),
+            CHARTS_PAGE_STYLE,
           ),
         )
       }
@@ -732,6 +735,7 @@ export const dashboard = new Hono<DashboardBindings>()
           'チャート',
           renderSymbolTab(symbolBodyArgs),
           '', // no subnav — the symbol tab's nav path is the symbol group + rail
+          CHARTS_PAGE_STYLE,
         ),
       )
     } catch (err) {
