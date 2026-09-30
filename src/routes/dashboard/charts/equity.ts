@@ -261,25 +261,21 @@ export function buildOverviewChartData(
   return { dates, equity, drawdownPct, markers: outMarkers, benchmark: benchAligned }
 }
 
+/** Sign before the $ mark (`+$35.76`, `-$2.13`) — no %, same reason as computePeriodReturns (no seed-capital denominator). */
 function fmtSignedAmount(v: number): string {
-  return `${v > 0 ? '+' : ''}${fmtNumber(v)}`
+  return `${v >= 0 ? '+' : '-'}$${fmtNumber(Math.abs(v))}`
 }
 
-/** No %, same reason as computePeriodReturns (no seed-capital denominator). */
-function renderPeriodReturnsTable(rows: PeriodReturn[]): string {
+function renderPeriodReturnsRow(rows: PeriodReturn[]): string {
   if (rows.length === 0) return ''
-  const cells = rows
+  const tiles = rows
     .map((r) => {
       const cls = r.change > 0 ? 'ok' : r.change < 0 ? 'err' : 'muted'
-      return `<td class="${cls} num">${esc(fmtSignedAmount(r.change))}</td>`
+      return `<div class="kpi"><div class="kpi-label">${esc(r.label)}</div><div class="kpi-value ${cls}" style="font-size:20px">${esc(fmtSignedAmount(r.change))}</div></div>`
     })
     .join('')
-  const heads = rows.map((r) => `<th>${esc(r.label)}</th>`).join('')
-  return `<h3 class="sub-head">期間別リターン (実現 PnL 変化額)</h3>
-  <table>
-    <thead><tr>${heads}</tr></thead>
-    <tbody><tr>${cells}</tr></tbody>
-  </table>`
+  return `<h3 class="sub-head">期間別の確定損益</h3>
+  <div class="kpi-grid">${tiles}</div>`
 }
 
 export function renderOverviewTab(args: ChartsBodyOverview): string {
@@ -295,9 +291,11 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
     (args.tradeMarkers ?? []).length > 0
       ? ' 取引マーカー: 売り (SELL) は実現損益で緑 (益) / 赤 (損)、買い (BUY) は灰。点クリックで該当注文の約定履歴へ。'
       : ''
+  const explainTip = `累積 realized PnL (上段) と peak からの下落率 MaxDD (下段)。戦略の長期パフォーマンス指標。シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算 (peak ≤ 0 のときは 0%)。当日 intraday の risk halt 閾値 (drawdown_kill / risk_dd_halt) は別概念のため重畳しない。${benchmarkNote}${markerNote}`
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
-      if (typeof echarts === 'undefined') return;
+      if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
+      var t = window.wtTokens ? window.wtTokens() : {};
       var data = window.__chartData;
       var vm = data.vm;
       var escHtml = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
@@ -308,29 +306,35 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
           var m = vm.markers[i];
           if (filter(m)) items.push({ value: [m.date, m.y], marker: m });
         }
-        return { name: name, type: 'scatter', symbolSize: 9, z: 5, itemStyle: { color: color }, data: items };
+        return { name: name, type: 'scatter', symbolSize: 9, z: 5, xAxisIndex: 0, yAxisIndex: 0, itemStyle: { color: color }, data: items };
       }
-      // Single source for legend/title/tooltip unit-detection, all three of
-      // which match against this name.
+      // Single source for legend/tooltip unit-detection, both of which
+      // match against this name (the card head above carries the title).
       var BENCH_SERIES = '市場に乗るだけ (QQQ)';
+      var DD_SERIES = 'ドローダウン (MaxDD)';
       var series = [
-        { name: '確定損益 (累積)', type: 'line', data: vm.equity, smooth: false, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } },
-        markerSeries('売り・益 (SELL)', '#057a55', function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) >= 0; }),
-        markerSeries('売り・損 (SELL)', '#c22', function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) < 0; }),
-        markerSeries('買い (BUY)', '#86868b', function (m) { return m.side !== 'SELL'; }),
+        { name: '確定損益 (累積)', type: 'line', data: vm.equity, xAxisIndex: 0, yAxisIndex: 0, smooth: false, symbol: 'none', areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 } },
+        markerSeries('売り・益 (SELL)', t.up, function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) >= 0; }),
+        markerSeries('売り・損 (SELL)', t.down, function (m) { return m.side === 'SELL' && (m.realizedPnl || 0) < 0; }),
+        markerSeries('買い (BUY)', t.text3, function (m) { return m.side !== 'SELL'; }),
+        { name: DD_SERIES, type: 'line', data: vm.drawdownPct, xAxisIndex: 1, yAxisIndex: 2, areaStyle: { color: t.down, opacity: 0.2 }, lineStyle: { color: t.down, width: 1 }, symbol: 'none' },
       ];
       if (vm.benchmark) {
-        series.push({ name: BENCH_SERIES, type: 'line', yAxisIndex: 1, data: vm.benchmark, showSymbol: false, connectNulls: true, lineStyle: { width: 1, type: 'dashed', color: '#1471a8' }, itemStyle: { color: '#1471a8' } });
+        series.push({ name: BENCH_SERIES, type: 'line', xAxisIndex: 0, yAxisIndex: 1, data: vm.benchmark, showSymbol: false, connectNulls: true, lineStyle: { width: 1, type: 'dashed', color: t.info }, itemStyle: { color: t.info } });
       }
-      var equityChart = echarts.init(document.getElementById('equity-chart'));
-      equityChart.setOption({
-        title: { text: vm.benchmark ? 'bot の確定損益 vs ' + BENCH_SERIES : 'bot の確定損益の推移', left: 'center', textStyle: { fontSize: 14 } },
-        legend: { top: 24, textStyle: { fontSize: 11 } },
+      // One instance, two grids sharing the x-axis (PnL/benchmark/markers on
+      // top ~70%, drawdown on bottom ~30%) — an axisPointer link keeps the
+      // crosshair aligned between them instead of two independently-hovered
+      // charts, which made comparing a PnL move to its drawdown context a
+      // manual lookup between two separate tooltips.
+      var equityChart = window.wtChart(document.getElementById('equity-chart'), {
+        legend: { top: 4, left: 4, textStyle: { fontSize: 11 }, data: ['確定損益 (累積)'].concat(vm.benchmark ? [BENCH_SERIES] : []) },
+        axisPointer: { link: [{ xAxisIndex: 'all' }] },
         tooltip: {
           trigger: 'axis',
           formatter: function (params) {
             if (!params || params.length === 0) return '';
-            var lines = [escHtml(params[0].axisValue)];
+            var lines = [escHtml(params[0].axisValueLabel || params[0].axisValue)];
             for (var i = 0; i < params.length; i++) {
               var p = params[i];
               if (p.data && p.data.marker) {
@@ -339,18 +343,35 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
                 var pnl = m.realizedPnl == null ? '' : ' / 実現損益 ' + Number(m.realizedPnl).toFixed(2);
                 lines.push(p.marker + escHtml(m.symbol) + ' ' + (SIDE_JA[m.side] || escHtml(m.side)) + ' ' + Number(m.filledPrice).toFixed(2) + ' × ' + qty + pnl);
               } else if (p.value != null) {
-                var unit = p.seriesName === BENCH_SERIES ? '%' : '';
+                var unit = (p.seriesName === BENCH_SERIES || p.seriesName === DD_SERIES) ? '%' : '';
                 lines.push(p.marker + escHtml(p.seriesName) + ': ' + Number(p.value).toFixed(2) + unit);
               }
             }
             return lines.join('<br/>');
           },
         },
-        grid: { left: 50, right: vm.benchmark ? 55 : 20, top: 52, bottom: 40 },
-        xAxis: { type: 'category', data: vm.dates },
+        grid: [
+          { left: 55, right: vm.benchmark ? 55 : 20, top: 32, height: '58%' },
+          { left: 55, right: vm.benchmark ? 55 : 20, top: '76%', height: '18%' },
+        ],
+        // Pans/zooms both grids together (mouse wheel / pinch only — no
+        // slider, consistent with the symbol chart's preset-only zoom UX).
+        dataZoom: [{ type: 'inside', xAxisIndex: [0, 1] }],
+        xAxis: [
+          { type: 'category', data: vm.dates, gridIndex: 0, axisLabel: { show: false } },
+          { type: 'category', data: vm.dates, gridIndex: 1 },
+        ],
+        // No axis "name" labels (they ate grid space for little gain) — the
+        // $/% mark lives in each tick's own formatter instead.
         yAxis: [
-          { type: 'value', name: 'PnL', axisLabel: { formatter: '{value}' } },
-          { type: 'value', name: 'QQQ %', show: !!vm.benchmark, axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
+          {
+            type: 'value', gridIndex: 0,
+            axisLabel: { formatter: function (v) { return (v < 0 ? '-$' : '$') + Math.abs(v); } },
+          },
+          { type: 'value', gridIndex: 0, show: !!vm.benchmark, axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
+          // splitNumber:2 keeps the short drawdown grid (~80px tall) to 2-3
+          // labels instead of the default 5, which overlapped.
+          { type: 'value', gridIndex: 1, max: 0, splitNumber: 2, axisLabel: { formatter: '{value}%' } },
         ],
         series: series,
       });
@@ -359,46 +380,35 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
           window.location.href = '/dashboard/trades?clientOrderId=' + encodeURIComponent(p.data.marker.clientOrderId);
         }
       });
-      var ddChart = echarts.init(document.getElementById('dd-chart'));
-      ddChart.setOption({
-        title: { text: 'ドローダウン (累積 PnL の peak からの低下率)', left: 'center', textStyle: { fontSize: 14 } },
-        tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2) + '%'; } },
-        grid: { left: 50, right: 20, top: 40, bottom: 40 },
-        xAxis: { type: 'category', data: vm.dates },
-        yAxis: { type: 'value', max: 0, axisLabel: { formatter: '{value}%' } },
-        series: [{ type: 'line', data: vm.drawdownPct, areaStyle: { color: '#c22', opacity: 0.2 }, lineStyle: { color: '#c22', width: 1 } }],
-      });
       var monthlyEl = document.getElementById('monthly-chart');
-      var monthlyChart = null;
       if (monthlyEl && data.monthly && data.monthly.length > 0) {
-        monthlyChart = echarts.init(monthlyEl);
-        monthlyChart.setOption({
-          title: { text: '月次 realized PnL (JST 集計)', left: 'center', textStyle: { fontSize: 14 } },
+        window.wtChart(monthlyEl, {
           tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
-          grid: { left: 50, right: 20, top: 40, bottom: 40 },
+          grid: { left: 50, right: 20, top: 30, bottom: 32 },
           xAxis: { type: 'category', data: data.monthly.map(function (m) { return m.month; }) },
           yAxis: { type: 'value', name: 'PnL' },
-          series: [{ type: 'bar', barMaxWidth: 40, data: data.monthly.map(function (m) { return { value: m.pnl, itemStyle: { color: m.pnl >= 0 ? '#057a55' : '#c22' } }; }) }],
+          series: [{ type: 'bar', barMaxWidth: 36, data: data.monthly.map(function (m) { return { value: m.pnl, itemStyle: { color: m.pnl >= 0 ? t.up : t.down } }; }) }],
         });
       }
-      window.addEventListener('resize', function () { equityChart.resize(); ddChart.resize(); if (monthlyChart) monthlyChart.resize(); });
     });
   `
   const monthly = args.monthlyReturns ?? []
   const monthlyChartHtml =
     monthly.length > 0
-      ? `<div id="monthly-chart" style="width:100%;height:260px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>`
+      ? `<div class="card">
+        <div class="card-head"><span class="card-title">月次 realized PnL (JST 集計)</span></div>
+        <div id="monthly-chart" style="width:100%;height:220px"></div>
+      </div>`
       : ''
-  return `<p class="muted" style="font-size:12px">
-    累積 realized PnL と peak からの下落率 (MaxDD)。戦略の長期パフォーマンス指標。
-    シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算
-    (peak ≤ 0 のときは 0%)。当日 intraday の risk halt 閾値 (drawdown_kill /
-    risk_dd_halt) は別概念のため重畳しない。
-    ${esc(benchmarkNote)}${esc(markerNote)}
-  </p>
-  <div id="equity-chart" style="width:100%;height:340px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  <div id="dd-chart" style="width:100%;height:280px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:12px"></div>
-  ${renderPeriodReturnsTable(args.periodReturns ?? [])}
+  const equityTitle = hasBenchmark ? `確定損益 vs 市場に乗るだけ (QQQ)` : '確定損益の推移'
+  return `${renderPeriodReturnsRow(args.periodReturns ?? [])}
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">${esc(equityTitle)}</span>
+      <span class="info-tip" tabindex="0" aria-label="チャートの読み方" data-tip="${esc(explainTip)}">?</span>
+    </div>
+    <div id="equity-chart" style="width:100%;height:460px"></div>
+  </div>
   ${monthlyChartHtml}
   ${safeJsonScript('__chartData', { vm, monthly })}
   <script src="${ECHARTS_CDN}" defer></script>

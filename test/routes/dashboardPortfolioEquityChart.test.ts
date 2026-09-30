@@ -79,7 +79,7 @@ describe('ホームの資産推移チャート', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('総資産チャート')
+    expect(body).toContain('<span class="card-title">総資産</span>')
     expect(body).toContain('id="portfolio-equity-chart"')
     expect(body).toContain('window.__equityChartData')
     expect(body).toContain('"hasUsd":true')
@@ -88,6 +88,10 @@ describe('ホームの資産推移チャート', () => {
     expect(body).toContain('/dashboard?range=90d')
     expect(body).toContain('/dashboard?range=365d')
     expect(body).toContain('/dashboard?range=all')
+    // hero: latest USD (10500) + JPY secondary (1,500,000) + delta vs range start (10000 → +500, +5.0%)
+    expect(body).toContain('$10,500')
+    expect(body).toContain('¥1,500,000')
+    expect(body).toContain('class="hero-delta ok">+$500 (+5.0%)</span>')
   })
 
   it('shows the "no data" message and no chart container when there are no snapshots', async () => {
@@ -101,7 +105,7 @@ describe('ホームの資産推移チャート', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('総資産チャート')
+    expect(body).toContain('<span class="card-title">総資産</span>')
     expect(body).toContain('まだ roll-daily 実行履歴がありません')
     expect(body).not.toContain('id="portfolio-equity-chart"')
   })

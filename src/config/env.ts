@@ -250,4 +250,8 @@ export interface Env {
 export interface Env {
   JEV_HEADLINE_EVAL_ENABLED?: string
   AI?: { run(model: string, input: unknown): Promise<unknown> }
+  // Unset POSTHOG_KEY serves a no-op telemetry.js. A non-https POSTHOG_HOST
+  // falls back to the default instead of sending identified events off-https.
+  POSTHOG_KEY?: string
+  POSTHOG_HOST?: string
 }

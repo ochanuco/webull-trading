@@ -12,23 +12,23 @@
  * Kept as a plain exported string (no separate build step) to match the POC
  * policy of not adding a bundler. This file has no `${...}` interpolation.
  * Changing the DOM ids/classes it queries (`#symbol-chart`,
- * `#decision-trace-panel`, `.zoom-preset`, `#symbol-main`, `.symbol-rail`,
- * `.symbol-subnav`) requires updating `symbol.ts` in lockstep.
+ * `#decision-trace-panel`, `#chart-range-seg`, `#symbol-main`,
+ * `.symbol-rail`, `.symbol-subnav`) requires updating `symbol.ts` in lockstep.
  */
 export const SYMBOL_CHART_CLIENT_SCRIPT = `
 (function () {
-  // Shared across initSymbolChart() re-runs (symbol switch) rather than
-  // adding a resize listener per call, which would pile up closures over
-  // disposed chart instances.
+  // Shared across initSymbolChart() re-runs (symbol switch).
   var symChart = null;
-  window.addEventListener('resize', function () { if (symChart) symChart.resize(); });
 
   function initSymbolChart() {
-      if (typeof echarts === 'undefined') return;
+      if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
+      var t = window.wtTokens ? window.wtTokens() : {};
       var chartEl = document.getElementById('symbol-chart');
       // getInstanceByDom (not just the symChart variable) so a stale
       // instance is still disposed if a prior init threw before symChart
-      // was assigned.
+      // was assigned. wtChart() re-inits on the same element on a symbol
+      // switch, but only after this explicit dispose — echarts.init on a
+      // node that still holds a live instance just returns it unchanged.
       if (chartEl) {
         var prevInstance = echarts.getInstanceByDom(chartEl);
         if (prevInstance) prevInstance.dispose();
@@ -38,6 +38,12 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       var data = chartDataEl ? JSON.parse(chartDataEl.textContent || 'null') : null;
       var sc = data && data.symbolChart;
       if (!chartEl || !sc || sc.points.length === 0) return;
+
+      // Operator constraint: prices always carry a currency mark. JPY-listed
+      // symbols (4-digit tickers) still show 2-decimal labels here — full
+      // fmtPriceCcy parity would need duplicating its digit-count branch for
+      // every label below, not worth it for the small JP-symbol slice.
+      var ccyMark = data.currency === 'JPY' ? '¥' : '$';
 
       // Category axis (index-based x, categories = each bar's ISO timestamp)
       // when intradayBars exist: ECharts' time axis has no native way to
@@ -187,7 +193,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       function bandEdgeLabel(name, edgeY) {
         if (!Number.isFinite(edgeY) || sc.latestCronPrice == null || !(sc.latestCronPrice > 0)) return name;
         var mv = (edgeY - sc.latestCronPrice) / sc.latestCronPrice;
-        return name + ' あと ' + (mv >= 0 ? '+' : '') + (mv * 100).toFixed(1) + '% ($' + edgeY.toFixed(2) + ')';
+        return name + ' あと ' + (mv >= 0 ? '+' : '') + (mv * 100).toFixed(1) + '% (' + ccyMark + edgeY.toFixed(2) + ')';
       }
       var pullbackUpperLabel = bandEdgeLabel('押し目上端', bandUpperY);
       var pullbackLowerLabel = bandEdgeLabel('押し目下端', bandLowerY);
@@ -276,8 +282,8 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           name: 'BUY', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
           realizedPnl: null, qty: m.qty, fillTimestamp: m.timestamp,
           clientOrderId: m.clientOrderId == null ? null : m.clientOrderId,
-          label: { show: showLabel, formatter: m.price.toFixed(2), color: '#057a55', position: 'top', distance: 6, fontSize: 11 },
-          itemStyle: { color: '#057a55' },
+          label: { show: showLabel, formatter: m.price.toFixed(2), color: t.up, position: 'top', distance: 6, fontSize: 11 },
+          itemStyle: { color: t.up },
         };
       });
       var exits = sells.map(function (m) {
@@ -287,24 +293,28 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           name: 'SELL', coord: [xForTimestamp(m.timestamp), m.price], value: m.price,
           realizedPnl: m.realizedPnl, qty: m.qty, fillTimestamp: m.timestamp,
           clientOrderId: m.clientOrderId == null ? null : m.clientOrderId,
-          label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: '#c22', position: 'bottom', distance: 6, fontSize: 11 },
-          itemStyle: { color: '#c22' },
+          label: { show: showLabel, formatter: m.price.toFixed(2) + pnlLabel, color: t.down, position: 'bottom', distance: 6, fontSize: 11 },
+          itemStyle: { color: t.down },
         };
       });
 
-      // Colors mirror the trade-quality tab's DECISION_COLORS.
-      var DECISION_COLORS = { BUY: '#057a55', SELL: '#1471a8', SKIP: '#b25000', REJECT: '#7c3aed', ERROR: '#c22' };
+      // Colors mirror the trade-quality tab's DECISION_COLORS. SELL uses
+      // info (not down) — a SELL fill isn't itself a loss, that's what
+      // realizedPnl decides (see the exits label color above).
+      var DECISION_COLORS = { BUY: t.up, SELL: t.info, SKIP: t.warn, REJECT: '#8b5cf6', ERROR: t.down };
       var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', SKIP: '見送り (bot判定)', REJECT: '拒否 (証券会社)', ERROR: 'エラー (原因不明・一時的)' };
       function escHtml(s) {
         return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       }
       var decisionList = sc.decisions || [];
       var decisionPoints = decisionList.map(function (d) {
-        var color = DECISION_COLORS[d.decision] || '#888';
+        var color = DECISION_COLORS[d.decision] || t.text3;
         return {
           value: [xForTimestamp(d.timestamp), d.price],
           decision: d.decision, reason: d.reason, evalTs: d.timestamp, ladderHtml: d.ladderHtml,
-          itemStyle: { color: color, borderColor: '#fff', borderWidth: 1 },
+          // opacity < 1 so a dense run of daily evals reads as individual
+          // dots, not a solid bead line, at normal zoom levels.
+          itemStyle: { color: color, borderColor: t.surface, borderWidth: 1, opacity: 0.72 },
         };
       });
 
@@ -388,9 +398,9 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         avgLineXY = toCategoryXY(densifyHorizontalLine(avg, fromMs, toMs, ohlcTimestamps));
         stopLineXY = toCategoryXY(densifyHorizontalLine(stopPrice, fromMs, toMs, ohlcTimestamps));
         tpLineXY = toCategoryXY(densifyHorizontalLine(tpPrice, fromMs, toMs, ohlcTimestamps));
-        avgLabel = 'avg ' + avg.toFixed(2);
-        stopLabel = 'stop ' + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
-        tpLabel = 'TP ' + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
+        avgLabel = 'avg ' + ccyMark + avg.toFixed(2);
+        stopLabel = 'stop ' + ccyMark + stopPrice.toFixed(2) + ' (' + (sc.rules.stopPct * 100).toFixed(0) + '%)';
+        tpLabel = 'TP ' + ccyMark + tpPrice.toFixed(2) + ' (+' + (sc.rules.takeProfitPct * 100).toFixed(0) + '%)';
       } else if (
         sc.points.length > 0 &&
         sc.latestCronPrice != null &&
@@ -409,8 +419,11 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         if (Number.isFinite(pFromMs) && Number.isFinite(pToMs)) {
           previewStopLineXY = toCategoryXY(densifyHorizontalLine(pStopPrice, pFromMs, pToMs, ohlcTimestamps));
           previewTpLineXY = toCategoryXY(densifyHorizontalLine(pTpPrice, pFromMs, pToMs, ohlcTimestamps));
-          previewStopLabel = 'stop ' + pStopPrice.toFixed(2) + ' (preview)';
-          previewTpLabel = 'TP ' + pTpPrice.toFixed(2) + ' (preview)';
+          // "(preview)" dropped from the label text: the dotted line +
+          // 0.5 opacity already read as non-committal, and the literal
+          // suffix was the long half of what clipped at the right edge.
+          previewStopLabel = 'stop ' + ccyMark + pStopPrice.toFixed(2);
+          previewTpLabel = 'TP ' + ccyMark + pTpPrice.toFixed(2);
         }
       }
 
@@ -528,8 +541,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         }, dzInitial),
       ];
 
-      symChart = echarts.init(chartEl);
-      symChart.setOption({
+      symChart = window.wtChart(chartEl, {
         tooltip: {
           trigger: 'axis',
           axisPointer: { label: { formatter: function (p) { return jstLabelForX(p.value); } } },
@@ -567,8 +579,22 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             return lines.join('');
           },
         },
-        legend: { top: 22, type: 'scroll' },
-        grid: { left: 50, right: 20, top: 56, bottom: 28, containLabel: true },
+        // Explicit allowlist (not every series name) so the legend stays a
+        // single compact top-left row: the candlestick series would
+        // otherwise show a solid-color swatch (it has no up/down duality in
+        // a legend icon) and the avg/stop/TP/projection lines already carry
+        // their own endLabel text on the chart, so listing them too just
+        // duplicates and overflows.
+        legend: {
+          top: 4, left: 4, itemWidth: 12, itemHeight: 8,
+          textStyle: { fontSize: 11 },
+          data: (trendLineXY ? ['価格トレンド(30日回帰)'] : []).concat(['SMA50']),
+        },
+        // right:96 (not 20) leaves room for the stop/TP/avg endLabels — an
+        // endLabel draws past the plot's right edge into this margin, and a
+        // margin narrower than the label text clips it hard at the canvas
+        // boundary (e.g. "stop $110.61" rendering as just "stop $").
+        grid: { left: 50, right: 96, top: 34, bottom: 28, containLabel: true },
         dataZoom: dataZoomCfg,
         // Category axis (equal spacing per bar) collapses non-trading gaps
         // so e.g. Friday close sits adjacent to Monday open — reads as an
@@ -618,7 +644,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
               itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
               symbol: 'none', z: 2,
-              endLabel: { show: true, formatter: pullbackUpperLabel, color: '#b25000', fontSize: 10 },
+              endLabel: { show: true, formatter: pullbackUpperLabel, color: t.warn, fontSize: 10 },
             },
             {
               name: '押し目下端',
@@ -627,23 +653,27 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               lineStyle: { width: 1, color: 'rgba(255, 140, 0, 0.55)', type: 'dashed' },
               itemStyle: { color: 'rgba(255, 140, 0, 0.55)' },
               symbol: 'none', z: 2,
-              endLabel: { show: true, formatter: pullbackLowerLabel, color: '#b25000', fontSize: 10 },
+              endLabel: { show: true, formatter: pullbackLowerLabel, color: t.warn, fontSize: 10 },
             },
           ]),
+          // Violet has no dedicated token (up/down/warn/info/accent all carry
+          // other meanings already) — a fixed hue keeps this decorative
+          // overlay distinguishable from every semantic series in both themes.
           ...(trendLineXY ? [{
-            name: '価格トレンド (linear regression, 30日)', type: 'line', data: trendLineXY,
-            lineStyle: { width: 1.8, color: '#9333ea', type: 'solid' }, symbol: 'none',
-            itemStyle: { color: '#9333ea' }, z: 7,
+            name: '価格トレンド(30日回帰)', type: 'line', data: trendLineXY,
+            lineStyle: { width: 1.8, color: '#8b5cf6', type: 'solid' }, symbol: 'none',
+            itemStyle: { color: '#8b5cf6' }, z: 7,
           }] : []),
           // Japan-style coloring: red = up (close >= open), green = down —
-          // opposite of the US convention.
+          // opposite of the US convention, so this intentionally uses
+          // t.down (red) for an up candle and t.up (green) for a down one.
           ...(ohlcXY.length > 0 ? [{
             name: 'price (15m OHLC)', type: 'candlestick', data: ohlcXY,
             itemStyle: {
-              color: '#d23f31',
-              color0: '#1e8e3e',
-              borderColor: '#d23f31',
-              borderColor0: '#1e8e3e',
+              color: t.down,
+              color0: t.up,
+              borderColor: t.down,
+              borderColor0: t.up,
               borderWidth: 1.5,
             },
             z: 5,
@@ -660,12 +690,12 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
               if (data.prevClose != null && Number.isFinite(data.prevClose)) {
                 mlData.push({
                   yAxis: data.prevClose,
-                  lineStyle: { color: '#9aa0a6', width: 1, type: 'dotted' },
+                  lineStyle: { color: t.text3, width: 1, type: 'dotted' },
                   label: {
                     show: true,
                     position: 'insideEndTop',
                     formatter: data.prevCloseLabel || '前日終値',
-                    color: '#5f6368',
+                    color: t.text2,
                     fontSize: 10,
                   },
                 });
@@ -675,7 +705,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
                 symbol: 'none',
                 silent: true,
                 label: { show: false },
-                lineStyle: { color: '#bbb', width: 1, type: 'dashed' },
+                lineStyle: { color: t.borderStrong, width: 1, type: 'dashed' },
                 z: 1,
                 data: mlData,
               };
@@ -692,66 +722,67 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
                   var qty = d.qty == null ? '' : '<br/>qty: ' + d.qty;
                   var ts = d.fillTimestamp == null ? '' : '<br/>fill: ' + jstLabelSec(d.fillTimestamp);
                   return d.name + ' @ ' + d.value.toFixed(2) + pnl + qty + ts
-                    + '<br/><span style="font-size:10px;color:#888">クリックで注文詳細</span>';
+                    + '<br/><span style="font-size:10px;color:' + t.text3 + '">クリックで注文詳細</span>';
                 },
               },
             } : undefined,
           }] : []),
           {
             name: 'SMA50', type: 'line', data: smasXY,
-            lineStyle: { width: 1.4, color: '#f59e0b', type: 'solid' },
+            lineStyle: { width: 1.4, color: t.warn, type: 'solid' },
             symbol: 'none', connectNulls: true, z: 6,
           },
           ...(avgLineXY ? [{
             name: avgLabel, type: 'line', data: avgLineXY,
-            lineStyle: { width: 1, color: '#444', type: 'solid' }, symbol: 'none',
-            itemStyle: { color: '#444' },
-            endLabel: { show: true, formatter: avgLabel, color: '#444', fontSize: 11 },
+            lineStyle: { width: 1, color: t.text2, type: 'solid' }, symbol: 'none',
+            itemStyle: { color: t.text2 },
+            endLabel: { show: true, formatter: avgLabel, color: t.text2, fontSize: 11 },
             silent: true, emphasis: { disabled: true }, z: 8,
           }] : []),
           ...(stopLineXY ? [{
             name: stopLabel, type: 'line', data: stopLineXY,
-            lineStyle: { width: 1, color: '#c22', type: 'dashed' }, symbol: 'none',
-            itemStyle: { color: '#c22' },
-            endLabel: { show: true, formatter: stopLabel, color: '#c22', fontSize: 11 },
+            lineStyle: { width: 1, color: t.down, type: 'dashed' }, symbol: 'none',
+            itemStyle: { color: t.down },
+            endLabel: { show: true, formatter: stopLabel, color: t.down, fontSize: 11 },
             silent: true, emphasis: { disabled: true }, z: 8,
           }] : []),
           ...(tpLineXY ? [{
             name: tpLabel, type: 'line', data: tpLineXY,
-            lineStyle: { width: 1, color: '#057a55', type: 'dashed' }, symbol: 'none',
-            itemStyle: { color: '#057a55' },
-            endLabel: { show: true, formatter: tpLabel, color: '#057a55', fontSize: 11 },
+            lineStyle: { width: 1, color: t.up, type: 'dashed' }, symbol: 'none',
+            itemStyle: { color: t.up },
+            endLabel: { show: true, formatter: tpLabel, color: t.up, fontSize: 11 },
             silent: true, emphasis: { disabled: true }, z: 8,
           }] : []),
           // dotted + opacity 0.5 distinguishes these from an actual position's lines.
           ...(previewStopLineXY ? [{
             name: previewStopLabel, type: 'line', data: previewStopLineXY,
-            lineStyle: { width: 1, color: '#c22', type: 'dotted', opacity: 0.5 }, symbol: 'none',
-            itemStyle: { color: '#c22', opacity: 0.5 },
+            lineStyle: { width: 1, color: t.down, type: 'dotted', opacity: 0.5 }, symbol: 'none',
+            itemStyle: { color: t.down, opacity: 0.5 },
             endLabel: {
-              show: true, formatter: previewStopLabel, color: '#c22', fontSize: 10, opacity: 0.7,
+              show: true, formatter: previewStopLabel, color: t.down, fontSize: 10, opacity: 0.7,
             },
             silent: true, emphasis: { disabled: true }, z: 7,
           }] : []),
           ...(previewTpLineXY ? [{
             name: previewTpLabel, type: 'line', data: previewTpLineXY,
-            lineStyle: { width: 1, color: '#057a55', type: 'dotted', opacity: 0.5 }, symbol: 'none',
-            itemStyle: { color: '#057a55', opacity: 0.5 },
+            lineStyle: { width: 1, color: t.up, type: 'dotted', opacity: 0.5 }, symbol: 'none',
+            itemStyle: { color: t.up, opacity: 0.5 },
             endLabel: {
-              show: true, formatter: previewTpLabel, color: '#057a55', fontSize: 10, opacity: 0.7,
+              show: true, formatter: previewTpLabel, color: t.up, fontSize: 10, opacity: 0.7,
             },
             silent: true, emphasis: { disabled: true }, z: 7,
           }] : []),
+          // "参考" (reference, not a forecast) reads naturally as the info token.
           ...(projLineXY ? [{
             name: '参考 価格外挿 (予測ではない)', type: 'line', data: projLineXY,
-            lineStyle: { width: 1.4, color: '#0891b2', type: 'dotted', opacity: 0.85 }, symbol: 'none',
-            itemStyle: { color: '#0891b2' },
+            lineStyle: { width: 1.4, color: t.info, type: 'dotted', opacity: 0.85 }, symbol: 'none',
+            itemStyle: { color: t.info },
             silent: true, emphasis: { disabled: true }, z: 8,
             markPoint: projCrossPoint ? {
               symbol: 'pin', symbolSize: 30,
               data: [{
                 coord: projCrossPoint.coord, value: projCrossPoint.value,
-                itemStyle: { color: '#0891b2' },
+                itemStyle: { color: t.info },
                 label: { show: true, formatter: '参考\\n到達', color: '#fff', fontSize: 9, lineHeight: 11 },
               }],
             } : undefined,
@@ -762,7 +793,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
             symbol: 'circle',
             symbolSize: function (val, p) {
               var dec = p && p.data ? p.data.decision : '';
-              return (dec === 'REJECT' || dec === 'ERROR') ? 13 : 9;
+              return (dec === 'REJECT' || dec === 'ERROR') ? 10 : 7;
             },
             z: 11, emphasis: { scale: 1.6 }, cursor: 'pointer',
             tooltip: {
@@ -775,7 +806,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
                 return '<div style="font-weight:600">' + escHtml(ja) + ' (' + escHtml(d.decision) + ') @ ' + price + '</div>'
                   + '<div style="font-size:11px">' + jstLabelSec(d.evalTs) + '</div>'
                   + rsn
-                  + '<div style="font-size:10px;color:#888;margin-top:2px">クリックで判定トレース表示</div>';
+                  + '<div style="font-size:10px;color:' + t.text3 + ';margin-top:2px">クリックで判定トレース表示</div>';
               },
             },
           }] : []),
@@ -796,13 +827,13 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       function showFillDetail(d) {
         if (!tracePanel || !d) return;
         var side = d.name === 'SELL' ? '売り (SELL)' : '買い (BUY)';
-        var sideColor = d.name === 'SELL' ? '#c22' : '#057a55';
+        var sideColor = d.name === 'SELL' ? t.down : t.up;
         var price = Number(d.value).toFixed(2);
         var qty = d.qty == null ? '—' : String(d.qty);
         var pnl = d.realizedPnl == null
           ? '—'
           : (d.realizedPnl >= 0 ? '+' : '') + d.realizedPnl.toFixed(2);
-        var pnlColor = d.realizedPnl == null ? '#555' : (d.realizedPnl >= 0 ? '#057a55' : '#c22');
+        var pnlColor = d.realizedPnl == null ? t.text2 : (d.realizedPnl >= 0 ? t.up : t.down);
         var link = d.clientOrderId
           ? '<a href="/dashboard/trades?clientOrderId=' + encodeURIComponent(d.clientOrderId) + '" style="font-size:12px">この注文の履歴 →</a>'
           : '<span class="muted" style="font-size:11px">注文 ID 未記録 (旧 fill)</span>';
@@ -990,7 +1021,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
 
       // dispatchAction below re-triggers the dataZoom listener above, which
       // also updates the URL — no separate URL-sync call needed here.
-      var presetButtons = document.querySelectorAll('.zoom-preset');
+      var presetButtons = document.querySelectorAll('#chart-range-seg button');
       for (var pi = 0; pi < presetButtons.length; pi += 1) {
         presetButtons[pi].addEventListener('click', function (ev) {
           var fromMs = Number(ev.currentTarget.getAttribute('data-from-ms'));

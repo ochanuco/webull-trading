@@ -155,13 +155,13 @@ function renderExtendedHoursCrosstab(crosstab: Record<string, number>): string {
   return `<div class="tablewrap"><table class="fit">
     <thead><tr><th>同日の時間外参考観測 status</th><th class="num">SL exit 件数</th></tr></thead>
     <tbody>${rows}</tbody>
-  </table><p class="muted" style="font-size:11px;margin-top:4px">合計 ${total} 件 (stop-loss exit)</p></div>`
+  </table><p class="muted small" style="margin-top:4px">合計 ${total} 件 (stop-loss exit)</p></div>`
 }
 
 function renderCostDrawdownTurnover(report: LifecycleReport): string {
   const { cost, drawdown, turnover } = report
   const tile = (label: string, value: string) =>
-    `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value" style="font-size:16px">${value}</div></div>`
+    `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value tile-val-sm">${value}</div></div>`
   const tiles = [
     // Unsigned, not fmtUsd: these are magnitudes ("how much"), and fmtUsd's
     // sign would render 0 as "+$0.00", implying a gain direction that doesn't apply.
@@ -175,17 +175,29 @@ function renderCostDrawdownTurnover(report: LifecycleReport): string {
       turnover.turnoverRatio === null ? '<span class="muted">—</span>' : `${(turnover.turnoverRatio * 100).toFixed(1)}%`,
     ),
   ].join('')
-  return `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:760px">${tiles}</div>`
+  return `<div class="grid cols-3" style="max-width:760px">${tiles}</div>`
 }
+
+// `.tile-val-sm` and `.small` have no foundation counterpart: the former
+// shrinks a KPI tile's value so `$12345.67`-scale turnover numbers don't
+// overflow this page's narrower 3-col tiles, the latter bumps this page's
+// old 11px meta text up to the 12px operator-mandated readability floor.
+const LIFECYCLE_PAGE_STYLE = `<style>
+  .tile-val-sm{font-size:16px}
+  .small{font-size:12px}
+</style>`
 
 export function lifecycleBody(report: LifecycleReport): string {
   const failedNote =
     report.meta.barFetchFailedSymbols.length > 0
-      ? `<p class="warn" style="font-size:12px">日足取得に失敗した銘柄 (フォワード指標が null): ${esc(report.meta.barFetchFailedSymbols.join(', '))}</p>`
+      ? `<p class="warn small">日足取得に失敗した銘柄 (フォワード指標が null): ${esc(report.meta.barFetchFailedSymbols.join(', '))}</p>`
       : ''
-  return `
-    <p class="muted" style="font-size:13px">${esc(report.meta.note)}</p>
-    <p class="muted" style="font-size:11px">round trip ${report.meta.roundTripCount} 件 / fill ${report.meta.fillCount} 件 / SKIP (dedup後) ${report.meta.skipSignalCount} 件 — as of ${esc(report.generatedAt)}</p>
+  return `${LIFECYCLE_PAGE_STYLE}<div class="card">
+    <div class="card-head">
+      <h2 class="card-title">ライフサイクル分析</h2>
+      <span class="info-tip" tabindex="0" aria-label="データソースの注記" data-tip="${esc(report.meta.note)}">?</span>
+      <div class="card-actions"><span class="muted small">round trip ${report.meta.roundTripCount} 件 / fill ${report.meta.fillCount} 件 / SKIP (dedup後) ${report.meta.skipSignalCount} 件 — as of ${esc(report.generatedAt)}</span></div>
+    </div>
     ${failedNote}
 
     <div class="section-head">(a) exit reason 別成績</div>
@@ -205,5 +217,5 @@ export function lifecycleBody(report: LifecycleReport): string {
 
     <div class="section-head" style="margin-top:20px">(f) コスト / 最大ドローダウン / turnover</div>
     ${renderCostDrawdownTurnover(report)}
-  `
+  </div>`
 }

@@ -255,7 +255,7 @@ describe('/dashboard/alerts 新 UI (#alerts-trades-ui)', () => {
     expect(body).toContain('>情報<')
     expect(body).toContain('設定変更')
     // 長文は先頭 + 全文 details (原文は grep 用に保持)
-    expect(body).toContain('<summary class="muted" style="font-size:11px;cursor:pointer">全文</summary>')
+    expect(body).toContain('<summary class="muted small">全文</summary>')
     expect(body).toContain(longMessage.slice(0, 100))
     expect(body).toContain('dryRun true → false')
     expect(body).toContain('id="log-copy-all"')

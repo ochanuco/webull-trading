@@ -7,6 +7,7 @@ import type { PairRegimeEntry } from '../../trading/strategy/pairRegime'
 import { asc, eq } from 'drizzle-orm'
 import { buyingPowerBadge } from './overview'
 import { esc, safeJsonScript } from './shared'
+import { FIELD_STYLE } from './webullToken'
 
 export async function loadAllSymbolConfigRows(db: D1Database): Promise<SymbolConfigRow[]> {
   const drizzle = createDb(db)
@@ -46,13 +47,17 @@ function applySymbolsListFilter(rows: SymbolConfigRow[], f: SymbolsListFilter): 
   })
 }
 
+// core/leveraged/inverse map onto the shared accent/warn/down tokens (their
+// role already carries that connotation); low_volatility/sector_trend have
+// no matching semantic token, so they reuse chartTheme.ts's static
+// violet/teal series slots to keep the app's categorical palette to one set.
 const ROLE_NODE_COLORS: Record<string, string> = {
-  cash_parking: '#5b8c5a',
-  core_trend: '#1a56db',
-  leveraged_trend: '#d97706',
-  low_volatility: '#7e3af2',
-  sector_trend: '#0e9f9f',
-  inverse_hedge: '#c22d2d',
+  cash_parking: 'var(--up)',
+  core_trend: 'var(--accent)',
+  leveraged_trend: 'var(--warn)',
+  low_volatility: '#8b5cf6',
+  sector_trend: '#14b8a6',
+  inverse_hedge: 'var(--down)',
 }
 
 // Draws one card per unit (a pair = 1 card, a standalone symbol = 1 card),
@@ -127,7 +132,7 @@ export function symbolMapEditorBody(
       syms,
       label: syms.join(' ⇄ '),
       currency: r.currency,
-      color: ROLE_NODE_COLORS[members[0]!.role ?? ''] ?? '#5f6368',
+      color: ROLE_NODE_COLORS[members[0]!.role ?? ''] ?? 'var(--text-3)',
       roles: Object.fromEntries(syms.map((x) => [x, bySym.get(x)?.role ?? null])),
       pct: Math.max(...members.map(pctOf)),
       active: members.some((m) => m.active),
@@ -202,19 +207,21 @@ export function symbolMapEditorBody(
     const members = [pair.proxySymbol, pair.bullSymbol, pair.bearSymbol].map((x) => x.toUpperCase())
     if (!members.some((x) => activeSyms.has(x))) continue
     if (pair.invalidConfig !== null) {
-      chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#fff4e5;color:#9a5b00;font-size:11px">⚠ regime misconfig ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}: ${esc(pair.invalidConfig)} (zone=unknown で両側 BUY 停止中)</span>`)
+      chips.push(`<span class="pill warn">⚠ regime misconfig ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}: ${esc(pair.invalidConfig)} (zone=unknown で両側 BUY 停止中)</span>`)
       continue
     }
-    chips.push(`<span style="padding:2px 8px;border-radius:10px;background:#f1ebfd;color:#7e3af2;font-size:11px">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
+    // No pill variant covers this hue — regime proxy reuses the same static
+    // violet chartTheme.ts uses for its series palette (see ROLE_NODE_COLORS).
+    chips.push(`<span class="pill" style="background:#f1ebfd;color:#8b5cf6">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
   }
   const chipRow = chips.length > 0
     ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
     : ''
-  const legend = `塗り: <span style="background:#5f6368;border:1px solid #3c4043;color:#fff;padding:0 6px;border-radius:4px">口座</span>
-      <span style="background:#fdf3f2;border:1px solid #d4a09a;padding:0 6px;border-radius:4px">JPY</span>
-      <span style="background:#f0f6ff;border:1px solid #9ab8dd;padding:0 6px;border-radius:4px">USD</span>
-      <span style="color:#8a8f98">実線 = 配分</span>
-      <span style="color:#0e9f6e">緑破線 = 退避</span>`
+  const legend = `塗り: <span style="background:var(--text-2);border:1px solid var(--text);color:var(--surface);padding:0 6px;border-radius:4px">口座</span>
+      <span style="background:var(--down-soft);border:1px solid var(--down);padding:0 6px;border-radius:4px">JPY</span>
+      <span style="background:var(--accent-soft);border:1px solid var(--accent);padding:0 6px;border-radius:4px">USD</span>
+      <span class="muted">実線 = 配分</span>
+      <span class="ok">緑破線 = 退避</span>`
   const helpText = [
     '口座 → カードの線 = 配分 (1/枝 均等。対は 1 カード = 1 枠)',
     'カード → カードの線 = 退避先 (緑破線)。対→対は適用時に側別へ展開 (bull→bull / bear→bear)',
@@ -227,68 +234,75 @@ export function symbolMapEditorBody(
   const header = mode === 'edit'
     ? `<p style="margin:0 0 6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols" style="font-size:13px">← 銘柄管理</a>
-    <button type="button" id="sm-simulate" style="padding:4px 12px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
-    <button type="button" id="sm-delete-conn" disabled style="padding:4px 12px;background:#fff;border:1px solid #ccc;color:#999;border-radius:6px;cursor:pointer;font-size:12px">選択中の線を削除</button>
-    <span title="${esc(helpText)}" style="cursor:help;color:#9aa0a6;font-size:14px;border:1px solid #d0d0d5;border-radius:50%;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center">?</span>
+    <button type="button" id="sm-simulate" class="btn-sm">シミュレート</button>
+    <button type="button" id="sm-delete-conn" disabled class="btn-sm">選択中の線を削除</button>
+    <span class="info-tip" tabindex="0" aria-label="操作方法" data-tip="${esc(helpText)}">?</span>
     <span class="muted" style="font-size:12px">${legend}</span>
   </p>
-  <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:#fff8e6;border:1px solid #e6c46a;border-radius:8px;margin-bottom:8px">
+  <div id="sm-changes-bar" hidden style="position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:flex-start;padding:8px 12px;background:var(--warn-soft);border:1px solid var(--warn);border-radius:8px;margin-bottom:8px">
     <div style="flex:1;min-width:0">
       <strong style="font-size:12px">未適用の変更</strong>
       <ul id="sm-changes-list" style="margin:4px 0 0 16px;padding:0;font-size:12px"></ul>
     </div>
-    <button type="button" id="sm-apply" style="padding:6px 18px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">適用</button>
-    <button type="button" id="sm-reset" style="padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:13px">リセット</button>
+    <button type="button" id="sm-apply" class="btn primary">適用</button>
+    <button type="button" id="sm-reset" class="btn">リセット</button>
   </div>`
     : `<p class="muted" style="margin:0 0 6px;font-size:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols/map">✏️ 編集モード</a>
-    <button type="button" id="sm-simulate" style="padding:3px 10px;background:#fff;border:1px solid #06c;color:#06c;border-radius:6px;cursor:pointer;font-size:12px">シミュレート</button>
-    <span title="${esc(helpText)}" style="cursor:help;color:#9aa0a6;font-size:13px;border:1px solid #d0d0d5;border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center">?</span>
+    <button type="button" id="sm-simulate" class="btn-sm">シミュレート</button>
+    <span class="info-tip" tabindex="0" aria-label="操作方法" data-tip="${esc(helpText)}">?</span>
     <span>${legend}</span>
   </p>`
   const canvasHeight = mode === 'edit'
     ? 'height:calc(100vh - 150px);min-height:520px'
     : `height:${Math.max(300, yCursor + 60)}px`
   return `${header}
-  <div id="sm-sim-meta" hidden style="display:flex;gap:10px;align-items:center;margin:0 0 6px;padding:6px 10px;background:#eafaf1;border:1px solid #0e9f6e;border-radius:8px;font-size:12px">
-    <strong style="color:#0e9f6e">シミュレーション表示中</strong>
+  <div id="sm-sim-meta" hidden style="display:flex;gap:10px;align-items:center;margin:0 0 6px;padding:6px 10px;background:var(--up-soft);border:1px solid var(--up);border-radius:8px;font-size:12px">
+    <strong class="ok">シミュレーション表示中</strong>
     <span id="sm-sim-meta-text" class="muted" style="flex:1;min-width:0"></span>
-    <button type="button" id="sm-sim-clear" style="padding:2px 10px;background:#fff;border:1px solid #0e9f6e;color:#0e9f6e;border-radius:6px;cursor:pointer;font-size:12px">クリア</button>
+    <button type="button" id="sm-sim-clear" class="btn-sm">クリア</button>
   </div>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow@0.0.60/dist/drawflow.min.css">
   <style>
-  #symbol-map-editor{${canvasHeight};background:#fafafa;border:1px solid #d0d0d5;border-radius:8px}
-  #symbol-map-editor .drawflow .drawflow-node{background:#fff;border:2px solid #d0d0d5;border-radius:10px;padding:0;width:210px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
-  #symbol-map-editor .drawflow .drawflow-node.selected{border-color:#06c}
-  #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:#e6a23c;box-shadow:0 0 0 3px rgba(230,162,60,0.25)}
-  #symbol-map-editor .drawflow .drawflow-node.sm-account{background:#5f6368;border-color:#3c4043}
-  #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:#fdf3f2;border-color:#d4a09a}
-  #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:#f0f6ff;border-color:#9ab8dd}
+  /* Page-scoped: only the drawflow canvas's fixed "account" node has no
+     matching semantic token (it represents the broker account itself, not
+     a status), so it gets its own light/dark pair here rather than growing
+     layout.ts's shared palette for one widget. */
+  :root{--sm-account-bg:#5f6368;--sm-account-border:#3c4043}
+  @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--sm-account-bg:#3a4048;--sm-account-border:#20242a}}
+  :root[data-theme="dark"]{--sm-account-bg:#3a4048;--sm-account-border:#20242a}
+  #symbol-map-editor{${canvasHeight};background:var(--bg);border:1px solid var(--border-strong);border-radius:8px}
+  #symbol-map-editor .drawflow .drawflow-node{background:var(--surface);border:2px solid var(--border-strong);border-radius:10px;padding:0;width:210px;box-shadow:var(--shadow)}
+  #symbol-map-editor .drawflow .drawflow-node.selected{border-color:var(--accent)}
+  #symbol-map-editor .drawflow .drawflow-node.sm-dirty{border-color:var(--warn);box-shadow:0 0 0 3px var(--warn-soft)}
+  #symbol-map-editor .drawflow .drawflow-node.sm-account{background:var(--sm-account-bg);border-color:var(--sm-account-border)}
+  #symbol-map-editor .drawflow .drawflow-node.sm-jpy{background:var(--down-soft);border-color:var(--down)}
+  #symbol-map-editor .drawflow .drawflow-node.sm-usd{background:var(--accent-soft);border-color:var(--accent)}
   #symbol-map-editor .drawflow .drawflow-node .input,
-  #symbol-map-editor .drawflow .drawflow-node .output{background:#9aa0a6;border:2px solid #6e6e73;width:14px;height:14px}
+  #symbol-map-editor .drawflow .drawflow-node .output{background:var(--text-3);border:2px solid var(--text-2);width:14px;height:14px}
   #symbol-map-editor .drawflow .drawflow-node .input:hover,
-  #symbol-map-editor .drawflow .drawflow-node .output:hover{background:#6e6e73}
+  #symbol-map-editor .drawflow .drawflow-node .output:hover{background:var(--text-2)}
   #symbol-map-editor.sm-view .drawflow .drawflow-node .input,
   #symbol-map-editor.sm-view .drawflow .drawflow-node .output{pointer-events:none}
   /* 退避線は保存済みでも緑破線 (配分の実線と常に区別がつくように)。 */
-  #symbol-map-editor svg.connection.sm-fallback path{stroke:#0e9f6e !important;stroke-dasharray:7 5;stroke-width:2.5px}
+  #symbol-map-editor svg.connection.sm-fallback path{stroke:var(--up) !important;stroke-dasharray:7 5;stroke-width:2.5px}
   #symbol-map-editor svg.connection.sm-pending path{stroke-width:3.5px !important}
   .sm-card{padding:8px 10px;font-size:12px}
   .sm-card .sm-title{font-size:14px;font-weight:700}
-  .sm-card .sm-status-active{color:#0e9f6e;font-size:11px}
-  .sm-card .sm-status-pending{color:#b25000;font-size:11px}
-  .sm-card .sm-meta{color:#6e6e73;font-size:10px;margin-top:2px}
+  .sm-card .sm-status-active{color:var(--up);font-size:11px}
+  .sm-card .sm-status-pending{color:var(--warn);font-size:11px}
+  .sm-card .sm-meta{color:var(--text-2);font-size:10px;margin-top:2px}
   .sm-card .sm-share{font-weight:600}
   /* シミュレーション結果はカードの「外」に浮かせる (#496 follow-up): フロー内に
      置くとカードが伸び、Drawflow が線の端点を再計算しないため点と線がズレる。
      absolute overlay なら几何が一切変わらない。 */
   #symbol-map-editor .drawflow .drawflow-node{overflow:visible}
   .sm-sim-wrap{position:absolute;top:calc(100% + 4px);left:2px;right:2px;z-index:6;display:flex;flex-direction:column;gap:3px;pointer-events:none}
-  .sm-sim{padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5;box-shadow:0 1px 4px rgba(0,0,0,0.18)}
-  .sm-sim.sm-sim-active{background:#eafaf1;color:#0b6e4f}
-  .sm-sim.sm-sim-reroute{background:#fff4e5;color:#9a5b00}
-  .sm-sim.sm-sim-recv{background:#eafaf1;color:#0b6e4f;border:1px dashed #0e9f6e}
-  #symbol-map-editor svg.connection.sm-sim-flow path{stroke:#0e9f6e !important;stroke-width:4px;stroke-dasharray:10 6;animation:smflow 1.2s linear infinite}
+  .sm-sim{padding:3px 6px;border-radius:6px;font-size:10px;line-height:1.5;box-shadow:var(--shadow-pop)}
+  .sm-sim.sm-sim-active{background:var(--up-soft);color:var(--up)}
+  .sm-sim.sm-sim-reroute{background:var(--warn-soft);color:var(--warn)}
+  .sm-sim.sm-sim-recv{background:var(--up-soft);color:var(--up);border:1px dashed var(--up)}
+  #symbol-map-editor svg.connection.sm-sim-flow path{stroke:var(--up) !important;stroke-width:4px;stroke-dasharray:10 6;animation:smflow 1.2s linear infinite}
   #symbol-map-editor svg.connection.sm-sim-dim path{opacity:0.25}
   @keyframes smflow{to{stroke-dashoffset:-32}}
   </style>
@@ -353,6 +367,10 @@ export function symbolMapEditorBody(
       var label = ccy === 'JPY' ? '日本口座 (JPY)' : '米国口座 (USD)';
       var y = ccy === 'JPY' ? 30 + ((Math.max(nJpy, 1) - 1) * 130) / 2 : 30 + nJpy * 130 + ((Math.max(data.units.length - nJpy, 1) - 1) * 130) / 2;
       var saved = savedPos['__account_' + ccy + '__'];
+      // Fixed light-on-dark text: the account node's background
+      // (--sm-account-bg) stays dark in both themes, so its text stays a
+      // fixed light color rather than following --text (which flips light
+      // in dark mode and would go unreadable against this node).
       var id = editor.addNode('口座' + ccy, 0, 1, saved ? saved.x : 40, saved ? saved.y : y, 'sm-node sm-account',
         { unit: '口座' + ccy },
         '<div class="sm-card"><div class="sm-title" style="color:#fff">' + label + '</div>' +
@@ -777,7 +795,7 @@ export function symbolMapEditorBody(
     var picker = document.createElement('div');
     picker.id = 'sm-spawn-picker';
     picker.hidden = true;
-    picker.style.cssText = 'position:fixed;z-index:50;background:#fff;border:1px solid #d0d0d5;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.15);padding:6px;font-size:12px;max-height:240px;overflow:auto';
+    picker.style.cssText = 'position:fixed;z-index:50;background:var(--surface);border:1px solid var(--border-strong);border-radius:8px;box-shadow:var(--shadow-pop);padding:6px;font-size:12px;max-height:240px;overflow:auto';
     document.body.appendChild(picker);
     function hidePicker() { picker.hidden = true; connStartId = null; }
     document.addEventListener('mousedown', function (ev) {
@@ -847,7 +865,7 @@ export function symbolMapEditorBody(
       var sx = clientX;
       var sy = clientY;
       picker.querySelectorAll('.sm-spawn-item').forEach(function (itemEl) {
-        itemEl.addEventListener('mouseenter', function () { itemEl.style.background = '#f0f6ff'; });
+        itemEl.addEventListener('mouseenter', function () { itemEl.style.background = 'var(--surface-2)'; });
         itemEl.addEventListener('mouseleave', function () { itemEl.style.background = ''; });
         itemEl.addEventListener('click', function () {
           var uid = itemEl.getAttribute('data-uid');
@@ -893,7 +911,7 @@ export function symbolMapEditorBody(
       if (!guide) {
         guide = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         guide.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:40';
-        guide.innerHTML = '<line stroke="#6e6e73" stroke-width="2.5" stroke-dasharray="6 5"/>';
+        guide.innerHTML = '<line stroke="var(--text-2)" stroke-width="2.5" stroke-dasharray="6 5"/>';
         document.body.appendChild(guide);
       }
       var line = guide.querySelector('line');
@@ -988,8 +1006,8 @@ export function symbolMapEditorBody(
     function refreshDeleteBtn() {
       var has = editor.connection_selected != null;
       deleteBtn.disabled = !has;
-      deleteBtn.style.color = has ? '#c22' : '#999';
-      deleteBtn.style.borderColor = has ? '#c22' : '#ccc';
+      deleteBtn.style.color = has ? 'var(--down)' : 'var(--text-3)';
+      deleteBtn.style.borderColor = has ? 'var(--down)' : 'var(--border-strong)';
     }
     el.addEventListener('click', function () { setTimeout(refreshDeleteBtn, 0); });
     deleteBtn.addEventListener('click', function () {
@@ -1089,9 +1107,9 @@ export function symbolsListBody(args: {
   const { rows, inversePairs = {}, pairRegimes = [], mapAmounts = {}, errorCode = null, errorSymbol = null, filter } = args
   const tradable: TradableAllowlist = args.tradable ?? new Map()
   const tab = args.tab ?? 'list'
-  const tabBar = `<div style="display:flex;gap:4px;margin:0 0 12px;border-bottom:1px solid #e3e3e8">
-    <a href="/dashboard/symbols" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'list' ? '#06c' : 'transparent'};color:${tab === 'list' ? '#06c' : '#5f6368'};font-weight:${tab === 'list' ? '600' : 'normal'}">一覧</a>
-    <a href="/dashboard/symbols?tab=workflow" style="padding:6px 16px;font-size:13px;text-decoration:none;border-bottom:2px solid ${tab === 'workflow' ? '#06c' : 'transparent'};color:${tab === 'workflow' ? '#06c' : '#5f6368'};font-weight:${tab === 'workflow' ? '600' : 'normal'}">ワークフロー</a>
+  const tabBar = `<div class="seg" style="margin:0 0 12px">
+    <a href="/dashboard/symbols"${tab === 'list' ? ' class="active"' : ''}>一覧</a>
+    <a href="/dashboard/symbols?tab=workflow"${tab === 'workflow' ? ' class="active"' : ''}>ワークフロー</a>
   </div>`
   // Every branch below starts with ${errorBanner}, so prepending the
   // buying-power badge here shows it in every case (list / empty / 0-filter).
@@ -1101,20 +1119,20 @@ export function symbolsListBody(args: {
   const inactiveCount = rows.length - activeCount
 
   const sel = (cur: string, val: string) => (cur === val ? ' selected' : '')
-  const filterBar = `<form method="get" action="/dashboard/symbols" style="margin:0 0 12px;padding:8px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-    <input type="search" name="q" value="${esc(filter.q)}" placeholder="🔍 銘柄 / 名前で絞り込み" style="padding:4px 8px;width:200px">
-    <select name="status" style="padding:4px 6px">
+  const filterBar = `<form method="get" action="/dashboard/symbols" class="field-row" style="margin:0 0 12px">
+    <div class="field"><label>検索</label><input type="search" name="q" value="${esc(filter.q)}" placeholder="🔍 銘柄 / 名前で絞り込み" style="width:200px"></div>
+    <div class="field"><label>状態</label><select name="status">
       <option value="all"${sel(filter.status, 'all')}>全状態</option>
       <option value="active"${sel(filter.status, 'active')}>有効のみ</option>
       <option value="inactive"${sel(filter.status, 'inactive')}>無効のみ</option>
-    </select>
-    <select name="market" style="padding:4px 6px">
+    </select></div>
+    <div class="field"><label>市場</label><select name="market">
       <option value="all"${sel(filter.market, 'all')}>全市場</option>
       <option value="US"${sel(filter.market, 'US')}>US</option>
       <option value="JP"${sel(filter.market, 'JP')}>JP</option>
-    </select>
-    <button type="submit" style="padding:4px 12px;background:#06c;color:#fff;border:none;border-radius:4px;cursor:pointer">絞り込み</button>
-    <a href="/dashboard/symbols" style="padding:4px 8px;text-decoration:none;font-size:12px;color:#86868b">リセット</a>
+    </select></div>
+    <div class="field"><button type="submit" class="btn primary">絞り込み</button></div>
+    <div class="field"><a href="/dashboard/symbols" class="btn">リセット</a></div>
   </form>`
 
   const tradableEntries = [...tradable.values()]
@@ -1128,9 +1146,9 @@ export function symbolsListBody(args: {
       ? '<span class="muted" style="font-size:12px">OpenAPI 取扱リスト: 未取得 — 「取扱リスト更新」で取得</span>'
       : `<span class="muted" style="font-size:12px" title="tradable/list を全件 sweep した結果のキャッシュ (#460)">OpenAPI 取扱リスト: ${tradableCount} 銘柄 (最終取得 ${esc(lastSync.slice(0, 10))})</span>`
   const headerBar = `<p style="margin:0 0 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-    <a href="/dashboard/symbols/new" style="padding:6px 12px;background:#06c;color:#fff;border-radius:4px;text-decoration:none">+ 新規追加</a>
+    <a href="/dashboard/symbols/new" class="btn primary">+ 新規追加</a>
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
-    <button type="button" id="tradable-refresh-btn" onclick="window.refreshTradableAllowlist()" style="padding:5px 10px;font-size:12px;background:#fff;border:1px solid #d0d0d5;border-radius:4px;cursor:pointer" title="Webull の OpenAPI 取扱可能銘柄リスト (tradable/list) を今すぐ再取得して allowlist を更新します。全件 sweep のため数十秒かかります (#460)">🔄 取扱リスト更新</button>
+    <button type="button" id="tradable-refresh-btn" onclick="window.refreshTradableAllowlist()" class="btn-sm" title="Webull の OpenAPI 取扱可能銘柄リスト (tradable/list) を今すぐ再取得して allowlist を更新します。全件 sweep のため数十秒かかります (#460)">🔄 取扱リスト更新</button>
     ${allowlistNote}
     <span id="tradable-refresh-status" style="font-size:12px"></span>
   </p>
@@ -1142,10 +1160,10 @@ export function symbolsListBody(args: {
     var btn = document.getElementById('tradable-refresh-btn');
     var st = document.getElementById('tradable-refresh-status');
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
-    if (st) { st.textContent = '⏳ 取得中... (全件まで約1分)'; st.style.color = '#86868b'; }
+    if (st) { st.textContent = '⏳ 取得中... (全件まで約1分)'; st.style.color = 'var(--text-3)'; }
     var step = function (cursor, watermark, guard) {
       if (guard > 40) { // 安全上限 (40 チャンク = 600 ページ相当)
-        if (st) { st.textContent = '⚠ 取得が長すぎるため中断 (部分反映済み)'; st.style.color = '#b25000'; }
+        if (st) { st.textContent = '⚠ 取得が長すぎるため中断 (部分反映済み)'; st.style.color = 'var(--warn)'; }
         if (btn) { btn.disabled = false; btn.style.opacity = ''; }
         return;
       }
@@ -1157,21 +1175,21 @@ export function symbolsListBody(args: {
         .then(function (r) { return r.json(); })
         .then(function (res) {
           if (!res || res.ok === false) {
-            if (st) { st.textContent = '⚠ 取得失敗: ' + ((res && res.error) || 'unknown'); st.style.color = '#c22'; }
+            if (st) { st.textContent = '⚠ 取得失敗: ' + ((res && res.error) || 'unknown'); st.style.color = 'var(--down)'; }
             if (btn) { btn.disabled = false; btn.style.opacity = ''; }
             return;
           }
           var n = res.total != null ? res.total : 0;
           if (res.done) {
-            if (st) { st.textContent = '✓ ' + n + ' 銘柄取得完了' + (res.disappeared > 0 ? ' / ' + res.disappeared + ' 消失' : '') + ' — 再読込します'; st.style.color = '#0e9f6e'; }
+            if (st) { st.textContent = '✓ ' + n + ' 銘柄取得完了' + (res.disappeared > 0 ? ' / ' + res.disappeared + ' 消失' : '') + ' — 再読込します'; st.style.color = 'var(--up)'; }
             setTimeout(function () { window.location.reload(); }, 700);
             return;
           }
-          if (st) { st.textContent = '⏳ 取得中... ' + n + ' 銘柄'; st.style.color = '#86868b'; }
+          if (st) { st.textContent = '⏳ 取得中... ' + n + ' 銘柄'; st.style.color = 'var(--text-3)'; }
           step(res.nextCursor, res.watermark, guard + 1);
         })
         .catch(function () {
-          if (st) { st.textContent = '⚠ 通信エラー'; st.style.color = '#c22'; }
+          if (st) { st.textContent = '⚠ 通信エラー'; st.style.color = 'var(--down)'; }
           if (btn) { btn.disabled = false; btn.style.opacity = ''; }
         });
     };
@@ -1179,15 +1197,17 @@ export function symbolsListBody(args: {
   };
   </script>`
 
+  const listStyle = `<style>${FIELD_STYLE}</style>`
+
   if (tab === 'workflow') {
-    return `${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes, tradable })}`
+    return `${listStyle}${errorBanner}${tabBar}${symbolMapEditorBody(rows, inversePairs, mapAmounts, { mode: 'view', pairRegimes, tradable })}`
   }
 
   if (rows.length === 0) {
-    return `${errorBanner}${tabBar}${headerBar}<p class="muted">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
+    return `${listStyle}${errorBanner}${tabBar}${headerBar}<p class="empty">登録銘柄なし。「+ 新規追加」から最初の symbol を登録してください。</p>`
   }
   if (filtered.length === 0) {
-    return `${errorBanner}${tabBar}${filterBar}${headerBar}<p class="muted">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
+    return `${listStyle}${errorBanner}${tabBar}${filterBar}${headerBar}<p class="empty">フィルタに一致する銘柄無し。条件を緩めてください。</p>`
   }
   const ordered = orderRowsByPair(filtered, inversePairs)
   const pairColor = assignPairColors(ordered, inversePairs)
@@ -1209,13 +1229,16 @@ export function symbolsListBody(args: {
       if (inactive) rowStyleParts.push('opacity:0.5')
       if (bg) rowStyleParts.push(`background:${bg}`)
       const rowStyle = rowStyleParts.length ? ` style="${rowStyleParts.join(';')}"` : ''
-      const symStyle = inactive ? ' style="text-decoration:line-through;color:#86868b"' : ''
+      const symStyle = inactive ? ' style="text-decoration:line-through;color:var(--text-3)"' : ''
       const toggleLabel = r.active ? '無効化' : '有効化'
       const editHref = `/dashboard/symbols/${encodeURIComponent(r.symbol)}/edit`
       const toggleAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/toggle-active`
       const deleteAction = `/admin/symbol-config/${encodeURIComponent(r.symbol)}/delete`
+      // Active rows show no delete affordance at all (must deactivate
+      // first) rather than a disabled placeholder — a muted "—" next to
+      // live buttons read as a rendering glitch, not a state.
       const deleteForm = r.active
-        ? '<span class="muted" style="font-size:11px" title="削除するには先に無効化してください">—</span>'
+        ? ''
         : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去、インバース対のリンクも解除)。元に戻せません。よろしいですか？');">
             <button type="submit" class="btn-sm danger">削除</button>
           </form>`
@@ -1257,31 +1280,33 @@ export function symbolsListBody(args: {
       // corner radius forms ┌, the bottom row's forms └, and the shared
       // left border between them reads as one continuous line.
       const connBase =
-        'position:absolute;left:11px;width:9px;border-left:2px solid #06c;display:block'
+        'position:absolute;left:11px;width:9px;border-left:2px solid var(--accent);display:block'
       const connStyle =
         role === 'top'
-          ? `${connBase};top:50%;bottom:0;border-top:2px solid #06c;border-top-left-radius:6px`
+          ? `${connBase};top:50%;bottom:0;border-top:2px solid var(--accent);border-top-left-radius:6px`
           : role === 'bottom'
-            ? `${connBase};top:0;bottom:50%;border-bottom:2px solid #06c;border-bottom-left-radius:6px`
+            ? `${connBase};top:0;bottom:50%;border-bottom:2px solid var(--accent);border-bottom-left-radius:6px`
             : ''
       const treeCell = connStyle
         ? `<a href="/dashboard/symbols/${encodeURIComponent(inverse!)}/edit" title="${treeTitle}" style="${connStyle}"></a>`
         : ''
       const dateOnly = (r.updatedAt || '').slice(0, 10)
+      const dateParts = dateOnly.split('-')
+      const dateShort = dateParts.length === 3 ? `${dateParts[1]}/${dateParts[2]}` : dateOnly
       const tradBadge = tradableBadgeHtml(tradable.get(sym)?.status ?? 'unknown')
       const tradBadgeHtml = tradBadge ? `<div style="margin-top:2px">${tradBadge}</div>` : ''
       return `<tr${rowStyle}>
         <td style="position:relative;width:28px;padding:0">${treeCell}</td>
         <td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="チャート銘柄タブで見る" style="text-decoration:none"><strong><span${symStyle}>${esc(r.symbol)}</span></strong></a>${tradBadgeHtml}</td>
-        <td>${esc(r.name ?? '')}</td>
+        <td class="grow">${esc(r.name ?? '')}</td>
         <td><code style="font-size:11px">${esc(r.market)}/${esc(r.currency)}</code></td>
         <td>${roleCell}</td>
         <td>${lotSizeCell}</td>
         <td>${maxNotionalCell}</td>
         ${budgetTd}
-        <td>${esc(r.notes ?? '')}</td>
-        <td class="muted" style="font-size:11px">${esc(dateOnly)}</td>
-        <td>
+        <td style="white-space:normal;max-width:220px">${esc(r.notes ?? '')}</td>
+        <td class="muted" style="font-size:11px" title="${esc(dateOnly)}">${esc(dateShort)}</td>
+        <td style="display:flex;gap:6px;align-items:center;white-space:nowrap">
           <a href="${esc(editHref)}" class="btn-sm">編集</a>
           <form method="post" action="${esc(toggleAction)}" style="display:inline">
             <button type="submit" class="btn-sm">${esc(toggleLabel)}</button>
@@ -1291,24 +1316,30 @@ export function symbolsListBody(args: {
       </tr>`
     })
     .join('')
-  return `${errorBanner}${tabBar}${filterBar}${headerBar}
-  <div class="tablewrap">
-  <table>
-    <thead><tr>
-      <th style="width:28px" title="インバース対のツリー表記"></th>
-      <th>銘柄</th>
-      <th>銘柄名</th>
-      <th>市場/通貨</th>
-      <th>ロール</th>
-      <th>売買単位</th>
-      <th>1注文上限</th>
-      <th>予算配分</th>
-      <th>メモ</th>
-      <th>更新日</th>
-      <th>操作</th>
-    </tr></thead>
-    <tbody>${tbody}</tbody>
-  </table>
+  return `${listStyle}${errorBanner}${tabBar}
+  <div class="card">
+    <div class="card-body">
+      ${filterBar}
+      ${headerBar}
+      <div class="tablewrap">
+      <table class="fit">
+        <thead><tr>
+          <th style="width:28px" title="インバース対のツリー表記"></th>
+          <th>銘柄</th>
+          <th class="grow">銘柄名</th>
+          <th>市場/通貨</th>
+          <th>ロール</th>
+          <th>売買単位</th>
+          <th>1注文上限</th>
+          <th>予算配分</th>
+          <th style="white-space:normal">メモ</th>
+          <th>更新日</th>
+          <th>操作</th>
+        </tr></thead>
+        <tbody>${tbody}</tbody>
+      </table>
+      </div>
+    </div>
   </div>
   ${budgetLadderControls()}
   ${safeJsonScript(
@@ -1387,7 +1418,7 @@ const BUDGET_LADDER_JS = `
     });
     if (used <= 0) { barMeter.innerHTML = ''; return; }
     var w = Math.min(100, used);
-    var col = used > 100 ? '#c22' : used > 80 ? '#b25000' : '#057a55';
+    var col = used > 100 ? 'var(--down)' : used > 80 ? 'var(--warn)' : 'var(--up)';
     barMeter.innerHTML = '<span title="同時保有ベースの口座(円)予算使用率 (インバース対は max を1回計上)" style="display:flex;align-items:center;gap:6px;font-size:12px;flex:1;min-width:0">'
       + '<span class="muted" style="white-space:nowrap">口座予算</span>'
       + '<span class="bar-track" style="flex:1;min-width:40px;height:8px"><span class="bar-fill" style="display:block;width:' + w.toFixed(0) + '%;height:8px;background:' + col + '"></span></span>'
@@ -1397,12 +1428,12 @@ const BUDGET_LADDER_JS = `
 
 function budgetLadderControls(): string {
   return `<form id="symbol-budget-form" method="post" action="/admin/symbol-config/budget-alloc"></form>
-  <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid #d0d0d5;border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,0.06)">
+  <div id="symbol-budget-bar" style="position:sticky;bottom:0;margin-top:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border-strong);border-radius:8px;display:none;align-items:center;gap:12px;box-shadow:var(--shadow-pop)">
     <strong style="font-size:13px">予算配分の変更（未確定）</strong>
     <span id="symbol-budget-dirty" class="muted" style="font-size:12px;white-space:nowrap"></span>
     <span id="symbol-budget-bar-meter" style="display:flex;gap:14px;align-items:center;flex:1"></span>
-    <a href="/dashboard/symbols" style="padding:5px 12px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">取消</a>
-    <button type="submit" form="symbol-budget-form" style="padding:5px 14px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">確定して保存</button>
+    <a href="/dashboard/symbols" class="btn">取消</a>
+    <button type="submit" form="symbol-budget-form" class="btn primary">確定して保存</button>
   </div>`
 }
 
@@ -1461,7 +1492,7 @@ export function assignPairColors(
   inversePairs: Record<string, string>,
 ): Map<string, string> {
   const present = new Set(ordered.map((r) => r.symbol.toUpperCase()))
-  const colors = ['#eef4ff', '#fff4ec'] as const // 薄青 / 薄橙を交互
+  const colors = ['var(--accent-soft)', 'var(--warn-soft)'] as const // 薄青 / 薄橙を交互
   const color = new Map<string, string>()
   const assignedPair = new Set<string>()
   let idx = 0
@@ -1545,19 +1576,17 @@ export interface SymbolFormArgs {
 // draws attention.
 const TRADABLE_BADGE: Record<
   Exclude<TradableStatus, 'tradable'>,
-  { label: string; bg: string; fg: string; title: string }
+  { label: string; pillClass: string; title: string }
 > = {
   disappeared: {
     label: '⚠ 取扱消失',
-    bg: '#fff4e5',
-    fg: '#9a5b00',
+    pillClass: 'warn',
     title:
       'OpenAPI 取扱リスト (tradable/list) に過去は在籍したが直近の sweep で消失。取扱停止された可能性 — 保有・運用中なら確認を (#460)',
   },
   unknown: {
     label: '⚠ 取扱未確認',
-    bg: '#f1f1f4',
-    fg: '#6e6e73',
+    pillClass: 'neutral',
     title:
       'OpenAPI 取扱リスト (tradable/list) に未観測。アプリで売買できても OpenAPI 経由では発注できない可能性 (USMV 等)。発注後に 417 で弾かれる場合あり (#460)',
   },
@@ -1566,7 +1595,7 @@ const TRADABLE_BADGE: Record<
 function tradableBadgeHtml(status: TradableStatus): string {
   if (status === 'tradable') return ''
   const b = TRADABLE_BADGE[status]
-  return `<span title="${esc(b.title)}" style="display:inline-block;padding:1px 6px;border-radius:6px;background:${b.bg};color:${b.fg};font-size:11px;font-weight:600;white-space:nowrap">${b.label}</span>`
+  return `<span class="pill ${b.pillClass}" title="${esc(b.title)}">${b.label}</span>`
 }
 
 export const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
@@ -1596,7 +1625,7 @@ function renderSymbolRoleCell(row: SymbolConfigRow): string {
     role === null
       ? '<span class="muted" title="role 未設定 = 従来挙動">—</span>'
       : known
-        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code><div class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</div>`
+        ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code> <span class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
         : `<span class="err" title="不正な role 値です。entry は抑止されます (fail-closed)。編集から正しい値を選んでください。">⚠ ${esc(role)}</span>`
   const notes: string[] = []
   if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
@@ -1700,7 +1729,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           const badge = tradableBadgeHtml(args.tradableStatus ?? 'unknown')
           return badge
             ? `<div style="margin-top:6px">${badge}</div>`
-            : `<div style="margin-top:6px"><span title="OpenAPI 取扱リスト (tradable/list) 在籍 — 発注可能" style="font-size:12px;color:#0e9f6e">✓ OpenAPI 取扱リスト在籍</span></div>`
+            : `<div style="margin-top:6px"><span title="OpenAPI 取扱リスト (tradable/list) 在籍 — 発注可能" class="ok" style="font-size:12px">✓ OpenAPI 取扱リスト在籍</span></div>`
         })()
       : ''
   const symbolField =
@@ -1708,21 +1737,21 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       ? // Must wrap in one element: multiple bare siblings here shift the
         // 2-column grid by a cell and misalign every label/value after it.
         `<div>
-           <input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:#eee">
+           <input type="text" name="symbol" value="${esc(symbolValue)}" readonly style="padding:6px;background:var(--surface-2)">
            ${editAllowlistBadge}
            <p class="muted" style="margin:4px 0 0;font-size:11px">symbol は immutable です。変更したい場合は一度削除して再追加してください。</p>
          </div>`
       : `<div>
            <div style="position:relative;display:inline-block">
              <input type="text" name="symbol" id="symbol-form-symbol" value="${esc(symbolValue)}" required maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="SOXL / 7974 / 1570" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchSymbolSuggest(this.value)" onfocus="window.searchSymbolSuggest(this.value)" onblur="setTimeout(window.hideSymbolSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
-             <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+             <ul id="symbol-form-symbol-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:var(--surface);border:1px solid var(--border-strong);border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:var(--shadow-pop)"></ul>
            </div>
            <span id="symbol-tradability" style="margin-left:10px;font-size:13px"></span>
            <div id="symbol-allowlist" style="margin-top:4px;font-size:12px"></div>
          </div>`
   const modeSelector =
     mode === 'new'
-      ? `<div style="grid-column:1/-1;display:flex;gap:16px;align-items:center;padding:8px 10px;background:#f5f5f7;border-radius:6px">
+      ? `<div style="grid-column:1/-1;display:flex;gap:16px;align-items:center;padding:8px 10px;background:var(--surface-2);border-radius:6px">
            <strong style="font-size:13px">登録モード:</strong>
            <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
              <input type="radio" name="reg_mode" value="single" checked onchange="window.setSymbolRegMode('single')"> 単体登録
@@ -1748,7 +1777,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
          <div id="symbol-form-inverse-row" style="display:none">
            <div style="position:relative;display:inline-block">
              <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
-             <ul id="symbol-form-inverse-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:#fff;border:1px solid #d0d0d5;border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.1)"></ul>
+             <ul id="symbol-form-inverse-suggest" style="display:none;position:absolute;top:100%;left:0;margin:2px 0 0;padding:0;list-style:none;background:var(--surface);border:1px solid var(--border-strong);border-radius:4px;width:380px;max-height:280px;overflow-y:auto;z-index:10;box-shadow:var(--shadow-pop)"></ul>
              <input type="hidden" name="inverse_name" id="symbol-form-inverse-name" value="">
              <input type="hidden" name="inverse_market" id="symbol-form-inverse-market" value="">
              <input type="hidden" name="inverse_currency" id="symbol-form-inverse-currency" value="">
@@ -1773,19 +1802,30 @@ export function symbolFormBody(args: SymbolFormArgs): string {
   const hasAllocValues =
     entryRequiredChecked !== '' || alwaysActiveChecked !== '' || cashFallbackValue !== ''
   const REQ =
-    '<span style="display:inline-block;padding:0 6px;border-radius:8px;background:#fdecec;color:#c22;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle">必須</span>'
+    '<span class="pill err" style="margin-left:4px;vertical-align:middle">必須</span>'
   const fieldGrid = 'display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center'
   const optSection = (title: string, hint: string, inner: string, open: boolean): string =>
-    `<details${open ? ' open' : ''} style="border:1px solid #e3e3e8;border-radius:10px;background:#fff">
+    `<details${open ? ' open' : ''} style="border:1px solid var(--border);border-radius:10px;background:var(--surface)">
       <summary style="cursor:pointer;padding:10px 14px;font-size:13px;font-weight:600">${title} <span class="muted" style="font-size:11px;font-weight:normal">— ${hint} (任意)</span></summary>
       <div style="padding:2px 14px 14px;${fieldGrid}">${inner}</div>
     </details>`
 
-  return `<h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
+  // This form predates `.field` (dense 2-column label/input grid, kept for
+  // the operator's existing muscle memory across ~40 fields) so its bare
+  // inputs never picked up FIELD_STYLE's `.field input` rule — without this
+  // they render with the browser's native white input background, which
+  // reads as broken in dark mode though the rest of the page re-themes.
+  const bareFieldStyle = `
+    #symbol-form input:not([type=checkbox]):not([type=radio]):not([type=range]),
+    #symbol-form select,
+    #symbol-form textarea{background:var(--surface);color:var(--text);border:1px solid var(--border-strong);border-radius:var(--radius-sm);font-family:inherit}
+  `
+  return `<style>${bareFieldStyle}</style>
+  <h2 style="font-size:16px;margin:8px 0 12px">${heading}</h2>
   ${errBlock}
-  <form method="post" action="${esc(action)}" style="max-width:680px;display:flex;flex-direction:column;gap:12px">
+  <form id="symbol-form" method="post" action="${esc(action)}" style="max-width:680px;display:flex;flex-direction:column;gap:12px">
     ${modeSelector}
-    <div style="border:1px solid #e3e3e8;border-radius:10px;background:#fff;padding:12px 14px">
+    <div style="border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:12px 14px">
       <div style="font-size:13px;font-weight:600;margin-bottom:2px">基本 <span class="muted" style="font-size:11px;font-weight:normal">— ${REQ} 以外は空欄で global 設定を使用</span></div>
       <div style="${fieldGrid}">
         <label>銘柄${REQ}</label>${symbolField}
@@ -1819,23 +1859,23 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
           <!-- 2軸を構造で表現: タブ = 入場アーキ、タブ内のカード = 銘柄プロファイル。
                現状は「押し目」タブのみ有効。モメンタム/逆張りは設計中。 -->
-          <div style="display:flex;gap:2px;border-bottom:1px solid #e3e3e8;margin-bottom:8px">
+          <div style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:8px">
             <button type="button" class="role-arch-tab" data-arch="pullback" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">押し目</button>
-            <button type="button" class="role-arch-tab" data-arch="momentum" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">モメンタム <span style="font-size:10px;color:#bbb">設計中</span></button>
-            <button type="button" class="role-arch-tab" data-arch="reversion" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">逆張り <span style="font-size:10px;color:#bbb">設計中</span></button>
+            <button type="button" class="role-arch-tab" data-arch="momentum" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">モメンタム <span class="muted" style="font-size:10px">設計中</span></button>
+            <button type="button" class="role-arch-tab" data-arch="reversion" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;font-size:13px;cursor:pointer">逆張り <span class="muted" style="font-size:10px">設計中</span></button>
           </div>
           <div class="role-arch-panel" data-arch="pullback">
             <div id="role-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
           <div class="role-arch-panel" data-arch="momentum" style="display:none">
-            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:10px 12px;line-height:1.55;margin-bottom:8px">
+            <div class="warn" style="font-size:12px;background:var(--warn-soft);border:1px solid var(--warn);border-radius:8px;padding:10px 12px;line-height:1.55;margin-bottom:8px">
               <strong>⚠ 要注意ロール(エッジ未検証)</strong> — 新高値ブレイクの継続を取る入場アーキ。選択・取引は可能ですが、
               <b>backtest 上、発注可能なテーマ ETF (ICLN/TAN/QCLN) では成績まちまち〜不良 (TAN -60%DD)</b>。広域/テック 1x では有効だがそれらは OpenAPI 発注不可。<b>1x 銘柄のみ</b>に付け、少額・DRY_RUN から。
             </div>
             <div id="momentum-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
           <div class="role-arch-panel" data-arch="reversion" style="display:none">
-            <div style="font-size:12px;color:#9a5b00;background:#fff4e5;border:1px solid #f0c98a;border-radius:8px;padding:12px 14px;line-height:1.6">
+            <div class="warn" style="font-size:12px;background:var(--warn-soft);border:1px solid var(--warn);border-radius:8px;padding:12px 14px;line-height:1.6">
               <strong>⚠ 使用不可(見送り)</strong> — 売られすぎの反発を拾う入場アーキ(1x向け)。<br>
               理由: red-team 評価で <b>$ POC のコスト/為替でエッジ証明困難</b>＋ <b>逆張りに適した 1x(広域指数)が OpenAPI 取扱外</b>(発注可の ICLN/TAN 等はテーマ ETF で逆張り不適=ナイフ掴み)。<br>
               現状は見送り。再訪は universe 拡大 + notional 引き上げが前提。
@@ -1844,7 +1884,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
         </div>
         <!-- ホバー時に画面右へ出る大プレビュー (fixed)。 -->
-        <div id="role-preview" style="display:none;position:fixed;right:16px;top:96px;width:300px;z-index:60;background:#fff;border:1px solid #d0d0d5;border-radius:10px;box-shadow:0 6px 22px rgba(0,0,0,0.14);padding:10px 12px">
+        <div id="role-preview" style="display:none;position:fixed;right:16px;top:96px;width:300px;z-index:60;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow-pop);padding:10px 12px">
           <div id="role-preview-body"></div>
         </div>
         <script>
@@ -1860,9 +1900,9 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             inverse_hedge: { tr: 15, heat: 40, atr: 1.5, pbMax: -3, pbMin: -6, stop: -4, tp: 7, tstop: 5, katr: 1.5 }
           };
           var COLOR = {
-            core_trend: '#1a56db', leveraged_trend: '#d97706', sector_trend: '#0e9f9f',
-            low_volatility: '#7e3af2', inverse_hedge: '#c22d2d', cash_parking: '#5b8c5a',
-            momentum: '#b25000'
+            core_trend: 'var(--accent)', leveraged_trend: 'var(--warn)', sector_trend: '#14b8a6',
+            low_volatility: '#8b5cf6', inverse_hedge: 'var(--down)', cash_parking: 'var(--up)',
+            momentum: 'var(--warn)'
           };
           var LABEL = {
             leveraged_trend: 'レバETF・トレンド', core_trend: '非レバ・トレンド',
@@ -1917,11 +1957,11 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             r.ov = ov;
             return r;
           }
-          function omark(b) { return b ? ' <span style="color:#d97706;font-weight:700" title="この銘柄の override">*</span>' : ''; }
+          function omark(b) { return b ? ' <span style="color:var(--warn);font-weight:700" title="この銘柄の override">*</span>' : ''; }
           // p is the effective (override-merged) parameter set; big=true adds axis labels.
           function ladder(role, p, w, h, big) {
             if (role === 'cash_parking') {
-              return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="#5b8c5a" text-anchor="middle">entry なし</text></svg>';
+              return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="var(--up)" text-anchor="middle">entry なし</text></svg>';
             }
             var color = COLOR[role], ov = p.ov || {};
             var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
@@ -1932,26 +1972,26 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             if (hi - lo < 6) { hi += 1; lo -= 1; }
             function y(pct) { return 12 + (hi - pct) * ((h - 24) / (hi - lo)); }
             var X0 = 14, X1 = big ? w - 70 : w - 12, a = [];
-            a.push('<line x1="' + X0 + '" y1="' + y(0).toFixed(1) + '" x2="' + X1 + '" y2="' + y(0).toFixed(1) + '" stroke="#c4c8cd" stroke-width="1"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(0).toFixed(1) + '" x2="' + X1 + '" y2="' + y(0).toFixed(1) + '" stroke="var(--border-strong)" stroke-width="1"/>');
             var zy = y(p.pbMax), zh = y(p.pbMin) - y(p.pbMax);
-            a.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="#f59e0b33" stroke="#f59e0b" stroke-width="0.8"/>');
+            a.push('<rect x="' + X0 + '" y="' + zy.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + zh.toFixed(1) + '" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="0.8"/>');
             a.push('<circle cx="' + ((X0 + X1) / 2).toFixed(1) + '" cy="' + y(em).toFixed(1) + '" r="' + (big ? 3.2 : 2.6) + '" fill="' + color + '"/>');
-            a.push('<line x1="' + X0 + '" y1="' + y(st).toFixed(1) + '" x2="' + X1 + '" y2="' + y(st).toFixed(1) + '" stroke="#c22d2d" stroke-width="1" stroke-dasharray="3,2"/>');
-            a.push('<line x1="' + X0 + '" y1="' + y(tp).toFixed(1) + '" x2="' + X1 + '" y2="' + y(tp).toFixed(1) + '" stroke="#0e9f6e" stroke-width="1" stroke-dasharray="3,2"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(st).toFixed(1) + '" x2="' + X1 + '" y2="' + y(st).toFixed(1) + '" stroke="var(--down)" stroke-width="1" stroke-dasharray="3,2"/>');
+            a.push('<line x1="' + X0 + '" y1="' + y(tp).toFixed(1) + '" x2="' + X1 + '" y2="' + y(tp).toFixed(1) + '" stroke="var(--up)" stroke-width="1" stroke-dasharray="3,2"/>');
             if (big) {
               var lx = X1 + 4;
               var mz = (ov.pbMax || ov.pbMin) ? ' *' : '', ms = ov.stop ? ' *' : '', mt = ov.tp ? ' *' : '';
-              a.push('<text x="' + lx + '" y="' + y(0).toFixed(1) + '" font-size="8" fill="#80868b" dominant-baseline="middle">高値 0%</text>');
-              a.push('<text x="' + lx + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="#b25000" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%' + mz + '</text>');
-              a.push('<text x="' + lx + '" y="' + y(st).toFixed(1) + '" font-size="8" fill="#c22d2d" dominant-baseline="middle">stop ' + fmtPct(p.stop) + ms + '</text>');
-              a.push('<text x="' + lx + '" y="' + y(tp).toFixed(1) + '" font-size="8" fill="#0e9f6e" dominant-baseline="middle">TP ' + fmtPct(p.tp) + mt + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(0).toFixed(1) + '" font-size="8" fill="var(--text-3)" dominant-baseline="middle">高値 0%</text>');
+              a.push('<text x="' + lx + '" y="' + (zy + zh / 2).toFixed(1) + '" font-size="8" fill="var(--warn)" dominant-baseline="middle">押し目 ' + p.pbMax + '〜' + p.pbMin + '%' + mz + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(st).toFixed(1) + '" font-size="8" fill="var(--down)" dominant-baseline="middle">stop ' + fmtPct(p.stop) + ms + '</text>');
+              a.push('<text x="' + lx + '" y="' + y(tp).toFixed(1) + '" font-size="8" fill="var(--up)" dominant-baseline="middle">TP ' + fmtPct(p.tp) + mt + '</text>');
             } else {
-              a.push('<text x="' + X0 + '" y="' + (y(0) - 2).toFixed(1) + '" font-size="7" fill="#9aa0a6">高値0%</text>');
+              a.push('<text x="' + X0 + '" y="' + (y(0) - 2).toFixed(1) + '" font-size="7" fill="var(--text-3)">高値0%</text>');
             }
             return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '" style="overflow:visible">' + a.join('') + '</svg>';
           }
           function gateHtml(role, p) {
-            if (role === 'cash_parking') return '<div style="color:#5b8c5a;font-size:11px">戦略 entry なし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定なし)。</div>';
+            if (role === 'cash_parking') return '<div style="color:var(--up);font-size:11px">戦略 entry なし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定なし)。</div>';
             var ov = p.ov || {}, g = [];
             g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">入場ゲート(閾値)</div>');
             g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + omark(ov.tr) + '</div>');
@@ -1965,16 +2005,16 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             return '<div style="font-size:11px;line-height:1.55">' + g.join('') + '</div>';
           }
           function cardHtml(role) {
-            var color = COLOR[role] || '#5f6368';
+            var color = COLOR[role] || 'var(--text-3)';
             var d = DESC[role] || {};
             // No chart on the card itself — the hover preview on the right shows one.
             var sub = role === 'cash_parking'
               ? (d.character || '')
               : (d.character || '') + ' ・ 保有' + P[role].tstop + '日';
             return '<div class="role-tpl-card" data-role="' + role + '" ' +
-              'style="cursor:pointer;border:1px solid #e3e3e8;border-radius:8px;padding:8px 10px;background:#fff;min-width:150px">' +
+              'style="cursor:pointer;border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--surface);min-width:150px">' +
               '<div style="font-size:12px;font-weight:600"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:5px"></span>' + LABEL[role] + '</div>' +
-              '<div style="font-size:10px;color:#86868b;margin-top:2px">' + sub + '</div>' +
+              '<div class="muted" style="font-size:10px;margin-top:2px">' + sub + '</div>' +
               '</div>';
           }
           var selected = ${JSON.stringify(roleValue)};
@@ -1983,8 +2023,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           function descHtml(role) {
             var d = DESC[role];
             if (!d) return '';
-            function row(k, v) { return '<div style="display:flex;gap:6px"><span style="color:#86868b;min-width:62px">' + k + '</span><span>' + v + '</span></div>'; }
-            return '<div style="font-size:11px;line-height:1.5;background:#f6f6f9;border-radius:6px;padding:5px 7px;margin-bottom:6px">' +
+            function row(k, v) { return '<div style="display:flex;gap:6px"><span style="color:var(--text-3);min-width:62px">' + k + '</span><span>' + v + '</span></div>'; }
+            return '<div style="font-size:11px;line-height:1.5;background:var(--surface-2);border-radius:6px;padding:5px 7px;margin-bottom:6px">' +
               row('入場アーキ', d.arch) + row('horizon', d.horizon) + row('想定銘柄', d.character) + '</div>';
           }
           function showPreview(role) {
@@ -1997,12 +2037,12 @@ export function symbolFormBody(args: SymbolFormArgs): string {
                 descHtml('momentum') +
                 '<div style="font-size:11px;line-height:1.55">新高値ブレイクの継続を取る別戦略 (BreakoutMomentumStrategy)。' +
                 'entry: トレンド+ 新高値ブレイク+ SMA50上+ 過熱でない。exit: stop -5% / TP +10% / 保有~7日。<br>' +
-                '<span style="color:#c22;font-weight:600">⚠ backtest 未検証。発注可テーマETFでは成績不良の例あり (TAN -60%DD)。1x のみ・少額で。</span></div>';
+                '<span style="color:var(--down);font-weight:600">⚠ backtest 未検証。発注可テーマETFでは成績不良の例あり (TAN -60%DD)。1x のみ・少額で。</span></div>';
               pv.style.display = '';
               return;
             }
             if (!role || (!P[role] && role !== 'cash_parking')) { pv.style.display = 'none'; return; }
-            var color = COLOR[role] || '#5f6368';
+            var color = COLOR[role] || 'var(--text-3)';
             if (role === 'cash_parking') {
               body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">待機資金</div>' + descHtml(role) + ladder(role, {}, 280, 120, true) + '<div style="margin-top:6px">' + gateHtml(role, {}) + '</div>';
               pv.style.display = '';
@@ -2015,15 +2055,15 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               descHtml(role) +
               ladder(role, p, 280, 150, true) +
               '<div style="margin-top:6px">' + gateHtml(role, p) + '</div>' +
-              '<div style="font-size:10px;color:#aaa;margin-top:6px">直近高値=0% 基準・実効値の模式<br>' + note + '</div>';
+              '<div class="muted" style="font-size:10px;margin-top:6px">直近高値=0% 基準・実効値の模式<br>' + note + '</div>';
             pv.style.display = '';
           }
           function highlight(role) {
             var cards = document.querySelectorAll('.role-tpl-card');
             for (var i = 0; i < cards.length; i++) {
               var r = cards[i].getAttribute('data-role'), on = r === role;
-              cards[i].style.border = on ? ('2px solid ' + (COLOR[r] || '#06c')) : '1px solid #e3e3e8';
-              cards[i].style.background = on ? '#fcfbf7' : '#fff';
+              cards[i].style.border = on ? ('2px solid ' + (COLOR[r] || 'var(--accent)')) : '1px solid var(--border)';
+              cards[i].style.background = on ? 'var(--accent-soft)' : 'var(--surface)';
               cards[i].style.boxShadow = on ? '0 1px 4px rgba(0,0,0,0.08)' : 'none';
             }
           }
@@ -2041,9 +2081,9 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           function momentumCardHtml() {
             var d = DESC.momentum || {};
             return '<div class="role-tpl-card" data-role="momentum" ' +
-              'style="cursor:pointer;border:1px solid #f0c98a;border-radius:8px;padding:8px 10px;background:#fffaf2;min-width:150px">' +
+              'style="cursor:pointer;border:1px solid var(--warn);border-radius:8px;padding:8px 10px;background:var(--warn-soft);min-width:150px">' +
               '<div style="font-size:12px;font-weight:600;color:' + COLOR.momentum + '">⚡ モメンタム</div>' +
-              '<div style="font-size:10px;color:#9a5b00;margin-top:2px">' + (d.character || '') + ' ・ 保有~7日</div>' +
+              '<div style="font-size:10px;color:var(--warn);margin-top:2px">' + (d.character || '') + ' ・ 保有~7日</div>' +
               '</div>';
           }
           function init() {
@@ -2070,8 +2110,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               var tabs = document.querySelectorAll('.role-arch-tab');
               for (var t = 0; t < tabs.length; t++) {
                 var a = tabs[t].getAttribute('data-arch'), on = a === arch;
-                tabs[t].style.borderBottom = on ? '2px solid #06c' : '2px solid transparent';
-                tabs[t].style.color = on ? '#06c' : '#5f6368';
+                tabs[t].style.borderBottom = on ? '2px solid var(--accent)' : '2px solid transparent';
+                tabs[t].style.color = on ? 'var(--accent-text)' : 'var(--text-2)';
                 tabs[t].style.fontWeight = on ? '600' : 'normal';
               }
               var panels = document.querySelectorAll('.role-arch-panel');
@@ -2210,14 +2250,14 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       hasAllocValues,
     )}
 
-    <div style="border:1px solid #e3e3e8;border-radius:10px;background:#fff;padding:12px 14px;${fieldGrid}">
+    <div style="border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:12px 14px;${fieldGrid}">
       <label>メモ</label>
       <textarea name="notes" maxlength="256" rows="2" placeholder="自由記述 (例: 一時停止理由)" style="padding:6px;font-family:inherit">${esc(notesValue)}</textarea>
     </div>
 
     <div style="display:flex;gap:8px">
-      <button type="submit" id="symbol-form-save" style="padding:8px 24px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">保存</button>
-      <a href="/dashboard/symbols" style="padding:8px 24px;text-decoration:none;border:1px solid #d0d0d5;border-radius:6px;font-size:13px">キャンセル</a>
+      <button type="submit" id="symbol-form-save" class="btn primary" style="padding:8px 24px;font-size:13px">保存</button>
+      <a href="/dashboard/symbols" class="btn" style="padding:8px 24px;font-size:13px">キャンセル</a>
     </div>
   </form>
   <script>
@@ -2251,7 +2291,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             list.innerHTML = '';
             if (matches.length === 0) {
               var hint = document.createElement('li');
-              hint.style.cssText = 'padding:6px 10px;color:#86868b;font-size:11px;font-style:italic;cursor:default';
+              hint.style.cssText = 'padding:6px 10px;color:var(--text-3);font-size:11px;font-style:italic;cursor:default';
               hint.textContent = '"' + query + '" に一致する銘柄無し (Yahoo Finance)。手動入力で続行可。';
               list.appendChild(hint);
               list.style.display = 'block';
@@ -2259,17 +2299,17 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             }
             matches.forEach(function (m) {
               var li = document.createElement('li');
-              li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid #eee';
+              li.style.cssText = 'padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border)';
               var sym = document.createElement('strong');
               sym.textContent = m.symbol;
               var nameSpan = document.createElement('span');
-              nameSpan.style.cssText = 'color:#86868b;margin-left:8px;font-size:12px';
+              nameSpan.style.cssText = 'color:var(--text-3);margin-left:8px;font-size:12px';
               nameSpan.textContent = (m.name || '?') + ' (' + m.market + '/' + m.currency + ')';
               li.appendChild(sym);
               li.appendChild(nameSpan);
               li.addEventListener('mousedown', function () { pick(m); });
-              li.addEventListener('mouseover', function () { li.style.background = '#eef'; });
-              li.addEventListener('mouseout', function () { li.style.background = '#fff'; });
+              li.addEventListener('mouseover', function () { li.style.background = 'var(--surface-2)'; });
+              li.addEventListener('mouseout', function () { li.style.background = 'var(--surface)'; });
               list.appendChild(li);
             });
             list.style.display = 'block';
@@ -2318,7 +2358,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       if (!/^[A-Z0-9]{1,10}$/.test(sym)) { statusEl.textContent = ''; if (allowElEarly) allowElEarly.textContent = ''; return; }
       var mySeq = ++window._tradabilitySeq;
       statusEl.textContent = '⏳ 取扱確認中...';
-      statusEl.style.color = '#86868b';
+      statusEl.style.color = 'var(--text-3)';
       var market = marketSel && marketSel.value === 'JP' ? 'JP' : 'US';
       fetch('/admin/symbol-config/tradability-check?symbol=' + encodeURIComponent(sym) + '&market=' + market, { credentials: 'same-origin' })
         .then(function (r) { return r.json(); })
@@ -2339,13 +2379,13 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           if (allowEl) {
             if (res.allowlist === 'tradable') {
               allowEl.textContent = '✓ OpenAPI 取扱リスト在籍 (発注可能)';
-              allowEl.style.color = '#0e9f6e';
+              allowEl.style.color = 'var(--up)';
             } else if (res.allowlist === 'disappeared') {
               allowEl.textContent = '⚠ OpenAPI 取扱リストから消失 (取扱停止の可能性)';
-              allowEl.style.color = '#9a5b00';
+              allowEl.style.color = 'var(--warn)';
             } else {
               allowEl.textContent = '⚠ OpenAPI 取扱リスト未登録 — アプリで売買できても OpenAPI 経由では発注で弾かれる可能性';
-              allowEl.style.color = '#6e6e73';
+              allowEl.style.color = 'var(--text-2)';
             }
           }
           if (res.verdict === 'denied') {
@@ -2355,7 +2395,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               : res.reason === 'instrument_status' ? '取引停止中の銘柄 (status CO/NT)'
               : 'Webull JP 取扱なし';
             statusEl.textContent = '❌ ' + why + ' — 登録できません';
-            statusEl.style.color = '#c22';
+            statusEl.style.color = 'var(--down)';
             window._tradabilityDenied = true;
             if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
           } else if (res.reason === 'quote_ok') {
@@ -2365,16 +2405,16 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               ? '△ status OC (取引可) + 見積もり可 — 発注 deny のみ未保証'
               : '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
             statusEl.textContent = head + instSuffix;
-            statusEl.style.color = '#b25000';
+            statusEl.style.color = 'var(--warn)';
           } else {
             statusEl.textContent = '❓ 確認不可 (登録は可能)';
-            statusEl.style.color = '#86868b';
+            statusEl.style.color = 'var(--text-3)';
           }
         })
         .catch(function () {
           if (mySeq !== window._tradabilitySeq) return;
           statusEl.textContent = '❓ 取扱を確認できませんでした (登録は可能)';
-          statusEl.style.color = '#86868b';
+          statusEl.style.color = 'var(--text-3)';
         });
     };
     (function () {

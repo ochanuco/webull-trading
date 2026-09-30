@@ -88,7 +88,7 @@ describe('recordPortfolioEquitySnapshot', () => {
 })
 
 describe('loadPortfolioEquitySnapshots', () => {
-  it('applies from/to range together and orders ASC', async () => {
+  it('applies from/to range together', async () => {
     const { db, query } = fakeSelectChain([])
     vi.mocked(createDb).mockReturnValue(db as unknown as ReturnType<typeof createDb>)
 
@@ -142,5 +142,22 @@ describe('loadPortfolioEquitySnapshots', () => {
 
     const result = await loadPortfolioEquitySnapshots(fakeD1, {})
     expect(result).toBe(rows)
+  })
+
+  // Regression: ORDER BY ... ASC + LIMIT N used to select the OLDEST N rows,
+  // so `?range=30d` on a table with a year of history showed day 1-30, not
+  // the most recent 30 days. The query now orders DESC (latest N) and the
+  // repo reverses the result back to ASC for the chart.
+  it('selects the latest N rows (DESC + LIMIT) and reverses them back to ASC', async () => {
+    const latestFirst = [
+      { id: 3, snapshotAt: '2026-05-16T00:00:00.000Z', dailyStartEquityUsd: 10200 },
+      { id: 2, snapshotAt: '2026-05-15T00:00:00.000Z', dailyStartEquityUsd: 10100 },
+      { id: 1, snapshotAt: '2026-05-14T00:00:00.000Z', dailyStartEquityUsd: 10000 },
+    ]
+    const { db } = fakeSelectChain(latestFirst)
+    vi.mocked(createDb).mockReturnValue(db as unknown as ReturnType<typeof createDb>)
+
+    const result = await loadPortfolioEquitySnapshots(fakeD1, { limit: 3 })
+    expect(result.map((r) => r.id)).toEqual([1, 2, 3])
   })
 })

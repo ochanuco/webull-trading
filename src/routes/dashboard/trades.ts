@@ -3,15 +3,19 @@ import { type TradeJournalRow, tradeJournal } from '../../infrastructure/db/sche
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { and, desc, eq, inArray, isNotNull, lt, or, type SQL } from 'drizzle-orm'
 import { formatRealizedPnl } from './cron'
-import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJst, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import { LOG_COPY_ALL_BTN, LOG_COPY_BTN_STYLE, SYMBOL_LINK_STYLE, clampLimit, displaySymbol, esc, exportMeta, fmtJstCompactCell, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
-const TRADE_EVENT_LABELS: Record<string, { ja: string; color: string }> = {
-  decision: { ja: '判定', color: '#86868b' },
-  intent: { ja: '注文作成', color: '#46608a' },
-  pre_submit: { ja: '送信記録', color: '#46608a' },
-  post_submit: { ja: '送信応答', color: '#46608a' },
-  fill: { ja: '約定', color: '#057a55' },
-  exit: { ja: '手仕舞い', color: '#b25000' },
+// `cls` names an event-type color utility declared in this page's own <style>
+// block (below) — decision/fill/exit reuse the foundation's muted/ok/warn
+// text tokens, order-lifecycle events (intent/pre_submit/post_submit) get a
+// page-local `.evt-order` since no foundation token means "in-flight order".
+const TRADE_EVENT_LABELS: Record<string, { ja: string; cls: string }> = {
+  decision: { ja: '判定', cls: 'muted' },
+  intent: { ja: '注文作成', cls: 'evt-order' },
+  pre_submit: { ja: '送信記録', cls: 'evt-order' },
+  post_submit: { ja: '送信応答', cls: 'evt-order' },
+  fill: { ja: '約定', cls: 'ok' },
+  exit: { ja: '手仕舞い', cls: 'warn' },
 }
 
 export const BROKER_ERROR_LABELS: Record<string, string> = {
@@ -95,6 +99,17 @@ export function buildTradesPacket(rows: TradeJournalRow[], q: TradesQuery) {
   }
 }
 
+// Page-local utilities not worth promoting to the shared STYLE: `.evt-order`
+// has no foundation token (no existing color means "order in flight"), and
+// `.small` bumps the log tables' secondary link/meta text from the old 11px
+// up to the 12px operator-mandated readability floor.
+const TRADES_PAGE_STYLE = `<style>
+  .evt-order{color:var(--info)}
+  .small{font-size:12px}
+  ${LOG_COPY_BTN_STYLE}
+  ${SYMBOL_LINK_STYLE}
+</style>`
+
 export function tradesBody(
   rows: TradeJournalRow[],
   limit: number,
@@ -108,7 +123,7 @@ export function tradesBody(
     (filters.symbol ? `&symbol=${encodeURIComponent(filters.symbol)}` : '') +
     (filters.clientOrderId ? `&clientOrderId=${encodeURIComponent(filters.clientOrderId)}` : '')
   const viewPill = (label: string, v: string, active: boolean): string =>
-    `<a href="/dashboard/trades?view=${v}&limit=${limit}${filterQs}" class="chip${active ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
+    `<a href="/dashboard/trades?view=${v}&limit=${limit}${filterQs}"${active ? ' class="active"' : ''}>${esc(label)}</a>`
   const filterBanner = filters.clientOrderId
     ? `<p class="filter-banner">注文 <code>${esc(filters.clientOrderId)}</code> の履歴のみ表示。<a href="/dashboard/cron?clientOrderId=${encodeURIComponent(filters.clientOrderId)}">判定を見る</a> / <a href="/dashboard/trades">全件へ戻る</a></p>`
     : filters.symbol
@@ -116,15 +131,17 @@ export function tradesBody(
       : ''
   // Carries the current filter into the JSON link so it opens the same subset as the screen.
   const jsonHref = `/dashboard/trades/json?view=${view}&limit=${limit}${filterQs}${before !== undefined ? `&before=${before}` : ''}`
-  const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip" style="margin-left:4px">JSON を開く</a>`
-  const pills = `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}<span class="muted" style="font-size:12px;margin:0 8px">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}</nav>`
+  const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip">JSON を開く</a>`
+  const cardActions = `<div class="seg">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}</div>
+    <span class="muted small">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}`
+  const cardHead = `<div class="card-head"><h2 class="card-title">約定履歴</h2><div class="card-actions">${cardActions}</div></div>`
   if (rows.length === 0) {
-    return `${filterBanner}${pills}<p class="muted">該当するレコードがありません。</p>`
+    return `<div class="card">${cardHead}${filterBanner}<p class="empty">該当するレコードがありません。</p></div>`
   }
   const tbody = rows
     .map((r) => {
-      const ev = TRADE_EVENT_LABELS[r.tradeEventType] ?? { ja: r.tradeEventType, color: '#86868b' }
-      const eventCell = `<span title="${esc(r.tradeEventType)}" style="color:${ev.color};font-weight:600">● ${esc(ev.ja)}</span>`
+      const ev = TRADE_EVENT_LABELS[r.tradeEventType] ?? { ja: r.tradeEventType, cls: 'muted' }
+      const eventCell = `<span title="${esc(r.tradeEventType)}" class="${ev.cls}" style="font-weight:600">● ${esc(ev.ja)}</span>`
       const symbolText = r.symbol ? displaySymbol(r.symbol, universe) : null
       const inactive = r.symbol ? isSymbolInactive(r.symbol, universe) : false
       // Ticker only in the cell; the full display name (e.g. "VUG-Vanguard Growth Index Fund
@@ -136,16 +153,16 @@ export function tradesBody(
           : (symbolText ?? r.symbol)
         : ''
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="${esc(symbolTitle)}" style="text-decoration:none"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(r.symbol)}</strong></a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の約定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="${esc(symbolTitle)}" class="sym-link${inactive ? ' symbol-disabled' : ''}">${esc(r.symbol)}</a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted small" title="この銘柄の約定だけに絞り込み">▼</a>`
         : '<span class="muted">—</span>'
       const decisionLink = r.clientOrderId
-        ? ` <a href="/dashboard/cron?clientOrderId=${encodeURIComponent(r.clientOrderId)}" class="muted" title="この注文の判定 (戦略判定ログ) を見る" style="font-size:11px">判定→</a>`
+        ? ` <a href="/dashboard/cron?clientOrderId=${encodeURIComponent(r.clientOrderId)}" class="muted small" title="この注文の判定 (戦略判定ログ) を見る">判定→</a>`
         : ''
       const sideCell =
         r.side === 'BUY'
-          ? `<span class="ok" style="font-weight:700">買</span> <span class="muted" style="font-size:11px">BUY</span>`
+          ? `<span class="pill buy">買</span> <span class="muted small">BUY</span>`
           : r.side === 'SELL'
-            ? `<span class="err" style="font-weight:700">売</span> <span class="muted" style="font-size:11px">SELL</span>`
+            ? `<span class="pill sell">売</span> <span class="muted small">SELL</span>`
             : '<span class="muted">—</span>'
       const qtyCell =
         r.filledQty !== null && r.quantity !== null && r.filledQty !== r.quantity
@@ -163,7 +180,7 @@ export function tradesBody(
             : '—'
       const pnlCell =
         r.realizedPnl !== null
-          ? `${formatRealizedPnl(r.realizedPnl)}${r.exitReason ? ` <span class="muted" style="font-size:11px">${esc(r.exitReason)}</span>` : ''}`
+          ? `${formatRealizedPnl(r.realizedPnl)}${r.exitReason ? ` <span class="muted small">${esc(r.exitReason)}</span>` : ''}`
           : '<span class="muted">—</span>'
       // Raw enum values are kept in title/details (not fully translated) so they stay
       // grep-able against the broker API's own error/status strings.
@@ -173,7 +190,7 @@ export function tradesBody(
         const code = extractBrokerErrorCode(errorText)
         const short = code ? (BROKER_ERROR_LABELS[code] ?? code) : (r.errorClass ?? 'エラー')
         statusCell = `<span class="pill err">エラー: ${esc(short)}</span>
-          <details style="margin-top:2px"><summary class="muted" style="font-size:11px;cursor:pointer">全文</summary><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
+          <details style="margin-top:2px"><summary class="muted small">全文</summary><code class="small" style="white-space:pre-wrap;word-break:break-all">${esc(errorText)}</code></details>`
       } else if (r.brokerStatus === 'FILLED') {
         statusCell = `<span class="pill ok">約定</span>`
       } else if (r.brokerStatus) {
@@ -189,25 +206,25 @@ export function tradesBody(
             : '<span class="muted">—</span>'
       return `<tr>
         <td>${logCopyRowBtn(r.id)}</td>
-        <td class="muted" style="white-space:nowrap">${esc(fmtJst(r.timestamp))}</td>
-        <td style="white-space:nowrap">${eventCell}${decisionLink}</td>
+        <td class="muted">${fmtJstCompactCell(r.timestamp)}</td>
+        <td>${eventCell}${decisionLink}</td>
         <td>${symbolCell}</td>
-        <td style="white-space:nowrap">${sideCell}</td>
+        <td>${sideCell}</td>
         <td class="num">${qtyCell}</td>
         <td class="num">${priceCell}</td>
         <td class="num">${pnlCell}</td>
-        <td class="grow">${statusCell}</td>
         <td>${modeCell}</td>
+        <td class="grow">${statusCell}</td>
       </tr>`
     })
     .join('')
-  return `${filterBanner}${pills}
+  return `${TRADES_PAGE_STYLE}<div class="card">${cardHead}${filterBanner}
   <div class="tablewrap">
   <table class="fit">
     <thead><tr>
       <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
       <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th>
-      <th class="grow">状態</th><th>モード</th>
+      <th>モード</th><th class="grow">状態</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
@@ -226,5 +243,5 @@ export function tradesBody(
     },
     rows,
   })}
-  ${renderLogCopyScript('__tradesCopy')}`
+  ${renderLogCopyScript('__tradesCopy')}</div>`
 }

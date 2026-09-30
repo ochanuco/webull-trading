@@ -121,3 +121,10 @@ DASHBOARD_BASE_URL=
 # (開場 90 分前〜開場) に Yahoo 時間外 1 分足を extended_hours_observation に
 # 蓄積する。未設定 = 無効。取引経路からは参照されない参考観測専用の producer。
 # EXTENDED_HOURS_OBSERVATION_ENABLED=true
+
+# --- dashboard telemetry (PostHog, optional) ---
+# POSTHOG_KEY: PostHog project API key。未設定なら /dashboard/assets/telemetry.js
+# は何も初期化しない空の JS を返し、telemetry は完全に無効。
+# POSTHOG_HOST: 省略時 https://us.i.posthog.com。https 以外は既定に fallback。
+# POSTHOG_KEY=
+# POSTHOG_HOST=

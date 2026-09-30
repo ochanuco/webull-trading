@@ -38,11 +38,11 @@ function renderPairRegimeLine(
   if (!view) return ''
   const d = view.decision
   const color =
-    d.zone === 'bull' ? '#057a55' : d.zone === 'bear' ? '#b25000' : d.zone === 'neutral' ? '#46608a' : '#c22'
+    d.zone === 'bull' ? 'var(--up)' : d.zone === 'bear' ? 'var(--warn)' : d.zone === 'neutral' ? 'var(--info)' : 'var(--down)'
   const sideJa = view.side === 'bull' ? 'ブル側' : 'ベア側'
   const allowed = (view.side === 'bull' && d.zone === 'bull') || (view.side === 'bear' && d.zone === 'bear')
   const verdict = allowed ? 'entry 可' : 'entry 不可'
-  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+  return `<div style="margin-top:8px;font-size:13px;color:var(--text);display:flex;gap:12px;flex-wrap:wrap;align-items:center">
     ペアレジーム: <strong style="color:${color}">${esc(PAIR_REGIME_ZONE_LABELS[d.zone])}</strong>
     <span class="muted" style="font-size:12px">この銘柄は${sideJa} → ${verdict}${view.mode === 'observe' ? ' (observe: gate は未適用)' : ''}</span>
     <span class="muted" style="font-size:12px">${d.score !== null ? `score ${(d.score * 100).toFixed(2)}%` : ''} proxy ${esc(d.proxySymbol)}${d.asOfDate ? ` / ${esc(d.asOfDate)} 時点` : ''}</span>
@@ -94,30 +94,30 @@ export function renderConclusionValue(
 ): { value: string; color: string } {
   if (position !== null) {
     const current = latestCronPrice ?? position.avgPrice
-    if (!(current > 0)) return { value: '算出不可 (現在値なし)', color: '#86868b' }
+    if (!(current > 0)) return { value: '算出不可 (現在値なし)', color: 'var(--text-3)' }
     const stopPrice = position.avgPrice * (1 + strategyParams.stopPct)
     const tpPrice = position.avgPrice * (1 + strategyParams.takeProfitPct)
     const toStop = (stopPrice - current) / current
     const toTp = (tpPrice - current) / current
     return {
       value: `stop まで ${fmtPctSigned(toStop)} ／ TP まで ${fmtPctSigned(toTp)}`,
-      color: '#3a3a3c',
+      color: 'var(--text)',
     }
   }
   const cur = buyability?.current ?? null
-  if (!cur) return { value: '判定データなし', color: '#86868b' }
-  if (cur.buyable) return { value: '入場条件 充足（BUY 候補）', color: '#057a55' }
+  if (!cur) return { value: '判定データなし', color: 'var(--text-3)' }
+  if (cur.buyable) return { value: '入場条件 充足（BUY 候補）', color: 'var(--up)' }
   if (cur.entryPrice !== null && cur.priceMove !== null) {
     const bottleneck = cur.bindingGate ? `（${esc(cur.bindingGate.labelJa)}）` : ''
     return {
       value: `入場まで あと 価格 ${fmtPctSigned(cur.priceMove)}${bottleneck}`,
-      color: '#b25000',
+      color: 'var(--warn)',
     }
   }
   const g = cur.bindingGate
   return {
     value: g ? `価格でも入場不可 — ${esc(g.labelJa)}` : '評価不可',
-    color: '#c22',
+    color: 'var(--down)',
   }
 }
 
@@ -164,7 +164,9 @@ export function renderLatestDecisionValue(rows: DecisionRow[] | undefined): stri
 /** `p` must be the resolved effective value (global → role preset → symbol override, via `buildSymbolRules`), not a raw symbol_config read — displaying raw config here previously drifted from what the strategy actually used. */
 export function renderEffectiveRuleChips(p: StrategyParamsSnapshot): string {
   const pct = (n: number): string => (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
-  return `<span class="chip">stop ${esc(pct(p.stopPct))}</span> <span class="chip">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip">time-stop ${p.timeStopDays}営業日</span>`
+  // white-space:nowrap: the 4-column judgment card's narrower columns
+  // otherwise let the browser break "time-stop" at its hyphen mid-word.
+  return `<span class="chip" style="white-space:nowrap">stop ${esc(pct(p.stopPct))}</span> <span class="chip" style="white-space:nowrap">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip" style="white-space:nowrap">time-stop ${p.timeStopDays}営業日</span>`
 }
 
 /** Returns '' when there's no chart data — the noData branch is handled by the caller instead. */
@@ -178,22 +180,28 @@ export function renderJudgmentSummaryGrid(args: ChartsBodySymbol): string {
     args.strategyParams,
     chart.latestCronPrice,
   )
-  return `<div class="judgment-grid">
-    <div class="judgment-card">
-      <div class="jc-label">結論</div>
-      <div class="jc-value" style="color:${conclusion.color}">${conclusion.value}</div>
-    </div>
-    <div class="judgment-card">
-      <div class="jc-label">保有状態</div>
-      <div class="jc-value">${renderPositionSummaryValue(chart.position, args.strategyParams, chart.latestCronPrice, ccy)}</div>
-    </div>
-    <div class="judgment-card">
-      <div class="jc-label">直近判定</div>
-      <div class="jc-value">${renderLatestDecisionValue(args.decisionRows)}</div>
-    </div>
-    <div class="judgment-card">
-      <div class="jc-label">有効ルール</div>
-      <div class="jc-value">${renderEffectiveRuleChips(args.strategyParams)}</div>
+  // One card, 4 columns divided by a border (spec: not 4 separate cards) —
+  // .judgment-row/.judgment-col switch to a bordered 2x2 under 900px instead
+  // of vertical dividers, since 4-across dividers don't read once wrapped.
+  return `<div class="card">
+    <div class="card-head"><span class="card-title">判断</span></div>
+    <div class="judgment-row">
+      <div class="judgment-col">
+        <div class="jc-label">結論</div>
+        <div class="jc-value" style="color:${conclusion.color}">${conclusion.value}</div>
+      </div>
+      <div class="judgment-col">
+        <div class="jc-label">保有状態</div>
+        <div class="jc-value">${renderPositionSummaryValue(chart.position, args.strategyParams, chart.latestCronPrice, ccy)}</div>
+      </div>
+      <div class="judgment-col">
+        <div class="jc-label">直近判定</div>
+        <div class="jc-value">${renderLatestDecisionValue(args.decisionRows)}</div>
+      </div>
+      <div class="judgment-col">
+        <div class="jc-label">有効ルール</div>
+        <div class="jc-value">${renderEffectiveRuleChips(args.strategyParams)}</div>
+      </div>
     </div>
   </div>`
 }
@@ -243,14 +251,16 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
       : null
   const view: SymbolTabView = args.view === 'detail' ? 'detail' : 'chart'
   const subnav = args.focusSymbol ? renderSymbolViewSubnav(args.focusSymbol, view) : ''
-  const focusHeader = renderFocusSymbolHeader(args)
 
   const chartViewContent = `<div class="symbol-chart-pin">
-  ${renderPriceHeader(args.symbolChart, args.universe)}
-  <div id="symbol-chart" style="width:100%;height:380px;background:#fff;border:1px solid #d0d0d5;border-radius:6px;margin-top:8px"></div>
-  ${renderZoomPresetButtons(args.symbolChart)}
+  ${renderSymbolChartHeaderRow(args)}
+  <div class="card-head" style="margin-top:12px">
+    <span class="card-title">チャート</span>
+    ${renderDecisionExplanationTip(args.symbolChart)}
   </div>
-  ${renderSymbolPolicyLine(args.focusSymbol, args.symbolPolicy ?? null)}
+  <div id="symbol-chart" style="width:100%;height:480px"></div>
+  ${renderDecisionColorKey(args.symbolChart)}
+  </div>
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderJudgmentSummaryGrid(args)}
   <details style="margin-top:10px">
@@ -260,20 +270,30 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
       currency: args.focusSymbol ? currencyOfSymbol(args.focusSymbol) : null,
     })}
   </details>
-  ${renderDecisionPlotCaption(args.symbolChart)}
   <div id="decision-trace-panel" class="reason-panel" style="margin-top:10px;display:none"></div>`
 
   const detailViewContent = `
+  ${renderFocusSymbolHeader(args)}
   ${renderSymbolDecisionHistory(args)}
   ${renderStrategyParamsPanel(args.strategyParams, args.strategyParamsGlobal)}`
 
-  const content = `${subnav}${focusHeader}${view === 'detail' ? detailViewContent : chartViewContent}`
+  // The chart view's own header row (ticker/name/role/price) already answers
+  // "which symbol" — repeating `renderFocusSymbolHeader`'s "銘柄: X" line
+  // above it was pure duplication. The detail/history view has no such
+  // header, so it keeps using it.
+  const content = `${subnav}${view === 'detail' ? detailViewContent : chartViewContent}`
   return `${content}
   ${chartDataScript({
     symbolChart: symbolChartPayload,
     projection,
     prevClose,
     prevCloseLabel,
+    // Lets the client label stop/TP/avg lines with the right currency mark
+    // (operator constraint: prices always carry $/¥) without a second load —
+    // the universe's currency map is already resolved server-side above.
+    currency: args.symbolChart
+      ? (args.universe?.symbolCurrency[args.symbolChart.symbol.toUpperCase()] ?? null)
+      : null,
     zoomFromMs: args.zoom ? args.zoom.from.getTime() : null,
     zoomToMs: args.zoom ? args.zoom.to.getTime() : null,
   })}`
@@ -288,16 +308,19 @@ export function renderSymbolTab(args: ChartsBodySymbol): string {
   <script src="${SYMBOL_CHART_STATIC_PATH}" defer></script>`
 }
 
-const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
-  ENTRY: { label: 'ENTRY', bg: '#e6f6ec', fg: '#057a55' },
-  HALF: { label: 'HALF 0.5x', bg: '#fff4e6', fg: '#b25000' },
-  WATCH: { label: 'WATCH', bg: '#eef2f8', fg: '#46608a' },
-  NG: { label: 'NG', bg: '#fdecec', fg: '#c22' },
+// pill classes reuse the same tokenized bg/fg the badge used inline before
+// (ok=e6f6ec/057a55, warn=fff4e6/b25000, info=eef2f8/46608a, err=fdecec/c22)
+// — no visual change in light mode, and dark mode now comes for free.
+const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; pillClass: string }> = {
+  ENTRY: { label: 'ENTRY', pillClass: 'ok' },
+  HALF: { label: 'HALF 0.5x', pillClass: 'warn' },
+  WATCH: { label: 'WATCH', pillClass: 'info' },
+  NG: { label: 'NG', pillClass: 'err' },
 }
 
 function entryStatusBadgeHtml(status: EntryStatus): string {
   const b = ENTRY_STATUS_BADGE[status]
-  return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${b.bg};color:${b.fg};font-weight:700;font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
+  return `<span class="pill ${b.pillClass}" style="font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
 }
 
 /** Renders nothing when `alloc` is undefined (symbol has no target weight and received no reroute). */
@@ -305,7 +328,7 @@ export function renderAllocationLine(alloc: SymbolAllocation | undefined): strin
   if (!alloc) return ''
   const pct = (w: number) => `${Math.round(w * 1000) / 10}%`
   const changed = Math.abs(alloc.activeWeight - alloc.targetWeight) > 1e-9
-  const color = alloc.activeWeight === 0 ? '#b25000' : changed ? '#057a55' : '#86868b'
+  const color = alloc.activeWeight === 0 ? 'var(--warn)' : changed ? 'var(--up)' : 'var(--text-3)'
   const arrow = changed ? ` → <strong>${pct(alloc.activeWeight)}</strong>` : ''
   const reroute = alloc.rerouteTo ? `（${esc(alloc.rerouteTo)} へ退避中）` : ''
   const rerouted = alloc.reroutedInWeight > 0 ? `（+${pct(alloc.reroutedInWeight)} 退避受入）` : ''
@@ -344,8 +367,8 @@ export function renderSymbolPolicyLine(
       `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
     )
   }
-  return `<div style="margin-top:8px;font-size:13px;color:#3a3a3c;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-    ${parts.join('<span style="color:#d0d0d5">｜</span>')}
+  return `<div style="margin-top:8px;font-size:13px;color:var(--text);display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+    ${parts.join('<span style="color:var(--border-strong)">｜</span>')}
     <a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:12px">設定変更</a>
   </div>`
 }
@@ -379,7 +402,7 @@ export function renderStrategyParamsPanel(
   // read as an unmodified global value.
   const symbolTag = (key: keyof StrategyParamsSnapshot): string =>
     globalParams !== undefined && p[key] !== globalParams[key]
-      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:#e8f0fe;color:#1a56db" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
+      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:var(--info-soft);color:var(--info)" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
       : ''
   const pct = (n: number): string =>
     (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
@@ -511,12 +534,12 @@ export function renderBuyabilityPanel(
   if (cur.buyable) {
     headline =
       '現在 入場条件を充足（cron 評価では BUY 候補。実発注は資金 / 単元など発注側ゲート次第）'
-    headColor = '#057a55'
+    headColor = 'var(--up)'
   } else if (cur.entryPrice !== null && cur.priceMove !== null) {
     const dir = cur.priceMove < 0 ? '下落' : '上昇'
     const binding = cur.bindingGate ? ` ／ ボトルネック: ${esc(cur.bindingGate.labelJa)}` : ''
     headline = `入場まで: あと 価格 <strong>${fmtPctSigned(cur.priceMove)}</strong>（${fmtPriceCcy(cur.entryPrice, ccy)} 到達 = ${dir}）${binding}`
-    headColor = '#b25000'
+    headColor = 'var(--warn)'
   } else {
     const g = cur.bindingGate
     const why = g
@@ -527,7 +550,7 @@ export function renderBuyabilityPanel(
     headline = g
       ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))} 不成立）。${why}`
       : '入場条件 評価不可'
-    headColor = '#c22'
+    headColor = 'var(--down)'
   }
 
   // --- 距離の推移 (mini bars) ---
@@ -543,10 +566,10 @@ export function renderBuyabilityPanel(
         const gap = Math.abs(p.priceMove)
         const w = Math.max(2, Math.round((gap / maxGap) * 90))
         const last = i === recent.length - 1
-        const color = last ? headColor : '#c9c9cf'
+        const color = last ? headColor : 'var(--border-strong)'
         const md = JST_MD_FMT.format(new Date(p.timestamp))
         return `<div style="display:flex;align-items:center;gap:6px;font-size:11px;line-height:1.5">
-          <span style="width:34px;color:#86868b;text-align:right">${esc(md)}</span>
+          <span style="width:34px;color:var(--text-3);text-align:right">${esc(md)}</span>
           <span style="display:inline-block;height:8px;width:${w}px;background:${color};border-radius:2px"></span>
           <span style="font-variant-numeric:tabular-nums">${fmtPctSigned(p.priceMove)}</span>
         </div>`
@@ -554,9 +577,9 @@ export function renderBuyabilityPanel(
       .join('')
     const trendLabel =
       buyability.trend === 'closing'
-        ? '<span style="color:#057a55">縮小中（入場に近づいている）</span>'
+        ? '<span style="color:var(--up)">縮小中（入場に近づいている）</span>'
         : buyability.trend === 'widening'
-          ? '<span style="color:#b25000">拡大中（入場から遠ざかっている）</span>'
+          ? '<span style="color:var(--warn)">拡大中（入場から遠ざかっている）</span>'
           : buyability.trend === 'flat'
             ? '<span class="muted">横ばい</span>'
             : '<span class="muted">判定不能</span>'
@@ -580,12 +603,12 @@ export function renderBuyabilityPanel(
       const ok = g.passed
       const binding = cur.bindingGate?.key === g.key
       const mark = ok ? '✅' : '❌'
-      const bg = ok ? '#f1f8f4' : '#fdf0f0'
-      const border = binding ? 'border-left:3px solid #c22;' : 'border-left:3px solid transparent;'
-      const tag = binding ? ' <span style="color:#c22;font-weight:600">◀ ボトルネック</span>' : ''
+      const bg = ok ? 'var(--up-soft)' : 'var(--down-soft)'
+      const border = binding ? 'border-left:3px solid var(--down);' : 'border-left:3px solid transparent;'
+      const tag = binding ? ' <span style="color:var(--down);font-weight:600">◀ ボトルネック</span>' : ''
       return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 8px;background:${bg};${border}border-radius:4px;font-size:12px;flex-wrap:wrap">
         <span>${mark}</span><span>${esc(g.labelJa)}</span>
-        <span style="color:#555;font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
+        <span style="color:var(--text-2);font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
       </div>`
     })
     .join('')
@@ -594,7 +617,7 @@ export function renderBuyabilityPanel(
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
-    halfNote = `<div style="margin-top:6px;font-size:12px;color:#b25000">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
+    halfNote = `<div style="margin-top:6px;font-size:12px;color:var(--warn)">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
   }
 
   return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
@@ -609,22 +632,30 @@ export function renderBuyabilityPanel(
   </div>`
 }
 
-/** Shows a truncation note once `decisions.length >= MAX_CHART_DECISIONS`, rather than silently capping. Colors mirror the chart's DECISION_COLORS. */
-export function renderDecisionPlotCaption(chart: SymbolChartData | null): string {
+/** `?` info-tip carrying the marker legend's explanation — kept out of the inline flow per spec (long operating text moves behind a tooltip, not above the chart). '' once there are no decisions to explain. */
+export function renderDecisionExplanationTip(chart: SymbolChartData | null): string {
+  const decisions = chart?.decisions ?? []
+  if (decisions.length === 0) return ''
+  const capped =
+    decisions.length >= MAX_CHART_DECISIONS ? ` 直近 ${MAX_CHART_DECISIONS} 件まで表示。` : ''
+  const tip = `● は cron の判定イベント。点をクリックすると下に判定トレースが出ます (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}`
+  return `<span class="info-tip" tabindex="0" aria-label="判定マーカーの凡例" data-tip="${esc(tip)}">?</span>`
+}
+
+/** Compact color-key row for the decision markers — the long explanation lives in `renderDecisionExplanationTip` instead, so this stays a one-line legend. */
+export function renderDecisionColorKey(chart: SymbolChartData | null): string {
   const decisions = chart?.decisions ?? []
   if (decisions.length === 0) return ''
   const dot = (color: string, label: string): string =>
-    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 1px #fff,0 0 0 2px ${color}"></span>${esc(label)}</span>`
-  const capped =
-    decisions.length >= MAX_CHART_DECISIONS
-      ? ` <span class="muted">(直近 ${MAX_CHART_DECISIONS} 件まで表示)</span>`
-      : ''
-  return `<p class="muted" style="font-size:12px;margin:6px 0 2px">
-    ● は cron の判定イベント。点をクリックすると下に判定トレースが出ます (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}
-  </p>
-  <div style="font-size:12px;margin:0 0 4px">
-    ${dot('#057a55', '買い (BUY)')}${dot('#1471a8', '売り (SELL)')}${dot('#b25000', '見送り・bot判定 (SKIP)')}${dot('#7c3aed', '拒否・証券会社 (REJECT)')}${dot('#c22', 'エラー (ERROR)')}
+    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 1px var(--surface),0 0 0 2px ${color}"></span>${esc(label)}</span>`
+  return `<div class="decision-legend-row">
+    ${dot('var(--up)', '買い (BUY)')}${dot('var(--info)', '売り (SELL)')}${dot('var(--warn)', '見送り・bot判定 (SKIP)')}${dot('#8b5cf6', '拒否・証券会社 (REJECT)')}${dot('var(--down)', 'エラー (ERROR)')}
   </div>`
+}
+
+/** Combines the two pieces above — kept for callers that want the full caption as one block (e.g. tests / JSON API consumers). The page itself places the tip and the color key separately (tip next to the chart card title, color key under the chart). */
+export function renderDecisionPlotCaption(chart: SymbolChartData | null): string {
+  return `${renderDecisionExplanationTip(chart)}${renderDecisionColorKey(chart)}`
 }
 
 export function prevDailyClose(chart: SymbolChartData | null): number | null {
@@ -649,8 +680,10 @@ export function renderPriceHeader(
     const diff = cur - prev
     const pct = (diff / prev) * 100
     const up = diff >= 0
-    // 日本式: 上昇=赤 / 下落=緑 (Google Finance JA と同じ)
-    const color = up ? '#d23f31' : '#188038'
+    // 日本式 (Google Finance JA と同じ): 上昇=赤 / 下落=緑 — US 慣習の逆なので
+    // --up/--down トークンをそのまま使うと意味が反転する。candlestick 側
+    // (symbolChartScript.ts) と同じ理由で --down を上昇に、--up を下落に流用する。
+    const color = up ? 'var(--down)' : 'var(--up)'
     const arrow = up ? '▲' : '▼'
     const sign = up ? '+' : ''
     changeHtml = ` <span style="font-size:14px;font-weight:600;color:${color};margin-left:6px">${arrow} ${sign}${pct.toFixed(2)}% (${sign}${diff.toFixed(2)}) 前日比</span>`
@@ -679,9 +712,77 @@ export function renderPriceHeader(
     )
     .join('')
   return `<div style="margin:2px 0 0">
-    <span style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em">${esc(fmtPriceCcy(cur, ccy))}</span>${changeHtml}
+    <span class="symbol-price-hero" style="font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em">${esc(fmtPriceCcy(cur, ccy))}</span>${changeHtml}
   </div>
   ${sub ? `<p style="margin:2px 0 0">${sub}</p>` : ''}`
+}
+
+/** Enum + Japanese short label pill (operator constraint: enum values show inline, not only on hover). '' when the symbol has no configured role. */
+function renderRolePill(role: string | null): string {
+  if (!role) return ''
+  const known = (SYMBOL_ROLES as readonly string[]).includes(role)
+  if (!known) {
+    return `<span class="pill err" title="不正な role 値 — entry は抑止されます (fail-closed)">⚠ ${esc(role)}</span>`
+  }
+  return `<span class="pill info" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}: ${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
+}
+
+/** '' when the symbol is active — kept out of the header id-block layout when there's nothing to say. */
+function renderFocusInactiveNote(args: ChartsBodySymbol): string {
+  if (!args.focusSymbol || !isSymbolInactive(args.focusSymbol, args.universe)) return ''
+  const reason = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
+  return ` <span class="muted" style="font-size:11px">(inactive — ${esc(reason)})</span>`
+}
+
+/**
+ * Compact policy meta for the header (配分 target / 常時配分 / 条件連動 / 退避先
+ * + 設定変更 link) — role itself is shown separately as `renderRolePill`, so
+ * this only covers the remaining fields `renderSymbolPolicyLine` used to
+ * print as its own line under the chart (now redundant with the header).
+ */
+function renderSymbolPolicyMeta(symbol: string, policy: SymbolPolicySummary | null): string {
+  const parts: string[] = []
+  if (policy?.targetWeight !== null && policy?.targetWeight !== undefined) {
+    parts.push(`配分 target ${Math.round(policy.targetWeight * 1000) / 10}%`)
+  }
+  if (policy?.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
+  if (policy?.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (policy?.cashFallbackSymbols) {
+    parts.push(
+      `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
+    )
+  }
+  const metaText =
+    parts.length > 0
+      ? `<span class="muted" style="font-size:12px">${parts.join('<span style="color:var(--border-strong)"> ｜ </span>')}</span> `
+      : ''
+  return `${metaText}<a href="/dashboard/symbols/${encodeURIComponent(symbol)}/edit" style="font-size:11px">設定変更</a>`
+}
+
+/**
+ * Header row above the chart: ticker/name/role/policy-meta on the left,
+ * price hero + range `.seg` stacked on the right — replaces the old small
+ * "銘柄: X" line + bare price header for the chart view specifically (the
+ * detail/history view keeps `renderFocusSymbolHeader`'s compact identity
+ * line instead, since it has no chart or range to anchor a hero header to).
+ */
+function renderSymbolChartHeaderRow(args: ChartsBodySymbol): string {
+  if (!args.focusSymbol) return ''
+  const name = args.universe?.symbolName[args.focusSymbol.toUpperCase()] ?? ''
+  const role = args.symbolPolicy?.role ?? null
+  return `<div class="symbol-header-row">
+    <div class="symbol-id-block">
+      <span class="symbol-ticker">${esc(args.focusSymbol)}</span>
+      ${name ? `<span class="symbol-name">${esc(name)}</span>` : ''}
+      ${renderRolePill(role)}
+      ${renderSymbolPolicyMeta(args.focusSymbol, args.symbolPolicy ?? null)}
+      ${renderFocusInactiveNote(args)}
+    </div>
+    <div class="symbol-header-right">
+      ${renderPriceHeader(args.symbolChart, args.universe)}
+      ${renderZoomPresetButtons(args.symbolChart)}
+    </div>
+  </div>`
 }
 
 function renderSymbolRail(args: ChartsBodySymbol): string {

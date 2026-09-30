@@ -58,6 +58,7 @@ import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
 import {
   ALL_OVERVIEW_PANELS,
+  OVERVIEW_PAGE_STYLE,
   type HomeRunSignals,
   type OverviewData,
   type StopDistanceView,
@@ -74,10 +75,11 @@ import { configBody } from './config'
 import { cronBody, loadDecisionRows, loadDecisionRowsInSession, runCronJsonExport } from './cron'
 import { alertsBody, clampAlertLimit, parseAlertsQuery, parseEventTypeFilter, parseSeverityFilter } from './alerts'
 import { auditBody, clampAuditLimit, parseAuditDateFilter, trimQuery } from './audit'
-import { type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseQualityPeriod, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
+import { CHARTS_PAGE_STYLE, type ChartsBodySymbol, type StrategyParamsSnapshot, computeZoomRange, parseChartsTab, parseIsoTimestamp, parseQualityPeriod, parseSymbolView, strategyParamsFromGlobal } from './charts/shared'
 import { type SymbolChartRules, buildSymbolChartPacket, loadSymbolChart, pickDefaultSymbol } from './charts/loaders'
 import { cachedDashboardJson } from './charts/dashboardBarsCache'
 import { SYMBOL_CHART_CLIENT_SCRIPT, SYMBOL_CHART_CLIENT_SCRIPT_ETAG } from './charts/symbolChartScript'
+import { CHART_THEME_CLIENT_SCRIPT, CHART_THEME_CLIENT_SCRIPT_ETAG } from './charts/chartTheme'
 import { type EquityTradeMarker, computeMonthlyReturns, computePeriodReturns, loadEquityCurve, loadEquityTradeMarkers } from './charts/equity'
 import { loadBenchmarkSeries } from './charts/benchmark'
 import { computeSymbolStats, computeTradeStats, filterTradePnlsByPeriod, loadSkipReasonBreakdown, loadTradePnls } from './charts/quality'
@@ -92,6 +94,7 @@ import {
 } from '../../infrastructure/db/extendedHoursObservationRepo'
 import { lifecycleBody } from './lifecycle'
 import { loadLifecycleReport } from '../../trading/analysis/lifecycleReport'
+import { telemetryDisabledJs, telemetryHost, telemetryJs } from './telemetry'
 export { safeJsonScript } from './shared'
 export { extractTokenFromPaste } from './webullToken'
 export { ALL_OVERVIEW_PANELS, parseOverviewPanels } from './overview'
@@ -153,22 +156,24 @@ async function loadHomeRunSignals(db: D1Database): Promise<HomeRunSignals> {
 
 async function loadActivityStats(
   db: D1Database,
-): Promise<{ wins: number; losses: number; errors: number }> {
+): Promise<{ wins: number; losses: number; errors: number; realizedPnlSum: number }> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
   const row = await db
     .prepare(
       `SELECT
          SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
          SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
-         SUM(CASE WHEN error_class IS NOT NULL THEN 1 ELSE 0 END) AS errors
+         SUM(CASE WHEN error_class IS NOT NULL THEN 1 ELSE 0 END) AS errors,
+         SUM(realized_pnl) AS realizedPnlSum
        FROM trade_journal WHERE timestamp >= ?`,
     )
     .bind(since)
-    .first<{ wins: number | null; losses: number | null; errors: number | null }>()
+    .first<{ wins: number | null; losses: number | null; errors: number | null; realizedPnlSum: number | null }>()
   return {
     wins: Number(row?.wins ?? 0) || 0,
     losses: Number(row?.losses ?? 0) || 0,
     errors: Number(row?.errors ?? 0) || 0,
+    realizedPnlSum: Number(row?.realizedPnlSum ?? 0) || 0,
   }
 }
 
@@ -241,6 +246,20 @@ export const dashboard = new Hono<DashboardBindings>()
     c.set('killSwitchState', state)
     await next()
   })
+  .get('/assets/telemetry.js', (c) => {
+    const key = c.env.POSTHOG_KEY
+    // identify にユーザのメールを埋めるので、同一ブラウザでのユーザ切替を跨いで
+    // 再利用させない。
+    c.header('Cache-Control', 'no-store')
+    const js = key
+      ? telemetryJs({
+          key,
+          host: telemetryHost(c.env.POSTHOG_HOST),
+          distinctId: c.req.header('Cf-Access-Authenticated-User-Email') ?? null,
+        })
+      : telemetryDisabledJs
+    return c.body(js, 200, { 'Content-Type': 'text/javascript; charset=utf-8' })
+  })
   .get('/', async (c) => {
     if (!c.env.DB) {
       return c.html(renderLayout(c, 'ダッシュボード', unavailable('DB not bound')))
@@ -306,7 +325,7 @@ export const dashboard = new Hono<DashboardBindings>()
         tradingEnabled: resolveTradingEnabled(global.tradingEnabled, c.env.TRADING_ENABLED),
         universe,
       }
-      return c.html(renderLayout(c, 'ダッシュボード', overviewBody(data)))
+      return c.html(renderLayout(c, 'ダッシュボード', overviewBody(data), '', OVERVIEW_PAGE_STYLE))
     } catch (err) {
       return c.html(renderLayout(c, 'ダッシュボード', unavailable(messageOf(err))))
     }
@@ -450,6 +469,22 @@ export const dashboard = new Hono<DashboardBindings>()
       'content-type': 'text/javascript; charset=utf-8',
     })
   })
+  // Same cache pattern as symbol-chart.js above. Loaded from layout.ts on
+  // every page (not just charts), so it must not touch DB/env either.
+  .get('/static/chart-theme.js', (c) => {
+    const ifNoneMatch = c.req.header('if-none-match')
+    const headers = {
+      'cache-control': 'public, max-age=86400',
+      etag: CHART_THEME_CLIENT_SCRIPT_ETAG,
+    }
+    if (ifNoneMatch === CHART_THEME_CLIENT_SCRIPT_ETAG) {
+      return c.body(null, 304, headers)
+    }
+    return c.body(CHART_THEME_CLIENT_SCRIPT, 200, {
+      ...headers,
+      'content-type': 'text/javascript; charset=utf-8',
+    })
+  })
   // Hono matches routes in definition order, so this must stay defined
   // before `/charts` — otherwise a future `/charts/:sub` route could shadow it.
   .get('/charts/symbol/json', async (c) => {
@@ -497,6 +532,7 @@ export const dashboard = new Hono<DashboardBindings>()
           'チャート',
           unavailable('DB not bound'),
           chartsPageSubnav(parseChartsTab(c.req.query('tab'))),
+          CHARTS_PAGE_STYLE,
         ),
       )
     }
@@ -537,6 +573,7 @@ export const dashboard = new Hono<DashboardBindings>()
               monthlyReturns: computeMonthlyReturns(equity),
             }),
             chartsPageSubnav(tab),
+            CHARTS_PAGE_STYLE,
           ),
         )
       }
@@ -561,6 +598,7 @@ export const dashboard = new Hono<DashboardBindings>()
               skipBreakdown,
             }),
             chartsPageSubnav(tab),
+            CHARTS_PAGE_STYLE,
           ),
         )
       }
@@ -715,6 +753,7 @@ export const dashboard = new Hono<DashboardBindings>()
           'チャート',
           renderSymbolTab(symbolBodyArgs),
           '', // no subnav — the symbol tab's nav path is the symbol group + rail
+          CHARTS_PAGE_STYLE,
         ),
       )
     } catch (err) {

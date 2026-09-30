@@ -1,4 +1,4 @@
-import { and, asc, gte, lte, type SQL } from 'drizzle-orm'
+import { and, desc, gte, lte, type SQL } from 'drizzle-orm'
 import {
   portfolioEquitySnapshot,
   type PortfolioEquitySnapshotRow,
@@ -8,8 +8,10 @@ import { createDb } from './tradeJournalRepo'
 /**
  * Daily snapshot writer / reader for `portfolio_equity_snapshot`.
  * Same-day duplicates are accepted rather than upserted, since the table
- * doubles as an audit trail. Rows load in ASC order so the dashboard chart
- * can feed echarts directly without a client-side reverse.
+ * doubles as an audit trail. Rows load newest-first under `limit` (so
+ * `?range=30d` is the most recent 30 days, not the oldest 30 ever recorded),
+ * then get reversed back to ASC before returning — the dashboard chart still
+ * wants oldest-to-newest order to feed echarts directly.
  */
 
 export interface RecordPortfolioEquitySnapshotPayload {
@@ -74,9 +76,12 @@ export async function loadPortfolioEquitySnapshots(
   if (conditions.length > 0) {
     query = query.where(conditions.length === 1 ? conditions[0] : and(...conditions))
   }
-  return await query
-    .orderBy(asc(portfolioEquitySnapshot.snapshotAt), asc(portfolioEquitySnapshot.id))
+  const rows = await query
+    .orderBy(desc(portfolioEquitySnapshot.snapshotAt), desc(portfolioEquitySnapshot.id))
     .limit(clampLimit(opts.limit))
+  // DESC+LIMIT selects the latest N rows; reverse restores the ASC order
+  // callers (and the chart) expect without re-querying.
+  return rows.reverse()
 }
 
 function clampLimit(raw: number | undefined): number {

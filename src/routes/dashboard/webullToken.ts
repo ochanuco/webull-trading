@@ -37,30 +37,20 @@ export function renderWebullTokenBody(args: {
 }): string {
   const { state, notice, error } = args
   const banner = error
-    ? `<p class="warn">⚠ ${esc(error)}</p>`
+    ? `<p class="err">⚠ ${esc(error)}</p>`
     : notice
       ? `<p class="ok">✓ ${esc(notice)}</p>`
       : ''
 
   const stateSection = state
     ? renderWebullTokenStateTable(state)
-    : '<p>DO is empty — まだ seed されていません。下の form から投入してください。</p>'
+    : '<p class="empty">DO is empty — まだ seed されていません。下の form から投入してください。</p>'
 
-  return `
-<section style="max-width:760px">
-  <p style="color:#666">
-    Webull <code>x-access-token</code> の状態確認 / 投入 / 強制 refresh を行います。
-    token 文字列は <code>pnpm run issue-token</code> で取得 (Webull モバイルアプリで 2FA verify 必要)。
-    取得した NORMAL token を下の form に貼り付けて「seed」してください。
-  </p>
-  ${banner}
-  <h2>現在の状態</h2>
-  ${stateSection}
-
-  <h2>新規 seed (or 上書き)</h2>
-  <details style="margin-bottom:8px">
-    <summary style="cursor:pointer;color:#555">📋 何を貼ればいい？</summary>
-    <div style="padding:8px 0 0 16px;color:#555;font-size:13px;line-height:1.6">
+  // Multi-paragraph + a <pre> sample can't fit `.info-tip`'s plain-text
+  // data-tip attribute, so this uses the `.info-tip-details` fallback.
+  const pasteGuide = `<details class="info-tip-details">
+    <summary aria-label="貼り付け内容の見本">?</summary>
+    <div>
       <p><code>pnpm run issue-token</code> を最後まで完了させる (status=NORMAL になる) と、
       stdout の <strong>最後の 1 行</strong> に長い英数字の token が出力されます。<br>
       diagnostic ログ (<code>[issue-token] ...</code> で始まる行) を含めて全文貼り付けても OK
@@ -69,37 +59,81 @@ export function renderWebullTokenBody(args: {
       実 token ではなく表示用の省略形</strong> です。2FA verify を完了するまで実 token は
       出力されません。</p>
       <p>例 (NORMAL 化したときの末尾出力):</p>
-      <pre style="background:#f6f8fa;padding:8px;border-radius:4px;overflow:auto;font-size:12px">[issue-token] poll (60s elapsed): xxxxxx...yyyy (status=NORMAL)
+      <pre style="background:var(--surface-2);padding:8px;border-radius:var(--radius-sm);overflow:auto;font-size:12px">[issue-token] poll (60s elapsed): xxxxxx...yyyy (status=NORMAL)
 [issue-token] NORMAL token acquired. Inject via:
   pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=&lt;dev|staging|production&gt;
   (paste the value printed below)
 
 &lt;long alphanumeric NORMAL token string&gt;   ← この行が実 token</pre>
     </div>
-  </details>
-  <form method="post" action="/dashboard/webull-token/seed" style="display:flex;flex-direction:column;gap:8px;max-width:720px">
-    <label for="token" style="font-weight:bold">issue-token の出力を貼り付け (丸ごとで OK):</label>
-    <textarea id="token" name="token" rows="6" required
-      placeholder="例:&#10;[issue-token] NORMAL token acquired. Inject via:&#10;  pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=production&#10;&#10;<long alphanumeric NORMAL token string>"
-      style="font-family:ui-monospace,monospace;padding:6px;border:1px solid #ccc;border-radius:4px"
-    ></textarea>
-    <button type="submit" style="padding:8px 16px;background:#28a;color:#fff;border:none;border-radius:4px;cursor:pointer;align-self:flex-start">
-      seed (token 行を自動抽出 → broker で再 verify → DO 書込)
-    </button>
-  </form>
+  </details>`
 
-  <h2 style="margin-top:24px">手動 refresh</h2>
-  <p style="color:#666">
-    既存 token を Webull に渡して <code>createToken(existingToken)</code> を強制実行します。
-    通常は daily cron (22:00 UTC) で自動的に走るため、ボタンは「期限間近を待たずに更新したい」「失敗事象を再現したい」など特殊用途のみ。
-  </p>
-  <form method="post" action="/dashboard/webull-token/refresh" onsubmit="return confirm('手動 refresh を実行します。よろしいですか?');">
-    <button type="submit" style="padding:8px 16px;background:#888;color:#fff;border:none;border-radius:4px;cursor:pointer">
-      refresh now
-    </button>
-  </form>
-</section>`
+  return `<style>${FIELD_STYLE}</style>
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">Webull token 管理</h2></div>
+    <div class="card-body">
+      <p class="muted" style="margin:0 0 10px">
+        Webull <code>x-access-token</code> の状態確認 / 投入 / 強制 refresh を行います。
+        token 文字列は <code>pnpm run issue-token</code> で取得 (Webull モバイルアプリで 2FA verify 必要)。
+        取得した NORMAL token を下の form に貼り付けて「seed」してください。
+      </p>
+      ${banner}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">現在の状態</h2></div>
+    <div class="card-body">${stateSection}</div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2 class="card-title">新規 seed (or 上書き)</h2>
+      ${pasteGuide}
+    </div>
+    <div class="card-body">
+      <form method="post" action="/dashboard/webull-token/seed" style="display:flex;flex-direction:column;gap:10px;max-width:720px">
+        <div class="field">
+          <label for="token">issue-token の出力を貼り付け (丸ごとで OK)</label>
+          <textarea id="token" name="token" rows="6" required
+            placeholder="例:&#10;[issue-token] NORMAL token acquired. Inject via:&#10;  pnpm wrangler secret put WEBULL_ACCESS_TOKEN --env=production&#10;&#10;<long alphanumeric NORMAL token string>"
+            style="font-family:var(--mono)"
+          ></textarea>
+        </div>
+        <div><button type="submit" class="btn primary">seed (token 行を自動抽出 → broker で再 verify → DO 書込)</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">手動 refresh</h2></div>
+    <div class="card-body">
+      <p class="muted" style="margin:0 0 10px">
+        既存 token を Webull に渡して <code>createToken(existingToken)</code> を強制実行します。
+        通常は daily cron (22:00 UTC) で自動的に走るため、ボタンは「期限間近を待たずに更新したい」「失敗事象を再現したい」など特殊用途のみ。
+      </p>
+      <form method="post" action="/dashboard/webull-token/refresh" onsubmit="return confirm('手動 refresh を実行します。よろしいですか?');">
+        <button type="submit" class="btn">refresh now</button>
+      </form>
+    </div>
+  </div>`
 }
+
+// Shared with config.ts / events.ts / symbols.ts forms: `label` above
+// `input`/`select`/`textarea` at the 13px body baseline, not `layout.ts`'s
+// shared STYLE — these are the only 4 pages with data-entry forms, so a
+// page-scoped block avoids growing the shared block for lane-local need.
+export const FIELD_STYLE = `
+  .field{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+  .field label{font-size:12px;font-weight:600;color:var(--text-2)}
+  .field input,.field select,.field textarea{padding:6px 8px;font-size:13px;min-height:32px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-family:inherit}
+  .field textarea{min-height:auto}
+  .field .hint{font-size:11px;color:var(--text-3)}
+  .field-row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  /* A single checkbox/radio row IS its own \`<label>\` (no nested label), so
+     the row variant styles the label element directly rather than a child. */
+  label.field-check{flex-direction:row;align-items:center;gap:6px;font-size:13px;font-weight:400;color:var(--text);margin-bottom:6px}
+`
 
 function renderWebullTokenStateTable(state: WebullTokenState): string {
   const statusClass = state.status === 'NORMAL' ? 'ok' : 'warn'
@@ -110,18 +144,18 @@ function renderWebullTokenStateTable(state: WebullTokenState): string {
     ? `${state.token.slice(0, 6)}...${state.token.slice(-4)}`
     : '<redacted>'
   return `
-<table style="border-collapse:collapse;margin-bottom:16px">
-  <tr><th style="text-align:left;padding:4px 12px 4px 0">status</th>
+<table style="max-width:520px">
+  <tr><th>status</th>
       <td><span class="${statusClass}">${esc(state.status)}</span></td></tr>
-  <tr><th style="text-align:left;padding:4px 12px 4px 0">tokenHint</th>
+  <tr><th>tokenHint</th>
       <td><code>${esc(tokenHint)}</code></td></tr>
-  <tr><th style="text-align:left;padding:4px 12px 4px 0">expires</th>
+  <tr><th>expires</th>
       <td>${esc(String(state.expires))} <span class="muted">(${esc(expiresIso)})</span></td></tr>
-  <tr><th style="text-align:left;padding:4px 12px 4px 0">fetchedAt</th>
+  <tr><th>fetchedAt</th>
       <td>${esc(state.fetchedAt)}</td></tr>
-  <tr><th style="text-align:left;padding:4px 12px 4px 0">lastAttemptAt</th>
+  <tr><th>lastAttemptAt</th>
       <td>${esc(state.lastAttemptAt ?? '(never)')}</td></tr>
-  <tr><th style="text-align:left;padding:4px 12px 4px 0">lastSuccessAt</th>
+  <tr><th>lastSuccessAt</th>
       <td>${esc(state.lastSuccessAt ?? '(never)')}</td></tr>
 </table>`
 }

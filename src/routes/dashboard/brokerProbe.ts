@@ -17,12 +17,12 @@ function inferProbeCategory(symbol: string): 'JP_STOCK' | 'JP_ETF' | 'US_STOCK' 
 
 function renderUniverseLinks(universe: SymbolUniverse | null): string {
   if (!universe) {
-    return '<span class="muted" style="font-size:12px">universe ロード失敗 (DB 未設定 / 接続失敗)</span>'
+    return '<span class="muted small">universe ロード失敗 (DB 未設定 / 接続失敗)</span>'
   }
   const inactiveSet = new Set(universe.inactiveSymbols.map((s) => s.toUpperCase()))
   const allSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
   if (allSymbols.length === 0) {
-    return '<span class="muted" style="font-size:12px">登録銘柄なし</span>'
+    return '<span class="muted small">登録銘柄なし</span>'
   }
   const groups: Record<string, string[]> = {
     US_STOCK: [],
@@ -37,20 +37,15 @@ function renderUniverseLinks(universe: SymbolUniverse | null): string {
   const renderBtn = (sym: string, cat: string): string => {
     const inactive = inactiveSet.has(sym.toUpperCase())
     const display = displaySymbol(sym, universe)
-    const style = inactive ? 'color:#999;background:#f3f3f3' : ''
-    const inactiveBadge = inactive
-      ? ' <span style="font-size:10px;color:#999">(INACTIVE)</span>'
-      : ''
-    return `<button type="button" class="bp-chip probe-pickbtn" data-symbol="${esc(sym)}" data-category="${cat}"${style ? ` style="${style}"` : ''} title="${esc(cat)}">${esc(display)}${inactiveBadge}</button>`
+    const inactiveBadge = inactive ? ' <span class="muted small">(INACTIVE)</span>' : ''
+    return `<button type="button" class="chip probe-pickbtn${inactive ? ' symbol-disabled' : ''}" data-symbol="${esc(sym)}" data-category="${cat}" title="${esc(cat)}">${esc(display)}${inactiveBadge}</button>`
   }
   const sections: string[] = []
   for (const cat of ['US_STOCK', 'US_ETF', 'JP_STOCK', 'JP_ETF']) {
     const syms = groups[cat]!
     if (syms.length === 0) continue
     const buttons = syms.map((s) => renderBtn(s, cat)).join(' ')
-    sections.push(
-      `<div style="margin-bottom:8px"><span class="muted" style="font-size:11px;margin-right:8px">${cat}</span>${buttons}</div>`,
-    )
+    sections.push(`<div style="margin-bottom:8px"><span class="muted small" style="margin-right:8px">${cat}</span>${buttons}</div>`)
   }
   return sections.join('')
 }
@@ -71,92 +66,90 @@ export function brokerProbeBody(args: {
   ].some((sym) => sym.toUpperCase() === 'AAPL')
   const controlChip = hasAapl
     ? ''
-    : `<div style="margin-bottom:10px"><button type="button" class="bp-chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted" style="font-size:10px">control</span></button></div>`
+    : `<div style="margin-bottom:10px"><button type="button" class="chip probe-pickbtn" data-symbol="AAPL" data-category="US_STOCK">AAPL <span class="muted small">control</span></button></div>`
   return `<style>
   .bp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:12px 0}
-  .bp-card{background:#fff;border:1px solid #e3e3e8;border-radius:10px;padding:14px 16px}
-  .bp-card h3{font-size:13px;margin:0 0 8px;display:flex;align-items:center;gap:8px;justify-content:space-between}
-  .bp-card .bp-body{font-size:13px;line-height:1.6}
-  .bp-pill{display:inline-block;padding:1px 10px;border-radius:10px;font-size:11px;font-weight:700;white-space:nowrap}
-  .bp-pill-ok{background:#e6f6ec;color:#057a55}
-  .bp-pill-ng{background:#fdecec;color:#c22}
-  .bp-pill-unknown{background:#eef2f8;color:#46608a}
-  .bp-pill-wait{background:#f3f3f5;color:#86868b}
-  .bp-chip{padding:4px 12px;font-size:12px;border:1px solid #d8d8de;border-radius:14px;cursor:pointer;background:#fff;margin:0 4px 6px 0}
-  .bp-chip:hover{background:#eef4ff;border-color:#06c}
-  .bp-chip-selected{background:#06c !important;border-color:#06c !important;color:#fff !important}
-  .bp-chip-selected .muted{color:#cfe0ff !important}
-  .bp-raw{background:#f6f6f8;border:1px solid #e3e3e8;border-radius:6px;padding:8px;font-size:11px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px}
-  .bp-num{font-variant-numeric:tabular-nums}
+  .bp-raw{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:12px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin-top:8px}
+  .small{font-size:12px}
   </style>
 
-  <div class="bp-card" style="margin-top:8px">
-    <h3>銘柄を選んで診断 <span class="muted" id="probe-status" style="font-weight:normal;font-size:12px">待機中</span>
-      <button type="button" id="probe-copy-ai" hidden style="float:right;padding:4px 12px;background:#fff;color:#333;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:12px;font-weight:normal" title="probe 結果全文 (全 raw セクション + meta) をコピー">📋 AI 用コピー</button></h3>
-    <div class="bp-body">
+  <div class="card" style="margin-top:8px">
+    <div class="card-head">
+      <h2 class="card-title">銘柄を選んで診断</h2>
+      <span class="muted small" id="probe-status">待機中</span>
+      <div class="card-actions"><button type="button" id="probe-copy-ai" hidden class="btn btn-sm" title="probe 結果全文 (全 raw セクション + meta) をコピー">📋 AI 用コピー</button></div>
+    </div>
+    <div class="card-body">
       <div style="margin-bottom:6px">${universeLinks}</div>
       ${controlChip}
-      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px;background:#f6f8fc;border-radius:8px">
-        <span style="font-size:13px">選択中: <strong id="probe-current">未選択</strong></span>
-        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
-          <input type="checkbox" id="probe-preview-check" checked> 発注前検証も実行 <span class="muted" style="font-size:11px">(発注なし)</span>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px;background:var(--surface-2);border-radius:8px">
+        <span>選択中: <strong id="probe-current">未選択</strong></span>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer" class="small">
+          <input type="checkbox" id="probe-preview-check" checked> 発注前検証も実行 <span class="muted small">(発注なし)</span>
         </label>
-        <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer" title="SDK の per-symbol 取引照会 (/trade/instrument・/trade/security) が tradePolicy を返すか検証。発注なし read-only (#460)">
-          <input type="checkbox" id="probe-tradecheck"> 取扱判定 (trade/instrument) <span class="muted" style="font-size:11px">#460</span>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer" class="small" title="SDK の per-symbol 取引照会 (/trade/instrument・/trade/security) が tradePolicy を返すか検証。発注なし read-only (#460)">
+          <input type="checkbox" id="probe-tradecheck"> 取扱判定 (trade/instrument) <span class="muted small">#460</span>
         </label>
-        <button type="button" id="probe-submit" style="padding:7px 22px;background:#06c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">診断を実行</button>
+        <button type="button" id="probe-submit" class="btn primary">診断を実行</button>
       </div>
     </div>
   </div>
 
   <div class="bp-grid">
-    <div class="bp-card">
-      <h3>Webull 取扱 <span id="bp-instrument-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="bp-instrument-body" class="muted">—</div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">Webull 取扱</h2><span id="bp-instrument-pill" class="pill neutral">未実行</span></div>
+      <div class="card-body" id="bp-instrument-body">—</div>
     </div>
-    <div class="bp-card">
-      <h3>Yahoo quote <span id="bp-yahoo-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="bp-yahoo-body" class="muted">—</div>
-      <details><summary class="muted" style="font-size:11px;cursor:pointer">raw</summary><pre id="probe-quote-yahoo" class="bp-raw">(未実行)</pre></details>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">Yahoo quote</h2><span id="bp-yahoo-pill" class="pill neutral">未実行</span></div>
+      <div class="card-body" id="bp-yahoo-body">—</div>
+      <details><summary class="muted small" style="cursor:pointer">raw</summary><pre id="probe-quote-yahoo" class="bp-raw">(未実行)</pre></details>
     </div>
-    <div class="bp-card">
-      <h3>買付余力 <span id="bp-bp-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div class="bp-body" id="probe-buying-power" class="muted">—</div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">買付余力</h2><span id="bp-bp-pill" class="pill neutral">未実行</span></div>
+      <div class="card-body" id="probe-buying-power">—</div>
     </div>
   </div>
 
-  <div class="bp-card">
-    <h3>保有銘柄 <span class="muted" style="font-size:11px;font-weight:normal">(click で probe)</span></h3>
-    <div class="bp-body" id="probe-positions-list" class="muted">未実行</div>
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">保有銘柄</h2><span class="muted small">(click で probe)</span></div>
+    <div class="card-body" id="probe-positions-list">未実行</div>
   </div>
 
   <details style="margin-top:12px">
-    <summary class="muted" style="font-size:12px;cursor:pointer">詳細 (drift 比較 / raw レスポンス / meta)</summary>
-    <div class="bp-card" style="margin-top:8px">
-      <h3>drift 比較 (旧 path vs 新 path) <span class="muted" style="font-size:11px;font-weight:normal">#251</span></h3>
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="border-bottom:1px solid #e3e3e8">
-          <th style="text-align:left;padding:4px 8px">endpoint</th>
-          <th style="text-align:left;padding:4px 8px">old</th>
-          <th style="text-align:left;padding:4px 8px">new</th>
+    <summary class="muted small" style="cursor:pointer">詳細 (drift 比較 / raw レスポンス / meta)</summary>
+    <div class="card" style="margin-top:8px">
+      <div class="card-head"><h2 class="card-title">drift 比較 (旧 path vs 新 path)</h2><span class="muted small">#251</span></div>
+      <div class="tablewrap"><table>
+        <thead><tr>
+          <th>endpoint</th>
+          <th>old</th>
+          <th>new</th>
         </tr></thead>
         <tbody id="probe-drift-table">
-          <tr><td colspan="3" class="muted" style="padding:8px;text-align:center">(未実行)</td></tr>
+          <tr><td colspan="3" class="empty">(未実行)</td></tr>
         </tbody>
-      </table>
-      <h3 style="margin-top:14px">Webull quote <span class="muted" style="font-size:11px;font-weight:normal">(data-api — 無応答が既知のため詳細に格下げ #461。稼働開始は疎通監視 #21 が通知)</span> <span id="bp-quote-pill" class="bp-pill bp-pill-wait">未実行</span></h3>
-      <div id="bp-quote-body" style="font-size:12px;margin:4px 0">—</div>
+      </table></div>
+      <div class="card-head" style="margin-top:14px">
+        <h2 class="card-title">Webull quote</h2>
+        <span class="info-tip" tabindex="0" aria-label="Webull quote の注記" data-tip="data-api — 無応答が既知のため詳細に格下げ #461。稼働開始は疎通監視 #21 が通知">?</span>
+        <span id="bp-quote-pill" class="pill neutral">未実行</span>
+      </div>
+      <div id="bp-quote-body" class="small" style="margin:4px 0">—</div>
       <pre id="probe-quote" class="bp-raw">(未実行)</pre>
-      <h3 style="margin-top:14px">instrument 照会 raw (quotes host / trade host)</h3>
+      <h2 class="sub-head">instrument 照会 raw (quotes host / trade host)</h2>
       <pre id="bp-instrument-raw" class="bp-raw">(未実行)</pre>
-      <h3 style="margin-top:14px">positions / orderHistory raw (旧/新)</h3>
+      <h2 class="sub-head">positions / orderHistory raw (旧/新)</h2>
       <pre id="probe-positions-raw" class="bp-raw">(未実行)</pre>
       <pre id="probe-positions-new-raw" class="bp-raw">(未実行)</pre>
       <pre id="probe-order-old-raw" class="bp-raw">(未実行)</pre>
       <pre id="probe-order-new-raw" class="bp-raw">(未実行)</pre>
-      <h3 style="margin-top:14px">取扱判定 probe <span class="muted" style="font-size:11px;font-weight:normal">(trade/instrument・trade/security tradePolicy — #460、チェック時のみ)</span></h3>
+      <div class="card-head" style="margin-top:14px">
+        <h2 class="card-title">取扱判定 probe</h2>
+        <span class="info-tip" tabindex="0" aria-label="取扱判定 probe の注記" data-tip="trade/instrument・trade/security tradePolicy — #460、チェック時のみ">?</span>
+      </div>
       <pre id="probe-tradecheck-raw" class="bp-raw">(未実行)</pre>
-      <h3 style="margin-top:14px">meta</h3>
+      <h2 class="sub-head">meta</h2>
       <pre id="probe-meta" class="bp-raw">(未実行)</pre>
     </div>
   </details>
@@ -179,10 +172,15 @@ export function brokerProbeBody(args: {
     return US_ETF_KNOWN[symbol.toUpperCase()] ? 'US_ETF' : 'US_STOCK';
   }
 
+  // Maps this probe's own ok/ng/unknown/wait vocabulary onto the foundation's
+  // shared .pill color variants (ok/err/info/neutral) instead of a
+  // page-local color scale, so this page's status colors track the same
+  // tokens as every other diagnostic page.
+  var PILL_VARIANT = { ok: 'ok', ng: 'err', unknown: 'info', wait: 'neutral' };
   function setPill(id, kind, text) {
     var el = document.getElementById(id);
     if (!el) return;
-    el.className = 'bp-pill bp-pill-' + kind;
+    el.className = 'pill ' + (PILL_VARIANT[kind] || 'neutral');
     el.textContent = text;
   }
 
@@ -384,7 +382,7 @@ export function brokerProbeBody(args: {
       if (denyVariant) {
         setPill('bp-instrument-pill', 'ng', '取扱なし (確定)');
         bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> — 発注前検証が <code>TICKER_IS_DENY</code> を返しました。' +
-          '<span style="color:#c22">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>' +
+          '<span class="err">Webull JP の OpenAPI では発注できない銘柄です (確定)。</span>' +
           instSummaryHtml(instMatch);
         return;
       }
@@ -396,7 +394,7 @@ export function brokerProbeBody(args: {
       }).join('');
       bodyEl.innerHTML = '発注前検証がどの body shape でも通りませんでした:' +
         '<ul style="margin:4px 0 0 16px;padding:0;font-size:12px">' + lines + '</ul>' +
-        '<span class="muted" style="font-size:11px">エラー内容から shape を調整します — raw を共有してください。</span>';
+        '<span class="muted small">エラー内容から shape を調整します — raw を共有してください。</span>';
       return;
     }
     var responded = [];
@@ -446,7 +444,7 @@ export function brokerProbeBody(args: {
     } else {
       setPill('bp-instrument-pill', 'ng', '銘柄情報なし');
       bodyEl.innerHTML = '<strong>' + escHtml(symbol.toUpperCase()) + '</strong> は instrument 照会 (ETF/STOCK 両 category) に出てきません。' +
-        '<span style="color:#c22">Webull JP の取扱対象外の可能性が高く、発注しても TICKER_IS_DENY で拒否される見込みです。</span>';
+        '<span class="err">Webull JP の取扱対象外の可能性が高く、発注しても TICKER_IS_DENY で拒否される見込みです。</span>';
     }
   }
 
@@ -486,13 +484,13 @@ export function brokerProbeBody(args: {
     var price = extractPrice(section, priceKeys);
     var ms = Number(section.msTaken) || 0;
     bodyEl.innerHTML = price != null
-      ? '<span style="font-size:18px;font-weight:700" class="bp-num">' + escHtml(formatNumber(price)) + '</span> <span class="muted" style="font-size:11px">(' + ms + 'ms)</span>'
+      ? '<span style="font-size:18px;font-weight:700">' + escHtml(formatNumber(price)) + '</span> <span class="muted small">(' + ms + 'ms)</span>'
       : '<span class="muted">200 OK (' + ms + 'ms) — 価格フィールドは raw を確認</span>';
   }
 
   function renderPositionsList(section) {
     if (!section || section.phase !== 'response' || !section.ok) {
-      positionsListEl.innerHTML = '<span class="muted" style="font-size:12px">positions: ' +
+      positionsListEl.innerHTML = '<span class="muted small">positions: ' +
         escHtml(humanizeError(section)) + '</span>';
       rawEl.textContent = section ? prettify(section) : '(no data)';
       return;
@@ -500,7 +498,7 @@ export function brokerProbeBody(args: {
     rawEl.textContent = prettify(section);
     var items = parseBody(section);
     if (!Array.isArray(items) || items.length === 0) {
-      positionsListEl.innerHTML = '<span class="muted" style="font-size:12px">保有銘柄なし</span>';
+      positionsListEl.innerHTML = '<span class="muted small">保有銘柄なし</span>';
       return;
     }
     var html = items.map(function (item) {
@@ -512,7 +510,7 @@ export function brokerProbeBody(args: {
       var mv = escHtml(formatNumber(item.market_value));
       var cost = escHtml(formatNumber(item.cost_price));
       var cat = escHtml(inferCategory(item.symbol || ''));
-      return '<button type="button" class="bp-chip probe-pickbtn" data-symbol="' + sym + '" data-category="' + cat +
+      return '<button type="button" class="chip probe-pickbtn" data-symbol="' + sym + '" data-category="' + cat +
         '" style="display:block;width:100%;text-align:left;margin:0 0 4px">' +
         '<strong>' + sym + '</strong> ' + (name ? '— ' + name + ' ' : '') +
         '<span class="muted">qty=' + qty + ' cost=' + cost + ' mv=' + cur + ' ' + mv + ' (' + cat + ')</span>' +
@@ -548,29 +546,30 @@ export function brokerProbeBody(args: {
     var b = hit.body;
     var assets = Array.isArray(b.account_currency_assets) ? b.account_currency_assets : [];
     var rows = assets.map(function (a) {
-      return '<tr><td style="padding:2px 10px 2px 0"><code>' + escHtml(a.currency || '?') + '</code></td>' +
-        '<td style="padding:2px 10px;text-align:right" class="bp-num">' + escHtml(formatNumber(a.buying_power)) + '</td>' +
-        '<td style="padding:2px 10px;text-align:right" class="muted bp-num">cash ' + escHtml(formatNumber(a.cash_balance)) + '</td></tr>';
+      return '<tr><td><code>' + escHtml(a.currency || '?') + '</code></td>' +
+        '<td class="num">' + escHtml(formatNumber(a.buying_power)) + '</td>' +
+        '<td class="num muted">cash ' + escHtml(formatNumber(a.cash_balance)) + '</td></tr>';
     }).join('');
     el.innerHTML =
-      '<table style="font-size:12px;border-collapse:collapse"><tbody>' +
+      '<table><tbody>' +
       (rows || '<tr><td class="muted">(通貨別資産なし)</td></tr>') + '</tbody></table>' +
-      '<div class="muted" style="font-size:11px;margin-top:4px">via ' + escHtml(hit.label) + ' / 基準通貨 ' + escHtml(b.total_asset_currency || '?') + '</div>';
+      '<div class="muted small" style="margin-top:4px">via ' + escHtml(hit.label) + ' / 基準通貨 ' + escHtml(b.total_asset_currency || '?') + '</div>';
   }
 
   function renderDriftTable(body) {
     var tableBody = document.getElementById('probe-drift-table');
     if (!tableBody) return;
+    // Foundation .ok/.err/.muted set color from tokens — no page-local hex scale needed.
     function cell(section) {
-      if (!section) return '<td class="muted" style="padding:4px 8px">(no data)</td>';
+      if (!section) return '<td class="muted">(no data)</td>';
       var status = section.status == null ? section.phase : 'status=' + section.status;
       var ok = section.ok ? '✅' : (section.ok === false ? '❌' : '');
       var ms = section.msTaken == null ? '' : ' (' + (Number(section.msTaken) || 0) + 'ms)';
-      var color = section.ok ? '#0a8a0a' : (section.ok === false ? '#c22' : '#666');
-      return '<td style="padding:4px 8px;color:' + color + '">' + ok + ' ' + escHtml(status) + ms + '</td>';
+      var cls = section.ok ? 'ok' : (section.ok === false ? 'err' : 'muted');
+      return '<td class="' + cls + '">' + ok + ' ' + escHtml(status) + ms + '</td>';
     }
     function row(label, oldSection, newSection) {
-      return '<tr><td style="padding:4px 8px"><code>' + label + '</code></td>' +
+      return '<tr><td><code>' + label + '</code></td>' +
         cell(oldSection) + cell(newSection) + '</tr>';
     }
     tableBody.innerHTML =
