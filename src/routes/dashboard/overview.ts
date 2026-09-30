@@ -7,7 +7,7 @@ import { formatRealizedPnl } from './cron'
 import { ECHARTS_CDN } from './charts/shared'
 import { type EquityRange, renderPortfolioEquityChart, renderVixRegimeCell } from './portfolio'
 import { pickFreshQuote } from './positions'
-import { displaySymbol, esc, fmtJst, fmtNumber, safeJsonScript } from './shared'
+import { JST_FORMATTER, displaySymbol, esc, fmtJst, fmtNumber, fmtPriceCcy } from './shared'
 
 export type OverviewPanel = 'risk' | 'activity'
 
@@ -74,8 +74,8 @@ export interface OverviewData {
   runSignals: HomeRunSignals | null
   /** symbol → 実効 stop までの距離。計算できない銘柄は不在。 */
   stopDistances: Map<string, StopDistanceView>
-  /** 直近 30 日の成績 (勝ち / 負け / 発注エラー)。未取得は null。 */
-  activityStats: { wins: number; losses: number; errors: number } | null
+  /** 直近 30 日の成績 (勝ち / 負け / 発注エラー / 実現損益合計)。未取得は null。 */
+  activityStats: { wins: number; losses: number; errors: number; realizedPnlSum: number } | null
   portfolio: {
     dailyStartEquity: number
     dailyRealizedPnl: number
@@ -113,6 +113,7 @@ interface OpenPositionView {
   sym: string
   qty: number
   currency: SymbolCurrency
+  avgPrice: number
   price: number | null
   marketValue: number | null
   pnlPct: number | null
@@ -168,6 +169,7 @@ function collectOpenPositions(data: OverviewData): OpenPositionView[] {
       sym: r.state.symbol,
       qty: pos.qty,
       currency: data.universe.symbolCurrency[r.state.symbol] ?? 'USD',
+      avgPrice: pos.avgPrice,
       price,
       marketValue: price !== null ? pos.qty * price : null,
       pnlPct,
@@ -176,9 +178,26 @@ function collectOpenPositions(data: OverviewData): OpenPositionView[] {
   return out
 }
 
+// Page-scoped CSS for pieces the shared STYLE doesn't already cover (run-state
+// dot, hero-number layout). Kept out of layout.ts's STYLE per #ui-redesign so
+// a home-only tweak never risks every other page's <style> block.
+export const OVERVIEW_PAGE_STYLE = `
+  .stat-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:middle;background:var(--text-3)}
+  .stat-dot.live{background:var(--up)}
+  .stat-dot.hold{background:var(--warn)}
+  .stat-dot.alarm{background:var(--down)}
+  .stat-note{font-size:12.5px;font-weight:400}
+  .hero-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 14px}
+  .hero-row .hero-jpy{font-size:14px;font-weight:400;color:var(--text-2)}
+  .hero-row .hero-delta{font-size:14px;font-variant-numeric:tabular-nums}
+  .mini-note{font-size:12px;color:var(--text-3);margin:8px 0 0}
+  .stop-bar-wrap{min-width:88px}
+  .stop-bar-track{width:80px}
+`
+
 // Not configurable/hideable like the panels below: mode, trading on/off, and quote freshness
 // stay visible because hiding them risks an operator missing an unsafe state.
-function renderRunStatePanel(data: OverviewData): string {
+function renderRunStateStrip(data: OverviewData): string {
   const mode = data.dryRun
     ? { text: 'DRY-RUN', tone: 'hold' as const }
     : { text: 'LIVE', tone: 'live' as const }
@@ -195,15 +214,18 @@ function renderRunStatePanel(data: OverviewData): string {
       : warn > 0
         ? { text: `${warn} warning`, tone: 'hold' as const }
         : { text: '0', tone: 'plain' as const }
-  const card = (label: string, value: string, tone: 'live' | 'hold' | 'alarm' | 'plain') =>
-    `<div class="state-card${tone === 'plain' ? '' : ` ${tone}`}"><div class="kpi-label">${esc(label)}</div><div class="state-value">${value}</div></div>`
-  return `<div class="state-band">
-    ${card('実行モード', esc(mode.text), mode.tone)}
-    ${card('取引', esc(trading.text), trading.tone)}
-    ${card('最終 cron', cron.html, cron.tone)}
-    ${card('株価の鮮度', quote.html, quote.tone)}
-    ${card('VIX レジーム', `<span style="font-size:13px;font-weight:400">${renderVixRegimeCell(data.vixRegime)}</span>`, 'plain')}
-    ${card('未確認アラート', `<a href="/dashboard/alerts">${esc(alert.text)}</a>`, alert.tone)}
+  const stat = (label: string, valueHtml: string, tone: 'live' | 'hold' | 'alarm' | 'plain') => {
+    const dot = tone === 'plain' ? '' : `<span class="stat-dot ${tone}"></span>`
+    return `<div class="stat"><div class="stat-label">${esc(label)}</div><div class="stat-value">${dot}${valueHtml}</div></div>`
+  }
+  return `<div class="stat-strip">
+    ${stat('実行モード', esc(mode.text), mode.tone)}
+    ${stat('取引', esc(trading.text), trading.tone)}
+    ${stat('最終 cron', cron.html, cron.tone)}
+    ${stat('株価の鮮度', quote.html, quote.tone)}
+    ${stat('VIX レジーム', `<span class="stat-note">${renderVixRegimeCell(data.vixRegime)}</span>`, 'plain')}
+    ${stat('未確認アラート', `<a href="/dashboard/alerts">${esc(alert.text)}</a>`, alert.tone)}
+    ${buyingPowerStat()}
     <a class="state-kill" href="/dashboard/config" title="global_config で trading_enabled を切る">緊急停止</a>
   </div>`
 }
@@ -241,51 +263,142 @@ function latestQuoteFreshness(data: OverviewData): { html: string; tone: 'live' 
   return renderRelativeAge(new Date(latest).toISOString(), 15)
 }
 
+// Rendered inside the run-state strip as one more `.stat` cell — not a
+// full-width card — so a failed fetch never claims a whole row of the fold
+// for a raw error message (#ui-redesign Lane B). Fetched client-side (not
+// SSR) so a slow/failed /admin/buying-power call never blocks page render.
+function buyingPowerStat(): string {
+  return `<div class="stat" id="bp-stat">
+    <div class="stat-label">買付余力</div>
+    <div class="stat-value" id="bp-stat-value"><span class="muted stat-note">読込中…</span></div>
+  </div>
+  <script>
+  (function () {
+    var el = document.getElementById('bp-stat-value');
+    if (!el) return;
+    function esc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    fetch('/admin/buying-power', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : { status: 'unavailable', reason: 'http ' + r.status }; })
+      .then(function (d) {
+        if (!d || d.status !== 'ok') {
+          var reason = (d && d.reason) ? esc(String(d.reason).slice(0, 200)) : '';
+          el.innerHTML = '<span class="pill err">取得不能</span> <span class="info-tip" tabindex="0" aria-label="買付余力エラー詳細" data-tip="' + reason + '">?</span>';
+          return;
+        }
+        var parts = (d.byCurrency || []).map(function (a) {
+          var bp = Number(a.buyingPower);
+          var sym = a.currency === 'JPY' ? '¥' : (a.currency === 'USD' ? '$' : '');
+          return sym + (isFinite(bp) ? bp.toLocaleString('ja-JP', { maximumFractionDigits: a.currency === 'JPY' ? 0 : 2 }) : a.buyingPower);
+        });
+        el.textContent = parts.join(' / ') || '—';
+      })
+      .catch(function () {
+        el.innerHTML = '<span class="pill err">取得不能</span>';
+      });
+  })();
+  </script>`
+}
+
 export function kpiCard(label: string, value: string, sub?: string, subClass?: string): string {
   const subHtml = sub ? `<div class="kpi-sub ${subClass ?? 'muted'}">${sub}</div>` : ''
   return `<div class="kpi-card"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${value}</div>${subHtml}</div>`
 }
 
-function renderRiskPanel(data: OverviewData, open: OpenPositionView[]): string {
-  const exposurePill = renderExposurePill(data, open)
-  if (!data.symbolStateBound) {
-    return `<div class="panel"><div class="panel-title"><span>保有銘柄</span></div><p class="muted" style="margin:0">SYMBOL_STATE 未配線のため表示できません。</p></div>`
+// exposure% (open USD positions / today's start equity) + a headcount of
+// positions within 2pt of their stop — the two numbers an operator scans the
+// hero row for right after the headline equity figure.
+function renderExposureStopSummary(data: OverviewData, open: OpenPositionView[]): string {
+  const usd = open
+    .filter((o) => o.currency === 'USD' && o.marketValue !== null)
+    .reduce((a, o) => a + (o.marketValue ?? 0), 0)
+  const cap = data.portfolio?.dailyStartEquity ?? 0
+  const near = open.filter((o) => {
+    const s = data.stopDistances.get(o.sym)
+    return s !== undefined && s.toStopPct <= 2
+  }).length
+  const parts: string[] = []
+  if (cap > 0 && usd > 0) {
+    parts.push(`エクスポージャー ${fmtNumber((usd / cap) * 100, 0)}%`)
   }
-  if (open.length === 0) {
-    return `<div class="panel"><div class="panel-title"><span>保有銘柄 0 件</span>${exposurePill}</div><p class="muted" style="margin:0">保有中の銘柄はありません。</p></div>`
-  }
-  const rows = open
-    .map((o) => {
-      const stop = data.stopDistances.get(o.sym)
-      const pnlCls = o.pnlPct === null ? '' : o.pnlPct >= 0 ? 'ok' : 'err'
-      const state =
-        stop === undefined
-          ? '<span class="muted">—</span>'
-          : stop.toStopPct <= 0
-            ? '<span class="pill off">損切り水準</span>'
-            : stop.toStopPct <= 2
-              ? `<span class="pill warn">損切りまで ${fmtNumber(stop.toStopPct, 1)}%</span>`
-              : '<span class="pill">保有継続</span>'
-      return `<tr>
-        <td class="grow"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}" title="${esc(displaySymbol(o.sym, data.universe))}">${esc(o.sym)}</a></td>
-        <td class="num">${fmtNumber(o.qty, 0)}</td>
-        <td class="num">${o.price === null ? '<span class="muted">—</span>' : fmtNumber(o.price, 2)}</td>
-        <td class="num ${pnlCls}">${o.pnlPct === null ? '—' : `${fmtNumber(o.pnlPct, 2)}%`}</td>
-        <td>${state}</td>
-      </tr>`
-    })
-    .join('')
-  return `<div class="panel">
-    <div class="panel-title"><span>保有銘柄 ${open.length} 件 / エクスポージャー</span>${exposurePill}</div>
-    <table class="fit">
-      <thead><tr><th class="grow">銘柄</th><th class="num">数量</th><th class="num">現在値</th><th class="num">損益</th><th>状態</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <p class="muted" style="font-size:12px;margin:10px 0 0">実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は <a href="/dashboard/charts?tab=symbol">銘柄</a> へ。</p>
+  if (near > 0) parts.push(`<span class="warn">損切り接近 ${near} 件</span>`)
+  if (parts.length === 0) return ''
+  return `<p class="mini-note">${parts.join(' ・ ')}</p>`
+}
+
+function renderPerformanceCard(data: OverviewData, open: OpenPositionView[]): string {
+  const st = data.activityStats
+  const winRate = st && st.wins + st.losses > 0 ? (st.wins / (st.wins + st.losses)) * 100 : null
+  const tiles = [
+    kpiCard('勝ち', st ? String(st.wins) : '—'),
+    kpiCard('負け', st ? String(st.losses) : '—'),
+    kpiCard('勝率', winRate !== null ? `${fmtNumber(winRate, 0)}%` : '—'),
+    kpiCard('発注エラー', st ? String(st.errors) : '—', st && st.errors > 0 ? '要確認' : undefined, 'err'),
+    kpiCard('実現損益', st ? `$${formatRealizedPnl(st.realizedPnlSum)}` : '—'),
+  ]
+  return `<div class="card">
+    <div class="card-head"><span class="card-title">直近30日</span></div>
+    <div class="kpi-grid" style="margin-bottom:0">${tiles.join('')}</div>
+    ${renderExposureStopSummary(data, open)}
   </div>`
 }
 
-/** 保有銘柄合計 / total_capital の比率 pill。total_capital 未設定なら件数のみ。 */
+function renderStopBar(stop: StopDistanceView | undefined): string {
+  if (stop === undefined) return '<span class="muted">—</span>'
+  if (stop.toStopPct <= 0) {
+    return `<div class="stop-bar-wrap"><div class="bar-track stop-bar-track"><div class="bar-fill down" style="width:100%"></div></div><span class="err">損切り水準</span></div>`
+  }
+  // Normalized against 2x the effective stop's own magnitude so breakeven
+  // (toStopPct == |effectiveStopPct|) reads as the bar's halfway point,
+  // regardless of whether the stop is pct-based or ATR-widened.
+  const magnitude = Math.abs(stop.effectiveStopPct) || 4
+  const fillPct = Math.max(4, Math.min(100, (stop.toStopPct / (magnitude * 2)) * 100))
+  const tone = stop.toStopPct <= 2 ? '' : 'up'
+  const style = tone === '' ? `width:${fillPct}%;background:var(--warn)` : `width:${fillPct}%`
+  return `<div class="stop-bar-wrap"><div class="bar-track stop-bar-track"><div class="bar-fill ${tone}" style="${style}"></div></div><span class="muted stat-note">あと ${fmtNumber(stop.toStopPct, 1)}%</span></div>`
+}
+
+function renderHoldingsCard(data: OverviewData, open: OpenPositionView[]): string {
+  const stopTip = `<span class="info-tip" tabindex="0" aria-label="stop 距離の説明" data-tip="${esc(
+    '実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は 銘柄 タブへ。',
+  )}">?</span>`
+  if (!data.symbolStateBound) {
+    return `<div class="card">
+      <div class="card-head"><span class="card-title">保有銘柄</span></div>
+      <div class="empty">SYMBOL_STATE 未配線のため表示できません。</div>
+    </div>`
+  }
+  if (open.length === 0) {
+    return `<div class="card">
+      <div class="card-head"><span class="card-title">保有銘柄 0 件</span></div>
+      <div class="empty">保有中の銘柄はありません。</div>
+    </div>`
+  }
+  const rows = open
+    .map((o) => {
+      const pnlCls = o.pnlPct === null ? '' : o.pnlPct >= 0 ? 'ok' : 'err'
+      return `<tr>
+        <td class="grow"><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(o.sym)}" title="${esc(displaySymbol(o.sym, data.universe))}">${esc(o.sym)}</a></td>
+        <td class="num">${fmtNumber(o.qty, 0)}</td>
+        <td class="num">${fmtPriceCcy(o.avgPrice, o.currency)}</td>
+        <td class="num">${o.price === null ? '<span class="muted">—</span>' : fmtPriceCcy(o.price, o.currency)}</td>
+        <td class="num ${pnlCls}">${o.pnlPct === null ? '—' : `${fmtNumber(o.pnlPct, 2)}%`}</td>
+        <td>${renderStopBar(data.stopDistances.get(o.sym))}</td>
+      </tr>`
+    })
+    .join('')
+  const exposurePill = renderExposurePill(data, open)
+  return `<div class="card">
+    <div class="card-head"><span class="card-title">保有銘柄 ${open.length} 件</span>${exposurePill}</div>
+    <div class="tablewrap"><table class="fit">
+      <thead><tr><th class="grow">銘柄</th><th class="num">数量</th><th class="num">平均取得</th><th class="num">現在値</th><th class="num">損益率</th><th>stop 距離 ${stopTip}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </div>`
+}
+
+/** 保有銘柄合計 / total_capital の比率 pill。total_capital 未設定なら省略。 */
 function renderExposurePill(data: OverviewData, open: OpenPositionView[]): string {
   const usd = open
     .filter((o) => o.currency === 'USD' && o.marketValue !== null)
@@ -293,77 +406,48 @@ function renderExposurePill(data: OverviewData, open: OpenPositionView[]): strin
   const cap = data.portfolio?.dailyStartEquity ?? 0
   if (!(cap > 0) || usd <= 0) return ''
   const pct = (usd / cap) * 100
-  const cls = pct >= 60 ? 'warn' : ''
-  return `<span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span>`
+  const cls = pct >= 60 ? 'warn' : 'neutral'
+  return `<span class="card-actions"><span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span></span>`
 }
 
-function renderRecentPanel(data: OverviewData): string {
+function fmtJstShort(iso: string): string {
+  const d = new Date(iso)
+  if (!Number.isFinite(d.getTime())) return iso
+  const parts = JST_FORMATTER.formatToParts(d)
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
+  return `${pick('month')}/${pick('day')} ${pick('hour')}:${pick('minute')}`
+}
+
+function renderRecentTradesCard(data: OverviewData): string {
+  const st = data.activityStats
+  const meta = st
+    ? `<span class="muted stat-note">直近30日 勝ち${st.wins}/負け${st.losses}・発注エラー${st.errors}</span>`
+    : ''
   const trades = data.recentTrades
     .map((t) => {
-      const sideClass = t.side === 'BUY' ? 'ok' : t.side === 'SELL' ? 'err' : 'muted'
+      const sidePill = t.side === 'BUY' ? '<span class="pill buy">BUY</span>' : t.side === 'SELL' ? '<span class="pill sell">SELL</span>' : '<span class="muted">—</span>'
       const pnl = t.realizedPnl !== null ? formatRealizedPnl(t.realizedPnl) : '<span class="muted">—</span>'
       return `<tr>
-        <td class="muted" style="font-size:12px">${esc(fmtJst(t.timestamp))}</td>
+        <td class="muted stat-note" title="${esc(fmtJst(t.timestamp))}">${esc(fmtJstShort(t.timestamp))}</td>
         <td class="grow"><strong title="${esc(displaySymbol(t.symbol ?? '—', data.universe))}">${esc(t.symbol ?? '—')}</strong></td>
-        <td class="${sideClass}">${esc(t.side ?? '—')}</td>
+        <td>${sidePill}</td>
         <td class="num">${t.filledQty !== null ? esc(t.filledQty) : '—'}</td>
         <td class="num">${t.filledPrice !== null ? fmtNumber(t.filledPrice, 2) : '—'}</td>
         <td class="num">${pnl}</td>
       </tr>`
     })
     .join('')
-  const recentTable = data.recentTrades.length
-    ? `<table class="fit"><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table>`
-    : '<p class="muted">約定履歴がありません。</p>'
-  // Mode / trading / VIX live in renderRunStatePanel now — not repeated here.
-  return `<div class="panel">
-    <div class="panel-title" style="display:flex;justify-content:space-between;align-items:baseline"><span>直近の約定</span><span style="font-weight:400;font-size:12px"><a href="/dashboard/cron">判定ログ →</a></span></div>
-    ${recentTable}
-    <div style="margin-top:8px"><a href="/dashboard/trades">約定履歴をすべて見る →</a></div>
-    ${activityFooter(data)}
+  const body = data.recentTrades.length
+    ? `<div class="tablewrap"><table class="fit"><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table></div>`
+    : '<div class="empty">約定履歴がありません。</div>'
+  return `<div class="card">
+    <div class="card-head">
+      <span class="card-title">直近の約定</span>
+      ${meta}
+      <span class="card-actions"><a href="/dashboard/cron">判定ログ →</a> <a href="/dashboard/trades">すべて見る →</a></span>
+    </div>
+    ${body}
   </div>`
-}
-
-/** Renders nothing (not a placeholder) when activityStats hasn't been loaded. */
-function activityFooter(data: OverviewData): string {
-  const st = data.activityStats
-  if (st === null) return ''
-  return `<p class="muted" style="font-size:12px;margin:10px 0 0">直近 30 日 ・ 勝ち ${st.wins} / 負け ${st.losses} ・ 発注エラー ${st.errors}</p>`
-}
-
-// Fetched client-side (not SSR) so a slow/failed /admin/buying-power call never blocks the
-// page render; a failure degrades to a ⚠ badge instead of breaking the page.
-export function buyingPowerBadge(): string {
-  return `<div id="buying-power-badge" class="panel" style="display:flex;align-items:center;gap:8px;font-size:13px;padding:10px 14px">
-    <strong>買付余力</strong> <span class="muted">読込中…</span>
-  </div>
-  <script>
-  (function () {
-    var el = document.getElementById('buying-power-badge');
-    if (!el) return;
-    fetch('/admin/buying-power', { credentials: 'same-origin' })
-      .then(function (r) { return r.ok ? r.json() : { status: 'unavailable', reason: 'http ' + r.status }; })
-      .then(function (d) {
-        if (!d || d.status !== 'ok') {
-          el.innerHTML = '<strong>買付余力</strong> <span style="color:#c22;font-weight:600">⚠ 取得不可</span>' +
-            ' <span class="muted" style="font-size:11px">' + ((d && d.reason) ? String(d.reason).slice(0, 80) : '') + '</span>';
-          return;
-        }
-        var parts = (d.byCurrency || []).map(function (a) {
-          var bp = Number(a.buyingPower);
-          var sym = a.currency === 'JPY' ? '¥' : (a.currency === 'USD' ? '$' : '');
-          var v = isFinite(bp) ? bp.toLocaleString('ja-JP', { maximumFractionDigits: a.currency === 'JPY' ? 0 : 2 }) : a.buyingPower;
-          var zero = isFinite(bp) && bp <= 0;
-          return '<span style="' + (zero ? 'color:#86868b' : 'font-weight:600') + '">' + a.currency + ' ' + sym + v + '</span>';
-        });
-        el.innerHTML = '<strong>買付余力</strong> ' + (parts.join(' &nbsp;/&nbsp; ') || '—') +
-          ' <span class="muted" style="font-size:11px">(口座 ' + (d.baseCurrency || '') + ' 総現金 ' + Number(d.totalCash).toLocaleString('ja-JP') + ')</span>';
-      })
-      .catch(function () {
-        el.innerHTML = '<strong>買付余力</strong> <span style="color:#c22;font-weight:600">⚠ 取得不可</span>';
-      });
-  })();
-  </script>`
 }
 
 // Each ECharts-using panel embeds its own CDN <script> tag so it works standalone; this
@@ -383,20 +467,62 @@ export function overviewBody(data: OverviewData): string {
   const open = collectOpenPositions(data)
   const sections: string[] = []
 
-  sections.push(renderRunStatePanel(data))
+  sections.push(renderRunStateStrip(data))
+
+  if (data.panels.has('activity')) {
+    sections.push(
+      `<div class="grid cols-12" style="margin-top:16px">
+        <div class="span-8"><div class="card">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div></div>
+        <div class="span-4">${renderPerformanceCard(data, open)}</div>
+      </div>`,
+    )
+  }
 
   if (data.panels.has('risk')) {
     sections.push(areaLabel('リスクと保有銘柄'))
-    sections.push(renderRiskPanel(data, open))
+    sections.push(renderHoldingsCard(data, open))
   }
 
   if (data.panels.has('activity')) {
     sections.push(areaLabel('最近の活動'))
-    sections.push(renderRecentPanel(data))
-    sections.push(
-      `<div class="panel">${renderPortfolioEquityChart(data.snapshots, data.range, '/dashboard')}</div>`,
-    )
+    sections.push(renderRecentTradesCard(data))
   }
 
-  return dedupeEchartsCdnTag(buyingPowerBadge() + sections.join(''))
+  return dedupeEchartsCdnTag(sections.join(''))
+}
+
+// Retained for /dashboard/symbols (Lane D), which still shows its own
+// full-width buying-power banner — the compact run-state stat above replaced
+// only the home page's use of this component, not the shared function.
+export function buyingPowerBadge(): string {
+  return `<div id="buying-power-badge" class="card" style="display:flex;align-items:center;gap:8px;font-size:13px;padding:10px 14px">
+    <strong>買付余力</strong> <span class="muted">読込中…</span>
+  </div>
+  <script>
+  (function () {
+    var el = document.getElementById('buying-power-badge');
+    if (!el) return;
+    fetch('/admin/buying-power', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : { status: 'unavailable', reason: 'http ' + r.status }; })
+      .then(function (d) {
+        if (!d || d.status !== 'ok') {
+          el.innerHTML = '<strong>買付余力</strong> <span style="color:var(--down);font-weight:600">⚠ 取得不可</span>' +
+            ' <span class="muted" style="font-size:11px">' + ((d && d.reason) ? String(d.reason).slice(0, 80) : '') + '</span>';
+          return;
+        }
+        var parts = (d.byCurrency || []).map(function (a) {
+          var bp = Number(a.buyingPower);
+          var sym = a.currency === 'JPY' ? '¥' : (a.currency === 'USD' ? '$' : '');
+          var v = isFinite(bp) ? bp.toLocaleString('ja-JP', { maximumFractionDigits: a.currency === 'JPY' ? 0 : 2 }) : a.buyingPower;
+          var zero = isFinite(bp) && bp <= 0;
+          return '<span style="' + (zero ? 'color:var(--text-3)' : 'font-weight:600') + '">' + a.currency + ' ' + sym + v + '</span>';
+        });
+        el.innerHTML = '<strong>買付余力</strong> ' + (parts.join(' &nbsp;/&nbsp; ') || '—') +
+          ' <span class="muted" style="font-size:11px">(口座 ' + (d.baseCurrency || '') + ' 総現金 ' + Number(d.totalCash).toLocaleString('ja-JP') + ')</span>';
+      })
+      .catch(function () {
+        el.innerHTML = '<strong>買付余力</strong> <span style="color:var(--down);font-weight:600">⚠ 取得不可</span>';
+      });
+  })();
+  </script>`
 }

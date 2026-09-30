@@ -36,16 +36,70 @@ export async function safeLoadPortfolioSnapshots(
   }
 }
 
+interface EquityHeroStats {
+  latestUsd: number | null
+  latestJpy: number | null
+  deltaUsd: number | null
+  deltaPct: number | null
+}
+
+// snapshots load oldest-first (portfolioEquitySnapshotRepo orders ASC to feed
+// the chart directly), so the first USD value seen is the range start and the
+// last is the current reading.
+function computeHeroStats(snapshots: PortfolioEquitySnapshotRow[]): EquityHeroStats {
+  let firstUsd: number | null = null
+  let latestUsd: number | null = null
+  let latestJpy: number | null = null
+  for (const row of snapshots) {
+    const usd =
+      typeof row.dailyStartEquityUsd === 'number' && Number.isFinite(row.dailyStartEquityUsd)
+        ? row.dailyStartEquityUsd
+        : null
+    const jpy =
+      typeof row.dailyStartEquityJpy === 'number' && Number.isFinite(row.dailyStartEquityJpy)
+        ? row.dailyStartEquityJpy
+        : null
+    if (usd !== null) {
+      if (firstUsd === null) firstUsd = usd
+      latestUsd = usd
+    }
+    if (jpy !== null) latestJpy = jpy
+  }
+  const deltaUsd = firstUsd !== null && latestUsd !== null ? latestUsd - firstUsd : null
+  const deltaPct =
+    deltaUsd !== null && firstUsd !== null && firstUsd !== 0 ? (deltaUsd / firstUsd) * 100 : null
+  return { latestUsd, latestJpy, deltaUsd, deltaPct }
+}
+
+function renderHeroDelta(stats: EquityHeroStats): string {
+  if (stats.deltaUsd === null || stats.deltaPct === null) return ''
+  const cls = stats.deltaUsd > 0 ? 'ok' : stats.deltaUsd < 0 ? 'err' : 'muted'
+  const sign = stats.deltaUsd > 0 ? '+' : ''
+  return `<span class="hero-delta ${cls}">${sign}$${fmtNumber(stats.deltaUsd, 0)} (${sign}${stats.deltaPct.toFixed(1)}%)</span>`
+}
+
+function renderHeroValue(stats: EquityHeroStats): string {
+  const usdText = stats.latestUsd !== null ? `$${fmtNumber(stats.latestUsd, 0)}` : '—'
+  const jpyText =
+    stats.latestJpy !== null ? `<span class="hero-jpy">(¥${fmtNumber(stats.latestJpy, 0)})</span>` : ''
+  return `<div class="hero-row"><span class="kpi-value hero">${usdText}</span>${jpyText}${renderHeroDelta(stats)}</div>`
+}
+
+// Card title is "総資産" only (no "チャート" suffix) — the redesigned home
+// treats this as the account's headline number, with the chart as supporting
+// detail, not the other way around (#ui-redesign Lane B).
 export function renderPortfolioEquityChart(
   snapshots: PortfolioEquitySnapshotRow[],
   range: EquityRange,
   basePath = '/dashboard/portfolio',
 ): string {
   const rangeTabs = renderEquityRangeTabs(range, basePath)
+  const infoTip = `<span class="info-tip" tabindex="0" aria-label="総資産チャートの説明" data-tip="${esc(
+    'PortfolioStateDO.dailyStartEquity の roll-daily 時点スナップショット。実現損益の推移 (レビュー) は trade_journal.realized_pnl の累積で、こちらは口座総資産そのもの (cash + 保有時価)。USD / JPY を別軸でプロットします。',
+  )}">?</span>`
+  const head = `<div class="card-head"><span class="card-title">総資産</span>${infoTip}<span class="card-actions">${rangeTabs}</span></div>`
   if (snapshots.length === 0) {
-    return `<h3 style="margin-top:24px">総資産チャート</h3>
-    ${rangeTabs}
-    <p class="muted">まだ roll-daily 実行履歴がありません。<code>/admin/portfolio/roll-daily</code> を実行すると、ここに時系列が描画されます。</p>`
+    return `${head}<p class="empty">まだ roll-daily 実行履歴がありません。<code>/admin/portfolio/roll-daily</code> を実行すると、ここに時系列が描画されます。</p>`
   }
   const usdPoints: Array<{ date: string; value: number | null }> = []
   const jpyPoints: Array<{ date: string; value: number | null }> = []
@@ -66,6 +120,7 @@ export function renderPortfolioEquityChart(
     usdPoints.push({ date, value: usd })
     jpyPoints.push({ date, value: jpy })
   }
+  const stats = computeHeroStats(snapshots)
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
       if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
@@ -96,16 +151,21 @@ export function renderPortfolioEquityChart(
           itemStyle: { color: t.warn },
         });
       }
-      var yAxis = [{ type: 'value', name: 'USD', axisLabel: { formatter: '{value}' } }];
+      var yAxis = [{ type: 'value', name: 'USD', scale: true, axisLabel: { formatter: '{value}' } }];
       if (data.hasUsd && data.hasJpy) {
-        yAxis.push({ type: 'value', name: 'JPY', axisLabel: { formatter: '{value}' } });
+        yAxis.push({ type: 'value', name: 'JPY', scale: true, axisLabel: { formatter: '{value}' } });
       } else if (!data.hasUsd && data.hasJpy) {
-        yAxis = [{ type: 'value', name: 'JPY', axisLabel: { formatter: '{value}' } }];
+        yAxis = [{ type: 'value', name: 'JPY', scale: true, axisLabel: { formatter: '{value}' } }];
       }
-      // No in-canvas title: the card head above already reads "総資産チャート".
+      // JPY defaults to hidden via the legend — the hero number above already
+      // shows it, and a second scale drawn by default competes with the USD
+      // line for attention on a chart whose point is "is USD going up".
+      var legend = { top: 4 };
+      if (data.hasJpy) legend.selected = { JPY: false };
+      // No in-canvas title: the card head above already reads "総資産".
       window.wtChart(document.getElementById('portfolio-equity-chart'), {
         tooltip: { trigger: 'axis', valueFormatter: function (v) { return v == null ? '—' : Number(v).toFixed(2); } },
-        legend: { top: 4 },
+        legend: legend,
         grid: { left: 50, right: 20, top: 40, bottom: 40, containLabel: true },
         xAxis: { type: 'category', data: dates },
         yAxis: yAxis,
@@ -113,13 +173,9 @@ export function renderPortfolioEquityChart(
       });
     });
   `
-  return `<div class="card-head"><span class="card-title">総資産チャート</span><span class="card-actions">${rangeTabs}</span></div>
-  <p class="muted" style="font-size:12px">
-    <code>PortfolioStateDO.dailyStartEquity</code> の roll-daily 時点スナップショット。
-    <code>/dashboard/charts?tab=overview</code> は <code>trade_journal.realized_pnl</code> の
-    累積で、こちらは口座総資産そのもの (cash + 保有時価)。USD / JPY を別軸でプロット。
-  </p>
-  <div id="portfolio-equity-chart" style="width:100%;height:320px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-top:12px"></div>
+  return `${head}
+  ${renderHeroValue(stats)}
+  <div id="portfolio-equity-chart" style="width:100%;height:260px"></div>
   ${safeJsonScript('__equityChartData', { usd: usdPoints, jpy: jpyPoints, hasUsd, hasJpy })}
   <script src="${ECHARTS_CDN}" defer></script>
   <script>${initScript}</script>`
@@ -127,9 +183,9 @@ export function renderPortfolioEquityChart(
 
 function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portfolio'): string {
   const options: Array<{ id: EquityRange; label: string }> = [
-    { id: '30d', label: '30 日' },
-    { id: '90d', label: '90 日' },
-    { id: '365d', label: '365 日' },
+    { id: '30d', label: '30日' },
+    { id: '90d', label: '90日' },
+    { id: '365d', label: '365日' },
     { id: 'all', label: '全期間' },
   ]
   const links = options
@@ -138,7 +194,7 @@ function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portf
       return `<a class="${cls}" href="${basePath}?range=${opt.id}">${opt.label}</a>`
     })
     .join(' ')
-  return `<div class="tab-strip" style="margin-top:12px">${links}</div>`
+  return `<div class="seg">${links}</div>`
 }
 
 // The snapshot table stores only the regime label, not the VIX value itself —

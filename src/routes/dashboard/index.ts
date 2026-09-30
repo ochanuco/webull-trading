@@ -58,6 +58,7 @@ import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
 import {
   ALL_OVERVIEW_PANELS,
+  OVERVIEW_PAGE_STYLE,
   type HomeRunSignals,
   type OverviewData,
   type StopDistanceView,
@@ -154,22 +155,24 @@ async function loadHomeRunSignals(db: D1Database): Promise<HomeRunSignals> {
 
 async function loadActivityStats(
   db: D1Database,
-): Promise<{ wins: number; losses: number; errors: number }> {
+): Promise<{ wins: number; losses: number; errors: number; realizedPnlSum: number }> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
   const row = await db
     .prepare(
       `SELECT
          SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
          SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
-         SUM(CASE WHEN error_class IS NOT NULL THEN 1 ELSE 0 END) AS errors
+         SUM(CASE WHEN error_class IS NOT NULL THEN 1 ELSE 0 END) AS errors,
+         SUM(realized_pnl) AS realizedPnlSum
        FROM trade_journal WHERE timestamp >= ?`,
     )
     .bind(since)
-    .first<{ wins: number | null; losses: number | null; errors: number | null }>()
+    .first<{ wins: number | null; losses: number | null; errors: number | null; realizedPnlSum: number | null }>()
   return {
     wins: Number(row?.wins ?? 0) || 0,
     losses: Number(row?.losses ?? 0) || 0,
     errors: Number(row?.errors ?? 0) || 0,
+    realizedPnlSum: Number(row?.realizedPnlSum ?? 0) || 0,
   }
 }
 
@@ -307,7 +310,7 @@ export const dashboard = new Hono<DashboardBindings>()
         tradingEnabled: resolveTradingEnabled(global.tradingEnabled, c.env.TRADING_ENABLED),
         universe,
       }
-      return c.html(renderLayout(c, 'ダッシュボード', overviewBody(data)))
+      return c.html(renderLayout(c, 'ダッシュボード', overviewBody(data), '', OVERVIEW_PAGE_STYLE))
     } catch (err) {
       return c.html(renderLayout(c, 'ダッシュボード', unavailable(messageOf(err))))
     }
