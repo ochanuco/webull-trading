@@ -2,7 +2,7 @@ import type { SymbolUniverse } from '../../infrastructure/db/symbolUniverse'
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
 import { and, asc, desc, eq, lt, type SQL } from 'drizzle-orm'
-import { LOG_COPY_ALL_BTN, clampLimit, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import { LOG_COPY_ALL_BTN, LOG_COPY_BTN_STYLE, SYMBOL_LINK_STYLE, clampLimit, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtJstCompactCell, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 // A skipped (closed-market) tick never writes a strategy_decision_log row,
 // so the matrix distinguishes "closed" from "no decision" by calendar here
 // at render time rather than at write time.
@@ -292,8 +292,8 @@ function renderCronViewPills(
 ): string {
   const symbolQs = symbolFilter ? `&symbol=${encodeURIComponent(symbolFilter)}` : ''
   const pill = (label: string, href: string, isActive: boolean): string =>
-    `<a href="${href}" class="chip${isActive ? ' active' : ''}" style="margin-right:6px">${esc(label)}</a>`
-  return `<nav style="margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:2px">${pill('一覧', `/dashboard/cron?limit=${limit}${symbolQs}`, active === 'list')}${pill('マトリクス', `/dashboard/cron?view=matrix${symbolQs}`, active === 'matrix')}</nav>`
+    `<a href="${href}"${isActive ? ' class="active"' : ''}>${esc(label)}</a>`
+  return `<div class="seg">${pill('一覧', `/dashboard/cron?limit=${limit}${symbolQs}`, active === 'list')}${pill('マトリクス', `/dashboard/cron?view=matrix${symbolQs}`, active === 'matrix')}</div>`
 }
 
 export function cronBody(
@@ -318,10 +318,10 @@ export function cronBody(
       ? `/dashboard/cron?symbol=${encodeURIComponent(symbolFilter)}&limit=${limit}${sessionQs}`
       : `/dashboard/cron?limit=${limit}${sessionQs}`
   const header = clientOrderIdFilter
-    ? `<p class="filter-banner">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a> ${copyAllBtn}</p>`
+    ? `<p class="filter-banner">注文 <code>${esc(clientOrderIdFilter)}</code> の判定のみ表示。<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(clientOrderIdFilter)}">約定を見る</a> / <a href="/dashboard/cron">全件へ戻る</a></p>`
     : symbolFilter
-      ? `<p class="filter-banner">Showing ${rows.length} decisions for <strong>${esc(displaySymbol(symbolFilter, universe))}</strong>。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/trades?symbol=${encodeURIComponent(symbolFilter)}">約定を見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a> / <a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
-      : `<p class="filter-banner">Showing ${rows.length} decisions。<code>?symbol=SOXL</code> で絞り込み可能。<a href="/dashboard/cron/json" target="_blank" rel="noreferrer">最新run JSON</a> ${copyAllBtn}</p>`
+      ? `<p class="filter-banner">銘柄 <strong>${esc(displaySymbol(symbolFilter, universe))}</strong> のみ表示。<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(symbolFilter)}">チャートで見る</a> / <a href="/dashboard/trades?symbol=${encodeURIComponent(symbolFilter)}">約定を見る</a> / <a href="/dashboard/cron">全銘柄へ戻る</a></p>`
+      : ''
   const pagination = renderPaginationNav({
     baseHref,
     before,
@@ -330,23 +330,33 @@ export function cronBody(
   })
   const rail = renderCronSymbolRail(universe, symbolFilter, limit)
   const stripSession = baseHref.replace('&session=all', '')
-  const sessionPills = `<span class="muted" style="font-size:12px;margin-left:8px">時間帯:</span>
-    <a href="${stripSession}" class="chip${sessionFilter === 'open' ? ' active' : ''}">開場中のみ</a>
-    <a href="${stripSession}&session=all" class="chip${sessionFilter === 'all' ? ' active' : ''}" title="休場時間帯に書かれた行 (手動 run 等) も表示する">全時間帯</a>`
-  const viewPills = renderCronViewPills('list', limit, symbolFilter).replace('</nav>', `${sessionPills}</nav>`)
-  const main =
+  const sessionSeg = `<div class="seg">
+    <a href="${stripSession}"${sessionFilter === 'open' ? ' class="active"' : ''}>開場中のみ</a>
+    <a href="${stripSession}&session=all"${sessionFilter === 'all' ? ' class="active"' : ''} title="休場時間帯に書かれた行 (手動 run 等) も表示する">全時間帯</a>
+  </div>`
+  const jsonLink = clientOrderIdFilter
+    ? ''
+    : `<a href="/dashboard/cron/json" target="_blank" rel="noreferrer" class="chip">最新run JSON</a>`
+  const countLine = `<span class="muted small">${rows.length} 件 (limit=${limit})</span>`
+  const cardActions = `${renderCronViewPills('list', limit, symbolFilter)}${sessionSeg}${countLine}${jsonLink}${copyAllBtn}`
+  const cardHead = `<div class="card-head"><h2 class="card-title">戦略判定</h2><span class="info-tip" tabindex="0" aria-label="絞り込みの注記" data-tip="URL に ?symbol=SOXL を付けると銘柄で絞り込めます。">?</span><div class="card-actions">${cardActions}</div></div>`
+  const cardBody =
     rows.length === 0
-      ? `${viewPills}${header}<p class="muted">${
+      ? `${cardHead}${header}<p class="empty">${
           sessionFilter === 'open' && pageLastId !== undefined
             ? 'このページの判定はすべて休場時間帯 (手動 run 等) のため非表示です。'
             : '判定ログがまだありません。'
         }</p>${pagination}`
-      : `${viewPills}${header}
+      : `${cardHead}${header}
   ${renderDecisionTable(rows, universe, {
     copyVarName: '__cronCopy',
     showSymbol: true,
     filterLabel: `symbol=${symbolFilter ?? 'all'}${clientOrderIdFilter ? `, clientOrderId=${clientOrderIdFilter}` : ''}, limit=${limit}`,
   })}${pagination}`
+  // `.small` also lives inside `renderDecisionTable`'s own <style> (needed
+  // there since charts/symbol.ts calls it standalone) — repeated here since
+  // the empty-rows branch above never renders that table.
+  const main = `<style>.small{font-size:12px}</style><div class="card">${cardBody}</div>`
   return rail ? `<div class="symbol-layout">${rail}<div class="symbol-main">${main}</div></div>` : main
 }
 
@@ -358,16 +368,16 @@ export function renderDecisionTable(
 ): string {
   const tbody = rows
     .map((r) => {
+      // Kept in sync with charts/symbol.ts's `decisionPillClass` — both render
+      // the same decision enum as a pill and must agree on its color.
       const cls =
         r.decision === 'BUY'
           ? 'ok'
-          : r.decision === 'SELL'
+          : r.decision === 'SELL' || r.decision === 'SKIP'
             ? 'warn'
             : r.decision === 'ERROR' || r.decision === 'REJECT'
               ? 'err'
-              : r.decision === 'SKIP'
-                ? 'warn'
-                : 'muted'
+              : 'neutral'
       const realizedCell =
         r.realizedPnl === null || r.realizedPnl === undefined
           ? '-'
@@ -381,16 +391,21 @@ export function renderDecisionTable(
           ? `<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(r.clientOrderId)}" title="この注文の約定履歴を見る">${esc(fillText)}</a>`
           : esc(fillText)
       const inactive = isSymbolInactive(r.symbol, universe)
-      const symbolClass = inactive ? ' class="symbol-disabled"' : ''
-      const titleAttr = inactive ? ` title="${esc(inactiveTooltip(r.symbol, universe))}"` : ''
+      // Ticker + name render as separate spans (not the concatenated
+      // "TICKER-Name" `displaySymbol` string) so `.sym-link`'s ellipsis can
+      // truncate the name alone instead of wrapping the whole cell to a 2nd
+      // line; the concatenated form still carries the full `title` tooltip.
+      const name = universe?.symbolName[r.symbol.toUpperCase()] ?? null
+      const fullLabel = displaySymbol(r.symbol, universe)
+      const titleAttr = ` title="${esc(inactive ? `${fullLabel} — ${inactiveTooltip(r.symbol, universe)}` : fullLabel)}"`
       const symbolCell = opts.showSymbol
-        ? `<td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${titleAttr}><strong><span${symbolClass}>${esc(displaySymbol(r.symbol, universe))}</span></strong></a> <a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}" class="muted" title="この銘柄の判定だけに絞り込み" style="font-size:11px;text-decoration:none">▼</a></td>`
+        ? `<td><a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}"${titleAttr} class="sym-link${inactive ? ' symbol-disabled' : ''}">${esc(r.symbol)}${name ? ` <span class="sym-name">${esc(name)}</span>` : ''}</a> <a href="/dashboard/cron?symbol=${encodeURIComponent(r.symbol)}" class="muted small" title="この銘柄の判定だけに絞り込み">▼</a></td>`
         : ''
       return `<tr>
         <td>${logCopyRowBtn(r.id)}</td>
-        <td class="muted">${esc(fmtJst(r.timestamp))}</td>
+        <td class="muted">${fmtJstCompactCell(r.timestamp)}</td>
         ${symbolCell}
-        <td class="${cls}">${esc(r.decision)}</td>
+        <td><span class="pill ${cls}">${esc(r.decision)}</span></td>
         <td>${cronReasonCell(r)}</td>
         <td>${r.price === null ? '-' : fmtNumber(r.price, 2)}</td>
         <td class="muted">${fillCell}</td>
@@ -398,12 +413,17 @@ export function renderDecisionTable(
       </tr>`
     })
     .join('')
-  return `<table>
+  return `<style>.small{font-size:12px}
+  table.decision-table th{white-space:nowrap}
+  ${LOG_COPY_BTN_STYLE}
+  ${SYMBOL_LINK_STYLE}
+  </style>
+  <div class="tablewrap"><table class="decision-table">
     <thead><tr>
-      <th></th><th>timestamp (JST)</th>${opts.showSymbol ? '<th>symbol</th>' : ''}<th>decision</th><th>reason (評価時の含み損益など)</th><th>price</th><th>実 fill (価格 × 数量)</th><th>実 損益</th>
+      <th></th><th>日時 (JST)</th>${opts.showSymbol ? '<th>銘柄</th>' : ''}<th>判定</th><th>理由</th><th>株価</th><th>約定</th><th>実損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
-  </table>
+  </table></div>
   ${safeJsonScript(opts.copyVarName, {
     meta: {
       page: 'strategy_decision_log (戦略判定)',
