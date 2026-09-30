@@ -3,7 +3,7 @@ import { type TradeJournalRow, tradeJournal } from '../../infrastructure/db/sche
 import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { and, desc, eq, inArray, isNotNull, lt, or, type SQL } from 'drizzle-orm'
 import { formatRealizedPnl } from './cron'
-import { LOG_COPY_ALL_BTN, clampLimit, displaySymbol, esc, exportMeta, fmtJstCompactCell, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
+import { LOG_COPY_ALL_BTN, LOG_COPY_BTN_STYLE, SYMBOL_LINK_STYLE, clampLimit, displaySymbol, esc, exportMeta, fmtJstCompactCell, fmtNumber, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseCursor, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 
 // `cls` names an event-type color utility declared in this page's own <style>
 // block (below) — decision/fill/exit reuse the foundation's muted/ok/warn
@@ -106,6 +106,8 @@ export function buildTradesPacket(rows: TradeJournalRow[], q: TradesQuery) {
 const TRADES_PAGE_STYLE = `<style>
   .evt-order{color:var(--info)}
   .small{font-size:12px}
+  ${LOG_COPY_BTN_STYLE}
+  ${SYMBOL_LINK_STYLE}
 </style>`
 
 export function tradesBody(
@@ -151,7 +153,7 @@ export function tradesBody(
           : (symbolText ?? r.symbol)
         : ''
       const symbolCell = r.symbol
-        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="${esc(symbolTitle)}"><strong${inactive ? ' class="symbol-disabled"' : ''}>${esc(r.symbol)}</strong></a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted small" title="この銘柄の約定だけに絞り込み">▼</a>`
+        ? `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(r.symbol)}" title="${esc(symbolTitle)}" class="sym-link${inactive ? ' symbol-disabled' : ''}">${esc(r.symbol)}</a> <a href="/dashboard/trades?symbol=${encodeURIComponent(r.symbol)}" class="muted small" title="この銘柄の約定だけに絞り込み">▼</a>`
         : '<span class="muted">—</span>'
       const decisionLink = r.clientOrderId
         ? ` <a href="/dashboard/cron?clientOrderId=${encodeURIComponent(r.clientOrderId)}" class="muted small" title="この注文の判定 (戦略判定ログ) を見る">判定→</a>`
@@ -211,8 +213,8 @@ export function tradesBody(
         <td class="num">${qtyCell}</td>
         <td class="num">${priceCell}</td>
         <td class="num">${pnlCell}</td>
-        <td class="grow">${statusCell}</td>
         <td>${modeCell}</td>
+        <td class="grow">${statusCell}</td>
       </tr>`
     })
     .join('')
@@ -222,7 +224,7 @@ export function tradesBody(
     <thead><tr>
       <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
       <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th>
-      <th class="grow">状態</th><th>モード</th>
+      <th>モード</th><th class="grow">状態</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>

@@ -51,12 +51,12 @@ export function renderPaginationNav(opts: {
   const parts: string[] = []
   if (opts.before !== undefined) {
     const sep = opts.baseHref.includes('?') ? '&' : '?'
-    parts.push(`<a href="${opts.baseHref}" style="padding:6px 14px;border:1px solid #d8d8de;border-radius:6px;text-decoration:none;font-size:13px">← 最新へ</a>`)
+    parts.push(`<a href="${opts.baseHref}" class="btn">← 最新へ</a>`)
     void sep
   }
   if (opts.hasMore && opts.lastId !== undefined) {
     const sep = opts.baseHref.includes('?') ? '&' : '?'
-    parts.push(`<a href="${opts.baseHref}${sep}before=${opts.lastId}" style="padding:6px 14px;border:1px solid #d8d8de;border-radius:6px;text-decoration:none;font-size:13px">古い方 →</a>`)
+    parts.push(`<a href="${opts.baseHref}${sep}before=${opts.lastId}" class="btn">古い方 →</a>`)
   }
   if (parts.length === 0) return ''
   return `<nav style="margin-top:12px;display:flex;gap:8px;justify-content:center">${parts.join('')}</nav>`
@@ -225,8 +225,22 @@ export function renderLogCopyScript(varName: string): string {
 export const LOG_COPY_ALL_BTN =
   '<button type="button" id="log-copy-all" class="chip">📋 表示中を AI 用にコピー</button>'
 
+// Dimmed until the row is hovered — full-opacity on every row made every log
+// table look like a wall of buttons before a reader had picked a row to act on.
+export const LOG_COPY_BTN_STYLE = `.log-copy-btn{opacity:.5;transition:opacity .12s ease}
+tr:hover .log-copy-btn{opacity:1}`
+
 export const logCopyRowBtn = (id: number): string =>
-  `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 2px">📋</button>`
+  `<button type="button" class="log-copy-btn" data-id="${id}" title="この行の全データを AI 用にコピー" style="border:none;background:none;cursor:pointer;font-size:14px;padding:0 2px">📋</button>`
+
+// Shared by the trades/cron tables' symbol cell: a plain-weight link (not
+// full <strong> bold, not accent-colored at rest) that only shifts to accent
+// on hover — a whole column of bold blue tickers otherwise reads as more
+// "important" than the row data next to it. `.sym-name` truncates inside the
+// fixed max-width via the parent's ellipsis instead of wrapping to a 2nd line.
+export const SYMBOL_LINK_STYLE = `.sym-link{display:inline-block;max-width:220px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:bottom;color:var(--text);font-weight:600;text-decoration:none}
+.sym-link:hover{color:var(--accent-text)}
+.sym-link .sym-name{color:var(--text-3);font-weight:400}`
 
 // A past (or epoch-0) cooldownUntil renders as cleared, matching the
 // strategy's own `cooldownUntil > now` check rather than the raw timestamp.

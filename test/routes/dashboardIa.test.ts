@@ -483,6 +483,6 @@ describe('table.fit の列ルール (#dashboard-ia)', () => {
     expect(html).toContain('<table class="fit">')
     expect(html).toContain('<th class="grow">状態</th>')
     expect(html).not.toContain('<th class="grow">銘柄</th>')
-    expect(html).toContain('<strong>SOXL</strong>')
+    expect(html).toContain('class="sym-link">SOXL</a>')
   })
 })
