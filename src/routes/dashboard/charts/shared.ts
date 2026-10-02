@@ -174,6 +174,8 @@ export interface ChartsBodySymbol {
   focusSymbol: string | null
   symbolChart: SymbolChartData | null
   availableSymbols: string[]
+  /** Symbols with a non-zero position, marked in the rail. Omitted marks none. */
+  heldSymbols?: ReadonlySet<string>
   /** Effective value for focusSymbol (global → role preset → override). */
   strategyParams: StrategyParamsSnapshot
   /** Global default, used as the comparison baseline to flag params that differ per-symbol. */
@@ -256,6 +258,9 @@ export function renderZoomPresetButtons(chart: SymbolChartData | null): string {
  * `cron.ts` also renders and so must stay in the shared layout STYLE).
  */
 export const CHARTS_PAGE_STYLE = `
+  .rail-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-left:6px;vertical-align:middle}
+  .rail-legend{float:right;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text-3)}
+  .rail-legend .rail-dot{margin:0 4px 0 0}
   /* 判断カード群 (fold 上部の判断サマリ)。1360px 幅で 2×2、780px 以下は縦積み。 */
   /* One card, 4 columns divided by a vertical rule (spec: not 4 separate
      cards). Under 900px the columns wrap to 2x2; a vertical rule on every
