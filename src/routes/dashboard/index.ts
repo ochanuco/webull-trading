@@ -655,7 +655,8 @@ export const dashboard = new Hono<DashboardBindings>()
               (pr) => pr.bullSymbol === focusSymbol || pr.bearSymbol === focusSymbol,
             )
           : undefined
-      const [symbolChart, pairRegimeDecision, decisionRows] = await Promise.all([
+      const symbolStateClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
+      const [symbolChart, pairRegimeDecision, decisionRows, heldSymbols] = await Promise.all([
         focusSymbol ? loadSymbolChart(c.env, focusSymbol, rules) : Promise.resolve(null),
         // Evaluates the same pure zone function cron uses. The proxy-bars
         // fetch goes through a dashboard-only short-TTL cache
@@ -698,6 +699,18 @@ export const dashboard = new Hono<DashboardBindings>()
         focusSymbol && c.env.DB
           ? loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(() => [])
           : Promise.resolve([]),
+        // A failed state read shows the symbol as not held rather than
+        // failing the page — the dot is a navigation hint, not a position source.
+        symbolStateClient
+          ? Promise.all(
+              allDisplaySymbols.map((sym) =>
+                symbolStateClient
+                  .getState(sym)
+                  .then((st) => ((st?.position?.qty ?? 0) !== 0 ? sym : null))
+                  .catch(() => null),
+              ),
+            ).then((held) => new Set(held.filter((s): s is string => s !== null)))
+          : Promise.resolve(new Set<string>()),
       ])
       const pairRegimeView: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null =
         pair !== undefined && pairRegimeDecision !== null
@@ -722,6 +735,7 @@ export const dashboard = new Hono<DashboardBindings>()
         focusSymbol,
         symbolChart,
         availableSymbols: allDisplaySymbols,
+        heldSymbols,
         strategyParams,
         strategyParamsGlobal: globalParams,
         zoom,
@@ -844,7 +858,7 @@ export const dashboard = new Hono<DashboardBindings>()
       ? await loadSymbolUniverse(c.env).catch(() => null)
       : null
     return c.html(
-      renderLayout(c, 'Broker 診断', brokerProbeBody({ symbol, category, universe })),
+      renderLayout(c, 'Broker 診断', brokerProbeBody({ symbol, category, universe }), renderDiagSubnav('probe')),
     )
   })
   .get('/alerts', async (c) => {
@@ -884,7 +898,7 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/audit', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, '監査ログ', unavailable('DB not bound')))
+      return c.html(renderLayout(c, '監査ログ', unavailable('DB not bound'), renderDiagSubnav('audit')))
     }
     const limit = clampAuditLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
@@ -915,10 +929,11 @@ export const dashboard = new Hono<DashboardBindings>()
             before,
             hasMore,
           }),
+          renderDiagSubnav('audit'),
         ),
       )
     } catch (err) {
-      return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err)), renderDiagSubnav('audit')))
     }
   })
   // Renders list/new/edit only; writes go to /admin/symbol-config[/...] via
@@ -1318,7 +1333,7 @@ export const dashboard = new Hono<DashboardBindings>()
   .get('/webull-token', async (c) => {
     c.header('Cache-Control', 'no-store')
     if (!c.env.WEBULL_TOKEN_STATE) {
-      return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured')))
+      return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured'), renderDiagSubnav('token')))
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
     // Distinguishes a DO read failure (an outage) from a genuinely empty DO
@@ -1333,13 +1348,13 @@ export const dashboard = new Hono<DashboardBindings>()
     }
     if (stateError) {
       return c.html(
-        renderLayout(c, 'Webull token', unavailable(`WEBULL_TOKEN_STATE read failed: ${stateError}`)),
+        renderLayout(c, 'Webull token', unavailable(`WEBULL_TOKEN_STATE read failed: ${stateError}`), renderDiagSubnav('token')),
       )
     }
     const notice = c.req.query('notice') ?? null
     const error = c.req.query('error') ?? null
     return c.html(
-      renderLayout(c, 'Webull token', renderWebullTokenBody({ state, notice, error })),
+      renderLayout(c, 'Webull token', renderWebullTokenBody({ state, notice, error }), renderDiagSubnav('token')),
     )
   })
   .post('/webull-token/seed', rateLimit('ADMIN_WRITE'), async (c) => {
