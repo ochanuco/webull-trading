@@ -207,12 +207,12 @@ export function symbolMapEditorBody(
     const members = [pair.proxySymbol, pair.bullSymbol, pair.bearSymbol].map((x) => x.toUpperCase())
     if (!members.some((x) => activeSyms.has(x))) continue
     if (pair.invalidConfig !== null) {
-      chips.push(`<span class="pill warn">⚠ regime misconfig ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}: ${esc(pair.invalidConfig)} (zone=unknown で両側 BUY 停止中)</span>`)
+      chips.push(`<span class="pill warn">⚠ レジーム設定の不整合 ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}: ${esc(pair.invalidConfig)} (判定不能のため両側 BUY 停止中)</span>`)
       continue
     }
     // No pill variant covers this hue — regime proxy reuses the same static
     // violet chartTheme.ts uses for its series palette (see ROLE_NODE_COLORS).
-    chips.push(`<span class="pill" style="background:#f1ebfd;color:#8b5cf6">regime proxy ${esc(pair.proxySymbol.toUpperCase())} → ${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())}</span>`)
+    chips.push(`<span class="pill" style="background:#f1ebfd;color:#8b5cf6">${esc(pair.proxySymbol.toUpperCase())} でレジーム判定 (${esc(pair.bullSymbol.toUpperCase())}/${esc(pair.bearSymbol.toUpperCase())})</span>`)
   }
   const chipRow = chips.length > 0
     ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips.join('')}</div>`
@@ -220,16 +220,16 @@ export function symbolMapEditorBody(
   const legend = `塗り: <span style="background:var(--text-2);border:1px solid var(--text);color:var(--surface);padding:0 6px;border-radius:4px">口座</span>
       <span style="background:var(--down-soft);border:1px solid var(--down);padding:0 6px;border-radius:4px">JPY</span>
       <span style="background:var(--accent-soft);border:1px solid var(--accent);padding:0 6px;border-radius:4px">USD</span>
-      <span class="muted">実線 = 配分</span>
-      <span class="ok">緑破線 = 退避</span>`
+      <span class="muted">実線: 配分</span>
+      <span class="ok">緑破線: 退避</span>`
   const helpText = [
-    '口座 → カードの線 = 配分 (1/枝 均等。対は 1 カード = 1 枠)',
-    'カード → カードの線 = 退避先 (緑破線)。対→対は適用時に側別へ展開 (bull→bull / bear→bear)',
-    '単独銘柄 → 対への退避は側を特定できないため不可',
-    '線の削除 = 線を選択 → Backspace / Delete',
-    '線を空中で放す = 既存 Inactive を呼び出して紐づけ (適用で有効化)',
-    '口座から到達できないカードは適用時に無効化 (保有中は除く)',
-    '変更は「適用」までは保存されない',
+    '口座からカードへの線: 配分。枝の数で均等に分ける (ペアは 1 カードで 1 枠)。',
+    'カードからカードへの線: 退避先 (緑破線)。対から対への退避は適用時にブル同士・ベア同士に振り分ける。',
+    '単独銘柄から対への退避は、側を特定できないため設定できない。',
+    '線を削除するには、線を選んで Backspace か Delete を押す。',
+    '線を空中で離すと、無効な銘柄を呼び出して線をつなげる (適用で有効化)。',
+    '口座から到達できないカードは適用時に無効化する (保有中のものは除く)。',
+    '変更は「適用」を押すまで保存されない。',
   ].join('\n')
   const header = mode === 'edit'
     ? `<p style="margin:0 0 6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -383,10 +383,10 @@ export function symbolMapEditorBody(
     function unitCardHtml(u, spawned) {
       var heldSyms = Object.keys(u.held || {});
       var statusHtml = heldSyms.length > 0
-        ? '<div class="sm-status-active">Active ・ ' + heldSyms.map(function (x) { return x + ' ' + u.held[x]; }).join(' / ') + '</div>'
+        ? '<div class="sm-status-active">保有中 ・ ' + heldSyms.map(function (x) { return x + ' ' + u.held[x]; }).join(' / ') + '</div>'
         : spawned
-          ? '<div class="sm-status-pending">Inactive (適用で有効化)</div>'
-          : '<div class="sm-status-pending">Pending (様子見' + (u.entryRequired ? '・条件連動 ON' : '') + ')</div>';
+          ? '<div class="sm-status-pending">無効 (適用で有効化)</div>'
+          : '<div class="sm-status-pending">様子見' + (u.entryRequired ? '・条件連動 ON' : '') + '</div>';
       var roleShorts = u.syms.map(function (x) { return u.roles[x]; }).filter(Boolean);
       var metaParts = [];
       if (roleShorts.length > 0) metaParts.push(roleShorts.join(' / '));
@@ -982,7 +982,7 @@ export function symbolMapEditorBody(
           unitBy[src].currency !== unitBy[newDst].currency ||
           (draft[src].fallbacks || []).indexOf(newDst) !== -1;
         if (invalid) {
-          alert('その付け替えはできません (単独→対 / 異通貨 / 重複)。元に戻します。');
+          alert('その付け替えはできません (単独から対、異なる通貨、重複のいずれか)。元に戻します。');
           programmatic = true;
           editor.addConnection(state.srcId, state.oldDstId, 'output_1', 'input_1');
           programmatic = false;
@@ -1085,7 +1085,7 @@ export function symbolMapEditorBody(
       });
       steps
         .then(function () { location.reload(); })
-        .catch(function (e) { alert(e.message + ' — 再読込して状態を確認してください。'); location.reload(); });
+        .catch(function (e) { alert(e.message + '。再読込して状態を確認してください。'); location.reload(); });
     });
   });
   </script>`
@@ -1143,12 +1143,12 @@ export function symbolsListBody(args: {
   )
   const allowlistNote =
     tradableEntries.length === 0
-      ? '<span class="muted" style="font-size:12px">OpenAPI 取扱リスト: 未取得 — 「取扱リスト更新」で取得</span>'
-      : `<span class="muted" style="font-size:12px" title="tradable/list を全件 sweep した結果のキャッシュ (#460)">OpenAPI 取扱リスト: ${tradableCount} 銘柄 (最終取得 ${esc(lastSync.slice(0, 10))})</span>`
+      ? '<span class="muted" style="font-size:12px">OpenAPI 取扱リスト: 未取得。「取扱リスト更新」で取得する</span>'
+      : `<span class="muted" style="font-size:12px" title="Webull から取得した取扱可能銘柄の一覧">OpenAPI 取扱リスト: ${tradableCount} 銘柄 (最終取得 ${esc(lastSync.slice(0, 10))})</span>`
   const headerBar = `<p style="margin:0 0 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <a href="/dashboard/symbols/new" class="btn primary">+ 新規追加</a>
     <span class="muted" style="font-size:12px">${filtered.length} / ${rows.length} 件表示 (有効 ${activeCount} / 無効 ${inactiveCount})</span>
-    <button type="button" id="tradable-refresh-btn" onclick="window.refreshTradableAllowlist()" class="btn-sm" title="Webull の OpenAPI 取扱可能銘柄リスト (tradable/list) を今すぐ再取得して allowlist を更新します。全件 sweep のため数十秒かかります (#460)">🔄 取扱リスト更新</button>
+    <button type="button" id="tradable-refresh-btn" onclick="window.refreshTradableAllowlist()" class="btn-sm" title="Webull の取扱可能銘柄リストを今すぐ再取得する。全銘柄をまとめて確認するため数十秒かかる。">🔄 取扱リスト更新</button>
     ${allowlistNote}
     <span id="tradable-refresh-status" style="font-size:12px"></span>
   </p>
@@ -1181,7 +1181,7 @@ export function symbolsListBody(args: {
           }
           var n = res.total != null ? res.total : 0;
           if (res.done) {
-            if (st) { st.textContent = '✓ ' + n + ' 銘柄取得完了' + (res.disappeared > 0 ? ' / ' + res.disappeared + ' 消失' : '') + ' — 再読込します'; st.style.color = 'var(--up)'; }
+            if (st) { st.textContent = '✓ ' + n + ' 銘柄取得完了' + (res.disappeared > 0 ? ' / ' + res.disappeared + ' 消失' : '') + '。再読込します'; st.style.color = 'var(--up)'; }
             setTimeout(function () { window.location.reload(); }, 700);
             return;
           }
@@ -1239,11 +1239,11 @@ export function symbolsListBody(args: {
       // live buttons read as a rendering glitch, not a state.
       const deleteForm = r.active
         ? ''
-        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します (DB row 自体を消去、インバース対のリンクも解除)。元に戻せません。よろしいですか？');">
+        : `<form method="post" action="${esc(deleteAction)}" style="display:inline" onsubmit="return confirm('${esc(r.symbol)} を完全に削除します。登録情報とインバース対のリンクを消去し、元に戻せません。よろしいですか？');">
             <button type="submit" class="btn-sm danger">削除</button>
           </form>`
       const maxNotionalCell = r.maxNotional === null
-        ? '<span class="muted" title="未設定 = global の MAX_ORDER_NOTIONAL を使用">— (global)</span>'
+        ? '<span class="muted" title="未設定のときは全体設定の max_order_notional_usd / max_order_notional_jpy を使用">— (全体設定)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
       const roleCell = renderSymbolRoleCell(r)
       // Same integer>=1 validity check loadSymbolConfig uses to adopt a
@@ -1271,10 +1271,10 @@ export function symbolsListBody(args: {
         role === 'bottom'
           ? ''
           : role === 'top'
-            ? `<td rowspan="2" style="vertical-align:middle">${sliderHtml}<div class="muted" style="font-size:11px;margin-top:2px">ペア共通 — 保有は片側のみ、予算消費は1回分</div></td>`
+            ? `<td rowspan="2" style="vertical-align:middle">${sliderHtml}<div class="muted" style="font-size:11px;margin-top:2px">ペア共通。保有は片側のみ、予算消費は1回分</div></td>`
             : `<td>${sliderHtml}</td>`
       const treeTitle = inverse
-        ? `インバース対: ${esc(inverse)} (相手に保有がある間は BUY 見送り #315)`
+        ? `インバース対: ${esc(inverse)} (相手に保有がある間は BUY を見送る)`
         : ''
       // Draws a bracket across the pair's two adjacent rows: the top row's
       // corner radius forms ┌, the bottom row's forms └, and the shared
@@ -1542,20 +1542,20 @@ function symbolErrorMessage(code: string, symbol: string | null): string {
   switch (code) {
     case 'duplicate':
       return sym
-        ? `symbol "${sym}" は既に登録済みです。`
-        : 'symbol は既に登録済みです。'
+        ? `銘柄 "${sym}" は既に登録済みです。`
+        : '銘柄は既に登録済みです。'
     case 'not_found':
-      return sym ? `symbol "${sym}" が見つかりません。` : 'symbol が見つかりません。'
+      return sym ? `銘柄 "${sym}" が見つかりません。` : '銘柄が見つかりません。'
     case 'still_active':
       return sym
-        ? `symbol "${sym}" は有効化中のため削除できません。先に無効化してから削除してください。`
-        : 'symbol が有効化中のため削除できません。先に無効化してください。'
+        ? `銘柄 "${sym}" は有効化中のため削除できません。先に無効化してから削除してください。`
+        : '銘柄が有効化中のため削除できません。先に無効化してください。'
     case 'validation':
       return '入力値に誤りがあります。'
     case 'inverse_self':
-      return 'インバース銘柄に主銘柄と同じ symbol は指定できません。'
+      return 'インバース銘柄に主銘柄と同じ銘柄は指定できません。'
     default:
-      return `エラーが発生しました (code=${code}).`
+      return `エラーが発生しました (コード: ${code})。`
   }
 }
 
@@ -1582,13 +1582,13 @@ const TRADABLE_BADGE: Record<
     label: '⚠ 取扱消失',
     pillClass: 'warn',
     title:
-      'OpenAPI 取扱リスト (tradable/list) に過去は在籍したが直近の sweep で消失。取扱停止された可能性 — 保有・運用中なら確認を (#460)',
+      'OpenAPI の取扱可能銘柄リストに過去は載っていたが、直近の確認で消えている。取扱停止の可能性があるため、保有・運用中なら確認する。',
   },
   unknown: {
     label: '⚠ 取扱未確認',
     pillClass: 'neutral',
     title:
-      'OpenAPI 取扱リスト (tradable/list) に未観測。アプリで売買できても OpenAPI 経由では発注できない可能性 (USMV 等)。発注後に 417 で弾かれる場合あり (#460)',
+      'OpenAPI の取扱可能銘柄リストに載っていない (USMV 等)。アプリで売買できても OpenAPI 経由では発注できず、417 エラーで拒否されることがある。',
   },
 }
 
@@ -1609,13 +1609,13 @@ export const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
 }
 
 export const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
-  cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
-  core_trend: 'core_trend — 非レバ・トレンド (QQQ / VOO 等)',
-  leveraged_trend: 'leveraged_trend — レバ ETF (TQQQ / SOXL 等)',
-  low_volatility: 'low_volatility — 低ボラ ETF (USMV / SPLV 等)',
-  sector_trend: 'sector_trend — 1x セクター ETF (SMH / SOXX 等)',
-  inverse_hedge: 'inverse_hedge — 3x インバース・短期 (SQQQ / SOXS。1x は override 必須)',
-  momentum: 'momentum — ⚠ モメンタム/ブレイク (1x向け・backtest未検証・要警告)',
+  cash_parking: '待機資金 ETF (SGOV / BIL 等)',
+  core_trend: '非レバ・トレンド (QQQ / VOO 等)',
+  leveraged_trend: 'レバ ETF (TQQQ / SOXL 等)',
+  low_volatility: '低ボラ ETF (USMV / SPLV 等)',
+  sector_trend: '1x セクター ETF (SMH / SOXX 等)',
+  inverse_hedge: '3x インバース・短期 (SQQQ / SOXS。1x は上書き必須)',
+  momentum: '⚠ モメンタム/ブレイク (1x向け・バックテスト未検証・要警告)',
 }
 
 function renderSymbolRoleCell(row: SymbolConfigRow): string {
@@ -1623,17 +1623,17 @@ function renderSymbolRoleCell(row: SymbolConfigRow): string {
   const known = role !== null && (SYMBOL_ROLES as readonly string[]).includes(role)
   const roleBadge =
     role === null
-      ? '<span class="muted" title="role 未設定 = 従来挙動">—</span>'
+      ? '<span class="muted" title="ロール未設定は従来動作のまま">—</span>'
       : known
         ? `<code style="font-size:11px" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}</code> <span class="muted" style="font-size:11px">${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
-        : `<span class="err" title="不正な role 値です。entry は抑止されます (fail-closed)。編集から正しい値を選んでください。">⚠ ${esc(role)}</span>`
+        : `<span class="err" title="ロールの値が不正なため、この銘柄のエントリーを止めている。編集から正しいロールを選んで保存する。">⚠ ${esc(role)}</span>`
   const notes: string[] = []
-  if (row.alwaysActive) notes.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
-  if (row.entryRequired) notes.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (row.alwaysActive) notes.push('<span title="判定に関わらず常に配分を有効にする">常時配分</span>')
+  if (row.entryRequired) notes.push('<span title="エントリー判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
   const fallbackList = parseCashFallbacksJson(row.cashFallbackSymbols, row.symbol)
   if (fallbackList.length > 0) {
     notes.push(
-      `<span title="条件未通過時の退避先${fallbackList.length > 1 ? ' (等分割)' : ''}">→${fallbackList
+      `<span title="条件未通過時の退避先${fallbackList.length > 1 ? ' (等分割)' : ''}">退避:${fallbackList
         .map((fb) => `<a href="/dashboard/symbols/${encodeURIComponent(fb)}/edit">${esc(fb)}</a>`)
         .join('/')}</span>`,
     )
@@ -1711,11 +1711,11 @@ export function symbolFormBody(args: SymbolFormArgs): string {
   const alwaysActiveChecked = row?.alwaysActive ? ' checked' : ''
   const cashFallbackValue = row ? parseCashFallbacksJson(row.cashFallbackSymbols, row.symbol).join(', ') : ''
   const timeStopPlaceholder = globalDefaults
-    ? `空欄で global default (${globalDefaults.timeStopDays}日) を使用`
-    : '空欄で global default を使用'
+    ? `空欄で全体設定の既定値 (${globalDefaults.timeStopDays}日) を使用`
+    : '空欄で全体設定の既定値を使用'
   const kAtrPlaceholder = globalDefaults
-    ? `空欄で global default (${globalDefaults.kAtr}) を使用`
-    : '空欄で global default を使用'
+    ? `空欄で全体設定の既定値 (${globalDefaults.kAtr}) を使用`
+    : '空欄で全体設定の既定値を使用'
   // DB stores budget allocation as a 0..1 fraction; displayed as % (×100).
   const budgetAllocPctValue =
     row?.budgetAllocPct === null || row?.budgetAllocPct === undefined
@@ -1729,7 +1729,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           const badge = tradableBadgeHtml(args.tradableStatus ?? 'unknown')
           return badge
             ? `<div style="margin-top:6px">${badge}</div>`
-            : `<div style="margin-top:6px"><span title="OpenAPI 取扱リスト (tradable/list) 在籍 — 発注可能" class="ok" style="font-size:12px">✓ OpenAPI 取扱リスト在籍</span></div>`
+            : `<div style="margin-top:6px"><span title="OpenAPI の取扱可能銘柄リストに登録済み。発注できる。" class="ok" style="font-size:12px">✓ OpenAPI 取扱リスト在籍</span></div>`
         })()
       : ''
   const symbolField =
@@ -1763,17 +1763,17 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       : ''
   const inverseField =
     mode === 'edit'
-      ? `<label>インバース対 <span class="muted" style="font-size:11px">(inverse)</span></label>
+      ? `<label>インバース対</label>
          <div>
            ${
              currentInverse
                ? `<span>↔ <a href="/dashboard/symbols/${encodeURIComponent(currentInverse)}/edit"><strong>${esc(currentInverse)}</strong></a></span>
-                  <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に保有がある間は BUY を見送ります (#315)。対の変更は一度削除して再登録してください。</p>`
+                  <p class="muted" style="margin:4px 0 0;font-size:11px">この銘柄は <strong>${esc(currentInverse)}</strong> と対です。相手に保有がある間は BUY を見送ります。対の変更は一度削除して再登録してください。</p>`
                : `<span class="muted">未設定 (対なし)</span>
                   <p class="muted" style="margin:4px 0 0;font-size:11px">対を組むには、相手銘柄の新規追加時に「インバース対で登録」を選んでください。</p>`
            }
          </div>`
-      : `<label id="symbol-form-inverse-label" style="display:none">インバース銘柄 <span class="muted" style="font-size:11px">(inverse)</span></label>
+      : `<label id="symbol-form-inverse-label" style="display:none">インバース銘柄</label>
          <div id="symbol-form-inverse-row" style="display:none">
            <div style="position:relative;display:inline-block">
              <input type="text" name="inverse_symbol" id="symbol-form-inverse" value="" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例: SOXS" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" oninput="window.searchInverseSuggest(this.value)" onfocus="window.searchInverseSuggest(this.value)" onblur="setTimeout(window.hideInverseSuggest, 200)" style="padding:6px;width:200px;text-transform:uppercase">
@@ -1806,7 +1806,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
   const fieldGrid = 'display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center'
   const optSection = (title: string, hint: string, inner: string, open: boolean): string =>
     `<details${open ? ' open' : ''} style="border:1px solid var(--border);border-radius:10px;background:var(--surface)">
-      <summary style="cursor:pointer;padding:10px 14px;font-size:13px;font-weight:600">${title} <span class="muted" style="font-size:11px;font-weight:normal">— ${hint} (任意)</span></summary>
+      <summary style="cursor:pointer;padding:10px 14px;font-size:13px;font-weight:600">${title} <span class="muted" style="font-size:11px;font-weight:normal">・${hint} (任意)</span></summary>
       <div style="padding:2px 14px 14px;${fieldGrid}">${inner}</div>
     </details>`
 
@@ -1826,7 +1826,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
   <form id="symbol-form" method="post" action="${esc(action)}" style="max-width:680px;display:flex;flex-direction:column;gap:12px">
     ${modeSelector}
     <div style="border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:12px 14px">
-      <div style="font-size:13px;font-weight:600;margin-bottom:2px">基本 <span class="muted" style="font-size:11px;font-weight:normal">— ${REQ} 以外は空欄で global 設定を使用</span></div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:2px">基本 <span class="muted" style="font-size:11px;font-weight:normal">・${REQ} 以外は空欄で全体設定を使用</span></div>
       <div style="${fieldGrid}">
         <label>銘柄${REQ}</label>${symbolField}
         ${inverseField}
@@ -1856,7 +1856,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
                + 入場ゲート閾値、個別銘柄チャートタブの視覚言語を流用)。 -->
           <input type="hidden" name="role" id="symbol-form-role" value="${esc(roleValue)}">
           <div style="font-size:12px;margin-bottom:6px">選択中: <strong id="role-current" style="font-size:13px">—</strong></div>
-          ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">DB に enum 外の role 値が入っています。この銘柄の entry は抑止中 (fail-closed)。正しい role を選んで保存してください。</p>'}
+          ${roleIsKnown ? '' : '<p class="err" style="margin:0 0 4px;font-size:11px">ロールの値が不正なため、この銘柄のエントリーを止めている。正しいロールを選んで保存してください。</p>'}
           <!-- 2軸を構造で表現: タブ = 入場アーキ、タブ内のカード = 銘柄プロファイル。
                現状は「押し目」タブのみ有効。モメンタム/逆張りは設計中。 -->
           <div style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:8px">
@@ -1869,19 +1869,18 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           </div>
           <div class="role-arch-panel" data-arch="momentum" style="display:none">
             <div class="warn" style="font-size:12px;background:var(--warn-soft);border:1px solid var(--warn);border-radius:8px;padding:10px 12px;line-height:1.55;margin-bottom:8px">
-              <strong>⚠ 要注意ロール(エッジ未検証)</strong> — 新高値ブレイクの継続を取る入場アーキ。選択・取引は可能ですが、
-              <b>backtest 上、発注可能なテーマ ETF (ICLN/TAN/QCLN) では成績まちまち〜不良 (TAN -60%DD)</b>。広域/テック 1x では有効だがそれらは OpenAPI 発注不可。<b>1x 銘柄のみ</b>に付け、少額・DRY_RUN から。
+              <strong>⚠ 未検証のロール</strong>。新高値更新の継続を狙うエントリー方式。選択・取引はできるが、
+              発注できる ICLN / TAN / QCLN では検証結果が悪い。<b>1x 銘柄のみ</b>に付け、少額と DRY_RUN から試す。
             </div>
             <div id="momentum-gallery" style="display:flex;flex-wrap:wrap;gap:8px"></div>
           </div>
           <div class="role-arch-panel" data-arch="reversion" style="display:none">
             <div class="warn" style="font-size:12px;background:var(--warn-soft);border:1px solid var(--warn);border-radius:8px;padding:12px 14px;line-height:1.6">
-              <strong>⚠ 使用不可(見送り)</strong> — 売られすぎの反発を拾う入場アーキ(1x向け)。<br>
-              理由: red-team 評価で <b>$ POC のコスト/為替でエッジ証明困難</b>＋ <b>逆張りに適した 1x(広域指数)が OpenAPI 取扱外</b>(発注可の ICLN/TAN 等はテーマ ETF で逆張り不適=ナイフ掴み)。<br>
-              現状は見送り。再訪は universe 拡大 + notional 引き上げが前提。
+              <strong>⚠ 使用不可</strong>。売られすぎからの反発を狙うエントリー方式 (1x向け)。<br>
+              少額では有効性を示せず、逆張りに向く銘柄が API で発注できないため見送りにしている。
             </div>
           </div>
-          <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期プリセット (time stop 5日)</div>
+          <div class="muted" style="font-size:11px;margin-top:4px">cash_parking は BUY を生成しない / inverse_hedge は短期既定値 (保有上限 5日)</div>
         </div>
         <!-- ホバー時に画面右へ出る大プレビュー (fixed)。 -->
         <div id="role-preview" style="display:none;position:fixed;right:16px;top:96px;width:300px;z-index:60;background:var(--surface);border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--shadow-pop);padding:10px 12px">
@@ -1915,9 +1914,9 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             core_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x トレンド' },
             sector_trend: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~10日', character: '1x セクター ETF' },
             low_volatility: { arch: '押し目 (上昇中の押し目買い)', horizon: '中期 ~15日', character: '低ボラ 1x' },
-            inverse_hedge: { arch: '押し目 (下落レジームの inverse 押し目)', horizon: '超短 5日', character: '3x インバース' },
-            cash_parking: { arch: 'entry なし', horizon: '—', character: '待機資金 (退避先・常時配分)' },
-            momentum: { arch: 'モメンタム (新高値ブレイク継続)', horizon: '短期 3–7日', character: '1x モメンタム ⚠ backtest 未検証' }
+            inverse_hedge: { arch: '押し目 (下落時のインバース押し目買い)', horizon: '超短 5日', character: '3x インバース' },
+            cash_parking: { arch: 'エントリーなし', horizon: '—', character: '待機資金 (退避先・常時配分)' },
+            momentum: { arch: 'モメンタム (新高値ブレイク継続)', horizon: '短期 3–7日', character: '1x モメンタム ⚠ 未検証' }
           };
           var ORDER = ['leveraged_trend', 'core_trend', 'sector_trend', 'low_volatility', 'inverse_hedge', 'cash_parking'];
           function fmtPct(v) { return (v > 0 ? '+' : '') + v + '%'; }
@@ -1957,11 +1956,11 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             r.ov = ov;
             return r;
           }
-          function omark(b) { return b ? ' <span style="color:var(--warn);font-weight:700" title="この銘柄の override">*</span>' : ''; }
+          function omark(b) { return b ? ' <span style="color:var(--warn);font-weight:700" title="この銘柄の上書き">*</span>' : ''; }
           // p is the effective (override-merged) parameter set; big=true adds axis labels.
           function ladder(role, p, w, h, big) {
             if (role === 'cash_parking') {
-              return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="var(--up)" text-anchor="middle">entry なし</text></svg>';
+              return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '"><text x="' + (w / 2) + '" y="' + (h / 2) + '" font-size="' + (big ? 12 : 10) + '" fill="var(--up)" text-anchor="middle">エントリーなし</text></svg>';
             }
             var color = COLOR[role], ov = p.ov || {};
             var em = (p.pbMax + p.pbMin) / 2, tp = em + p.tp, st = em + p.stop;
@@ -1991,9 +1990,9 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '" style="overflow:visible">' + a.join('') + '</svg>';
           }
           function gateHtml(role, p) {
-            if (role === 'cash_parking') return '<div style="color:var(--up);font-size:11px">戦略 entry なし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (pullback 判定なし)。</div>';
+            if (role === 'cash_parking') return '<div style="color:var(--up);font-size:11px">戦略エントリーなし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (押し目判定なし)。</div>';
             var ov = p.ov || {}, g = [];
-            g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">入場ゲート(閾値)</div>');
+            g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">エントリー条件 (閾値)</div>');
             g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + omark(ov.tr) + '</div>');
             g.push('<div>SMA50 ' + (p.sma50 ? '上抜け必須' : '上抜け不問') + omark(ov.sma50) + '</div>');
             g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + omark(ov.heat) + '</div>');
@@ -2025,7 +2024,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             if (!d) return '';
             function row(k, v) { return '<div style="display:flex;gap:6px"><span style="color:var(--text-3);min-width:62px">' + k + '</span><span>' + v + '</span></div>'; }
             return '<div style="font-size:11px;line-height:1.5;background:var(--surface-2);border-radius:6px;padding:5px 7px;margin-bottom:6px">' +
-              row('入場アーキ', d.arch) + row('horizon', d.horizon) + row('想定銘柄', d.character) + '</div>';
+              row('エントリー方式', d.arch) + row('想定期間', d.horizon) + row('想定銘柄', d.character) + '</div>';
           }
           function showPreview(role) {
             currentShown = role;
@@ -2035,9 +2034,9 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             if (role === 'momentum') {
               body.innerHTML = '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + COLOR.momentum + '">⚡ モメンタム ⚠</div>' +
                 descHtml('momentum') +
-                '<div style="font-size:11px;line-height:1.55">新高値ブレイクの継続を取る別戦略 (BreakoutMomentumStrategy)。' +
-                'entry: トレンド+ 新高値ブレイク+ SMA50上+ 過熱でない。exit: stop -5% / TP +10% / 保有~7日。<br>' +
-                '<span style="color:var(--down);font-weight:600">⚠ backtest 未検証。発注可テーマETFでは成績不良の例あり (TAN -60%DD)。1x のみ・少額で。</span></div>';
+                '<div style="font-size:11px;line-height:1.55">新高値更新の継続を狙う別戦略。' +
+                '条件: トレンド陽転・新高値更新・SMA50超・過熱でないこと。損切 -5%、利確 +10%、保有上限 7日。<br>' +
+                '<span style="color:var(--down);font-weight:600">⚠ 未検証。発注できる ICLN / TAN / QCLN では成績が悪い。1x のみ・少額で。</span></div>';
               pv.style.display = '';
               return;
             }
@@ -2049,13 +2048,13 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               return;
             }
             var p = eff(role);
-            var note = p.ov.any ? 'preset + この銘柄の override (* 印) を反映' : 'preset の姿 (override 未設定)';
+            var note = p.ov.any ? '既定値にこの銘柄の上書き (* 印) を反映' : '既定値のまま (上書きなし)';
             body.innerHTML =
               '<div style="font-size:13px;font-weight:700;margin-bottom:4px;color:' + color + '">' + LABEL[role] + '</div>' +
               descHtml(role) +
               ladder(role, p, 280, 150, true) +
               '<div style="margin-top:6px">' + gateHtml(role, p) + '</div>' +
-              '<div class="muted" style="font-size:10px;margin-top:6px">直近高値=0% 基準・実効値の模式<br>' + note + '</div>';
+              '<div class="muted" style="font-size:10px;margin-top:6px">直近高値: 0% 基準・実効値の模式<br>' + note + '</div>';
             pv.style.display = '';
           }
           function highlight(role) {
@@ -2148,20 +2147,20 @@ export function symbolFormBody(args: SymbolFormArgs): string {
       '1 注文の上限と配分',
       `<label>1注文上限</label>
         <div>
-          <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄 = global 上限" style="padding:6px;width:180px">
-          <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注 (global: <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code>)</span>
+          <input type="number" name="max_notional" value="${esc(maxNotionalValue)}" step="0.01" min="0.01" placeholder="空欄で全体の上限を使用" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px"><span id="symbol-form-max-notional-unit">${esc(currencyValue)}</span> / 1 発注 (全体設定: <code>max_order_notional_<span id="symbol-form-max-notional-global-key">${currencyValue.toLowerCase()}</span></code>)</span>
         </div>
         <label>予算配分</label>
         <div>
-          <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄 = risk-% sizing" style="padding:6px;width:180px">
-          <span class="muted" style="font-size:12px;margin-left:6px">% — 口座総額(円) × この % で発注</span>
+          <input type="number" name="budget_alloc_pct" value="${esc(budgetAllocPctValue)}" step="0.1" min="0.1" max="100" placeholder="空欄なら risk-% で算出" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% ・ 口座総額 (円) × この割合で発注する</span>
         </div>`,
       hasSizingValues,
     )}
 
     ${optSection(
-      '戦略ロール・entry 条件',
-      'role プリセットと entry gate の銘柄別調整',
+      '戦略ロール・エントリー条件',
+      'ロール既定値とエントリー条件の銘柄別調整',
       `<label>押し目バンド</label>
         <div>
           <input type="number" name="pullback_max_override" value="${esc(pullbackMaxOverrideValue)}" step="0.1" min="-100" max="0" placeholder="浅い側 (例 -3)" style="padding:6px;width:130px">
@@ -2171,22 +2170,22 @@ export function symbolFormBody(args: SymbolFormArgs): string {
         </div>
         <label>トレンド条件</label>
         <div>
-          <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <input type="number" name="min_return_50d_override" value="${esc(minReturn50dOverrideValue)}" step="0.1" min="-100" max="1000" placeholder="空欄でロール既定値か全体設定を使用" style="padding:6px;width:180px">
           <span class="muted" style="font-size:12px;margin-left:6px">% (20日騰落率の下限)</span>
         </div>
         <label>ボラ過熱上限</label>
         <div>
-          <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <input type="number" name="max_atr_ratio_override" value="${esc(maxAtrRatioOverrideValue)}" step="0.1" min="0.1" max="10" placeholder="空欄でロール既定値か全体設定を使用" style="padding:6px;width:180px">
           <span class="muted" style="font-size:12px;margin-left:6px">× baseline ATR</span>
         </div>
         <label>過伸長上限</label>
         <div>
-          <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄 = preset / global" style="padding:6px;width:180px">
+          <input type="number" name="max_sma50_deviation_pct_override" value="${esc(maxSma50DeviationPctOverrideValue)}" step="0.1" min="0.1" max="1000" placeholder="空欄でロール既定値か全体設定を使用" style="padding:6px;width:180px">
           <span class="muted" style="font-size:12px;margin-left:6px">% (SMA50 上方乖離)</span>
         </div>
         <label>SMA50 上抜け</label>
         <select name="require_above_sma50_override" style="padding:6px;max-width:240px">
-          <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>global default に従う</option>
+          <option value=""${requireAboveSma50OverrideValue === '' ? ' selected' : ''}>全体設定の既定値に従う</option>
           <option value="true"${requireAboveSma50OverrideValue === 'true' ? ' selected' : ''}>必須 (price &gt; SMA50)</option>
           <option value="false"${requireAboveSma50OverrideValue === 'false' ? ' selected' : ''}>不要</option>
         </select>
@@ -2196,7 +2195,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
 
     ${optSection(
       '損切・利食・保有',
-      'exit 系の銘柄別調整',
+      '決済条件の銘柄別調整',
       `<label>保有上限</label>
         <div>
           <input type="number" name="time_stop_days_override" value="${esc(timeStopDaysOverrideValue)}" step="1" min="1" max="365" placeholder="${esc(timeStopPlaceholder)}" style="padding:6px;width:180px">
@@ -2209,21 +2208,21 @@ export function symbolFormBody(args: SymbolFormArgs): string {
         </div>
         <label>損切ライン</label>
         <div>
-          <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄 = global" style="padding:6px;width:180px">
-          <span class="muted" style="font-size:12px;margin-left:6px">% (負値)。exit は max(この%, kAtr×ATR) の広い方</span>
+          <input type="number" name="stop_pct_override" value="${esc(stopPctOverrideValue)}" step="0.1" min="-99" max="-0.1" placeholder="空欄で全体設定を使用" style="padding:6px;width:180px">
+          <span class="muted" style="font-size:12px;margin-left:6px">% (負値)。決済は max(この%, kAtr×ATR) の広い方</span>
         </div>
         <label>利食ライン</label>
         <div>
-          <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄 = global" style="padding:6px;width:180px">
+          <input type="number" name="take_profit_pct_override" value="${esc(takeProfitPctOverrideValue)}" step="0.1" min="0.1" max="100" placeholder="空欄で全体設定を使用" style="padding:6px;width:180px">
           <span class="muted" style="font-size:12px;margin-left:6px">% (正値)</span>
         </div>
         <label>持ち越し</label>
         <div style="display:flex;flex-direction:column;gap:4px;font-size:13px">
           <label style="display:flex;align-items:center;gap:6px">
-            <input type="radio" name="intraday_only" value="false"${intradayOnlyChecked === '' ? ' checked' : ''}> 持ち越す <span class="muted" style="font-size:12px">(スイング — 既定)</span>
+            <input type="radio" name="intraday_only" value="false"${intradayOnlyChecked === '' ? ' checked' : ''}> 持ち越す <span class="muted" style="font-size:12px">(スイング / 既定)</span>
           </label>
           <label style="display:flex;align-items:center;gap:6px">
-            <input type="radio" name="intraday_only" value="true"${intradayOnlyChecked}> 持ち越さない <span class="muted" style="font-size:12px">(デイトレ — US 引け前に強制クローズ)</span>
+            <input type="radio" name="intraday_only" value="true"${intradayOnlyChecked}> 持ち越さない <span class="muted" style="font-size:12px">(デイトレ / US 引け前に強制クローズ)</span>
           </label>
         </div>`,
       hasExitValues,
@@ -2231,11 +2230,11 @@ export function symbolFormBody(args: SymbolFormArgs): string {
 
     ${optSection(
       '配分の条件連動',
-      'entry 判定と予算配分の連動 (#452)',
+      'エントリー判定と予算配分の連動',
       `<label>条件連動</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px">
           <input type="hidden" name="entry_required" value="false">
-          <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> entry 判定 (ENTRY/HALF) 通過時のみ実配分を有効化
+          <input type="checkbox" name="entry_required" value="true"${entryRequiredChecked}> エントリー判定 (ENTRY/HALF) 通過時のみ実配分を有効化
         </label>
         <label>常時配分</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px">
@@ -2384,7 +2383,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               allowEl.textContent = '⚠ OpenAPI 取扱リストから消失 (取扱停止の可能性)';
               allowEl.style.color = 'var(--warn)';
             } else {
-              allowEl.textContent = '⚠ OpenAPI 取扱リスト未登録 — アプリで売買できても OpenAPI 経由では発注で弾かれる可能性';
+              allowEl.textContent = '⚠ OpenAPI 取扱リスト未登録。アプリで売買できても OpenAPI 経由では発注が弾かれる可能性がある';
               allowEl.style.color = 'var(--text-2)';
             }
           }
@@ -2394,7 +2393,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
               : res.reason === 'not_listed' ? 'Webull の銘柄マスタに不存在'
               : res.reason === 'instrument_status' ? '取引停止中の銘柄 (status CO/NT)'
               : 'Webull JP 取扱なし';
-            statusEl.textContent = '❌ ' + why + ' — 登録できません';
+            statusEl.textContent = '❌ ' + why + '。登録できません';
             statusEl.style.color = 'var(--down)';
             window._tradabilityDenied = true;
             if (saveBtn) { saveBtn.disabled = true; saveBtn.style.opacity = '0.4'; }
@@ -2402,8 +2401,8 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             // No checkmark here even at instrument status=OC: OC doesn't
             // guarantee an order won't still be denied.
             var head = res.instrument && res.instrument.status === 'OC'
-              ? '△ status OC (取引可) + 見積もり可 — 発注 deny のみ未保証'
-              : '△ 見積もり可 — 発注可否は未保証 (Webull アプリで確認)';
+              ? '△ 取引可 (status OC)。見積もりは取れるが、発注が拒否されないとは限らない'
+              : '△ 見積もりは取れるが、発注できるかは分からない (Webull アプリで確認)';
             statusEl.textContent = head + instSuffix;
             statusEl.style.color = 'var(--warn)';
           } else {
@@ -2427,7 +2426,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
             if (window._tradabilityDenied) {
               ev.preventDefault();
               var statusEl = document.getElementById('symbol-tradability');
-              if (statusEl) statusEl.textContent = '❌ Webull JP 取扱なし — 登録できません';
+              if (statusEl) statusEl.textContent = '❌ Webull JP 取扱なし。登録できません';
             }
           });
         }

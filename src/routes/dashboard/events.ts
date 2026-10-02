@@ -88,18 +88,18 @@ export function validateEarningsForm(
 ): ValidationOkEarnings | ValidationFail {
   const sym = echo.symbol.trim().toUpperCase()
   if (sym.length === 0 || sym.length > 16) {
-    return { ok: false, error: 'symbol は 1〜16 文字で入力してください' }
+    return { ok: false, error: '銘柄は 1〜16 文字で入力してください' }
   }
   const date = echo.earningsDate.trim()
   if (!isYmdRoundTrip(date)) {
-    return { ok: false, error: 'event_date は YYYY-MM-DD 形式で実在する日付にしてください' }
+    return { ok: false, error: '日付は YYYY-MM-DD 形式で実在する日付にしてください' }
   }
   if (!withinClampRange(date, new Date())) {
-    return { ok: false, error: 'event_date は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
+    return { ok: false, error: '日付は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
   }
   const notesRaw = echo.notes.trim()
   if (notesRaw.length > 256) {
-    return { ok: false, error: 'notes (source) は 256 文字以内にしてください' }
+    return { ok: false, error: '備考は 256 文字以内にしてください' }
   }
   // universe===null means the load itself failed, not "no symbols" — skip the check rather
   // than raise a false-positive "unknown symbol" warning.
@@ -107,7 +107,7 @@ export function validateEarningsForm(
   if (universe) {
     const inUniverse = universe.allowedSymbols.some((s) => s.toUpperCase() === sym)
     if (!inUniverse) {
-      warning = `symbol "${sym}" は symbol_config (universe) に存在しません。typo でなければ symbol 管理から追加してください。`
+      warning = `銘柄 "${sym}" は銘柄一覧に登録されていません。typo でなければ銘柄管理画面から追加してください。`
     }
   }
   return {
@@ -129,7 +129,7 @@ export interface ValidationOkMacro {
 export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro | ValidationFail {
   const kindRaw = echo.eventType.trim()
   if (kindRaw.length === 0 || kindRaw.length > 32) {
-    return { ok: false, error: 'event_kind は 1〜32 文字で入力してください' }
+    return { ok: false, error: 'イベント種別は 1〜32 文字で入力してください' }
   }
   // Normalizes toward the schema's `[A-Z0-9_]{1,32}` constraint (e.g. 'NFP REV' -> 'NFP_REV')
   // before the regex check below rejects whatever still doesn't fit.
@@ -137,19 +137,19 @@ export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro 
   if (!/^[A-Z0-9_]{1,32}$/.test(kind)) {
     return {
       ok: false,
-      error: 'event_kind は半角英数 + アンダースコアのみ使えます (例: FOMC / CPI / NFP)',
+      error: 'イベント種別は半角英数とアンダースコアのみ使えます (例: FOMC / CPI / NFP)',
     }
   }
   const country = echo.country.trim()
   if (country.length > 16) {
-    return { ok: false, error: 'country は 16 文字以内にしてください' }
+    return { ok: false, error: '国は 16 文字以内にしてください' }
   }
   const date = echo.eventDate.trim()
   if (!isYmdRoundTrip(date)) {
-    return { ok: false, error: 'event_date は YYYY-MM-DD 形式で実在する日付にしてください' }
+    return { ok: false, error: '日付は YYYY-MM-DD 形式で実在する日付にしてください' }
   }
   if (!withinClampRange(date, new Date())) {
-    return { ok: false, error: 'event_date は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
+    return { ok: false, error: '日付は 過去 90 日 〜 未来 365 日 の範囲にしてください' }
   }
   const notesPlain = echo.notes.trim()
   const combined =
@@ -159,7 +159,7 @@ export function validateMacroForm(echo: EventsMacroFormEcho): ValidationOkMacro 
         ? country
         : notesPlain
   if (combined.length > 256) {
-    return { ok: false, error: 'country + notes (source) の合計は 256 文字以内にしてください' }
+    return { ok: false, error: '国と備考の合計は 256 文字以内にしてください' }
   }
   return {
     ok: true,
@@ -294,9 +294,9 @@ export function eventsBody(args: EventsBodyArgs): string {
       ? '<p class="empty">この範囲には登録された決算がありません。</p>'
       : `<div class="tablewrap"><table>
     <thead><tr>
-      <th>銘柄<br><span class="muted" style="font-size:10px">symbol</span></th>
-      <th>決算日<br><span class="muted" style="font-size:10px">event_date</span></th>
-      <th>備考<br><span class="muted" style="font-size:10px">notes</span></th>
+      <th>銘柄</th>
+      <th>決算日</th>
+      <th>備考</th>
       <th>操作</th>
     </tr></thead>
     <tbody>${earnings
@@ -322,9 +322,9 @@ export function eventsBody(args: EventsBodyArgs): string {
       ? '<p class="empty">この範囲には登録されたマクロイベントがありません。</p>'
       : `<div class="tablewrap"><table>
     <thead><tr>
-      <th>イベント種別<br><span class="muted" style="font-size:10px">event_type</span></th>
-      <th>備考<br><span class="muted" style="font-size:10px">国 / notes</span></th>
-      <th>発生日<br><span class="muted" style="font-size:10px">event_date</span></th>
+      <th>イベント種別</th>
+      <th>備考 (国)</th>
+      <th>発生日</th>
       <th>操作</th>
     </tr></thead>
     <tbody>${macros
@@ -340,8 +340,8 @@ export function eventsBody(args: EventsBodyArgs): string {
   </table></div>`
 
   return `<style>${FIELD_STYLE}</style>
-  <p class="muted" style="margin:0 0 12px">期間: ${esc(from)} 〜 ${esc(to)} (now-30d 〜 now+30d)。<code>earnings_calendar</code> / <code>macro_event_calendar</code> は risk gate の avoid ソースです。
-  add は <code>now-90d 〜 now+365d</code> の範囲に clamp します。delete は audit に記録されます。</p>
+  <p class="muted" style="margin:0 0 12px">期間: ${esc(from)} 〜 ${esc(to)} (今日の前後30日)。登録した日付は判定処理の見送り判断に使われる。
+  追加できる日付は過去90日から未来365日まで。削除は監査ログに記録される。</p>
 
   <div class="card">
     <div class="card-head"><h2 class="card-title">決算 (earnings)</h2></div>

@@ -10,13 +10,13 @@ const EXIT_REASON_LABELS: Record<ExitReasonCategory, string> = {
   INTRADAY_CLOSE: 'INTRADAY_CLOSE (日中強制クローズ)',
   REBALANCE: 'REBALANCE (現金配分調整)',
   OTHER: 'OTHER (その他)',
-  UNKNOWN: 'UNKNOWN (reason 未特定)',
+  UNKNOWN: 'UNKNOWN (理由未特定)',
 }
 
 const SKIP_REASON_LABELS: Record<SkipReasonCategory, string> = {
   HALT: 'HALT (取引停止中)',
-  SIZING: 'SIZING (サイジング不可)',
-  RISK: 'RISK (リスクゲート)',
+  SIZING: 'SIZING (サイズ不可)',
+  RISK: 'RISK (リスク制限)',
   OTHER: 'OTHER (その他)',
 }
 
@@ -46,7 +46,7 @@ const signClass = (n: number) => (n > 0 ? 'ok' : n < 0 ? 'err' : 'muted')
 
 function renderExitReasonStats(stats: LifecycleReport['exitReasonStats']): string {
   if (stats.length === 0) {
-    return '<p class="muted">確定損益のある round trip がまだありません。</p>'
+    return '<p class="muted">確定損益のある往復がまだありません。</p>'
   }
   const rows = stats
     .map(
@@ -61,13 +61,13 @@ function renderExitReasonStats(stats: LifecycleReport['exitReasonStats']): strin
     )
     .join('')
   return `<div class="tablewrap"><table class="fit">
-    <thead><tr><th>exit reason</th><th class="num">件数</th><th class="num">勝率</th><th class="num">平均利益</th><th class="num">平均損失</th><th class="num">期待値</th></tr></thead>
+    <thead><tr><th>決済理由</th><th class="num">件数</th><th class="num">勝率</th><th class="num">平均利益</th><th class="num">平均損失</th><th class="num">期待値</th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`
 }
 
 function renderForwardReturns(rows: LifecycleReport['forwardReturns']): string {
-  if (rows.length === 0) return '<p class="muted">round trip がまだありません。</p>'
+  if (rows.length === 0) return '<p class="muted">往復がまだありません。</p>'
   const body = rows
     .map(
       (r) => `<tr>
@@ -80,7 +80,7 @@ function renderForwardReturns(rows: LifecycleReport['forwardReturns']): string {
     )
     .join('')
   return `<div class="tablewrap"><table class="fit">
-    <thead><tr><th>exit reason</th><th class="num">1営業日後</th><th class="num">3営業日後</th><th class="num">5営業日後</th><th class="num">10営業日後</th></tr></thead>
+    <thead><tr><th>決済理由</th><th class="num">1営業日後</th><th class="num">3営業日後</th><th class="num">5営業日後</th><th class="num">10営業日後</th></tr></thead>
     <tbody>${body}</tbody>
   </table></div>`
 }
@@ -90,7 +90,7 @@ function renderMfeRunup(
   runupRows: LifecycleReport['preEntryRunup'],
 ): string {
   if (mfeRows.length === 0 && runupRows.length === 0) {
-    return '<p class="muted">round trip がまだありません。</p>'
+    return '<p class="muted">往復がまだありません。</p>'
   }
   const mfeByCategory = new Map(mfeRows.map((r) => [r.category, r.mfe10]))
   const runupByCategory = new Map(runupRows.map((r) => [r.category, r.runup5]))
@@ -107,7 +107,7 @@ function renderMfeRunup(
     })
     .join('')
   return `<div class="tablewrap"><table class="fit">
-    <thead><tr><th>exit reason</th><th class="num">post-exit MFE (10営業日)</th><th class="num">entry前5営業日 上昇率</th></tr></thead>
+    <thead><tr><th>決済理由</th><th class="num">決済後 MFE (10営業日)</th><th class="num">エントリー前5営業日 上昇率</th></tr></thead>
     <tbody>${body}</tbody>
   </table></div>`
 }
@@ -124,7 +124,7 @@ function renderSkipOutcomes(rows: LifecycleReport['skipOutcomes']): string {
     )
     .join('')
   return `<div class="tablewrap"><table class="fit">
-    <thead><tr><th>SKIP reason</th><th class="num">10営業日 MFE</th><th class="num">10営業日 MAE</th></tr></thead>
+    <thead><tr><th>見送り理由</th><th class="num">10営業日 MFE</th><th class="num">10営業日 MAE</th></tr></thead>
     <tbody>${body}</tbody>
   </table></div>`
 }
@@ -140,7 +140,7 @@ const EXTENDED_HOURS_STATUS_LABELS: Record<string, string> = {
 function renderExtendedHoursCrosstab(crosstab: Record<string, number>): string {
   const entries = Object.entries(crosstab)
   if (entries.length === 0) {
-    return '<p class="muted">stop-loss exit がまだありません。</p>'
+    return '<p class="muted">損切り決済がまだありません。</p>'
   }
   const total = entries.reduce((a, [, n]) => a + n, 0)
   const rows = entries
@@ -153,9 +153,9 @@ function renderExtendedHoursCrosstab(crosstab: Record<string, number>): string {
     )
     .join('')
   return `<div class="tablewrap"><table class="fit">
-    <thead><tr><th>同日の時間外参考観測 status</th><th class="num">SL exit 件数</th></tr></thead>
+    <thead><tr><th>同日の時間外参考観測の状態</th><th class="num">SL 決済件数</th></tr></thead>
     <tbody>${rows}</tbody>
-  </table><p class="muted small" style="margin-top:4px">合計 ${total} 件 (stop-loss exit)</p></div>`
+  </table><p class="muted small" style="margin-top:4px">合計 ${total} 件 (損切り決済)</p></div>`
 }
 
 function renderCostDrawdownTurnover(report: LifecycleReport): string {
@@ -167,11 +167,11 @@ function renderCostDrawdownTurnover(report: LifecycleReport): string {
     // sign would render 0 as "+$0.00", implying a gain direction that doesn't apply.
     tile('推定コスト合計', `$${cost.totalEstimatedCostUsd.toFixed(2)}`),
     tile('最大ドローダウン (USD)', `$${drawdown.maxDrawdownUsd.toFixed(2)}`),
-    tile('turnover (BUY)', `$${turnover.buyNotionalUsd.toFixed(2)}`),
-    tile('turnover (SELL)', `$${turnover.sellNotionalUsd.toFixed(2)}`),
-    tile('turnover 合計', `$${turnover.totalNotionalUsd.toFixed(2)}`),
+    tile('売買代金 (BUY)', `$${turnover.buyNotionalUsd.toFixed(2)}`),
+    tile('売買代金 (SELL)', `$${turnover.sellNotionalUsd.toFixed(2)}`),
+    tile('売買代金合計', `$${turnover.totalNotionalUsd.toFixed(2)}`),
     tile(
-      'turnover / 平均equity',
+      '売買代金 / 平均資産',
       turnover.turnoverRatio === null ? '<span class="muted">—</span>' : `${(turnover.turnoverRatio * 100).toFixed(1)}%`,
     ),
   ].join('')
@@ -190,32 +190,32 @@ const LIFECYCLE_PAGE_STYLE = `<style>
 export function lifecycleBody(report: LifecycleReport): string {
   const failedNote =
     report.meta.barFetchFailedSymbols.length > 0
-      ? `<p class="warn small">日足取得に失敗した銘柄 (フォワード指標が null): ${esc(report.meta.barFetchFailedSymbols.join(', '))}</p>`
+      ? `<p class="warn small">日足取得に失敗した銘柄 (フォワード指標は未算出): ${esc(report.meta.barFetchFailedSymbols.join(', '))}</p>`
       : ''
   return `${LIFECYCLE_PAGE_STYLE}<div class="card">
     <div class="card-head">
       <h2 class="card-title">ライフサイクル分析</h2>
       <span class="info-tip" tabindex="0" aria-label="データソースの注記" data-tip="${esc(report.meta.note)}">?</span>
-      <div class="card-actions"><span class="muted small">round trip ${report.meta.roundTripCount} 件 / fill ${report.meta.fillCount} 件 / SKIP (dedup後) ${report.meta.skipSignalCount} 件 — as of ${esc(report.generatedAt)}</span></div>
+      <div class="card-actions"><span class="muted small">往復 ${report.meta.roundTripCount} 件 / 約定 ${report.meta.fillCount} 件 / 見送り ${report.meta.skipSignalCount} 件 (重複除外、${esc(report.generatedAt)} 時点)</span></div>
     </div>
     ${failedNote}
 
-    <div class="section-head">(a) exit reason 別成績</div>
+    <div class="section-head">(a) 決済理由別成績</div>
     ${renderExitReasonStats(report.exitReasonStats)}
 
-    <div class="section-head" style="margin-top:20px">(b) exit 後リターン (1/3/5/10 営業日)</div>
+    <div class="section-head" style="margin-top:20px">(b) 決済後リターン (1/3/5/10 営業日)</div>
     ${renderForwardReturns(report.forwardReturns)}
 
-    <div class="section-head" style="margin-top:20px">(c) post-exit MFE / entry 前 runup</div>
+    <div class="section-head" style="margin-top:20px">(c) 決済後 MFE / エントリー前上昇率</div>
     ${renderMfeRunup(report.postExitMfe, report.preEntryRunup)}
 
     <div class="section-head" style="margin-top:20px">(d) 見送り (SKIP) 後の 10 営業日 MFE/MAE</div>
     ${renderSkipOutcomes(report.skipOutcomes)}
 
-    <div class="section-head" style="margin-top:20px">(e) 時間外警戒 × stop-loss exit (同日突き合わせ)</div>
+    <div class="section-head" style="margin-top:20px">(e) 時間外警戒 × 損切り決済 (同日突き合わせ)</div>
     ${renderExtendedHoursCrosstab(report.extendedHoursSlCrosstab)}
 
-    <div class="section-head" style="margin-top:20px">(f) コスト / 最大ドローダウン / turnover</div>
+    <div class="section-head" style="margin-top:20px">(f) コスト / 最大ドローダウン / 売買代金</div>
     ${renderCostDrawdownTurnover(report)}
   </div>`
 }

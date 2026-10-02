@@ -27,7 +27,7 @@ export function inactiveTooltip(symbol: string, universe?: SymbolUniverse | null
   if (!universe) return ''
   const upper = symbol.toUpperCase()
   const note = universe.symbolNotes[upper]
-  return note ? `INACTIVE: ${note}` : 'INACTIVE'
+  return note ? `無効化中: ${note}` : '無効化中'
 }
 
 export function clampLimit(raw: string | undefined): number {
@@ -128,8 +128,27 @@ export function fmtJstCompactCell(value: string | Date | null | undefined): stri
   return `<span title="${esc(fmtJst(value))}">${esc(fmtJstCompact(value))}</span>`
 }
 
+// Known throw-site messages translated in full; anything else keeps the
+// original text after "詳細:" rather than guessing at a translation.
+const KNOWN_UNAVAILABLE_REASONS: Record<string, string> = {
+  'DB not bound': 'DB未接続',
+  'symbol path param required': '銘柄コードの指定が必要',
+  'WEBULL_TOKEN_STATE binding is not configured': 'WEBULL_TOKEN_STATE が未設定',
+}
+
+const UNAVAILABLE_REASON_PATTERNS: ReadonlyArray<{ re: RegExp; format: (m: RegExpMatchArray) => string }> = [
+  { re: /^symbol "(.+)" not found$/, format: (m) => `銘柄 "${m[1]}" が見つからない` },
+  { re: /^WEBULL_TOKEN_STATE read failed: (.+)$/, format: (m) => `Webull token の状態取得に失敗 (詳細: ${m[1]})` },
+]
+
 export function unavailable(reason: string): string {
-  return `<p class="warn">利用不可: ${esc(reason)}</p>`
+  const known = KNOWN_UNAVAILABLE_REASONS[reason]
+  if (known) return `<p class="warn">利用不可: ${esc(known)}</p>`
+  for (const { re, format } of UNAVAILABLE_REASON_PATTERNS) {
+    const m = reason.match(re)
+    if (m) return `<p class="warn">利用不可: ${esc(format(m))}</p>`
+  }
+  return `<p class="warn">利用不可 (詳細: ${esc(reason)})</p>`
 }
 
 export function jsonPretty(payload: unknown, status = 200): Response {

@@ -90,7 +90,7 @@ const ALERTS_PAGE_STYLE = `<style>.small{font-size:12px}</style>`
 export function alertsBody(args: AlertsBodyArgs): string {
   const { rows, limit, severityFilter, eventTypeFilter, currentQuery, universe, before, hasMore = false } = args
   const filterPills = renderAlertFilterPills(severityFilter, eventTypeFilter, currentQuery)
-  const countLine = `<span class="muted small">${rows.length} 件 (limit=${limit}, max 500)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
+  const countLine = `<span class="muted small">${rows.length} 件 (上限 ${limit} 件、最大 500 件)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}`
   const cardHead = `<div class="card-head"><h2 class="card-title">アラート</h2><div class="card-actions">${filterPills}${countLine}</div></div>`
   if (rows.length === 0) {
     return `${ALERTS_PAGE_STYLE}<div class="card">${cardHead}<p class="empty">該当するアラートはありません。</p></div>`
@@ -131,7 +131,7 @@ export function alertsBody(args: AlertsBodyArgs): string {
   <div class="tablewrap">
   <table>
     <thead><tr>
-      <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>requestId</th>
+      <th></th><th>日時 (JST)</th><th>重要度</th><th>種別</th><th>銘柄</th><th>要因</th><th>内容</th><th>リクエストID</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table>
@@ -182,7 +182,7 @@ export function renderAlertFilterPills(
   const pill = (label: string, href: string, isActive: boolean): string =>
     `<a href="${esc(href)}"${isActive ? ' class="active"' : ''}>${esc(label)}</a>`
   const sev = [
-    pill('全 severity', buildHref('severity', null), active.length === 0),
+    pill('全重要度', buildHref('severity', null), active.length === 0),
     pill(
       'critical',
       buildHref('severity', 'critical'),
@@ -194,14 +194,14 @@ export function renderAlertFilterPills(
       active.length === 1 && active[0] === 'warning',
     ),
     pill(
-      'critical+warning',
+      'critical/warning',
       buildHref('severity', 'critical,warning'),
       active.length === 2 && active.includes('critical') && active.includes('warning'),
     ),
     pill('info', buildHref('severity', 'info'), active.length === 1 && active[0] === 'info'),
   ].join('')
   const ev = [
-    pill('全 type', buildHref('eventType', null), activeEventType === undefined),
+    pill('全種別', buildHref('eventType', null), activeEventType === undefined),
     pill('ERROR', buildHref('eventType', 'ERROR'), activeEventType === 'ERROR'),
     pill('TRADE', buildHref('eventType', 'TRADE'), activeEventType === 'TRADE'),
     pill(

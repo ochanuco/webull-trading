@@ -133,7 +133,7 @@ export function tradesBody(
   const jsonHref = `/dashboard/trades/json?view=${view}&limit=${limit}${filterQs}${before !== undefined ? `&before=${before}` : ''}`
   const jsonLink = `<a href="${esc(jsonHref)}" target="_blank" rel="noreferrer" class="chip">JSON を開く</a>`
   const cardActions = `<div class="seg">${viewPill('全イベント', 'all', view === 'all')}${viewPill('約定・手仕舞い', 'fills', view === 'fills')}${viewPill('エラー', 'errors', view === 'errors')}</div>
-    <span class="muted small">${rows.length} 件 (limit=${limit})</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}`
+    <span class="muted small">${rows.length} 件 (上限 ${limit} 件)</span>${rows.length > 0 ? LOG_COPY_ALL_BTN : ''}${jsonLink}`
   const cardHead = `<div class="card-head"><h2 class="card-title">約定履歴</h2><div class="card-actions">${cardActions}</div></div>`
   if (rows.length === 0) {
     return `<div class="card">${cardHead}${filterBanner}<p class="empty">該当するレコードがありません。</p></div>`
@@ -223,7 +223,7 @@ export function tradesBody(
   <table class="fit">
     <thead><tr>
       <th></th><th>日時 (JST)</th><th>イベント</th><th>銘柄</th><th>売買</th>
-      <th class="num">数量</th><th class="num">単価</th><th class="num">実現損益</th>
+      <th class="num">数量</th><th class="num">単価</th><th class="num">確定損益</th>
       <th>モード</th><th class="grow">状態</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
