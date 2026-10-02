@@ -280,18 +280,18 @@ function renderPeriodReturnsRow(rows: PeriodReturn[]): string {
 
 export function renderOverviewTab(args: ChartsBodyOverview): string {
   if (args.equity.length === 0) {
-    return `<p class="muted">まだ実 fill (realized_pnl) が無いためエクイティカーブを描けません。最初の SELL が約定すると表示されます。</p>`
+    return `<p class="muted">まだ約定がなく確定損益の推移を描けません。最初の SELL が約定すると表示されます。</p>`
   }
   const vm = buildOverviewChartData(args.equity, args.tradeMarkers ?? [], args.benchmark ?? null)
   const hasBenchmark = vm.benchmark !== null
   const benchmarkNote = hasBenchmark
-    ? 'ベンチマーク: 実現 PnL ($ 左軸) vs QQQ 騰落率 (% 右軸) — 意味の異なる系列の重ね描きなので傾き / 方向の比較のみに使う (絶対値は比較不能)。'
-    : 'ベンチマーク (QQQ 騰落率) は取得失敗のため非表示 (チャート本体には影響なし)。'
+    ? '左軸は確定損益、右軸は QQQ 騰落率。単位が違うため、傾きと方向だけを比較し絶対値は比較しない。'
+    : 'QQQ 騰落率の取得に失敗したためベンチマークは非表示 (チャート本体には影響しない)。'
   const markerNote =
     (args.tradeMarkers ?? []).length > 0
-      ? ' 取引マーカー: 売り (SELL) は実現損益で緑 (益) / 赤 (損)、買い (BUY) は灰。点クリックで該当注文の約定履歴へ。'
+      ? ' 取引マーカー: 売り (SELL) は確定損益で緑が益、赤が損。買い (BUY) は灰色。クリックで該当注文の約定履歴へ移動。'
       : ''
-  const explainTip = `累積 realized PnL (上段) と peak からの下落率 MaxDD (下段)。戦略の長期パフォーマンス指標。シード資金額を保持していないため下落率は「累積 PnL の peak からの相対」で計算 (peak ≤ 0 のときは 0%)。当日 intraday の risk halt 閾値 (drawdown_kill / risk_dd_halt) は別概念のため重畳しない。${benchmarkNote}${markerNote}`
+  const explainTip = `上段は確定損益の累積、下段はピークからの下落率 (MaxDD)。日中の下落停止の基準とは別の指標で重ねない。${benchmarkNote}${markerNote}`
   const initScript = `
     document.addEventListener('DOMContentLoaded', function () {
       if (typeof echarts === 'undefined' || typeof window.wtChart !== 'function') return;
@@ -386,7 +386,7 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
           tooltip: { trigger: 'axis', valueFormatter: function (v) { return Number(v).toFixed(2); } },
           grid: { left: 50, right: 20, top: 30, bottom: 32 },
           xAxis: { type: 'category', data: data.monthly.map(function (m) { return m.month; }) },
-          yAxis: { type: 'value', name: 'PnL' },
+          yAxis: { type: 'value', name: '確定損益' },
           series: [{ type: 'bar', barMaxWidth: 36, data: data.monthly.map(function (m) { return { value: m.pnl, itemStyle: { color: m.pnl >= 0 ? t.up : t.down } }; }) }],
         });
       }
@@ -396,11 +396,11 @@ export function renderOverviewTab(args: ChartsBodyOverview): string {
   const monthlyChartHtml =
     monthly.length > 0
       ? `<div class="card">
-        <div class="card-head"><span class="card-title">月次 realized PnL (JST 集計)</span></div>
+        <div class="card-head"><span class="card-title">月次確定損益 (JST 集計)</span></div>
         <div id="monthly-chart" style="width:100%;height:220px"></div>
       </div>`
       : ''
-  const equityTitle = hasBenchmark ? `確定損益 vs 市場に乗るだけ (QQQ)` : '確定損益の推移'
+  const equityTitle = hasBenchmark ? `確定損益 / 市場に乗るだけ (QQQ)` : '確定損益の推移'
   return `${renderPeriodReturnsRow(args.periodReturns ?? [])}
   <div class="card">
     <div class="card-head">

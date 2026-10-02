@@ -192,7 +192,7 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
 
     it('news shock critical → Jev shock で新規買い停止', () => {
       expect(localizeReason('risk: news_shock_critical: shock=0.94 direction=risk_off age=3m (block)')).toBe(
-        '発注スキップ: ニュース急落シグナルで新規買い停止 (Jev shock 0.94・risk_off、3分前の判定)',
+        '発注スキップ: ニュース急落シグナルで新規買い停止 (Jev shock 0.94・リスクオフ、3分前の判定)',
       )
     })
 
@@ -202,7 +202,7 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
           'risk: news_shock_warning: shock=0.62 direction=mixed age=12m (size x0.5) (qty rounded to 0, lot=100)',
         ),
       ).toBe(
-        '発注スキップ: ニュース悪化シグナルで発注数量縮小 (Jev shock 0.62・mixed、12分前の判定、数量 x0.5、売買単位 100 未満で見送り)',
+        '発注スキップ: ニュース悪化シグナルで発注数量縮小 (Jev shock 0.62・方向感混在、12分前の判定、数量 x0.5、売買単位 100 未満で見送り)',
       )
     })
 
@@ -244,16 +244,16 @@ describe('localizeReason (日本株・信用取引の伝統的語彙)', () => {
       ).toBe('発注見送り: 総資産未設定 (risk-% sizing には total_capital_usd / total_capital_jpy の設定が必要)')
     })
 
-    it('portfolio exposure cap unavailable → 建玉上限データ取得不可', () => {
+    it('portfolio exposure cap unavailable → 保有上限データ取得不可', () => {
       expect(
         localizeReason('risk: portfolio exposure cap unavailable (total_capital_jpy unset)'),
-      ).toBe('発注スキップ: 建玉上限データ取得不可 (total_capital_jpy unset)')
+      ).toBe('発注スキップ: 保有上限データ取得不可 (total_capital_jpy unset)')
     })
 
-    it('portfolio exposure cap exceeded → 建玉上限超過 (remaining ベース)', () => {
+    it('portfolio exposure cap exceeded → 保有上限超過 (remaining ベース)', () => {
       expect(
         localizeReason('risk: portfolio exposure cap (notionalJpy 50000 > remaining 30000 of ceiling 600000)'),
-      ).toBe('発注スキップ: 建玉上限超過 (発注金額 50000円 > 残枠 30000円 / 上限 600000円)')
+      ).toBe('発注スキップ: 保有上限超過 (発注金額 50000円 > 残枠 30000円 / 上限 600000円)')
     })
 
     it('stale price (intraday bar unavailable) → 価格データ不足', () => {

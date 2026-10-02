@@ -106,7 +106,7 @@ describe('ホームの資産推移チャート', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('<span class="card-title">総資産</span>')
-    expect(body).toContain('まだ roll-daily 実行履歴がありません')
+    expect(body).toContain('まだ日次ロールの実行履歴がありません')
     expect(body).not.toContain('id="portfolio-equity-chart"')
   })
 
@@ -150,6 +150,6 @@ describe('ホームの資産推移チャート', () => {
     const res = await app.request('/dashboard', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('まだ roll-daily 実行履歴がありません')
+    expect(body).toContain('まだ日次ロールの実行履歴がありません')
   })
 })

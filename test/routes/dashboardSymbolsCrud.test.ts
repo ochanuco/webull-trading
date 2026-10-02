@@ -629,7 +629,7 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     )
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('DB not bound')
+    expect(body).toContain('DB未接続')
   })
 
   it('GET /dashboard/symbols/:symbol/edit shows immutability hint for the symbol field', async () => {
