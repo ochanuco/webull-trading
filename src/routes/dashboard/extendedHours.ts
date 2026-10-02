@@ -62,7 +62,7 @@ export function extendedHoursBody(args: ExtendedHoursBodyArgs): string {
       ? '<p class="empty">本日 (NY) のプレマーケット観測はまだありません。</p>'
       : `<div class="tablewrap"><table class="fit">
           <thead><tr>
-            <th>銘柄</th><th>状態</th><th class="num">プレマ終値</th><th class="num">gap</th><th class="num">直近15分</th><th class="num">stopまで</th><th>最終bar (JST)</th><th>新しさ</th>
+            <th>銘柄</th><th>状態</th><th class="num">プレマ終値</th><th class="num">ギャップ</th><th class="num">直近15分</th><th class="num">損切りまで</th><th>最終足 (JST)</th><th>新しさ</th>
           </tr></thead>
           <tbody>${latest.map((r) => renderRow(r, false)).join('')}</tbody>
         </table></div>`
@@ -71,14 +71,14 @@ export function extendedHoursBody(args: ExtendedHoursBodyArgs): string {
       ? '<p class="empty">履歴はまだありません。</p>'
       : `<div class="tablewrap"><table class="fit">
           <thead><tr>
-            <th>観測時刻 (JST)</th><th>銘柄</th><th>状態</th><th class="num">プレマ終値</th><th class="num">gap</th><th class="num">直近15分</th><th class="num">stopまで</th><th>最終bar (JST)</th><th>新しさ</th>
+            <th>観測時刻 (JST)</th><th>銘柄</th><th>状態</th><th class="num">プレマ終値</th><th class="num">ギャップ</th><th class="num">直近15分</th><th class="num">損切りまで</th><th>最終足 (JST)</th><th>新しさ</th>
           </tr></thead>
           <tbody>${recent.map((r) => renderRow(r, true)).join('')}</tbody>
         </table></div>`
   return `<div class="card">
     <div class="card-head">
       <h2 class="card-title">時間外参考</h2>
-      <span class="info-tip" tabindex="0" aria-label="観測データの注記" data-tip="Yahoo 時間外参考値であり執行価格ではありません。売買判断には未接続 (観測専用) です。">?</span>
+      <span class="info-tip" tabindex="0" aria-label="観測データの注記" data-tip="Yahoo 時間外参考値であり執行価格ではありません。売買判定には未接続 (観測専用) です。">?</span>
       <div class="card-actions"><span class="muted">対象日 (NY): ${esc(sessionYmd)}</span></div>
     </div>
     <div class="section-head">当日の銘柄別最新観測</div>

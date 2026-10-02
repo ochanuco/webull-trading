@@ -296,7 +296,7 @@ describe('renderSymbolTab — fill 詳細パネル + 保有区間 markArea の�
     // 静的ファイル化された client script 側にある (#charts-symbol-redesign)。
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('showFillDetail')
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('/dashboard/trades?clientOrderId=')
-    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('保有区間 (確定)')
+    expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('保有区間 (決済済み)')
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain('holdingAreaData')
   })
 
