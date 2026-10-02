@@ -44,20 +44,20 @@ export function renderWebullTokenBody(args: {
 
   const stateSection = state
     ? renderWebullTokenStateTable(state)
-    : '<p class="empty">DO is empty — まだ seed されていません。下の form から投入してください。</p>'
+    : '<p class="empty">token 未登録。下のフォームから登録する。</p>'
 
   // Multi-paragraph + a <pre> sample can't fit `.info-tip`'s plain-text
   // data-tip attribute, so this uses the `.info-tip-details` fallback.
   const pasteGuide = `<details class="info-tip-details">
     <summary aria-label="貼り付け内容の見本">?</summary>
     <div>
-      <p><code>pnpm run issue-token</code> を最後まで完了させる (status=NORMAL になる) と、
-      stdout の <strong>最後の 1 行</strong> に長い英数字の token が出力されます。<br>
-      diagnostic ログ (<code>[issue-token] ...</code> で始まる行) を含めて全文貼り付けても OK
-      — server-side で token 行だけ自動抽出します。</p>
+      <p><code>pnpm run issue-token</code> を実行し、status が NORMAL になるまで待つ。
+      出力の<strong>最後の 1 行</strong>に長い英数字の token が表示される。<br>
+      診断ログ (<code>[issue-token] ...</code> で始まる行) を含めて全文貼り付けてよい。
+      token の行だけサーバー側で自動的に抜き出す。</p>
       <p>⚠ ログ内の <code>received: 0197e6...7689</code> のような <strong>"..." 入りの短い文字列は
-      実 token ではなく表示用の省略形</strong> です。2FA verify を完了するまで実 token は
-      出力されません。</p>
+      実 token ではなく表示用の省略形</strong>。2FA 認証を完了するまで実 token は
+      表示されない。</p>
       <p>例 (NORMAL 化したときの末尾出力):</p>
       <pre style="background:var(--surface-2);padding:8px;border-radius:var(--radius-sm);overflow:auto;font-size:12px">[issue-token] poll (60s elapsed): xxxxxx...yyyy (status=NORMAL)
 [issue-token] NORMAL token acquired. Inject via:
@@ -73,9 +73,9 @@ export function renderWebullTokenBody(args: {
     <div class="card-head"><h2 class="card-title">Webull token 管理</h2></div>
     <div class="card-body">
       <p class="muted" style="margin:0 0 10px">
-        Webull <code>x-access-token</code> の状態確認 / 投入 / 強制 refresh を行います。
-        token 文字列は <code>pnpm run issue-token</code> で取得 (Webull モバイルアプリで 2FA verify 必要)。
-        取得した NORMAL token を下の form に貼り付けて「seed」してください。
+        Webull の <code>x-access-token</code> を確認・登録・強制更新する。
+        token は <code>pnpm run issue-token</code> で取得する (Webull アプリで 2FA 認証が必要)。
+        取得した NORMAL token を下のフォームに貼り付けて登録する。
       </p>
       ${banner}
     </div>
@@ -88,7 +88,7 @@ export function renderWebullTokenBody(args: {
 
   <div class="card">
     <div class="card-head">
-      <h2 class="card-title">新規 seed (or 上書き)</h2>
+      <h2 class="card-title">新規登録 (上書き可)</h2>
       ${pasteGuide}
     </div>
     <div class="card-body">
@@ -100,20 +100,20 @@ export function renderWebullTokenBody(args: {
             style="font-family:var(--mono)"
           ></textarea>
         </div>
-        <div><button type="submit" class="btn primary">seed (token 行を自動抽出 → broker で再 verify → DO 書込)</button></div>
+        <div><button type="submit" class="btn primary">登録する (token を抽出し再検証して保存)</button></div>
       </form>
     </div>
   </div>
 
   <div class="card">
-    <div class="card-head"><h2 class="card-title">手動 refresh</h2></div>
+    <div class="card-head"><h2 class="card-title">手動更新</h2></div>
     <div class="card-body">
       <p class="muted" style="margin:0 0 10px">
-        既存 token を Webull に渡して <code>createToken(existingToken)</code> を強制実行します。
-        通常は daily cron (22:00 UTC) で自動的に走るため、ボタンは「期限間近を待たずに更新したい」「失敗事象を再現したい」など特殊用途のみ。
+        既存の token を使って Webull から強制的に再取得する。
+        通常は日次の自動更新処理 (UTC 22:00) で実行されるため、このボタンは「期限間近を待たずに更新したい」「失敗を再現して確認したい」など特殊な場合のみ使う。
       </p>
-      <form method="post" action="/dashboard/webull-token/refresh" onsubmit="return confirm('手動 refresh を実行します。よろしいですか?');">
-        <button type="submit" class="btn">refresh now</button>
+      <form method="post" action="/dashboard/webull-token/refresh" onsubmit="return confirm('手動更新を実行します。よろしいですか?');">
+        <button type="submit" class="btn">今すぐ更新</button>
       </form>
     </div>
   </div>`
@@ -145,17 +145,17 @@ function renderWebullTokenStateTable(state: WebullTokenState): string {
     : '<redacted>'
   return `
 <table style="max-width:520px">
-  <tr><th>status</th>
+  <tr><th>状態</th>
       <td><span class="${statusClass}">${esc(state.status)}</span></td></tr>
-  <tr><th>tokenHint</th>
+  <tr><th>token (一部)</th>
       <td><code>${esc(tokenHint)}</code></td></tr>
-  <tr><th>expires</th>
+  <tr><th>有効期限</th>
       <td>${esc(String(state.expires))} <span class="muted">(${esc(expiresIso)})</span></td></tr>
-  <tr><th>fetchedAt</th>
+  <tr><th>取得日時</th>
       <td>${esc(state.fetchedAt)}</td></tr>
-  <tr><th>lastAttemptAt</th>
-      <td>${esc(state.lastAttemptAt ?? '(never)')}</td></tr>
-  <tr><th>lastSuccessAt</th>
-      <td>${esc(state.lastSuccessAt ?? '(never)')}</td></tr>
+  <tr><th>最終試行日時</th>
+      <td>${esc(state.lastAttemptAt ?? '(未実行)')}</td></tr>
+  <tr><th>最終成功日時</th>
+      <td>${esc(state.lastSuccessAt ?? '(未実行)')}</td></tr>
 </table>`
 }

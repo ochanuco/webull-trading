@@ -18,11 +18,11 @@ function renderSymbolDecisionHistory(args: ChartsBodySymbol): string {
   if (rows.length === 0 || !args.focusSymbol) return ''
   const symbolCronHref = `/dashboard/cron?symbol=${encodeURIComponent(args.focusSymbol)}`
   return `<div style="margin-top:14px">
-    <h2 class="section-head">判定履歴 <span class="muted" style="font-size:11px;font-weight:normal">直近 ${rows.length} 件 — チャートの判定 pin と同じデータ</span>
+    <h2 class="section-head">判定履歴 <span class="muted" style="font-size:11px;font-weight:normal">直近 ${rows.length} 件 (チャートの判定ピンと同じデータ)</span>
       <a href="${esc(symbolCronHref)}" style="font-size:11px">この銘柄の全件 →</a>
       <a href="/dashboard/trades?symbol=${encodeURIComponent(args.focusSymbol)}" style="font-size:11px">この銘柄の約定 →</a>
       <a href="/dashboard/cron" style="font-size:11px">全銘柄 →</a>
-      <a href="/dashboard/charts/symbol/json?symbol=${encodeURIComponent(args.focusSymbol)}" target="_blank" rel="noreferrer" style="font-size:11px" title="チャート + 判定履歴の機械可読版 (#dashboard-json-api)">この銘柄の JSON →</a>
+      <a href="/dashboard/charts/symbol/json?symbol=${encodeURIComponent(args.focusSymbol)}" target="_blank" rel="noreferrer" style="font-size:11px" title="チャートと判定履歴の JSON">この銘柄の JSON →</a>
     </h2>
     ${renderDecisionTable(rows, args.universe, {
       copyVarName: '__decisionCopy',
@@ -41,11 +41,11 @@ function renderPairRegimeLine(
     d.zone === 'bull' ? 'var(--up)' : d.zone === 'bear' ? 'var(--warn)' : d.zone === 'neutral' ? 'var(--info)' : 'var(--down)'
   const sideJa = view.side === 'bull' ? 'ブル側' : 'ベア側'
   const allowed = (view.side === 'bull' && d.zone === 'bull') || (view.side === 'bear' && d.zone === 'bear')
-  const verdict = allowed ? 'entry 可' : 'entry 不可'
+  const verdict = allowed ? 'エントリー可' : 'エントリー不可'
   return `<div style="margin-top:8px;font-size:13px;color:var(--text);display:flex;gap:12px;flex-wrap:wrap;align-items:center">
     ペアレジーム: <strong style="color:${color}">${esc(PAIR_REGIME_ZONE_LABELS[d.zone])}</strong>
-    <span class="muted" style="font-size:12px">この銘柄は${sideJa} → ${verdict}${view.mode === 'observe' ? ' (observe: gate は未適用)' : ''}</span>
-    <span class="muted" style="font-size:12px">${d.score !== null ? `score ${(d.score * 100).toFixed(2)}%` : ''} proxy ${esc(d.proxySymbol)}${d.asOfDate ? ` / ${esc(d.asOfDate)} 時点` : ''}</span>
+    <span class="muted" style="font-size:12px">この銘柄は${sideJa}のため${verdict}${view.mode === 'observe' ? ' (観測モード、制限なし)' : ''}</span>
+    <span class="muted" style="font-size:12px">${d.score !== null ? `スコア ${(d.score * 100).toFixed(2)}%` : ''} 代替指標 ${esc(d.proxySymbol)}${d.asOfDate ? ` / ${esc(d.asOfDate)} 時点` : ''}</span>
     ${d.zone === 'unknown' ? `<span class="err" style="font-size:12px">${esc(d.reason)}</span>` : ''}
   </div>`
 }
@@ -100,23 +100,23 @@ export function renderConclusionValue(
     const toStop = (stopPrice - current) / current
     const toTp = (tpPrice - current) / current
     return {
-      value: `stop まで ${fmtPctSigned(toStop)} ／ TP まで ${fmtPctSigned(toTp)}`,
+      value: `損切りまで ${fmtPctSigned(toStop)} / TP まで ${fmtPctSigned(toTp)}`,
       color: 'var(--text)',
     }
   }
   const cur = buyability?.current ?? null
   if (!cur) return { value: '判定データなし', color: 'var(--text-3)' }
-  if (cur.buyable) return { value: '入場条件 充足（BUY 候補）', color: 'var(--up)' }
+  if (cur.buyable) return { value: 'エントリー条件を満たしている（BUY 候補）', color: 'var(--up)' }
   if (cur.entryPrice !== null && cur.priceMove !== null) {
     const bottleneck = cur.bindingGate ? `（${esc(cur.bindingGate.labelJa)}）` : ''
     return {
-      value: `入場まで あと 価格 ${fmtPctSigned(cur.priceMove)}${bottleneck}`,
+      value: `エントリーまで株価あと ${fmtPctSigned(cur.priceMove)}${bottleneck}`,
       color: 'var(--warn)',
     }
   }
   const g = cur.bindingGate
   return {
-    value: g ? `価格でも入場不可 — ${esc(g.labelJa)}` : '評価不可',
+    value: g ? `価格だけではエントリー不可（未達: ${esc(g.labelJa)}）` : '評価不可',
     color: 'var(--down)',
   }
 }
@@ -147,7 +147,7 @@ export function renderPositionSummaryValue(
         })()
       : ''
   return `<div>平均取得 ${esc(fmtPriceCcy(position.avgPrice, ccy))}｜含み損益 <span class="${pnlCls}">${esc(pnlText)}</span></div>
-    <div class="muted" style="margin-top:2px">stop ${esc(fmtPriceCcy(stopPrice, ccy))} ／ TP ${esc(fmtPriceCcy(tpPrice, ccy))}</div>
+    <div class="muted" style="margin-top:2px">損切り ${esc(fmtPriceCcy(stopPrice, ccy))} / TP ${esc(fmtPriceCcy(tpPrice, ccy))}</div>
     ${qtyLine}`
 }
 
@@ -166,7 +166,7 @@ export function renderEffectiveRuleChips(p: StrategyParamsSnapshot): string {
   const pct = (n: number): string => (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
   // white-space:nowrap: the 4-column judgment card's narrower columns
   // otherwise let the browser break "time-stop" at its hyphen mid-word.
-  return `<span class="chip" style="white-space:nowrap">stop ${esc(pct(p.stopPct))}</span> <span class="chip" style="white-space:nowrap">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip" style="white-space:nowrap">time-stop ${p.timeStopDays}営業日</span>`
+  return `<span class="chip" style="white-space:nowrap">損切り ${esc(pct(p.stopPct))}</span> <span class="chip" style="white-space:nowrap">TP ${esc(pct(p.takeProfitPct))}</span> <span class="chip" style="white-space:nowrap">時間切れ ${p.timeStopDays}営業日</span>`
 }
 
 /** Returns '' when there's no chart data — the noData branch is handled by the caller instead. */
@@ -264,7 +264,7 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderJudgmentSummaryGrid(args)}
   <details style="margin-top:10px">
-    <summary style="cursor:pointer;font-size:13px">入場まで — ゲートチェックリスト・距離推移 (詳細)</summary>
+    <summary style="cursor:pointer;font-size:13px">エントリー条件の詳細</summary>
     ${renderBuyabilityPanel(args.buyability ?? null, {
       entryStatus: args.entryStatus ?? null,
       currency: args.focusSymbol ? currencyOfSymbol(args.focusSymbol) : null,
@@ -320,7 +320,7 @@ const ENTRY_STATUS_BADGE: Record<EntryStatus, { label: string; pillClass: string
 
 function entryStatusBadgeHtml(status: EntryStatus): string {
   const b = ENTRY_STATUS_BADGE[status]
-  return `<span class="pill ${b.pillClass}" style="font-size:11px" title="段階判定 (#452): 発注対象は ENTRY / HALF のみ">${b.label}</span>`
+  return `<span class="pill ${b.pillClass}" style="font-size:11px" title="段階判定: 発注対象は ENTRY / HALF のみ">${b.label}</span>`
 }
 
 /** Renders nothing when `alloc` is undefined (symbol has no target weight and received no reroute). */
@@ -329,10 +329,10 @@ export function renderAllocationLine(alloc: SymbolAllocation | undefined): strin
   const pct = (w: number) => `${Math.round(w * 1000) / 10}%`
   const changed = Math.abs(alloc.activeWeight - alloc.targetWeight) > 1e-9
   const color = alloc.activeWeight === 0 ? 'var(--warn)' : changed ? 'var(--up)' : 'var(--text-3)'
-  const arrow = changed ? ` → <strong>${pct(alloc.activeWeight)}</strong>` : ''
+  const arrow = changed ? `（実際は <strong>${pct(alloc.activeWeight)}</strong>）` : ''
   const reroute = alloc.rerouteTo ? `（${esc(alloc.rerouteTo)} へ退避中）` : ''
   const rerouted = alloc.reroutedInWeight > 0 ? `（+${pct(alloc.reroutedInWeight)} 退避受入）` : ''
-  return `<div style="font-size:11px;color:${color};margin-bottom:4px" title="${esc(alloc.reason)}">配分 target ${pct(alloc.targetWeight)}${arrow}${reroute}${rerouted}</div>`
+  return `<div style="font-size:11px;color:${color};margin-bottom:4px" title="${esc(alloc.reason)}">配分目標 ${pct(alloc.targetWeight)}${arrow}${reroute}${rerouted}</div>`
 }
 
 /** Renders nothing when role/weight/entryRequired/alwaysActive/cashFallback are all unset, so unconfigured symbols show no noise. */
@@ -354,14 +354,14 @@ export function renderSymbolPolicyLine(
     parts.push(
       known
         ? `ロール: <code style="font-size:12px" title="${esc(SYMBOL_ROLE_LABELS[policy.role as SymbolRole])}">${esc(policy.role)}</code>: <strong>${esc(SYMBOL_ROLE_LABELS_SHORT[policy.role as SymbolRole])}</strong>`
-        : `ロール: <span class="err" title="不正な role 値 — entry は抑止されます (fail-closed)">⚠ ${esc(policy.role)}</span>`,
+        : `ロール: <span class="err" title="不正なロール値のためエントリー停止中">⚠ ${esc(policy.role)}</span>`,
     )
   }
   if (policy.targetWeight !== null) {
-    parts.push(`配分 target ${Math.round(policy.targetWeight * 1000) / 10}%`)
+    parts.push(`配分目標 ${Math.round(policy.targetWeight * 1000) / 10}%`)
   }
-  if (policy.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
-  if (policy.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (policy.alwaysActive) parts.push('<span title="判定結果に関わらず常に配分目標どおり反映">常時配分</span>')
+  if (policy.entryRequired) parts.push('<span title="エントリー判定 (ENTRY/HALF) 通過時のみ実配分が有効">条件連動</span>')
   if (policy.cashFallbackSymbols !== null) {
     parts.push(
       `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
@@ -396,47 +396,47 @@ export function renderStrategyParamsPanel(
   globalParams?: StrategyParamsSnapshot,
 ): string {
   const flag = (current: number | boolean, def: number | boolean): string =>
-    current === def ? '' : ' <span class="warn" title="default 値から変更">⚠</span>'
+    current === def ? '' : ' <span class="warn" title="既定値から変更">⚠</span>'
   // Tags a row "symbol-specific" only when the effective value differs from
   // global — without this, an override that happens to match global would
   // read as an unmodified global value.
   const symbolTag = (key: keyof StrategyParamsSnapshot): string =>
     globalParams !== undefined && p[key] !== globalParams[key]
-      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:var(--info-soft);color:var(--info)" title="role preset / 銘柄別 override 由来 (global と異なる)">銘柄別</span>'
+      ? ' <span style="font-size:10px;padding:1px 5px;border-radius:8px;background:var(--info-soft);color:var(--info)" title="ロール既定値 / 銘柄別上書き由来 (全体設定と異なる)">銘柄別</span>'
       : ''
   const pct = (n: number): string =>
     (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%'
   const rows: Array<{ label: string; key: keyof StrategyParamsSnapshot; current: string; def: string; flag: string }> = [
     {
-      label: '損切ライン (stopPct)',
+      label: '損切ライン',
       key: 'stopPct',
       current: pct(p.stopPct),
       def: pct(STRATEGY_DEFAULTS.stopPct),
       flag: flag(p.stopPct, STRATEGY_DEFAULTS.stopPct),
     },
     {
-      label: '利食ライン (takeProfitPct)',
+      label: '利食ライン',
       key: 'takeProfitPct',
       current: pct(p.takeProfitPct),
       def: pct(STRATEGY_DEFAULTS.takeProfitPct),
       flag: flag(p.takeProfitPct, STRATEGY_DEFAULTS.takeProfitPct),
     },
     {
-      label: '時間切れ (timeStopDays)',
+      label: '時間切れ',
       key: 'timeStopDays',
       current: `${p.timeStopDays} 営業日`,
       def: `${STRATEGY_DEFAULTS.timeStopDays} 営業日`,
       flag: flag(p.timeStopDays, STRATEGY_DEFAULTS.timeStopDays),
     },
     {
-      label: '押し目 上限 (pullbackMax)',
+      label: '押し目 上限',
       key: 'pullbackMax',
       current: pct(p.pullbackMax),
       def: pct(STRATEGY_DEFAULTS.pullbackMax),
       flag: flag(p.pullbackMax, STRATEGY_DEFAULTS.pullbackMax),
     },
     {
-      label: '押し目 下限 (pullbackMin)',
+      label: '押し目 下限',
       key: 'pullbackMin',
       current: pct(p.pullbackMin),
       def: pct(STRATEGY_DEFAULTS.pullbackMin),
@@ -445,21 +445,21 @@ export function renderStrategyParamsPanel(
     {
       // Field kept as `minReturn50d` for global_config column compat even
       // though the actual lookback is 20 business days.
-      label: '20日騰落率 閾値 (minReturn50d)',
+      label: '20日騰落率 閾値',
       key: 'minReturn50d',
       current: pct(p.minReturn50d),
       def: pct(STRATEGY_DEFAULTS.minReturn50d),
       flag: flag(p.minReturn50d, STRATEGY_DEFAULTS.minReturn50d),
     },
     {
-      label: 'SMA50 上 必須 (requireAboveSma50)',
+      label: 'SMA50 上 必須',
       key: 'requireAboveSma50',
       current: p.requireAboveSma50 ? 'true' : 'false',
       def: STRATEGY_DEFAULTS.requireAboveSma50 ? 'true' : 'false',
       flag: flag(p.requireAboveSma50, STRATEGY_DEFAULTS.requireAboveSma50),
     },
     {
-      label: 'ATR 倍率 (kAtr、サイジング用)',
+      label: 'ATR 倍率 (サイジング用)',
       key: 'kAtr',
       current: p.kAtr.toFixed(2),
       def: STRATEGY_DEFAULTS.kAtr.toFixed(2),
@@ -469,18 +469,18 @@ export function renderStrategyParamsPanel(
   const tbody = rows
     .map(
       (r) =>
-        `<tr><th>${esc(r.label)}</th><td>${esc(r.current)}${r.flag}${symbolTag(r.key)}</td><td class="muted">${esc(r.def)}</td></tr>`,
+        `<tr><th title="${esc(r.key)}">${esc(r.label)}</th><td>${esc(r.current)}${r.flag}${symbolTag(r.key)}</td><td class="muted">${esc(r.def)}</td></tr>`,
     )
     .join('')
   return `<details open style="margin-top:12px">
-    <summary style="cursor:pointer;font-size:13px">戦略パラメータ (PullbackUptrendStrategy${globalParams !== undefined ? ' — この銘柄に適用される値' : ''}) — <span class="muted">⚠ は default から変更されている項目</span></summary>
+    <summary style="cursor:pointer;font-size:13px">戦略パラメータ${globalParams !== undefined ? '（この銘柄に適用される値）' : ''} <span class="muted">⚠ は既定値から変更されている項目</span></summary>
     <table style="margin-top:8px">
-      <thead><tr><th>項目</th><th>現在値</th><th>default</th></tr></thead>
+      <thead><tr><th>項目</th><th>現在値</th><th>既定値</th></tr></thead>
       <tbody>${tbody}</tbody>
     </table>
     <p class="muted" style="font-size:11px;margin-top:6px">
-      「銘柄別」タグは role preset / 銘柄管理の override 由来 (設定は 銘柄管理 → 編集)。
-      global の変更は 設定ページ (pullback_default_*)。
+      「銘柄別」タグはロール既定値または銘柄別の上書きに由来する (設定変更は銘柄管理の編集画面から)。
+      全体設定の変更は設定ページで行う。
     </p>
   </details>`
 }
@@ -533,23 +533,23 @@ export function renderBuyabilityPanel(
   let headColor: string
   if (cur.buyable) {
     headline =
-      '現在 入場条件を充足（cron 評価では BUY 候補。実発注は資金 / 単元など発注側ゲート次第）'
+      'エントリー条件を満たしている（BUY 候補。実際の発注は資金と単元しだい）'
     headColor = 'var(--up)'
   } else if (cur.entryPrice !== null && cur.priceMove !== null) {
     const dir = cur.priceMove < 0 ? '下落' : '上昇'
-    const binding = cur.bindingGate ? ` ／ ボトルネック: ${esc(cur.bindingGate.labelJa)}` : ''
-    headline = `入場まで: あと 価格 <strong>${fmtPctSigned(cur.priceMove)}</strong>（${fmtPriceCcy(cur.entryPrice, ccy)} 到達 = ${dir}）${binding}`
+    const binding = cur.bindingGate ? `。未達: ${esc(cur.bindingGate.labelJa)}` : ''
+    headline = `エントリーまで株価あと <strong>${fmtPctSigned(cur.priceMove)}</strong>（${fmtPriceCcy(cur.entryPrice, ccy)} 到達で${dir}）${binding}`
     headColor = 'var(--warn)'
   } else {
     const g = cur.bindingGate
     const why = g
       ? g.priceDependent
-        ? '押し目ゾーンと過熱上限が同時に成立しない局面です。'
-        : 'この指標が条件を満たすまでは、価格がどこでも入場しません。'
+        ? '押し目と過熱上限を同時に満たせない状態。'
+        : 'この条件を満たすまで株価に関係なくエントリーしない。'
       : ''
     headline = g
-      ? `価格を動かすだけでは入場不可 — ボトルネック: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))} 不成立）。${why}`
-      : '入場条件 評価不可'
+      ? `価格だけではエントリー不可。未達: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))}）。${why}`
+      : 'エントリー条件を評価できない'
     headColor = 'var(--down)'
   }
 
@@ -577,24 +577,24 @@ export function renderBuyabilityPanel(
       .join('')
     const trendLabel =
       buyability.trend === 'closing'
-        ? '<span style="color:var(--up)">縮小中（入場に近づいている）</span>'
+        ? '<span style="color:var(--up)">縮小中</span>'
         : buyability.trend === 'widening'
-          ? '<span style="color:var(--warn)">拡大中（入場から遠ざかっている）</span>'
+          ? '<span style="color:var(--warn)">拡大中</span>'
           : buyability.trend === 'flat'
             ? '<span class="muted">横ばい</span>'
             : '<span class="muted">判定不能</span>'
-    trendBlock = `<div style="margin-top:8px"><strong>距離の推移</strong>(入場までの価格距離)：${trendLabel}
+    trendBlock = `<div style="margin-top:8px"><strong>エントリーまでの距離</strong>: ${trendLabel}
       <div style="margin-top:4px">${bars}</div></div>`
   } else {
-    trendBlock = `<div style="margin-top:8px" class="muted">距離の推移: 価格距離が算出できる評価日がありません（価格非依存ゲートが要因）。</div>`
+    trendBlock = `<div style="margin-top:8px" class="muted">エントリーまでの距離: 価格に依存しない条件が未達のため算出できない。</div>`
   }
 
-  // --- 参考 ETA ---
+  // --- 到達目安 ---
   let etaBlock = ''
   if (buyability.etaTradingDays !== null && buyability.trend === 'closing') {
     const days = Math.max(1, Math.ceil(buyability.etaTradingDays))
-    etaBlock = `<div style="margin-top:8px"><strong>参考 ETA</strong>: このペースが続けば 約 ${days} 営業日
-      <div class="muted" style="font-size:11px">⚠ 外挿の参考値・予測ではない（相場が逆行すれば遠のく / 押し目バンドも日々動く）</div></div>`
+    etaBlock = `<div style="margin-top:8px"><strong>到達目安</strong>: このペースなら約 ${days} 営業日
+      <div class="muted" style="font-size:11px">⚠ 過去の推移からの外挿で、予測ではない</div></div>`
   }
 
   // --- ゲートチェックリスト ---
@@ -605,7 +605,7 @@ export function renderBuyabilityPanel(
       const mark = ok ? '✅' : '❌'
       const bg = ok ? 'var(--up-soft)' : 'var(--down-soft)'
       const border = binding ? 'border-left:3px solid var(--down);' : 'border-left:3px solid transparent;'
-      const tag = binding ? ' <span style="color:var(--down);font-weight:600">◀ ボトルネック</span>' : ''
+      const tag = binding ? ' <span style="color:var(--down);font-weight:600">◀ 未達</span>' : ''
       return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 8px;background:${bg};${border}border-radius:4px;font-size:12px;flex-wrap:wrap">
         <span>${mark}</span><span>${esc(g.labelJa)}</span>
         <span style="color:var(--text-2);font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
@@ -617,7 +617,7 @@ export function renderBuyabilityPanel(
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
-    halfNote = `<div style="margin-top:6px;font-size:12px;color:var(--warn)">HALF: 未通過は「${esc(status.halfGate.labelJa)}」のみで閾値の許容バンド内 → 0.5x サイジングで entry 候補 (role が entry 有効な銘柄のみ発注対象)。</div>`
+    halfNote = `<div style="margin-top:6px;font-size:12px;color:var(--warn)">HALF: 未達は「${esc(status.halfGate.labelJa)}」のみで許容範囲内のため、数量 0.5 倍でエントリー候補。</div>`
   }
 
   return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
@@ -625,7 +625,7 @@ export function renderBuyabilityPanel(
     ${halfNote}
     <div class="panel-row" style="gap:8px 20px">
       <div>${trendBlock}${etaBlock}</div>
-      <div style="margin-top:8px"><strong>入場ゲート</strong>(全条件。閾値は global 既定 + role preset + 銘柄 override、#452)
+      <div style="margin-top:8px"><strong>エントリー条件</strong> <span class="muted">閾値は銘柄別上書き、ロール既定値、全体設定の順で優先</span>
         <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
       </div>
     </div>
@@ -638,7 +638,7 @@ export function renderDecisionExplanationTip(chart: SymbolChartData | null): str
   if (decisions.length === 0) return ''
   const capped =
     decisions.length >= MAX_CHART_DECISIONS ? ` 直近 ${MAX_CHART_DECISIONS} 件まで表示。` : ''
-  const tip = `● は cron の判定イベント。点をクリックすると下に判定トレースが出ます (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}`
+  const tip = `● は判定処理のイベント。点をクリックすると下に判定トレースが出る (文字ログとグラフを同期)。HOLD (保有継続 / 様子見) は省略。${capped}`
   return `<span class="info-tip" tabindex="0" aria-label="判定マーカーの凡例" data-tip="${esc(tip)}">?</span>`
 }
 
@@ -649,7 +649,7 @@ export function renderDecisionColorKey(chart: SymbolChartData | null): string {
   const dot = (color: string, label: string): string =>
     `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 1px var(--surface),0 0 0 2px ${color}"></span>${esc(label)}</span>`
   return `<div class="decision-legend-row">
-    ${dot('var(--up)', '買い (BUY)')}${dot('var(--info)', '売り (SELL)')}${dot('var(--warn)', '見送り・bot判定 (SKIP)')}${dot('#8b5cf6', '拒否・証券会社 (REJECT)')}${dot('var(--down)', 'エラー (ERROR)')}
+    ${dot('var(--up)', '買い (BUY)')}${dot('var(--info)', '売り (SELL)')}${dot('var(--warn)', '見送り・システム判定 (SKIP)')}${dot('#8b5cf6', '拒否・証券会社 (REJECT)')}${dot('var(--down)', 'エラー (ERROR)')}
   </div>`
 }
 
@@ -722,7 +722,7 @@ function renderRolePill(role: string | null): string {
   if (!role) return ''
   const known = (SYMBOL_ROLES as readonly string[]).includes(role)
   if (!known) {
-    return `<span class="pill err" title="不正な role 値 — entry は抑止されます (fail-closed)">⚠ ${esc(role)}</span>`
+    return `<span class="pill err" title="不正なロール値のためエントリー停止中">⚠ ${esc(role)}</span>`
   }
   return `<span class="pill info" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}: ${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
 }
@@ -730,8 +730,8 @@ function renderRolePill(role: string | null): string {
 /** '' when the symbol is active — kept out of the header id-block layout when there's nothing to say. */
 function renderFocusInactiveNote(args: ChartsBodySymbol): string {
   if (!args.focusSymbol || !isSymbolInactive(args.focusSymbol, args.universe)) return ''
-  const reason = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外'
-  return ` <span class="muted" style="font-size:11px">(inactive — ${esc(reason)})</span>`
+  const reason = args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? '判定処理対象外'
+  return ` <span class="muted" style="font-size:11px">(無効化中: ${esc(reason)})</span>`
 }
 
 /**
@@ -743,10 +743,10 @@ function renderFocusInactiveNote(args: ChartsBodySymbol): string {
 function renderSymbolPolicyMeta(symbol: string, policy: SymbolPolicySummary | null): string {
   const parts: string[] = []
   if (policy?.targetWeight !== null && policy?.targetWeight !== undefined) {
-    parts.push(`配分 target ${Math.round(policy.targetWeight * 1000) / 10}%`)
+    parts.push(`配分目標 ${Math.round(policy.targetWeight * 1000) / 10}%`)
   }
-  if (policy?.alwaysActive) parts.push('<span title="判定に関わらず常時 target = active">常時配分</span>')
-  if (policy?.entryRequired) parts.push('<span title="entry 判定 (ENTRY/HALF) 通過時のみ実配分有効">条件連動</span>')
+  if (policy?.alwaysActive) parts.push('<span title="判定結果に関わらず常に配分目標どおり反映">常時配分</span>')
+  if (policy?.entryRequired) parts.push('<span title="エントリー判定 (ENTRY/HALF) 通過時のみ実配分が有効">条件連動</span>')
   if (policy?.cashFallbackSymbols) {
     parts.push(
       `退避先 ${policy.cashFallbackSymbols.map((fb) => `<a href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(fb)}">${esc(fb)}</a>`).join(' / ')}`,
@@ -829,8 +829,8 @@ function renderFocusSymbolHeader(args: ChartsBodySymbol): string {
   const focusInactive = isSymbolInactive(args.focusSymbol, args.universe)
   const focusLabel = displaySymbol(args.focusSymbol, args.universe)
   const note = focusInactive
-    ? ` <span class="muted" style="font-size:11px">(inactive — ${esc(
-        args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? 'cron 評価対象外',
+    ? ` <span class="muted" style="font-size:11px">(無効化中: ${esc(
+        args.universe?.symbolNotes[args.focusSymbol.toUpperCase()] ?? '判定処理対象外',
       )})</span>`
     : ''
   return `<p class="muted" style="font-size:12px;margin:0 0 4px">銘柄: <strong>${esc(focusLabel)}</strong>${note}</p>`

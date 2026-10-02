@@ -320,7 +320,7 @@ describe('dashboard events UI (#293)', () => {
     expect(res1.status).toBe(400)
     const body1 = await res1.text()
     expect(body1).toContain('class="err"')
-    expect(body1).toContain('symbol は 1〜16 文字')
+    expect(body1).toContain('銘柄は 1〜16 文字')
     expect(earningsRepo.bulkUpsert).not.toHaveBeenCalled()
 
     // future-too-far date (now + 400 days) → 400
@@ -423,7 +423,7 @@ describe('dashboard events UI (#293)', () => {
     const body = await res.text()
     expect(body).toContain('class="warn"')
     expect(body).toContain('MSFT')
-    expect(body).toContain('symbol_config')
+    expect(body).toContain('銘柄一覧に登録されていません')
   })
 
   it('XSS regression: notes / event_kind with <script> payload is escaped on render', async () => {

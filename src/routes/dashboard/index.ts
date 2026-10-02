@@ -858,7 +858,7 @@ export const dashboard = new Hono<DashboardBindings>()
       ? await loadSymbolUniverse(c.env).catch(() => null)
       : null
     return c.html(
-      renderLayout(c, 'Broker 診断', brokerProbeBody({ symbol, category, universe }), renderDiagSubnav('probe')),
+      renderLayout(c, 'ブローカー診断', brokerProbeBody({ symbol, category, universe }), renderDiagSubnav('probe')),
     )
   })
   .get('/alerts', async (c) => {
@@ -1188,7 +1188,7 @@ export const dashboard = new Hono<DashboardBindings>()
     } catch (err) {
       return await renderEventsWithError(c, {
         section: 'earnings',
-        message: `保存に失敗しました: ${messageOf(err)}`,
+        message: `保存に失敗しました (詳細: ${messageOf(err)})`,
         earningsEcho: echo,
         macroEcho: null,
       })
@@ -1212,7 +1212,7 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!Number.isInteger(id) || id <= 0) {
       return await renderEventsWithError(c, {
         section: 'earnings',
-        message: 'invalid id',
+        message: 'ID が不正',
         earningsEcho: null,
         macroEcho: null,
       })
@@ -1228,7 +1228,7 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!ok) {
       return await renderEventsWithError(c, {
         section: 'earnings',
-        message: `id=${id} は見つかりませんでした`,
+        message: `ID ${id} が見つからない`,
         earningsEcho: null,
         macroEcho: null,
       })
@@ -1283,7 +1283,7 @@ export const dashboard = new Hono<DashboardBindings>()
     } catch (err) {
       return await renderEventsWithError(c, {
         section: 'macro',
-        message: `保存に失敗しました: ${messageOf(err)}`,
+        message: `保存に失敗しました (詳細: ${messageOf(err)})`,
         earningsEcho: null,
         macroEcho: echo,
       })
@@ -1298,7 +1298,7 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!Number.isInteger(id) || id <= 0) {
       return await renderEventsWithError(c, {
         section: 'macro',
-        message: 'invalid id',
+        message: 'ID が不正',
         earningsEcho: null,
         macroEcho: null,
       })
@@ -1314,7 +1314,7 @@ export const dashboard = new Hono<DashboardBindings>()
     if (!ok) {
       return await renderEventsWithError(c, {
         section: 'macro',
-        message: `id=${id} は見つかりませんでした`,
+        message: `ID ${id} が見つからない`,
         earningsEcho: null,
         macroEcho: null,
       })
@@ -1359,15 +1359,15 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .post('/webull-token/seed', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.WEBULL_TOKEN_STATE) {
-      return c.redirect('/dashboard/webull-token?error=WEBULL_TOKEN_STATE+binding+is+not+configured', 303)
+      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent('WEBULL_TOKEN_STATE が未設定')}`, 303)
     }
     if (!c.env.WEBULL_APP_KEY || !c.env.WEBULL_APP_SECRET) {
-      return c.redirect('/dashboard/webull-token?error=WEBULL_APP_KEY+%2F+WEBULL_APP_SECRET+missing', 303)
+      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent('WEBULL_APP_KEY / WEBULL_APP_SECRET が未設定')}`, 303)
     }
     const form = await c.req.formData()
     const rawPaste = (form.get('token')?.toString() ?? '').trim()
     if (rawPaste.length === 0) {
-      return c.redirect('/dashboard/webull-token?error=token+is+required', 303)
+      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent('token を入力')}`, 303)
     }
     // Accepts pasting the issue-token script's full output, not just the
     // token: strips stderr diagnostics and the wrangler suggestion line,
@@ -1395,11 +1395,11 @@ export const dashboard = new Hono<DashboardBindings>()
     try {
       dto = await tokenClient.checkToken(rawToken)
     } catch (err) {
-      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent(`checkToken failed: ${messageOf(err)}`)}`, 303)
+      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent(`token の確認に失敗 (詳細: ${messageOf(err)})`)}`, 303)
     }
     if (dto.status !== 'NORMAL') {
       return c.redirect(
-        `/dashboard/webull-token?error=${encodeURIComponent(`token status is ${dto.status}, only NORMAL can be seeded`)}`,
+        `/dashboard/webull-token?error=${encodeURIComponent(`token の状態が ${dto.status} のため登録不可 (NORMAL のみ登録可)`)}`,
         303,
       )
     }
@@ -1423,17 +1423,17 @@ export const dashboard = new Hono<DashboardBindings>()
           : null,
         { status: seeded.status, expires: seeded.expires, fetchedAt: seeded.fetchedAt },
       )
-      return c.redirect('/dashboard/webull-token?notice=seeded', 303)
+      return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent('登録しました')}`, 303)
     } catch (err) {
       return c.redirect(
-        `/dashboard/webull-token?error=${encodeURIComponent(`seed failed: ${messageOf(err)}`)}`,
+        `/dashboard/webull-token?error=${encodeURIComponent(`登録に失敗 (詳細: ${messageOf(err)})`)}`,
         303,
       )
     }
   })
   .post('/webull-token/refresh', rateLimit('ADMIN_WRITE'), async (c) => {
     if (!c.env.WEBULL_TOKEN_STATE) {
-      return c.redirect('/dashboard/webull-token?error=WEBULL_TOKEN_STATE+binding+is+not+configured', 303)
+      return c.redirect(`/dashboard/webull-token?error=${encodeURIComponent('WEBULL_TOKEN_STATE が未設定')}`, 303)
     }
     // refreshWebullToken normally catches its own errors into
     // failureReason rather than throwing; this try/catch is a backstop so a
@@ -1445,7 +1445,7 @@ export const dashboard = new Hono<DashboardBindings>()
       summary = await refreshWebullToken(c.env, { force: true })
     } catch (err) {
       return c.redirect(
-        `/dashboard/webull-token?error=${encodeURIComponent(`refresh threw: ${messageOf(err)}`)}`,
+        `/dashboard/webull-token?error=${encodeURIComponent(`更新処理で例外 (詳細: ${messageOf(err)})`)}`,
         303,
       )
     }
@@ -1468,17 +1468,17 @@ export const dashboard = new Hono<DashboardBindings>()
         : { refreshed: summary.refreshed, skippedReason: summary.skippedReason ?? null },
     )
     if (summary.refreshed) {
-      return c.redirect('/dashboard/webull-token?notice=refreshed', 303)
+      return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent('更新しました')}`, 303)
     }
     if (summary.failureReason) {
       return c.redirect(
-        `/dashboard/webull-token?error=${encodeURIComponent(`refresh failed: ${summary.failureReason}`)}`,
+        `/dashboard/webull-token?error=${encodeURIComponent(`更新に失敗 (詳細: ${summary.failureReason})`)}`,
         303,
       )
     }
     // A skip (e.g. plenty of time left before expiry) is normal, not an error.
-    const why = summary.skippedReason ?? 'no change'
-    return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`refresh: ${why}`)}`, 303)
+    const why = summary.skippedReason ?? '変更なし'
+    return c.redirect(`/dashboard/webull-token?notice=${encodeURIComponent(`更新をスキップ: ${why}`)}`, 303)
   })
   // Read-only view over extended_hours_observation, written by
   // extendedHoursScheduler (the producer).

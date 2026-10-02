@@ -127,11 +127,11 @@ export function computeSymbolStats(rows: TradePnlRow[]): SymbolStat[] {
 // its light/dark and CVD-adjacency validation still holds.
 const SKIP_REASON_CATEGORIES = [
   { key: 'halt', label: '取引停止中', color: '#2a78d6' },
-  { key: 'risk_gate', label: 'リスクゲート', color: '#eb6834' },
+  { key: 'risk_gate', label: 'リスク制限', color: '#eb6834' },
   { key: 'role', label: '銘柄ロール抑止', color: '#1baf7a' },
   { key: 'funds', label: '資金不足', color: '#eda100' },
-  { key: 'sizing', label: 'サイジング不可', color: '#e87ba4' },
-  { key: 'system_guard', label: 'システムガード', color: '#008300' },
+  { key: 'sizing', label: 'サイズ不可', color: '#e87ba4' },
+  { key: 'system_guard', label: 'システム保護', color: '#008300' },
   { key: 'other', label: 'その他', color: '#4a3aa7' },
 ] as const
 
@@ -242,7 +242,7 @@ function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: stri
   // TradeStats has no per-trade max-win/max-loss, so row 3 is 勝/負 spanning
   // 2 columns each rather than 4 single cells matching row 2's width.
   const cells = [
-    cell('profit factor', PF_FMT(stats.profitFactor)),
+    cell('損益比率 (PF)', PF_FMT(stats.profitFactor)),
     cell('期待値 (トレード毎)', MONEY_FMT(stats.expectancy), signClass(stats.expectancy)),
     cell('平均利益', MONEY_FMT(stats.avgWin), 'ok'),
     cell('平均損失', MONEY_FMT(stats.avgLoss), 'err'),
@@ -252,11 +252,11 @@ function renderStatsCard(stats: TradeStats, period: QualityPeriod, asOfJst: stri
   return `<div class="card" style="width:640px;box-sizing:border-box">
     <div class="card-head">
       <span class="card-title">運用成績 (${esc(QUALITY_PERIOD_LABELS[period])})</span>
-      <span class="card-actions muted" style="font-size:11px">as of ${esc(asOfJst)}</span>
+      <span class="card-actions muted" style="font-size:11px">${esc(asOfJst)} 時点</span>
     </div>
     <div class="perf-hero-row">
       <div class="perf-hero">
-        <div class="perf-hero-label">合計 PnL</div>
+        <div class="perf-hero-label">合計確定損益</div>
         <div class="perf-hero-value ${signClass(stats.total)}">${esc(MONEY_FMT(stats.total))}</div>
       </div>
       <div class="perf-hero-secondary">
@@ -285,7 +285,7 @@ function renderSymbolTable(symbolStats: SymbolStat[]): string {
     <div class="card-head"><span class="card-title">銘柄別 成績</span></div>
     <div class="tablewrap">
       <table>
-        <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計PnL</th><th class="num">PF</th></tr></thead>
+        <thead><tr><th>銘柄</th><th class="num">件数</th><th class="num">勝率</th><th class="num">合計確定損益</th><th class="num">PF</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -294,12 +294,12 @@ function renderSymbolTable(symbolStats: SymbolStat[]): string {
 
 export function renderQualityTab(args: ChartsBodyQuality): string {
   if (!args.hasTradeData && args.skipBreakdown.length === 0) {
-    return `<p class="muted">まだ判定ログも実 fill も無いため成績を描けません。cron が動き出すと SKIP 理由の内訳、SELL が約定すると成績サマリが出ます。</p>`
+    return `<p class="muted">判定ログと SELL 約定がまだない。判定処理が動くと見送り理由の内訳、SELL が約定すると成績が表示される。</p>`
   }
   const symbolBarChart =
     args.symbolStats.length > 0
       ? `<div class="card">
-        <div class="card-head"><span class="card-title">銘柄別 合計PnL</span></div>
+        <div class="card-head"><span class="card-title">銘柄別 合計確定損益</span></div>
         <div id="symbol-pnl-chart" style="width:100%;height:${Math.max(200, args.symbolStats.length * 34 + 60)}px"></div>
       </div>`
       : ''
