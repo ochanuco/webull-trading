@@ -655,7 +655,8 @@ export const dashboard = new Hono<DashboardBindings>()
               (pr) => pr.bullSymbol === focusSymbol || pr.bearSymbol === focusSymbol,
             )
           : undefined
-      const [symbolChart, pairRegimeDecision, decisionRows] = await Promise.all([
+      const symbolStateClient = c.env.SYMBOL_STATE ? new SymbolStateClient(c.env.SYMBOL_STATE) : null
+      const [symbolChart, pairRegimeDecision, decisionRows, heldSymbols] = await Promise.all([
         focusSymbol ? loadSymbolChart(c.env, focusSymbol, rules) : Promise.resolve(null),
         // Evaluates the same pure zone function cron uses. The proxy-bars
         // fetch goes through a dashboard-only short-TTL cache
@@ -698,6 +699,18 @@ export const dashboard = new Hono<DashboardBindings>()
         focusSymbol && c.env.DB
           ? loadDecisionRows(createDb(c.env.DB), { symbol: focusSymbol, limit: 30 }).catch(() => [])
           : Promise.resolve([]),
+        // A failed state read shows the symbol as not held rather than
+        // failing the page — the dot is a navigation hint, not a position source.
+        symbolStateClient
+          ? Promise.all(
+              allDisplaySymbols.map((sym) =>
+                symbolStateClient
+                  .getState(sym)
+                  .then((st) => ((st?.position?.qty ?? 0) !== 0 ? sym : null))
+                  .catch(() => null),
+              ),
+            ).then((held) => new Set(held.filter((s): s is string => s !== null)))
+          : Promise.resolve(new Set<string>()),
       ])
       const pairRegimeView: { decision: PairRegimeDecision; side: 'bull' | 'bear'; mode: string } | null =
         pair !== undefined && pairRegimeDecision !== null
@@ -722,6 +735,7 @@ export const dashboard = new Hono<DashboardBindings>()
         focusSymbol,
         symbolChart,
         availableSymbols: allDisplaySymbols,
+        heldSymbols,
         strategyParams,
         strategyParamsGlobal: globalParams,
         zoom,

@@ -2270,6 +2270,27 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
     )
   })
 
+  it('銘柄レールは保有中の銘柄にだけドットを付け、凡例を出す', () => {
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL'],
+      heldSymbols: new Set(['SOXL']),
+    })
+    expect(html).toContain('<span class="rail-sym">SOXL<span class="rail-dot" aria-label="保有中"></span></span>')
+    expect(html).toContain('<span class="rail-sym">TQQQ</span>')
+    expect(html).toContain('<span class="rail-legend"><span class="rail-dot"></span>保有中</span>')
+  })
+
+  it('保有が無ければ銘柄レールに凡例を出さない', () => {
+    const html = renderSymbolTab({
+      ...symbolArgs([]),
+      availableSymbols: ['TQQQ', 'SOXL'],
+      heldSymbols: new Set(),
+    })
+    expect(html).not.toContain('rail-legend')
+    expect(html).not.toContain('class="rail-dot"')
+  })
+
   it('projection があれば payload に外挿情報を載せる (参考 価格外挿線)', () => {
     const view = buildBuyabilityView(
       [99.5, 99, 98.5, 98].map((price, i) => ({

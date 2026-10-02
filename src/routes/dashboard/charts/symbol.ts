@@ -805,11 +805,14 @@ function renderSymbolRail(args: ChartsBodySymbol): string {
           ? ` title="${esc(name)}"`
           : ''
       return `<a class="${cls}" href="/dashboard/charts?tab=symbol&symbol=${encodeURIComponent(s)}${zoomQs}"${titleAttr}>
-        <span class="rail-sym">${esc(s)}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
+        <span class="rail-sym">${esc(s)}${args.heldSymbols?.has(s) ? '<span class="rail-dot" aria-label="保有中"></span>' : ''}</span>${name ? `<span class="rail-name">${esc(name)}</span>` : ''}
       </a>`
     })
     .join('')
-  return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${items}</aside>`
+  const legend = args.heldSymbols && args.heldSymbols.size > 0
+    ? '<span class="rail-legend"><span class="rail-dot"></span>保有中</span>'
+    : ''
+  return `<aside class="symbol-rail"><div class="rail-head">銘柄${legend}</div>${items}</aside>`
 }
 
 function wrapWithSymbolRail(args: ChartsBodySymbol, content: string): string {
