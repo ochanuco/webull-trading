@@ -243,7 +243,7 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
     for (const href of ['/dashboard/charts?tab=quality', '/dashboard/charts']) {
       expect(body).toContain(`href="${href}"`)
     }
-    expect(body).toContain('実現損益の推移')
+    expect(body).toContain('確定損益の推移')
     // 判定ログ / アラートはレビュー subnav からは外れる (診断側へ)
     expect(body).not.toContain('<a class="subnav-link" href="/dashboard/cron">')
     expect(body).not.toContain('<a class="subnav-link" href="/dashboard/alerts">')
@@ -259,7 +259,7 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
   })
   it.each([
     ['/dashboard/audit', '監査ログ'],
-    ['/dashboard/broker-probe', 'broker 診断'],
+    ['/dashboard/broker-probe', 'ブローカー診断'],
     ['/dashboard/webull-token', 'Webull token'],
   ])('%s renders the 診断 subnav with %s active', async (path, label) => {
     const app = createApp()
@@ -320,11 +320,11 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('実行モード')
     expect(body).toContain('株価の鮮度')
     expect(body).toContain('取引 ON')
-    expect(body).toContain('最終 cron')
+    expect(body).toContain('最終判定')
     expect(body).toContain('未確認アラート')
     // エリアラベル (リスクと保有銘柄 / 最近の活動見出し) は撤去し、カードタイトルのみで示す (#ui-redesign polish)
     expect(body).toContain('保有銘柄')
-    expect(body).toContain('実効 stop は ATR と R:R 上限')
+    expect(body).toContain('損切りラインは ATR と R:R 上限')
     expect(body).toContain('直近の約定')
     expect(body).toContain('href="/dashboard/trades"')
     expect(body).toContain('href="/dashboard/cron"')
@@ -341,7 +341,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).toContain('負け')
     expect(body).toContain('勝率')
     expect(body).toContain('エラー')
-    expect(body).toContain('実現損益')
+    expect(body).toContain('確定損益')
     // 保有銘柄は 直近30日 カードの下、右列 (span-4) にスタックされる
     expect(body).toMatch(/直近30日[\s\S]*保有銘柄 1 件/)
   })
@@ -374,7 +374,7 @@ describe('dashboard IA — home integration (#dashboard-ia)', () => {
     expect(body).not.toContain('本日開始 equity')
     expect(body).not.toContain('home-equity-spark')
     expect(vi.mocked(loadUsdJpyRate)).not.toHaveBeenCalled()
-    expect(body).toContain('SYMBOL_STATE 未配線')
+    expect(body).toContain('保有状態を取得できない')
     // 運転状態帯は DO 不在でも出る (実行モード / 取引は D1 由来)
     expect(body).toContain('実行モード')
     expect(body).toContain('未確認アラート')

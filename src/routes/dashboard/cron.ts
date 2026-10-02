@@ -5,6 +5,20 @@ import { and, asc, desc, eq, lt, type SQL } from 'drizzle-orm'
 import { LOG_COPY_ALL_BTN, LOG_COPY_BTN_STYLE, SYMBOL_LINK_STYLE, clampLimit, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtJstCompactCell, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
 import { inferTradingMarket, isWithinStrategyWindow } from '../../trading/domain/tradingCalendar'
 
+// Jev's direction classification (jevHeadlineClassifier.ts); unmapped values
+// (future classes) pass through raw rather than disappearing.
+const NEWS_SHOCK_DIRECTION_LABELS: Record<string, string> = {
+  risk_off: 'リスクオフ',
+  risk_on: 'リスクオン',
+  mixed: '方向感混在',
+  not_market_relevant: '市場無関係',
+  unknown: '不明',
+}
+
+function localizeNewsShockDirection(direction: string): string {
+  return NEWS_SHOCK_DIRECTION_LABELS[direction] ?? direction
+}
+
 // Translates strategy/sizing's canonical English reason strings for display
 // only — the DB and journal keep the English form untouched.
 export function localizeReason(en: string | null | undefined): string {
@@ -98,12 +112,12 @@ export function localizeReason(en: string | null | undefined): string {
   // === Portfolio 全体エクスポージャー上限 ===
   s = s.replace(
     /^risk: portfolio exposure cap unavailable \((.+)\)$/,
-    (_m, reason) => `発注スキップ: 建玉上限データ取得不可 (${reason})`,
+    (_m, reason) => `発注スキップ: 保有上限データ取得不可 (${reason})`,
   )
   s = s.replace(
     /^risk: portfolio exposure cap \(notionalJpy (\S+) > remaining (\S+) of ceiling (\S+)\)$/,
     (_m, notional, remaining, ceiling) =>
-      `発注スキップ: 建玉上限超過 (発注金額 ${notional}円 > 残枠 ${remaining}円 / 上限 ${ceiling}円)`,
+      `発注スキップ: 保有上限超過 (発注金額 ${notional}円 > 残枠 ${remaining}円 / 上限 ${ceiling}円)`,
   )
 
   // === 価格鮮度ゲート (BUY のみ) ===
@@ -137,12 +151,12 @@ export function localizeReason(en: string | null | undefined): string {
   s = s.replace(
     /^risk: news_shock_critical: shock=([\d.]+) direction=(\S+) age=(\d+)m \(block\)$/,
     (_m, shock, direction, age) =>
-      `発注スキップ: ニュース急落シグナルで新規買い停止 (Jev shock ${shock}・${direction}、${age}分前の判定)`,
+      `発注スキップ: ニュース急落シグナルで新規買い停止 (Jev shock ${shock}・${localizeNewsShockDirection(direction)}、${age}分前の判定)`,
   )
   s = s.replace(
     /^risk: news_shock_warning: shock=([\d.]+) direction=(\S+) age=(\d+)m \(size x([\d.]+)\)(?: \(qty rounded to 0, lot=(\d+)\))?$/,
     (_m, shock, direction, age, scale, lot) =>
-      `発注スキップ: ニュース悪化シグナルで発注数量縮小 (Jev shock ${shock}・${direction}、${age}分前の判定、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
+      `発注スキップ: ニュース悪化シグナルで発注数量縮小 (Jev shock ${shock}・${localizeNewsShockDirection(direction)}、${age}分前の判定、数量 x${scale}${lot ? `、売買単位 ${lot} 未満で見送り` : ''})`,
   )
   s = s.replace(
     /^risk: news_shock_unavailable_(no_row|stale: [\w.]+min|status: \S+|no_shock)$/,
@@ -316,11 +330,11 @@ export function cronBody(
   const stripSession = baseHref.replace('&session=all', '')
   const sessionSeg = `<div class="seg">
     <a href="${stripSession}"${sessionFilter === 'open' ? ' class="active"' : ''}>開場中のみ</a>
-    <a href="${stripSession}&session=all"${sessionFilter === 'all' ? ' class="active"' : ''} title="休場時間帯に書かれた行 (手動 run 等) も表示する">全時間帯</a>
+    <a href="${stripSession}&session=all"${sessionFilter === 'all' ? ' class="active"' : ''} title="休場時間帯に書かれた行 (手動実行等) も表示する">全時間帯</a>
   </div>`
   const jsonLink = clientOrderIdFilter
     ? ''
-    : `<a href="/dashboard/cron/json" target="_blank" rel="noreferrer" class="chip">最新run JSON</a>`
+    : `<a href="/dashboard/cron/json" target="_blank" rel="noreferrer" class="chip">最新判定 JSON</a>`
   const countLine = `<span class="muted small">${rows.length} 件 (limit=${limit})</span>`
   const cardActions = `${sessionSeg}${countLine}${jsonLink}${copyAllBtn}`
   const cardHead = `<div class="card-head"><h2 class="card-title">戦略判定</h2><span class="info-tip" tabindex="0" aria-label="絞り込みの注記" data-tip="URL に ?symbol=SOXL を付けると銘柄で絞り込めます。">?</span><div class="card-actions">${cardActions}</div></div>`
@@ -328,7 +342,7 @@ export function cronBody(
     rows.length === 0
       ? `${cardHead}${header}<p class="empty">${
           sessionFilter === 'open' && pageLastId !== undefined
-            ? 'このページの判定はすべて休場時間帯 (手動 run 等) のため非表示です。'
+            ? 'このページの判定はすべて休場時間帯 (手動実行等) のため非表示です。'
             : '判定ログがまだありません。'
         }</p>${pagination}`
       : `${cardHead}${header}
@@ -404,7 +418,7 @@ export function renderDecisionTable(
   </style>
   <div class="tablewrap"><table class="decision-table">
     <thead><tr>
-      <th></th><th>日時 (JST)</th>${opts.showSymbol ? '<th>銘柄</th>' : ''}<th>判定</th><th>理由</th><th>株価</th><th>約定</th><th>実損益</th>
+      <th></th><th>日時 (JST)</th>${opts.showSymbol ? '<th>銘柄</th>' : ''}<th>判定</th><th>理由</th><th>株価</th><th>約定</th><th>確定損益</th>
     </tr></thead>
     <tbody>${tbody}</tbody>
   </table></div>
@@ -457,9 +471,9 @@ function cronReasonCell(row: {
     <div class="reason-panel">
       ${ladder}
       <div><strong>読み方</strong>${humanDetails}</div>
-      <div><strong>RUNID</strong><br><code>${esc(row.requestId ?? '-')}</code></div>
-      <div><strong>raw reason</strong><br><code>${esc(rawReason)}</code></div>
-      <div><strong>decision id / clientOrderId</strong><br><code>${row.id}</code> / ${row.clientOrderId ? `<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(row.clientOrderId)}" title="この注文の約定履歴を見る"><code>${esc(row.clientOrderId)}</code></a>` : '<code>-</code>'}</div>
+      <div><strong>リクエストID</strong><br><code>${esc(row.requestId ?? '-')}</code></div>
+      <div><strong>元の理由</strong><br><code>${esc(rawReason)}</code></div>
+      <div><strong>判定ID / 注文ID</strong><br><code>${row.id}</code> / ${row.clientOrderId ? `<a href="/dashboard/trades?clientOrderId=${encodeURIComponent(row.clientOrderId)}" title="この注文の約定履歴を見る"><code>${esc(row.clientOrderId)}</code></a>` : '<code>-</code>'}</div>
       <div><strong>JSON</strong><br><pre>${esc(decisionJson)}</pre></div>
     </div>
   </details>`
@@ -572,7 +586,7 @@ function renderDecisionLadder(
     <div class="trace-ladder">
       ${rows}
       <div class="tl-arrow">▼</div>
-      <div class="tl-output tl-out-${esc(decUpper.toLowerCase())}">出力: <strong>${esc(decUpper)}</strong> — ${esc(outputReason)}</div>
+      <div class="tl-output tl-out-${esc(decUpper.toLowerCase())}">出力: <strong>${esc(decUpper)}</strong>。${esc(outputReason)}</div>
     </div>
   </div>`
 }
@@ -592,7 +606,7 @@ export function renderChartDecisionTrace(
   return `<div><strong>判定トレース</strong>
     <div class="trace-ladder">
       <p class="muted" style="margin:4px 0;font-size:12px">この判定にはトレースが保存されていません (旧ログ)。</p>
-      <div class="tl-output tl-out-${esc(decUpper.toLowerCase())}">出力: <strong>${esc(decUpper)}</strong> — ${esc(outputReason)}</div>
+      <div class="tl-output tl-out-${esc(decUpper.toLowerCase())}">出力: <strong>${esc(decUpper)}</strong>。${esc(outputReason)}</div>
     </div>
   </div>`
 }

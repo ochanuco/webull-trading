@@ -1609,13 +1609,13 @@ export const SYMBOL_ROLE_LABELS_SHORT: Record<SymbolRole, string> = {
 }
 
 export const SYMBOL_ROLE_LABELS: Record<SymbolRole, string> = {
-  cash_parking: 'cash_parking — 待機資金 ETF (SGOV / BIL 等)',
-  core_trend: 'core_trend — 非レバ・トレンド (QQQ / VOO 等)',
-  leveraged_trend: 'leveraged_trend — レバ ETF (TQQQ / SOXL 等)',
-  low_volatility: 'low_volatility — 低ボラ ETF (USMV / SPLV 等)',
-  sector_trend: 'sector_trend — 1x セクター ETF (SMH / SOXX 等)',
-  inverse_hedge: 'inverse_hedge — 3x インバース・短期 (SQQQ / SOXS。1x は override 必須)',
-  momentum: 'momentum — ⚠ モメンタム/ブレイク (1x向け・backtest未検証・要警告)',
+  cash_parking: '待機資金 ETF (SGOV / BIL 等)',
+  core_trend: '非レバ・トレンド (QQQ / VOO 等)',
+  leveraged_trend: 'レバ ETF (TQQQ / SOXL 等)',
+  low_volatility: '低ボラ ETF (USMV / SPLV 等)',
+  sector_trend: '1x セクター ETF (SMH / SOXX 等)',
+  inverse_hedge: '3x インバース・短期 (SQQQ / SOXS。1x は上書き必須)',
+  momentum: '⚠ モメンタム/ブレイク (1x向け・バックテスト未検証・要警告)',
 }
 
 function renderSymbolRoleCell(row: SymbolConfigRow): string {

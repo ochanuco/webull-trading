@@ -423,8 +423,8 @@ const NAV_GROUPS: ReadonlyArray<{
   title?: string
 }> = [
   { key: 'home', href: '/dashboard', text: 'ホーム', title: '今日の状況 (運転状態 / 保有銘柄 / 直近の活動)' },
-  { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート (判定 pin / ラダー / 約定マーカー)' },
-  { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 成績 / 実現損益の推移' },
+  { key: 'symbol', href: '/dashboard/charts?tab=symbol', text: '銘柄', title: '個別銘柄チャート (判定ピン / ラダー / 約定マーカー)' },
+  { key: 'review', href: '/dashboard/trades', text: 'レビュー', title: '約定履歴 / 成績 / 確定損益の推移' },
 ]
 
 const OPS_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string }> = [
@@ -439,18 +439,18 @@ const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string
   { href: '/dashboard/audit', text: '監査ログ', title: '設定変更の before/after と実行者' },
   {
     href: '/dashboard/broker-probe',
-    text: 'broker 診断',
-    title: 'Webull broker に直接 quote/positions を投げて raw レスポンスを表示する診断ページ',
+    text: 'ブローカー診断',
+    title: 'Webull に直接問い合わせて相場・保有情報を生で確認する診断ページ',
   },
   {
     href: '/dashboard/webull-token',
     text: 'Webull token',
-    title: 'Webull x-access-token の状態確認 / 投入 / refresh (#21 Phase B)',
+    title: 'Webull token の状態確認 / 登録 / 更新',
   },
   {
     href: '/dashboard/extended-hours',
     text: '時間外参考',
-    title: 'US プレマーケット帯の Yahoo 時間外値の参考観測 (#709、売買判断には未接続)',
+    title: '米国プレマーケット帯の参考値 (Yahoo、売買判断には未使用)',
   },
 ]
 
@@ -513,7 +513,7 @@ const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   // value / PnL distribution, not slippage or fill rate.
   { key: 'quality', href: '/dashboard/charts?tab=quality', label: '成績' },
   // Labelled to distinguish from account-level portfolio equity.
-  { key: 'equity', href: '/dashboard/charts', label: '実現損益の推移' },
+  { key: 'equity', href: '/dashboard/charts', label: '確定損益の推移' },
   { key: 'lifecycle', href: '/dashboard/lifecycle', label: 'ライフサイクル' },
 ]
 
@@ -563,7 +563,7 @@ function killSwitchTopnav(state: KillSwitchBannerState | null): string {
     ? '<span class="ok">取引 ON (有効)</span>'
     : '<span class="err">取引 OFF (停止中)</span>'
   const envNote = state.envOverrideActive
-    ? `<div class="warn" style="font-size:10px;margin-top:4px;line-height:1.3">⚠ env TRADING_ENABLED で deploy-gate ON: DB を ${state.dbEnabled ? 'ON' : 'OFF'} にしても effective は OFF</div>`
+    ? `<div class="warn" style="font-size:10px;margin-top:4px;line-height:1.3">⚠ 環境変数 TRADING_ENABLED が優先: DB を ${state.dbEnabled ? 'ON' : 'OFF'} にしても取引は停止のまま</div>`
     : ''
   const disabled = state.envOverrideActive ? 'disabled' : ''
   const buttonForm = state.effective

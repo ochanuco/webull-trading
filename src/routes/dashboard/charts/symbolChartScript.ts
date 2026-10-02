@@ -302,7 +302,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
       // info (not down) — a SELL fill isn't itself a loss, that's what
       // realizedPnl decides (see the exits label color above).
       var DECISION_COLORS = { BUY: t.up, SELL: t.info, SKIP: t.warn, REJECT: '#8b5cf6', ERROR: t.down };
-      var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', SKIP: '見送り (bot判定)', REJECT: '拒否 (証券会社)', ERROR: 'エラー (原因不明・一時的)' };
+      var DECISION_LABEL_JA = { BUY: '買い', SELL: '売り', SKIP: '見送り (システム判定)', REJECT: '拒否 (証券会社)', ERROR: 'エラー (原因不明・一時的)' };
       function escHtml(s) {
         return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       }
@@ -622,7 +622,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           // Empty-data line series exists only as a named host for the
           // markArea (ECharts markArea has no series type of its own).
           ...(holdingAreaData.length > 0 ? [{
-            name: '保有区間 (確定)', type: 'line', data: [],
+            name: '保有区間 (決済済み)', type: 'line', data: [],
             symbol: 'none', silent: true, z: 0,
             itemStyle: { color: 'rgba(120, 120, 128, 0.4)' },
             markArea: { silent: true, data: holdingAreaData },
@@ -774,7 +774,7 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
           }] : []),
           // "参考" (reference, not a forecast) reads naturally as the info token.
           ...(projLineXY ? [{
-            name: '参考 価格外挿 (予測ではない)', type: 'line', data: projLineXY,
+            name: '価格外挿 (参考)', type: 'line', data: projLineXY,
             lineStyle: { width: 1.4, color: t.info, type: 'dotted', opacity: 0.85 }, symbol: 'none',
             itemStyle: { color: t.info },
             silent: true, emphasis: { disabled: true }, z: 8,
@@ -836,12 +836,12 @@ export const SYMBOL_CHART_CLIENT_SCRIPT = `
         var pnlColor = d.realizedPnl == null ? t.text2 : (d.realizedPnl >= 0 ? t.up : t.down);
         var link = d.clientOrderId
           ? '<a href="/dashboard/trades?clientOrderId=' + encodeURIComponent(d.clientOrderId) + '" style="font-size:12px">この注文の履歴 →</a>'
-          : '<span class="muted" style="font-size:11px">注文 ID 未記録 (旧 fill)</span>';
+          : '<span class="muted" style="font-size:11px">注文 ID 未記録 (旧い約定)</span>';
         tracePanel.innerHTML =
           '<div style="font-size:13px;font-weight:600;margin-bottom:4px;color:' + sideColor + '">約定 ' + escHtml(side) + ' @ ' + price + '</div>'
           + '<div style="font-size:12px">日時: ' + escHtml(d.fillTimestamp == null ? '—' : jstLabelSec(d.fillTimestamp)) + '</div>'
           + '<div style="font-size:12px">価格 × 数量: ' + price + ' × ' + escHtml(qty) + '</div>'
-          + '<div style="font-size:12px">実現損益: <span style="color:' + pnlColor + '">' + escHtml(pnl) + '</span></div>'
+          + '<div style="font-size:12px">確定損益: <span style="color:' + pnlColor + '">' + escHtml(pnl) + '</span></div>'
           + '<div style="margin-top:4px">' + link + '</div>';
         tracePanel.style.display = 'block';
       }

@@ -14,8 +14,8 @@ export type OverviewPanel = 'risk' | 'activity'
 export const ALL_OVERVIEW_PANELS: readonly OverviewPanel[] = ['risk', 'activity']
 
 export const OVERVIEW_PANEL_LABELS: Record<OverviewPanel, string> = {
-  risk: 'リスクと保有銘柄 (保有一覧 + 資産構成 / 含み損益ランキング)',
-  activity: '最近の活動 (直近の約定 + 資産推移)',
+  risk: 'リスクと保有銘柄 (保有一覧・資産構成・含み損益ランキング)',
+  activity: '最近の活動 (直近の約定・資産推移)',
 }
 
 // Maps old panel keys to their new area so a previously saved CSV keeps working without the
@@ -245,12 +245,12 @@ function renderRunStateStrip(data: OverviewData): string {
   return `<div class="stat-strip">
     ${stat('実行モード', esc(mode.text), mode.tone)}
     ${stat('取引', esc(trading.text), trading.tone)}
-    ${stat('最終 cron', cron.html, cron.tone)}
+    ${stat('最終判定', cron.html, cron.tone)}
     ${stat('株価の鮮度', quote.html, quote.tone)}
     ${stat('VIX レジーム', `<span class="stat-note">${renderVixRegimeCell(data.vixRegime)}</span>`, 'plain')}
     ${stat('未確認アラート', `<a href="/dashboard/alerts">${esc(alert.text)}</a>`, alert.tone)}
     ${buyingPowerStat()}
-    <a class="state-kill" href="/dashboard/config" title="global_config で trading_enabled を切る">緊急停止</a>
+    <a class="state-kill" href="/dashboard/config" title="取引停止の設定へ">緊急停止</a>
   </div>`
 }
 
@@ -375,7 +375,7 @@ function renderPerformanceCard(data: OverviewData, open: OpenPositionView[]): st
   return `<div class="card">
     <div class="card-head"><span class="card-title">直近30日</span></div>
     <div class="kpi-hero-line">
-      <span class="stat-label">実現損益</span>
+      <span class="stat-label">確定損益</span>
       <span class="kpi-value">${st ? fmtMoneySigned(st.realizedPnlSum) : '—'}</span>
     </div>
     <div class="flat-stats">${cells.join('')}</div>
@@ -403,13 +403,13 @@ function renderStopBar(stop: StopDistanceView | undefined): string {
 // 6-column table header wraps before it fits.
 function renderHoldingsCard(data: OverviewData, open: OpenPositionView[]): string {
   if (!data.symbolStateBound) {
-    return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄</span><span class="empty">SYMBOL_STATE 未配線のため表示できません。</span></div></div>`
+    return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄</span><span class="empty">保有状態を取得できないため表示できません。</span></div></div>`
   }
   if (open.length === 0) {
     return `<div class="card"><div class="empty-row"><span class="card-title">保有銘柄 0 件</span><span class="empty">保有中の銘柄はありません。</span></div></div>`
   }
-  const stopTip = `<span class="info-tip" tabindex="0" aria-label="stop 距離の説明" data-tip="${esc(
-    '実効 stop は ATR と R:R 上限で銘柄ごとに変動します。詳細は 銘柄 タブへ。',
+  const stopTip = `<span class="info-tip" tabindex="0" aria-label="損切りまでの距離の説明" data-tip="${esc(
+    '損切りラインは ATR と R:R 上限で銘柄ごとに変わります。詳細は銘柄タブへ。',
   )}">?</span>`
   const rows = open
     .map((o) => {
@@ -442,7 +442,7 @@ function renderExposurePill(data: OverviewData, open: OpenPositionView[]): strin
   if (!(cap > 0) || usd <= 0) return ''
   const pct = (usd / cap) * 100
   const cls = pct >= 60 ? 'warn' : 'neutral'
-  return `<span class="pill ${cls}">開始 equity の ${fmtNumber(pct, 0)}%</span>`
+  return `<span class="pill ${cls}">開始資産の ${fmtNumber(pct, 0)}%</span>`
 }
 
 function fmtJstShort(iso: string): string {
@@ -471,7 +471,7 @@ function renderRecentTradesCard(data: OverviewData): string {
     })
     .join('')
   const body = data.recentTrades.length
-    ? `<div class="tablewrap"><table class="fit"><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">実損益</th></tr></thead><tbody>${trades}</tbody></table></div>`
+    ? `<div class="tablewrap"><table class="fit"><thead><tr><th>時刻</th><th class="grow">銘柄</th><th>売買</th><th class="num">数量</th><th class="num">約定値</th><th class="num">確定損益</th></tr></thead><tbody>${trades}</tbody></table></div>`
     : '<div class="empty">約定履歴がありません。</div>'
   return `<div class="card">
     <div class="card-head">

@@ -95,11 +95,11 @@ export function renderPortfolioEquityChart(
 ): string {
   const rangeTabs = renderEquityRangeTabs(range, basePath)
   const infoTip = `<span class="info-tip" tabindex="0" aria-label="総資産チャートの説明" data-tip="${esc(
-    'PortfolioStateDO.dailyStartEquity の roll-daily 時点スナップショット。実現損益の推移 (レビュー) は trade_journal.realized_pnl の累積で、こちらは口座総資産そのもの (cash + 保有時価)。JPY 換算値はツールチップで確認できます。',
+    '日次ロール時点の口座総資産のスナップショット (現金・保有時価の合計)。確定損益の推移 (レビュー) とは別の指標で、JPY 換算はツールチップで確認できる。',
   )}">?</span>`
   const head = `<div class="card-head"><span class="card-title">総資産</span>${infoTip}<span class="card-actions">${rangeTabs}</span></div>`
   if (snapshots.length === 0) {
-    return `${head}<p class="empty">まだ roll-daily 実行履歴がありません。<code>/admin/portfolio/roll-daily</code> を実行すると、ここに時系列が描画されます。</p>`
+    return `${head}<p class="empty">まだ日次ロールの実行履歴がありません。<code>/admin/portfolio/roll-daily</code> を実行すると、ここに時系列が描画されます。</p>`
   }
   const usdPoints: Array<{ date: string; value: number | null }> = []
   const jpyPoints: Array<{ date: string; value: number | null }> = []
@@ -215,15 +215,15 @@ function renderEquityRangeTabs(active: EquityRange, basePath = '/dashboard/portf
 // see strategy_decision_log's VIX reject reason if the number is needed.
 export function renderVixRegimeCell(regime: VixRegime | null): string {
   if (regime === null) {
-    return `<span class="muted">— (cron 未到達 or DB 未配線、fail-open で通常運用)</span>`
+    return `<span class="muted">— (判定処理が未到達、または DB 未接続のため通常運用)</span>`
   }
   if (regime === 'critical') {
-    return `<span class="err">critical — 新規買い停止 (売却は通常)</span>`
+    return `<span class="err">critical: 新規買い停止 (売却は通常)</span>`
   }
   if (regime === 'warning') {
-    return `<span class="warn">warning — 新規買いを縮小 (size scale 適用)</span>`
+    return `<span class="warn">warning: 新規買いを縮小 (数量を減らす)</span>`
   }
-  return `<span class="ok">normal — 通常運用</span>`
+  return `<span class="ok">normal: 通常運用</span>`
 }
 
 // 24h/48h thresholds mirror runStrategyCron.emitStaleRollWarningIfNeeded — keep the two in sync.
@@ -232,17 +232,17 @@ export function renderLastRolledCell(
   now: () => number = Date.now,
 ): string {
   if (lastRolledAt === null) {
-    return `<span class="warn">未実行 (EOD cron 未到達 or PORTFOLIO_STATE 未配線)</span>`
+    return `<span class="warn">未実行 (日次終業処理が未到達、またはポートフォリオ状態が未接続)</span>`
   }
   const ms = new Date(lastRolledAt).getTime()
   if (!Number.isFinite(ms)) {
-    return `<span class="err">${esc(lastRolledAt)} (parse 不能)</span>`
+    return `<span class="err">${esc(lastRolledAt)} (形式不正)</span>`
   }
   const elapsedHours = (now() - ms) / 3_600_000
   const formatted = esc(fmtJst(lastRolledAt))
   const elapsedLabel = `${elapsedHours.toFixed(1)}h 前`
   if (elapsedHours >= 48) {
-    return `<span class="err">${formatted} <small>(${esc(elapsedLabel)}, 48h 超 — EOD cron 要確認)</small></span>`
+    return `<span class="err">${formatted} <small>(${esc(elapsedLabel)}, 48h 超。日次終業処理を確認)</small></span>`
   }
   if (elapsedHours >= 24) {
     return `<span class="warn">${formatted} <small>(${esc(elapsedLabel)}, 24h 超)</small></span>`
