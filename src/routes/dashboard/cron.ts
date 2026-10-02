@@ -3,9 +3,6 @@ import { createDb } from '../../infrastructure/db/tradeJournalRepo'
 import { strategyDecisionLog, tradeJournal } from '../../infrastructure/db/schema'
 import { and, asc, desc, eq, lt, type SQL } from 'drizzle-orm'
 import { LOG_COPY_ALL_BTN, LOG_COPY_BTN_STYLE, SYMBOL_LINK_STYLE, clampLimit, currencyOfSymbol, displaySymbol, esc, fmtJst, fmtJstCompactCell, fmtNumber, fmtPct, fmtPctSigned, fmtPriceCcy, inactiveTooltip, isSymbolInactive, logCopyRowBtn, parseJsonObject, renderLogCopyScript, renderPaginationNav, safeJsonScript } from './shared'
-// A skipped (closed-market) tick never writes a strategy_decision_log row,
-// so the matrix distinguishes "closed" from "no decision" by calendar here
-// at render time rather than at write time.
 import { inferTradingMarket, isWithinStrategyWindow } from '../../trading/domain/tradingCalendar'
 
 // Translates strategy/sizing's canonical English reason strings for display
@@ -283,19 +280,6 @@ function renderCronSymbolRail(
   return `<aside class="symbol-rail"><div class="rail-head">銘柄</div>${allItem}${items}</aside>`
 }
 
-// `?symbol=` carries across the list/matrix toggle so returning to the
-// list keeps the filter, even though matrix itself ignores it.
-function renderCronViewPills(
-  active: 'list' | 'matrix',
-  limit: number,
-  symbolFilter?: string,
-): string {
-  const symbolQs = symbolFilter ? `&symbol=${encodeURIComponent(symbolFilter)}` : ''
-  const pill = (label: string, href: string, isActive: boolean): string =>
-    `<a href="${href}"${isActive ? ' class="active"' : ''}>${esc(label)}</a>`
-  return `<div class="seg">${pill('一覧', `/dashboard/cron?limit=${limit}${symbolQs}`, active === 'list')}${pill('マトリクス', `/dashboard/cron?view=matrix${symbolQs}`, active === 'matrix')}</div>`
-}
-
 export function cronBody(
   rows: DecisionRow[],
   limit: number,
@@ -338,7 +322,7 @@ export function cronBody(
     ? ''
     : `<a href="/dashboard/cron/json" target="_blank" rel="noreferrer" class="chip">最新run JSON</a>`
   const countLine = `<span class="muted small">${rows.length} 件 (limit=${limit})</span>`
-  const cardActions = `${renderCronViewPills('list', limit, symbolFilter)}${sessionSeg}${countLine}${jsonLink}${copyAllBtn}`
+  const cardActions = `${sessionSeg}${countLine}${jsonLink}${copyAllBtn}`
   const cardHead = `<div class="card-head"><h2 class="card-title">戦略判定</h2><span class="info-tip" tabindex="0" aria-label="絞り込みの注記" data-tip="URL に ?symbol=SOXL を付けると銘柄で絞り込めます。">?</span><div class="card-actions">${cardActions}</div></div>`
   const cardBody =
     rows.length === 0
