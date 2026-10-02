@@ -100,7 +100,7 @@ export function renderConclusionValue(
     const toStop = (stopPrice - current) / current
     const toTp = (tpPrice - current) / current
     return {
-      value: `損切りまで ${fmtPctSigned(toStop)} ／ TP まで ${fmtPctSigned(toTp)}`,
+      value: `損切りまで ${fmtPctSigned(toStop)} / TP まで ${fmtPctSigned(toTp)}`,
       color: 'var(--text)',
     }
   }
@@ -147,7 +147,7 @@ export function renderPositionSummaryValue(
         })()
       : ''
   return `<div>平均取得 ${esc(fmtPriceCcy(position.avgPrice, ccy))}｜含み損益 <span class="${pnlCls}">${esc(pnlText)}</span></div>
-    <div class="muted" style="margin-top:2px">損切り ${esc(fmtPriceCcy(stopPrice, ccy))} ／ TP ${esc(fmtPriceCcy(tpPrice, ccy))}</div>
+    <div class="muted" style="margin-top:2px">損切り ${esc(fmtPriceCcy(stopPrice, ccy))} / TP ${esc(fmtPriceCcy(tpPrice, ccy))}</div>
     ${qtyLine}`
 }
 
@@ -354,7 +354,7 @@ export function renderSymbolPolicyLine(
     parts.push(
       known
         ? `ロール: <code style="font-size:12px" title="${esc(SYMBOL_ROLE_LABELS[policy.role as SymbolRole])}">${esc(policy.role)}</code>: <strong>${esc(SYMBOL_ROLE_LABELS_SHORT[policy.role as SymbolRole])}</strong>`
-        : `ロール: <span class="err" title="不正な role 値のためエントリーを停止 (安全側に倒す)">⚠ ${esc(policy.role)}</span>`,
+        : `ロール: <span class="err" title="不正なロール値のためエントリー停止中">⚠ ${esc(policy.role)}</span>`,
     )
   }
   if (policy.targetWeight !== null) {
@@ -722,7 +722,7 @@ function renderRolePill(role: string | null): string {
   if (!role) return ''
   const known = (SYMBOL_ROLES as readonly string[]).includes(role)
   if (!known) {
-    return `<span class="pill err" title="不正な role 値のためエントリーを停止 (安全側に倒す)">⚠ ${esc(role)}</span>`
+    return `<span class="pill err" title="不正なロール値のためエントリー停止中">⚠ ${esc(role)}</span>`
   }
   return `<span class="pill info" title="${esc(SYMBOL_ROLE_LABELS[role as SymbolRole])}">${esc(role)}: ${esc(SYMBOL_ROLE_LABELS_SHORT[role as SymbolRole])}</span>`
 }

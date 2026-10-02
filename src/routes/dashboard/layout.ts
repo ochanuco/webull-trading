@@ -440,7 +440,7 @@ const DIAG_NAV_LINKS: ReadonlyArray<{ href: string; text: string; title?: string
   {
     href: '/dashboard/broker-probe',
     text: 'ブローカー診断',
-    title: 'Webull に直接問い合わせて相場・保有情報を生で確認する診断ページ',
+    title: 'Webull に直接問い合わせて相場・保有情報の応答をそのまま表示する',
   },
   {
     href: '/dashboard/webull-token',
