@@ -844,7 +844,7 @@ export const dashboard = new Hono<DashboardBindings>()
       ? await loadSymbolUniverse(c.env).catch(() => null)
       : null
     return c.html(
-      renderLayout(c, 'Broker 診断', brokerProbeBody({ symbol, category, universe })),
+      renderLayout(c, 'Broker 診断', brokerProbeBody({ symbol, category, universe }), renderDiagSubnav('probe')),
     )
   })
   .get('/alerts', async (c) => {
@@ -884,7 +884,7 @@ export const dashboard = new Hono<DashboardBindings>()
   })
   .get('/audit', async (c) => {
     if (!c.env.DB) {
-      return c.html(renderLayout(c, '監査ログ', unavailable('DB not bound')))
+      return c.html(renderLayout(c, '監査ログ', unavailable('DB not bound'), renderDiagSubnav('audit')))
     }
     const limit = clampAuditLimit(c.req.query('limit'))
     const before = parseCursor(c.req.query('before'))
@@ -915,10 +915,11 @@ export const dashboard = new Hono<DashboardBindings>()
             before,
             hasMore,
           }),
+          renderDiagSubnav('audit'),
         ),
       )
     } catch (err) {
-      return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err))))
+      return c.html(renderLayout(c, '監査ログ', unavailable(messageOf(err)), renderDiagSubnav('audit')))
     }
   })
   // Renders list/new/edit only; writes go to /admin/symbol-config[/...] via
@@ -1318,7 +1319,7 @@ export const dashboard = new Hono<DashboardBindings>()
   .get('/webull-token', async (c) => {
     c.header('Cache-Control', 'no-store')
     if (!c.env.WEBULL_TOKEN_STATE) {
-      return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured')))
+      return c.html(renderLayout(c, 'Webull token', unavailable('WEBULL_TOKEN_STATE binding is not configured'), renderDiagSubnav('token')))
     }
     const store = new WebullTokenStateClient(c.env.WEBULL_TOKEN_STATE)
     // Distinguishes a DO read failure (an outage) from a genuinely empty DO
@@ -1333,13 +1334,13 @@ export const dashboard = new Hono<DashboardBindings>()
     }
     if (stateError) {
       return c.html(
-        renderLayout(c, 'Webull token', unavailable(`WEBULL_TOKEN_STATE read failed: ${stateError}`)),
+        renderLayout(c, 'Webull token', unavailable(`WEBULL_TOKEN_STATE read failed: ${stateError}`), renderDiagSubnav('token')),
       )
     }
     const notice = c.req.query('notice') ?? null
     const error = c.req.query('error') ?? null
     return c.html(
-      renderLayout(c, 'Webull token', renderWebullTokenBody({ state, notice, error })),
+      renderLayout(c, 'Webull token', renderWebullTokenBody({ state, notice, error }), renderDiagSubnav('token')),
     )
   })
   .post('/webull-token/seed', rateLimit('ADMIN_WRITE'), async (c) => {

@@ -255,8 +255,16 @@ describe('dashboard IA — レビュー / 診断 subnav (#dashboard-ia)', () => 
       await app.request('/dashboard/cron', { headers: authHeader }, baseEnv)
     ).text()
     expect(cronBody).toContain('<span class="subnav-link active">判定ログ</span>')
-    // 判定マトリクスは廃止 (#dashboard-ia)
-    expect(cronBody).not.toContain('判定マトリクス')
+    expect(cronBody).not.toContain('マトリクス')
+  })
+  it.each([
+    ['/dashboard/audit', '監査ログ'],
+    ['/dashboard/broker-probe', 'broker 診断'],
+    ['/dashboard/webull-token', 'Webull token'],
+  ])('%s renders the 診断 subnav with %s active', async (path, label) => {
+    const app = createApp()
+    const body = await (await app.request(path, { headers: authHeader }, baseEnv)).text()
+    expect(body).toContain(`<span class="subnav-link active">${label}</span>`)
   })
   it('alerts page activates アラート', async () => {
     vi.mocked(loadRecentAlerts).mockResolvedValue([])
