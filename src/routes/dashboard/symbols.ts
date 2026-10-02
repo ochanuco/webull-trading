@@ -1992,7 +1992,7 @@ export function symbolFormBody(args: SymbolFormArgs): string {
           function gateHtml(role, p) {
             if (role === 'cash_parking') return '<div style="color:var(--up);font-size:11px">戦略エントリーなし。条件未達時の<b>退避先</b>・<b>常時配分</b>枠 (押し目判定なし)。</div>';
             var ov = p.ov || {}, g = [];
-            g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">入場ゲート(閾値)</div>');
+            g.push('<div style="font-weight:600;font-size:11px;margin-bottom:2px">エントリー条件 (閾値)</div>');
             g.push('<div>トレンド &gt; ' + fmtPct(p.tr) + omark(ov.tr) + '</div>');
             g.push('<div>SMA50 ' + (p.sma50 ? '上抜け必須' : '上抜け不問') + omark(ov.sma50) + '</div>');
             g.push('<div>過熱(SMA50乖離) ≤ ' + fmtPct(p.heat) + omark(ov.heat) + '</div>');

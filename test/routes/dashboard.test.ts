@@ -2157,7 +2157,7 @@ describe('renderSymbolTab — 判定点 scatter + click-to-trace の配線', () 
       TEST_DEFAULT_RULE,
     )
     const html = renderSymbolTab(symbolArgs([], view))
-    expect(html).toContain('入場まで') // パネル headline
+    expect(html).toContain('エントリーまで') // パネル headline
     // 入場ライン独立線は廃止 → 押し目ゾーン端に距離ラベルを載せる (bandEdgeLabel は
     // 静的ファイル化された client script 側にある)
     expect(SYMBOL_CHART_CLIENT_SCRIPT).toContain("bandEdgeLabel('押し目上端'")
@@ -2365,7 +2365,7 @@ describe('fold 内 判断サマリ (#charts-symbol-redesign)', () => {
         TEST_DEFAULT_RULE,
       )
       const { value, color } = renderConclusionValue(view, null, baseParams, 95)
-      expect(value).toContain('入場条件 充足')
+      expect(value).toContain('エントリー条件を満たしている')
       expect(color).toBe('var(--up)')
     })
 
@@ -2571,7 +2571,7 @@ describe('renderSymbolTab — fold 内サマリ / サブタブ分離 (#charts-sy
     )
     const html = renderSymbolTab(baseArgs({ buyability: view }))
     const detailsIdx = html.indexOf('<details style="margin-top:10px">')
-    const summaryIdx = html.indexOf('入場までの詳細 (ゲートチェックリスト・距離推移)')
+    const summaryIdx = html.indexOf('エントリー条件の詳細')
     const gridIdx = html.indexOf('class="judgment-row"')
     expect(detailsIdx).toBeGreaterThanOrEqual(0)
     expect(summaryIdx).toBeGreaterThan(detailsIdx)
@@ -2595,18 +2595,18 @@ describe('renderBuyabilityPanel (入場まで あとどれくらい / いつ頃)
     expect(renderBuyabilityPanel(null)).toBe('')
   })
 
-  it('価格があと下落で入場 → 「入場まで あと 価格」+ 到達価格 + ゲート表', () => {
+  it('株価があと下落でエントリー → 「エントリーまで株価あと」+ 到達価格 + 条件表', () => {
     const html = renderBuyabilityPanel(viewFromPrices([99]))
-    expect(html).toContain('入場まで')
+    expect(html).toContain('エントリーまで')
     expect(html).toContain('株価あと')
     expect(html).toContain('97.00') // band 上端 = 到達価格
-    expect(html).toContain('入場ゲート')
-    expect(html).toContain('◀ ボトルネック') // 不成立ゲートを明示
+    expect(html).toContain('エントリー条件')
+    expect(html).toContain('◀ 未達') // 不成立ゲートを明示
   })
 
   it('全条件充足なら「入場条件を充足」', () => {
     const html = renderBuyabilityPanel(viewFromPrices([95]))
-    expect(html).toContain('入場条件を充足')
+    expect(html).toContain('エントリー条件を満たしている')
   })
 
   it('価格非依存ブロック (トレンド不足) は「価格を動かすだけでは入場不可」', () => {
@@ -2615,7 +2615,7 @@ describe('renderBuyabilityPanel (入場まで あとどれくらい / いつ頃)
       TEST_DEFAULT_RULE,
     )
     const html = renderBuyabilityPanel(view)
-    expect(html).toContain('価格を動かすだけでは入場不可')
+    expect(html).toContain('価格だけではエントリー不可')
     expect(html).toContain('トレンド')
   })
 

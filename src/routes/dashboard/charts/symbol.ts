@@ -106,7 +106,7 @@ export function renderConclusionValue(
   }
   const cur = buyability?.current ?? null
   if (!cur) return { value: '判定データなし', color: 'var(--text-3)' }
-  if (cur.buyable) return { value: '入場条件 充足（BUY 候補）', color: 'var(--up)' }
+  if (cur.buyable) return { value: 'エントリー条件を満たしている（BUY 候補）', color: 'var(--up)' }
   if (cur.entryPrice !== null && cur.priceMove !== null) {
     const bottleneck = cur.bindingGate ? `（${esc(cur.bindingGate.labelJa)}）` : ''
     return {
@@ -116,7 +116,7 @@ export function renderConclusionValue(
   }
   const g = cur.bindingGate
   return {
-    value: g ? `価格でも入場不可 (壁: ${esc(g.labelJa)})` : '評価不可',
+    value: g ? `価格だけではエントリー不可（未達: ${esc(g.labelJa)}）` : '評価不可',
     color: 'var(--down)',
   }
 }
@@ -264,7 +264,7 @@ export function renderSymbolMainInner(args: ChartsBodySymbol): string {
   ${renderPairRegimeLine(args.pairRegime ?? null)}
   ${renderJudgmentSummaryGrid(args)}
   <details style="margin-top:10px">
-    <summary style="cursor:pointer;font-size:13px">入場までの詳細 (ゲートチェックリスト・距離推移)</summary>
+    <summary style="cursor:pointer;font-size:13px">エントリー条件の詳細</summary>
     ${renderBuyabilityPanel(args.buyability ?? null, {
       entryStatus: args.entryStatus ?? null,
       currency: args.focusSymbol ? currencyOfSymbol(args.focusSymbol) : null,
@@ -533,23 +533,23 @@ export function renderBuyabilityPanel(
   let headColor: string
   if (cur.buyable) {
     headline =
-      '現在 入場条件を充足（判定処理では BUY 候補。実発注は資金 / 単元など発注側ゲート次第）'
+      'エントリー条件を満たしている（BUY 候補。実際の発注は資金と単元しだい）'
     headColor = 'var(--up)'
   } else if (cur.entryPrice !== null && cur.priceMove !== null) {
     const dir = cur.priceMove < 0 ? '下落' : '上昇'
-    const binding = cur.bindingGate ? ` ／ ボトルネック: ${esc(cur.bindingGate.labelJa)}` : ''
+    const binding = cur.bindingGate ? `。未達: ${esc(cur.bindingGate.labelJa)}` : ''
     headline = `エントリーまで株価あと <strong>${fmtPctSigned(cur.priceMove)}</strong>（${fmtPriceCcy(cur.entryPrice, ccy)} 到達で${dir}）${binding}`
     headColor = 'var(--warn)'
   } else {
     const g = cur.bindingGate
     const why = g
       ? g.priceDependent
-        ? '押し目ゾーンと過熱上限が同時に成立しない局面です。'
-        : 'この指標が条件を満たすまでは、価格がどこでも入場しません。'
+        ? '押し目と過熱上限を同時に満たせない状態。'
+        : 'この条件を満たすまで株価に関係なくエントリーしない。'
       : ''
     headline = g
-      ? `価格を動かすだけでは入場不可。壁は <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))} が不成立）。${why}`
-      : '入場条件 評価不可'
+      ? `価格だけではエントリー不可。未達: <strong>${esc(g.labelJa)}</strong>（${esc(fmtGateValue(g, ccy))}）。${why}`
+      : 'エントリー条件を評価できない'
     headColor = 'var(--down)'
   }
 
@@ -577,16 +577,16 @@ export function renderBuyabilityPanel(
       .join('')
     const trendLabel =
       buyability.trend === 'closing'
-        ? '<span style="color:var(--up)">縮小中（入場に近づいている）</span>'
+        ? '<span style="color:var(--up)">縮小中</span>'
         : buyability.trend === 'widening'
-          ? '<span style="color:var(--warn)">拡大中（入場から遠ざかっている）</span>'
+          ? '<span style="color:var(--warn)">拡大中</span>'
           : buyability.trend === 'flat'
             ? '<span class="muted">横ばい</span>'
             : '<span class="muted">判定不能</span>'
-    trendBlock = `<div style="margin-top:8px"><strong>距離の推移</strong> (入場までの価格距離): ${trendLabel}
+    trendBlock = `<div style="margin-top:8px"><strong>エントリーまでの距離</strong>: ${trendLabel}
       <div style="margin-top:4px">${bars}</div></div>`
   } else {
-    trendBlock = `<div style="margin-top:8px" class="muted">距離の推移: 価格距離が算出できる評価日がありません（価格非依存ゲートが要因）。</div>`
+    trendBlock = `<div style="margin-top:8px" class="muted">エントリーまでの距離: 価格に依存しない条件が未達のため算出できない。</div>`
   }
 
   // --- 到達目安 ---
@@ -594,7 +594,7 @@ export function renderBuyabilityPanel(
   if (buyability.etaTradingDays !== null && buyability.trend === 'closing') {
     const days = Math.max(1, Math.ceil(buyability.etaTradingDays))
     etaBlock = `<div style="margin-top:8px"><strong>到達目安</strong>: このペースなら約 ${days} 営業日
-      <div class="muted" style="font-size:11px">⚠ 過去の推移からの外挿で、予測ではない (相場の逆行や押し目バンドの変動で変わる)</div></div>`
+      <div class="muted" style="font-size:11px">⚠ 過去の推移からの外挿で、予測ではない</div></div>`
   }
 
   // --- ゲートチェックリスト ---
@@ -605,7 +605,7 @@ export function renderBuyabilityPanel(
       const mark = ok ? '✅' : '❌'
       const bg = ok ? 'var(--up-soft)' : 'var(--down-soft)'
       const border = binding ? 'border-left:3px solid var(--down);' : 'border-left:3px solid transparent;'
-      const tag = binding ? ' <span style="color:var(--down);font-weight:600">◀ ボトルネック</span>' : ''
+      const tag = binding ? ' <span style="color:var(--down);font-weight:600">◀ 未達</span>' : ''
       return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 8px;background:${bg};${border}border-radius:4px;font-size:12px;flex-wrap:wrap">
         <span>${mark}</span><span>${esc(g.labelJa)}</span>
         <span style="color:var(--text-2);font-variant-numeric:tabular-nums">${esc(fmtGateValue(g, ccy))}</span>${tag}
@@ -617,7 +617,7 @@ export function renderBuyabilityPanel(
   const statusBadge = status ? entryStatusBadgeHtml(status.status) : ''
   let halfNote = ''
   if (status?.status === 'HALF' && status.halfGate) {
-    halfNote = `<div style="margin-top:6px;font-size:12px;color:var(--warn)">HALF: 未達は「${esc(status.halfGate.labelJa)}」のみで、許容バンド内のため 0.5x サイジングでエントリー候補になる。ただしロールでエントリーが有効な銘柄のみ発注対象。</div>`
+    halfNote = `<div style="margin-top:6px;font-size:12px;color:var(--warn)">HALF: 未達は「${esc(status.halfGate.labelJa)}」のみで許容範囲内のため、数量 0.5 倍でエントリー候補。</div>`
   }
 
   return `<div class="reason-panel" style="margin-top:10px;max-width:1000px">
@@ -625,7 +625,7 @@ export function renderBuyabilityPanel(
     ${halfNote}
     <div class="panel-row" style="gap:8px 20px">
       <div>${trendBlock}${etaBlock}</div>
-      <div style="margin-top:8px"><strong>入場ゲート</strong> (全条件。閾値は全体設定の既定値・ロール既定値・銘柄別上書きの順で決まる)
+      <div style="margin-top:8px"><strong>エントリー条件</strong> <span class="muted">閾値は銘柄別上書き、ロール既定値、全体設定の順で優先</span>
         <div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${gateRows}</div>
       </div>
     </div>
