@@ -135,7 +135,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
       '口座の運用資本 (円)。配分比率指定の銘柄は通貨によらずこの円総額を共通プールとして使う (USD 銘柄も USD/JPY で円換算)。リスク率方式の日本株資本基準も兼ね、買付余力プールの円換算基準でもある。',
   },
   max_portfolio_exposure_pct: {
-    label: 'portfolio exposure 上限率 (比率)',
+    label: '同時保有の上限率 (比率)',
     detail: '同時保有の合計上限を「資本 × この率」で決めます。0.6 なら 60%。大きくすると分散度↑、損失時の衝撃↑。',
   },
   drawdown_kill_threshold: {
@@ -147,15 +147,15 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     detail: '気配値が古すぎる時に判定を止める閾値。900000 = 15 分。短いと厳格、長いと古い気配でも売買。',
   },
   gap_reject_pct: {
-    label: 'gap reject 閾値 (比率)',
+    label: '寄付ギャップ上限 (比率)',
     detail: '前日終値からの寄付 gap がこの率を超えた銘柄は買わない。0.03 = 3% 以上の gap で見送り。寄付の高値掴みを防ぐ。',
   },
   spread_limit_pct_us: {
-    label: 'spread 上限率 (US、比率)',
+    label: 'スプレッド上限 (US、比率)',
     detail: '買値と売値の差 (spread) がこの率を超えた銘柄は流動性不足で見送り。US は 0.25% 目安。',
   },
   spread_limit_pct_jp: {
-    label: 'spread 上限率 (JP、比率)',
+    label: 'スプレッド上限 (JP、比率)',
     detail: '買値と売値の差 (spread) がこの率を超えた銘柄は流動性不足で見送り。日本株は 0.6% 目安。',
   },
   pullback_default_stop_pct: {
@@ -203,7 +203,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     detail: '1 回のトレードで失ってよい割合 (対 総資本)。0.004 = 0.4%。大きくすると 1 回あたりの買付数量↑、連敗時の損失↑。',
   },
   risk_dd_half_threshold: {
-    label: 'risk half 閾値 (比率、負)',
+    label: 'リスク半減閾値 (比率、負)',
     detail: '日次損失がこの率を超えたら 1 回のリスクを半分に減らす。-0.05 = -5%。連敗時の傷を浅く保つ自動ブレーキ。',
   },
   risk_dd_halt_threshold: {
