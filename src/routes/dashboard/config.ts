@@ -298,24 +298,26 @@ const CONFIG_STYLE = `
   .config-grid{align-items:start;margin-bottom:16px}
   .config-grid .card{margin:0}
   .config-table td{vertical-align:middle}
+  .config-table{overflow:visible}
   .config-table .cfg-key{display:block;font-family:var(--mono);font-size:11.5px;color:var(--text-3)}
   .config-table .cfg-val{text-align:right;white-space:nowrap;font-weight:600}
-  .config-table .info-tip:hover::after,.config-table .info-tip:focus-visible::after{left:0;transform:none}
+  .config-table .cfg-row{cursor:help}
+  .config-table .cfg-row:hover,.config-table .cfg-row:focus{background:var(--surface-2);outline:none}
+  .config-table .cfg-row td:first-child{position:relative}
+  .config-table .cfg-row:hover td[data-tip]::after,.config-table .cfg-row:focus td[data-tip]::after{content:attr(data-tip);position:absolute;left:8px;top:calc(100% + 2px);background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow-pop);padding:8px 10px;font-size:12.5px;font-weight:400;line-height:1.5;width:max-content;max-width:min(440px,80vw);white-space:normal;z-index:200;pointer-events:none}
   @media (max-width:1100px){.grid.cols-2.config-grid{grid-template-columns:1fr}}
 `
 
 function renderGroupCard(title: string, rows: string): string {
   return `<div class="card"><div class="card-head"><h3 class="card-title">${esc(title)}</h3></div>
-    <div class="card-body tablewrap"><table class="config-table"><tbody>${rows}</tbody></table></div></div>`
+    <div class="card-body"><table class="config-table"><tbody>${rows}</tbody></table></div></div>`
 }
 
 function renderGlobalRow(key: string, value: unknown, meta: ConfigKeyMeta | undefined): string {
-  const label = meta ? esc(meta.label) : `<span class="muted">${esc(key)}</span>`
-  const tip = meta
-    ? ` <span class="info-tip" tabindex="0" aria-label="${esc(meta.label)}" data-tip="${esc(meta.detail.replace(/\*\*(.+?)\*\*/g, '$1'))}">?</span>`
-    : ''
-  const keyLine = meta ? `<span class="cfg-key">${esc(key)}</span>` : ''
-  return `<tr><td>${label}${tip}${keyLine}</td><td class="cfg-val">${esc(formatConfigValue(value))}</td></tr>`
+  const val = `<td class="cfg-val">${esc(formatConfigValue(value))}</td>`
+  if (!meta) return `<tr><td><span class="muted">${esc(key)}</span></td>${val}</tr>`
+  const tip = esc(meta.detail.replace(/\*\*(.+?)\*\*/g, '$1'))
+  return `<tr class="cfg-row" tabindex="0" aria-label="${esc(meta.label)}: ${tip}"><td data-tip="${tip}">${esc(meta.label)}<span class="cfg-key">${esc(key)}</span></td>${val}</tr>`
 }
 
 function formatConfigValue(v: unknown): string {
