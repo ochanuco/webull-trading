@@ -110,7 +110,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   session_window_gate_enabled: {
     label: '開場前ゲート',
     detail:
-      'true で開場30分前から引けまでは戦略判定を見送る (US 09:00–16:00 ET / JP 08:30–15:30 JST、市場ごと)。判定処理は動くが評価はしない。false は従来通り常時評価。',
+      'true なら開場30分前から引けまでの時間外は戦略判定を見送る (US 09:00–16:00 ET / JP 08:30–15:30 JST)。false でも通常取引時間外の BUY は見送る。',
   },
   max_order_notional: {
     label: '1注文上限 (非推奨)',

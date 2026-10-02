@@ -1243,7 +1243,7 @@ export function symbolsListBody(args: {
             <button type="submit" class="btn-sm danger">削除</button>
           </form>`
       const maxNotionalCell = r.maxNotional === null
-        ? '<span class="muted" title="未設定のときは全体設定の MAX_ORDER_NOTIONAL を使用">— (全体設定)</span>'
+        ? '<span class="muted" title="未設定のときは全体設定の max_order_notional_usd / max_order_notional_jpy を使用">— (全体設定)</span>'
         : `${esc(r.maxNotional.toLocaleString('ja-JP'))} <span class="muted" style="font-size:11px">${esc(r.currency)}</span>`
       const roleCell = renderSymbolRoleCell(r)
       // Same integer>=1 validity check loadSymbolConfig uses to adopt a

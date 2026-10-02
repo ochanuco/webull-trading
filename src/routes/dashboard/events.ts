@@ -341,7 +341,7 @@ export function eventsBody(args: EventsBodyArgs): string {
 
   return `<style>${FIELD_STYLE}</style>
   <p class="muted" style="margin:0 0 12px">期間: ${esc(from)} 〜 ${esc(to)} (今日の前後30日)。登録した日付は判定処理の見送り判断に使われる。
-  追加できる日付は前後90日・365日の範囲に自動調整される。削除は監査ログに記録される。</p>
+  追加できる日付は過去90日から未来365日まで。削除は監査ログに記録される。</p>
 
   <div class="card">
     <div class="card-head"><h2 class="card-title">決算 (earnings)</h2></div>

@@ -294,7 +294,7 @@ function renderSymbolTable(symbolStats: SymbolStat[]): string {
 
 export function renderQualityTab(args: ChartsBodyQuality): string {
   if (!args.hasTradeData && args.skipBreakdown.length === 0) {
-    return `<p class="muted">まだ判定ログも約定も無いため成績を描けません。判定処理が動き出すと SKIP 理由の内訳、SELL が約定すると成績サマリが出ます。</p>`
+    return `<p class="muted">判定ログと SELL 約定がまだない。判定処理が動くと見送り理由の内訳、SELL が約定すると成績が表示される。</p>`
   }
   const symbolBarChart =
     args.symbolStats.length > 0

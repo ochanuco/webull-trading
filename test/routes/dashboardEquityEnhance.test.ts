@@ -273,7 +273,7 @@ describe('GET /dashboard/charts?tab=overview (equity enhance SSR)', () => {
     const res = await app.request('/dashboard/charts?tab=overview', {}, env as never)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('まだ約定がなく確定損益の推移を描けません')
+    expect(body).toContain('確定損益がまだない')
     expect(body).not.toContain('id="equity-chart"')
   })
 })

@@ -273,7 +273,7 @@ describe('dashboard', () => {
       const env = { ...baseEnv, DB: fakeQualityDb([], []) }
       const res = await app.request('/dashboard/charts?tab=quality', { headers: authHeader }, env)
       const body = await res.text()
-      expect(body).toContain('まだ判定ログも約定も無いため成績を描けません')
+      expect(body).toContain('判定ログと SELL 約定がまだない')
     })
   })
 

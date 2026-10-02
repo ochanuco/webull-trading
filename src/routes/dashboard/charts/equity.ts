@@ -280,7 +280,7 @@ function renderPeriodReturnsRow(rows: PeriodReturn[]): string {
 
 export function renderOverviewTab(args: ChartsBodyOverview): string {
   if (args.equity.length === 0) {
-    return `<p class="muted">まだ約定がなく確定損益の推移を描けません。最初の SELL が約定すると表示されます。</p>`
+    return `<p class="muted">確定損益がまだない。最初の SELL が約定すると表示される。</p>`
   }
   const vm = buildOverviewChartData(args.equity, args.tradeMarkers ?? [], args.benchmark ?? null)
   const hasBenchmark = vm.benchmark !== null
