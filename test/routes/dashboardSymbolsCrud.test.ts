@@ -849,8 +849,8 @@ describe('dashboard symbol_config CRUD UI (#292)', () => {
     expect(body).toContain('name="k_atr_override"')
     expect(body).toMatch(/name="time_stop_days_override"[^>]*value="5"/)
     expect(body).toMatch(/name="k_atr_override"[^>]*value="3"/)
-    // placeholder に global default が表示される (makeGlobalConfigSnapshot の値)
-    expect(body).toContain('global default')
+    // placeholder に全体設定の既定値が表示される (makeGlobalConfigSnapshot の値)
+    expect(body).toContain('全体設定の既定値')
   })
 
   // checkbox の二重否定 (「持ち越さない」を外す/入れる) が読めない、という operator 指摘の
@@ -1515,7 +1515,7 @@ describe('symbols list ロール列 (#452)', () => {
     expect(body).toContain('常時配分')
     expect(body).toContain('core_trend')
     expect(body).toContain('条件連動')
-    expect(body).toMatch(/→<a [^>]*>SGOV<\/a>/)
+    expect(body).toMatch(/退避:<a [^>]*>SGOV<\/a>/)
   })
 
   it('不正な role 値は警告表示 (entry 抑止の旨)', async () => {
@@ -1550,7 +1550,7 @@ describe('CodeRabbit #453 対応 (不正 role のフォーム防御)', () => {
     const body = await res.text()
     // select 廃止 → 不正値は hidden input に保持され、警告を出す (#role-stats)
     expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role" value="cash_praking">/)
-    expect(body).toContain('entry は抑止中')
+    expect(body).toContain('この銘柄のエントリーを止めている')
   })
 })
 
@@ -1574,9 +1574,9 @@ describe('新規登録フォームの取扱チェック (#461)', () => {
     expect(body).toContain('/admin/symbol-config/tradability-check')
     expect(body).toContain('id="symbol-form-save"')
     expect(body).toContain('_tradabilityDenied')
-    // denied のみブロック。quote_ok は ✅ ではなく △ (発注可否は未保証)
+    // denied のみブロック。quote_ok は ✅ ではなく △ (発注できるかは分からない)
     expect(body).toContain('登録は可能')
-    expect(body).toContain('発注可否は未保証')
+    expect(body).toContain('発注できるかは分からない')
     // inline script が構文エラーなく parse できる (#465 の回帰ガードをこのページにも)
     for (const m of body.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
       expect(() => new Function(m[1]!)).not.toThrow()
@@ -1606,7 +1606,7 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     expect(body).toMatch(/<input type="hidden" name="role" id="symbol-form-role"/)
     expect(body).toContain('選択中:')
     expect(body).toContain('発注サイズ')
-    expect(body).toContain('戦略ロール・entry 条件')
+    expect(body).toContain('戦略ロール・エントリー条件')
     expect(body).toContain('損切・利食・保有')
     expect(body).toContain('配分の条件連動')
     expect(body).not.toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
@@ -1645,7 +1645,7 @@ describe('銘柄フォームのセクション UI (#symbols-form-ui)', () => {
     )
     const body = await res.text()
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>発注サイズ/)
-    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>戦略ロール・entry 条件/)
+    expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>戦略ロール・エントリー条件/)
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>損切・利食・保有/)
     expect(body).toMatch(/<details open[^>]*>\s*<summary[^>]*>配分の条件連動/)
   })

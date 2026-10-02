@@ -302,7 +302,7 @@ describe('dashboard', () => {
     const res = await app.request('/dashboard/config', { headers: authHeader }, env)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('global_config')
+    expect(body).toContain('グローバル設定')
     expect(body).toContain('SOXL')
   })
 
@@ -2972,7 +2972,7 @@ describe('symbolMapEditorBody (#symbol-relation-map 編集キャンバス・unit
     expect(html).not.toContain('id="sm-apply"')
     expect(html).toContain("el.classList.add('sm-view')")
     expect(html).toContain('✏️ 編集モード')
-    expect(html).toContain('regime proxy SOXX → SOXL/SOXS')
+    expect(html).toContain('SOXX でレジーム判定 (SOXL/SOXS)')
     // 盤面に無い対の misconfig は出ない (TQQQ/SQQQ inactive 相当 = 未登録)
     expect(html).not.toContain('self-proxy')
   })

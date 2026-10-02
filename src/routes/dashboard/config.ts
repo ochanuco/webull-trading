@@ -10,13 +10,13 @@ export function configBody(
   overviewPanels: Set<OverviewPanel>,
 ): string {
   const panelForm = `<div class="card">
-    <div class="card-head"><h2 class="card-title">ダッシュボード overview パネル表示</h2></div>
+    <div class="card-head"><h2 class="card-title">ダッシュボードの表示パネル設定</h2></div>
     <div class="card-body">
       <form method="post" action="/dashboard/config/overview-panels" style="display:flex;flex-direction:column;gap:2px;max-width:560px">
         ${ALL_OVERVIEW_PANELS.map((k) => `<label class="field-check"><input type="checkbox" name="panels" value="${k}"${overviewPanels.has(k) ? ' checked' : ''}/> ${esc(OVERVIEW_PANEL_LABELS[k])}</label>`).join('')}
         <div style="margin-top:6px"><button type="submit" class="btn primary">保存</button></div>
       </form>
-      <p class="muted" style="font-size:12px;margin:8px 0 0"><code>/dashboard</code> の overview に表示するパネル。全て OFF にすると全表示に戻ります。</p>
+      <p class="muted" style="font-size:12px;margin:8px 0 0"><code>/dashboard</code> の概要に表示するパネルを選ぶ。全てオフにすると全パネル表示に戻る。</p>
     </div>
   </div>`
   // Keys stay in snake_case (not translated) so a row can be pasted straight into
@@ -64,12 +64,12 @@ export function configBody(
 
   <div class="card">
     <div class="card-head">
-      <h2 class="card-title">グローバル設定 (global_config)</h2>
-      <span class="card-actions"><a href="/dashboard/audit">監査ログ (before/after) →</a></span>
+      <h2 class="card-title">グローバル設定</h2>
+      <span class="card-actions"><a href="/dashboard/audit">監査ログ</a></span>
     </div>
     <div class="card-body tablewrap">
       <table>
-        <thead><tr><th style="white-space:nowrap">Key</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
+        <thead><tr><th style="white-space:nowrap">設定キー</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
         <tbody>${globalRows}</tbody>
       </table>
     </div>
@@ -77,12 +77,12 @@ export function configBody(
 
   <div class="card">
     <div class="card-head">
-      <h2 class="card-title">銘柄別設定 (symbol_config) — active ${universe.allowedSymbols.length} / inactive ${universe.inactiveSymbols.length} 銘柄</h2>
-      <span class="info-tip" tabindex="0" aria-label="inactive 銘柄の扱い" data-tip="inactive (active=0) 銘柄も表示しています。cron / risk gate の評価対象は active=1 のみで、inactive 銘柄は灰色斜体・取消線で区別しています。再有効化は UPDATE symbol_config SET active = 1 WHERE symbol = '...'。">?</span>
+      <h2 class="card-title">銘柄別設定 (active ${universe.allowedSymbols.length} / inactive ${universe.inactiveSymbols.length} 銘柄)</h2>
+      <span class="info-tip" tabindex="0" aria-label="無効銘柄の扱い" data-tip="無効 (active=0) の銘柄も一覧に表示する。判定処理の対象は有効銘柄のみで、無効銘柄は灰色斜体と取消線で区別する。再有効化は銘柄編集画面から行う。">?</span>
     </div>
     <div class="card-body tablewrap">
       <table>
-        <thead><tr><th>銘柄</th><th>状態</th><th>通貨</th><th>1注文あたり上限 (max_notional)</th><th>インバース対 (inverse)</th><th>メモ (notes)</th></tr></thead>
+        <thead><tr><th>銘柄</th><th>状態</th><th>通貨</th><th title="max_notional">1注文あたり上限</th><th title="inverse">インバース対</th><th title="notes">メモ</th></tr></thead>
         <tbody>${symRows}</tbody>
       </table>
     </div>
@@ -104,17 +104,17 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     detail: 'false にすると全ての注文を拒否します。緊急停止用のスイッチ。止めたい時だけ false に。',
   },
   market_hours_check: {
-    label: '場中チェック (bool)',
-    detail: 'true で市場時間外の注文を防ぎます。false は 24 時間発注可 (sandbox 確認用)。',
+    label: '場中チェック',
+    detail: 'true で市場時間外の注文を防ぎます。false は 24 時間発注可 (動作確認用)。',
   },
   session_window_gate_enabled: {
-    label: '開場前ゲート (bool)',
+    label: '開場前ゲート',
     detail:
-      'true で開場30分前〜引けの窓外は戦略判定を skip (US 09:00–16:00 ET / JP 08:30–15:30 JST、市場ごと)。cron は発火しますが評価しません。false は従来通り常時評価。',
+      'true で開場30分前から引けまでは戦略判定を見送る (US 09:00–16:00 ET / JP 08:30–15:30 JST、市場ごと)。判定処理は動くが評価はしない。false は従来通り常時評価。',
   },
   max_order_notional: {
     label: '1注文上限 (非推奨)',
-    detail: '旧 generic 上限 (通貨別 cap 導入前の互換)。現在は参照されないので触らなくて OK。',
+    detail: '旧上限。現在は使われていない。',
   },
   max_order_notional_usd: {
     label: '1注文上限 (USD)',
@@ -127,12 +127,12 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   total_capital_usd: {
     label: '運用資本 (USD)',
     detail:
-      'risk-% sizing (stop 距離ベース) の US 株 equity 基準 (ドル)。budget配分% (budget_alloc_pct) 指定銘柄は通貨に関係なく total_capital_jpy 単一プールを使うため、こちらは不要 (USD risk-% 銘柄がある時のみ設定)。',
+      '損切り幅ベースでリスク率を使う US 株の資本基準 (ドル)。配分比率指定銘柄は通貨によらず運用資本 (JPY) の共通プールを使うため設定不要。USD でリスク率方式を使う銘柄がある場合のみ設定する。',
   },
   total_capital_jpy: {
     label: '運用資本 (JPY / 口座総額)',
     detail:
-      '口座の運用資本 (円)。budget配分% (budget_alloc_pct) 指定銘柄は通貨に関係なく **この円総額が単一プール基準** (USD 銘柄も USD/JPY で円換算して sizing、#407)。risk-% sizing の日本株 equity 基準も兼ねる。買付余力 pool ゲートの円換算基準でもある (#415)。',
+      '口座の運用資本 (円)。配分比率指定の銘柄は通貨によらずこの円総額を共通プールとして使う (USD 銘柄も USD/JPY で円換算)。リスク率方式の日本株資本基準も兼ね、買付余力プールの円換算基準でもある。',
   },
   max_portfolio_exposure_pct: {
     label: 'portfolio exposure 上限率 (比率)',
@@ -180,10 +180,10 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   pullback_default_min_return_50d: {
     label: '20日最低騰落率 (比率)',
-    detail: '過去 **20 営業日** の騰落率がこの値以上の銘柄だけ押し目買い対象。0.08 = +8%。上昇トレンド銘柄を絞るフィルター。列名の `50d` は #318 で lookback を 50→20 日に短縮した際の名残 (storage 互換のため据え置き)。',
+    detail: '過去 20 営業日の騰落率がこの値以上の銘柄だけ押し目買い対象 (0.08 = +8%)。上昇トレンド銘柄を絞るフィルター。列名は 50d のままだが実際の参照期間は 20 営業日。',
   },
   pullback_default_require_above_sma50: {
-    label: 'SMA50 超必須 (bool)',
+    label: 'SMA50 超必須',
     detail: 'true で 50 日移動平均線より上の銘柄だけ買い対象。上昇トレンドフィルターを厳しくする。',
   },
   pullback_default_k_atr: {
@@ -224,7 +224,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   news_shock_mode: {
     label: 'ニュース急落ゲート モード',
-    detail: 'Google/Yahoo 見出しの Jev 判定 (news_headline_eval) で動く。off (無効、既定) / observe (判定と Discord 通知のみで数量は変えない) / enforce (shock ≥ 0.5 で縮小、shock ≥ 0.8 かつ risk_off で新規買い停止)。',
+    detail: 'Google/Yahoo の見出し判定で動く。off：無効 (既定)／observe：判定と通知のみで数量は変えない／enforce：急落度が高いと数量縮小、極端なら新規買いを停止。',
   },
   news_shock_warn_size_scale: {
     label: 'ニュース急落 警戒時の発注数量縮小率 (比率)',
@@ -232,7 +232,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   attention_stale_policy: {
     label: 'ニュース判定不能時の挙動',
-    detail: '最新の Jev 判定が無い・45分より古い・取得失敗のとき。fail_open (既定、通常通り BUY を許可) / block_buy (新規買いを止める、operator の明示的な安全側切替)。',
+    detail: '最新のニュース判定が無い・45分より古い・取得失敗のとき。fail_open：既定、通常通り BUY を許可／block_buy：新規買いを止める (安全側への明示的な切替)。',
   },
 }
 
