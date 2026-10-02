@@ -224,7 +224,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   news_shock_mode: {
     label: 'ニュース急落ゲート モード',
-    detail: 'Google/Yahoo の見出し判定で動く。off：無効 (既定)／observe：判定と通知のみで数量は変えない／enforce：急落度が高いと数量縮小、極端なら新規買いを停止。',
+    detail: 'Google/Yahoo の見出し判定で動く。off は無効 (既定)。observe は判定と通知のみ。enforce は shock 0.5 以上で数量縮小、0.8 以上かつ risk_off で新規買い停止。',
   },
   news_shock_warn_size_scale: {
     label: 'ニュース急落 警戒時の発注数量縮小率 (比率)',
@@ -232,7 +232,7 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
   },
   attention_stale_policy: {
     label: 'ニュース判定不能時の挙動',
-    detail: '最新のニュース判定が無い・45分より古い・取得失敗のとき。fail_open：既定、通常通り BUY を許可／block_buy：新規買いを止める (安全側への明示的な切替)。',
+    detail: '最新のニュース判定が無い・45分より古い・取得失敗のとき。fail_open は通常どおり BUY を許可 (既定)。block_buy は新規買いを止める。',
   },
 }
 
