@@ -19,24 +19,30 @@ export function configBody(
       <p class="muted" style="font-size:12px;margin:8px 0 0"><code>/dashboard</code> の概要に表示するパネルを選ぶ。全てオフにすると全パネル表示に戻る。</p>
     </div>
   </div>`
-  // Keys stay in snake_case (not translated) so a row can be pasted straight into
-  // `UPDATE global_config SET xxx = ...`; the Japanese explanation lives in its own column.
-  const globalRows = Object.entries(global as unknown as Record<string, unknown>)
-    .filter(([k]) => k !== 'source')
-    .map(([k, v]) => {
-      const camelKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
-      // Column names disagree on the underscore-before-digit convention (min_return_50d has
-      // one, require_above_sma50 doesn't), so try the naive form before this variant.
-      const camelKeyWithDigitUnderscore = camelKey.replace(/([a-z])(\d)/g, '$1_$2')
-      const meta =
-        CONFIG_KEY_META[camelKey] ??
-        CONFIG_KEY_META[camelKeyWithDigitUnderscore] ??
-        CONFIG_KEY_META[k]
-      const label = meta?.label ?? '—'
-      const detail = meta?.detail ?? '—'
-      return `<tr><th style="white-space:nowrap">${esc(camelKey)}</th><td>${esc(formatConfigValue(v))}</td><td class="muted">${esc(label)}</td><td class="muted" style="font-size:12px">${mdBoldToStrong(esc(detail))}</td></tr>`
+  const rowsByKey = new Map<string, string>()
+  for (const [k, v] of Object.entries(global as unknown as Record<string, unknown>)) {
+    if (k === 'source') continue
+    const snakeKey = k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
+    // Column names disagree on the underscore-before-digit convention (min_return_50d has
+    // one, require_above_sma50 doesn't), so try the naive form before this variant.
+    const snakeKeyWithDigitUnderscore = snakeKey.replace(/([a-z])(\d)/g, '$1_$2')
+    const metaKey = CONFIG_KEY_META[snakeKey]
+      ? snakeKey
+      : CONFIG_KEY_META[snakeKeyWithDigitUnderscore]
+        ? snakeKeyWithDigitUnderscore
+        : snakeKey
+    rowsByKey.set(metaKey, renderGlobalRow(metaKey, v, CONFIG_KEY_META[metaKey] ?? CONFIG_KEY_META[k]))
+  }
+  const grouped = new Set<string>()
+  const groupCards = CONFIG_GROUPS.map((g) => {
+    const rows = g.keys.filter((key) => rowsByKey.has(key)).map((key) => {
+      grouped.add(key)
+      return rowsByKey.get(key)
     })
-    .join('')
+    return rows.length > 0 ? renderGroupCard(g.title, rows.join('')) : ''
+  })
+  const rest = [...rowsByKey.entries()].filter(([key]) => !grouped.has(key)).map(([, row]) => row)
+  if (rest.length > 0) groupCards.push(renderGroupCard('その他', rest.join('')))
   const allConfigSymbols = [...universe.allowedSymbols, ...universe.inactiveSymbols]
   const symRows = allConfigSymbols
     .map((sym) => {
@@ -59,21 +65,15 @@ export function configBody(
         </tr>`
     })
     .join('')
-  return `<style>${FIELD_STYLE}</style>
+  return `<style>${FIELD_STYLE}${CONFIG_STYLE}</style>
   ${panelForm}
 
-  <div class="card">
-    <div class="card-head">
-      <h2 class="card-title">グローバル設定</h2>
-      <span class="card-actions"><a href="/dashboard/audit">監査ログ</a></span>
-    </div>
-    <div class="card-body tablewrap">
-      <table>
-        <thead><tr><th style="white-space:nowrap">設定キー</th><th>値</th><th>説明</th><th>詳細</th></tr></thead>
-        <tbody>${globalRows}</tbody>
-      </table>
-    </div>
+  <div class="config-head">
+    <h2 class="card-title">グローバル設定</h2>
+    <span class="info-tip" tabindex="0" aria-label="設定の変更方法" data-tip="キーは global_config の列名。変更は UPDATE global_config SET キー = 値 で行う。">?</span>
+    <span class="card-actions"><a href="/dashboard/audit">監査ログ</a></span>
   </div>
+  <div class="grid cols-2 config-grid">${groupCards.join('')}</div>
 
   <div class="card">
     <div class="card-head">
@@ -234,6 +234,88 @@ const CONFIG_KEY_META: Record<string, ConfigKeyMeta> = {
     label: 'ニュース判定不能時の挙動',
     detail: '最新のニュース判定が無い・45分より古い・取得失敗のとき。fail_open は通常どおり BUY を許可 (既定)。block_buy は新規買いを止める。',
   },
+  extended_hours_gate_mode: {
+    label: '時間外警戒ゲート モード',
+    detail: 'プレマーケットの警戒判定を当日の BUY 数量に反映する。off は無効 (既定)。observe は記録のみ。enforce で反映。',
+  },
+  cash_fallback_orders_enabled: {
+    label: '退避先への自動買付',
+    detail: 'true で条件未達の資金を退避先銘柄へ自動で買う。false は配分の計算と表示のみ。DRY_RUN / 取引停止 / リスク判定は優先される。',
+  },
+  cash_fallback_sell_mode: {
+    label: '退避玉の自動売却 モード',
+    detail: 'エントリーで資金が要るとき、退避先銘柄の超過分を売って戻す。off は無効 (既定)。observe は記録のみ。enforce で売却。',
+  },
+  fee_pct_of_notional: {
+    label: '手数料率 (約定代金比)',
+    detail: '確定損益から差し引く手数料率。0 は手数料なし。',
+  },
+  fee_fixed_per_order: {
+    label: '1注文あたり固定手数料',
+    detail: '確定損益から差し引く固定手数料 (銘柄の通貨)。0 は無効。',
+  },
+  pullback_default_max_stop_to_tp_ratio: {
+    label: '損切り幅の上限 (利食い幅の倍)',
+    detail: 'ATR で広がる損切り幅を「利食い幅 × この値」までに抑える。2.0 なら R:R ≥ 0.5。0 で上限なし。',
+  },
+  atr_baseline_mode: {
+    label: '過熱ガードの ATR 基準',
+    detail: 'ATR比上限の分母。percentile は銘柄自身の ATR 80 パーセンタイル (既定)。',
+  },
+  pair_regime_mode: {
+    label: 'ペアレジーム モード',
+    detail: '1x 指数の20日騰落率でブル / ベアどちらを買うか絞る。off は無効 (既定)。observe は記録のみ。enforce で制限。',
+  },
+  pair_regime_theta_bull_enter: { label: 'ブル入り閾値', detail: '1x 指数の20日騰落率。ベア入り < ベア抜け < ブル抜け < ブル入り の順に設定する。順序が崩れると判定不能になる。' },
+  pair_regime_theta_bull_exit: { label: 'ブル抜け閾値', detail: 'ベア入り < ベア抜け < ブル抜け < ブル入り の順に設定する。' },
+  pair_regime_theta_bear_enter: { label: 'ベア入り閾値', detail: 'ベア入り < ベア抜け < ブル抜け < ブル入り の順に設定する。' },
+  pair_regime_theta_bear_exit: { label: 'ベア抜け閾値', detail: 'ベア入り < ベア抜け < ブル抜け < ブル入り の順に設定する。' },
+}
+
+const CONFIG_GROUPS: ReadonlyArray<{ title: string; keys: readonly string[] }> = [
+  {
+    title: '取引の基本',
+    keys: ['dry_run', 'trading_enabled', 'market_hours_check', 'session_window_gate_enabled', 'extended_hours_gate_mode', 'cash_fallback_orders_enabled', 'cash_fallback_sell_mode'],
+  },
+  { title: '損失時の停止', keys: ['drawdown_kill_threshold', 'risk_dd_half_threshold', 'risk_dd_halt_threshold'] },
+  {
+    title: '資金と注文上限',
+    keys: ['total_capital_usd', 'total_capital_jpy', 'max_order_notional_usd', 'max_order_notional_jpy', 'max_order_notional', 'max_portfolio_exposure_pct', 'risk_base_per_trade_pct', 'fee_pct_of_notional', 'fee_fixed_per_order'],
+  },
+  { title: '発注前チェック', keys: ['stale_quote_ms', 'gap_reject_pct', 'spread_limit_pct_us', 'spread_limit_pct_jp'] },
+  {
+    title: '押し目エントリーの既定値',
+    keys: ['pullback_default_stop_pct', 'pullback_default_take_profit_pct', 'pullback_default_time_stop_days', 'pullback_default_pullback_max', 'pullback_default_pullback_min', 'pullback_default_min_return_50d', 'pullback_default_require_above_sma50', 'pullback_default_k_atr', 'pullback_default_max_sma50_deviation_pct', 'pullback_default_max_atr_ratio', 'pullback_default_max_stop_to_tp_ratio', 'atr_baseline_mode'],
+  },
+  { title: 'VIX', keys: ['vix_warning_threshold', 'vix_critical_threshold', 'vix_warning_size_scale'] },
+  { title: 'ニュース', keys: ['news_shock_mode', 'news_shock_warn_size_scale', 'attention_stale_policy'] },
+  { title: 'ペアレジーム', keys: ['pair_regime_mode', 'pair_regime_theta_bull_enter', 'pair_regime_theta_bull_exit', 'pair_regime_theta_bear_enter', 'pair_regime_theta_bear_exit'] },
+]
+
+const CONFIG_STYLE = `
+  .config-head{display:flex;align-items:center;gap:8px;margin:4px 0 10px}
+  .config-head .card-actions{margin-left:auto}
+  .config-grid{align-items:start;margin-bottom:16px}
+  .config-grid .card{margin:0}
+  .config-table td{vertical-align:middle}
+  .config-table .cfg-key{display:block;font-family:var(--mono);font-size:11.5px;color:var(--text-3)}
+  .config-table .cfg-val{text-align:right;white-space:nowrap;font-weight:600}
+  .config-table .info-tip:hover::after,.config-table .info-tip:focus-visible::after{left:0;transform:none}
+  @media (max-width:1100px){.grid.cols-2.config-grid{grid-template-columns:1fr}}
+`
+
+function renderGroupCard(title: string, rows: string): string {
+  return `<div class="card"><div class="card-head"><h3 class="card-title">${esc(title)}</h3></div>
+    <div class="card-body tablewrap"><table class="config-table"><tbody>${rows}</tbody></table></div></div>`
+}
+
+function renderGlobalRow(key: string, value: unknown, meta: ConfigKeyMeta | undefined): string {
+  const label = meta ? esc(meta.label) : `<span class="muted">${esc(key)}</span>`
+  const tip = meta
+    ? ` <span class="info-tip" tabindex="0" aria-label="${esc(meta.label)}" data-tip="${esc(meta.detail.replace(/\*\*(.+?)\*\*/g, '$1'))}">?</span>`
+    : ''
+  const keyLine = meta ? `<span class="cfg-key">${esc(key)}</span>` : ''
+  return `<tr><td>${label}${tip}${keyLine}</td><td class="cfg-val">${esc(formatConfigValue(value))}</td></tr>`
 }
 
 function formatConfigValue(v: unknown): string {
@@ -241,13 +323,4 @@ function formatConfigValue(v: unknown): string {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   return String(v)
-}
-
-// CONFIG_KEY_META.detail uses `**word**` (author convenience, some notes
-// rely on the emphasis to disambiguate e.g. which side of a lookback window
-// a number refers to). Input must already be HTML-escaped — this only adds
-// trusted `<strong>` tags, so escaping first keeps a literal `<`/`>` in a
-// detail string from becoming a tag instead of merely losing its emphasis.
-function mdBoldToStrong(escaped: string): string {
-  return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }
