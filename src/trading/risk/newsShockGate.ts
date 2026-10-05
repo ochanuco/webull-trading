@@ -23,12 +23,10 @@ export const DEFAULT_NEWS_SHOCK_CONFIG: NewsShockGateConfig = {
   attentionStalePolicy: 'fail_open',
 }
 
-// Provisional thresholds, not yet exposed via global_config: there is no
-// calibration data for the Jev shock-score distribution the way GDELT's
-// ratio thresholds had 12mo of history behind them. Revisit once
-// news_headline_eval has enough history to calibrate against.
+// Not exposed via global_config: only a few dozen historical crash days back
+// these values, too few to tune per deployment.
 const CRITICAL_SHOCK_THRESHOLD = 0.8
-const WARNING_SHOCK_THRESHOLD = 0.5
+const WARNING_SHOCK_THRESHOLD = 0.6
 /** Collector and strategy cron both run on 15-minute slots, so a fresh row should never be far behind. */
 const STALE_MAX_AGE_MIN = 45
 
@@ -104,7 +102,9 @@ export function evaluateNewsShockGate(
       asOf,
     }
   }
-  if (row.shock >= WARNING_SHOCK_THRESHOLD) {
+  // Not shock alone: rebound-day headlines still recap the selloff and score
+  // high shock with risk_on, which would halve BUY into the recovery.
+  if (row.shock >= WARNING_SHOCK_THRESHOLD && row.direction === 'risk_off') {
     return {
       regime: 'warning',
       sizeScale: sane.warnSizeScale,

@@ -78,11 +78,11 @@ median 比の ratio) は撤去済み — 閾値は shock スコア (0〜1) 直�
 | `news_shock_warn_size_scale` | `0.5` | warning 帯での size 倍率 |
 | `attention_stale_policy` | `'fail_open'` | 観測が古い/欠測の時の扱い。`fail_open` / `block_buy` |
 
-regime 判定 (コード定数、DB 設定なし — 校正データが揃うまで暫定値):
+regime 判定 (コード定数、DB 設定なし):
 
 - 最新行が無い / 45 分より古い / `status ≠ 'ok'` → `unknown`
 - `shock >= 0.8` かつ `direction === 'risk_off'` → `critical` (BUY 全停止)
-- `shock >= 0.5` → `warning` (`news_shock_warn_size_scale` で縮小)
+- `shock >= 0.6` かつ `direction === 'risk_off'` → `warning` (`news_shock_warn_size_scale` で縮小)
 - それ以外 → `normal`
 
 `news_shock_mode` が `off` 以外の間は、regime 遷移時の STATE_CHANGE 通知
