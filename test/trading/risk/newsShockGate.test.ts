@@ -24,32 +24,34 @@ function headlineRow(overrides: Partial<NewsShockHeadlineRow> = {}): NewsShockHe
 }
 
 describe('evaluateNewsShockGate — regime thresholds', () => {
-  it('returns normal below the warning threshold (0.5)', () => {
-    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.49 }), now: NOW }
+  it('returns normal below the warning threshold (0.6) even with risk_off', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.59, direction: 'risk_off' }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('normal')
     expect(decision.sizeScale).toBe(1.0)
-    expect(decision.shock).toBe(0.49)
+    expect(decision.shock).toBe(0.59)
   })
 
-  it('returns warning exactly at the 0.5 boundary (inclusive)', () => {
-    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.5, direction: 'mixed' }), now: NOW }
+  it('returns warning exactly at the 0.6 boundary (inclusive) with risk_off', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6, direction: 'risk_off' }), now: NOW }
     const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
     expect(decision.regime).toBe('warning')
     expect(decision.sizeScale).toBe(0.5)
   })
 
-  it('returns warning (not critical) at shock>=0.8 when direction is not risk_off', () => {
-    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.85, direction: 'mixed' }), now: NOW }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('warning')
-    expect(decision.sizeScale).toBe(0.5)
-  })
+  it.each(['risk_on', 'mixed', 'not_market_relevant'])(
+    'returns normal at high shock when direction is %s (rebound-day recaps do not shrink BUY)',
+    (direction) => {
+      const input: NewsShockGateInput = { row: headlineRow({ shock: 0.99, direction }), now: NOW }
+      const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
+      expect(decision.regime).toBe('normal')
+      expect(decision.sizeScale).toBe(1.0)
+    },
+  )
 
-  it('returns warning (not critical) at shock>=0.8 with risk_on direction', () => {
-    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.99, direction: 'risk_on' }), now: NOW }
-    const decision = evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG)
-    expect(decision.regime).toBe('warning')
+  it('returns normal at high shock when direction is null', () => {
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.9, direction: null }), now: NOW }
+    expect(evaluateNewsShockGate(input, DEFAULT_NEWS_SHOCK_CONFIG).regime).toBe('normal')
   })
 
   it('returns critical exactly at the 0.8 boundary (inclusive) with risk_off', () => {
@@ -72,7 +74,7 @@ describe('evaluateNewsShockGate — regime thresholds', () => {
 
   it('uses warnSizeScale from config for the warning regime', () => {
     const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnSizeScale: 0.25 }
-    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6 }), now: NOW }
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6, direction: 'risk_off' }), now: NOW }
     const decision = evaluateNewsShockGate(input, config)
     expect(decision.sizeScale).toBe(0.25)
     expect(decision.reason).toContain('size x0.25')
@@ -139,7 +141,7 @@ describe('evaluateNewsShockGate — unknown (missing/stale/non-ok data)', () => 
 describe('evaluateNewsShockGate — defensive config sanitize', () => {
   it('clamps invalid warnSizeScale to the default (0.5)', () => {
     const config: NewsShockGateConfig = { ...DEFAULT_NEWS_SHOCK_CONFIG, warnSizeScale: 3 }
-    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6 }), now: NOW }
+    const input: NewsShockGateInput = { row: headlineRow({ shock: 0.6, direction: 'risk_off' }), now: NOW }
     const decision = evaluateNewsShockGate(input, config)
     expect(decision.sizeScale).toBe(0.5)
   })
