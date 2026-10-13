@@ -56,6 +56,8 @@ import { clampLimit, fmtJst, jsonPretty, messageOf, parseCursor, unavailable } f
 import { type DashboardBindings, loadKillSwitchState, renderAnalysisSubnav, renderDiagSubnav, renderLayout } from './layout'
 import { extractTokenFromPaste, renderWebullTokenBody } from './webullToken'
 import { brokerProbeBody } from './brokerProbe'
+import { MODELS_PAGE_STYLE, modelsBody, type ModelsPageQuery } from './models'
+import { loadModelRegistryView, runReplayFromQuery } from '../adminModels'
 import {
   ALL_OVERVIEW_PANELS,
   OVERVIEW_PAGE_STYLE,
@@ -409,6 +411,36 @@ export const dashboard = new Hono<DashboardBindings>()
       return jsonPretty(report)
     } catch (err) {
       return jsonPretty({ error: 'lifecycle_json_export_failed', message: messageOf(err) }, 500)
+    }
+  })
+  // Replay fetches Yahoo bars per symbol and runs every model over them, so
+  // a replay failure renders inline instead of failing the registry view.
+  .get('/models', async (c) => {
+    const subnav = renderAnalysisSubnav('models')
+    if (!c.env.DB) {
+      return c.html(renderLayout(c, 'モデル比較', unavailable('DB not bound'), subnav))
+    }
+    const query: ModelsPageQuery = {
+      from: c.req.query('from') ?? '',
+      to: c.req.query('to') ?? '',
+      symbols: c.req.query('symbols') ?? '',
+      modelIds: c.req.query('modelIds') ?? '',
+    }
+    try {
+      const registry = await loadModelRegistryView(c.env, c.get('requestId'))
+      const replay = await runReplayFromQuery(c.env, (key) => {
+        const v = query[key as keyof ModelsPageQuery]
+        return v && v.trim().length > 0 ? v : undefined
+      })
+        .then((data) => ({ ok: true as const, data }))
+        .catch((err: unknown) => ({ ok: false as const, error: messageOf(err) }))
+      if (replay.ok) {
+        query.from = replay.data.from
+        query.to = replay.data.to
+      }
+      return c.html(renderLayout(c, 'モデル比較', modelsBody(registry, replay, query), subnav, MODELS_PAGE_STYLE))
+    } catch (err) {
+      return c.html(renderLayout(c, 'モデル比較', unavailable(messageOf(err)), subnav))
     }
   })
   .get('/config', async (c) => {

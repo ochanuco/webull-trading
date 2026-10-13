@@ -20,8 +20,14 @@ auth 列の `Access` は Cloudflare Access JWT (`Cf-Access-Jwt-Assertion` 検証
 | GET/POST/DELETE | `/admin/{earnings,macro-events}` | Access | イベントカレンダーの参照 / 投入 / 削除 |
 | GET | `/admin/backtest` | Access | offline backtest (Yahoo daily bars + 戦略 rule、実発注なし) |
 | GET | `/admin/backtest/compare` | Access | 一括投入 vs 段階エントリー (entry 軸) / 全量利確 vs 部分利確+ATRトレーリング (exit 軸) / exit reason 別の再エントリー条件 (reentry 軸) の比較 backtest (同一 bars/rule/コスト、実発注なし)。`variants` は `<entry>[+<exit>][+reentry:<spec>]` 形式 (`+<exit>` 省略時は `preset`、`+reentry:<spec>` 省略時は `none`。`<spec>` = `none`\|`guard`\|`aware:<slWaitDays>`) |
+| GET | `/admin/models` | Access | 戦略モデル一覧 / 各モデルの検証履歴と昇格ゲート判定 / この環境の昇格履歴 / global_config のドリフト検出 ([strategy-models.md](strategy-models.md)) |
+| POST | `/admin/models` | Access | モデル登録 (`{kind, params, label}`、現行設定は `{fromGlobalConfig:true, label}`)。同一パラメタは既存行を返す |
+| GET | `/admin/models/:id` / `/admin/models/:id/gate` | Access | モデル詳細 / 昇格ゲートの事前評価 |
+| POST | `/admin/models/:id/backtest` | Access | 指定期間でリプレイし、`in_sample` / `out_of_sample` の検証結果として記録 (実発注なし) |
+| POST | `/admin/models/:id/promote` | Access | ゲート通過モデルを昇格 (`{reason, confirm:true}`)。`pullback_default_*` / `atr_baseline_mode` のみ書き換え、dry_run / trading_enabled は触らない。`rollback:true` は過去に稼働したモデルに限りゲート免除 |
+| GET | `/admin/models/replay` | Access | 稼働実績のある全モデル (+ `modelIds`) を同じ期間・銘柄でリプレイ比較 |
 | GET | `/dashboard` | Access | read-only ランディング (資産サマリ / KPI / equity / 保有 / 直近取引) |
-| GET | `/dashboard/{positions,portfolio,trades,config,cron,charts,symbols,events,alerts,audit,broker-probe,webull-token,extended-hours,lifecycle}` | Access | DO / D1 snapshot を HTML で可視化 |
+| GET | `/dashboard/{positions,portfolio,trades,config,cron,charts,symbols,events,alerts,audit,broker-probe,webull-token,extended-hours,lifecycle,models}` | Access | DO / D1 snapshot を HTML で可視化 |
 | GET | `/dashboard/{positions,trades,cron,charts/symbol,lifecycle}/json` | Access | 同 packet の JSON 版 |
 | GET/POST/DELETE | `/mcp` | Access (service token) | read-only MCP server。dashboard と同一 packet を tool として公開 (#553) |
 

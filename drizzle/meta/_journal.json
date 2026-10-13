@@ -358,6 +358,13 @@
       "when": 1790681831301,
       "tag": "0050_add_question_version_to_news_headline_eval",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "6",
+      "when": 1791901195291,
+      "tag": "0051_add_strategy_model_registry",
+      "breakpoints": true
     }
   ]
 }
