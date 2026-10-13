@@ -173,6 +173,33 @@
             "simple": { "limit": 60, "period": 60 }
           }
         ]
+      },
+      // PR ブランチごとの Worker Preview (`wrangler preview --env staging`、Workers Builds の preview command)。
+      // Preview は staging の設定を引き継がないので、必要なものだけをここに書く。
+      // - ENVIRONMENT: 'production' 以外なので WebullTradeClient が発注を止める (強制 DRY_RUN)。
+      //   'staging' にしないのは、promotion 履歴 (model_deployment.env) を staging 本体と混ぜないため。
+      // - QUOTE_SOURCE / BAR_SOURCE は書かない: Preview には Webull の secret を渡さないので Yahoo (既定) を使う。
+      // - Durable Object は Preview ごとに名前空間が自動で作られる。D1 は staging の DB を共有する。
+      // - RateLimit (unsafe binding) は載せない。binding が無いと rateLimit() は素通しになる。
+      "previews": {
+        "vars": {
+          "ENVIRONMENT": "staging-preview"
+        },
+        "durable_objects": {
+          "bindings": [
+            { "name": "SYMBOL_STATE", "class_name": "SymbolStateDO" },
+            { "name": "PORTFOLIO_STATE", "class_name": "PortfolioStateDO" },
+            { "name": "WEBULL_TOKEN_STATE", "class_name": "WebullTokenStateDO" }
+          ]
+        },
+        "d1_databases": [
+          {
+            "binding": "DB",
+            "database_name": "webull-trading-staging",
+            "database_id": "cbc199f0-5ed8-40b0-b619-6bdb43a400e3",
+            "migrations_dir": "drizzle"
+          }
+        ]
       }
       // No triggers: staging is manual run only (issue #277).
     },
