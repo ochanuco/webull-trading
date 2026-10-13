@@ -465,7 +465,7 @@ export function resolveActiveNavGroup(activePath?: string, tab?: string | null):
   if (activePath === '/dashboard/trades' || activePath.startsWith('/dashboard/trades/')) {
     return 'review'
   }
-  if (activePath === '/dashboard/lifecycle') {
+  if (activePath === '/dashboard/lifecycle' || activePath === '/dashboard/models') {
     return 'review'
   }
   for (const p of ['/dashboard/cron', '/dashboard/alerts', '/dashboard/audit', '/dashboard/broker-probe', '/dashboard/webull-token', '/dashboard/extended-hours']) {
@@ -501,7 +501,7 @@ function renderTopNav(active?: NavGroupKey | null): string {
 
 // 'cron' / 'alerts' keys stay even though the diag nav owns those pages now —
 // pages that still render this subnav need the key to not render as active.
-export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts' | 'lifecycle'
+export type AnalysisSubnavKey = 'trades' | 'cron' | 'quality' | 'equity' | 'alerts' | 'lifecycle' | 'models'
 
 const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   key: AnalysisSubnavKey
@@ -515,6 +515,7 @@ const ANALYSIS_SUBNAV_ITEMS: ReadonlyArray<{
   // Labelled to distinguish from account-level portfolio equity.
   { key: 'equity', href: '/dashboard/charts', label: '確定損益の推移' },
   { key: 'lifecycle', href: '/dashboard/lifecycle', label: 'ライフサイクル' },
+  { key: 'models', href: '/dashboard/models', label: 'モデル比較' },
 ]
 
 // Diag pages get their own subnav (unlike review) because alert → judgment
