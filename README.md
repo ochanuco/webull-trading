@@ -15,7 +15,7 @@ production で Pullback / BreakoutMomentum 戦略が 15 分 cron で**実発注�
 | [docs/configuration.md](docs/configuration.md) | `global_config` / `symbol_config` の全パラメタと既定値 |
 | [docs/endpoints.md](docs/endpoints.md) | HTTP endpoint 一覧と認証 |
 | [docs/db-operations.md](docs/db-operations.md) | D1 の初回セットアップ・schema 変更・運用 SQL レシピ |
-| [docs/production-cd.md](docs/production-cd.md) | リリースフロー (main → 昇格 PR → Workers Builds) |
+| [docs/production-cd.md](docs/production-cd.md) | リリースフロー (main → 昇格 PR → Workers Builds。GitHub Actions deploy へ移行中) |
 | [docs/production-deployment.md](docs/production-deployment.md) | 本番投入の手順とロールバック |
 | [docs/env-separation.md](docs/env-separation.md) | dev / staging / production の分離方針 |
 | [docs/review-queries.md](docs/review-queries.md) | 障害・振り返り用のクエリ集と運用 runbook |

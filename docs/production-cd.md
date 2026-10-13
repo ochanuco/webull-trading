@@ -71,6 +71,30 @@ GitHub App 側に必要な repository permissions:
 
 通常の typecheck / test / CodeRabbit は `main` に入る通常 PR で済ませる。
 
+## GitHub Actions deploy (移行中)
+
+yunomi と同じ「`main` への merge で staging、本番は承認付きの手動実行」へ段階的に移行している。移行が終わるまでは上の release PR → Workers Builds の経路も残す。
+
+| workflow | 契機 | 反映先 |
+|---|---|---|
+| `deploy-staging` | `main` への push (と手動実行) | staging |
+| `deploy-production` | 手動実行のみ。ref は `main` か `main` 上のコミット SHA | production (Environment `production` の承認が必要) |
+
+どちらも typecheck / test の後に `scripts/deploy.sh <staging\|production>` を実行する。中身は `pnpm deploy:<env>` (migration apply → `wrangler deploy`、production は先に D1 binding を検証) と `/health` の確認。ロールバックは戻したいコミットの SHA を指定して `deploy-production` を実行する (D1 schema 変更を跨ぐ場合は不可)。Worker secret (Webull の鍵など) は扱わない。従来どおり `wrangler secret put` で管理する。
+
+### 初回設定 (GitHub / Cloudflare 側)
+
+1. Cloudflare で deploy 用の API トークンを staging 用と production 用に 1 本ずつ作る (「Edit Cloudflare Workers」テンプレートに D1 Edit を足したもの。custom domain の更新に zone 側の権限も要る)
+2. GitHub の Environment `staging` / `production` を作り、それぞれに
+   - secret `CLOUDFLARE_API_TOKEN` (上のトークン)
+   - variable `CLOUDFLARE_ACCOUNT_ID`
+3. Environment `production` に Required reviewers を設定し、Deployment branches を `main` に限定する
+
+### 移行の残り
+
+1. `deploy-staging` が `main` merge で成功し、staging の `/health` が通ることを確認したら、Cloudflare ダッシュボードで staging の Workers Builds の Git 連携を切る (それまでは staging に二重 deploy される)
+2. `deploy-production` で本番 deploy が一度成功したら、production の Workers Builds の Git 連携を切り、`production release PR` / `production preflight` workflow と `production` branch を撤去する (別 PR)
+
 ## Bootstrap
 
 初回だけ `production` branch を明示的に作る。Cloudflare Workers Builds を有効化する前に実施する。
