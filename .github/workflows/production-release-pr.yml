@@ -1,246 +1,26 @@
 name: production release PR
 
-# main の内容を production へ昇格させる PR を作る・更新する。
-# main への push ごとに release/production を main の snapshot で作り直すので、
-# 昇格 PR は常に main 先端を反映する。「リリースする」判断 = この PR を merge する。
-# workflow_dispatch は手動で作り直したいとき用。
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: production-release-pr
   cancel-in-progress: false
 
 jobs:
-  create:
-    name: create or update release PR
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # default GITHUB_TOKEN で作った PR は後続の pull_request workflow を発火
-      # させず approval 待ちになり得る。また CODEOWNER が自分自身なので、App bot
-      # を PR 作成者にして self-approve 制限を回避する。
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      - name: Ensure production branch exists
-        env:
-          PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if ! git ls-remote --exit-code --heads "$remote" production >/dev/null; then
-            {
-              echo "::error::origin/production does not exist."
-              echo "Create it intentionally from the current production baseline before enabling Cloudflare Workers Builds."
-              echo "Example: git push origin main:production"
-            } >&2
-            exit 1
-          fi
-
-      - name: Update release branch
-        id: release_branch
-        env:
-          PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          remote_release_sha="$(git ls-remote --heads "$remote" release/production | cut -f1)"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Fetch production so we can build release/production on top of it,
-          # and main which is the content we promote.
-          git fetch --no-tags "$remote" production:refs/remotes/origin/production
-          git fetch --no-tags "$remote" main:refs/remotes/origin/main
-
-          main_sha="$(git rev-parse origin/main)"
-          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
-
-          # Snapshot main's tree wholesale on top of production (no 3-way merge).
-          # The release intent is "production := current main content", and release
-          # commits never flow back to main, so the merge-base between the two
-          # branches stays frozen at the last pre-squash-flow release. A frozen
-          # base makes `git merge --squash` accumulate spurious conflicts over
-          # time (add/add on files added after the base and later modified on
-          # main, lockfile churn) — observed 2026-07-03 when 0037 + pnpm-lock
-          # conflicts blocked release PR creation. read-tree sidesteps merging
-          # entirely: the index becomes exactly main's tree, and each deploy is
-          # one snapshot commit merged into production.
-          git checkout -B release/production origin/production
-          git read-tree -u --reset "origin/main^{tree}"
-          if git diff --cached --quiet; then
-            echo "::notice::No changes between production and main; nothing to commit."
-          else
-            git commit -m "release: sync production to main@${main_sha}"
-          fi
-
-          push_with_retry() {
-            attempt=1
-            while [ "$attempt" -le 3 ]; do
-              if "$@"; then
-                return 0
-              fi
-
-              if [ "$attempt" = "3" ]; then
-                return 1
-              fi
-
-              echo "::notice::git push failed; retrying in $((attempt * 5)) seconds."
-              sleep $((attempt * 5))
-              attempt=$((attempt + 1))
-            done
-          }
-
-          if [ -n "$remote_release_sha" ]; then
-            push_with_retry git push --force-with-lease=refs/heads/release/production:"$remote_release_sha" "$remote" release/production:refs/heads/release/production
-          else
-            push_with_retry git push "$remote" release/production:refs/heads/release/production
-          fi
-
-      - name: Check production delta
-        id: production_delta
-        env:
-          PRODUCTION_RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          remote="https://x-access-token:${PRODUCTION_RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags "$remote" production:refs/remotes/origin/production
-
-          ahead_count="$(git rev-list --count origin/production..release/production)"
-          if [ "$ahead_count" = "0" ]; then
-            echo "::notice::production is already up to date with main; skipping production release PR creation."
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            echo "release/production is $ahead_count commit(s) ahead of production."
-          fi
-
-      - name: Create or update production PR
-        if: steps.production_delta.outputs.has_changes == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          MAIN_SHA: ${{ steps.release_branch.outputs.main_sha }}
-        run: |
-          # 前回昇格点 = production の tree と一致する main 上の commit。
-          # production の各コミットは main のどこかの tree の snapshot なので、
-          # first-parent を遡って tree が一致した commit が前回昇格した main 位置。
-          production_tree="$(git rev-parse 'origin/production^{tree}')"
-          base_sha=""
-          for sha in $(git rev-list --first-parent origin/main); do
-            if [ "$(git rev-parse "${sha}^{tree}")" = "$production_tree" ]; then
-              base_sha="$sha"
-              break
-            fi
-          done
-
-          if [ -n "$base_sha" ]; then
-            # main は merge commit のみなので first-parent の merge subject から
-            # PR 番号を列挙できる (direct push は subject をそのまま載せる)。
-            changes="$(git log --first-parent --format='- %s' "${base_sha}..origin/main" \
-              | sed -E 's/- Merge pull request (#[0-9]+) from .*/- \1/')"
-            if [ -z "$changes" ]; then
-              changes="(差分コミットなし — tree 差分のみ)"
-            fi
-          else
-            changes="(前回昇格点を main 上で特定できなかったため一覧は省略。diff を確認してください)"
-          fi
-
-          {
-            echo "## 概要"
-            echo
-            echo "\`main\` (\`${MAIN_SHA}\`) の内容を \`production\` に昇格するリリースPRです。"
-            echo
-            echo "\`main\` に新しい PR が merge されるたびに、このPRは main 先端の snapshot に自動更新されます。merge 時点の diff がそのまま本番に deploy される内容です。"
-            echo
-            echo "このPRは本番昇格の承認ゲートであり、コードの再レビュー用ではありません。通常のコードレビューとCIは \`main\` に入る通常PRで完了済みです。"
-            echo
-            echo "## 含まれる変更"
-            echo
-            echo "$changes"
-            echo
-            echo "## Merge前チェック"
-            echo
-            echo "- [ ] Cloudflare Workers Builds の production branch が \`production\` になっている"
-            echo "- [ ] rollback 手順を直近で確認している"
-            echo "- [ ] \`/admin/production-readiness\` に \`fail\` がない"
-            echo
-            echo "## Deploy"
-            echo
-            echo "このPRを \`production\` に merge すると、Cloudflare Workers Builds が production deploy を開始します。"
-          } > release-pr-body.md
-
-          existing="$(gh pr list \
-            --base production \
-            --head release/production \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')"
-
-          # title は初回作成時の日時のまま維持する (「いつから昇格待ちか」を表す)。
-          # 内容は body と diff が常に main 先端を示すので title 更新は不要。
-          if [ -n "$existing" ]; then
-            gh pr edit "$existing" --body-file release-pr-body.md
-            echo "Updated PR #$existing"
-          else
-            title="🚀リリース $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S')"
-            gh pr create --base production --head release/production --title "$title" --body-file release-pr-body.md
-          fi
-
-      # release/production は production の先端に main の snapshot commit を1つ
-      # 積む形で作成するため、通常は production と fast-forward 関係にあり
-      # BEHIND にはならない。
-      # production に新コミットが来て BEHIND になった場合は update-branch (merge commit
-      # を生成) ではなく、このワークフローを再実行して release/production を作り直す。
-      - name: Check release PR branch is not behind
-        if: steps.production_delta.outputs.has_changes == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          pr_number="$(gh pr list \
-            --base production \
-            --head release/production \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')"
-          if [ -z "$pr_number" ]; then
-            echo "::notice::no open release PR; nothing to check."
-            exit 0
-          fi
-
-          attempt=1
-          while [ "$attempt" -le 6 ]; do
-            state="$(gh pr view "$pr_number" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo UNKNOWN)"
-            case "$state" in
-              BEHIND)
-                echo "::error::release PR #$pr_number is BEHIND production. Re-run this workflow to rebuild release/production on the latest production tip."
-                exit 1
-                ;;
-              UNKNOWN)
-                echo "mergeability still computing; waiting."
-                sleep 5
-                ;;
-              *)
-                echo "::notice::release PR #$pr_number state=$state; branch is up to date."
-                exit 0
-                ;;
-            esac
-            attempt=$((attempt + 1))
-          done
-          echo "::error::mergeability not confirmed after retries; operator should verify the PR is not behind."
-          exit 1
+  release-pr:
+    uses: ochanuco/.github/.github/workflows/release-pr.yml@5dc4f2961ad12425cb2b3c6ab38cd52c9b8b6558 # main
+    with:
+      checklist: |
+        - [ ] Cloudflare Workers Builds の production branch が `production` になっている
+        - [ ] rollback 手順を直近で確認している
+        - [ ] `/admin/production-readiness` に `fail` がない
+      deploy-note: このPRを `production` に merge すると、Cloudflare Workers Builds が production deploy を開始します。
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
