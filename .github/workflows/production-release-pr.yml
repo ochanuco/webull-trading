@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release-pr:
-    uses: ochanuco/.github/.github/workflows/release-pr.yml@5dc4f2961ad12425cb2b3c6ab38cd52c9b8b6558 # main
+    uses: ochanuco/.github/.github/workflows/release-pr.yml@f41400013689c51685e10ba1523bfbb576f687dd # v1.0.0
     with:
       checklist: |
         - [ ] Cloudflare Workers Builds の production branch が `production` になっている

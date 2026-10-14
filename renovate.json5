@@ -1,0 +1,5 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  // 共通設定と自動マージは ochanuco/.github の preset（README を参照）
+  extends: ['github>ochanuco/.github', 'github>ochanuco/.github:automerge'],
+}
