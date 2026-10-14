@@ -59,7 +59,7 @@ describe('classifyHeadlines', () => {
   })
 
   it('asks the v2 shock question (outsized selloff, not an ordinary down day)', async () => {
-    expect(JEV_QUESTION_VERSION).toBe('v2')
+    expect(JEV_QUESTION_VERSION).toBe('v2f')
     const run = vi.fn(async (_model: string, _input: unknown) => COMPLETED_SAMPLE)
     const ai: JevAi = { run }
     await classifyHeadlines(ai, ['A'])

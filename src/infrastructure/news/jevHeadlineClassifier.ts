@@ -7,13 +7,14 @@
 const MODEL_ID = 'typesafe/jev'
 
 /**
- * Bump this whenever the question text below changes — rows scored under
- * different wordings are not comparable, so evaluation needs to tell them
+ * Bump this whenever the question text below or the shaping of its input
+ * (the market-wide headline filter) changes — rows scored under
+ * different wordings or inputs are not comparable, so evaluation needs to tell them
  * apart. v0's shock question ("a sudden negative shock... moving markets")
  * scored an ordinary -0.7% day as high as real crashes, and asking for the
  * "implied direction" leaned risk_off even on quiet days.
  */
-export const JEV_QUESTION_VERSION = 'v2'
+export const JEV_QUESTION_VERSION = 'v2f'
 
 const QUESTIONS = {
   shock: {
