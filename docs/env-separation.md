@@ -26,10 +26,10 @@ pnpm deploy:staging
 pnpm deploy:production
 ```
 
-scripts は `wrangler d1 migrations apply --env=<env> --remote` → `wrangler deploy --env=<env>` の 2 段。migration 失敗時は deploy 走らない。
+dev / staging の scripts は `wrangler d1 migrations apply --env=<env> --remote` → `wrangler deploy --env=<env>` の 2 段。migration 失敗時は deploy 走らない。production は `verify:production-d1` → `wrangler deploy --env=production` で、migration は適用しない。
 `pnpm deploy` は unqualified top-level deploy 事故を避けるため default では失敗する。
 意図して top-level worker を deploy する場合だけ `ALLOW_UNQUALIFIED_DEPLOY=1 pnpm deploy` を使う。
-本番の通常 CD は `production` branch への release PR merge を Cloudflare Workers Builds が検知する方式。詳細は [production-cd.md](production-cd.md)。
+本番の通常 CD は GitHub Actions の `deploy` workflow の手動実行。詳細は [production-cd.md](production-cd.md)。
 
 ## ユーザー側の初期作業 (実マネー前)
 
@@ -102,7 +102,7 @@ pnpm wrangler secret put WEBULL_APP_SECRET --env=production
 pnpm wrangler secret delete WEBULL_APP_SECRET --env=production
 ```
 
-rotation 後は対応する env を再 deploy せず即時反映される (Cloudflare 側で worker に re-bind される)。ただし production rotation 時は `pnpm wrangler deploy --env=production --dry-run` で binding 一覧が崩れていない事を確認する (`pnpm deploy:production` は先頭で `wrangler d1 migrations apply --remote` を実行するので dry-run 確認には使えない)。
+rotation 後は対応する env を再 deploy せず即時反映される (Cloudflare 側で worker に re-bind される)。ただし production rotation 時は `pnpm wrangler deploy --env=production --dry-run` で binding 一覧が崩れていない事を確認する。
 
 ## Cron triggers (重要な非自明仕様)
 
