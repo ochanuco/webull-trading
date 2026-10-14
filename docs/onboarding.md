@@ -98,14 +98,7 @@ WEBULL_APP_KEY=... WEBULL_APP_SECRET=... WEBULL_EXISTING_TOKEN=<old token> \
 
 ## デプロイの流れ
 
-deploy は Cloudflare Workers Builds の CD 任せで、手動 `wrangler deploy` は通常不要 (migration も CD に含まれる)。
-
-| Branch | deploy 先 | build command |
-|---|---|---|
-| `main` | staging | `pnpm deploy:staging` |
-| `production` | production | `pnpm deploy:production` |
-
-リリースは `main` push ごとに自動更新される production 昇格 PR を merge するだけ。詳細は [`production-cd.md`](production-cd.md)、初回の本番投入手順は [`production-deployment.md`](production-deployment.md)。
+staging は `main` への merge で Cloudflare Workers Builds が `pnpm run deploy:staging` (migration 含む) を実行する。production は GitHub Actions の `deploy` workflow を手動実行する (Environment `production` の承認付き)。production の deploy は D1 migration を適用しないので、migration を含む PR は手動で適用する。詳細は [`production-cd.md`](production-cd.md)、初回の本番投入手順は [`production-deployment.md`](production-deployment.md)。
 
 ## 迷ったら
 

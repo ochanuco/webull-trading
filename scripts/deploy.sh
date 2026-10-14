@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 使い方: scripts/deploy.sh <staging|production>
-# CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID は呼び出し側 (GitHub Actions の Environment) が環境変数で渡す。
+# CLOUDFLARE_API_TOKEN は呼び出し側 (.github/workflows/deploy.yml の op run) が環境変数で渡す。
 # Worker secret (Webull の鍵など) はここでは反映しない。`wrangler secret put` で別に管理する。
 set -euo pipefail
 
@@ -15,13 +15,14 @@ esac
 
 # CI では wrangler login の状態を持たないので、未設定なら wrangler の認証エラーより先に原因を示す
 if [ "${CI:-}" = "true" ] && [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  echo "error: CLOUDFLARE_API_TOKEN が空。GitHub の Environment '$target' に secret を設定する (docs/production-cd.md)" >&2
+  echo "error: CLOUDFLARE_API_TOKEN が空。1Password の gh-deploy/cloudflare-workers を確認する (docs/production-cd.md)" >&2
   exit 1
 fi
 
 cd "$(dirname "$0")/.."
 
-# deploy:<env> は migrations apply → wrangler deploy の 2 段 (production は先に D1 binding を検証する)。
+# production は D1 binding の検証 → wrangler deploy。D1 migration は deploy に含めず、migration を含む PR ごとに手動で適用する。
+# staging は migrations apply → wrangler deploy (Workers Builds が main から実行する)。
 pnpm "deploy:$target"
 
 # curl -f は 3xx を成功扱いにするので、Access のログイン画面へのリダイレクトを health OK と取り違えないよう本文を見る。
