@@ -83,6 +83,7 @@ import {
   type MacroEventCalendarSeedInput,
 } from '../infrastructure/calendar/macroEventCalendarRepo'
 import { runBacktest, type BacktestParams } from '../trading/backtest/runBacktest'
+import { adminModels } from './adminModels'
 import {
   runLifecycleBacktest,
   type EntryPolicy,
@@ -2153,6 +2154,8 @@ export const admin = new Hono<AppBindings>()
       updatedAt: state.updatedAt,
     })
   })
+
+admin.route('/models', adminModels)
 
 /**
  * Parse `/admin/portfolio/seed-exposure` body. At least one of `usd` / `jpy`

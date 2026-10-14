@@ -40,6 +40,7 @@ README は索引のみ。実体は `docs/` にある。
 - `docs/endpoints.md` — HTTP endpoint 一覧
 - `docs/db-operations.md` — D1 運用 SQL
 - `docs/production-cd.md` — リリースフロー
+- `docs/strategy-models.md` — 戦略モデルの検証 → 昇格 → リプレイ追跡
 
 ## 関連設定
 

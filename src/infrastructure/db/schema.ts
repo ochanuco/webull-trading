@@ -963,3 +963,104 @@ export const newsHeadlineEval = sqliteTable(
 
 export type NewsHeadlineEvalRow = typeof newsHeadlineEval.$inferSelect
 export type NewsHeadlineEvalInsert = typeof newsHeadlineEval.$inferInsert
+
+/**
+ * Immutable strategy model = strategy kind + full parameter set. Changing a
+ * single parameter registers a new row; rows are never UPDATEd, so a model
+ * id always replays to the same decisions. `params_hash` (sha256 over kind +
+ * canonical params JSON) dedupes re-registration of an identical model.
+ */
+export const strategyModel = sqliteTable(
+  'strategy_model',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** `StrategyModelKind` ('pullback_uptrend' / 'breakout_momentum')。 */
+    kind: text('kind').notNull(),
+    /** Canonical (key-sorted) params JSON; parsed by `parseModelParams`. */
+    paramsJson: text('params_json').notNull(),
+    paramsHash: text('params_hash').notNull(),
+    label: text('label').notNull(),
+    note: text('note'),
+    /** Model this one was derived from (lineage only, no FK — models are never deleted). */
+    parentModelId: integer('parent_model_id'),
+    createdAt: text('created_at').notNull(),
+    createdBy: text('created_by').notNull(),
+  },
+  (t) => ({
+    paramsHashUnique: uniqueIndex('strategy_model_params_hash_unique').on(t.paramsHash),
+  }),
+)
+
+export type StrategyModelRow = typeof strategyModel.$inferSelect
+export type StrategyModelInsert = typeof strategyModel.$inferInsert
+
+/**
+ * Recorded backtest of one model over one bar window — the evidence the
+ * promotion gate reads. Only summary metrics are stored; equity curves are
+ * recomputed by replay (deterministic given the same bars) rather than
+ * persisted, to keep D1 rows small.
+ */
+export const backtestRun = sqliteTable(
+  'backtest_run',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    modelId: integer('model_id').notNull(),
+    /** 'in_sample' (tuning window) / 'out_of_sample' (validation window, gate evidence)。 */
+    purpose: text('purpose').notNull(),
+    symbolsJson: text('symbols_json').notNull(),
+    fromDate: text('from_date').notNull(),
+    toDate: text('to_date').notNull(),
+    /** Starting cash per US symbol; JP symbols use `initial_cash_jpy` (prices are in JPY). */
+    initialCashUsd: real('initial_cash_usd').notNull(),
+    initialCashJpy: real('initial_cash_jpy').notNull(),
+    barSource: text('bar_source').notNull(),
+    /** `ReplayMetrics` JSON aggregated across symbols. */
+    metricsJson: text('metrics_json').notNull(),
+    /** Per-symbol `ReplayMetrics` JSON (no equity curve / trades). */
+    perSymbolJson: text('per_symbol_json').notNull(),
+    createdAt: text('created_at').notNull(),
+    createdBy: text('created_by').notNull(),
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    modelIdIdx: index('backtest_run_model_id_idx').on(t.modelId, t.id),
+  }),
+)
+
+export type BacktestRunRow = typeof backtestRun.$inferSelect
+export type BacktestRunInsert = typeof backtestRun.$inferInsert
+
+/**
+ * Promotion history: which model was live in which environment, and when.
+ * A row with `ended_at IS NULL` is the currently active model; the partial
+ * unique index makes a second concurrent active row for the same env a DB
+ * error rather than an ambiguous state. Replay reads these periods to show
+ * "what would past models have done since they were replaced".
+ */
+export const modelDeployment = sqliteTable(
+  'model_deployment',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    modelId: integer('model_id').notNull(),
+    /** `ENVIRONMENT` var of the worker that performed the promotion ('production' / 'staging' / 'dev')。 */
+    env: text('env').notNull(),
+    startedAt: text('started_at').notNull(),
+    endedAt: text('ended_at'),
+    actor: text('actor').notNull(),
+    reason: text('reason').notNull(),
+    /** backtest_run ids the gate evaluated, JSON array. */
+    evidenceRunIdsJson: text('evidence_run_ids_json').notNull(),
+    /** `PromotionGateResult` JSON at promotion time. */
+    gateJson: text('gate_json').notNull(),
+    requestId: text('request_id'),
+  },
+  (t) => ({
+    activePerEnvUnique: uniqueIndex('model_deployment_active_env_unique')
+      .on(t.env)
+      .where(sql`${t.endedAt} IS NULL`),
+    envStartedIdx: index('model_deployment_env_started_idx').on(t.env, t.startedAt),
+  }),
+)
+
+export type ModelDeploymentRow = typeof modelDeployment.$inferSelect
+export type ModelDeploymentInsert = typeof modelDeployment.$inferInsert
