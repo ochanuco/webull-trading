@@ -1,5 +1,6 @@
 name: production preflight
 
+# production への昇格 PR に付く required check。本番 D1 の binding を確かめ、production 向けの deploy を dry-run する
 on:
   pull_request:
     branches: [production]
@@ -14,27 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy-preflight:
-    name: production deploy preflight
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install worker deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify production D1 binding
-        run: pnpm verify:production-d1
-
-      - name: Wrangler production dry run
-        run: pnpm run deploy:production:dry-run
+  preflight:
+    uses: ochanuco/.github/.github/workflows/pnpm.yml@f41400013689c51685e10ba1523bfbb576f687dd # v1.0.0
+    with:
+      run: pnpm run deploy:production:dry-run
+      timeout-minutes: 10
