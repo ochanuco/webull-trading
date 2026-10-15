@@ -62,13 +62,18 @@ pnpm wrangler secret list --env=production
 
 ### B1. Deploy
 
-通常運用では `docs/production-cd.md` の release PR を merge し、Cloudflare Workers Builds に本番 deploy させる。
+通常運用では `docs/production-cd.md` のとおり GitHub Actions の `deploy` workflow を手動実行する。
+D1 migration は deploy に含まれないので、先に手動で適用する:
+
+```bash
+pnpm wrangler d1 migrations apply webull-trading-production --env=production --remote
+```
+
 手動 deploy が必要な break-glass 時のみ以下を実行:
 
 ```bash
 pnpm deploy:production
 # = pnpm verify:production-d1
-#   && wrangler d1 migrations apply webull-trading-production --env=production --remote
 #   && wrangler deploy --env=production
 ```
 

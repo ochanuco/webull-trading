@@ -10,7 +10,7 @@
     "deploy": "tsx scripts/guard-deploy.ts && wrangler deploy",
     "deploy:dev": "wrangler d1 migrations apply webull-trading-dev --env=dev --remote && wrangler deploy --env=dev",
     "deploy:staging": "wrangler d1 migrations apply webull-trading-staging --env=staging --remote && wrangler deploy --env=staging",
-    "deploy:production": "pnpm verify:production-d1 && wrangler d1 migrations apply webull-trading-production --env=production --remote && wrangler deploy --env=production",
+    "deploy:production": "pnpm verify:production-d1 && wrangler deploy --env=production",
     "deploy:production:dry-run": "pnpm verify:production-d1 && wrangler deploy --env=production --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -33,6 +33,6 @@
     "typescript": "^7.0.0",
     "vite": "^8.0.14",
     "vitest": "^5.0.0",
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.135.0"
   }
 }

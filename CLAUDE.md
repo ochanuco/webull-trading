@@ -25,7 +25,7 @@
 - **merge 方式は repo 設定で強制済み — 選ぶ必要はない**: `main` / `production` とも **merge commit のみ** (`gh pr merge --merge`)。squash / rebase は無効化されている
 - worktree: `git gtr new dev/<topic>` で作成、`git gtr rm` で削除
 - PR title: Conventional Commits 形式 (POC 期は `POC Phase N: <概要> (issue #<n>)` を使っていた)
-- リリース: `main` push ごとに自動更新される昇格 PR (`release/production -> production`) を merge するだけ。tag / semver は使わない (詳細は `docs/production-cd.md`)
+- リリース: 本番は GitHub Actions の `deploy` workflow を手動実行する (Environment `production` の承認付き)。deploy は D1 migration を適用しない。tag / semver は使わない (詳細は `docs/production-cd.md`)
 - commit: 英文1行 subject、**Conventional Commits** (`feat:` / `fix:` / `chore:` / `docs:` / `refactor:` / `perf:` / `test:` / `ci:`)、body は **why** のみ (prefix は履歴の可読性のため。採番には使っていない)
 - **記述の役割分担 (強い規約)**: コードは **How**、テストは **What** (仕様が読める名前と構造)、コミットログは **Why**、コードコメントは **Why not** (採らなかった選択肢と、なぜ採らなかったか / この防御が無いと何が起きるか) のみ。実装をなぞる How コメント・コミット body に書くべき経緯の Why コメントは書かない
 - 並列 PR 共有ファイル (`src/app.ts` / `src/config/env.ts` / `.dev.vars.example`) は **末尾 append のみ** → 後発 PR が rebase で解決
@@ -39,7 +39,7 @@ README は索引のみ。実体は `docs/` にある。
 - `docs/configuration.md` — `global_config` / `symbol_config` の全パラメタ
 - `docs/endpoints.md` — HTTP endpoint 一覧
 - `docs/db-operations.md` — D1 運用 SQL
-- `docs/production-cd.md` — リリースフロー
+- `docs/production-cd.md` — デプロイフロー
 - `docs/strategy-models.md` — 戦略モデルの検証 → 昇格 → リプレイ追跡
 
 ## 関連設定
