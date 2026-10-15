@@ -1,6 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "webull-trading",
+  "workers_dev": false,
+  "preview_urls": false,
   "main": "src/index.ts",
   "compatibility_date": "2025-10-01",
   "observability": {
@@ -61,6 +63,8 @@
     // --env still uses the top-level config (local miniflare + local SQLite).
     "dev": {
       "name": "webull-trading-dev",
+      "workers_dev": false,
+      "preview_urls": false,
       "vars": {
         // #21: live trade を gate するため env を識別するラベル。`WebullTradeClient`
         // が `ENVIRONMENT !== 'production'` のとき placeOrder を throw する。
