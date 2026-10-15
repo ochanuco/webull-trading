@@ -11,7 +11,6 @@
     "deploy:dev": "wrangler d1 migrations apply webull-trading-dev --env=dev --remote && wrangler deploy --env=dev",
     "deploy:staging": "wrangler d1 migrations apply webull-trading-staging --env=staging --remote && wrangler deploy --env=staging",
     "deploy:production": "pnpm verify:production-d1 && wrangler deploy --env=production",
-    "deploy:production:dry-run": "pnpm verify:production-d1 && wrangler deploy --env=production --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
