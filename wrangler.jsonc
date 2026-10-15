@@ -109,6 +109,8 @@
     },
     "staging": {
       "name": "webull-trading-staging",
+      "workers_dev": false,
+      "preview_urls": false,
       "vars": {
         // #21: live trade を gate するため env を識別するラベル。Webull JP は
         // 1 user = 1 app の制約で staging/prod で API key 分離できないため、コード
@@ -205,6 +207,8 @@
     },
     "production": {
       "name": "webull-trading-production",
+      "workers_dev": false,
+      "preview_urls": false,
       "vars": {
         // #21: `WebullTradeClient` の trade gate を通すラベル。'production' のときだけ
         // placeOrder が実行可能。他の値 (staging / dev / 未設定) は強制 DRY_RUN。
