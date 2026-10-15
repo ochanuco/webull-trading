@@ -164,7 +164,7 @@ describe('runHeadlineEvalScheduler — no headlines', () => {
     expect(inserts).toHaveLength(1)
     expect(inserts[0]).toContain('no_headlines')
     expect(inserts[0]).toContain('yahoo_finance_rss')
-    expect(inserts[0]).toContain('v2')
+    expect(inserts[0]).toContain('v2f')
   })
 })
 
@@ -198,7 +198,7 @@ describe('runHeadlineEvalScheduler — both sources fail', () => {
     expect(inserts).toHaveLength(1)
     expect(inserts[0]).toContain('fetch_error')
     expect(inserts[0]).toContain('yahoo_finance_rss')
-    expect(inserts[0]).toContain('v2')
+    expect(inserts[0]).toContain('v2f')
     const combinedError = inserts[0]!.find(
       (v) => typeof v === 'string' && v.includes('Yahoo unreachable'),
     ) as string | undefined
@@ -219,7 +219,7 @@ describe('runHeadlineEvalScheduler — jev failure', () => {
     expect(summary.source).toBe('yahoo_finance_rss')
     expect(inserts[0]).toContain('jev_error')
     expect(inserts[0]).toContain('AI Gateway down')
-    expect(inserts[0]).toContain('v2')
+    expect(inserts[0]).toContain('v2f')
   })
 
   it('AI の応答が壊れていても (state !== Completed) jev_error 行を書く', async () => {
@@ -252,7 +252,7 @@ describe('runHeadlineEvalScheduler — happy path', () => {
     expect(params).toContain('ok')
     expect(params).toContain('yahoo_finance_rss')
     expect(params).toContain('jev-1.13.0')
-    expect(params).toContain('v2')
+    expect(params).toContain('v2f')
     expect(params).toContain(0.94)
     expect(params).toContain('risk_off')
     expect(params).toContain(3.08)
@@ -260,6 +260,41 @@ describe('runHeadlineEvalScheduler — happy path', () => {
     expect(params).toContain(810)
     expect(params).toContain(139)
     expect(params).toContain('req-1')
+  })
+})
+
+describe('runHeadlineEvalScheduler — market-wide filter', () => {
+  const NOISE_TITLE = 'Disney (DIS): Buy, Sell, or Hold Post Q2 Earnings?'
+  const MIXED: RssHeadline[] = [
+    { title: NOISE_TITLE, source: 'Yahoo', publishedAt: '2026-09-26T12:00:00.000Z' },
+    { title: 'U.S. Stock Futures Fall on Hot Inflation Data', source: 'Yahoo', publishedAt: '2026-09-26T12:05:00.000Z' },
+  ]
+
+  it('Jev には市場全体の見出しだけを渡し、headlines_json / headline_count は取得した全件を残す', async () => {
+    const { db, inserts } = capturingD1()
+    const { client: yahooClient } = fakeYahooClient(() => MIXED)
+    const env = makeEnv({ DB: db, AI: fakeAi(async () => COMPLETED_SAMPLE) })
+    const summary = await runHeadlineEvalScheduler({ env, yahooClient, now: () => SLOT_NOW })
+    expect(summary.status).toBe('ok')
+    expect(summary.headlineCount).toBe(2)
+    expect(vi.mocked(env.AI!.run)).toHaveBeenCalledWith(
+      'typesafe/jev',
+      expect.objectContaining({ state: ['U.S. Stock Futures Fall on Hot Inflation Data'] }),
+    )
+    expect(inserts[0]).toContain(JSON.stringify(MIXED))
+  })
+
+  it('市場全体の見出しが 1 件も残らなければ Jev を呼ばず、全件を保存して no_headlines にする', async () => {
+    const { db, inserts } = capturingD1()
+    const noiseOnly = [MIXED[0]!]
+    const { client: yahooClient } = fakeYahooClient(() => noiseOnly)
+    const env = makeEnv({ DB: db })
+    const summary = await runHeadlineEvalScheduler({ env, yahooClient, now: () => SLOT_NOW })
+    expect(summary.status).toBe('no_headlines')
+    expect(summary.headlineCount).toBe(1)
+    expect(vi.mocked(env.AI!.run)).not.toHaveBeenCalled()
+    expect(inserts[0]).toContain('no_headlines')
+    expect(inserts[0]).toContain(JSON.stringify(noiseOnly))
   })
 })
 

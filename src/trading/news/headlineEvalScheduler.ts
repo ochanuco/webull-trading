@@ -23,6 +23,7 @@ import {
   type JevClassification,
   type JevClassifyResult,
 } from '../../infrastructure/news/jevHeadlineClassifier'
+import { selectMarketWideHeadlines } from '../../infrastructure/news/marketWideHeadlines'
 
 const NEWS_HEADLINE_EVAL_SOURCE_YAHOO = 'yahoo_finance_rss'
 const NEWS_HEADLINE_EVAL_SOURCE_GOOGLE = 'google_news_rss'
@@ -173,9 +174,14 @@ export async function runHeadlineEvalScheduler(
       return await persist('no_headlines', source, query, [])
     }
 
+    const marketWide = selectMarketWideHeadlines(headlines)
+    if (marketWide.length === 0) {
+      return await persist('no_headlines', source, query, headlines)
+    }
+
     const classification: JevClassifyResult = await classifyHeadlines(
       ai,
-      headlines.map((h) => h.title),
+      marketWide.map((h) => h.title),
     )
     if (!classification.ok) {
       return await persist('jev_error', source, query, headlines, { error: classification.error })
