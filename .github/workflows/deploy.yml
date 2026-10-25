@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: ochanuco/.github/.github/workflows/deploy.yml@71e324e93ea560488bcc309e52c5ce48ef8a282c # v1.3.0
+    uses: ochanuco/.github/.github/workflows/deploy.yml@737e6affb5e43803670afb13376dded4731e3388 # v1.5.0
     with:
       ref: ${{ inputs.ref }}
       op-env-file: .github/deploy/production.env.op
