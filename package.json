@@ -4,7 +4,7 @@
   "version": "1.6.0",
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@12.6.0",
+  "packageManager": "pnpm@12.14.0",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "tsx scripts/guard-deploy.ts && wrangler deploy",
