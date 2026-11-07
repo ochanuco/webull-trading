@@ -71,11 +71,11 @@ codex exec --full-auto \
 - プロンプトでは `coderabbit review --agent` をそのまま呼ぶ (`--api-key` 不要)
 
 **`--api-key` 経由** (有料 Hoppy CLI アドオン必須、通常プランでは "User API keys are not supported" / "No CLI addon found" と弾かれる):
-1. 1P の Agentic API key (User API key ではない) を `op://Personal/CODERABBIT_API_KEY/credential` に保存
+1. 1P の Agentic API key (User API key ではない) を `op://Personal/webull-trading/coderabbit_api_key` に保存
 2. 親シェルで解決して env var で渡す (codex sandbox は 1P デスクトップアプリの IPC socket に到達できないので `op run -- ...` を codex 内から直接呼ぶのは失敗する):
 
 ```bash
-CODERABBIT_API_KEY="$(op read 'op://Personal/CODERABBIT_API_KEY/credential')" \
+CODERABBIT_API_KEY="$(op read 'op://Personal/webull-trading/coderabbit_api_key')" \
   codex exec --full-auto \
     -c 'sandbox_workspace_write.network_access=true' \
     -c 'sandbox_workspace_write.writable_roots=["$HOME/.coderabbit"]' \
