@@ -1,15 +1,10 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: ['github>ochanuco/.github', 'github>ochanuco/.github:automerge'],
-  // Pinned here as well as in the shared preset: the Worker holds live Webull
-  // credentials (staging included), so a preset change must not silently
-  // shorten the wait or let runtime updates merge unreviewed.
+  // :base has no automerge: the Worker holds live Webull credentials
+  // (staging included), so every update is reviewed by hand.
+  extends: ['github>ochanuco/.github:base'],
+  // Pinned here as well as in the shared preset, so a preset change must not
+  // silently shorten the wait.
   minimumReleaseAge: '7 days',
   internalChecksFilter: 'strict',
-  packageRules: [
-    {
-      matchDepTypes: ['dependencies'],
-      automerge: false,
-    },
-  ],
 }
